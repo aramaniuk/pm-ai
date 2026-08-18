@@ -1,6 +1,6 @@
 ## **title: Local-First AI PM Assistant (pm-ai)**
 
-version: 0.9.0  
+version: 0.9.1  
 created: 2026-08-16  
 updated: 2026-08-18  
 status: draft
@@ -130,7 +130,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
   * **Persona \+ context:** Andrei finishing a 45-minute Project Alpha architecture sync.  
   * **Entry state:** Meeting ends in Outlook Calendar.  
   * **Path:**  
-    1. pm-ai automatically downloads, sanitizes, and processes the meeting transcript within 600 seconds. It calculates Meeting Man-Hour Cost (![][image1]) and includes this metric in the summary card header.  
+    1. pm-ai automatically downloads, sanitizes, and processes the meeting transcript within 600 seconds. It calculates Meeting Man-Hour Cost (attendees × duration\_hours × blended\_hourly\_rate) and includes this metric in the summary card header.  
     2. pm-ai parses explicit direct commands issued during the meeting and executes them via authorized MCP tools, including an explicit confirmation section in the post-meeting report.  
     3. pm-ai extracts Alex's spoken commitment (*"I'll finish Redis benchmarks by Thursday"*) and stages an interactive card proposing to append a timestamped comment to GitLab Work Item \#102, while writing the commitment entry to .project-ai/memory/commitments\_log.md with closed-loop verification parameters.  
   * **Climax:** GitLab Work Items and local commitments log reflect real discussion state without Andrei opening a single ticket editor or setting manual alarms.  
@@ -209,7 +209,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
     2. pm-ai displays a secure step-by-step prompt requesting target domain URL, API token/OAuth key, and sync parameters.  
     3. pm-ai executes an immediate endpoint health check probe to verify API connectivity, permissions, and webhook endpoints.  
     4. Upon successful probe verification, pm-ai encrypts credentials inside \~/.pm-ai/private/config.json using AES-256 with file permissions 600 and dynamically registers the Jira harvester module into the active background radar without requiring a daemon restart.  
-    5. pm-ai triggers a background historical telemetry backfill (past 7 days) and outputs a confirmation card displaying active status, connector health, and available entity mappings (e.g., Jira Issues ![][image2] Work Items).  
+    5. pm-ai triggers a background historical telemetry backfill (past 7 days) and outputs a confirmation card displaying active status, connector health, and available entity mappings (e.g., Jira Issues → Work Items).  
   * **Climax:** pm-ai seamlessly incorporates Jira tickets, Slack discussions, or Notion docs into morning dashboards, 1:1 dossiers, and deep inquiry queries alongside existing GitLab and Teams telemetry.  
   * **Resolution:** Andrei manages and expands his multi-tool ecosystem across both personal and project scopes in under 2 minutes with zero plaintext secret exposure.
 
@@ -228,7 +228,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 > * **Socratic 1:1 Protocol:** An asynchronous or conversational dialogue mechanism conducted via Telegram or CLI where pm-ai surfaces telemetry-backed blind spots and asks reflective questions rather than issuing direct mandates.  
 > * **High-Context Voice Concierge:** The capability of pm-ai to expand short voice prompts into detailed, context-rich correspondence by synthesizing background repository specs, meeting transcripts, and project data.  
 > * **Contextual Web & Literature Engine (FR-17):** The background ingestion and situational matching of external industry RSS feeds and HTTP web pages against live project bottlenecks, team dynamics, and career goals.  
-> * **Meeting ROI Metric:** A post-meeting mindfulness calculation (![][image3]) displayed as an informative metric within post-meeting summary header blocks to foster team cost awareness.  
+> * **Meeting ROI Metric:** A post-meeting mindfulness calculation (attendees × duration\_hours × blended\_hourly\_rate, where the blended rate is a single PM-configured figure in \~/.pm-ai/config.toml) displayed as an informative metric within post-meeting summary header blocks to foster team cost awareness.  
 > * **Verbal Commitment Sync:** The automatic extraction of spoken meeting promises and staging of timestamped comments attached to target GitLab Work Items or Jira tickets.  
 > * **Meeting Commitment Ledger & Closed-Loop Lifecycle:** The persistent accountability mechanism (recorded as structured Markdown entries in .project-ai/memory/commitments\_log.md and indexed in event\_telemetry.db) that captures extracted spoken promises, assigned owners, target deadlines, target Work Items, lifecycle statuses (\[STAGED\_APPROVAL\], \[PENDING\], \[FULFILLED\], \[ALTERED\], \[BROKEN\]), and continuously cross-references incoming Git commits, PR review latencies, and ticket state updates to verify real-world execution.  
 > * **Spoken Anchor Protocol & Fuzzy Recovery:** A structured speaking convention used to identify target Work Item numbers, coupled with an automated fuzzy search recovery mechanism (\>85% confidence threshold) for phonetic or transcript speech recognition errors.  
@@ -256,29 +256,29 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 Parse meeting transcripts for deterministic spoken keywords (e.g., ticket IDs, assignees) and match them against GitLab Work Item IDs.  
 In cases where no matching Work Item ID exists or speech recognition misinterprets the spoken reference:
 
-> 1. System shall execute fuzzy search matching and contextual reference recovery against mentions earlier or later in the transcript. If recovered with a confidence score ![][image4], proceed with updating the Work Item as planned.  
-> 2. If recovery fails (![][image5] confidence), log a \[UNMATCHED\_ANCHOR\] token and surface the topic in the post-meeting summary approval section. The PM shall be presented with candidate matching Work Items to select from or the option to enter a Work Item ID manually. Realizes UJ-3, UJ-6, UJ-7, UJ-8.
+> 1. System shall execute fuzzy search matching and contextual reference recovery against mentions earlier or later in the transcript. If recovered with a confidence score ≥85%, proceed with updating the Work Item as planned.  
+> 2. If recovery fails (<85% confidence), log a \[UNMATCHED\_ANCHOR\] token and surface the topic in the post-meeting summary approval section. The PM shall be presented with candidate matching Work Items to select from or the option to enter a Work Item ID manually. Realizes UJ-3, UJ-6, UJ-7, UJ-8.
 
 **Consequences (testable):**
 
-> * Given a spoken reference misrecognized as "WI-2260" when only "WI-226" exists in active memory, fuzzy context recovery maps the ID to WI-226 with ![][image4] confidence and updates the ticket within SLA.  
-> * Given an unresolvable reference with ![][image6] confidence, the system stages an \[UNMATCHED\_ANCHOR\] prompt in the post-meeting summary card displaying a dropdown/list of candidate WIs and a manual entry field.
+> * Given a spoken reference misrecognized as "WI-2260" when only "WI-226" exists in active memory, fuzzy context recovery maps the ID to WI-226 with ≥85% confidence and updates the ticket within SLA.  
+> * Given an unresolvable reference with <85% confidence, the system stages an \[UNMATCHED\_ANCHOR\] prompt in the post-meeting summary card displaying a dropdown/list of candidate WIs and a manual entry field.
 
 #### **FR-02: 24/7 Passive Context Telemetry Radar**
 
 Background daemon harvesting telemetry across configured external system connectors (GitLab, Teams, Outlook calendars, emails, Jira, Slack, Notion) every 4 hours into local Markdown cache and SQLite index. Ingested payloads pass through the Input Sanitization Module (FR-36). Realizes UJ-1, UJ-2, UJ-5, UJ-6, UJ-9, UJ-10.  
 **Consequences (testable):**
 
-> * Executes background harvesting cycle every 240 minutes (![][image7] minutes); writes raw parsed diffs to \~/.pm-ai/private/event\_telemetry.db without exceeding 50MB RSS memory footprint during execution.  
+> * Executes background harvesting cycle every 240 minutes (±15 minutes); writes raw parsed diffs to \~/.pm-ai/private/event\_telemetry.db without exceeding 50MB RSS memory footprint during execution.  
 > * If an external provider API returns an HTTP 5xx error or times out, the daemon logs the failure to event\_log.md and retries with exponential backoff without crashing the runner.
 
 #### **FR-03: Calendar Event-Driven Processing, On-Demand Missed Meeting Analysis & Cost Metrics**
 
-Automatically fetch and process meeting transcripts upon completion or upon explicit PM request for missed/optional meetings within 600 seconds (10 minutes). Calculate post-meeting Man-Hour Cost (![][image3]) and include this metric in the post-meeting summary card header (as a secondary informative metric). Realizes UJ-3, UJ-6, UJ-7, UJ-8.  
+Automatically fetch and process meeting transcripts upon completion or upon explicit PM request for missed/optional meetings within 600 seconds (10 minutes). Calculate post-meeting Man-Hour Cost (attendees × duration\_hours × blended\_hourly\_rate) and include this metric in the post-meeting summary card header (as a secondary informative metric). Realizes UJ-3, UJ-6, UJ-7, UJ-8.  
 **Consequences (testable):**
 
 > * Upon receipt of an Outlook Calendar meeting.ended trigger or on-demand PM command, fetching, sanitizing, and parsing pipelines complete within 600 seconds.  
-> * Post-meeting summary cards attach exact Man-Hour Cost calculations (![][image8]) inside the card header block.
+> * Post-meeting summary cards attach exact Man-Hour Cost calculations (attendees × duration\_hours × blended\_hourly\_rate) inside the card header block.
 
 #### **FR-04: Resilient Background Runner & Offline Buffer**
 
@@ -381,11 +381,11 @@ Pre-render daily briefings (\~/.manager-ai/memory/daily\_dashboard.md) categoriz
 
 #### **FR-10: Traceable Event Log & Self-Retrospective Engine**
 
-Immutably log all decisions, operational events, and telemetry diffs as typed entries in event\_log.md and local SQLite event\_telemetry.db. Compute weekly pm-ai Performance Index. Realizes UJ-1, UJ-9.  
+Immutably log all decisions, operational events, and telemetry diffs as typed entries in event\_log.md and local SQLite event\_telemetry.db. Aggregate weekly action counts by category for self-retrospective. Realizes UJ-1, UJ-9.  
 **Consequences (testable):**
 
 > * Every state mutation appends an immutable JSON line to \~/.manager-ai/memory/event\_log.md with ISO-8601 timestamp, actor ID, and action category.  
-> * Running pm-ai retrospective \--weekly aggregates weekly action counts and outputs a calculated Performance Index score (![][image9]).
+> * Running pm-ai retrospective \--weekly aggregates weekly action counts by category (decisions logged, proposals staged vs. approved, commitments fulfilled vs. broken) and renders them as a weekly trend. *(A single composite "pm-ai Performance Index" is deferred \- see §10 Open Questions.)*
 
 #### **FR-11: Micro-Decision Daily Alignment Engine**
 
@@ -400,7 +400,7 @@ Conduct interactive 1:1 coaching dialogues via Telegram or CLI console session, 
 **Consequences (testable):**
 
 > * Initiating a 1:1 session (pm-ai console 1on1 or Telegram /1on1) surfaces a time-allocation breakdown comparing actual telemetry against targets in strategic\_goals.md in the first message turn.  
-> * System frames responses as open-ended questions ending in question marks (![][image10] of turns) rather than direct prescriptive directives.
+> * System frames responses as open-ended questions ending in question marks (≥80% of turns) rather than direct prescriptive directives.
 
 #### **FR-13: Executive Sovereignty & Controlled Notification Boundaries**
 
@@ -423,14 +423,14 @@ Capture post-1:1 feedback on Coaching Efficiency (1-10 numeric rating scale) and
 Silently audit leadership dynamics to surface blind spots and guide the PM through real-world behavioral experiments during 1:1s. Realizes UJ-1.  
 **Consequences (testable):**
 
-> * When telemetry shows a specific activity repeated ![][image11] consecutive sprints, system proposes a structured 1-sprint behavioral delegation experiment in the next 1:1 summary.
+> * When telemetry shows a specific activity repeated ≥2 consecutive sprints, system proposes a structured 1-sprint behavioral delegation experiment in the next 1:1 summary.
 
 #### **FR-16: Sovereign Personal Scope, User Privacy & Anti-Burnout Shield**
 
 Maintain independent career directory (\~/.manager-ai/) and evaluate working hours, calendar density, and PTO balances to detect burnout risks inside 1:1 dialogues and weekly/daily planning sessions. Governed by the **User Privacy & Data Boundary Charter**: burnout telemetry, working hour dynamics, and personal coaching records are strictly hardware-bound to \~/.manager-ai/ and shall never be published or synced to team channels, public repositories, or enterprise dashboards. Realizes UJ-1, UJ-9.  
 **Consequences (testable):**
 
-> * If harvested telemetry indicates ![][image12] hours daily calendar/commit activity for 3 consecutive days or calendar density ![][image13], system flags an \[ELEVATED\_WORKLOAD\_ALERT\] inside private 1:1 coaching logs and planning briefings.  
+> * If harvested telemetry indicates >10 hours daily calendar/commit activity for 3 consecutive days or calendar density >65%, system flags an \[ELEVATED\_WORKLOAD\_ALERT\] inside private 1:1 coaching logs and planning briefings.  
 > * Anti-burnout indicators and personal workload analytics are strictly excluded from all public or project-level files in \<project-root\>/.project-ai/.
 
 #### **FR-17: Contextual Web & Literature Recommendation Engine**
@@ -438,7 +438,7 @@ Maintain independent career directory (\~/.manager-ai/) and evaluate working hou
 Continuously monitor and digest RSS feeds and arbitrary HTTP web pages configured in article\_sources.md. Dynamically cite relevant publications and web articles during 1:1 coaching sessions or Daily Briefings. Realizes UJ-1.  
 **Consequences (testable):**
 
-> * Background job polls configured RSS feeds and HTTP web pages in article\_sources.md every 24 hours (![][image14] minutes), creating vector embeddings for updated content.  
+> * Background job polls configured RSS feeds and HTTP web pages in article\_sources.md every 24 hours (1440 minutes), creating vector embeddings for updated content.  
 > * Cites at most 3 situational articles/web pages per week across all briefings/1:1s, requiring exact URL and title matches from article\_sources.md.
 
 ### **4.3 Mobile Command & CLI Access Interfaces**
@@ -676,20 +676,20 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
 
 ### **8.1 Primary Success Metrics**
 
-> * **SM-1 (Executive Bandwidth Reclaimed):** Weekly meeting hours reduced by ![][image15] through async inquiry proxies and pre-meeting relevance checks. Validates FR-26.  
+> * **SM-1 (Executive Bandwidth Reclaimed):** Weekly meeting hours reduced by ≥20% through async inquiry proxies and pre-meeting relevance checks. Validates FR-26.  
 > * **SM-2 (Voice Response Latency):** Sub-60-second end-to-end duration to turn a 20-second voice instruction into approved, dispatched multi-channel replies. Validates FR-19, FR-21.  
-> * **SM-3 (Socratic Coaching Utility):** Post-1:1 Coaching Efficiency Score averaged across monthly retrospectives ![][image16]. Validates FR-12, FR-14.  
-> * **SM-4 (Literature Relevance Rate):** Percentage of contextual literature recommendations rated "actionable/relevant" during 1:1s ![][image10]. Validates FR-17.  
+> * **SM-3 (Socratic Coaching Utility):** Post-1:1 Coaching Efficiency Score averaged across monthly retrospectives ≥7 on the 1-10 scale. Validates FR-12, FR-14.  
+> * **SM-4 (Literature Relevance Rate):** Percentage of contextual literature recommendations rated "actionable/relevant" during 1:1s ≥80%. Validates FR-17.  
 > * **SM-5 (Economic & Power Cost Efficiency):** Total monthly operating cost (LLM API spend \+ electrical power) tracked against the $20/user monitored target, with every frontier call attributed by task class. Measures whether the local-first split holds the target; a breach is a signal to investigate, not a failure condition. Validates NFR-13.  
-> * **SM-6 (Deep Inquiry & Meeting Preparation Accuracy):** Accuracy rate of multi-source telemetry, pre-meeting status validations, and documentation drift queries validated by the PM without requiring manual re-queries ![][image18]. Validates FR-23, FR-24, FR-25, FR-32, FR-33, FR-34.  
-> * **SM-7 (Spoken Anchor & In-Meeting Command Execution Precision):** Percentage of spoken anchors (including fuzzy-recovered references) and direct verbal commands correctly parsed and executed via MCP tools without manual correction ![][image19]. Validates FR-01, FR-05, FR-06, FR-07, FR-36.  
-> * **SM-8 (Implicit Update Approval Accuracy):** Percentage of implicit meeting updates staged in Telegram/CLI Interactive Approval Cards accepted by PM without complete rejection ![][image20]. Validates FR-06, FR-34.  
-> * **SM-9 (Closed-Loop Commitment Verification Precision):** Accuracy of automated commitment status transitions (\[FULFILLED\] via Git/ticket telemetry vs manual override) ![][image21]. Validates FR-33, FR-34.
+> * **SM-6 (Deep Inquiry & Meeting Preparation Accuracy):** Accuracy rate of multi-source telemetry, pre-meeting status validations, and documentation drift queries validated by the PM without requiring manual re-queries ≥90%. Validates FR-23, FR-24, FR-25, FR-32, FR-33, FR-34.  
+> * **SM-7 (Spoken Anchor & In-Meeting Command Execution Precision):** Percentage of spoken anchors (including fuzzy-recovered references) and direct verbal commands correctly parsed and executed via MCP tools without manual correction ≥95%. Validates FR-01, FR-05, FR-06, FR-07, FR-36.  
+> * **SM-8 (Implicit Update Approval Accuracy):** Percentage of implicit meeting updates staged in Telegram/CLI Interactive Approval Cards accepted by PM without complete rejection ≥80%. Validates FR-06, FR-34.  
+> * **SM-9 (Closed-Loop Commitment Verification Precision):** Accuracy of automated commitment status transitions (\[FULFILLED\] via Git/ticket telemetry vs manual override) ≥90%. Validates FR-33, FR-34.
 
 ### **8.2 Counter-Metrics (Do Not Optimize)**
 
-> * **SM-C1 (Message Draft Volume):** Do not optimize for raw volume of generated drafts. Focus on draft acceptance rate without extensive manual edits (![][image4]). Counterbalances SM-2.  
-> * **SM-C2 (Literature Push Frequency):** Do not optimize for number of articles recommended per week (cap at ![][image22] situational citations/week to avoid cognitive spam). Counterbalances SM-4.  
+> * **SM-C1 (Message Draft Volume):** Do not optimize for raw volume of generated drafts. Focus on draft acceptance rate without extensive manual edits (≥85%). Counterbalances SM-2.  
+> * **SM-C2 (Literature Push Frequency):** Do not optimize for number of articles recommended per week (cap at 3 situational citations/week to avoid cognitive spam). Counterbalances SM-4.  
 > * **SM-C3 (Coaching Session Frequency):** Do not force daily coaching prompts; respect PM-initiated cadences to avoid session fatigue. Counterbalances SM-3.
 
 ## **9\. Phased Execution Roadmap**
@@ -703,13 +703,15 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
 ## **10\. Open Questions**
 
 > 1. **Local Model RAM Thrashing during Concurrent Execution:** While NFR-12 specifies a 16GB RAM baseline with quantized 7B-13B models, concurrent execution of local Whisper audio transcription (small.en) and Ollama LLM parsing under heavy background telemetry loads must be benchmarked to prevent swap thrashing on 16GB unified memory systems. *(To be monitored during Phase 1 bench tests).*
+> 2. **Definition of the pm-ai Performance Index (FR-10):** FR-10 originally promised a weekly composite "Performance Index" scoring pm-ai's own usefulness, but never defined its inputs or scale. The weekly action-count aggregation is retained and well-defined; the composite index is deferred until there is a validated answer to what "pm-ai performing well" means in practice. A candidate definition \- the ratio of staged proposals that survive PM review and commitments that reach \[FULFILLED\] \- should be evaluated against real usage before being committed to. *(To be resolved after Phase 2 produces enough proposal and commitment history to measure).*
 
 ## **11\. Assumptions Index**
 
 > * \[ASSUMPTION: Voice Ingestion SLA\] 10-second Whisper latency is achievable locally on modern Apple Silicon / CUDA hardware using whisper.cpp base/small models.  
 > * \[ASSUMPTION: Literature & Web Digest Frequency\] Background polling of RSS feeds and HTTP web pages in article\_sources.md once every 24 hours is sufficient for non-urgent literature citations.  
 > * \[ASSUMPTION: Token Budget Cap\] Capping frontier LLM calls strictly to morning focus briefings, pre-meeting dashboard synthesis, complex research tasks, and 1:1 sessions while running quantized 7B-13B models locally keeps monthly token and power spend below $20/month under typical PM query volumes.  
-> * \[ASSUMPTION: Spoken Protocol & Fuzzy Matching\] Spoken anchor extraction coupled with fuzzy search matching against local Work Items achieves ![][image4] confidence for minor phonetic speech recognition errors (e.g., matching "WI-2260" to "WI-226").  
+> * \[ASSUMPTION: Spoken Protocol & Fuzzy Matching\] Spoken anchor extraction coupled with fuzzy search matching against local Work Items achieves ≥85% confidence for minor phonetic speech recognition errors (e.g., matching "WI-2260" to "WI-226").  
+> * \[ASSUMPTION: Success Metric Targets\] The numeric targets in §8.1 (SM-1 ≥20%, SM-3 ≥7/10, SM-4 ≥80%, SM-6 ≥90%, SM-7 ≥95%, SM-8 ≥80%, SM-9 ≥90%) and the FR-12 question-ratio (≥80% of turns) are provisional first-release targets set on judgement rather than measurement, since the original figures were lost in document conversion. They are deliberately set to be meaningful without being theatrical, and should be re-baselined against actual telemetry after the first month of operation.  
 > * \[ASSUMPTION: Transcript Retention Default\] A 30-day default retention window for raw audio transcript text files provides sufficient runway for retrospective auditing while keeping disk usage lightweight.
 
 # **Addendum**
@@ -763,6 +765,7 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
   4. *Network Isolation & Mobile Pairing:* Added **NFR-14** enforcing strict loopback binding (127.0.0.1) for the core daemon with zero open public listening ports, and requiring cryptographically authenticated user-ID pairing over Telegram transport.  
   5. *Closed-Loop Commitment Verification:* Expanded **FR-33** and **FR-34** from passive logging to active cross-referencing against incoming Git commit logs, PR review latencies, and ticket state updates, surfacing proactive private Socratic prompts (FR-12) before delivery milestones slip. Added **SM-9**.  
   6. *Quantized Model Execution & Cost Guardrails:* Updated **NFR-12** and **NFR-13** mandating quantized 7B-13B open-weight local models (via Ollama) to keep combined API and power runtime operating costs strictly below $20/month per user.
+  6. *Quantized Model Execution & Cost Guardrails:* Updated **NFR-12** and **NFR-13** mandating quantized 7B-13B open-weight local models (via Ollama) to keep combined API and power runtime operating costs strictly below $20/month per user.
 
 > * **2026-08-18 (Architecture Reconciliation \- v0.9.0):** Closed six divergences surfaced by the architecture spine (`_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md`), each a decision taken with the PM during architecture coaching:  
   1. *Scoped Encryption (NFR-08):* Replaced blanket "encrypt everything" with a defined encrypted set (event\_telemetry.db, chat\_history/, telegram\_cache/, config.json, personal analytics). All Markdown in every scope is now **plaintext by design** — transparency over one's own record is a product property, not an oversight — and the vector index is unencrypted (derived embeddings, rebuildable per NFR-11, 600 perms \+ full-disk encryption). Added the debug-toggle rule and OS-keychain key custody. This also removed an unverified SQLCipher \+ sqlite-vec extension-loading dependency that risked becoming a Phase 1 blocker.  
@@ -771,3 +774,9 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
   4. *Cost as Monitored Target (NFR-13, SM-5):* The $20/month figure is now an accounted, warn-only target rather than an enforced cap. The system shall not silently degrade quality or disable features on breach; converting the target into a cap is a later decision to be taken against real spend data.  
   5. *Model Strategy Refresh (§6):* Claude 3.5 Sonnet was retired 2025-10-28. Frontier synthesis is now tiered by task class — Claude Opus 5 for Socratic 1:1 coaching and deep research, Claude Sonnet 5 for briefings, drafts, and inquiry synthesis. Supersedes the 2026-08-16 Model Strategy entry.  
   6. *Latency SLA Split (FR-37, NFR-04):* Resolved the internal contradiction between FR-37's "synthesized responses within 150 ms" and NFR-04's 60-second budget. **Retrieval** (SQLite \+ vector, no model in path) holds 50–150 ms; **synthesis** (retrieval \+ model call) holds ≤60 s and is always asynchronous. No LLM synthesis completes in 150 ms; the two SLAs were describing different operations.
+
+> * **2026-08-18 (Threshold Recovery \- v0.9.1):** Restored all 26 numeric thresholds and formulas lost when the PRD was exported from Google Docs \- the equation objects survived neither the Markdown export (which produced dangling `image` references with no definitions) nor the plain-text export at `docs/prd_source_doc.txt` (which produced whitespace). Roughly a third of the PRD's testable consequences were unfalsifiable as written.  
+  1. *Recovered from internal evidence (10 sites):* the fuzzy-match threshold ≥85% and its complement <85% (FR-01, SM-C1, Assumptions) from the Glossary's "*>85% confidence threshold*"; the burnout trigger >10 hours daily (FR-16) from UJ-1's "*3 consecutive 10-hour days*"; the literature cap of 3 citations/week (SM-C2) from FR-17's own consequence; the 1440-minute polling interval (FR-17); and the entity-mapping arrow (UJ-10).  
+  2. *Set by PM decision (16 sites):* success-metric targets SM-1 ≥20%, SM-3 ≥7/10, SM-4 ≥80%, SM-6 ≥90%, SM-7 ≥95%, SM-8 ≥80%, SM-9 ≥90%, and the FR-12 question-ratio ≥80%, all recorded as provisional in §11; operational thresholds ±15 min harvest tolerance (FR-02), ≥2 consecutive sprints before a delegation experiment (FR-15), and >65% calendar density for the workload alert (FR-16, matching the figure UJ-9 already narrates).  
+  3. *Man-Hour Cost formula defined* as attendees × duration\_hours × blended\_hourly\_rate across FR-03, UJ-3, and the Glossary, with the blended rate a single PM-configured figure in \~/.pm-ai/config.toml rather than per-attendee salary data \- keeping compensation out of the telemetry store.  
+  4. *pm-ai Performance Index deferred:* FR-10 promised a composite index it never defined. The weekly action-count aggregation is retained and specified; the composite is moved to §10 Open Questions with a candidate definition to evaluate against real usage.
