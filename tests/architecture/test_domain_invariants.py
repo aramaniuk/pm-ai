@@ -640,3 +640,39 @@ def test_ad38_project_scope_is_the_only_committed_scope():
     assert d.DataScope(d.ScopeKind.PROJECT, "alpha").is_git_committed is True
     assert d.DataScope(d.ScopeKind.PERSONAL).is_git_committed is False
     assert d.DataScope(d.ScopeKind.APPLICATION).is_git_committed is False
+
+
+def test_ad3_reindex_cannot_reach_tier_2():
+    """AD-3 — the tier separation is physical, not a naming convention.
+
+    The earlier spine put the job queue and the search indexes in one file, so
+    the obvious rebuild (drop the file, recreate) destroyed pending external
+    writes and every cursor while the AD-3 test stayed green.
+    """
+    d = mod("pm_ai.domain")
+    d.assert_reindex_safe(frozenset({"derived.db", "vector_index/"}))
+    with pytest.raises(d.TierViolation):
+        d.assert_reindex_safe(frozenset({"derived.db", "operational.db"}))
+    with pytest.raises(d.TierViolation):
+        d.assert_reindex_safe(frozenset({"event_log/"}))
+
+
+def test_ad3_no_artifact_is_both_rebuilt_and_backed_up():
+    """AD-3 — an artifact in both sets means a rebuild destroys unrecoverable state."""
+    d = mod("pm_ai.domain")
+    assert not (d.REBUILD_TARGETS & d.BACKUP_TARGETS)
+    assert "operational.db" in d.BACKUP_TARGETS, (
+        "AD-3: backing up markdown alone loses the job queue, cursors, and "
+        "executed-key ledger — none of which any rebuild can reconstruct."
+    )
+    assert "operational.db" not in d.REBUILD_TARGETS
+
+
+def test_ad3_every_artifact_has_exactly_one_tier():
+    """A path in two tiers is the defect the table exists to prevent."""
+    d = mod("pm_ai.domain")
+    for artifact, tier in d.ARTIFACT_TIER.items():
+        assert isinstance(tier, d.Tier), artifact
+    assert d.Tier.OPERATIONAL.rebuildable is False
+    assert d.Tier.OPERATIONAL.backed_up is True
+    assert d.Tier.DERIVED.backed_up is False

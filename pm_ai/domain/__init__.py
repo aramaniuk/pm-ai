@@ -23,6 +23,14 @@ from pm_ai.domain.events import (
     PayloadMismatch,
     Provenance,
 )
+from pm_ai.domain.storage_tiers import (
+    ARTIFACT_TIER,
+    BACKUP_TARGETS,
+    REBUILD_TARGETS,
+    Tier,
+    TierViolation,
+    assert_reindex_safe,
+)
 from pm_ai.domain.identity import (
     PM_AI,
     PM_AI_ACTOR,
@@ -57,5 +65,6 @@ __all__ = [
     "PayloadMismatch", "ProposalState", "Provenance", "ScopeKind",
     "SkillPermission", "SourceRef", "TargetRef", "UNRESOLVED",
     "UNRESOLVED_ACTOR", "UnknownVerb", "VERB_REGISTRY", "Verb",
-    "evaluate_commitment", "lookup_verb",
+    "evaluate_commitment", "lookup_verb", "ARTIFACT_TIER", "BACKUP_TARGETS",
+    "REBUILD_TARGETS", "Tier", "TierViolation", "assert_reindex_safe",
 ]

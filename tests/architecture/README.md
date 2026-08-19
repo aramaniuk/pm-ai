@@ -39,7 +39,7 @@ Phase 1 means an invariant is unenforced, not that a test is unnecessary.
 | Paradigm | `layering` contract | Adapters are independent siblings, so no adapter imports another |
 | AD-1 | `core-is-io-free`, `http-confined-to-adapters`, `test_ad1_no_shell_execution_outside_platform` | |
 | AD-2 | `test_ad2_telegram_uses_outbound_polling_only` | |
-| AD-3 | `test_ad3_indexes_rebuild_from_markdown_without_loss` | Integration-weight; the sovereignty property |
+| AD-3 | `test_ad3_indexes_rebuild_from_markdown_without_loss`, `test_ad3_reindex_cannot_reach_tier_2`, `test_ad3_no_artifact_is_both_rebuilt_and_backed_up`, `test_ad3_every_artifact_has_exactly_one_tier` | Tier separation is physical; rebuild and backup sets are disjoint |
 | AD-5 | `test_ad5_single_writer_owns_all_file_writes`, `db-confined-to-storage` | |
 | AD-6 | `test_ad6_markdown_is_never_encrypted` | |
 | AD-7 | `cli-owns-no-scheduling` | |
