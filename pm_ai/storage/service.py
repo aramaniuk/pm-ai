@@ -29,6 +29,7 @@ class _Tier2:
     """Operational state — durable, never rebuilt (AD-3)."""
 
     cursors: dict[str, Cursor] = field(default_factory=dict)
+    proposals: dict[str, object] = field(default_factory=dict)
     coverage: list[object] = field(default_factory=list)
     executed: dict[str, tuple[str, str]] = field(default_factory=dict)
 
@@ -94,6 +95,19 @@ class StorageService:
 
     def record_execution(self, idempotency_key: str, target: TargetRef, external_id: str) -> None:
         self._t2.executed[idempotency_key] = (target.lock_key, external_id)
+
+    def stage_proposal(self, proposal) -> None:
+        self._t2.proposals[proposal.proposal_id] = proposal
+
+    def load_proposal(self, proposal_id: str):
+        return self._t2.proposals[proposal_id]
+
+    def transition_proposal(self, proposal_id: str, to, *, expected_version: int):
+        """CAS through the single writer, so two surfaces cannot both win (AD-37)."""
+        current = self._t2.proposals[proposal_id]
+        moved = current.transition(to, expected_version=expected_version)
+        self._t2.proposals[proposal_id] = moved
+        return moved
 
     def executed_mutations(self) -> dict[str, tuple[str, str]]:
         """Read by normalization to mark harvested events as pm-ai's own (AD-36)."""

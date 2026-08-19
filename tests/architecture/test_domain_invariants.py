@@ -357,40 +357,47 @@ def test_ad31_personal_material_cannot_reach_a_project_destination():
 
 
 @pytest.mark.parametrize(
-    "source_authenticated,speaker_is_pm,verb,expected",
+    "source_authenticated,speaker_is_pm,provider,verb,expected",
     [
-        (True, True, "comment", "execute"),      # all three hold
-        (True, True, "close", "stage"),          # irreversible verb
-        (True, False, "comment", "stage"),       # not the PM
-        (False, True, "comment", "stage"),       # manual/unauthenticated source
-        (False, True, "send_email", "stage"),    # never, on any axis
+        (True, True, "gitlab", "post_comment", "execute"),      # all three hold
+        (True, True, "gitlab", "close_work_item", "stage"),     # irreversible
+        (True, True, "outlook", "send_email", "stage"),         # irreversible + notifies
+        (True, True, "gitlab", "set_priority", "stage"),        # reversible but notifies
+        (True, True, "jira", "set_priority", "execute"),        # same verb, quiet provider
+        (True, False, "gitlab", "post_comment", "stage"),       # not the PM
+        (False, True, "gitlab", "post_comment", "stage"),       # manual source
+        (True, True, "gitlab", "obliterate", "stage"),          # unregistered: fail closed
     ],
 )
 def test_ad32_auto_execute_requires_all_three_conditions(
-    source_authenticated, speaker_is_pm, verb, expected
+    source_authenticated, speaker_is_pm, provider, verb, expected
 ):
-    """AD-32 — D2's tiering. Anything short of all three conditions stages."""
+    """AD-32 — source AND speaker AND verb. Any one failing stages.
+
+    `gitlab:set_priority` vs `jira:set_priority` is the case that matters: the
+    same verb name is quiet in one provider and notifies thirty people in the
+    other, so reversibility cannot be a property of the verb alone.
+    """
     auth = mod("pm_ai.core.command_authorization")
-    decision = auth.classify(
+    assert auth.classify(
         source_authenticated=source_authenticated,
         speaker_is_pm=speaker_is_pm,
+        provider=provider,
         verb=verb,
-    )
-    assert decision == expected
+    ) == expected
 
 
 def test_ad32_manual_transcripts_never_auto_execute():
     """AD-32 — the watched folder is untrusted by construction.
 
-    It was introduced (AD-23) so the pipeline stays developable without a live
-    tenant; it must not also become an unapproved write path.
+    It exists (AD-23) so the pipeline stays developable without a live tenant; it
+    must not also become an unapproved write path.
     """
     auth = mod("pm_ai.core.command_authorization")
     for verb in ("post_comment", "set_label", "edit_description"):
-        assert (
-            auth.classify(source_authenticated=False, speaker_is_pm=True, verb=verb)
-            == "stage"
-        )
+        assert auth.classify(
+            source_authenticated=False, speaker_is_pm=True, provider="gitlab", verb=verb
+        ) == "stage"
 
 
 def test_ad33_source_refs_never_point_at_a_transcript():
