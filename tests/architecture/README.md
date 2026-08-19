@@ -69,6 +69,7 @@ Phase 1 means an invariant is unenforced, not that a test is unnecessary.
 | AD-35 | `test_ad35_the_two_clocks_are_not_interchangeable`, `test_ad35_ledger_folding_is_deterministic`, `test_ad35_sweeper_will_not_declare_broken_without_coverage` | Two clocks; coverage-aware sweeping |
 | AD-36 | `test_ad36_self_authored_events_are_excluded_from_evidence`, `test_ad36_every_class_m_mutation_is_recorded_for_attribution` | pm-ai's own writes are never evidence |
 | AD-37 | `test_ad37_concurrent_approval_from_two_surfaces_yields_one_execution`, `test_ad37_expired_proposals_cannot_execute` | Versioned CAS on shared entities |
+| AD-38 | `test_ad38_disclosure_records_cannot_reach_a_committed_scope`, `test_ad38_no_committed_record_may_reference_personal_scope`, `test_ad38_project_scope_is_the_only_committed_scope` | Disclosure ledger is application-scoped; committed scopes never name personal material |
 
 ### Not mechanically enforced
 

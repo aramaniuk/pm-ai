@@ -592,3 +592,51 @@ def test_coverage_gap_resolves_to_unknown_not_broken():
     assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=False) is d.CommitmentState.UNKNOWN
     assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=True) is d.CommitmentState.BROKEN
     assert d.evaluate_commitment(overdue=True, evidence_admissible=True, covered=True) is d.CommitmentState.FULFILLED
+
+
+def test_ad38_disclosure_records_cannot_reach_a_committed_scope():
+    """AD-38 — the audit mechanism must not become the leak.
+
+    `event_log.md` exists per scope and the project scope is git-committed, so
+    routing AD-31's provenance record there would publish to the employer's
+    repository exactly what AD-31 protects.
+    """
+    d = mod("pm_ai.domain")
+    disc = mod("pm_ai.domain.disclosure")
+    from datetime import datetime
+
+    rec = d.DisclosureRecord(
+        at=datetime(2026, 8, 19),
+        task_class="coaching",
+        model="claude-opus-5",
+        contributing_scopes=frozenset({d.DataScope(d.ScopeKind.PERSONAL)}),
+        input_tokens=1200,
+        output_tokens=400,
+        estimated_cost_usd=0.017,
+    )
+    assert rec.involves_personal
+    assert rec.home == disc.DISCLOSURE_LEDGER_SCOPE
+
+    with pytest.raises(d.CommittedScopeLeak):
+        d.assert_writable(rec, scope=d.DataScope(d.ScopeKind.PROJECT, "alpha"))
+    d.assert_writable(rec, scope=disc.DISCLOSURE_LEDGER_SCOPE)  # its one home
+
+
+def test_ad38_no_committed_record_may_reference_personal_scope():
+    """AD-38's general invariant, not just the disclosure special case."""
+    d = mod("pm_ai.domain")
+
+    class _Entry:
+        contributing_scopes = frozenset({d.DataScope(d.ScopeKind.PERSONAL)})
+
+    with pytest.raises(d.CommittedScopeLeak):
+        d.assert_writable(_Entry(), scope=d.DataScope(d.ScopeKind.PROJECT, "alpha"))
+    d.assert_writable(_Entry(), scope=d.DataScope(d.ScopeKind.PERSONAL))
+
+
+def test_ad38_project_scope_is_the_only_committed_scope():
+    """The property the whole rule rests on."""
+    d = mod("pm_ai.domain")
+    assert d.DataScope(d.ScopeKind.PROJECT, "alpha").is_git_committed is True
+    assert d.DataScope(d.ScopeKind.PERSONAL).is_git_committed is False
+    assert d.DataScope(d.ScopeKind.APPLICATION).is_git_committed is False

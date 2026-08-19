@@ -9,6 +9,13 @@ did not fix it; a malformed reference is now a construction error rather than a
 review comment.
 """
 
+from pm_ai.domain.disclosure import (
+    DISCLOSURE_LEDGER_PATH,
+    DISCLOSURE_LEDGER_SCOPE,
+    CommittedScopeLeak,
+    DisclosureRecord,
+    assert_writable,
+)
 from pm_ai.domain.events import (
     NormalizedEvent,
     NormalizedEventType,
@@ -43,7 +50,8 @@ from pm_ai.domain.lifecycle import (
 )
 
 __all__ = [
-    "Actor", "CommitmentState", "CoverageWindow", "DEFAULT_PROPOSAL_TTL",
+    "Actor", "CommittedScopeLeak", "DISCLOSURE_LEDGER_PATH",
+    "DISCLOSURE_LEDGER_SCOPE", "DisclosureRecord", "assert_writable", "CommitmentState", "CoverageWindow", "DEFAULT_PROPOSAL_TTL",
     "DataScope", "MalformedReference", "NonDurableReferent", "NormalizedEvent",
     "NormalizedEventType", "PAYLOAD_FOR", "PM_AI", "PM_AI_ACTOR",
     "PayloadMismatch", "ProposalState", "Provenance", "ScopeKind",

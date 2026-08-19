@@ -53,6 +53,15 @@ class DataScope:
         """Used by the AD-31 boundary check. A project named 'personal' is not."""
         return self.kind is ScopeKind.PERSONAL
 
+    @property
+    def is_git_committed(self) -> bool:
+        """AD-38 — project scope lives in the employer's repository.
+
+        This is why disclosure records cannot live in `event_log.md`: that file
+        exists per scope, and one of those scopes is pushed.
+        """
+        return self.kind is ScopeKind.PROJECT
+
     def __str__(self) -> str:
         return f"{self.kind.value}:{self.project_id}" if self.project_id else self.kind.value
 
