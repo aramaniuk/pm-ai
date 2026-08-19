@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# BMad: the framework and its *project* config are tracked deliberately —
+# _bmad-output/ holds the architecture spine, decision memlogs, and reviewer
+# findings, none of which is regenerable. Only machine-local overrides are
+# ignored here (_bmad/custom/.gitignore already covers custom/*.user.toml).
+_bmad/config.user.*
+_bmad/**/config.user.*
+
+# Scratch used by the architecture test suite
+/tmp/pm-ai-*
