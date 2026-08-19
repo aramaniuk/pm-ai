@@ -15,6 +15,15 @@ import pytest
 from conftest import REPO_ROOT
 
 
+def _daemon(tmp: str = "/tmp/pm-ai-slice"):
+    """A wired daemon from the composition root (AD-30)."""
+    import shutil, pathlib
+    wiring = mod("pm_ai.app.wiring")
+    root = pathlib.Path(tmp)
+    shutil.rmtree(root, ignore_errors=True)
+    return wiring.build(root, "alpha")
+
+
 def mod(dotted: str):
     """Import a module or skip with a reason that names what's missing."""
     try:
@@ -65,9 +74,16 @@ def test_ad20_idempotency_keys_are_deterministic():
 
 def test_ad20_mutating_jobs_require_a_key():
     """AD-20 — ADVERSARIAL. The skill layer refuses unkeyed external mutations."""
-    skills = mod("pm_ai.skills.registry")
-    with pytest.raises(skills.MissingIdempotencyKey):
-        skills.invoke("gitlab.post_comment", payload={"work_item": "WI-102"}, idempotency_key=None)
+    reg = mod("pm_ai.skills.registry")
+    d = mod("pm_ai.domain")
+    daemon = _daemon()
+    with pytest.raises(reg.MissingIdempotencyKey):
+        daemon.skills.invoke(
+            "gitlab.post_comment",
+            target=d.TargetRef.parse("gitlab:alpha:issue:102"),
+            payload={"comment": "Approved"},
+            idempotency_key=None,
+        )
 
 
 def test_ad27_connectors_only_emit_core_declared_event_types():
@@ -504,11 +520,15 @@ def test_ad36_self_authored_events_are_excluded_from_evidence():
 
 def test_ad36_every_class_m_mutation_is_recorded_for_attribution():
     """AD-36 — attribution needs both mechanisms; one of them will have gaps."""
-    skills = mod("pm_ai.skills.registry")
-    skills.invoke("gitlab.post_comment", payload={"work_item": "WI-102"},
-                  idempotency_key="k1")
-    recorded = skills.executed_mutations()
-    assert any(m["target_ref"].endswith("WI-102") for m in recorded), (
+    d = mod("pm_ai.domain")
+    daemon = _daemon()
+    target = d.TargetRef.parse("gitlab:alpha:issue:102")
+    daemon.skills.invoke(
+        "gitlab.post_comment", target=target,
+        payload={"comment": "Approved"}, idempotency_key="idem_k1",
+    )
+    recorded = daemon.storage.executed_mutations()
+    assert any(lock == target.lock_key for lock, _ in recorded.values()), (
         "AD-36: the skill layer must record what it wrote so normalization can "
         "recognise it on the way back in."
     )
