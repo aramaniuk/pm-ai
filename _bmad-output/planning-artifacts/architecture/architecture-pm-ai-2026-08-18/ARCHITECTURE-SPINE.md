@@ -9,7 +9,7 @@ status: revision-in-progress
 created: '2026-08-18'
 updated: '2026-08-19'
 binds: [FR-01..FR-37, NFR-01..NFR-14, UJ-1..UJ-10]
-sources: ['docs/prd_pm_ai.md v0.9.1']
+sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.10.0']
 companions: []
 ---
 

@@ -1,6 +1,6 @@
 # pm-ai — Solution Design
 
-**Companion to** `ARCHITECTURE-SPINE.md` · **Source** `docs/prd_pm_ai.md` v0.9.1 · **Date** 2026-08-19
+**Companion to** `ARCHITECTURE-SPINE.md` · **Source** `_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md` v0.10.0 · **Date** 2026-08-19
 
 ---
 
