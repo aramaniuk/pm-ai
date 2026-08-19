@@ -1,0 +1,210 @@
+# Import contracts derived from ARCHITECTURE-SPINE.md
+#
+# Run:  lint-imports
+# These contracts fail the build the moment a dependency points the wrong way.
+# Each contract names the AD it enforces; do not edit one without editing its AD.
+
+[importlinter]
+root_package = pm_ai
+include_external_packages = True
+
+
+# ── Design Paradigm: hexagonal layering ────────────────────────────────────────
+# Dependencies point inward only. Adapters are siblings and independent, which is
+# what stops one adapter importing another (e.g. a connector reaching into storage
+# instead of returning events for the core to persist).
+[importlinter:contract:layering]
+name = Hexagonal layering — dependencies point inward only
+type = layers
+layers =
+    (pm_ai.app)
+    (pm_ai.surfaces)
+    (pm_ai.connectors) : (pm_ai.skills) : (pm_ai.storage) : (pm_ai.models) : (pm_ai.platform)
+    (pm_ai.core)
+    (pm_ai.ports)
+    (pm_ai.domain)
+
+
+# ── AD-1: the MCP skill layer is the only egress ───────────────────────────────
+# Core must be I/O-free. An HTTP client in core means a feature is one import away
+# from bypassing sanitization, authorization, and the event log.
+[importlinter:contract:core-is-io-free]
+name = AD-1 — core imports no I/O client
+type = forbidden
+source_modules =
+    pm_ai.core
+forbidden_modules =
+    httpx
+    requests
+    aiohttp
+    urllib
+    socket
+    subprocess
+    sqlite3
+    anthropic
+    ollama
+
+# Only inbound connectors and outbound skills may speak HTTP at all.
+[importlinter:contract:http-confined-to-adapters]
+name = AD-1 — HTTP clients confined to connectors and skills
+type = forbidden
+source_modules =
+    pm_ai.surfaces
+    pm_ai.storage
+    pm_ai.platform
+forbidden_modules =
+    httpx
+    requests
+    aiohttp
+
+
+# ── AD-15: all model access flows through the router ───────────────────────────
+[importlinter:contract:model-clients-confined]
+name = AD-15 — model clients live only in pm_ai.models
+type = forbidden
+source_modules =
+    pm_ai.core
+    pm_ai.surfaces
+    pm_ai.connectors
+    pm_ai.skills
+    pm_ai.storage
+    pm_ai.platform
+forbidden_modules =
+    anthropic
+    ollama
+
+
+# ── AD-16: Tool Runner, never a built-in-tool agent framework ──────────────────
+# The Claude Agent SDK ships Bash/Read/Write/Edit tools. Importing it anywhere
+# reintroduces exactly the shell and filesystem access FR-36 exists to forbid.
+[importlinter:contract:no-builtin-tool-agent]
+name = AD-16 — no agent framework with built-in shell/filesystem tools
+type = forbidden
+source_modules =
+    pm_ai
+forbidden_modules =
+    claude_agent_sdk
+    langchain
+    langchain_community
+    crewai
+    autogen
+
+
+# ── AD-5: one writer for all persistent state ──────────────────────────────────
+# Only the storage service touches the database. (File writes are AST-checked —
+# see tests/architecture/test_static_rules.py — because `open(p, "w")` is a call,
+# not an import.)
+[importlinter:contract:db-confined-to-storage]
+name = AD-5 — database access confined to pm_ai.storage
+type = forbidden
+source_modules =
+    pm_ai.core
+    pm_ai.surfaces
+    pm_ai.connectors
+    pm_ai.skills
+    pm_ai.models
+forbidden_modules =
+    sqlite3
+    sqlcipher3
+    sqlite_vec
+
+
+# ── AD-26: macOS-only today, portable tomorrow ─────────────────────────────────
+# OS-touching concerns sit behind pm_ai.platform so the Linux port is an adapter,
+# not a rewrite.
+[importlinter:contract:os-behind-platform]
+name = AD-26 — OS-specific APIs confined to pm_ai.platform
+type = forbidden
+source_modules =
+    pm_ai.core
+    pm_ai.surfaces
+    pm_ai.connectors
+    pm_ai.skills
+    pm_ai.storage
+    pm_ai.models
+forbidden_modules =
+    keyring
+    Foundation
+    objc
+    launchd
+
+
+# ── AD-7: the CLI is a thin client and owns no scheduling ──────────────────────
+[importlinter:contract:cli-owns-no-scheduling]
+name = AD-7 — CLI holds no scheduler; the daemon owns background life
+type = forbidden
+source_modules =
+    pm_ai.surfaces.cli
+forbidden_modules =
+    pm_ai.core.scheduler
+    apscheduler
+    sched
+
+
+# ── AD-30: surfaces go through core, never straight to an adapter ──────────────
+# The layering contract permits surfaces -> adapters because surfaces sit higher.
+# That is not the intent: only the composition root wires adapters.
+[importlinter:contract:surfaces-through-core]
+name = AD-30 — surfaces reach adapters only through core
+type = forbidden
+source_modules =
+    pm_ai.surfaces
+forbidden_modules =
+    pm_ai.storage
+    pm_ai.models
+    pm_ai.connectors
+    pm_ai.skills
+
+
+# ── AD-30: the domain is the still point ───────────────────────────────────────
+# domain imports nothing from pm_ai, which is what lets ports express protocols
+# in domain types without a cycle.
+[importlinter:contract:domain-imports-nothing]
+name = AD-30 — pm_ai.domain imports nothing from pm_ai
+type = forbidden
+source_modules =
+    pm_ai.domain
+forbidden_modules =
+    pm_ai.app
+    pm_ai.surfaces
+    pm_ai.core
+    pm_ai.ports
+    pm_ai.connectors
+    pm_ai.skills
+    pm_ai.storage
+    pm_ai.models
+    pm_ai.platform
+
+
+# ── AD-1 class L: whisper.cpp is the one permitted subprocess ──────────────────
+# pm_ai.models.local may spawn an allowlisted binary; nothing else may.
+[importlinter:contract:subprocess-confined]
+name = AD-1 — subprocess confined to pm_ai.models.local and pm_ai.platform
+type = forbidden
+source_modules =
+    pm_ai.core
+    pm_ai.domain
+    pm_ai.surfaces
+    pm_ai.connectors
+    pm_ai.skills
+    pm_ai.storage
+    pm_ai.models.frontier
+forbidden_modules =
+    subprocess
+
+
+# ── AD-30: ports declare protocols, they do not depend on implementations ──────
+[importlinter:contract:ports-depend-only-on-domain]
+name = AD-30 — pm_ai.ports imports only pm_ai.domain
+type = forbidden
+source_modules =
+    pm_ai.ports
+forbidden_modules =
+    pm_ai.app
+    pm_ai.core
+    pm_ai.surfaces
+    pm_ai.connectors
+    pm_ai.skills
+    pm_ai.storage
+    pm_ai.models
+    pm_ai.platform

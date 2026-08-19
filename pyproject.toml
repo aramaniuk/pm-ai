@@ -1,0 +1,49 @@
+[project]
+name = "pm-ai"
+version = "0.1.0"
+description = "Local-first AI PM assistant — daemon, CLI, Telegram bridge, connectors, MCP skills"
+requires-python = ">=3.13"
+
+# Runtime dependencies are declared under [project.optional-dependencies] rather
+# than here, deliberately: the architecture suite must be runnable before the
+# stack resolves. Installing sqlcipher3 and friends is a Phase 1 concern, and the
+# `[mcp]` extra pulls a second web stack that deserves its own resolution pass.
+dependencies = []
+
+[project.optional-dependencies]
+# The Stack table from ARCHITECTURE-SPINE.md, made executable.
+# Versions re-verified against their registries 2026-08-19.
+runtime = [
+    "anthropic[mcp]",
+    "python-telegram-bot==22.8",   # NOT [job-queue] — it embeds a second scheduler
+    "ollama",
+    "sqlcipher3==0.6.2",           # NOT sqlcipher3-binary — Linux-x86_64 wheels only
+    "sqlite-vec==0.1.9",           # pre-1.0; a minor bump is a reindex event (AD-3)
+    "fastapi==0.141.1",
+    "uvicorn==0.52.3",
+    "keyring==25.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "import-linter>=2",
+]
+
+[tool.uv]
+# sqlite-vec needs `enable_load_extension`, which is ABSENT from python.org and
+# macOS system CPython builds — not merely disabled. A uv-managed interpreter has
+# it. Without this the daemon installs, starts, and then fails on the first
+# embedding write, inside the single writer, on a clean machine only.
+python-preference = "only-managed"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests/architecture"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pm_ai"]
