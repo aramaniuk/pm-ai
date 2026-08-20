@@ -1,6 +1,6 @@
 # pm-ai — Solution Design
 
-**Companion to** `ARCHITECTURE-SPINE.md` (40 ADs) · **Source** `_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md` v0.11.0 · **Date** 2026-08-19
+**Companion to** `ARCHITECTURE-SPINE.md` (40 ADs) · **Source** `_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md` v0.12.0 · **Date** 2026-08-20
 
 ---
 
@@ -88,6 +88,14 @@ The tell had been sitting in the PRD's own directory tree the whole time: `team_
 
 Records about reports now live at `~/.pm-ai/private/people/`: encrypted, never committed, HR-syncable on explicit approval, and **deleted on leaving the role** rather than carried onward. It is stored under the application scope but is its own *kind* in the type system, because two rules turn on telling it apart from personal and neither can be written against a path.
 
+### Storage follows the subject, not the mechanism
+
+The scope model settled into one rule, and it took two passes to see it: **an artifact belongs to the scope that owns its subject.** It already governed log entries; it turned out to govern everything.
+
+Raw meeting transcripts had been filed in the application scope — the one documented as holding *no personal records* — alongside the PM's Telegram voice notes, as though "encrypted blobs the daemon manages" were a category. They aren't. A recording of a team meeting is employer material; a voice note is the PM's own. They now live in different scopes, and a transcript follows its meeting rather than having a home of its own: every scope keeps its captures at `transcripts/`, the way each keeps its own `event_log/`. The old name, `chat_history/`, described neither a chat nor a history.
+
+That reframing exposed a contradiction that had been live in the architecture: **meeting records sat in the sovereign personal scope**, while every extracted fact cites its meeting and commitments live in the git-committed project ledger. Each such commitment referenced personal-scope material by `source_ref` — the precise thing the cross-scope rule forbids. It survived four review lenses because the write guard checked the scope a record *belongs to* and never the scope it *points at*; both are checked now.
+
 ### Two 1:1s, two rules
 
 This distinction dissolved an apparent conflict between the privacy charter and the HR integration. The two were never the same data.
@@ -105,7 +113,7 @@ Nothing in the charter had to weaken. `CareerGoal` is deliberately *not* a `Comm
 
 NFR-08 said encrypt everything. Taken literally, that would encrypt `coaching_1on1_history.md` and `commitments_log.md` — and the moment those are ciphertext, they stop being greppable, diffable, hand-editable records and become an opaque blob you happen to own.
 
-The narrowed rule encrypts what genuinely needs it — credentials, raw transcripts and audio, the Tier-2 operational store, the Telegram cache, the team-member records — and leaves every `.md` in plaintext. Tier 3 is plaintext too: it holds embeddings and lookup structures rather than recoverable text, and rebuilds from Tier 1.
+The narrowed rule encrypts what genuinely needs it — credentials, raw transcripts and audio, the Tier-2 operational store, the PM's voice-note cache, the team-member records, and the personal analytics store — and leaves every `.md` in plaintext. Tier 3 is plaintext too: it holds embeddings and lookup structures rather than recoverable text, and rebuilds from Tier 1. Encryption and tier are independent axes — one is confidentiality, the other durability — and `personal_analytics.db` is the artifact that proves it: encrypted because burnout figures are recoverable personal facts, and Tier 2 because those trends outlive the telemetry they were computed from.
 
 **A correction worth keeping.** This decision was originally justified partly by an unverified claim that SQLCipher and `sqlite-vec` could not be combined. A currency review tested the combination and it *works*. The decision stands on its remaining merits — derived data, rebuildable, no plaintext to protect — but the reason cited at the time was not real. The genuine constraint in this area is different and sharper: `sqlite-vec` cannot load into a stock macOS Python at all, because `enable_load_extension` is absent from those builds. A uv-managed interpreter is required regardless of encryption.
 
@@ -196,7 +204,7 @@ Approved commitments enter the domain state machine at `PENDING` and are verifie
 
 ### The 07:00 briefing (UJ-9, FR-09)
 
-The scheduler wakes, pulls from the derived indexes (retrieval budget: 50–150 ms), assembles context, and makes exactly one frontier call — Sonnet 5, tiered — to synthesize. It writes `daily_dashboard.md` and pushes a card. Because the personal analytics store is a physically separate database, burnout signals can inform the briefing while remaining structurally incapable of reaching any project-scope output. The call's scope provenance and cost land in the disclosure ledger.
+The scheduler wakes, pulls from the derived indexes (retrieval budget: 50–150 ms), assembles context, and makes exactly one frontier call — Sonnet 5, tiered — to synthesize. It writes `daily_dashboard.md` and pushes a card. Because the personal analytics store (`~/.manager-ai/private/personal_analytics.db`) is a separate database inside the personal scope, burnout signals can inform the briefing while remaining structurally incapable of reaching any project-scope output. The call's scope provenance and cost land in the disclosure ledger.
 
 ---
 

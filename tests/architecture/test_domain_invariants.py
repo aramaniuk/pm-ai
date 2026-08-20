@@ -209,10 +209,16 @@ def test_ad6_markdown_is_never_encrypted():
 def test_ad25_project_rendering_cannot_open_the_personal_store():
     """AD-25 — the privacy charter is a wall, not a remembered tag check."""
     rendering = mod("pm_ai.core.rendering")
-    opened = rendering.project_scope_datasources(project="alpha")
-    assert not any("manager-ai-private" in str(s) for s in opened), (
-        "AD-25: personal analytics live in a separate database that project-scope "
-        "rendering never opens."
+    opened = [str(s) for s in rendering.project_scope_datasources(project="alpha")]
+    # Assert against the personal SCOPE, not one filename. This previously looked
+    # for "manager-ai-private"; once that directory was folded into the personal
+    # scope the substring could never appear, so the check would have passed
+    # vacuously the day it stopped skipping.
+    leaks = [s for s in opened if "manager-ai" in s or "personal_analytics" in s]
+    assert not leaks, (
+        f"AD-25: project-scope rendering opened {leaks}. Personal analytics live in "
+        "a separate database inside the personal scope, and project rendering has no "
+        "code path to it."
     )
 
 

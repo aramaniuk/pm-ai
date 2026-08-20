@@ -10,6 +10,7 @@ from pm_ai.app.wiring import Daemon
 from pm_ai.core.extraction import extract
 from pm_ai.core.normalize import attribute_all
 from pm_ai.core.sanitize import sanitize
+from pm_ai.domain.disclosure import assert_citation_legal
 from pm_ai.domain.identity import TargetRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.proposals import Proposal
@@ -43,6 +44,10 @@ def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: s
     connector, the core, storage, and the skill registry, which no single layer
     below is permitted to do (AD-30).
     """
+    # AD-38 — check the citation direction BEFORE extracting anything. A meeting
+    # owned by `personal` or `people` cannot be cited from a git-committed scope,
+    # and every extraction below will cite this meeting (AD-33).
+    assert_citation_legal(cited=meeting.scope, into=daemon.scope)
     daemon.meetings[meeting.meeting_id] = meeting  # Tier-1 record, the citation root
     results = extract(transcript, meeting, pm_handle=daemon.pm_handle, provider=provider)
 

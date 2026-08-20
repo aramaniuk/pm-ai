@@ -7,9 +7,9 @@ paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pip
 scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, connectors, MCP skills, storage'
 status: final
 created: '2026-08-18'
-updated: '2026-08-19'
+updated: '2026-08-20'
 binds: [FR-01..FR-37, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
-sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.11.0']
+sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.12.0']
 companions: ['SOLUTION-DESIGN.md']
 ---
 
@@ -87,7 +87,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   | Tier | Contents | Promise |
   | --- | --- | --- |
   | **1 — Truth** | `event_log/` segments per scope (incl. harvested telemetry per FR-27), `commitments_log.md`, coaching history, goals, rules, meeting records, and the application-scoped `disclosure.md` ledger (AD-38) | Plaintext markdown, append-only, hand-editable, git-diffable. A backup target. Bounded by FR-37 compaction, which replaces whole sealed segments rather than rewriting lines (AD-5). |
-  | **2 — Operational** | Job queue and its `PENDING_RETRY` buffer, connector cursors, executed-idempotency-key ledger, staged proposals, key material | Durable and **not derivable from Tier 1**. Must be backed up. Losing it loses pending external writes and resets harvest position — a real consequence, not a cache miss. |
+  | **2 — Operational** | Job queue and its `PENDING_RETRY` buffer, connector cursors, executed-idempotency-key ledger, the harvest dedup set, staged proposals, key material, and `personal_analytics.db` | Durable and **not derivable from Tier 1**. Must be backed up. Losing it loses pending external writes and resets harvest position — a real consequence, not a cache miss. |
   | **3 — Derived** | Search and commitment indexes, `vector_index/`, caches | Disposable. Rebuildable from Tier 1 with zero loss. |
 
   **Tiers are physically separated, not merely labelled.** The earlier version named three tiers while the job queue (Tier 2) and the search indexes (Tier 3) shared one `event_telemetry.db` file — so "rebuild Tier 3 only" was unimplementable, and the natural implementation of a rebuild (delete the file, recreate it) would have destroyed pending external writes and every connector cursor.
@@ -96,9 +96,16 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   | --- | --- | --- | --- |
   | 1 | markdown segments per scope, `~/.pm-ai/disclosure.md`, config | no | **yes** |
   | 2 | `~/.pm-ai/private/operational.db` (SQLCipher) | **never** | **yes** |
+  | 2 | `~/.manager-ai/private/personal_analytics.db` (SQLCipher) | **never** | **yes** |
   | 3 | `~/.pm-ai/private/derived.db`, `vector_index/` | yes | no |
 
   `pm-ai reindex` deletes and rebuilds the Tier-3 artifacts and *cannot* reach Tier 2, because Tier 2 is a different file. That is a structural guarantee rather than a careful implementation. Discarding Tier 2 is a separate, explicitly-named operation whose consequences the CLI states first.
+
+  **Raw captures are outside the tier model on purpose.** `transcripts/` and `telegram_cache/` hold transient input the pipeline consumes and NFR-09 purges at 30 days. They are **not Tier 3**: Tier 3 promises *rebuildable from Tier 1 with zero loss*, and no rebuild reconstructs a recording. They are never a backup target and nothing may depend on them surviving (AD-33). The exclusion is asserted in code against the tier table rather than left implicit — an artifact absent from every set is an oversight, which is how `personal_analytics.db` came to be covered by no backup; an artifact named as excluded is a decision.
+
+  **`personal_analytics.db` is Tier 2, despite being computed.** AD-25 calls it "derived telemetry" in the ordinary sense of *calculated from something else* — which is not what Tier 3's "Derived" means. Tier 3's test is narrow: **rebuildable from Tier 1 with zero loss**. Burnout and workload trends are longitudinal and outlive their inputs, because FR-37 compaction prunes the telemetry they were computed from — so a rebuild after compaction would silently return a shorter history, not the same history. It fails the Tier-3 test and is therefore durable, backed up, and never a rebuild target.
+
+  It previously had **no tier at all**: it appeared in neither the rebuild set nor the backup set, so the one artifact holding months of personal trend data was the one artifact no backup covered. Two words meaning different things — "derived" as a calculation and "Derived" as a durability class — is the same collision that split `scope` four ways.
 
   **Two boundaries on the zero-loss guarantee, stated rather than implied:**
 
@@ -109,7 +116,9 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** all storage paths, FR-16, FR-30, FR-31, NFR-07, AD-31
 - **Prevents:** project configuration contaminating the sovereign personal scope and breaking its portability across roles and companies — and, added after the scope model was found to have no legal home at all for a direct report's career record, that record landing in the one scope that travels to your next employer or the one scope your team can read
-- **Rule:** Three top-level scopes. `~/.pm-ai/` holds application-level state: daemon settings, project registry, per-project connector configuration, credentials. `~/.manager-ai/` holds sovereign personal material only — coaching, career, principles, goals, personal briefings — and contains **no** project-specific information or configuration. `<repo>/.project-ai/` holds committed per-project material. Writing project config into `~/.manager-ai/` is prohibited.
+- **Rule:** Three top-level scopes. `~/.pm-ai/` holds application-level state: daemon settings, project registry, per-project connector configuration, credentials. `~/.manager-ai/` holds sovereign personal material only — coaching, career, principles, goals, personal briefings — and contains **no** project-specific information or configuration. `<repo>/.project-ai/` holds committed per-project material, with one gitignored exception: `transcripts/`, the raw captures of its meetings (AD-23). Writing project config into `~/.manager-ai/` is prohibited.
+
+  Raw meeting transcripts previously sat in the application scope — documented as holding *no personal records*, which a recording of a meeting plainly is. Material now lands in the scope that owns its subject, the same rule AD-38 applies to log entries, and each scope holds its captures at the same relative path rather than in a directory of its own.
 
   **`people` is a fourth scope *kind*, stored as a sub-scope of the application scope** at `~/.pm-ai/private/people/` — encrypted, gitignored, never committed. It holds material about direct reports: career dossiers, goals agreed in a team 1:1, per-employee monitored metrics (FR-30, FR-31).
 
@@ -140,7 +149,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** storage service, NFR-08
 - **Prevents:** a future feature encrypting a markdown file "for consistency" and destroying git-diffability and hand-editability
-- **Rule:** Only these are encrypted: `operational.db` (Tier 2, SQLCipher), `chat_history/` and `telegram_cache/` (envelope-encrypted files), and `config.json` (credentials). **All `.md` files in every scope stay plaintext by design** — transparency over one's own record is a product principle, not an oversight. The Tier-3 artifacts `derived.db` and `vector_index/` are unencrypted: both are rebuildable and hold indexes and embeddings rather than recoverable raw text, protected by `0600` perms and FileVault. The master key lives in the macOS Keychain so the daemon starts unattended; raw key export/import is the documented migration path. Encryption is toggleable for local debugging (default **on**); when off the daemon must emit a CLI banner and an `event_log/` entry, and off is never the default in a fresh install.
+- **Rule:** Only these are encrypted: `operational.db` (Tier 2, SQLCipher), `personal_analytics.db` (SQLCipher), `transcripts/` **in whichever scope owns the meeting** and `~/.manager-ai/private/telegram_cache/` (envelope-encrypted files), and `config.json` (credentials). **All `.md` files in every scope stay plaintext by design** — transparency over one's own record is a product principle, not an oversight. The Tier-3 artifacts `derived.db` and `vector_index/` are unencrypted: both are rebuildable and hold indexes and embeddings rather than recoverable raw text, protected by `0600` perms and FileVault. **Encryption tracks confidentiality; the tier tracks durability, and the two are independent** — `personal_analytics.db` is encrypted because burnout and workload figures are recoverable personal facts, which the embeddings argument never covered. The master key lives in the macOS Keychain so the daemon starts unattended; raw key export/import is the documented migration path. Encryption is toggleable for local debugging (default **on**); when off the daemon must emit a CLI banner and an `event_log/` entry, and off is never the default in a fresh install.
 
 ### AD-7 — One long-lived daemon; every other process is a thin client
 
@@ -250,7 +259,9 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** FR-03, FR-06, FR-07, FR-08, UJ-3, UJ-6, UJ-7, UJ-8
 - **Prevents:** the entire meeting pipeline blocking on tenant-admin consent, and being untestable without a live tenant
-- **Rule:** All transcript ingestion goes through `TranscriptSourcePort`. The primary adapter is Microsoft Graph. A **manual adapter is built from day one**: a watched folder accepting `.vtt` / `.docx` / `.txt`, plus a local-recording-and-transcribe path. The extraction pipeline must be exercisable end-to-end using only the fallback adapter. **Every ingested transcript binds to a `Meeting`** (AD-33) — to its calendar event where one exists, otherwise the drop supplies title, start, and attendees to mint the record. An unbound transcript is rejected rather than allowed to mint attributed provenance from an unattributed file; the manual path is also never an auto-execute source (AD-32).
+- **Rule:** All transcript ingestion goes through `TranscriptSourcePort`. The primary adapter is Microsoft Graph. A **manual adapter is built from day one**: a watched folder accepting `.vtt` / `.docx` / `.txt`, plus a local-recording-and-transcribe path. The extraction pipeline must be exercisable end-to-end using only the fallback adapter. **Every ingested transcript binds to a `Meeting`** (AD-33) — to its calendar event where one exists, otherwise the drop supplies title, start, and attendees to mint the record. **A transcript is stored in its meeting's scope**, never a scope of its own: the capture cannot be more or less shareable than the event it records, so a project meeting's transcript is project-owned and a report 1:1's transcript is `people`-owned. Every scope holds its captures at the same relative path, `transcripts/`, the way each holds its own `event_log/`.
+
+  Captures are encrypted and never committed. For the project scope that means `<repo>/.project-ai/transcripts/` **excluded by a `.gitignore` rule**, because the scope around it *is* committed — so the exclusion rests on a rule rather than on a directory boundary, and a rule can go missing. **The daemon verifies the rule before writing a capture and refuses if it is absent.** Losing a transcript is recoverable, since it is transient input nothing may depend on (AD-33); publishing verbatim meeting minutes to the team's repository is not. An unbound transcript is rejected rather than allowed to mint attributed provenance from an unattributed file; the manual path is also never an auto-execute source (AD-32).
 
 ### AD-24 — The event ledger is domain truth and never carries debug output
 
@@ -262,7 +273,9 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** FR-16, NFR-07
 - **Prevents:** FR-16's privacy charter being enforced only by a tag someone remembers to check
-- **Rule:** Personal-only derived telemetry — burnout metrics, workload and calendar-density dynamics, coaching analytics — lives in its own encrypted store at `~/.manager-ai-private/`, a separate SQLite database. Project-scope rendering never opens it, so personal analytics cannot be joined into any project-scope output. Operational telemetry lives separately in `~/.pm-ai/private/`.
+- **Rule:** Personal-only computed telemetry — burnout metrics, workload and calendar-density dynamics, coaching analytics — lives in **`~/.manager-ai/private/personal_analytics.db`**: its own SQLite database, encrypted, `0600`, and gitignored so it never rides along when the personal scope is backed up as a private repository. Project-scope rendering never opens it, so personal analytics cannot be joined into any project-scope output. Operational telemetry lives separately in `~/.pm-ai/private/`.
+
+  **The wall is the scope boundary, not the directory.** This store previously sat in a fifth top-level location, `~/.manager-ai-private/`, which belonged to no scope kind and therefore fell outside AD-4's ownership rules and AD-38's cross-scope invariant — the two mechanisms that actually stop personal material reaching a committed artifact. Inside the personal scope it is governed by both, and the separation that matters — a distinct database project rendering has no code path to open — is unchanged.
 
   **`people`-scope metrics are a different store again.** FR-30's per-employee monitored metrics describe a direct report, not the PM, and belong in `people` (AD-4) — never in the personal analytics database. The separation runs both ways: your burnout signal must not reach a report's dossier, and a report's performance trend is not personal-scope material that follows you to your next job.
 
@@ -345,7 +358,11 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** provenance pointing at a derived artifact that has its own lifecycle — so a transcript purge silently empties every citation that depended on it, and the drift auditor reports **clean** against sources that no longer exist
 - **Rule:** `source_ref` points at the **most upstream durable referent** — the thing that happened — never at a derived capture of it. A transcript is a derivative of a meeting, so meeting-derived facts cite `meeting:<id>` plus speaker, with an optional time offset used only for tracing. Commit SHAs, MR URLs, ticket anchors, and message IDs already satisfy this.
 
-  **`Meeting` is a first-class Tier-1 record**: id, calendar event reference, title, start, duration, attendees, derived-transcript pointer, processing status. It is also where FR-03's Man-Hour Cost inputs live, so FR-03, FR-32, and UJ-8 key off one entity rather than three ad-hoc lookups.
+  **`Meeting` is a first-class Tier-1 record**: id, calendar event reference, title, start, duration, attendees, **scope**, derived-transcript pointer, processing status. It is also where FR-03's Man-Hour Cost inputs live, so FR-03, FR-32, and UJ-8 key off one entity rather than three ad-hoc lookups.
+
+  **A Meeting belongs to the scope that owns its subject, and `scope` is required rather than defaulted** — a team meeting to its project, a 1:1 with a direct report to `people` (AD-4), a purely personal session to `personal`. It decides two things no caller may guess: where the transcript is written, and whether a git-committed record may cite this meeting at all.
+
+  This was wrong until 2026-08-20, and wrong in a way that made AD-38 false on the main path: `meetings/` was filed in the **personal** scope while commitments live in the git-committed project ledger, so **every commitment extracted from a meeting referenced personal-scope material by `source_ref`** — the exact phrasing AD-38 prohibits. Nothing detected it, because the write guard checks the scope a record *belongs to* and never the scope it *points at*. Both directions are now checked.
 
   **Derived records are self-contained.** A ledger or decision entry carries everything needed to act on it and never depends on its source artifact still existing — which is what makes NFR-09's 30-day transcript purge a purely operational matter. Tracing walks *fact → meeting → transcript if present*; nothing may treat the third hop as a dependency.
 
@@ -607,26 +624,27 @@ graph LR
         A4["logs/ — diagnostics, not a tier"]
         A5["private/operational.db — T2, SQLCipher<br/>jobs, cursors, executed keys, proposals"]
         A6["private/derived.db + vector_index/ — T3<br/>plaintext, rebuildable"]
-        A7["private/: chat_history/, telegram_cache/,<br/>config.json — enc"]
-        A8["private/people/ — PEOPLE scope kind, enc<br/>report dossiers, CareerGoals, FR-30 metrics<br/>not personal · not committed · deleted on role change"]
+        A7["private/config.json — enc<br/>credentials only"]
+        A8["private/people/&lt;person&gt;/ — PEOPLE scope kind, enc<br/>dossiers, CareerGoals, FR-30 metrics,<br/>1:1 meetings + their transcripts/<br/>not personal · not committed · deleted on role change"]
     end
-    subgraph PERS["~/.manager-ai/ — sovereign personal, plaintext md, T1"]
-        P1[rules/]
-        P2["memory/: goals, coaching, dashboard,<br/>event_log/ segments, meetings/"]
-    end
-    subgraph PERSPRIV["~/.manager-ai-private/ — personal analytics, enc"]
-        PP1[burnout + workload metrics]
+    subgraph PERS["~/.manager-ai/ — sovereign personal scope"]
+        P1["rules/ — T1, plaintext md"]
+        P2["memory/: goals, coaching, dashboard,<br/>event_log/ segments, meetings/ (personal-subject<br/>sessions only) — T1, plaintext md"]
+        P3["private/ — enc, gitignored<br/>personal_analytics.db (T2, SQLCipher)<br/>telegram_cache/ — voice notes + dialogue state"]
     end
     subgraph PROJ["repo/.project-ai/ — COMMITTED, plaintext md, T1"]
         R1[rules/]
-        R2["memory/: dashboard, commitments_log,<br/>event_log/ segments"]
+        R2["memory/: dashboard, commitments_log,<br/>event_log/ segments, meetings/ (summaries)"]
         R3[skills/]
+        R4["transcripts/ — raw captures + audio, enc<br/>GITIGNORED inside a committed scope;<br/>daemon verifies the rule before writing<br/>NFR-09 purge at 30d · outside the tier model"]
     end
     PERS -.reads.-> APP
     PROJ -.reads.-> APP
     A3 -.->|"never referenced by"| PROJ
     A8 -->|"class-M sync, PM-approved (FR-31)"| HR[HR platform]
     PERS -.->|"never, in any form (AD-31)"| HR
+    PROJ -.->|"no code path opens it (AD-25)"| P3
+    R4 -.->|"capture belongs to its meeting's scope;<br/>only the meeting record is ever cited (AD-23/AD-33)"| R2
 ```
 
 ### Core entities
@@ -654,7 +672,7 @@ erDiagram
 - **Supervision:** `launchd` user agent, `KeepAlive`, starts at login. Single daemon instance.
 - **Install / update:** isolated install via `uv tool install`.
 - **Health:** `pm-ai doctor` — keychain access, Ollama reachability, per-connector probe status, index and disk sizes, encryption-toggle state.
-- **Backup:** Tier 1 **and Tier 2** — the markdown scopes (project rides in git; personal may be its own private repository), `~/.pm-ai/disclosure.md`, and `operational.db`, plus an exported keychain key. Tier 3 is explicitly **not** a backup target; `pm-ai reindex` rebuilds it. Backing up markdown alone would lose the job queue, cursors, and executed-key ledger — state AD-3 requires to survive and that no rebuild can reconstruct.
+- **Backup:** Tier 1 **and Tier 2** — the markdown scopes (project rides in git; personal may be its own private repository), `~/.pm-ai/disclosure.md`, `operational.db`, and `~/.manager-ai/private/personal_analytics.db`, plus an exported keychain key. Tier 3 is explicitly **not** a backup target; `pm-ai reindex` rebuilds it. Backing up markdown alone would lose the job queue, cursors, executed-key ledger, and every burnout and workload trend — state AD-3 requires to survive and that no rebuild can reconstruct. **If the personal scope is kept as a private git repository, `private/` must be gitignored there**: the store is encrypted, but a personal-analytics history does not belong in version control even privately. Raw captures (`transcripts/`, `telegram_cache/`) are **not** a backup target in any scope — they are transient input under NFR-09's purge, outside the tier model, and nothing may depend on them (AD-33).
 - **Environments:** one — the user's Mac. No staging tier; a debug profile (`~/.pm-ai/config.toml`) toggles encryption and verbose logging.
 
 ### Source tree

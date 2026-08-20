@@ -113,3 +113,20 @@ def cross_scope_split(record: DisclosureRecord) -> tuple[DisclosureRecord, None]
     call's provenance belongs in a repository.
     """
     return record, None
+
+
+def assert_citation_legal(*, cited: DataScope, into: DataScope) -> None:
+    """AD-38 — a committed record may not cite personal- or people-scope material.
+
+    `assert_writable` checks the scope a record *belongs to*; this checks the
+    scope a record *points at*. Both are needed, because AD-38 forbids the
+    reference "not by content, not by `source_ref`, not by scope name" — and a
+    commitment in a git-committed ledger citing `meeting:<id>` is a reference by
+    source_ref to whatever scope owns that meeting.
+    """
+    if into.is_git_committed and (cited.is_personal or cited.is_people):
+        raise CommittedScopeLeak(
+            f"a record in {into} (git-committed) cannot cite material owned by "
+            f"{cited}. The citation would publish, by reference, exactly what the "
+            f"scope boundary exists to keep out (AD-38)."
+        )

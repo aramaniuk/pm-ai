@@ -1,8 +1,8 @@
 ## **title: Local-First AI PM Assistant (pm-ai)**
 
-version: 0.11.0  
+version: 0.12.0  
 created: 2026-08-16  
-updated: 2026-08-19  
+updated: 2026-08-20  
 status: draft
 
 # **PRD: Local-First AI PM Assistant (pm-ai)**
@@ -22,7 +22,8 @@ pm-ai is a local-first, privacy-preserving Executive Operating System and Socrat
 > * **Application Scope (\~/.pm-ai/):** System-level state owned by the application itself — daemon settings, the registry of enrolled projects, per-project connector configuration, encrypted credentials, operational telemetry, and diagnostic logs. Deliberately separate so that no employer-specific or project-specific configuration ever lands in the sovereign personal scope.  
 > * **Sovereign Personal PM Scope (\~/.manager-ai/):** Independent personal coaching hub containing leadership philosophy (manager\_principles.md), 3-tier goals (strategic\_goals.md), Socratic 1:1 coaching logs (coaching\_1on1\_history.md), literature and web page subscriptions (article\_sources.md), and anti-burnout metrics. Contains **no** project-specific information or configuration. This scope survives independently across project, role, or company transitions and is governed by a strict User Privacy & Data Boundary Charter.  
 > * **Team-Member Scope (\~/.pm-ai/private/people/):** Encrypted, gitignored records about direct reports — career dossiers, goals agreed in a team 1:1 (UJ-4), and per-employee monitored metrics (FR-30, FR-31). Stored under the application scope but governed by its own rules, because two requirements turn on telling it apart from the sovereign personal scope: **these records may sync to an external HR platform on explicit PM approval, and personal-scope records never may** (FR-16). It is deliberately **not** part of the sovereign scope and does not survive a company transition — it is a single directory, deleted on leaving the role.
-> * **Isolated Project Scopes (\<project-root\>/.project-ai/):** Repository-specific directory committed to version control, containing project-specific rules, task automation scripts, team cultural rules/conventions, local daily project dashboards, and the team meeting commitments ledger.
+> * **Isolated Project Scopes (\<project-root\>/.project-ai/):** Repository-specific directory committed to version control, containing project-specific rules, task automation scripts, team cultural rules/conventions, local daily project dashboards, meeting records, and the team meeting commitments ledger. Its one gitignored subdirectory, **`transcripts/`**, holds the raw captures of those meetings (encrypted, purged at 30 days). Every scope holds its captures at that same relative path, the way each holds its own `event_log/`.
+> * **Scope is decided by subject, not by convenience.** A meeting record and its transcript live in the scope that owns the meeting: a team meeting in its project, a 1:1 with a direct report in the team-member scope, a purely personal session in the sovereign scope. A committed record may cite only a meeting in its own scope, so the capture is never more or less shareable than the event it records.
 
 \================================================================================  
 A. APPLICATION SCOPE (\~/.pm-ai/)  
@@ -40,8 +41,6 @@ A. APPLICATION SCOPE (\~/.pm-ai/)
 └── private/                            \# OPERATIONAL ENCLAVE (Gitignored)  
     ├── operational.db                   \# Tier 2: job queue, cursors, executed-key ledger, staged proposals (Encrypted, never rebuilt)
     ├── derived.db                       \# Tier 3: search & commitment indexes — disposable, rebuilt by pm-ai reindex  
-    ├── chat\_history/                   \# Raw transcripts & audio (Encrypted, 30-day retention NFR-09)  
-    ├── telegram\_cache/                 \# Mobile voice notes & conversation state (Encrypted)  
     ├── config.json                     \# API credentials (Encrypted: GitLab, Teams, Telegram, HR MCP, Jira, Slack, Notion)  
     ├── vector\_index/                   \# Pruned embeddings (FR-37) — NOT encrypted, rebuildable per NFR-11
     └── people/                          \# TEAM-MEMBER SCOPE (Encrypted) — career dossiers, agreed
@@ -65,15 +64,20 @@ B. SOVEREIGN PERSONAL PM SCOPE (\~/.manager-ai/)
 │   ├── coaching\_1on1\_history.md        \# Socratic 1:1 logs, meta-feedback & growth notes (FR-12)  
 │   └── event\_log/                    \# Personal-scope audit trail & decision log (FR-10, FR-27)  
 │  
-└── skills/                             \# PERSONAL CONCIERGE & CAREER SKILLS  
-    ├── telemetry/                      \# Global cross-project telemetry harvesters & connectors  
-    ├── synthesize\_manager\_dashboard.py \# Manager Strategic Focus generator  
-    └── anti\_burnout\_shield.py          \# Workload telemetry & PTO guardrail analyzer (FR-16)
-
-.manager-ai-private/                    \# PERSONAL ANALYTICS ENCLAVE (Gitignored, AES-256 Encrypted)  
-└── personal\_analytics.db               \# Burnout metrics, workload & calendar-density dynamics (FR-16)  
+├── skills/                             \# PERSONAL CONCIERGE & CAREER SKILLS  
+│   ├── telemetry/                      \# Global cross-project telemetry harvesters & connectors  
+│   ├── synthesize\_manager\_dashboard.py \# Manager Strategic Focus generator  
+│   └── anti\_burnout\_shield.py          \# Workload telemetry & PTO guardrail analyzer (FR-16)  
+│  
+└── private/                            \# PERSONAL ENCLAVE (Gitignored, AES-256 Encrypted)  
+    ├── telegram\_cache/                 \# The PM's own voice notes & dialogue state (Encrypted)  
+    │                                    \# Transient input, NFR-09 retention; never a backup target.  
+    └── personal\_analytics.db           \# Burnout metrics, workload & calendar-density dynamics (FR-16)  
                                         \# Separate DB by design: project-scope rendering never opens it,  
-                                        \# so personal analytics cannot be joined into team-facing output.
+                                        \# so personal analytics cannot be joined into team-facing output.  
+                                        \# Tier 2: backed up, never rebuilt \- burnout trends outlive the  
+                                        \# telemetry they were computed from once FR-37 compaction runs.  
+                                        \# Gitignore this directory if the personal scope is kept as a repo.
 
 \================================================================================  
 C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)  
@@ -88,12 +92,25 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 │   ├── memory/  
 │   │   ├── daily\_dashboard.md          \# Project Alpha Daily Team Dashboard  
 │   │   ├── commitments\_log.md          \# Spoken commitments & promise tracking ledger (FR-34)  
+│   │   ├── meetings/                   \# Meeting SUMMARIES \- citation root for every extracted  
+│   │   │                               \# fact (FR-03 man-hour cost, attendees, duration).  
+│   │   │                               \# Committed: a commitment in this scope may only cite  
+│   │   │                               \# a meeting in this scope.  
 │   │   └── event\_log/                \# Project Alpha specific audit trail & decision log (FR-27)  
-│   └── skills/                         \# PROJECT ALPHA SPECIFIC SKILLS  
-│       ├── parse\_standup.py  
-│       └── sync\_gitlab\_wi.py  
+│   ├── skills/                         \# PROJECT ALPHA SPECIFIC SKILLS  
+│   │   ├── parse\_standup.py  
+│   │   └── sync\_gitlab\_wi.py  
+│   │  
+│   └── transcripts/                    \# RAW CAPTURES (Gitignored, AES-256 Encrypted)  
+│                                       \# Verbatim transcripts & audio; 30-day purge (NFR-09).  
+│                                       \# The one gitignored directory inside a committed scope \-  
+│                                       \# the daemon verifies the .gitignore rule before writing,  
+│                                       \# because the rule is the only thing keeping verbatim  
+│                                       \# meeting minutes out of the team's repository.  
+│                                       \# A 1:1 with a direct report is people-scoped instead \-  
+│                                       \# the capture always lives wherever its meeting lives.  
 │  
-└── .gitignore                          \# Contains .project-ai-private/
+└── .gitignore                          \# Contains /.project-ai/transcripts/
 
 ### **2.2 Jobs To Be Done**
 
@@ -117,7 +134,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
   * **Entry state:** Authenticated via cryptographic pairing on Telegram or in loopback terminal session (pm-ai console or interactive pm-ai). Sends a text message: *"Let's start our weekly 1:1 session."*  
   * **Path:**  
     1. pm-ai opens the session with a concise telemetry breakdown showing actual time allocation vs. Q3 strategic goals (e.g., 80% time spent debugging ticket specs vs. 20% on delegation).  
-    2. pm-ai evaluates the Anti-Burnout Telemetry Shield and flags elevated workload patterns (e.g., 3 consecutive 10-hour days) stored securely in \~/.manager-ai-private/.  
+    2. pm-ai evaluates the Anti-Burnout Telemetry Shield and flags elevated workload patterns (e.g., 3 consecutive 10-hour days) stored securely in \~/.manager-ai/private/.  
     3. pm-ai asks a targeted Socratic question: *"What specific blocker in Project Alpha prevented you from handing off the auth refactor to Alex this week?"*  
     4. Andrei reflects via text or voice note on why he hesitated to delegate.  
     5. pm-ai references an article or HTTP page on engineering delegation frameworks from article\_sources.md with a direct citation and suggests an actionable delegation experiment for next sprint.  
@@ -656,9 +673,10 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
 |  \- event\_log/ (Unified Telemetry)      \- event\_log/ (Unified Telemetry)   |  
 |                                                                               |  
 |  \[\~/.pm-ai/\] (Application Scope: settings, project registry, connectors)     |  
-|  \[\~/.pm-ai/private/\] (Gitignored) \- operational.db, chat\_history/,      |  
-|      telegram\_cache/, config.json  \= Encrypted;  vector\_index/ \= plaintext   |  
-|  \[\~/.manager-ai-private/\] (Gitignored, Encrypted) \- personal analytics only  |  
+|  \[\~/.pm-ai/private/\] (Gitignored) \- operational.db, config.json \=          |  
+|      Encrypted;  derived.db, vector\_index/ \= plaintext                        |  
+|  \[\<repo\>/.project-ai/transcripts/\] (Gitignored, Encrypted) \- raw captures  |  
+|  \[\~/.manager-ai/private/\] (Gitignored, Encrypted) \- personal analytics only    |  
 |  All .md files above are PLAINTEXT by design (NFR-08)                          |  
 \+-------------------------------------------------------------------------------+
 
@@ -676,8 +694,8 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
 ### **7.2 Security, Privacy & Data Sovereignty**
 
 > * **NFR-07 (Scope Boundary Isolation):** Files in \~/.manager-ai/ must never be indexed into or committed to project repositories. Automated pre-commit hooks verify that the private enclaves are gitignored.  
-> * **NFR-08 (Scoped Encryption at Rest & Input Sanitization):** Encryption is applied to a **defined set** rather than to all local state, because plaintext Markdown is a deliberate product property (see below). Encrypted at rest with AES-256 and 600 file permissions: the Tier-2 operational store (operational.db), raw meeting transcripts and voice notes (chat\_history/), the mobile conversation cache (telegram\_cache/), API credentials (config.json), the **team-member records in \~/.pm-ai/private/people/**, and the personal analytics store in \~/.manager-ai-private/. **Explicitly not encrypted:** (a) all Markdown files in every scope — including coaching\_1on1\_history.md, strategic\_goals.md, event\_log/, and commitments\_log.md — which remain plaintext by design so the PM can read, grep, diff, and hand-edit their own record without the system's cooperation; and (b) the Tier-3 derived state — the search and commitment indexes (derived.db) and the vector index — which hold derived embeddings and lookup structures rather than recoverable text, is fully rebuildable per NFR-11, and is protected by 600 permissions plus full-disk encryption. The master key is held in the OS keychain so the daemon can start unattended; raw key export is the supported migration path. Encryption may be disabled by an explicit debug flag, which is never the default in a fresh install and must emit both a console warning and an event\_log/ entry while active. All inbound operational telemetry must pass through the Input Sanitization Module (FR-36).  
-> * **NFR-09 (Transcript Lifecycle & Automated Purge):** Raw meeting transcript text files stored in the encrypted chat\_history/ enclave must be maintained for a default window of 30 days (configurable). The background runner will automatically purge raw text transcripts older than the retention threshold after verified conversion into Markdown summaries, Work Item updates, decision logs, and pruned memory indexes.
+> * **NFR-08 (Scoped Encryption at Rest & Input Sanitization):** Encryption is applied to a **defined set** rather than to all local state, because plaintext Markdown is a deliberate product property (see below). Encrypted at rest with AES-256 and 600 file permissions: the Tier-2 operational store (operational.db), raw meeting transcripts and audio (transcripts/, in whichever scope owns the meeting), the PM's own voice notes and dialogue state (\~/.manager-ai/private/telegram\_cache/), API credentials (config.json), the **team-member records in \~/.pm-ai/private/people/**, and the personal analytics store at \~/.manager-ai/private/personal\_analytics.db. **Explicitly not encrypted:** (a) all Markdown files in every scope — including coaching\_1on1\_history.md, strategic\_goals.md, event\_log/, and commitments\_log.md — which remain plaintext by design so the PM can read, grep, diff, and hand-edit their own record without the system's cooperation; and (b) the Tier-3 derived state — the search and commitment indexes (derived.db) and the vector index — which hold derived embeddings and lookup structures rather than recoverable text, is fully rebuildable per NFR-11, and is protected by 600 permissions plus full-disk encryption. The master key is held in the OS keychain so the daemon can start unattended; raw key export is the supported migration path. Encryption may be disabled by an explicit debug flag, which is never the default in a fresh install and must emit both a console warning and an event\_log/ entry while active. All inbound operational telemetry must pass through the Input Sanitization Module (FR-36).  
+> * **NFR-09 (Transcript Lifecycle & Automated Purge):** Raw meeting transcript text files stored in the encrypted transcripts/ directory of the scope that owns the meeting (\<repo\>/.project-ai/transcripts/ for a team meeting) must be maintained for a default window of 30 days (configurable). The background runner will automatically purge raw text transcripts older than the retention threshold after verified conversion into Markdown summaries, Work Item updates, decision logs, and pruned memory indexes.
 
 ### **7.3 Reliability, Offline Resilience & Hardware Constraints**
 
@@ -797,6 +815,22 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
   2. *Set by PM decision (16 sites):* success-metric targets SM-1 ≥20%, SM-3 ≥7/10, SM-4 ≥80%, SM-6 ≥90%, SM-7 ≥95%, SM-8 ≥80%, SM-9 ≥90%, and the FR-12 question-ratio ≥80%, all recorded as provisional in §11; operational thresholds ±15 min harvest tolerance (FR-02), ≥2 consecutive sprints before a delegation experiment (FR-15), and >65% calendar density for the workload alert (FR-16, matching the figure UJ-9 already narrates).  
   3. *Man-Hour Cost formula defined* as attendees × duration\_hours × blended\_hourly\_rate across FR-03, UJ-3, and the Glossary, with the blended rate a single PM-configured figure in \~/.pm-ai/config.toml rather than per-attendee salary data \- keeping compensation out of the telemetry store.  
   4. *pm-ai Performance Index deferred:* FR-10 promised a composite index it never defined. The weekly action-count aggregation is retained and specified; the composite is moved to §10 Open Questions with a candidate definition to evaluate against real usage.
+
+> * **2026-08-20 (Capture Storage Scoped by Subject \- v0.12.0):** `chat\_history/` and `telegram\_cache/` sat in `\~/.pm-ai/private/` — the application scope, documented as holding **no personal records** — while one held raw recordings of meetings and the other the PM's own voice notes. Both moved, but not to the same place, because they are not the same kind of data. `chat\_history/` was also renamed **`transcripts/`**: it was neither a chat nor a history, and a name that describes nothing in the system is a name every reader has to decode twice.
+
+  `telegram\_cache/` is the PM's own input and moved to the sovereign scope. `chat\_history/` holds **raw meeting transcripts** (NFR-09), which are employer material rather than personal: filing them in the sovereign scope would have made them project-specific content in a scope defined to carry none, sent a former employer's recordings along at a company transition, and forced project-scope ingestion to read the personal scope on every meeting. They now live in **`\<repo\>/.project-ai/transcripts/`** — one directory per scope rather than a second top-level directory per project, since a whole directory tree existing to hold one thing is the same smell that retired `\~/.manager-ai-private/`. Every scope keeps its captures at that same relative path, the way each keeps its own `event\_log/`.
+
+  The cost of folding it inside the committed scope is that the exclusion now rests on a **`.gitignore` rule instead of a directory boundary**, and a rule can go missing. The daemon therefore **verifies the rule before writing a capture and refuses if it is absent**: losing a transcript is recoverable, because it is transient input nothing may depend on, while publishing verbatim meeting minutes to the team's repository is not.
+
+  The governing rule is now stated in §2.1: **a meeting record and its transcript live in the scope that owns the meeting** — team meeting to its project, 1:1 with a direct report to the team-member scope, personal session to the sovereign scope. The capture is never more or less shareable than the event it records.
+
+  **This closed a live contradiction, not just an untidy path.** Meeting records were filed in the sovereign personal scope while every extracted fact cites its meeting and commitments live in the git-committed project ledger — so each such commitment referenced personal-scope material by reference, which the privacy boundary prohibits in exactly those terms. Nothing caught it, because the write check tested the scope a record *belongs to* and never the scope it *points at*. Meeting records move to project scope, both directions are now checked, and the check fails on a planted violation.
+
+> * **2026-08-20 (Personal Analytics Enclave Folded In \- v0.11.1):** Removed `\~/.manager-ai-private/`, a fifth top-level location that existed to hold one file. `personal\_analytics.db` now lives at `\~/.manager-ai/private/personal\_analytics.db`, keeping every original constraint — AES-256 encrypted, gitignored, a separate database that project-scope rendering has no code path to open.
+
+  The move also **strengthens** the boundary rather than merely relocating it. The old directory belonged to no scope kind, so it sat outside both the scope-ownership rules and the cross-scope invariant that actually prevent personal material reaching a committed artifact; those are the mechanisms doing the work, and it was governed by neither. Inside the personal scope it is covered by both.
+
+  Two latent defects surfaced and were fixed in the same pass: the file **had no storage tier at all**, so it appeared in neither the backup set nor the rebuild set — the one store holding months of personal trend data was the one store no backup covered. It is now **Tier 2** (durable, backed up, never rebuilt), because Tier 3 means *rebuildable from truth with zero loss* and burnout trends outlive the telemetry they were computed from once FR-37 compaction prunes it. Separately, NFR-08's encrypted set had **omitted the file** while the architecture described it as an encrypted store; it is now named explicitly.
 
 > * **2026-08-19 (Spine Finalization Reconciliation \- v0.11.0):** Closed the divergences the architecture reviewer gate found still open after v0.10.0. Three were **factual errors** that survived the previous reconciliation:
 

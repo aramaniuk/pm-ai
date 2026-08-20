@@ -13,7 +13,7 @@ import pytest
 
 from pm_ai.app.pipelines import run_transcript_ingestion
 from pm_ai.app.wiring import build
-from pm_ai.domain.identity import Actor
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.proposals import TerminalState, VersionConflict
@@ -34,6 +34,9 @@ MEETING = Meeting(
     start=NOW,
     duration_minutes=45,
     attendees=(Actor("actor_andrei", "Andrei"), Actor("actor_alex", "Alex")),
+    # A team meeting belongs to its project (AD-33/AD-38), which is what makes it
+    # legal for a git-committed commitment to cite it.
+    scope=DataScope(ScopeKind.PROJECT, "alpha"),
     calendar_event_ref="outlook:evt_9931",
 )
 
