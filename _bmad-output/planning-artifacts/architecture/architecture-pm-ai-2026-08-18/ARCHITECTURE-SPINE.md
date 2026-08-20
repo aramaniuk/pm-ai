@@ -8,8 +8,8 @@ scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, con
 status: final
 created: '2026-08-18'
 updated: '2026-08-20'
-binds: [FR-01..FR-37, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
-sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.13.1']
+binds: [FR-01..FR-40, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
+sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.14.2']
 companions: ['SOLUTION-DESIGN.md']
 ---
 
@@ -225,7 +225,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** FR-36, MCP layer
 - **Prevents:** "unsigned" being read as "the firewall is optional"
-- **Rule:** The skill registry is an allowlist of first-party modules, each declaring the **`SkillPermission`s** it may exercise (`read`, `comment`, `edit`, `transition`, `create`, `send`); the daemon refuses to invoke an unlisted skill or a call exceeding its declared permissions, and logs the violation. `SkillPermission` is a distinct type from `DataScope` (AD-4) and is never called "scope" — the two were one word in an earlier draft, which is how a project literally named `personal` could have satisfied a privacy check. Cryptographic signature verification is deferred (see Deferred), and the skill load path must stay pluggable so a verification step can be inserted without restructuring. Everything else in AD-1 remains binding.
+- **Rule:** The skill registry is an allowlist of first-party modules, each declaring the **`SkillPermission`s** it may exercise (`read`, `comment`, `edit`, `transition`, `create`, `send`); the daemon refuses to invoke an unlisted skill or a call exceeding its declared permissions, and logs the violation. `SkillPermission` is a distinct type from `DataScope` (AD-4) and is never called "scope" — the two were one word in an earlier draft, which is how a project literally named `personal` could have satisfied a privacy check. Cryptographic signature verification is deferred (see Deferred), and the skill load path must stay pluggable so a verification step can be inserted without restructuring. **pm-ai may not add to this allowlist**, and may not author or execute a skill of its own (AD-42): a self-improving system whose improvements include widening its own permissions has no permissions. Everything else in AD-1 remains binding.
 
 ### AD-19 — Single asyncio loop for I/O; a bounded pool for heavy local models
 
@@ -473,6 +473,35 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   7. **Unaligned work is never hidden — it is the drift signal.** Unaligned tasks rank lower and stay individually visible: never collapsed, truncated, or summarized away. The **unaligned set is surfaced as a set**, because a week of unaligned work is precisely what FR-24's drift audit exists to catch, and burying it destroys the only evidence that the PM is drifting. Unaligned does not mean unimportant; it means *this may be pulling in a direction nobody chose*, which is a thing to look at rather than a thing to demote out of sight.
 
      The corollary is a guard against gaming the rank: **nothing may mark a task aligned in order to promote it.** Alignment comes only from a resolvable citation to a real goal (rule 2), never from a model's judgment that something feels strategic — otherwise the ranking rule creates an incentive to tag everything, and the tag stops carrying information.
+
+### AD-42 — pm-ai adapts itself only by proposal, and never toward agreement `[NEW]`
+
+- **Binds:** FR-10, FR-12, FR-14, FR-15, FR-20, UJ-1, SM-3, SM-C3, AD-1, AD-5, AD-13, AD-16, AD-18, AD-36, AD-38, AD-41
+- **Prevents:** two failures that arrive wearing the same clothes. A system that improves itself is a system that **rewrites its own constraints** unless something says which parts are off limits — and the parts most worth rewriting, from the model's point of view, are the ones restricting it. And a coach tuned on *"was that session helpful?"*, rated by the person being coached, converges on **flattery**: scores climb, challenge disappears, and the Socratic premise the product is built on is gone while every metric says it is working
+- **Rule:**
+
+  1. **The adaptable surface is a closed set.** pm-ai may adapt its **persona and questioning strategy** (`persona.md`), its **retrieval and recommendation weighting**, and its **memory patterns**. It may not adapt its skill registry, its declared permissions, its egress classes, its scope boundaries, or any rule an AD encodes. Self-improvement operates *inside* the architecture, never on it.
+
+  2. **Every self-modification is a Proposal (AD-13), approved before it applies.** A persona revision is staged with the feedback that motivated it and the diff it would make. `persona.md` is Tier-1 and append-only (AD-5): a revision is a **new version**, never an in-place edit, so the PM can read what changed, when, and why — and revert. A system that silently rewrites how it behaves is one you cannot debug and cannot trust.
+
+  3. **The scorecard measures pm-ai, and only pm-ai.** Three dimensions — **coaching efficiency, dialogue quality, questioning precision**. Domain Distress measures the PM's world, is recorded alongside, and is **never an input to self-tuning**: external firefighting must not be read as pm-ai coaching badly, or the loop learns from noise.
+
+  4. **Any loop tuned on the PM's own approval is bounded by a counter-signal.** This is one rule with two instances, because the failure is structural rather than particular to coaching: optimizing a score the PM assigns converges on giving the PM what they already want.
+
+     - **Coaching** (FR-38): the scorecard is one input and may never be optimized alone. A rise in scores accompanied by a fall in **challenge** — question ratio (FR-12), blind spots surfaced, experiments proposed (FR-15) — is a regression, and the loop must refuse the adaptation.
+     - **Retrieval and memory** (FR-40): weighting learned from what the PM engages with must be bounded by **novelty** — the share of surfaced material the PM has not previously engaged with. If engagement rises while novelty falls, the adaptation is refused. A memory tuned purely on what you already click stops showing you the decision you keep avoiding, which is the blind spot FR-15 and FR-24 exist to surface.
+
+     The counter-metrics (SM-C) are the constraint, not decoration. This is the one place in the system where an improving number is evidence of a problem.
+
+  4b. **Memory weighting changes ordering, never the record.** The loop may change what surfaces first; it may never edit, delete, or rewrite what was logged — ledgers are append-only (AD-5), and bounded forgetting is FR-37's recorded compaction, not silent decay. A self-improving system permitted to revise its own history can make any past decision look correct.
+
+  5. **The Performance Index is application-scoped and labels its own confidence.** It describes the assistant's own behaviour, so it lives beside the disclosure ledger (AD-38) rather than in any per-scope log — never team-facing, and answerable from one file. Each component declares whether it is **measured** or **estimated**: predictive accuracy and recommendation resonance are measured against outcomes pm-ai did not author (AD-36), while *saved managerial hours* is an estimate and must be rendered as one. An index that presents an estimate as a measurement is a system marking its own homework.
+
+  6. **pm-ai does not generate skill code.** Not to execute, not to test, and not as a diff for review — producing a diff *is* authoring, and a rule that forbids authoring while permitting a reviewable patch contradicts itself, which is how a builder ends up reading the second clause as permission. The registry stays a first-party allowlist (AD-18); class L stays whisper.cpp alone (AD-1).
+
+     What the loop may do instead is **name the gap in prose**: *"a skill that closed stale MR threads would have saved eleven manual approvals this month"*, citing the telemetry that motivates it. A human decides whether to write it, and writes it. The observation is the useful part; the code was never the part only a model could supply.
+
+     Generating and running code — the "local sandbox" of the original framing — is the exact capability AD-1 and AD-16 exist to deny, and it is not made safe by being called a sandbox: what is admitted either way is a model-authored program on the PM's machine, holding the PM's credentials.
 
 ## Consistency Conventions
 
@@ -722,6 +751,7 @@ pm_ai/
 | Transcript ingestion & meeting pipeline (FR-01, FR-03, FR-05, FR-08) | `core/extraction` + `TranscriptSourcePort` | AD-12, AD-19, AD-23 |
 | Dual-authorization extraction & approvals (FR-06, FR-21, FR-31) | `core/proposals` + surfaces | AD-13, AD-1 |
 | Commitment ledger & closed-loop verification (FR-33, FR-34) | `core/commitments` + storage | AD-3, AD-5, AD-14, AD-34, AD-35, AD-36, AD-37 |
+| Continuous self-improvement loop (FR-10, FR-14, FR-15, FR-20, UJ-1) | `core/coaching` + `domain/selfimprovement` + application ledger | **AD-42**, AD-13, AD-5, AD-18, AD-36, AD-38 |
 | Micro-decision alignment engine (FR-11, FR-09, FR-13, UJ-9) | `core/alignment` + `domain/goals` | **AD-41**, AD-27, AD-34, AD-38, AD-40 |
 | Coaching, briefings, anti-burnout (FR-09, FR-12, FR-14..FR-17) | `core/coaching`, `core/alignment` | AD-15, AD-17, AD-25, AD-28, AD-41 |
 | Literature & web ingestion (FR-17) | personal-scope connector instance | AD-10, AD-12 |
@@ -750,6 +780,7 @@ pm_ai/
 - **Encryption of the vector index.** Skipped deliberately (AD-6). Revisit only if the index starts holding recoverable raw text rather than embeddings.
 - **Retention policy beyond raw transcripts.** NFR-09 covers transcripts; retention for telemetry rows and derived summaries is unspecified and can wait for real disk-growth data.
 - **Tier-2 schema migration.** Tier 2 is the one tier no rebuild can reconstruct (AD-3), so its schema changes need a real migration path rather than a drop-and-recreate. Deferred only until Tier 2 is durable at all — it is in-memory today, so there is no schema to migrate yet, and this must be settled before the first release that persists it.
+- **Self-authored skill generation and sandboxed execution — deprioritised.** The original framing had pm-ai writing and testing modular Python/Bash skills in a local sandbox. Deliberately not built, and not queued: pm-ai names capability gaps in prose and a human writes the skill (AD-42.6). The bar for revisiting is recorded so a later reader knows this was a decision rather than an oversight — it requires a **real isolation boundary** (process, filesystem, network), **demonstrated red on a planted escape** before it is trusted, and an explicit **AD-1 amendment**. Never a feature increment.
 - **Project-scope goals.** `strategic_goals.md` holds all three domains in the personal scope today (§2.1), which suits FR-11's briefing because that briefing is personal-scope too. If a project-scope dashboard ever needs its own `[Strategic Alignment]` tag, project goals must exist as project-scope records first — a project artifact citing a personal goal is the AD-38 violation that moved meetings. Revisit when a committed surface needs alignment.
 - **The Socratic voice contract.** FR-12's "≥80% of coaching turns end in a question" and the persona system (FR-14, FR-20) are the product's most falsifiable personality claims, and the spine deliberately does not bind them: they are prompt and product-design decisions, revisited here only if a second surface or a second generated-text flow starts diverging on voice.
 

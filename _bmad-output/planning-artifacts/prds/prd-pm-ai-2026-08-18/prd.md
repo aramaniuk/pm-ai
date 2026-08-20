@@ -1,6 +1,6 @@
 ## **title: Local-First AI PM Assistant (pm-ai)**
 
-version: 0.13.1  
+version: 0.14.2  
 created: 2026-08-16  
 updated: 2026-08-20  
 status: draft
@@ -454,11 +454,15 @@ Maintain strict work-hour quiet boundaries by silencing unsolicited alerts and b
 
 #### **FR-14: Bi-Directional Meta-Coaching & Scorecard Engine**
 
-Capture post-1:1 feedback on Coaching Efficiency (1-10 numeric rating scale) and Domain Distress (1-10 numeric rating scale) to calibrate persona questioning strategies. Realizes UJ-1.  
+Capture post-1:1 feedback rating **pm-ai itself** on three dimensions — **Coaching Efficiency**, **Dialogue Quality**, and **Questioning Precision** (each 1-10) — to calibrate its persona and questioning strategy. Realizes UJ-1.
+
+**Domain Distress (1-10) is captured alongside and is deliberately excluded from the tuning loop.** It measures the PM's world, not pm-ai's performance; feeding it in would teach the system that a week of external firefighting was bad coaching, and the self-improvement loop would learn from noise.
+
 **Consequences (testable):**
 
-> * Upon 1:1 session conclusion, system prompts for two numeric ratings on a scale of 1 to 10\.  
-> * Ratings are stored in coaching\_1on1\_history.md and dynamically alter persona parameters for subsequent sessions.
+> * Upon 1:1 session conclusion, the system prompts for three ratings of pm-ai plus Domain Distress, each on a 1-10 scale.  
+> * Ratings are stored in coaching\_1on1\_history.md. Domain Distress is recorded but never read by the persona-tuning engine (FR-38).  
+> * A rating outside 1-10 is rejected at capture rather than stored and averaged.
 
 #### **FR-15: Continuous Leadership Auditing & Guided Experiments**
 
@@ -636,8 +640,48 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
 > * When telemetry detects a merged MR referencing the target Work Item of a \[PENDING\] commitment, system automatically updates commitment status to \[FULFILLED\] and appends the commit SHA verification reference.  
 > * An overdue \[PENDING\] commitment that blocks a milestone triggers a private Socratic alert card to the PM at least 48 hours prior to milestone target date.
 
+### **4.5 Continuous Self-Improvement & Adaptive Learning**
+
+pm-ai is a coach that must get better at coaching *this* PM, or it goes stale. This group is the loop that makes that true: it rates its own effectiveness (FR-14), tunes how it asks (FR-38), audits its own usefulness (FR-39), and learns what is worth remembering (FR-40).
+
+Every requirement here shares one constraint, because a self-improving system is a system that rewrites its own constraints unless something says which parts are off limits: **the loop operates inside the architecture, never on it.** pm-ai may adapt its persona, its retrieval weighting, and its memory patterns. It may not adapt its skill registry, its declared permissions, its egress classification, or its scope boundaries.
+
+**pm-ai does not generate code.** Not to execute, not to test, and not as a patch for review. Where it identifies a capability gap it says so in prose — *"a skill that closed stale MR threads would have saved eleven manual approvals this month"* — and a human writes the skill. The observation is the valuable part; the code was never the part only a model could supply.
+
+#### **FR-38: Adaptive Persona & Prompt Self-Tuning**
+
+Process coaching feedback (FR-14) to refine pm-ai's persona definition (`\~/.manager-ai/rules/persona.md`) and Socratic questioning strategy, so the coach improves with use rather than staying static. Realizes UJ-1.
+
+**Consequences (testable):**
+
+> * A persona revision is **staged as a Proposal** carrying its diff and the feedback that motivated it; it does not take effect until the PM approves it.  
+> * `persona.md` is versioned append-only — a revision is a new version, never an in-place edit — and `pm-ai persona revert` restores any prior version.  
+> * **The loop refuses an adaptation when ratings rise while challenge falls.** If the question ratio (FR-12), blind spots surfaced, or experiments proposed (FR-15) decline as scores improve, the change is rejected and logged as a suppressed adaptation. Optimising a score assigned by the person being coached otherwise selects for agreement, and a coach that stops challenging has stopped working while every metric says otherwise.  
+> * The tunable surface is closed: persona and questioning strategy, retrieval weighting, and memory patterns. pm-ai may not modify its skill registry, its declared permissions, its egress classification, or its scope boundaries.
+
+#### **FR-39: Automated Self-Retrospective & Performance Index**
+
+Run periodic self-audits (`pm-ai retro`) over the event ledger and operational telemetry, producing a **pm-ai Performance Index** that reports the system's own usefulness: predictive accuracy, recommendation resonance, and saved managerial hours. Extends FR-10's weekly aggregation, and resolves the composite index deferred in v0.9.0.
+
+**Consequences (testable):**
+
+> * The Index lives in the **application scope**, beside the disclosure ledger — it describes pm-ai's own behaviour, is never team-facing, and is answerable from one file rather than N per-scope logs.  
+> * **Every component declares whether it is measured or estimated**, and estimates render with that label. *Predictive accuracy* and *recommendation resonance* are measured against outcomes pm-ai did not author; *saved managerial hours* is an estimate and is never presented as a measurement.  
+> * Recommendation resonance is computed from the PM's own subsequent actions (proposals approved, rejected, or expired), never from pm-ai's record of having made the recommendation.
+
+#### **FR-40: Dynamic Memory Evolution**
+
+Refine which stored material is worth surfacing, so recall improves with use rather than degrading as the archive grows. pm-ai learns retrieval weighting from which recalled items the PM actually acts on, and promotes recurring decisions into durable patterns.
+
+**Consequences (testable):**
+
+> * **Weighting changes ordering, never the record.** The ledgers stay append-only: the loop may change what surfaces first, and may never edit, delete, or rewrite what was logged. Bounded forgetting remains FR-37's compaction — a deliberate, recorded reduction — not silent decay.  
+> * `pm-ai memory why \<item\>` explains why something surfaced (or did not), so the weighting is inspectable rather than a black box that quietly stops showing things.  
+> * **Retrieval must not collapse into an echo chamber.** If the share of surfaced material the PM has *not* previously engaged with declines as engagement rises, the adaptation is refused — the same guard FR-38 applies to coaching, on the retrieval axis. A memory tuned purely on what you already click stops showing you the decision you keep avoiding, which is exactly the blind spot FR-15 and FR-24 exist to surface.
+
 ## **5\. Non-Goals (Explicit)**
 
+> * **No Self-Written or Self-Executed Code:** pm-ai does not author, test, or run code it generated — including in a sandbox. It may describe a capability gap; a human writes the skill. A model-authored program on the PM's machine holding the PM's credentials is what the MCP execution boundary exists to prevent, and naming its environment a sandbox does not change what is admitted.  
 > * **No Open Shell / Raw Terminal Execution:** pm-ai will never grant raw shell access to the LLM core. Every **model-driven change to external state** must execute via registry-authorized MCP tools, which are the LLM core's only route to an external effect. Read-only telemetry harvesting, frontier API calls, and local model subprocesses are separately classified and separately constrained — a single blanket claim was weaker in practice, because the first path that contradicted it weakened the whole rule.  
 > * **No Real-Time Audio Interruption:** pm-ai does not speak live during meetings or interrupt speakers in real-time; transcript analysis and execution occur asynchronously post-meeting or via stream processing.  
 > * **No Unsanctioned Autonomous External Writes for Implicit Extractions:** pm-ai will not modify external GitLab Work Items, Jira tickets, or project documentation based on implicit meeting discussions without explicit PM approval via Interactive Approval Cards or CLI approval commands. Spoken in-meeting directives explicitly addressing pm-ai or John authorize immediate execution only under the three conditions in FR-05 (authenticated source, speaker is the PM, reversible non-notifying verb); everything else stages.  
@@ -829,6 +873,28 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
   2. *Set by PM decision (16 sites):* success-metric targets SM-1 ≥20%, SM-3 ≥7/10, SM-4 ≥80%, SM-6 ≥90%, SM-7 ≥95%, SM-8 ≥80%, SM-9 ≥90%, and the FR-12 question-ratio ≥80%, all recorded as provisional in §11; operational thresholds ±15 min harvest tolerance (FR-02), ≥2 consecutive sprints before a delegation experiment (FR-15), and >65% calendar density for the workload alert (FR-16, matching the figure UJ-9 already narrates).  
   3. *Man-Hour Cost formula defined* as attendees × duration\_hours × blended\_hourly\_rate across FR-03, UJ-3, and the Glossary, with the blended rate a single PM-configured figure in \~/.pm-ai/config.toml rather than per-attendee salary data \- keeping compensation out of the telemetry store.  
   4. *pm-ai Performance Index deferred:* FR-10 promised a composite index it never defined. The weekly action-count aggregation is retained and specified; the composite is moved to §10 Open Questions with a candidate definition to evaluate against real usage.
+
+> * **2026-08-20 (No Self-Generated Code \- v0.14.2):** The last open component of the self-improvement framework — *"tests modular Python/Bash skills in a local sandbox"* — is resolved: **no code generation, and the sandbox work is deprioritised.**
+
+  The ruling also resolved a contradiction the previous revision had introduced. The rule said pm-ai *"never authors, tests, or executes a skill it wrote"* and then permitted it to *"propose a skill as a diff for human review"* — but producing a diff **is** authoring. A rule that contradicts itself gets read at its most permissive clause, which is the failure this document has corrected three times already. pm-ai now names capability gaps in prose and a human writes the skill.
+
+  Recorded as a **Non-Goal** as well as a requirement constraint, so the exclusion is findable where a reader looks for exclusions rather than only inside a feature group. The bar for revisiting is stated rather than left implicit: a real isolation boundary — process, filesystem, network — demonstrated to fail on a planted escape, and an explicit change to the execution boundary. No code changed, because nothing implemented skill generation; the tunable surface already excluded the skill registry by type.
+
+> * **2026-08-20 (Self-Improvement Given Its Own Section \- v0.14.1):** v0.14.0 added the requirements but filed FR-38 and FR-39 between FR-14 and FR-15, so the document read 13, 14, 38, 39, 15 and the pillar was **present but unfindable** — the same failure as the alignment engine hiding inside an FR-range. Continuous self-improvement now has its own group, **§4.5**, visible in the contents alongside the other four.
+
+  **FR-40 (Dynamic Memory Evolution)** completes the loop: pm-ai learns retrieval weighting from what the PM acts on, and promotes recurring decisions into durable patterns. Two constraints, both inherited rather than invented:
+
+  1. *Weighting changes ordering, never the record.* Ledgers stay append-only; the loop may change what surfaces first and may never edit or delete what was logged. Bounded forgetting remains FR-37's recorded compaction, not silent decay. A self-improving system allowed to revise its own history can make any past decision look correct.
+  2. *Retrieval must not collapse into an echo chamber.* Weighting learned from engagement is bounded by **novelty**, exactly as coaching is bounded by challenge — this is one failure with two instances, not two rules. A memory tuned purely on what you already click stops surfacing the decision you keep avoiding, which is the blind spot FR-15 and FR-24 exist to catch.
+
+> * **2026-08-20 (Continuous Self-Improvement Made Explicit \- v0.14.0):** pm-ai is meant to improve with use rather than go stale, and that pillar existed only in fragments: FR-14 captured two ratings and said persona parameters would change "dynamically" with no mechanism, and the composite Performance Index had been **deferred in v0.9.0 for lack of a definition**. Both are now specified.
+
+  **FR-14** rates pm-ai on three dimensions — Coaching Efficiency, Dialogue Quality, Questioning Precision — with **Domain Distress captured alongside and deliberately excluded from tuning**, so a week of external firefighting is not read as bad coaching. **FR-38** makes each persona revision a staged Proposal carrying its diff and motivating feedback, applied only on approval, versioned append-only, revertible. **FR-39** revives the Performance Index with the definition it lacked.
+
+  Two constraints came out of writing it, and both are load-bearing:
+
+  1. *The loop must not optimise agreement.* A coach tuned on "was that session helpful?", rated by the person being coached, converges on flattery — scores climb, challenge disappears, and every metric reports success while the Socratic premise is gone. FR-38 therefore **refuses an adaptation when ratings rise as challenge falls**, measured by the question ratio, blind spots surfaced, and experiments proposed. This is the one place in the system where an improving number is evidence of a problem.
+  2. *Self-improvement operates inside the architecture, never on it.* The tunable surface is closed to persona, retrieval weighting, and memory patterns. **The brainstormed "test modular Python/Bash skills in a local sandbox" is deliberately NOT adopted**: a model-authored program executing on the PM's machine with the PM's credentials is the exact capability the MCP execution boundary exists to deny, and naming the environment a sandbox does not change what is being admitted. pm-ai may propose a skill as a diff for human review. Revisiting this is a change to the execution boundary itself, not a feature increment — recorded in §10.
 
 > * **2026-08-20 (Alignment Drives Rank \- v0.13.1):** FR-11 said what alignment *is* and never what it *does*. Alignment now orders work: an aligned task ranks above an unaligned one at comparable urgency, by one rule shared across the briefing, the weekly plan, and the prep dashboard, so three surfaces cannot each invent an ordering.
 
