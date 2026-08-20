@@ -58,14 +58,36 @@ class DisclosureRecord:
         return DISCLOSURE_LEDGER_SCOPE
 
 
+def referenced_scopes(record: object) -> tuple[DataScope, ...]:
+    """Every scope a record names, across the shapes records actually take.
+
+    A `DisclosureRecord` names its sources in `contributing_scopes`; a
+    `NormalizedEvent` names the single scope it belongs to in `scope`. Reading
+    only the former made this guard a no-op on the only record type the storage
+    service actually persists — it passed because the attribute was absent, not
+    because the record was safe.
+    """
+    found: list[DataScope] = []
+    contributing = getattr(record, "contributing_scopes", None) or ()
+    found.extend(s for s in contributing if isinstance(s, DataScope))
+    own = getattr(record, "scope", None)
+    if isinstance(own, DataScope):
+        found.append(own)
+    return tuple(found)
+
+
 def assert_writable(record: object, *, scope: DataScope) -> None:
     """AD-38's general invariant, checked at the write boundary.
 
-    No record written to a git-committed scope may reference personal-scope
-    material — not by content, not by `source_ref`, not by scope name. A
-    cross-scope operation writes its project-visible part to the project log and
-    everything else to the application ledger; it never writes one record naming
-    both.
+    No record written to a git-committed scope may reference personal- or
+    people-scope material — not by content, not by `source_ref`, not by scope
+    name. A cross-scope operation writes its project-visible part to the project
+    log and everything else to the application ledger; it never writes one record
+    naming both.
+
+    `people` is included for the same structural reason and a sharper
+    consequence: a direct report's performance objective committed to a
+    repository is readable by that report's peers.
     """
     if isinstance(record, DisclosureRecord) and scope != DISCLOSURE_LEDGER_SCOPE:
         raise CommittedScopeLeak(
@@ -74,13 +96,13 @@ def assert_writable(record: object, *, scope: DataScope) -> None:
         )
     if not scope.is_git_committed:
         return
-    scopes = getattr(record, "contributing_scopes", None) or ()
-    if any(getattr(s, "is_personal", False) for s in scopes):
-        raise CommittedScopeLeak(
-            f"record references personal scope and is bound for {scope}, which is "
-            f"git-committed. Split it: project-visible part to the project log, "
-            f"the rest to the application ledger (AD-38)."
-        )
+    for referenced in referenced_scopes(record):
+        if referenced.is_personal or referenced.is_people:
+            raise CommittedScopeLeak(
+                f"record references {referenced} and is bound for {scope}, which is "
+                f"git-committed. Split it: project-visible part to the project log, "
+                f"the rest to the application ledger (AD-38)."
+            )
 
 
 def cross_scope_split(record: DisclosureRecord) -> tuple[DisclosureRecord, None]:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pm_ai.app.wiring import Daemon
 from pm_ai.core.extraction import extract
+from pm_ai.core.normalize import attribute_all
 from pm_ai.core.sanitize import sanitize
 from pm_ai.domain.identity import TargetRef
 from pm_ai.domain.lifecycle import ProposalState
@@ -25,7 +26,12 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     for event in result.events:
         sanitize(getattr(event.payload, "message", "") or "")
 
-    persisted = daemon.storage.persist_events(result.events, scope=daemon.scope)
+    # AD-36 — the match step. Connectors emit `unknown`; this is the only layer
+    # that can see the executed-mutation ledger, so this is where provenance is
+    # decided. Without it, pm-ai's own writes harvest back as external evidence.
+    attributed = attribute_all(result.events, daemon.storage.executed_mutations())
+
+    persisted = daemon.storage.persist_events(attributed, scope=daemon.scope)
     daemon.storage.save_cursor(instance, result.cursor, result.coverage)  # AD-35
     return persisted
 

@@ -153,6 +153,12 @@ class NormalizedEvent:
             )
 
     @property
-    def natural_key(self) -> tuple[str, str]:
-        """AD-34: dedup on this, never on the minted surrogate."""
-        return (self.source_ref.system, str(self.source_ref))
+    def natural_key(self) -> tuple[str, str, str]:
+        """AD-34: dedup on this, never on the minted surrogate.
+
+        `scope` is part of the key. Without it, AD-38's mandated cross-scope
+        split — one operation writing a project entry and a personal entry — has
+        its second entry silently counted as a duplicate, so the rule written to
+        prevent a leak instead drops the record.
+        """
+        return (str(self.scope), self.source_ref.system, str(self.source_ref))

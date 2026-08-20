@@ -8,7 +8,7 @@ skip, and the Phase 1 exit criterion is zero skips in this directory.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -37,6 +37,7 @@ class SourceFile:
 
     path: Path
     tree: ast.AST
+    aliases: dict = field(default_factory=dict)
 
     @property
     def rel(self) -> str:
@@ -66,7 +67,8 @@ def source_files(*layers: str) -> list[SourceFile]:
         for path in sorted(root.rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
-            files.append(SourceFile(path=path, tree=ast.parse(path.read_text())))
+            tree = ast.parse(path.read_text())
+            files.append(SourceFile(path=path, tree=tree, aliases=alias_map(tree)))
     if not files:
         pytest.skip(f"no source files yet under {', '.join(layers) or 'pm_ai'}")
     return files
@@ -84,12 +86,45 @@ def called_name(node: ast.Call) -> str:
     return ".".join(reversed(parts))
 
 
+def alias_map(tree: ast.AST) -> dict[str, str]:
+    """Local binding -> the dotted origin it came from.
+
+    A banned call renamed at import is still the banned call. Without this,
+    `import subprocess as _sp` yields the call name `_sp.run`, which matches no
+    entry in any forbidden-call set — a planted `_sp.run(..., shell=True)` was
+    caught by import-linter and missed by the AST scan on 2026-08-19.
+    """
+    mapping: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                mapping[a.asname or a.name.split(".")[0]] = a.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for a in node.names:
+                mapping[a.asname or a.name] = f"{node.module}.{a.name}"
+    return mapping
+
+
+def canonical_name(f: SourceFile, node: ast.Call) -> str:
+    """`called_name` with import aliases resolved back to their origin."""
+    raw = called_name(node)
+    head, _, rest = raw.partition(".")
+    origin = f.aliases.get(head)
+    if origin is None:
+        return raw
+    return f"{origin}.{rest}" if rest else origin
+
+
 def calls(files: list[SourceFile]):
-    """Yield every (SourceFile, Call, dotted_name) triple in the given files."""
+    """Yield every (SourceFile, Call, dotted_name) triple in the given files.
+
+    The name is alias-resolved, so a forbidden call cannot be hidden behind a
+    rename at the import site.
+    """
     for f in files:
         for node in ast.walk(f.tree):
             if isinstance(node, ast.Call):
-                yield f, node, called_name(node)
+                yield f, node, canonical_name(f, node)
 
 
 def format_violations(violations: list[str], rule: str) -> str:

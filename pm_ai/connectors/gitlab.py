@@ -48,7 +48,13 @@ class GitLabConnector:
                 actor=resolve_actor(system="gitlab", handle=r["author_email"]),
                 occurred_at=r["committed_at"],  # provider clock (AD-35)
                 payload=CommitPayload(sha=r["sha"], message=r["message"]),
-                authored_by=Provenance.EXTERNAL,
+                # AD-36 — a connector may NEVER assert `external`. It cannot see
+                # the executed-mutation ledger, so it cannot know whether this is
+                # pm-ai's own write coming back. Normalization decides; this
+                # emits the fail-closed default. Hard-coding EXTERNAL here made
+                # our own comments admissible as evidence that our own promises
+                # were kept.
+                authored_by=Provenance.UNKNOWN,
                 # no `id`: the storage service mints the surrogate (AD-34)
             )
             for r in rows

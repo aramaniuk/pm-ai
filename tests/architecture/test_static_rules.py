@@ -55,14 +55,29 @@ SCHEDULING_CALLS = {
 }
 
 
-def _write_mode(node: ast.Call) -> bool:
-    """True when an `open()` call opens for writing rather than reading."""
-    if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-        return any(c in str(node.args[1].value) for c in "wax+")
+def _mode_of(node: ast.Call) -> str:
+    """The mode string an `open` call was given, or "" when it took none.
+
+    Two call shapes put it in two places: the builtin `open(path, "w")` carries
+    mode second, while `path.open("w")` — `Path.open` — carries it first.
+
+    Reading only the second position scored every `Path.open("w")` as a read.
+    That is the idiomatic form in this codebase, so AD-5's single-writer rule
+    passed a planted violation until 2026-08-19. Distinguish on the call shape:
+    a bare `ast.Name` func is the builtin, an `ast.Attribute` is the method.
+    """
+    index = 1 if isinstance(node.func, ast.Name) else 0
+    if len(node.args) > index and isinstance(node.args[index], ast.Constant):
+        return str(node.args[index].value)
     for kw in node.keywords:
         if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
-            return any(c in str(kw.value.value) for c in "wax+")
-    return False  # bare open(p) is a read
+            return str(kw.value.value)
+    return ""
+
+
+def _write_mode(node: ast.Call) -> bool:
+    """True when an `open()` call opens for writing rather than reading."""
+    return any(c in _mode_of(node) for c in "wax+")  # no mode at all is a read
 
 
 def test_ad5_single_writer_owns_all_file_writes():
@@ -91,7 +106,11 @@ def test_ad1_no_shell_execution_outside_platform():
     A `subprocess.run` reachable from a model-driven code path is the exact hole
     the MCP execution firewall exists to close.
     """
-    layers = ["core", "connectors", "skills", "surfaces", "storage"]
+    # `app` is deliberately included: it is the composition root and the ONE
+    # layer permitted to import every other, which made it the one layer where an
+    # unscanned `subprocess.run(shell=True)` was invisible to both this check and
+    # .importlinter. It passed a planted violation until 2026-08-19.
+    layers = ["app", "domain", "core", "ports", "connectors", "skills", "surfaces", "storage"]
     violations = [
         f"{f.location(node)}  {name}(...)"
         for f, node, name in calls(source_files(*layers))
@@ -229,10 +248,8 @@ def test_ad5_storage_never_rewrites_a_markdown_ledger_in_place():
         if not any(led in rendered for led in LEDGERS):
             continue
         if name == "open" and _write_mode(node):
-            mode = next(
-                (a.value for a in node.args[1:2] if isinstance(a, ast.Constant)), ""
-            )
-            if "a" not in str(mode):
+            mode = _mode_of(node)  # both call shapes, per _mode_of
+            if "a" not in mode:
                 violations.append(f"{f.location(node)}  open(..., {mode!r}) on a ledger")
         if name.endswith("write_text") or name.endswith("write_bytes"):
             violations.append(f"{f.location(node)}  {name}(...) replaces a ledger wholesale")

@@ -72,8 +72,15 @@ class SkillRegistry:
                 prior = self._storage.executed_mutations()[idempotency_key]
                 return Invocation(external_id=prior[1], replayed=True)
 
+            # AD-20 — claim the key BEFORE calling out. Recording only after the
+            # provider responds leaves a crash window in which the mutation
+            # happened and the ledger does not know: the retry then executes a
+            # second time, which is the duplicate this rule exists to prevent, on
+            # the ordinary path rather than the rare one. A key found in flight
+            # is a reconciliation task, not a licence to re-execute.
+            self._storage.begin_execution(idempotency_key, target)
             external_id = skill.execute(target, payload)
-            self._storage.record_execution(idempotency_key, target, external_id)  # AD-36
+            self._storage.settle_execution(idempotency_key, external_id)  # AD-36
             self._storage.append_event_log(  # AD-1
                 f"- [skill] {qualified_name} target={target.lock_key} "
                 f"external_id={external_id} key={idempotency_key}",

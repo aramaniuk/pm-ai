@@ -92,7 +92,10 @@ def test_ad27_connectors_only_emit_core_declared_event_types():
     If GitLab emits `mr_updated` and Jira emits `workitem.updated`, commitment
     verification silently misses evidence from one of them.
     """
-    taxonomy = mod("pm_ai.core.taxonomy")
+    # AD-27 puts the closed enumeration in `domain`, and the code correctly did
+    # so. This test looked for `pm_ai.core.taxonomy` — a module that will never
+    # exist — and therefore skipped forever while reading as covered.
+    taxonomy = mod("pm_ai.domain.events")
     registry = mod("pm_ai.connectors.registry")
 
     allowed = set(taxonomy.NormalizedEventType)
@@ -153,11 +156,14 @@ def test_ad9_cursor_is_opaque_to_the_core():
 
 def test_ad14_proposal_and_commitment_lifecycles_stay_distinct():
     """AD-14 — approval status and real-world fulfilment are different questions."""
-    commitments = mod("pm_ai.core.commitments")
-    proposals = mod("pm_ai.core.proposals")
+    # Both lifecycles live in `pm_ai.domain.lifecycle` and are named `...State`,
+    # not `...Status`. Looking for `pm_ai.core.commitments.CommitmentStatus` meant
+    # this skipped forever, and would have failed on the wrong thing the day it
+    # stopped skipping.
+    lifecycle = mod("pm_ai.domain.lifecycle")
 
-    commitment_states = {s.name for s in commitments.CommitmentStatus}
-    proposal_states = {s.name for s in proposals.ProposalStatus}
+    commitment_states = {s.name for s in lifecycle.CommitmentState}
+    proposal_states = {s.name for s in lifecycle.ProposalState}
 
     assert "STAGED_APPROVAL" not in commitment_states, (
         "AD-14: STAGED_APPROVAL is a Proposal state. A commitment begins at PENDING."

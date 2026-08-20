@@ -19,51 +19,75 @@ from enum import Enum
 
 
 class ScopeKind(Enum):
-    """The three storage scopes of AD-4.
+    """The scope kinds of AD-4.
 
     Distinct from `SkillPermission` below. Both were called "scope" in the
     spine's prose, which is how a reviewer found that a project literally named
     `personal` would defeat AD-31's privacy boundary.
+
+    PEOPLE is stored *under* the application scope (`~/.pm-ai/private/people/`)
+    but is its own kind, because two rules turn on telling it apart from
+    PERSONAL and neither can be written against a path: a report's career goal
+    may sync to HR (AD-31, UJ-4) and the PM's own coaching record may never.
     """
 
     APPLICATION = "application"  # ~/.pm-ai/
-    PERSONAL = "personal"  # ~/.manager-ai/
+    PERSONAL = "personal"  # ~/.manager-ai/ — the PM's own
+    PEOPLE = "people"  # ~/.pm-ai/private/people/ — a direct report's
     PROJECT = "project"  # <repo>/.project-ai/
 
 
 @dataclass(frozen=True, slots=True)
 class DataScope:
-    """Which of the three scopes some data belongs to (AD-4).
+    """Which scope some data belongs to (AD-4).
 
-    A project id is required for PROJECT and forbidden otherwise, so
+    The subject id is required exactly where a scope has a subject — a project
+    id for PROJECT, a person id for PEOPLE — and forbidden elsewhere, so
     `DataScope(PROJECT)` cannot exist ambiguously.
     """
 
     kind: ScopeKind
     project_id: str | None = None
+    person_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind is ScopeKind.PROJECT and not self.project_id:
             raise ValueError("PROJECT scope requires a project_id")
         if self.kind is not ScopeKind.PROJECT and self.project_id:
             raise ValueError(f"{self.kind.value} scope must not carry a project_id")
+        if self.kind is ScopeKind.PEOPLE and not self.person_id:
+            raise ValueError("PEOPLE scope requires a person_id — whose record is this?")
+        if self.kind is not ScopeKind.PEOPLE and self.person_id:
+            raise ValueError(f"{self.kind.value} scope must not carry a person_id")
 
     @property
     def is_personal(self) -> bool:
-        """Used by the AD-31 boundary check. A project named 'personal' is not."""
+        """The PM's own material, and only that (AD-31).
+
+        Deliberately false for PEOPLE: a direct report's record is personal data,
+        but it is not *the PM's* personal scope, and conflating the two would
+        either forbid the HR sync UJ-4 requires or permit the export FR-16
+        forbids.
+        """
         return self.kind is ScopeKind.PERSONAL
+
+    @property
+    def is_people(self) -> bool:
+        """A direct report's material (AD-4). HR-syncable on approval (AD-31)."""
+        return self.kind is ScopeKind.PEOPLE
 
     @property
     def is_git_committed(self) -> bool:
         """AD-38 — project scope lives in the employer's repository.
 
-        This is why disclosure records cannot live in `event_log.md`: that file
-        exists per scope, and one of those scopes is pushed.
+        This is why disclosure records cannot live in the event ledger: it exists
+        per scope, and one of those scopes is pushed.
         """
         return self.kind is ScopeKind.PROJECT
 
     def __str__(self) -> str:
-        return f"{self.kind.value}:{self.project_id}" if self.project_id else self.kind.value
+        subject = self.project_id or self.person_id
+        return f"{self.kind.value}:{subject}" if subject else self.kind.value
 
 
 class SkillPermission(Enum):

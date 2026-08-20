@@ -23,6 +23,7 @@ from pm_ai.domain import (
     TargetRef,
     evaluate_commitment,
 )
+from pm_ai.domain.harvest import Cursor
 from pm_ai.domain.identity import UNRESOLVED_ACTOR, Actor, register_alias
 from pm_ai.skills.registry import MissingIdempotencyKey, SkillNotAuthorized
 
@@ -63,18 +64,37 @@ def test_reharvest_is_idempotent_on_the_natural_key(daemon):
     Without this, a replayed harvest doubles every metric that feeds a review.
     """
     run_harvest(daemon, "gitlab:alpha")
-    daemon.storage._t2.cursors.clear()  # simulate a cursor reset / restore
+    # Simulate a cursor reset / restore through the public write path.
+    daemon.storage.save_cursor("gitlab:alpha", Cursor(), None)
     second = run_harvest(daemon, "gitlab:alpha")
+    assert (second.persisted, second.duplicates) == (0, 2)
+
+
+def test_dedup_survives_a_restart(daemon):
+    """AD-34 + AD-3 — the dedup set is Tier 2, so it outlives the process.
+
+    While it lived in a set on the instance, "re-harvesting is idempotent" was
+    true only within one daemon lifetime: a restart re-persisted every event in
+    the replayed window and doubled the metrics the rule exists to protect.
+    """
+    first = run_harvest(daemon, "gitlab:alpha")
+    assert first.persisted == 2
+
+    restarted = build(daemon.storage._root, "alpha", now=lambda: NOW)
+    restarted.connectors["gitlab:alpha"]._fake_api = daemon.connectors["gitlab:alpha"]._fake_api
+    restarted.storage.save_cursor("gitlab:alpha", Cursor(), None)  # replay the window
+
+    second = run_harvest(restarted, "gitlab:alpha")
     assert (second.persisted, second.duplicates) == (0, 2)
 
 
 def test_harvest_records_a_coverage_window(daemon):
     """AD-35 — coverage rides in the return type, so a connector cannot forget it."""
     run_harvest(daemon, "gitlab:alpha")
-    assert daemon.storage._t2.coverage, "no coverage recorded"
-    window = daemon.storage._t2.coverage[-1]
-    assert window.connector_instance == "gitlab:alpha"
-    assert window.covers(NOW - timedelta(minutes=30))
+    windows = daemon.storage.coverage_windows("gitlab:alpha")
+    assert windows, "no coverage recorded"
+    start, end = windows[-1]
+    assert start <= NOW - timedelta(minutes=30) <= end
 
 
 def test_unresolved_author_does_not_become_an_identity(daemon):
@@ -83,7 +103,6 @@ def test_unresolved_author_does_not_become_an_identity(daemon):
     assert result_before.persisted == 2
     # No alias registered, so the commit email resolves to UNRESOLVED, not itself.
     stored = daemon.storage
-    assert stored._seen, "nothing persisted"
 
     register_alias("gitlab", "alex@example.com", Actor("actor_alex", "Alex"))
     d2 = build(stored._root / "second", "alpha", now=lambda: NOW)

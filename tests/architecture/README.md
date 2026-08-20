@@ -15,14 +15,30 @@ uv run pytest tests/architecture -v      # everything
 uv run lint-imports                      # layering only, faster feedback
 ```
 
-## Status: skipping by design
+## Status
 
-`pm_ai/` does not exist yet, so these skip. That is intentional — they are
-written against the package Phase 1 will create, so the contracts are in place
-*before* the code they constrain rather than retrofitted afterwards.
+`pm_ai/` exists. Two vertical slices are built, so a majority of these checks
+now run against real code; the remainder skip on modules Phase 1 has yet to
+create (`pm_ai.core.*`, `pm_ai.models.router`, `pm_ai.surfaces.*`).
 
-**Phase 1 exit criterion: zero skips in this directory.** A skip here after
-Phase 1 means an invariant is unenforced, not that a test is unnecessary.
+**Read the coverage table below with care.** A populated "Enforced by" cell
+means a test is *written*, not that it is *running*. An AD whose only check
+skips is an AD nothing enforces — a reviewer found eleven of those on
+2026-08-19, all reading as covered.
+
+**Phase 1 exit criterion: zero skips in this directory, and every active check
+demonstrated to fail on a planted violation.** The second half was added after
+two load-bearing checks turned out to be bypassable while green:
+
+- `_write_mode` read the mode from the builtin `open(path, mode)` position only,
+  so the idiomatic `Path.open("w")` scored as a read and AD-5's single-writer
+  rule passed a planted violation.
+- The AD-1 shell scan omitted `pm_ai.app` — the composition root, the one layer
+  permitted to import every other — and resolved no import aliases, so
+  `import subprocess as _sp; _sp.run(..., shell=True)` was invisible.
+
+Both are fixed and both now have their own regressions in
+`test_enforcement_meta.py`. A check nobody checks is a comment.
 
 ## What is enforced where
 
@@ -31,6 +47,8 @@ Phase 1 means an invariant is unenforced, not that a test is unnecessary.
 | Import contracts | Dependency direction, forbidden libraries | `.importlinter`, `test_layering.py` |
 | AST rules | Calls, not imports — file writes, shell exec, scheduling | `test_static_rules.py` |
 | Behavioural tests | Semantics no static check can see | `test_domain_invariants.py` |
+| Slice regressions | The five defects the r4 gate verified, each proven red first | `../slice/test_r4_gate_fixes.py` |
+| Meta-checks | The AST helpers themselves — mode detection, alias resolution | `test_enforcement_meta.py` |
 
 ## AD coverage
 
@@ -67,7 +85,7 @@ Phase 1 means an invariant is unenforced, not that a test is unnecessary.
 | AD-33 | `test_ad33_source_refs_never_point_at_a_transcript`, `test_ad33_ledger_entries_are_self_contained`, `test_ad23_transcript_without_a_meeting_is_rejected` | D3 — cite the meeting, not the capture |
 | AD-34 | `test_ad34_source_refs_follow_the_fixed_grammar`, `test_ad34_unresolvable_actors_never_become_raw_string_identities`, `test_ad34_connectors_do_not_mint_event_ids` | Reference grammar, actor resolution, natural key |
 | AD-35 | `test_ad35_the_two_clocks_are_not_interchangeable`, `test_ad35_ledger_folding_is_deterministic`, `test_ad35_sweeper_will_not_declare_broken_without_coverage` | Two clocks; coverage-aware sweeping |
-| AD-36 | `test_ad36_self_authored_events_are_excluded_from_evidence`, `test_ad36_every_class_m_mutation_is_recorded_for_attribution` | pm-ai's own writes are never evidence |
+| AD-36 | `test_ad36_self_authored_events_are_excluded_from_evidence`, `test_ad36_every_class_m_mutation_is_recorded_for_attribution`, **`test_our_own_write_harvested_back_is_not_evidence`**, `test_connector_never_asserts_external`, `test_unrecognisable_mutation_makes_its_scope_uncertain` | pm-ai's own writes are never evidence. The first two tests passed while the AD was **defeated in code**: they handed `Provenance.PM_AI` straight to the evaluator, proving the downstream half, while the step that *derives* PM_AI from the executed-mutation ledger did not exist and the connector hard-coded `EXTERNAL`. The bolded test drives the real path |
 | AD-37 | `test_ad37_concurrent_approval_from_two_surfaces_yields_one_execution`, `test_ad37_expired_proposals_cannot_execute` | Versioned CAS on shared entities |
 | AD-38 | `test_ad38_disclosure_records_cannot_reach_a_committed_scope`, `test_ad38_no_committed_record_may_reference_personal_scope`, `test_ad38_project_scope_is_the_only_committed_scope` | Disclosure ledger is application-scoped; committed scopes never name personal material |
 

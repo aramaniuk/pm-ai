@@ -182,8 +182,10 @@ forbidden_modules =
 name = AD-1 — subprocess confined to pm_ai.models.local and pm_ai.platform
 type = forbidden
 source_modules =
+    pm_ai.app
     pm_ai.core
     pm_ai.domain
+    pm_ai.ports
     pm_ai.surfaces
     pm_ai.connectors
     pm_ai.skills
