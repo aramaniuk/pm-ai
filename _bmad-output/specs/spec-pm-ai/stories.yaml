@@ -1,0 +1,233 @@
+- id: "1"
+  title: Scope and storage foundation
+  description: >-
+    Establish the four scopes, the three storage tiers, the encrypted set with
+    keychain key custody, and the gitignore verification that guards captures.
+    Covers the storage and scope Constraints plus scope-model.md and
+    storage-contract.md, which everything later depends on.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Tier 2 is in-memory today and has no migration path yet; settle Tier-2
+    schema durability before persisting it. Assert
+    hasattr(conn, "enable_load_extension") in pm-ai doctor - a stock macOS
+    Python cannot load sqlite-vec at all, and the failure surfaces deep inside
+    the single writer on a clean install.
+- id: "2"
+  title: Event log and disclosure ledger
+  description: >-
+    Implement the segmented, append-only per-scope event log with typed entries
+    and the separate application-scoped disclosure ledger for frontier-call
+    provenance and cost. Delivers CAP-10 and CAP-27.
+  spec_checkpoint: true
+- id: "3"
+  title: MCP execution firewall and skill registry
+  description: >-
+    Build the execution boundary, the non-destructive input sanitization layer,
+    and the allowlisted skill registry with declared permissions. Delivers
+    CAP-36 and gates every later story that mutates external state.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    The firewall is fully binding even though skill signing is deferred. The
+    registry is a first-party local allowlist with declared permissions; keep
+    the skill load path pluggable so verification can be added later without
+    restructuring.
+- id: "4"
+  title: Daemon, loopback API and CLI REPL
+  description: >-
+    Stand up the single long-lived daemon with loopback-only binding and the
+    terminal REPL client that reaches it. Delivers CAP-18.
+- id: "5"
+  title: Telegram bridge and cryptographic pairing
+  description: >-
+    Add the outbound long-polling Telegram surface locked to paired user-IDs,
+    rejecting everything else. Delivers CAP-19; webhooks are prohibited.
+  spec_checkpoint: true
+- id: "6"
+  title: Dynamic persona engine
+  description: >-
+    Load persona profiles per scope and let the PM adjust tone and directness
+    from either surface without a daemon restart. Delivers CAP-20.
+- id: "7"
+  title: Local model pipeline - Whisper and Ollama
+  description: >-
+    Wire local transcription and the 8B-class parsing model behind the model
+    port, and benchmark them running concurrently. Delivers the NFR-01 and
+    NFR-12 substrate that CAP-1 and CAP-21 build on.
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Set OLLAMA_MAX_LOADED_MODELS=1, OLLAMA_NUM_PARALLEL=1 and keep_alive: 0
+    before dispatching a whisper.cpp job - a client-side pool bound does not
+    unload a model. Benchmark concurrent transcription and parsing at the 16GB
+    baseline and report the numbers; the hardware floor is an open question
+    that this story is meant to answer.
+- id: "8"
+  title: Connector framework and credential lifecycle
+  description: >-
+    Build the pull-adapter connector architecture with health probes, event
+    normalization, hot plugin loading, and encrypted credential storage.
+    Delivers CAP-35.
+- id: "9"
+  title: Passive telemetry radar
+  description: >-
+    Run the scheduled harvest across configured connectors through the
+    sanitization boundary, with backoff on provider failure. Delivers CAP-2.
+- id: "10"
+  title: Durable job queue and offline replay
+  description: >-
+    Make every unit of deferred work a durable row with idempotent external
+    mutations, buffering offline and replaying in order on reconnect. Delivers
+    CAP-4.
+  done_checkpoint: true
+- id: "11"
+  title: Meeting records and transcript ingestion
+  description: >-
+    Introduce the Meeting entity as citation root, the provider transcript path
+    and the manual fallback, with cost metrics in the summary header. Delivers
+    CAP-3 and CAP-8.
+- id: "12"
+  title: Spoken anchor resolution and fuzzy recovery
+  description: >-
+    Match spoken Work Item references against real ids, recovering at
+    confidence and staging an unmatched-anchor prompt below it. Delivers CAP-1.
+- id: "13"
+  title: Proposal engine and interactive approval cards
+  description: >-
+    Build the one Proposal entity behind every staged-then-approved flow, and
+    render approval cards on both surfaces. Delivers CAP-6 and gives story 14 a
+    staging path to fall back to.
+- id: "14"
+  title: In-meeting command authorization
+  description: >-
+    Add explicit spoken command handling behind the three-condition
+    authorization test, in-band fact-checking, and async research dispatch.
+    Delivers CAP-5 and CAP-7.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Auto-execution requires all three of authenticated source, speaker
+    resolving to the PM, and a reversible non-notifying verb. When any is
+    uncertain, stage. Irreversible verbs always stage regardless of source or
+    speaker, and manually supplied transcripts are never an auto-execution
+    source.
+- id: "15"
+  title: Commitment ledger and lifecycle
+  description: >-
+    Persist extracted spoken commitments with their full lifecycle states and
+    an append-only audit trail carrying evidence references. Delivers CAP-34.
+  spec_checkpoint: true
+- id: "16"
+  title: Closed-loop verification and evidence admissibility
+  description: >-
+    Transition commitment states from harvested execution telemetry and surface
+    met, altered, broken and stalled promises. Delivers CAP-33.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    pm-ai's own writes are never evidence - every event carries an authorship
+    marker and only external is admissible. An overdue commitment with no
+    harvest coverage for its window resolves to UNKNOWN, never BROKEN.
+- id: "17"
+  title: Voice and text draft synthesis and dispatch
+  description: >-
+    Expand short instructions into cited draft cards that stay staged until
+    approved, plus direct comment and ticket dispatch. Delivers CAP-21 and
+    CAP-22.
+- id: "18"
+  title: Deep inquiry, knowledge query and drift audit
+  description: >-
+    Answer multi-source activity questions, retrieve operational procedure, and
+    compare meeting decisions against committed documentation. Delivers CAP-23,
+    CAP-24 and CAP-25.
+- id: "19"
+  title: Memory pruning and retrieval budget
+  description: >-
+    Compress ageing streams into milestone summaries, cap the vector index, and
+    hold the retrieval budget with no model in the path. Delivers CAP-37.
+- id: "20"
+  title: Pre-meeting prep dashboard and inquiry proxy
+  description: >-
+    Generate the telemetry-enriched preparation dashboard on schedule and send
+    owner inquiries when an agenda item needs clarification first. Delivers
+    CAP-26 and CAP-32.
+- id: "21"
+  title: Autonomous work item execution and MCP tool glue
+  description: >-
+    Execute simple labelled work items into ready-to-merge changes, and reach
+    presentation and spreadsheet tools through MCP. Delivers CAP-28 and CAP-29.
+  done_checkpoint: true
+- id: "22"
+  title: Goals and micro-decision alignment engine
+  description: >-
+    Model goals on the Domain and Horizon axes and tag every recommendation
+    with a resolvable goal citation that drives rank. Delivers CAP-11.
+- id: "23"
+  title: Daily briefing and notification discipline
+  description: >-
+    Pre-render the multi-tier strategic focus briefing and enforce the declared
+    occasions on which the system may interrupt. Delivers CAP-9 and CAP-13.
+- id: "24"
+  title: Socratic 1:1 protocol and meta-coaching scorecard
+  description: >-
+    Run the telemetry-opened coaching dialogue and capture the three ratings of
+    pm-ai plus Domain Distress. Delivers CAP-12 and CAP-14.
+- id: "25"
+  title: Literature and web recommendation engine
+  description: >-
+    Poll configured sources, embed updated content, and cite situationally
+    within the weekly cap. Delivers CAP-17.
+- id: "26"
+  title: Anti-burnout shield and charter enforcement
+  description: >-
+    Detect workload and calendar-density risk inside private surfaces only, and
+    enforce the privacy charter's destination rule. Delivers CAP-16.
+  spec_checkpoint: true
+- id: "27"
+  title: Leadership auditing and guided experiments
+  description: >-
+    Detect repeated patterns across sprints and propose structured behavioural
+    experiments in the next 1:1. Delivers CAP-15.
+  done_checkpoint: true
+- id: "28"
+  title: Team-member scope, custom metrics and dossiers
+  description: >-
+    Define PM-configured metrics per person or cohort and assemble career
+    dossiers, stored in the team-member scope alone. Delivers CAP-30.
+  spec_checkpoint: true
+- id: "29"
+  title: HR MCP integration and approval-gated sync
+  description: >-
+    Connect HR platforms for dossier input and sync agreed 1:1 goals outward
+    only on explicit approval. Delivers CAP-31.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Only team-member-scope material may enter the sync payload, and never by
+    way of a model that also read personal-scope material. A PM-to-pm-ai
+    Socratic 1:1 produces the PM's own record and never syncs anywhere.
+- id: "30"
+  title: Adaptive persona self-tuning
+  description: >-
+    Turn coaching feedback into staged, revertible persona proposals under the
+    anti-agreement guard. Delivers CAP-38.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Refuse the adaptation when ratings rise while question ratio, blind spots
+    surfaced, or experiments proposed decline, and log it as a suppressed
+    adaptation. Domain Distress is never an input. The tunable surface is
+    closed - never the skill registry, permissions, egress classification, or
+    scope boundaries.
+- id: "31"
+  title: Self-retrospective and Performance Index
+  description: >-
+    Produce the application-scoped index reporting pm-ai's own usefulness, with
+    every component labelled measured or estimated. Delivers CAP-39, whose
+    exact inputs remain an open question in SPEC.md.
+- id: "32"
+  title: Dynamic memory evolution
+  description: >-
+    Learn retrieval weighting from what the PM acts on, bounded by novelty and
+    explainable per item. Delivers CAP-40.
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Weighting changes ordering, never the record - the ledgers stay append-only
+    and bounded forgetting remains story 19's recorded compaction. Refuse the
+    adaptation when the share of surfaced material the PM has not previously
+    engaged with declines as engagement rises.
