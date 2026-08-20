@@ -1,6 +1,6 @@
 # pm-ai — Solution Design
 
-**Companion to** `ARCHITECTURE-SPINE.md` (40 ADs) · **Source** `_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md` v0.12.0 · **Date** 2026-08-20
+**Companion to** `ARCHITECTURE-SPINE.md` (41 ADs) · **Source** `_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md` v0.13.1 · **Date** 2026-08-20
 
 ---
 

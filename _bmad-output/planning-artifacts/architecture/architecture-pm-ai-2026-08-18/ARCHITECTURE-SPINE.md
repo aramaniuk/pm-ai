@@ -9,7 +9,7 @@ status: final
 created: '2026-08-18'
 updated: '2026-08-20'
 binds: [FR-01..FR-37, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
-sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.12.0']
+sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.13.1']
 companions: ['SOLUTION-DESIGN.md']
 ---
 
@@ -371,7 +371,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Binds:** every connector, AD-9, AD-27, AD-33, FR-30, FR-33, FR-34
 - **Prevents:** AD-27 closed the *type* enumeration and left every other field open, so two connectors could describe the same change compliantly and still fail to join — GitLab writing `source_ref` as a URL and Jira as a ticket key, or one engineer arriving as a commit email and a speaker label and becoming four people in the metrics that feed a performance review
 - **Rule:** Three identity elements are fixed in `domain`, not left to each adapter:
-  1. **Reference grammar.** `source_ref` is `<system>:<scope>:<kind>:<native_id>` — `gitlab:alpha:commit:9f2a1c`, `jira:alpha:issue:PAY-102`. A closed set of **global entities** that belong to no project takes the scopeless two-part form `<system>:<native_id>` — today just `meeting:mtg_01HX`. Parseable, joinable, uniform across sources; free-form refs and bare URLs are rejected at normalization, as are refs naming a non-durable capture (AD-33). One type, one grammar: `TargetRef` (AD-37) additionally rejects sub-resource fragments, so a lock names one entity rather than one of its fields.
+  1. **Reference grammar.** `source_ref` is `<system>:<scope>:<kind>:<native_id>` — `gitlab:alpha:commit:9f2a1c`, `jira:alpha:issue:PAY-102`. A closed set of **global entities** that belong to no project takes the scopeless two-part form `<system>:<native_id>` — `meeting:mtg_01HX`, `goal:goal_01HX` (AD-41). Closed: adding a member is a deliberate change in `domain`, which is what stopped `goal:` being invented at a call site. Parseable, joinable, uniform across sources; free-form refs and bare URLs are rejected at normalization, as are refs naming a non-durable capture (AD-33). One type, one grammar: `TargetRef` (AD-37) additionally rejects sub-resource fragments, so a lock names one entity rather than one of its fields.
   2. **Actor resolution.** Every event carries an `actor_id` resolved to a single `Actor` in `domain`. Connectors supply their native handle (commit email, tenant account, speaker label); normalization maps it through an alias table. An unresolvable handle becomes an explicit `unresolved` actor — **never** a raw string used silently as identity, because that is what silently splits one person into several.
   3. **Natural key.** Deduplication uses `(scope, source_system, source_ref)`, never the locally-minted id. The `evt_` ULID is a surrogate assigned by the **storage service at persist time**; connectors never mint ids. Re-harvesting the same window must therefore be idempotent rather than doubling every metric.
 
@@ -452,6 +452,28 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   - **Approval cards are not interruptions**; they are responses to work the user initiated, and are exempt.
   - Anything irreversible (FR-26 nudges) additionally clears AD-35's coverage guard before it may fire.
 
+### AD-41 — A recommendation cites a goal, or it is not surfaced as aligned `[NEW]`
+
+- **Binds:** FR-09, FR-11, FR-13, FR-32, UJ-9, SM-1, AD-27, AD-33, AD-34, AD-38, AD-40
+- **Prevents:** the system's central purpose degrading into a formatting convention. Continuous alignment of daily micro-decisions across goal horizons is what pm-ai *is*, and it had no invariant at all — it survived in this document only as a directory name and as three characters inside an FR-range in the capability map, which reads as coverage while fixing nothing. Three surfaces building "alignment" independently would each pick a tier vocabulary, one would omit the tag, and every choice would be locally defensible
+- **Rule:**
+
+  1. **Two closed enumerations in `domain`, deliberately separate.** `GoalDomain` — `project | team | personal` — is *what a goal is about*, and is the `<Tier>` in `[Strategic Alignment: <Tier>]`. `GoalHorizon` — `short | medium | long` — is *when it lands*, and is what UJ-9's Strategic/Tactical/Operational planning breakdown groups by. The PRD uses "tier" and "horizon" for both axes interchangeably: FR-11 says short/medium/long, §2.1 says Project/Team/Personal, UJ-9 says Strategic/Tactical/Operational. **Conflating them is how one surface tags `Team` and another tags `Long-Term`, both compliant with the requirement as written.** Closed, in `domain`, for the same reason AD-27 closes event types.
+
+  2. **Goals have stable ids, and a recommendation cites one.** A `goal_` id is minted by storage and referenced as `goal:<id>` under AD-34's grammar. `strategic_goals.md` is hand-editable Tier-1 markdown (AD-3), so an edit that removes or renames a goal must leave the citation **explicitly unresolved and visible** — never silently dropped. This is AD-34's actor rule applied to goals, and for the same reason: a reference that quietly degrades to nothing corrupts the metric built on it.
+
+  3. **No recommendation is surfaced as aligned without a resolvable goal reference.** A task the engine cannot align is rendered *explicitly unaligned*. **Aligned-by-omission is the failure mode** — a briefing that reads as strategic while the tags mean nothing is worse than one that admits the gap, because it is the claim the product is sold on.
+
+  4. **The Strategic Rationale Snippet is generated prose and never a substitute for the citation.** It explains the link; the `goal:<id>` *is* the link. AD-33's logic, applied one level up: cite the durable referent, not the model's sentence about it.
+
+  5. **`strategic_goals.md` is personal scope**, so the alignment tag belongs on personal-scope surfaces — FR-09's briefing, FR-13's planning. A project-scope artifact may not cite a personal-scope goal (AD-38); project-scope alignment would require project-scope goals, which do not exist yet (see Deferred).
+
+  6. **Alignment ranks, and it ranks everywhere the same way.** On any surface presenting a task list, an aligned task ranks above an unaligned one **at comparable urgency** — a citation to a goal is evidence that the work advances a stated growth path, and that is what makes it worth doing first. Alignment **lifts; it does not override**: an unaligned production incident still outranks a long-term refactor, because a ranking that buries genuine urgency behind strategy is one the PM stops trusting after the first outage. One ordering rule across FR-09, FR-13, and FR-32; a surface that invents its own is a defect.
+
+  7. **Unaligned work is never hidden — it is the drift signal.** Unaligned tasks rank lower and stay individually visible: never collapsed, truncated, or summarized away. The **unaligned set is surfaced as a set**, because a week of unaligned work is precisely what FR-24's drift audit exists to catch, and burying it destroys the only evidence that the PM is drifting. Unaligned does not mean unimportant; it means *this may be pulling in a direction nobody chose*, which is a thing to look at rather than a thing to demote out of sight.
+
+     The corollary is a guard against gaming the rank: **nothing may mark a task aligned in order to promote it.** Alignment comes only from a resolvable citation to a real goal (rule 2), never from a model's judgment that something feels strategic — otherwise the ranking rule creates an incentive to tag everything, and the tag stops carrying information.
+
 ## Consistency Conventions
 
 | Concern | Convention |
@@ -460,7 +482,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 | Scope kinds | `application`, `personal`, `project`, `people` (AD-4). `is_personal` is true for `personal` **only**; `is_git_committed` for `project` only. A scope kind is never inferred from a path, and a project named `personal` satisfies neither |
 | Naming — files/modules | `snake_case.py`; connectors as `pm_ai/connectors/<service>.py`; skills as `pm_ai/skills/<verb>_<object>.py` |
 | Naming — ports | `<Noun>Port` protocol in `pm_ai/ports/`; adapters named `<Service><Noun>Adapter` |
-| Identifiers | Prefixed ULIDs — `cmt_`, `prp_`, `evt_`, `job_`, `skl_`; sortable by creation time; never reused. These are **surrogates**: deduplication and joins use the natural key `(source_system, source_ref)` (AD-34) |
+| Identifiers | Prefixed ULIDs — `cmt_`, `prp_`, `evt_`, `job_`, `skl_`, `goal_`; sortable by creation time; never reused. These are **surrogates**: deduplication and joins use the natural key `(source_system, source_ref)` (AD-34) |
 | Dates & times | ISO-8601 with explicit offset, stored UTC, rendered local at the surface only. `occurred_at` governs domain reasoning, `ingested_at` operational reasoning; neither substitutes for the other (AD-35) |
 | Event envelope | Every `NormalizedEvent` carries `scope` (`DataScope`), `type` (closed enumeration, AD-27), `source_ref` (AD-34), `actor` (resolved `Actor`, AD-34), `occurred_at` + `ingested_at` (never interchangeable, AD-35), `payload` (the shape registered for its type, AD-27), `authored_by` ∈ `{external, pm_ai, unknown}`, defaulting to `unknown` (AD-36). **No `id` field** — the `evt_` ULID surrogate is minted by storage at persist; a connector that minted one would double-count every re-harvest (AD-34) |
 | Proposal TTL | Default 7 days; overridable per registered type; expiry swept by the scheduler only (AD-13) |
@@ -700,7 +722,8 @@ pm_ai/
 | Transcript ingestion & meeting pipeline (FR-01, FR-03, FR-05, FR-08) | `core/extraction` + `TranscriptSourcePort` | AD-12, AD-19, AD-23 |
 | Dual-authorization extraction & approvals (FR-06, FR-21, FR-31) | `core/proposals` + surfaces | AD-13, AD-1 |
 | Commitment ledger & closed-loop verification (FR-33, FR-34) | `core/commitments` + storage | AD-3, AD-5, AD-14, AD-34, AD-35, AD-36, AD-37 |
-| Coaching, briefings, alignment, anti-burnout (FR-09..FR-17) | `core/coaching`, `core/alignment` | AD-15, AD-17, AD-25, AD-28 |
+| Micro-decision alignment engine (FR-11, FR-09, FR-13, UJ-9) | `core/alignment` + `domain/goals` | **AD-41**, AD-27, AD-34, AD-38, AD-40 |
+| Coaching, briefings, anti-burnout (FR-09, FR-12, FR-14..FR-17) | `core/coaching`, `core/alignment` | AD-15, AD-17, AD-25, AD-28, AD-41 |
 | Literature & web ingestion (FR-17) | personal-scope connector instance | AD-10, AD-12 |
 | Pre-meeting inquiry proxy & prep dashboard (FR-26, FR-32) | scheduler + `core/meetings` + `skills/` | AD-1, AD-20, AD-21 |
 | Custom metric monitoring & career dossiers (FR-30, FR-31, UJ-4) | `core/metrics` + HR skill adapter, people scope | AD-4, AD-13, AD-15, AD-25, AD-28, AD-31 |
@@ -727,6 +750,7 @@ pm_ai/
 - **Encryption of the vector index.** Skipped deliberately (AD-6). Revisit only if the index starts holding recoverable raw text rather than embeddings.
 - **Retention policy beyond raw transcripts.** NFR-09 covers transcripts; retention for telemetry rows and derived summaries is unspecified and can wait for real disk-growth data.
 - **Tier-2 schema migration.** Tier 2 is the one tier no rebuild can reconstruct (AD-3), so its schema changes need a real migration path rather than a drop-and-recreate. Deferred only until Tier 2 is durable at all — it is in-memory today, so there is no schema to migrate yet, and this must be settled before the first release that persists it.
+- **Project-scope goals.** `strategic_goals.md` holds all three domains in the personal scope today (§2.1), which suits FR-11's briefing because that briefing is personal-scope too. If a project-scope dashboard ever needs its own `[Strategic Alignment]` tag, project goals must exist as project-scope records first — a project artifact citing a personal goal is the AD-38 violation that moved meetings. Revisit when a committed surface needs alignment.
 - **The Socratic voice contract.** FR-12's "≥80% of coaching turns end in a question" and the persona system (FR-14, FR-20) are the product's most falsifiable personality claims, and the spine deliberately does not bind them: they are prompt and product-design decisions, revisited here only if a second surface or a second generated-text flow starts diverging on voice.
 
 ## Enforcement

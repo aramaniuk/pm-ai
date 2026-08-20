@@ -1,6 +1,6 @@
 ## **title: Local-First AI PM Assistant (pm-ai)**
 
-version: 0.12.0  
+version: 0.13.1  
 created: 2026-08-16  
 updated: 2026-08-20  
 status: draft
@@ -417,10 +417,24 @@ Immutably log all decisions, operational events, and telemetry diffs as typed en
 
 #### **FR-11: Micro-Decision Daily Alignment Engine**
 
-Evaluate daily tasks against short-, medium-, and long-term goal frameworks and attach concise "Strategic Rationale Snippets" to recommendations. Realizes UJ-9.  
+Continuously align daily micro-decisions against the PM's goal framework, and attach concise "Strategic Rationale Snippets" to recommendations. Realizes UJ-9.
+
+Goals carry **two independent axes**, and the requirement previously named both "tier":
+
+> * **Domain** — `Project` | `Team` | `Personal` (career growth). This is what a goal is *about*, and it is the `\<Tier\>` in the alignment tag, matching §2.1's "3-Tier Goals".
+> * **Horizon** — `short` | `medium` | `long`. This is *when it lands*, and it is what UJ-9's Strategic / Tactical / Operational planning breakdown groups by.
+
+A project goal may be long-horizon and a personal goal short-horizon; the axes do not imply one another. Keeping them one word is how one surface would tag `Team` and another `Long-Term`, both satisfying the requirement as written.
+
 **Consequences (testable):**
 
-> * Every task recommendation rendered on the Daily Focus Briefing includes a \[Strategic Alignment: \<Tier\>\] tag mapping directly to a goal defined in \~/.manager-ai/memory/strategic\_goals.md.
+> * Every task recommendation rendered on the Daily Focus Briefing includes a \[Strategic Alignment: \<Domain\>\] tag citing a `goal:\<id\>` defined in \~/.manager-ai/memory/strategic\_goals.md.  
+> * A task the engine cannot align renders as \[Strategic Alignment: UNALIGNED\] — **never untagged**. A briefing that reads as strategic while its tags mean nothing is the failure this requirement exists to prevent.  
+> * `strategic\_goals.md` is hand-editable, so a recommendation citing a goal the PM has since deleted surfaces as unresolved rather than silently losing its tag.  
+> * The Rationale Snippet explains the link; the `goal:\<id\>` citation *is* the link. Generated prose never substitutes for the reference.  
+> * **An aligned task ranks above an unaligned one at comparable urgency**, on every surface that presents a task list (FR-09, FR-13, FR-32) — a citation to a goal is evidence the work advances a stated growth path. Alignment **lifts; it does not override**: an unaligned production incident still outranks a long-term refactor.  
+> * **Unaligned tasks are never hidden.** They rank lower and stay individually visible, and the unaligned set is surfaced *as a set* — a week of unaligned work is exactly what FR-24's drift audit exists to catch, so burying it destroys the only evidence of drift. Unaligned does not mean unimportant; it means the work may be pulling in a direction nobody chose.  
+> * Nothing may mark a task aligned in order to promote it. Rank follows a resolvable citation, never a judgement that something feels strategic — otherwise the tag stops carrying information.
 
 #### **FR-12: Socratic 1:1 Strategic Coaching Protocol**
 
@@ -815,6 +829,18 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
   2. *Set by PM decision (16 sites):* success-metric targets SM-1 ≥20%, SM-3 ≥7/10, SM-4 ≥80%, SM-6 ≥90%, SM-7 ≥95%, SM-8 ≥80%, SM-9 ≥90%, and the FR-12 question-ratio ≥80%, all recorded as provisional in §11; operational thresholds ±15 min harvest tolerance (FR-02), ≥2 consecutive sprints before a delegation experiment (FR-15), and >65% calendar density for the workload alert (FR-16, matching the figure UJ-9 already narrates).  
   3. *Man-Hour Cost formula defined* as attendees × duration\_hours × blended\_hourly\_rate across FR-03, UJ-3, and the Glossary, with the blended rate a single PM-configured figure in \~/.pm-ai/config.toml rather than per-attendee salary data \- keeping compensation out of the telemetry store.  
   4. *pm-ai Performance Index deferred:* FR-10 promised a composite index it never defined. The weekly action-count aggregation is retained and specified; the composite is moved to §10 Open Questions with a candidate definition to evaluate against real usage.
+
+> * **2026-08-20 (Alignment Drives Rank \- v0.13.1):** FR-11 said what alignment *is* and never what it *does*. Alignment now orders work: an aligned task ranks above an unaligned one at comparable urgency, by one rule shared across the briefing, the weekly plan, and the prep dashboard, so three surfaces cannot each invent an ordering.
+
+  Two guards came with it. Alignment **lifts rather than overrides** — an unaligned production incident still outranks a long-term refactor, because a ranking that buries genuine urgency behind strategy is one the PM stops trusting after the first outage. And **unaligned work is never hidden**: it ranks lower but stays individually visible, and is surfaced as a set, because a week of unaligned work is exactly what FR-24's drift audit exists to catch and burying it destroys the only evidence of drift. Unaligned does not mean unimportant — it means the work may be pulling in a direction nobody chose.
+
+  Promotion also creates an incentive, so the rank is anchored: nothing may mark a task aligned in order to raise it. Rank follows a resolvable `goal:\<id\>` citation, never a judgement that something feels strategic.
+
+> * **2026-08-20 (Alignment Engine Given an Invariant \- v0.13.0):** FR-11 was intact in this document and **absent from the architecture**. The micro-decision alignment engine — continuous alignment of daily decisions across goal horizons, which is what the product *is* — survived the spine only as a directory name and as three characters inside an FR-range in the capability map. An FR-range in a table reads as coverage while fixing nothing, and this is the concrete case: three surfaces building "alignment" independently would each have picked a tier vocabulary and one would have omitted the tag, every choice locally defensible.
+
+  Writing the invariant surfaced an ambiguity that had been in this document from the start: **`\<Tier\>` named two different axes.** FR-11 said short/medium/long, §2.1 said Project/Team/Personal, UJ-9 said Strategic/Tactical/Operational. They are orthogonal — *what a goal is about* versus *when it lands* — and a project goal may be long-horizon while a personal goal is short-horizon. FR-11 now separates **Domain** (`Project`/`Team`/`Personal`, the tag's value) from **Horizon** (`short`/`medium`/`long`, what UJ-9's planning breakdown groups by).
+
+  Two further rules follow, both testable: a task the engine cannot align renders **UNALIGNED rather than untagged**, because a briefing that reads as strategic while its tags mean nothing is worse than one that admits the gap; and since `strategic\_goals.md` is hand-editable, a citation to a deleted goal **surfaces as unresolved instead of quietly losing its tag**. Goals now carry stable `goal\_` ids and are cited as `goal:\<id\>`.
 
 > * **2026-08-20 (Capture Storage Scoped by Subject \- v0.12.0):** `chat\_history/` and `telegram\_cache/` sat in `\~/.pm-ai/private/` — the application scope, documented as holding **no personal records** — while one held raw recordings of meetings and the other the PM's own voice notes. Both moved, but not to the same place, because they are not the same kind of data. `chat\_history/` was also renamed **`transcripts/`**: it was neither a chat nor a history, and a name that describes nothing in the system is a name every reader has to decode twice.
 

@@ -110,7 +110,10 @@ class SkillPermission(Enum):
 # different shapes, in two modules, both claiming to be canonical.
 
 _REF = re.compile(r"^(?P<system>[a-z0-9_]+):(?P<scope>[A-Za-z0-9_.-]+):(?P<kind>[a-z0-9_]+):(?P<native_id>\S+)$")
-_SCOPELESS = frozenset({"meeting"})  # global entities: `meeting:mtg_01HX`
+# Global entities belong to no project, so they take the two-part form:
+# `meeting:mtg_01HX`, `goal:goal_01HX`. A closed set (AD-34) — adding a member
+# is a deliberate change here, not something a caller may assume.
+_SCOPELESS = frozenset({"meeting", "goal"})
 _NON_DURABLE = frozenset({"transcript", "file", "chat_history"})
 
 
