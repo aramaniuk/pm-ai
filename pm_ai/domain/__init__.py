@@ -23,15 +23,28 @@ from pm_ai.domain.events import (
     PayloadMismatch,
     Provenance,
 )
-from pm_ai.domain.storage_tiers import (
+from pm_ai.domain.scope_model import (
     ARTIFACT_TIER,
     BACKUP_TARGETS,
-    EVENT_LOG,
-    OPERATIONAL_DB,
+    DIAGNOSTIC_ONLY,
     REBUILD_TARGETS,
+    RETENTION_MANAGED,
+    SCOPE_TREES,
+    Collection,
+    Dir,
+    File,
+    MalformedLayout,
+    OutsideTierModel,
     ScopeResolutionError,
     Tier,
+)
+from pm_ai.domain.storage_tiers import (
+    EVENT_LOG,
+    GITIGNORE_REQUIRED,
+    OPERATIONAL_DB,
     TierViolation,
+    UnprotectedCaptureDir,
+    assert_capture_dir_ignored,
     assert_reindex_safe,
 )
 from pm_ai.domain.identity import (
@@ -71,4 +84,9 @@ __all__ = [
     "evaluate_commitment", "lookup_verb", "ARTIFACT_TIER", "BACKUP_TARGETS",
     "REBUILD_TARGETS", "Tier", "TierViolation", "assert_reindex_safe",
     "EVENT_LOG", "OPERATIONAL_DB", "ScopeResolutionError",
+    # The scope layout and the durability each of its artifacts declares. The
+    # tier tables are derived from the trees, so both come from one module.
+    "SCOPE_TREES", "File", "Dir", "Collection", "MalformedLayout",
+    "OutsideTierModel", "RETENTION_MANAGED", "DIAGNOSTIC_ONLY",
+    "GITIGNORE_REQUIRED", "UnprotectedCaptureDir", "assert_capture_dir_ignored",
 ]

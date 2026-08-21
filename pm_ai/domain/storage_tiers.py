@@ -1,104 +1,74 @@
-"""Storage tiers and their physical artifacts (AD-3, AD-5).
+"""What the tier model *does*, and the artifact keys code spells by name (AD-3, AD-5).
 
-The earlier spine named three tiers while the job queue (Tier 2) and the search
-indexes (Tier 3) shared one `event_telemetry.db`. "Rebuild Tier 3 only" was
-therefore unimplementable, and the obvious implementation of a rebuild — delete
-the file, recreate it — would have destroyed every pending external write and
-every connector cursor, silently, with the AD-3 test still green.
+The three tiers themselves, and every artifact's place in them, are declared on
+the nodes of the scope trees in `pm_ai.domain.scope_model` — one tier per `File`,
+one durability per `Collection` — and `ARTIFACT_TIER`, `BACKUP_TARGETS`,
+`REBUILD_TARGETS`, `RETENTION_MANAGED` and `DIAGNOSTIC_ONLY` are derived from
+them there. They used to be hand-written here, in a flat table beside a tree that
+described structure only, and the cost was three things: two edits in two modules
+to add one artifact, a basename key that could not tell personal
+`daily_dashboard.md` from project `daily_dashboard.md`, and a pair of import-time
+assertions whose only job was to catch the two structures drifting apart.
 
-Separation is physical here, so `reindex` cannot reach Tier 2 by construction
-rather than by careful coding.
+This module keeps what operates on that model rather than restating it:
 
-Imports nothing from `pm_ai` (AD-30).
+- `assert_reindex_safe` — the Tier-3-only guarantee `pm-ai reindex` owes AD-3.
+- `assert_capture_dir_ignored` and `GITIGNORE_REQUIRED` — the `.gitignore` check
+  the daemon runs before writing a raw capture into a committed scope.
+- `EVENT_LOG` and `OPERATIONAL_DB` — the two artifact keys that appear in *code*
+  rather than only in a tree, spelled once.
+
+Everything the previous shape exported is re-exported here, so `pm_ai.storage`,
+`pm_ai.domain`, and the suite keep importing tiers from the module that owns tier
+*behaviour*.
+
+Imports nothing from `pm_ai` outside `pm_ai.domain` (AD-30), and performs no I/O.
 """
 
 from __future__ import annotations
 
-from enum import Enum
+from pm_ai.domain.scope_model import (
+    ARTIFACT_TIER,
+    BACKUP_TARGETS,
+    DIAGNOSTIC_ONLY,
+    KEYS,
+    REBUILD_TARGETS,
+    RETENTION_MANAGED,
+    OutsideTierModel,
+    ScopeResolutionError,
+    Tier,
+)
+
+__all__ = [
+    "ARTIFACT_TIER",
+    "BACKUP_TARGETS",
+    "DIAGNOSTIC_ONLY",
+    "EVENT_LOG",
+    "GITIGNORE_REQUIRED",
+    "OPERATIONAL_DB",
+    "OutsideTierModel",
+    "REBUILD_TARGETS",
+    "RETENTION_MANAGED",
+    "ScopeResolutionError",
+    "Tier",
+    "TierViolation",
+    "UnprotectedCaptureDir",
+    "assert_capture_dir_ignored",
+    "assert_reindex_safe",
+]
 
 
 # ── Artifact keys ────────────────────────────────────────────────────────────
-# The keys of the tables below are also the keys `pm_ai.platform.paths` resolves
-# and `pm_ai.storage` writes through. The ones that appear in code — rather than
-# only in a table — are spelled once, here: `domain` is the only package all
-# three may import (AD-30), so this is the single home for them rather than a
-# fourth copy of the string.
+# The scope trees spell every key as a literal, so they read like the document
+# they mirror. These two are also named in code — `pm_ai.storage.service` appends
+# to one and opens the other — rather than only in a tree, so they are spelled
+# once here: `domain` is the only package `storage`, `core`, and `surfaces` may
+# all import (AD-30), so this is the single home for them rather than a fourth
+# copy of the string. The assertion at the bottom of this module is what makes a
+# rename of either fail at import instead of at the first write.
 EVENT_LOG = "event_log/"
 OPERATIONAL_DB = "operational.db"
 
-
-class ScopeResolutionError(Exception):
-    """A path resolver refused to locate an artifact.
-
-    The concrete refusals live in `pm_ai.platform.paths`, which `storage`,
-    `core`, and `surfaces` may not import — so without a base here, no caller
-    could catch a refusal by type and every one of them would either catch
-    `Exception` or let the daemon abort. Declared in `domain` because that is the
-    one package every layer may reach (AD-30).
-    """
-
-
-class Tier(Enum):
-    """AD-3. Exactly one tier per artifact."""
-
-    TRUTH = 1
-    OPERATIONAL = 2
-    DERIVED = 3
-
-    @property
-    def rebuildable(self) -> bool:
-        """Only Tier 3 can be reconstructed; the others must survive."""
-        return self is Tier.DERIVED
-
-    @property
-    def backed_up(self) -> bool:
-        """Tier 2 is a backup target precisely because it is NOT rebuildable.
-
-        Backing up markdown alone — the earlier rule — would have lost the job
-        queue, cursors, and executed-key ledger.
-        """
-        return self in (Tier.TRUTH, Tier.OPERATIONAL)
-
-
-# Every persistent artifact, assigned once. A path that appears in two tiers is
-# the bug this table exists to prevent.
-ARTIFACT_TIER: dict[str, Tier] = {
-    EVENT_LOG: Tier.TRUTH,
-    "commitments_log.md": Tier.TRUTH,
-    "coaching_1on1_history.md": Tier.TRUTH,
-    "strategic_goals.md": Tier.TRUTH,
-    "meetings/": Tier.TRUTH,
-    "disclosure.md": Tier.TRUTH,
-    "rules/": Tier.TRUTH,
-    "config.toml": Tier.TRUTH,
-    OPERATIONAL_DB: Tier.OPERATIONAL,
-    # Tier 2, not Tier 3, despite AD-25 calling it "derived telemetry" — that
-    # word means *calculated*, not *rebuildable*. Tier 3's test is rebuildable
-    # from Tier 1 with zero loss, and burnout trends outlive the telemetry they
-    # were computed from once FR-37 compaction prunes it. It had no tier at all
-    # until 2026-08-20, so the one store holding months of personal trend data
-    # was in neither the backup set nor the rebuild set.
-    "personal_analytics.db": Tier.OPERATIONAL,
-    "derived.db": Tier.DERIVED,
-    "vector_index/": Tier.DERIVED,
-}
-
-REBUILD_TARGETS = frozenset(a for a, t in ARTIFACT_TIER.items() if t.rebuildable)
-BACKUP_TARGETS = frozenset(a for a, t in ARTIFACT_TIER.items() if t.backed_up)
-
-
-# Raw input under a retention policy is deliberately OUTSIDE the tier model.
-# AD-3 tiers "persistent state"; these are transient material the pipeline
-# consumes and NFR-09 purges at 30 days. They are not Tier 3 — Tier 3 promises
-# *rebuildable from Tier 1 with zero loss*, and no rebuild reconstructs a
-# recording. Listing them here rather than omitting them is the point: an
-# artifact absent from both sets is an oversight (that is how
-# personal_analytics.db ended up backed up by nothing), while an artifact named
-# here is an excluded-on-purpose decision that the assertion below keeps honest.
-#
-# Per-scope, like `event_log/`: a transcript lives in the scope owning its
-# meeting (AD-33). Nothing may depend on them surviving.
-RETENTION_MANAGED: frozenset[str] = frozenset({"transcripts/", "telegram_cache/"})
 
 # `transcripts/` sits INSIDE a committed scope, so its exclusion from git is a
 # `.gitignore` rule rather than a directory boundary. A rule can go missing; a
@@ -133,10 +103,6 @@ def assert_capture_dir_ignored(artifact: str, gitignore_text: str) -> None:
             f"in the team's repository is not recoverable."
         )
 
-assert not (RETENTION_MANAGED & set(ARTIFACT_TIER)), (
-    "an artifact is both tiered and retention-managed; it must be exactly one."
-)
-
 
 class TierViolation(ValueError):
     """An operation reached an artifact outside the tier it is allowed to touch."""
@@ -157,8 +123,10 @@ def assert_reindex_safe(artifacts: frozenset[str]) -> None:
         )
 
 
-# Tier 2 and Tier 3 must never share a physical artifact — the original defect.
-assert not (REBUILD_TARGETS & BACKUP_TARGETS), (
-    "AD-3: an artifact is both a rebuild target and a backup target, so a "
-    "rebuild would destroy state that cannot be reconstructed."
+# The two keys above are literals in this module and literals in the trees, which
+# is the one place those two structures still have to agree. A rename of either
+# constant therefore fails here, at import, rather than at the first write.
+assert {EVENT_LOG, OPERATIONAL_DB} <= KEYS, (
+    "a key spelled as a constant here names no node in any scope tree: "
+    f"{sorted({EVENT_LOG, OPERATIONAL_DB} - KEYS)}"
 )

@@ -22,8 +22,13 @@ from pathlib import Path
 import pytest
 
 from pm_ai.domain.identity import DataScope, ScopeKind
+
+# The durability marker a node carries when it is outside the tier model. It
+# lives with the trees, because that is where it is declared.
+from pm_ai.domain.scope_model import OutsideTierModel
 from pm_ai.domain.storage_tiers import (
     ARTIFACT_TIER,
+    DIAGNOSTIC_ONLY,
     GITIGNORE_REQUIRED,
     RETENTION_MANAGED,
     ScopeResolutionError,
@@ -31,7 +36,13 @@ from pm_ai.domain.storage_tiers import (
 )
 from pm_ai.platform.paths import (
     PERSONAL_SUBJECT_ARTIFACTS,
+    SCOPE_TREES,
+    AmbiguousArtifact,
     ArtifactNotInScope,
+    Collection,
+    Dir,
+    File,
+    MalformedLayout,
     MalformedSubjectId,
     RepositoryOutsideRoot,
     ScopePathError,
@@ -39,7 +50,9 @@ from pm_ai.platform.paths import (
     UnknownArtifact,
     UnknownProject,
     artifacts_in,
+    declared_nodes,
     is_directory,
+    scopes_of,
 )
 
 # An explicit home and an explicit repository, so nothing here depends on the
@@ -94,52 +107,104 @@ def _personal_only() -> set[str]:
 # path it must answer with. The scope subjects are `p1` and `alpha`, matching the
 # resolver the test below builds from the same literals.
 RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
-    # application — /home/pm/.pm-ai/
+    # ── application — /home/pm/.pm-ai/ (scope-model.md §A) ───────────────────
     (ScopeKind.APPLICATION, "config.toml"):
         "/home/pm/.pm-ai/config.toml",
-    (ScopeKind.APPLICATION, "derived.db"):
-        "/home/pm/.pm-ai/private/derived.db",
     (ScopeKind.APPLICATION, "disclosure.md"):
         "/home/pm/.pm-ai/disclosure.md",
+    (ScopeKind.APPLICATION, "projects.toml"):
+        "/home/pm/.pm-ai/projects.toml",
+    (ScopeKind.APPLICATION, "connectors/"):
+        "/home/pm/.pm-ai/connectors",
+    (ScopeKind.APPLICATION, "logs/"):
+        "/home/pm/.pm-ai/logs",
+    # The application-scope audit trail. `scope-model.md` §A draws no `memory/`;
+    # its prose says every scope holds its own `event_log/`, and this is where
+    # the daemon has always written one.
+    (ScopeKind.APPLICATION, "memory/"):
+        "/home/pm/.pm-ai/memory",
     (ScopeKind.APPLICATION, "event_log/"):
         "/home/pm/.pm-ai/memory/event_log",
+    (ScopeKind.APPLICATION, "private/"):
+        "/home/pm/.pm-ai/private",
     (ScopeKind.APPLICATION, "operational.db"):
         "/home/pm/.pm-ai/private/operational.db",
+    (ScopeKind.APPLICATION, "derived.db"):
+        "/home/pm/.pm-ai/private/derived.db",
+    (ScopeKind.APPLICATION, "config.json"):
+        "/home/pm/.pm-ai/private/config.json",
     (ScopeKind.APPLICATION, "vector_index/"):
         "/home/pm/.pm-ai/private/vector_index",
-    # personal — /home/pm/.manager-ai/
+    (ScopeKind.APPLICATION, "people/"):
+        "/home/pm/.pm-ai/private/people",
+    # ── personal — /home/pm/.manager-ai/ (scope-model.md §B) ─────────────────
+    (ScopeKind.PERSONAL, "rules/"):
+        "/home/pm/.manager-ai/rules",
+    (ScopeKind.PERSONAL, "manager_principles.md"):
+        "/home/pm/.manager-ai/rules/manager_principles.md",
+    # The personal coach persona. The project scope declares its own
+    # `rules/persona.md` with different content, and the two rows below are the
+    # reason the layout is one tree per scope rather than one global name table.
+    (ScopeKind.PERSONAL, "persona.md"):
+        "/home/pm/.manager-ai/rules/persona.md",
+    (ScopeKind.PERSONAL, "communication_preferences.md"):
+        "/home/pm/.manager-ai/rules/communication_preferences.md",
+    (ScopeKind.PERSONAL, "article_sources.md"):
+        "/home/pm/.manager-ai/rules/article_sources.md",
+    (ScopeKind.PERSONAL, "memory/"):
+        "/home/pm/.manager-ai/memory",
+    (ScopeKind.PERSONAL, "daily_dashboard.md"):
+        "/home/pm/.manager-ai/memory/daily_dashboard.md",
+    (ScopeKind.PERSONAL, "strategic_goals.md"):
+        "/home/pm/.manager-ai/memory/strategic_goals.md",
     (ScopeKind.PERSONAL, "coaching_1on1_history.md"):
         "/home/pm/.manager-ai/memory/coaching_1on1_history.md",
     (ScopeKind.PERSONAL, "event_log/"):
         "/home/pm/.manager-ai/memory/event_log",
     (ScopeKind.PERSONAL, "meetings/"):
         "/home/pm/.manager-ai/memory/meetings",
-    (ScopeKind.PERSONAL, "personal_analytics.db"):
-        "/home/pm/.manager-ai/private/personal_analytics.db",
-    (ScopeKind.PERSONAL, "rules/"):
-        "/home/pm/.manager-ai/rules",
-    (ScopeKind.PERSONAL, "strategic_goals.md"):
-        "/home/pm/.manager-ai/memory/strategic_goals.md",
+    (ScopeKind.PERSONAL, "skills/"):
+        "/home/pm/.manager-ai/skills",
+    (ScopeKind.PERSONAL, "telemetry/"):
+        "/home/pm/.manager-ai/skills/telemetry",
+    (ScopeKind.PERSONAL, "private/"):
+        "/home/pm/.manager-ai/private",
     (ScopeKind.PERSONAL, "telegram_cache/"):
         "/home/pm/.manager-ai/private/telegram_cache",
+    (ScopeKind.PERSONAL, "personal_analytics.db"):
+        "/home/pm/.manager-ai/private/personal_analytics.db",
     (ScopeKind.PERSONAL, "transcripts/"):
         "/home/pm/.manager-ai/transcripts",
-    # people — /home/pm/.pm-ai/private/people/p1/
+    # ── people — /home/pm/.pm-ai/private/people/p1/ ──────────────────────────
+    (ScopeKind.PEOPLE, "memory/"):
+        "/home/pm/.pm-ai/private/people/p1/memory",
     (ScopeKind.PEOPLE, "event_log/"):
         "/home/pm/.pm-ai/private/people/p1/memory/event_log",
     (ScopeKind.PEOPLE, "meetings/"):
         "/home/pm/.pm-ai/private/people/p1/memory/meetings",
     (ScopeKind.PEOPLE, "transcripts/"):
         "/home/pm/.pm-ai/private/people/p1/transcripts",
-    # project — /repositories/alpha/.project-ai/
-    (ScopeKind.PROJECT, "commitments_log.md"):
-        "/repositories/alpha/.project-ai/memory/commitments_log.md",
-    (ScopeKind.PROJECT, "event_log/"):
-        "/repositories/alpha/.project-ai/memory/event_log",
-    (ScopeKind.PROJECT, "meetings/"):
-        "/repositories/alpha/.project-ai/memory/meetings",
+    # ── project — /repositories/alpha/.project-ai/ (scope-model.md §C) ───────
     (ScopeKind.PROJECT, "rules/"):
         "/repositories/alpha/.project-ai/rules",
+    (ScopeKind.PROJECT, "persona.md"):
+        "/repositories/alpha/.project-ai/rules/persona.md",
+    (ScopeKind.PROJECT, "conventions.md"):
+        "/repositories/alpha/.project-ai/rules/conventions.md",
+    (ScopeKind.PROJECT, "engineering_specs.md"):
+        "/repositories/alpha/.project-ai/rules/engineering_specs.md",
+    (ScopeKind.PROJECT, "memory/"):
+        "/repositories/alpha/.project-ai/memory",
+    (ScopeKind.PROJECT, "daily_dashboard.md"):
+        "/repositories/alpha/.project-ai/memory/daily_dashboard.md",
+    (ScopeKind.PROJECT, "commitments_log.md"):
+        "/repositories/alpha/.project-ai/memory/commitments_log.md",
+    (ScopeKind.PROJECT, "meetings/"):
+        "/repositories/alpha/.project-ai/memory/meetings",
+    (ScopeKind.PROJECT, "event_log/"):
+        "/repositories/alpha/.project-ai/memory/event_log",
+    (ScopeKind.PROJECT, "skills/"):
+        "/repositories/alpha/.project-ai/skills",
     (ScopeKind.PROJECT, "transcripts/"):
         "/repositories/alpha/.project-ai/transcripts",
 }
@@ -594,3 +659,251 @@ def test_home_override_is_expanded():
     paths = ScopePaths.production(home="~")
     assert "~" not in paths.application_root.parts
     assert paths.application_root == Path.home() / ".pm-ai"
+
+
+# ── The three node types, and what each one promises ─────────────────────────
+
+
+def test_a_collection_cannot_declare_an_artifact_inside_it():
+    """The point of the type: an unenumerable directory declares nothing.
+
+    A flat artifact set could not say whether `skills/` held two declared
+    modules or two hundred undeclared ones, and the reader had no way to tell an
+    omission from a decision. `Collection` is that decision, so a `File` or `Dir`
+    smuggled inside one would put the ambiguity straight back.
+    """
+    for intruder in (
+        File("anti_burnout_shield.py", Tier.TRUTH),
+        Dir("x", (File("y.md", Tier.TRUTH),)),
+    ):
+        with pytest.raises(MalformedLayout, match="cannot enumerate"):
+            Collection("skills", Tier.TRUTH, (intruder,))  # type: ignore[arg-type]
+
+    # A nested Collection is the same statement one level down, and is the one
+    # thing that may sit here: `skills/telemetry/` is a known sub-namespace whose
+    # own contents are as arbitrary as its siblings'.
+    assert Collection("skills", Tier.TRUTH, (Collection("telemetry", Tier.TRUTH),)).children
+
+
+def test_no_declared_artifact_sits_inside_a_collection_in_any_real_tree():
+    """The construction-time check, re-asserted over the trees as declared.
+
+    `Collection.__post_init__` guards its own arguments; this walks what was
+    actually built, so a future node type or a hand-assembled tuple cannot slip
+    a declared artifact into a namespace that says it declares nothing.
+    """
+    checked = 0
+    for tree in SCOPE_TREES.values():
+        stack = list(tree)
+        while stack:
+            node = stack.pop()
+            stack.extend(node.children)
+            if isinstance(node, Collection):
+                checked += 1
+                assert all(isinstance(m, Collection) for m in node.children), (
+                    f"{node.name}/ is a Collection holding a declared artifact"
+                )
+    assert checked, "no Collection in any tree — this check would pass vacuously"
+
+
+def test_a_directory_with_no_declared_members_must_say_it_is_a_collection():
+    """`Dir` means "the members are listed here", so an empty one is a lie."""
+    with pytest.raises(MalformedLayout, match="declares no members"):
+        Dir("memory", ())
+    with pytest.raises(MalformedLayout, match="one path segment"):
+        File("rules/persona.md", Tier.TRUTH)
+
+
+def test_a_declared_artifact_carries_its_durability_on_the_node():
+    """The tier tables are a projection of the trees, not a second structure.
+
+    They used to be a flat, hand-written dict in another module, kept in step
+    with the trees by a pair of import-time assertions that existed only because
+    the two could drift. Durability is now a required field of the node, so the
+    drift is unrepresentable in both directions: a `File` without a tier does not
+    construct, and no key can appear in `ARTIFACT_TIER` without a node to derive
+    it from.
+    """
+    with pytest.raises(TypeError):
+        File("notes.md")  # type: ignore[call-arg]
+    with pytest.raises(MalformedLayout, match="exactly one Tier"):
+        File("notes.md", OutsideTierModel.RETENTION_MANAGED)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        Collection("logs")  # type: ignore[call-arg]
+    with pytest.raises(MalformedLayout, match="durability"):
+        Collection("logs", "diagnostics")  # type: ignore[arg-type]
+
+    # Every row of every projection came from a node that declared it, and every
+    # node that declared one is in the matching projection.
+    checked = 0
+    for kind in ScopeKind:
+        for placement in declared_nodes(kind):
+            durability = placement.node.durability
+            if durability is None:
+                assert isinstance(placement.node, Dir), (
+                    f"{placement.key} declares no durability and is not structure"
+                )
+                continue
+            checked += 1
+            key = placement.node.key
+            if isinstance(durability, Tier):
+                assert ARTIFACT_TIER[key] is durability
+            elif durability is OutsideTierModel.RETENTION_MANAGED:
+                assert key in RETENTION_MANAGED
+            else:
+                assert key in DIAGNOSTIC_ONLY
+    assert checked, "no node declared a durability — this check would pass vacuously"
+
+    # And nothing in a projection is missing its node.
+    keys = {p.node.key for kind in ScopeKind for p in declared_nodes(kind)}
+    assert (set(ARTIFACT_TIER) | RETENTION_MANAGED | DIAGNOSTIC_ONLY) <= keys
+
+
+def test_every_declared_artifact_is_tiered_or_deliberately_excluded():
+    """The oversight the tier tables exist to catch, stated over the trees.
+
+    `personal_analytics.db` held months of burnout history while belonging to
+    neither the backup set nor the rebuild set, and nothing noticed because
+    nothing walked the layout asking. A `Dir` is exempt — it is structure whose
+    declared members carry the tiers — but a `File` or a `Collection` is the
+    artifact itself.
+    """
+    accounted = set(ARTIFACT_TIER) | RETENTION_MANAGED | DIAGNOSTIC_ONLY
+    unaccounted = [
+        f"{kind.value}:{placement.key}"
+        for kind in ScopeKind
+        for placement in declared_nodes(kind)
+        if not isinstance(placement.node, Dir) and placement.key not in accounted
+    ]
+    assert not unaccounted, (
+        f"{sorted(unaccounted)} have a path and no tier, so no backup covers "
+        f"them and no rebuild reproduces them"
+    )
+
+
+def test_the_three_exclusion_sets_are_pairwise_disjoint():
+    """Exactly one answer to "what happens to this on backup and on rebuild".
+
+    `logs/` is excluded for a different reason than `transcripts/` — diagnostics
+    that are not state, versus raw captures under NFR-09's purge — and folding
+    the two together would put `logs/` under a retention promise nothing
+    implements.
+    """
+    tiered = set(ARTIFACT_TIER)
+    assert not (tiered & RETENTION_MANAGED)
+    assert not (tiered & DIAGNOSTIC_ONLY)
+    assert not (RETENTION_MANAGED & DIAGNOSTIC_ONLY)
+    assert DIAGNOSTIC_ONLY == {"logs/"}, (
+        "the spine calls logs/ diagnostics rather than a tier; anything else "
+        "arriving here needs the same argument made explicitly"
+    )
+
+
+# ── Addressing: relative paths, basenames, and refusing to guess ─────────────
+
+
+def test_an_artifact_resolves_the_same_by_relative_path_and_by_basename(production):
+    """Two spellings of one declaration, never two declarations.
+
+    The relative path is the canonical form; the basename is accepted because
+    `pm_ai.storage.service` passes `EVENT_LOG` and `ARTIFACT_TIER` is keyed by
+    basename. If the two ever disagreed, a write and its tier would be talking
+    about different files.
+    """
+    assert production.resolve(PERSONAL, "rules/persona.md") == production.resolve(
+        PERSONAL, "persona.md"
+    )
+    assert production.resolve(PROJECT, "memory/event_log/") == production.resolve(
+        PROJECT, "event_log/"
+    )
+    assert production.resolve(
+        APPLICATION, "private/people/"
+    ) == production.resolve(APPLICATION, "people/")
+
+
+def test_the_same_basename_in_two_scopes_is_two_different_declarations(production):
+    """The correctness ceiling the flat artifact set could not get past.
+
+    `persona.md` is a personal coach persona in one scope and a project
+    assistant persona in another, with different content and different
+    audiences. A layout keyed by a globally unique name could not hold both, so
+    one of them had to be undeclared — and an undeclared file is one whose path
+    the next caller invents.
+    """
+    assert scopes_of("persona.md") == {ScopeKind.PERSONAL, ScopeKind.PROJECT}
+    personal = production.resolve(PERSONAL, "persona.md")
+    project = production.resolve(PROJECT, "persona.md")
+    assert personal != project
+    assert personal.is_relative_to(production.personal_root)
+    assert project.is_relative_to(production.repository("alpha"))
+
+    # And a scope that declares no such file says so, rather than answering with
+    # a plausible path nothing wrote.
+    with pytest.raises(ArtifactNotInScope):
+        production.resolve(APPLICATION, "persona.md")
+    with pytest.raises(ArtifactNotInScope):
+        production.resolve(PEOPLE, "persona.md")
+
+
+def test_an_ambiguous_basename_is_refused_rather_than_picked():
+    """No scope has one today, which is exactly why this uses a synthetic tree.
+
+    Picking either candidate would put a record at a plausible wrong path and
+    nothing downstream could tell. The check has to exist before the collision
+    does, because the day it arrives is the day it silently resolves.
+    """
+    from pm_ai.platform.paths import _index
+
+    placements, address, ambiguous = _index(
+        (
+            Dir("rules", (File("notes.md", Tier.TRUTH),)),
+            Dir("memory", (File("notes.md", Tier.TRUTH),)),
+        )
+    )
+    assert ambiguous == {"notes.md"}, "the collision was not noticed"
+    assert "notes.md" not in address, "an ambiguous basename resolved anyway"
+    # Both remain addressable, by the spelling that distinguishes them.
+    assert {p.key for p in placements} >= {"rules/notes.md", "memory/notes.md"}
+
+
+def test_an_ambiguous_basename_refuses_at_the_resolver_too(production, monkeypatch):
+    """`_index` noticing is only half of it; `resolve` must act on the notice.
+
+    Injected rather than declared, for the same reason as above: the guard has
+    to be wired before a real collision exists, or its first exercise is the
+    incident.
+    """
+    import pm_ai.platform.paths as module
+
+    monkeypatch.setattr(
+        module,
+        "_AMBIGUOUS",
+        {**module._AMBIGUOUS, ScopeKind.PERSONAL: frozenset({"persona.md"})},
+    )
+    with pytest.raises(AmbiguousArtifact, match="more than one node"):
+        production.resolve(PERSONAL, "persona.md")
+    # Still addressable by the spelling that cannot be mistaken.
+    assert production.resolve(PERSONAL, "rules/persona.md")
+    assert issubclass(AmbiguousArtifact, ScopePathError)
+    assert not issubclass(AmbiguousArtifact, KeyError)
+
+
+def test_config_toml_stays_at_the_application_scope_root(production):
+    """A relocation this file has to notice, not a cosmetic assertion.
+
+    `config.toml` is what `pm-ai doctor` and the debug profile read. Moved into
+    `memory/`, the new path is simply empty: nothing errors, and the daemon reads
+    defaults while the operator's real settings sit somewhere nothing looks.
+    """
+    assert production.resolve(APPLICATION, "config.toml") == HOME / ".pm-ai" / "config.toml"
+    assert production.resolve(APPLICATION, "config.toml").parent == production.scope_root(
+        APPLICATION
+    )
+    # Not the credentials file, which is a different artifact in the enclave.
+    assert production.resolve(APPLICATION, "config.json").parent == production.enclave_root
+
+
+def test_the_project_registry_is_application_scoped(production):
+    """AD-11 — the one door into the system, outside every repository."""
+    assert production.project_registry == HOME / ".pm-ai" / "projects.toml"
+    assert scopes_of("projects.toml") == {ScopeKind.APPLICATION}

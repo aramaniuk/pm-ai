@@ -1,18 +1,18 @@
-"""The one place a directory layout is written down (AD-4, AD-26).
+"""Anchoring the scope model to a real filesystem (AD-4, AD-26).
 
-Four scopes exist so that personal coaching material cannot reach a team
-repository and a direct report's record cannot be read by that report's peers
-(AD-31). Until now no object could answer where any of them live: the layout was
-four trailing comments on `ScopeKind` plus a bare string in
-`pm_ai.domain.disclosure`. A boundary that exists only as a comment is a boundary
-each new caller re-derives, and one of those derivations is the leak.
-
-`ScopeKind`'s comments are the specification this implements:
+The layout itself — which artifacts exist, where each sits relative to its scope
+root, and the durability promise each carries — is declared in
+`pm_ai.domain.scope_model`. None of that touches the OS, so none of it belongs
+here. What belongs here is the one thing that does: turning a scope and an
+artifact key into an absolute path.
 
     APPLICATION  ~/.pm-ai/
     PERSONAL     ~/.manager-ai/
     PEOPLE       ~/.pm-ai/private/people/<person_id>/
     PROJECT      <repository>/.project-ai/
+
+Those four roots, and a registered repository, are the only structure written
+down in this module; everything below the root comes from the scope trees.
 
 Two factories, and the difference between them is the point. `production()`
 reads the real home directory and knows no project repository it was not told
@@ -21,26 +21,32 @@ unregistered project is an error rather than a guess. `rooted()` puts all four
 scopes beneath a directory the caller supplies, at the same relative structure,
 so a test exercises the real layout instead of a parallel fake of it.
 
-What is written down here is two independent declarations, and keeping them
-apart is the point. *Structure* is the directory skeleton a scope may have —
-`ScopeDir` and `SCOPE_SKELETON`. *Content* is the artifacts the system creates —
-`ARTIFACTS`, each record naming its own directory and its own scopes. Nothing
-maps an artifact to a path: a path is computed, `scope_root / directory / name`,
-identically in every scope, which is what lets `rooted()` reproduce production
-structure rather than approximate it.
+## Addressing
 
-The split buys an invariant the older artifact-to-path table could not state: an
-artifact's scopes must be a subset of its directory's scopes. `memory/` exists in
-all four scopes while `commitments_log.md` is project-only, so the two facts are
-genuinely separate, and only the artifact's own scope set is the privacy
-boundary. It also stops `rules/` — a directory the PM and the team fill, which no
-table describes the contents of — from having to pose as an artifact.
+A key is the scope-relative path as declared in the tree —
+`resolve(scope, "rules/persona.md")`. A bare basename is also accepted when it is
+unambiguous within that scope, because `pm_ai.storage.service` passes
+`EVENT_LOG` (`"event_log/"`) and `OPERATIONAL_DB`, and `ARTIFACT_TIER`'s keys are
+basenames. A basename that names two nodes in one scope raises
+`AmbiguousArtifact`: picking one is how a record acquires the wrong path
+silently. A trailing slash means a directory, and it is derived from the node
+type rather than typed by hand.
+
+Because the trees are per scope, `resolve(PERSONAL, "persona.md")` and
+`resolve(PROJECT, "persona.md")` are two different declarations that happen to
+share a spelling — they resolve through different trees.
+
+An unknown key is refused rather than composed as `scope_root / artifact`:
+guessing is how the same file acquires two paths, and therefore two tiers.
+
+## Subject ids are the trust boundary this module owns
 
 Subject ids are interpolated into paths, which makes them a trust boundary: a
 `person_id` of `../../..` would resolve outside the enclave that keeps a direct
-report's record away from that report's peers. They are therefore validated as
-directory names before use, and every path this module composes is normalized so
-that a `..` cannot survive into a containment check.
+report's record away from that report's peers. `DataScope` cannot catch it — it
+is a domain type with no filesystem to reason about — so ids are validated as
+directory names here, and every path this module composes is normalized so that
+a `..` cannot survive into a containment check.
 
 This module resolves paths and may create directories. It writes no file
 contents: that is `StorageService`'s alone (AD-5), which is also why nothing here
@@ -52,21 +58,74 @@ from __future__ import annotations
 import os.path
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.storage_tiers import (
-    ARTIFACT_TIER,
-    EVENT_LOG,
-    OPERATIONAL_DB,
-    RETENTION_MANAGED,
+from pm_ai.domain.scope_model import (
+    ADDRESS as _ADDRESS,
+    AMBIGUOUS as _AMBIGUOUS,
+    APPLICATION_TREE,
+    KEY_SCOPES as _KEY_SCOPES,
+    KEYS as _KEYS,
+    PATH_SEPARATORS as _SEPARATORS,
+    PEOPLE_TREE,
+    PERSONAL_SUBJECT_ARTIFACTS,
+    PERSONAL_TREE,
+    PLACEMENTS as _PLACEMENTS,
+    PROJECT_TREE,
+    SCOPE_TREES,
+    Collection,
+    Dir,
+    File,
+    LayoutNode,
+    MalformedLayout,
+    Placement,
     ScopeResolutionError,
+    artifacts_in,
+    declared_nodes,
+    index_tree as _index,
 )
 
+# Re-exported so that "where does this live" stays one import for a caller, and
+# so that moving the trees into `domain` did not move this module's surface. The
+# declarations are `pm_ai.domain.scope_model`'s; the anchoring is this module's.
+__all__ = [
+    "APPLICATION_DIRNAME",
+    "APPLICATION_TREE",
+    "AmbiguousArtifact",
+    "ArtifactNotInScope",
+    "Collection",
+    "Dir",
+    "ENCLAVE_DIRNAME",
+    "File",
+    "LayoutNode",
+    "MalformedLayout",
+    "MalformedSubjectId",
+    "PEOPLE_DIRNAME",
+    "PEOPLE_TREE",
+    "PERSONAL_DIRNAME",
+    "PERSONAL_SUBJECT_ARTIFACTS",
+    "PERSONAL_TREE",
+    "PROJECT_DIRNAME",
+    "PROJECT_TREE",
+    "Placement",
+    "ROOTED_PROJECTS_DIRNAME",
+    "RepositoryOutsideRoot",
+    "SCOPE_TREES",
+    "ScopePathError",
+    "ScopePaths",
+    "UnknownArtifact",
+    "UnknownProject",
+    "artifacts_in",
+    "declared_nodes",
+    "is_directory",
+    "scopes_of",
+]
+
 # ── Directory names ──────────────────────────────────────────────────────────
-# The four scope roots, spelled once each.
+# The four scope roots, spelled once each. This is the whole of what this module
+# knows about layout that the trees do not say.
 
 APPLICATION_DIRNAME = ".pm-ai"
 PERSONAL_DIRNAME = ".manager-ai"
@@ -92,9 +151,6 @@ PEOPLE_DIRNAME = "people"
 # Where `rooted()` puts a repository it was not given a path for.
 ROOTED_PROJECTS_DIRNAME = "projects"
 
-_ALL_SCOPES = frozenset(ScopeKind)
-_SUBJECT_SCOPES = frozenset({ScopeKind.PERSONAL, ScopeKind.PEOPLE, ScopeKind.PROJECT})
-
 
 # ── Errors ───────────────────────────────────────────────────────────────────
 # One base, so a caller wiring the resolver into storage can catch every way it
@@ -102,6 +158,11 @@ _SUBJECT_SCOPES = frozenset({ScopeKind.PERSONAL, ScopeKind.PEOPLE, ScopeKind.PRO
 # added next. None of these subclass `KeyError`: its `__str__` is `repr` of the
 # argument, which turns a multi-line explanation into an escaped one-liner in
 # the traceback — the wording is the point of raising.
+#
+# `MalformedLayout` is the exception to the "declared here" rule: a tree that
+# contradicts itself is refused where the tree is written, in
+# `pm_ai.domain.scope_model`, and it shares `ScopeResolutionError` as its base so
+# a caller still catches it with everything else.
 
 
 class ScopePathError(ScopeResolutionError):
@@ -114,7 +175,7 @@ class ScopePathError(ScopeResolutionError):
 
 
 class UnknownArtifact(ScopePathError, LookupError):
-    """No layout entry for this artifact.
+    """No node in any scope tree answers to this key.
 
     Deliberately not a fallback to `scope_root / artifact`: guessing is how the
     same file acquires two paths, and `ARTIFACT_TIER`'s "a path that appears in
@@ -128,6 +189,16 @@ class ArtifactNotInScope(ScopePathError, ValueError):
     A `coaching_1on1_history.md` under a project repository would be exactly the
     cross-scope leak the four scopes exist to prevent, so asking for one is an
     error here rather than a path the caller can go on to write.
+    """
+
+
+class AmbiguousArtifact(ScopePathError, LookupError):
+    """A basename that names more than one node inside one scope.
+
+    Basenames are accepted as a convenience, not as an addressing scheme. Where
+    the convenience stops being unambiguous the resolver refuses instead of
+    picking, because picking would put a record at a plausible wrong path and
+    nothing downstream could tell.
     """
 
 
@@ -163,10 +234,6 @@ class RepositoryOutsideRoot(ScopePathError, ValueError):
 
 # ── Subject ids ──────────────────────────────────────────────────────────────
 
-# Both spellings, on every platform: an id is persisted and may be read back on
-# another OS, so a backslash is a separator here even where the OS disagrees.
-_SEPARATORS = ("/", "\\", os.sep, os.altsep or "/")
-
 
 def _directory_name(label: str, value: str | None) -> str:
     """Validate a subject id as the single directory name it becomes.
@@ -180,6 +247,10 @@ def _directory_name(label: str, value: str | None) -> str:
     - surrounding whitespace makes two ids that look identical in every log;
     - uppercase merges two ids into one directory on a case-insensitive
       filesystem, which on macOS silently joins two people's records.
+
+    The separator tuple is the scope model's, not a second copy: a node name and
+    an interpolated subject id must agree on what a separator is, or one of them
+    admits a nested path the other refuses.
     """
     if value is None or not value.strip():
         raise MalformedSubjectId(
@@ -216,223 +287,9 @@ def _directory_name(label: str, value: str | None) -> str:
     return value
 
 
-# ── Structure: the directory skeleton of a scope ─────────────────────────────
-# What subdirectories a scope may have. This is the shape of a scope, not its
-# contents: `rules/` is a directory the PM or the team fills with conventions,
-# and no table here describes what is inside it.
-
-
-class ScopeDir(Enum):
-    """A subdirectory of a scope root, spelled once.
-
-    The value is the path segment. `ROOT` is the scope root itself, so an
-    artifact that sits directly in it is not a special case anywhere.
-    """
-
-    ROOT = ""
-    RULES = "rules"
-    MEMORY = "memory"
-    ENCLAVE = ENCLAVE_DIRNAME
-    # Raw captures sit at the scope root rather than under `memory/`, because
-    # `GITIGNORE_REQUIRED` anchors their exclusion at
-    # `/.project-ai/transcripts/`. Move this and the rule still reports
-    # "protected" for a directory git tracks, which is how verbatim minutes
-    # reach the employer's repository.
-    CAPTURES = "transcripts"
-
-
-# Which scope kinds have which subdirectory. Flat pairs rather than a nested
-# mapping: one row is one fact, and the subset invariant below reads straight off
-# it. Every kind has a root and a `memory/`; the rest do not, which is exactly
-# why this is declared rather than assumed.
-SCOPE_SKELETON: frozenset[tuple[ScopeDir, ScopeKind]] = frozenset(
-    {(ScopeDir.ROOT, kind) for kind in _ALL_SCOPES}
-    # Per scope, every one of them: an audit trail that lived in one place would
-    # be a committed file naming personal material (AD-38).
-    | {(ScopeDir.MEMORY, kind) for kind in _ALL_SCOPES}
-    # A capture lives in the scope owning its meeting (AD-33), and the
-    # application scope owns no meeting.
-    | {(ScopeDir.CAPTURES, kind) for kind in _SUBJECT_SCOPES}
-    | {
-        # A persona and a set of conventions are a property of the PM or of the
-        # team, never of the daemon.
-        (ScopeDir.RULES, ScopeKind.PERSONAL),
-        (ScopeDir.RULES, ScopeKind.PROJECT),
-        # The gitignored enclave: the system's databases at the application
-        # scope, the PM's own at the personal one. Neither a team-member nor a
-        # project scope has one, so nothing can put a database in a repository.
-        (ScopeDir.ENCLAVE, ScopeKind.APPLICATION),
-        (ScopeDir.ENCLAVE, ScopeKind.PERSONAL),
-    }
-)
-
-
-def scopes_with(directory: ScopeDir) -> frozenset[ScopeKind]:
-    """The scope kinds whose skeleton includes `directory`."""
-    return frozenset(kind for d, kind in SCOPE_SKELETON if d is directory)
-
-
-# Two skeleton directories are also resolvable keys, because `ARTIFACT_TIER`
-# names `rules/` and `RETENTION_MANAGED` names `transcripts/`. They are not
-# artifacts — nothing here creates a named file in either, and the directory
-# itself is the whole answer — so they resolve down their own path below rather
-# than joining `ARTIFACTS`.
-#
-# Written out rather than derived from `ScopeDir`, so that `memory/` and
-# `private/` do not silently become resolvable keys as well.
-SKELETON_KEYS: Mapping[str, ScopeDir] = MappingProxyType(
-    {
-        "rules/": ScopeDir.RULES,
-        "transcripts/": ScopeDir.CAPTURES,
-    }
-)
-
-
-# ── Content: the artifacts a scope holds ─────────────────────────────────────
-
-
-@dataclass(frozen=True, slots=True)
-class Artifact:
-    """One file or directory the system creates, and where it may exist.
-
-    Which scopes an artifact declares is the privacy boundary in executable
-    form: a caller cannot route a record into the wrong scope by supplying the
-    wrong `DataScope`, because the pair is checked on the way to a path.
-    """
-
-    name: str
-    """Exactly the `ARTIFACT_TIER` / `RETENTION_MANAGED` key, trailing slash and
-    all — one spelling, so a rename cannot leave a tiered artifact with no path
-    or a path with no tier. A trailing slash means a directory."""
-
-    directory: ScopeDir
-    scopes: frozenset[ScopeKind]
-
-    @property
-    def relative_path(self) -> Path:
-        """Where this artifact sits below a scope root — the same in every scope.
-
-        Computed, never looked up. A per-artifact path table is how one file
-        acquires two spellings, and `rooted()` reproducing production exactly
-        depends on there being only one.
-        """
-        return Path(self.directory.value, self.name.rstrip("/"))
-
-
-ARTIFACTS: frozenset[Artifact] = frozenset(
-    {
-        # Tier 1 — Markdown truth, plaintext by design (AD-6).
-        # The application scope holds system-level state only, so that no
-        # employer-specific configuration lands in the sovereign personal scope.
-        Artifact("config.toml", ScopeDir.ROOT, frozenset({ScopeKind.APPLICATION})),
-        # AD-38 — one ledger, outside every repository. Per-scope would push it
-        # into a committed one.
-        Artifact("disclosure.md", ScopeDir.ROOT, frozenset({ScopeKind.APPLICATION})),
-        # Spelled from `pm_ai.domain.storage_tiers` where code outside this
-        # module also names the key, so a rename cannot leave two spellings.
-        Artifact(EVENT_LOG, ScopeDir.MEMORY, _ALL_SCOPES),
-        # A summary follows the subject of its meeting, not the convenience
-        # (AD-33) — the same rule the raw capture follows.
-        Artifact("meetings/", ScopeDir.MEMORY, _SUBJECT_SCOPES),
-        Artifact("commitments_log.md", ScopeDir.MEMORY, frozenset({ScopeKind.PROJECT})),
-        # The sovereign hub. `strategic_goals.md` holds all three goal domains
-        # here today; a project artifact citing a personal goal is the
-        # cross-scope violation the scope model exists to prevent.
-        Artifact(
-            "coaching_1on1_history.md", ScopeDir.MEMORY, frozenset({ScopeKind.PERSONAL})
-        ),
-        Artifact("strategic_goals.md", ScopeDir.MEMORY, frozenset({ScopeKind.PERSONAL})),
-        # Tier 2 — durable, never rebuilt.
-        Artifact(OPERATIONAL_DB, ScopeDir.ENCLAVE, frozenset({ScopeKind.APPLICATION})),
-        # A separate database inside the personal scope, so project-scope
-        # rendering has no code path that could join burnout metrics into
-        # team-facing output (AD-25).
-        Artifact(
-            "personal_analytics.db", ScopeDir.ENCLAVE, frozenset({ScopeKind.PERSONAL})
-        ),
-        # Tier 3 — disposable, rebuilt by `pm-ai reindex`.
-        # Separate files from Tier 2, so a rebuild cannot reach the job queue,
-        # the cursors, or the executed-key ledger (AD-3). The enclave they share
-        # proves nothing on its own; what holds is the assertion in
-        # tests/architecture/test_paths.py that no Tier-1 path lies inside a
-        # Tier-3 one, since a rebuild deletes the artifacts it names by path.
-        Artifact("derived.db", ScopeDir.ENCLAVE, frozenset({ScopeKind.APPLICATION})),
-        Artifact("vector_index/", ScopeDir.ENCLAVE, frozenset({ScopeKind.APPLICATION})),
-        # Retention-managed raw input, outside the tier model (NFR-09).
-        # In the PERSONAL enclave, per the scope model: it holds the PM's own
-        # voice notes and dialogue state, which is personal-scope material by
-        # subject. `test_ad25_...` in tests/architecture treats any path naming
-        # `manager-ai` as personal, and this is one — deliberately.
-        # `test_ad6_markdown_is_never_encrypted` still spells it under
-        # `~/.pm-ai/private/`; that list is an encryption-classifier fixture
-        # (story 1e), and its strings will need the personal scope when it runs.
-        Artifact("telegram_cache/", ScopeDir.ENCLAVE, frozenset({ScopeKind.PERSONAL})),
-    }
-)
-
-_BY_NAME: Mapping[str, Artifact] = MappingProxyType({a.name: a for a in ARTIFACTS})
-
-# Every key this module resolves: declared artifacts, plus the two skeleton
-# directories the tier tables name.
-_KEYS: frozenset[str] = frozenset(_BY_NAME) | frozenset(SKELETON_KEYS)
-
-# The artifacts whose subject is the PM personally (AD-31). Stated separately
-# from `ARTIFACTS` on purpose: the scope sets are the mechanism, this is the
-# intent, and a test that reads only the mechanism cannot notice the mechanism
-# changing. Adding a scope to one of these declarations is caught by comparing
-# the two.
-#
-# A committed scope holds none of them. `event_log/` and `transcripts/` are
-# absent because they are per-scope by construction: the personal one is
-# personal, the project one was never the PM's.
-PERSONAL_SUBJECT_ARTIFACTS: frozenset[str] = frozenset(
-    {
-        "coaching_1on1_history.md",
-        "strategic_goals.md",
-        "personal_analytics.db",
-        "telegram_cache/",
-    }
-)
-
-
-def _assert_declarations_agree() -> None:
-    """The consistency checks, at import time.
-
-    An artifact that is tiered or retention-managed but has no home is an
-    artifact whose location the next caller invents. This is the same shape of
-    check `storage_tiers` makes about tiers, for the same reason.
-
-    The subset check is what the structure/content split buys: an artifact
-    cannot claim a scope whose skeleton has no directory to put it in. Nothing
-    else notices — `commitments_log.md` sits in `memory/`, which every scope
-    has, so the two declarations really are independent and a typo in either one
-    is silent without this.
-    """
-    assert len(_BY_NAME) == len(ARTIFACTS), "two artifacts share a name"
-    assert not (frozenset(_BY_NAME) & frozenset(SKELETON_KEYS)), (
-        "a skeleton directory is also declared as an artifact: "
-        f"{sorted(frozenset(_BY_NAME) & frozenset(SKELETON_KEYS))}"
-    )
-    assert all(a.scopes for a in ARTIFACTS), "an artifact declared in no scope"
-    assert all(scopes_with(d) for d in ScopeDir), (
-        "a directory no scope kind has: "
-        f"{sorted(d.name for d in ScopeDir if not scopes_with(d))}"
-    )
-    for artifact in ARTIFACTS:
-        homeless = artifact.scopes - scopes_with(artifact.directory)
-        assert not homeless, (
-            f"{artifact.name!r} is declared in "
-            f"{sorted(k.value for k in homeless)}, which has no "
-            f"{artifact.directory.name} directory in its skeleton."
-        )
-    assert (set(ARTIFACT_TIER) | RETENTION_MANAGED) <= _KEYS, (
-        "an artifact is tiered or retention-managed but has no path: "
-        f"{sorted((set(ARTIFACT_TIER) | RETENTION_MANAGED) - _KEYS)}"
-    )
-    assert PERSONAL_SUBJECT_ARTIFACTS <= _KEYS, "a personal artifact with no path"
-
-
-_assert_declarations_agree()
+# ── Looking a key up in the scope model ──────────────────────────────────────
+# The index is the scope model's; the refusals are this module's, because a
+# refusal is what a caller of `resolve` has to catch.
 
 
 def is_directory(artifact: str) -> bool:
@@ -441,42 +298,52 @@ def is_directory(artifact: str) -> bool:
     Raises for an unknown artifact rather than reading the trailing slash off
     any string handed to it: a caller reaching for this as a validity check
     would otherwise get a confident answer about something that does not exist.
+    The slash is not a convention typed by hand — it comes from the node type.
     """
     if artifact not in _KEYS:
         raise UnknownArtifact(_unknown_message(artifact))
     return artifact.endswith("/")
 
 
-def artifacts_in(kind: ScopeKind) -> frozenset[str]:
-    """Every artifact that scope kind may hold, skeleton directories included."""
-    return frozenset(a.name for a in ARTIFACTS if kind in a.scopes) | frozenset(
-        key for key, directory in SKELETON_KEYS.items() if kind in scopes_with(directory)
-    )
-
-
-def _place(artifact: str) -> tuple[Path, frozenset[ScopeKind]]:
-    """Where `artifact` sits below a scope root, and which scopes may hold it.
-
-    Two lookups, kept apart rather than blended. A skeleton key names part of a
-    scope's structure and resolves to that directory; an artifact names content
-    and resolves to a path computed from its directory and its own name. One
-    table holding both is the conflation this module was refactored out of.
-    """
-    directory = SKELETON_KEYS.get(artifact)
-    if directory is not None:
-        return Path(directory.value), scopes_with(directory)
-    entry = _BY_NAME.get(artifact)
-    if entry is None:
+def scopes_of(artifact: str) -> frozenset[ScopeKind]:
+    """Which scope kinds declare a node answering to `artifact`."""
+    if artifact not in _KEY_SCOPES:
         raise UnknownArtifact(_unknown_message(artifact))
-    return entry.relative_path, entry.scopes
+    return _KEY_SCOPES[artifact]
+
+
+def _place(kind: ScopeKind, artifact: str) -> Placement:
+    """Where `artifact` sits below a `kind` scope root.
+
+    One lookup against one per-scope index. The previous shape needed two — a
+    skeleton table and an artifact table — and keeping them apart was the whole
+    difficulty; a tree makes "is this structure or content" the node's own type.
+    """
+    if artifact in _AMBIGUOUS[kind]:
+        raise AmbiguousArtifact(
+            f"{artifact!r} names more than one node in the {kind.value} scope. "
+            f"Address it by its relative path instead: "
+            f"{sorted(p.key for p in _PLACEMENTS[kind] if p.node.key == artifact)}"
+        )
+    placement = _ADDRESS[kind].get(artifact)
+    if placement is not None:
+        return placement
+    homes = _KEY_SCOPES.get(artifact)
+    if homes is None:
+        raise UnknownArtifact(_unknown_message(artifact))
+    raise ArtifactNotInScope(
+        f"{artifact!r} does not exist in the {kind.value} scope. It belongs to "
+        f"{sorted(k.value for k in homes)}."
+    )
 
 
 def _unknown_message(artifact: str) -> str:
     return (
-        f"{artifact!r} is not a declared artifact. Add it to ARTIFACTS here — "
-        f"naming its directory and its scopes — with a tier in "
-        f"pm_ai.domain.storage_tiers: an artifact with a path and no tier is in "
-        f"neither the backup set nor the rebuild set. Known: {sorted(_KEYS)}"
+        f"{artifact!r} is not a declared artifact. Add it to the tree of the "
+        f"scope that holds it in pm_ai.domain.scope_model — as a File with its "
+        f"tier, a Dir, or a Collection with its durability: an artifact with a "
+        f"path and no tier is in neither the backup set nor the rebuild set. "
+        f"Known: {sorted(_KEYS)}"
     )
 
 
@@ -634,25 +501,25 @@ class ScopePaths:
     def resolve(self, scope: DataScope, artifact: str, *, create: bool = False) -> Path:
         """Where `artifact` lives in `scope`.
 
+        `artifact` is a scope-relative path as declared in that scope's tree —
+        `"rules/persona.md"` — or a bare basename where that is unambiguous
+        within the scope.
+
         `create` makes the directory the artifact needs — the directory itself for
         a directory artifact, its parent for a file. It never creates the file:
         `StorageService` owns content (AD-5), and a resolver that touched files
         would be a second writer.
         """
-        relative, homes = _place(artifact)
-        if scope.kind not in homes:
-            raise ArtifactNotInScope(
-                f"{artifact!r} does not exist in the {scope.kind.value} scope. It "
-                f"belongs to {sorted(k.value for k in homes)}."
-            )
-        path = self.scope_root(scope) / relative
+        placement = _place(scope.kind, artifact)
+        path = self.scope_root(scope) / placement.relative
         if create:
-            directory = path if is_directory(artifact) else path.parent
+            directory = path if placement.node.is_dir else path.parent
             directory.mkdir(parents=True, exist_ok=True)
         return path
 
     # ── The named stores (AD-3) ──────────────────────────────────────────────
-    # Three tiers, and the two that share a directory do not share a file.
+    # Three tiers, and the two that share a directory do not share a file. Which
+    # tier each one is, is declared on its node in `pm_ai.domain.scope_model`.
 
     @property
     def disclosure_ledger(self) -> Path:
@@ -660,9 +527,14 @@ class ScopePaths:
         return self.resolve(DataScope(ScopeKind.APPLICATION), "disclosure.md")
 
     @property
+    def project_registry(self) -> Path:
+        """AD-11 — the enrolled-project registry `pm-ai project add` writes."""
+        return self.resolve(DataScope(ScopeKind.APPLICATION), "projects.toml")
+
+    @property
     def operational_store(self) -> Path:
         """Tier 2. Job queue, cursors, executed-key ledger, staged proposals."""
-        return self.resolve(DataScope(ScopeKind.APPLICATION), OPERATIONAL_DB)
+        return self.resolve(DataScope(ScopeKind.APPLICATION), "operational.db")
 
     @property
     def derived_store(self) -> Path:
