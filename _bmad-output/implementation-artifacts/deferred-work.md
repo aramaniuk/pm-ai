@@ -43,7 +43,7 @@ the queue begins after `1i`.
   evidence: The storage contract specifies `0600` for encrypted files but says nothing about the directories holding them. Material described as unreadable by a report's peers is currently created with default permissions. Belongs with story 1f, which owns file modes.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`
-  summary: Module-level `assert` statements used as consistency guards are stripped under `python -O` / `PYTHONOPTIMIZE`, in `pm_ai/platform/paths.py:167-172` and pre-existing in `pm_ai/domain/storage_tiers.py:115,140`.
+  summary: Module-level `assert` statements used as consistency guards are stripped under `python -O` / `PYTHONOPTIMIZE`, in `pm_ai/platform/paths.py` (inside `_assert_declarations_agree()`) and pre-existing in `pm_ai/domain/storage_tiers.py`.
   evidence: Both modules rely on import-time asserts to enforce that every artifact has exactly one tier and one home. Under an optimized interpreter those invariants vanish silently. Pre-existing pattern, so it is a codebase-wide decision rather than this story's defect.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1b-storage-writes-through-the-resolver.md`

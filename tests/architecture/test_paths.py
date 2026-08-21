@@ -88,6 +88,116 @@ def _personal_only() -> set[str]:
     return set(artifacts_in(ScopeKind.PERSONAL)) - elsewhere
 
 
+# ── The whole resolution table, pinned to literal paths ──────────────────────
+
+# Every (scope kind, artifact key) pair the resolver answers, and the absolute
+# path it must answer with. The scope subjects are `p1` and `alpha`, matching the
+# resolver the test below builds from the same literals.
+RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
+    # application — /home/pm/.pm-ai/
+    (ScopeKind.APPLICATION, "config.toml"):
+        "/home/pm/.pm-ai/config.toml",
+    (ScopeKind.APPLICATION, "derived.db"):
+        "/home/pm/.pm-ai/private/derived.db",
+    (ScopeKind.APPLICATION, "disclosure.md"):
+        "/home/pm/.pm-ai/disclosure.md",
+    (ScopeKind.APPLICATION, "event_log/"):
+        "/home/pm/.pm-ai/memory/event_log",
+    (ScopeKind.APPLICATION, "operational.db"):
+        "/home/pm/.pm-ai/private/operational.db",
+    (ScopeKind.APPLICATION, "vector_index/"):
+        "/home/pm/.pm-ai/private/vector_index",
+    # personal — /home/pm/.manager-ai/
+    (ScopeKind.PERSONAL, "coaching_1on1_history.md"):
+        "/home/pm/.manager-ai/memory/coaching_1on1_history.md",
+    (ScopeKind.PERSONAL, "event_log/"):
+        "/home/pm/.manager-ai/memory/event_log",
+    (ScopeKind.PERSONAL, "meetings/"):
+        "/home/pm/.manager-ai/memory/meetings",
+    (ScopeKind.PERSONAL, "personal_analytics.db"):
+        "/home/pm/.manager-ai/private/personal_analytics.db",
+    (ScopeKind.PERSONAL, "rules/"):
+        "/home/pm/.manager-ai/rules",
+    (ScopeKind.PERSONAL, "strategic_goals.md"):
+        "/home/pm/.manager-ai/memory/strategic_goals.md",
+    (ScopeKind.PERSONAL, "telegram_cache/"):
+        "/home/pm/.manager-ai/private/telegram_cache",
+    (ScopeKind.PERSONAL, "transcripts/"):
+        "/home/pm/.manager-ai/transcripts",
+    # people — /home/pm/.pm-ai/private/people/p1/
+    (ScopeKind.PEOPLE, "event_log/"):
+        "/home/pm/.pm-ai/private/people/p1/memory/event_log",
+    (ScopeKind.PEOPLE, "meetings/"):
+        "/home/pm/.pm-ai/private/people/p1/memory/meetings",
+    (ScopeKind.PEOPLE, "transcripts/"):
+        "/home/pm/.pm-ai/private/people/p1/transcripts",
+    # project — /repositories/alpha/.project-ai/
+    (ScopeKind.PROJECT, "commitments_log.md"):
+        "/repositories/alpha/.project-ai/memory/commitments_log.md",
+    (ScopeKind.PROJECT, "event_log/"):
+        "/repositories/alpha/.project-ai/memory/event_log",
+    (ScopeKind.PROJECT, "meetings/"):
+        "/repositories/alpha/.project-ai/memory/meetings",
+    (ScopeKind.PROJECT, "rules/"):
+        "/repositories/alpha/.project-ai/rules",
+    (ScopeKind.PROJECT, "transcripts/"):
+        "/repositories/alpha/.project-ai/transcripts",
+}
+
+
+def test_every_scope_and_artifact_resolves_to_its_pinned_path():
+    """The full layout, as literal strings, so relocating anything fails here.
+
+    The expectations are hand-written literals rather than paths composed from
+    `ARTIFACTS`, `ScopeDir`, or `SCOPE_SKELETON`, and that is the whole point: a
+    table derived from the structure under test moves when the structure moves,
+    so it cannot notice the move. Every other test in this file pins one
+    interesting row and leaves the rest to the reader — which is how
+    `config.toml` came to be an artifact whose directory nothing asserted, free
+    to migrate from the scope root into `memory/` with the suite still green.
+
+    A relocation is not a cosmetic change. Each of these paths is a place a
+    previous version of the daemon has already written to, so moving one orphans
+    real content silently: the new path is empty, nothing errors, and the
+    Markdown truth AD-3 promises is unrecoverable simply reads as absent.
+
+    The completeness check at the end is what keeps the literals honest. Without
+    it a new artifact, or an artifact quietly losing a scope, would be a pair
+    this table never mentions and therefore never checks.
+    """
+    paths = ScopePaths.production(
+        home="/home/pm", projects={"alpha": "/repositories/alpha"}
+    )
+    scopes = {
+        ScopeKind.APPLICATION: DataScope(ScopeKind.APPLICATION),
+        ScopeKind.PERSONAL: DataScope(ScopeKind.PERSONAL),
+        ScopeKind.PEOPLE: DataScope(ScopeKind.PEOPLE, person_id="p1"),
+        ScopeKind.PROJECT: DataScope(ScopeKind.PROJECT, project_id="alpha"),
+    }
+
+    for (kind, artifact), expected in sorted(
+        RESOLUTION_TABLE.items(), key=lambda item: (item[0][0].value, item[0][1])
+    ):
+        assert paths.resolve(scopes[kind], artifact) == Path(expected), (
+            f"{artifact} in the {kind.value} scope moved: it now resolves to "
+            f"{paths.resolve(scopes[kind], artifact)}, not {expected}. If the move "
+            f"is intended, migrating whatever the old path already holds is part "
+            f"of it."
+        )
+
+    # Not derived from the table, so a pair the table forgot is a failure rather
+    # than a silent omission.
+    reachable = {
+        (kind, artifact) for kind in ScopeKind for artifact in artifacts_in(kind)
+    }
+    assert reachable == set(RESOLUTION_TABLE), (
+        f"the pinned table no longer matches what the resolver answers. "
+        f"Unpinned: "
+        f"{sorted((k.value, a) for k, a in reachable - set(RESOLUTION_TABLE))}; "
+        f"gone: {sorted((k.value, a) for k, a in set(RESOLUTION_TABLE) - reachable)}"
+    )
+
+
 # ── Matrix rows ──────────────────────────────────────────────────────────────
 
 
@@ -372,8 +482,8 @@ def test_the_personal_only_set_matches_the_scope_table():
     """Intent and mechanism, cross-checked.
 
     `PERSONAL_SUBJECT_ARTIFACTS` states which artifacts have the PM as their
-    subject; `_HOMES` implements it. Granting one of them a second scope changes
-    the mechanism only, and this is what notices.
+    subject; each `Artifact`'s own scope set implements it. Granting one of them
+    a second scope changes the mechanism only, and this is what notices.
     """
     assert _personal_only() == set(PERSONAL_SUBJECT_ARTIFACTS)
 
