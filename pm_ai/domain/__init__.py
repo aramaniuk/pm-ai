@@ -26,7 +26,10 @@ from pm_ai.domain.events import (
 from pm_ai.domain.storage_tiers import (
     ARTIFACT_TIER,
     BACKUP_TARGETS,
+    EVENT_LOG,
+    OPERATIONAL_DB,
     REBUILD_TARGETS,
+    ScopeResolutionError,
     Tier,
     TierViolation,
     assert_reindex_safe,
@@ -67,4 +70,5 @@ __all__ = [
     "UNRESOLVED_ACTOR", "UnknownVerb", "VERB_REGISTRY", "Verb",
     "evaluate_commitment", "lookup_verb", "ARTIFACT_TIER", "BACKUP_TARGETS",
     "REBUILD_TARGETS", "Tier", "TierViolation", "assert_reindex_safe",
+    "EVENT_LOG", "OPERATIONAL_DB", "ScopeResolutionError",
 ]

@@ -2,8 +2,9 @@
 title: 'Storage writes through the resolver'
 type: 'feature'
 created: '2026-08-21'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: 'e1d9539'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/scope-model.md'
 ---
@@ -59,12 +60,14 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/storage/service.py` — accept the resolver and clock as constructor arguments; resolve every path through the resolver; remove the three internal clock reads.
-- [ ] `pm_ai/app/wiring.py` — construct the resolver and clock and inject both. Keep `now` optional.
-- [ ] `tests/slice/test_vertical_slice.py`, `test_r4_gate_fixes.py`, `test_transcript_slice.py` — re-point path assertions and replace `storage._root` reuse. Change paths only.
+- [x] `pm_ai/storage/service.py` — accept the resolver and clock as constructor arguments; resolve every path through the resolver; remove the three internal clock reads.
+- [x] `pm_ai/app/wiring.py` — construct the resolver and clock and inject both. Keep `now` optional.
+- [x] `tests/slice/test_vertical_slice.py` — re-pointed the three path assertions through `storage.paths` and replaced both `storage._root` reuses with `tmp_path`. Paths only; no assertion changed what it proves.
+- [x] `tests/slice/test_r4_gate_fixes.py`, `test_transcript_slice.py` — **no change needed**: both only pass `tmp_path` to `build()` as a root and assert no paths, so the re-pointing this story is about does not reach them. Verified by running them unmodified.
+- [x] `tests/slice/test_storage_resolution.py` (new) — the behavioural coverage for the I/O matrix rows nothing asserted before: append-only ledgers, all four scopes, Tier 2 outside every Tier-1 path, the injected clock in a month that is not the current one, and a batch that must not be swallowed when the resolver refuses.
 
 **Acceptance Criteria:**
-- Given `uv run pytest`, then all 119 tests pass, the skip count stays at 30, and no new skip appears.
+- Given `uv run pytest`, then every test passes, the skip count stays at 30, and no new skip appears. The count is **175 passed** at the end of this story; the "119" in this story's draft predates story 1a, whose `tests/architecture/test_paths.py` puts the baseline at `e1d9539` at **157 passed, 30 skipped**.
 - Given `uv run lint-imports`, then all 12 contracts hold and no module under `pm_ai/storage/` imports `pm_ai.platform`.
 - Given a grep for `datetime.now` under `pm_ai/storage/`, then there are no matches.
 - Given a service constructed twice against the same roots, then the mutation ledger from the first construction is still readable.
@@ -79,6 +82,63 @@ pm_ai.app.wiring  ──builds resolver + clock──>  storage.StorageService
 
 ## Verification
 
-- `uv run pytest -q -rs` — expected: 119 passed, 30 skipped.
+- `uv run pytest -q -rs` — expected: 175 passed, 30 skipped (157 was the baseline at `e1d9539`; the story's original "119" predates story 1a's path tests).
 - `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
 - `grep -rn "datetime.now" pm_ai/storage/` — expected: no output.
+
+## Suggested Review Order
+
+**The seam this story exists to move**
+
+- Start here: the writer now receives its layout and its clock instead of deriving either.
+  [`service.py:148`](../../../../pm_ai/storage/service.py#L148)
+
+- The flattened `project_alpha/` directory replaced by a resolved path.
+  [`service.py:226`](../../../../pm_ai/storage/service.py#L226)
+
+- The protocol that lets storage take a resolver it may not import.
+  [`ports/__init__.py:33`](../../../../pm_ai/ports/__init__.py#L33)
+
+- Exactly one of a root or a resolver, so the production factory is reachable.
+  [`wiring.py:37`](../../../../pm_ai/app/wiring.py#L37)
+
+**The clock, in one place**
+
+- Single read point; rejects a naive or non-UTC clock rather than writing a wrong-month segment.
+  [`service.py:207`](../../../../pm_ai/storage/service.py#L207)
+
+- Pinned against a 2019 instant, so a re-introduced system clock fails today, not in September.
+  [`test_storage_resolution.py:255`](../../../../tests/slice/test_storage_resolution.py#L255)
+
+**Data loss the review caught**
+
+- Batch append isolated so a refused resolve rolls back its dedup rows.
+  [`service.py:267`](../../../../pm_ai/storage/service.py#L267)
+
+- The regression: a refused write must not swallow the batch forever.
+  [`test_storage_resolution.py:326`](../../../../tests/slice/test_storage_resolution.py#L326)
+
+**The disarmed guard, re-armed both ways**
+
+- The static rule now resolves names bound to a ledger token, so a constant cannot blind it.
+  [`test_static_rules.py:244`](../../../../tests/architecture/test_static_rules.py#L244)
+
+- The rename-proof half: append twice, read back both entries in order.
+  [`test_storage_resolution.py:92`](../../../../tests/slice/test_storage_resolution.py#L92)
+
+- One spelling of each artifact key, in the layer both storage and platform may import.
+  [`storage_tiers.py:26`](../../../../pm_ai/domain/storage_tiers.py#L26)
+
+- A resolver refusal callers can catch without importing the platform layer.
+  [`storage_tiers.py:30`](../../../../pm_ai/domain/storage_tiers.py#L30)
+
+**Peripherals**
+
+- Tier 2 checked against every Tier-1 path in all four scopes, not just `memory/`.
+  [`test_storage_resolution.py:179`](../../../../tests/slice/test_storage_resolution.py#L179)
+
+- A malformed project id fails at build, not mid-harvest.
+  [`test_storage_resolution.py:383`](../../../../tests/slice/test_storage_resolution.py#L383)
+
+- Re-pointed assertions only; nothing a test proves was changed.
+  [`test_vertical_slice.py`](../../../../tests/slice/test_vertical_slice.py)

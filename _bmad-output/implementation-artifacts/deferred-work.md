@@ -45,3 +45,19 @@ the queue begins after `1i`.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`
   summary: Module-level `assert` statements used as consistency guards are stripped under `python -O` / `PYTHONOPTIMIZE`, in `pm_ai/platform/paths.py:167-172` and pre-existing in `pm_ai/domain/storage_tiers.py:115,140`.
   evidence: Both modules rely on import-time asserts to enforce that every artifact has exactly one tier and one home. Under an optimized interpreter those invariants vanish silently. Pre-existing pattern, so it is a codebase-wide decision rather than this story's defect.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1b-storage-writes-through-the-resolver.md`
+  summary: `ScopePathPort` is absent from the architecture spine's port inventory, and `ScopePaths` does not follow the spine's `<Service><Noun>Adapter` naming convention for a port implementation.
+  evidence: ARCHITECTURE-SPINE.md:27 enumerates seven ports and :513 sets the adapter naming convention; the new port satisfies neither. The spine is a skill-derived artifact that AGENTS.md warns is re-rendered over hand edits, so this needs a re-run of the architecture skill rather than a manual patch.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1b-storage-writes-through-the-resolver.md`
+  summary: No type checker is configured, so every Protocol in `pm_ai/ports/` is documentation rather than a contract. `[dependency-groups]` holds only pytest and import-linter, and there is no CI.
+  evidence: A port and its implementation can diverge with a green suite. Story 1b adds isinstance conformance tests as a partial substitute, but that catches attribute existence only — not signatures, keyword arguments, or return types. Adding mypy or pyright is a repo-wide decision.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1b-storage-writes-through-the-resolver.md`
+  summary: The suite silently drops to 31 skips when `lint-imports` is not on PATH, and the skipped test is the layering contract that the storage/platform sibling design depends on.
+  evidence: `tests/architecture/test_layering.py:21-22` skips on `shutil.which("lint-imports") is None`, so `python -m pytest` outside an activated venv reports green while never checking import direction. Pre-existing, and it makes any run count that is not produced by `uv run` untrustworthy.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1b-storage-writes-through-the-resolver.md`
+  summary: Moving off the flattened `<root>/<scope>_<id>/event_log/` layout has no migration, so Tier-1 segments written under the old layout would be orphaned and the daemon would start an empty ledger.
+  evidence: No deployment exists and no data is at risk today, so this is correctly out of scope for 1b. It becomes real the moment anything writes segments before story 4 stands up the daemon.

@@ -15,13 +15,18 @@ import pytest
 from conftest import REPO_ROOT
 
 
-def _daemon(tmp: str = "/tmp/pm-ai-slice"):
-    """A wired daemon from the composition root (AD-30)."""
-    import shutil, pathlib
-    wiring = mod("pm_ai.app.wiring")
-    root = pathlib.Path(tmp)
-    shutil.rmtree(root, ignore_errors=True)
-    return wiring.build(root, "alpha")
+def _daemon(tmp):
+    """A wired daemon from the composition root (AD-30), beneath `tmp`.
+
+    `tmp` is the caller's `tmp_path`, not a fixed `/tmp` directory: the resolver
+    now creates all four scope roots under it, so a hardcoded location left
+    `.pm-ai/`, `.manager-ai/`, and `projects/alpha/.project-ai/` behind on the
+    developer's machine after every run.
+
+    Deliberately called without a clock — `now` staying optional on `build()` is
+    what this call site proves.
+    """
+    return mod("pm_ai.app.wiring").build(tmp, "alpha")
 
 
 def mod(dotted: str):
@@ -72,11 +77,11 @@ def test_ad20_idempotency_keys_are_deterministic():
     assert first != other, "AD-20: distinct payloads must not collide onto one key."
 
 
-def test_ad20_mutating_jobs_require_a_key():
+def test_ad20_mutating_jobs_require_a_key(tmp_path):
     """AD-20 — ADVERSARIAL. The skill layer refuses unkeyed external mutations."""
     reg = mod("pm_ai.skills.registry")
     d = mod("pm_ai.domain")
-    daemon = _daemon()
+    daemon = _daemon(tmp_path)
     with pytest.raises(reg.MissingIdempotencyKey):
         daemon.skills.invoke(
             "gitlab.post_comment",
@@ -537,10 +542,10 @@ def test_ad36_self_authored_events_are_excluded_from_evidence():
     )
 
 
-def test_ad36_every_class_m_mutation_is_recorded_for_attribution():
+def test_ad36_every_class_m_mutation_is_recorded_for_attribution(tmp_path):
     """AD-36 — attribution needs both mechanisms; one of them will have gaps."""
     d = mod("pm_ai.domain")
-    daemon = _daemon()
+    daemon = _daemon(tmp_path)
     target = d.TargetRef.parse("gitlab:alpha:issue:102")
     daemon.skills.invoke(
         "gitlab.post_comment", target=target,
@@ -715,3 +720,36 @@ def test_ad3_every_artifact_has_exactly_one_tier():
     assert d.Tier.OPERATIONAL.rebuildable is False
     assert d.Tier.OPERATIONAL.backed_up is True
     assert d.Tier.DERIVED.backed_up is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AD-30 — an adapter that does not satisfy its port
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
+    """AD-30 — the annotations are documentation until something checks them.
+
+    There is no type checker in this repository, so `paths: ScopePathPort` in the
+    storage constructor is a comment: a resolver missing `resolve`, or a storage
+    service that dropped a method `core` calls through `StoragePort`, would be
+    caught at the first call site instead of here.
+
+    `isinstance` rather than `issubclass`: a runtime-checkable protocol refuses
+    `issubclass` the moment it gains a non-method member, so the class-level form
+    would start raising `TypeError` on a change that is not an error.
+    """
+    import datetime
+
+    ports = mod("pm_ai.ports")
+    paths = mod("pm_ai.platform.paths").ScopePaths.rooted(tmp_path)
+    clock = lambda: datetime.datetime(2026, 8, 19, tzinfo=datetime.timezone.utc)
+    storage = mod("pm_ai.storage.service").StorageService(paths, now=clock)
+
+    assert isinstance(paths, ports.ScopePathPort), (
+        "the resolver the composition root injects does not satisfy the port "
+        "storage names as its dependency"
+    )
+    assert isinstance(storage, ports.StoragePort), (
+        "the single writer no longer satisfies the port core depends on"
+    )

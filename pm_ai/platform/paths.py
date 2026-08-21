@@ -41,7 +41,13 @@ from pathlib import Path
 from types import MappingProxyType
 
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.storage_tiers import ARTIFACT_TIER, RETENTION_MANAGED
+from pm_ai.domain.storage_tiers import (
+    ARTIFACT_TIER,
+    EVENT_LOG,
+    OPERATIONAL_DB,
+    RETENTION_MANAGED,
+    ScopeResolutionError,
+)
 
 # ── Directory names ──────────────────────────────────────────────────────────
 # The four scope roots, spelled once each.
@@ -82,8 +88,13 @@ _SUBJECT_SCOPES = frozenset({ScopeKind.PERSONAL, ScopeKind.PEOPLE, ScopeKind.PRO
 # the traceback — the wording is the point of raising.
 
 
-class ScopePathError(Exception):
-    """The resolver refused. Every failure below is one of these."""
+class ScopePathError(ScopeResolutionError):
+    """The resolver refused. Every failure below is one of these.
+
+    The base is in `pm_ai.domain` so that `storage`, `core`, and `surfaces` —
+    none of which may import this module — can still catch a refusal by type
+    instead of by catching `Exception`.
+    """
 
 
 class UnknownArtifact(ScopePathError, LookupError):
@@ -201,13 +212,15 @@ _LAYOUT: Mapping[str, str] = MappingProxyType(
         "config.toml": "config.toml",
         "disclosure.md": "disclosure.md",
         "rules/": "rules",
-        "event_log/": "memory/event_log",
+        # Spelled from `pm_ai.domain.storage_tiers` where code outside this
+        # module also names the key, so a rename cannot leave two spellings.
+        EVENT_LOG: "memory/event_log",
         "meetings/": "memory/meetings",
         "commitments_log.md": "memory/commitments_log.md",
         "coaching_1on1_history.md": "memory/coaching_1on1_history.md",
         "strategic_goals.md": "memory/strategic_goals.md",
         # Tier 2 — durable, never rebuilt.
-        "operational.db": f"{ENCLAVE_DIRNAME}/operational.db",
+        OPERATIONAL_DB: f"{ENCLAVE_DIRNAME}/{OPERATIONAL_DB}",
         "personal_analytics.db": f"{ENCLAVE_DIRNAME}/personal_analytics.db",
         # Tier 3 — disposable, rebuilt by `pm-ai reindex`. Separate file and
         # separate directory from Tier 2, so a rebuild cannot reach the job
@@ -244,7 +257,7 @@ _HOMES: Mapping[str, frozenset[ScopeKind]] = MappingProxyType(
         "config.toml": frozenset({ScopeKind.APPLICATION}),
         # AD-38 — one ledger, outside every repository. Per-scope would push it.
         "disclosure.md": frozenset({ScopeKind.APPLICATION}),
-        "operational.db": frozenset({ScopeKind.APPLICATION}),
+        OPERATIONAL_DB: frozenset({ScopeKind.APPLICATION}),
         "derived.db": frozenset({ScopeKind.APPLICATION}),
         "vector_index/": frozenset({ScopeKind.APPLICATION}),
         # A persona and a set of conventions are a property of the PM or of the
@@ -252,7 +265,7 @@ _HOMES: Mapping[str, frozenset[ScopeKind]] = MappingProxyType(
         "rules/": frozenset({ScopeKind.PERSONAL, ScopeKind.PROJECT}),
         # Per scope, every one of them: an audit trail that lived in one place
         # would be a committed file naming personal material (AD-38).
-        "event_log/": _ALL_SCOPES,
+        EVENT_LOG: _ALL_SCOPES,
         # A capture lives in the scope owning its meeting (AD-33), so both the
         # summary and the raw capture follow the subject, not the convenience.
         "meetings/": _SUBJECT_SCOPES,
@@ -509,7 +522,7 @@ class ScopePaths:
     @property
     def operational_store(self) -> Path:
         """Tier 2. Job queue, cursors, executed-key ledger, staged proposals."""
-        return self.resolve(DataScope(ScopeKind.APPLICATION), "operational.db")
+        return self.resolve(DataScope(ScopeKind.APPLICATION), OPERATIONAL_DB)
 
     @property
     def derived_store(self) -> Path:

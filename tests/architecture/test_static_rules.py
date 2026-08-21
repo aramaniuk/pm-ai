@@ -234,6 +234,45 @@ def test_ad1_core_stays_io_free(layer, forbidden):
     )
 
 
+LEDGERS = ("event_log", "commitments_log", "coaching_1on1_history")
+
+# Words this codebase uses for a Tier-1 path when the artifact key itself is a
+# parameter: `self._segment(scope, artifact, at).open(...)` names no ledger.
+LEDGER_SHAPES = ("segment", "ledger")
+
+
+def _ledger_names() -> frozenset[str]:
+    """Every token that counts as naming a ledger in a call's source text.
+
+    The scan below reads the *text* of the call, and the idiomatic way to spell
+    an artifact key is a constant: `self._segment(scope, EVENT_LOG, at)` contains
+    no `event_log`, so both event-log writes were skipped before the mode check
+    ran and a planted truncating `open` passed this test on 2026-08-21. A name
+    bound anywhere in the package to a string that names a ledger therefore
+    counts as naming it — the binding may be renamed, but not without renaming
+    the string it holds.
+
+    This is still a text match, which is why the behavioural guard
+    (`test_the_event_log_is_appended_to_never_rewritten`) is the one that cannot
+    be blinded by a refactor.
+    """
+    names = set(LEDGERS) | set(LEDGER_SHAPES)
+    for f in source_files():
+        for node in ast.walk(f.tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            value = node.value
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                continue
+            if any(led in value.value for led in LEDGERS):
+                names.update(t.id for t in targets if isinstance(t, ast.Name))
+    return frozenset(names)
+
+
 def test_ad5_storage_never_rewrites_a_markdown_ledger_in_place():
     """AD-5 — append-only, checked in the one layer allowed to write.
 
@@ -241,11 +280,11 @@ def test_ad5_storage_never_rewrites_a_markdown_ledger_in_place():
     what makes this check necessary. A truncating open or a whole-file rewrite
     of a ledger destroys history that AD-3 Tier 1 calls truth.
     """
-    LEDGERS = ("event_log", "commitments_log", "coaching_1on1_history")
+    ledger_names = _ledger_names()
     violations = []
     for f, node, name in calls(source_files("storage")):
         rendered = ast.unparse(node) if hasattr(ast, "unparse") else ""
-        if not any(led in rendered for led in LEDGERS):
+        if not any(led in rendered for led in ledger_names):
             continue
         if name == "open" and _write_mode(node):
             mode = _mode_of(node)  # both call shapes, per _mode_of

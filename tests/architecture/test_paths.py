@@ -26,6 +26,7 @@ from pm_ai.domain.storage_tiers import (
     ARTIFACT_TIER,
     GITIGNORE_REQUIRED,
     RETENTION_MANAGED,
+    ScopeResolutionError,
     Tier,
 )
 from pm_ai.platform.paths import (
@@ -411,7 +412,14 @@ def test_is_directory_refuses_an_artifact_that_does_not_exist():
 
 
 def test_every_refusal_is_catchable_as_one_error(production):
-    """A caller wiring this into storage should not enumerate five exception types."""
+    """A caller wiring this into storage should not enumerate five exception types.
+
+    Two bases, and the domain one is the load-bearing half: `storage`, `core`,
+    and `surfaces` are forbidden to import this module, so `ScopePathError` is
+    not a name they can write in an `except` clause. Without
+    `ScopeResolutionError` in `pm_ai.domain`, the only way to survive a resolver
+    refusal outside `platform` and `app` is to catch `Exception`.
+    """
     refusals = (
         lambda: production.resolve(APPLICATION, "notes.md"),
         lambda: production.resolve(PROJECT, "strategic_goals.md"),
@@ -422,6 +430,10 @@ def test_every_refusal_is_catchable_as_one_error(production):
     for refuse in refusals:
         with pytest.raises(ScopePathError):
             refuse()
+        with pytest.raises(ScopeResolutionError):
+            refuse()
+
+    assert issubclass(ScopePathError, ScopeResolutionError)
 
     # Not `KeyError`: its `__str__` is `repr` of the argument, so a multi-line
     # explanation arrives in the traceback as an escaped one-liner.

@@ -17,6 +17,27 @@ from __future__ import annotations
 from enum import Enum
 
 
+# ── Artifact keys ────────────────────────────────────────────────────────────
+# The keys of the tables below are also the keys `pm_ai.platform.paths` resolves
+# and `pm_ai.storage` writes through. The ones that appear in code — rather than
+# only in a table — are spelled once, here: `domain` is the only package all
+# three may import (AD-30), so this is the single home for them rather than a
+# fourth copy of the string.
+EVENT_LOG = "event_log/"
+OPERATIONAL_DB = "operational.db"
+
+
+class ScopeResolutionError(Exception):
+    """A path resolver refused to locate an artifact.
+
+    The concrete refusals live in `pm_ai.platform.paths`, which `storage`,
+    `core`, and `surfaces` may not import — so without a base here, no caller
+    could catch a refusal by type and every one of them would either catch
+    `Exception` or let the daemon abort. Declared in `domain` because that is the
+    one package every layer may reach (AD-30).
+    """
+
+
 class Tier(Enum):
     """AD-3. Exactly one tier per artifact."""
 
@@ -42,7 +63,7 @@ class Tier(Enum):
 # Every persistent artifact, assigned once. A path that appears in two tiers is
 # the bug this table exists to prevent.
 ARTIFACT_TIER: dict[str, Tier] = {
-    "event_log/": Tier.TRUTH,
+    EVENT_LOG: Tier.TRUTH,
     "commitments_log.md": Tier.TRUTH,
     "coaching_1on1_history.md": Tier.TRUTH,
     "strategic_goals.md": Tier.TRUTH,
@@ -50,7 +71,7 @@ ARTIFACT_TIER: dict[str, Tier] = {
     "disclosure.md": Tier.TRUTH,
     "rules/": Tier.TRUTH,
     "config.toml": Tier.TRUTH,
-    "operational.db": Tier.OPERATIONAL,
+    OPERATIONAL_DB: Tier.OPERATIONAL,
     # Tier 2, not Tier 3, despite AD-25 calling it "derived telemetry" — that
     # word means *calculated*, not *rebuildable*. Tier 3's test is rebuildable
     # from Tier 1 with zero loss, and burnout trends outlive the telemetry they

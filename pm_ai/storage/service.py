@@ -16,17 +16,23 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pm_ai.domain.disclosure import assert_writable
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.harvest import Cursor, PersistResult
-from pm_ai.domain.identity import DataScope, SourceRef, TargetRef
+from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.proposals import Proposal
-from pm_ai.domain.storage_tiers import Tier
+from pm_ai.domain.storage_tiers import EVENT_LOG, OPERATIONAL_DB, Tier
+from pm_ai.ports import ScopePathPort
+
+# The application scope owns Tier 2 (AD-3). Resolved rather than remembered, so
+# the mapping from artifact to scope stays in the one table that owns it.
+APPLICATION = DataScope(ScopeKind.APPLICATION)
 
 # AD-20 — an execution is recorded *before* the call and settled after, so a
 # crash in between is a reconciliation task rather than a silent second write.
@@ -50,7 +56,8 @@ CREATE TABLE IF NOT EXISTS executed (
     lock_key    TEXT NOT NULL,
     external_id TEXT,
     state       TEXT NOT NULL,
-    at          TEXT NOT NULL
+    at          TEXT NOT NULL,
+    settled_at  TEXT
 );
 CREATE TABLE IF NOT EXISTS seen (
     natural_key TEXT PRIMARY KEY
@@ -105,6 +112,26 @@ def _load_proposal(body: str) -> Proposal:
     )
 
 
+class OperationalStoreUnavailable(RuntimeError):
+    """Tier 2 could not be opened, and the daemon has no state without it.
+
+    Raised in place of a bare `sqlite3.OperationalError`, whose message ("unable
+    to open database file") names neither the path nor the reason — and the path
+    is now resolved rather than passed in, so the operator cannot read it off the
+    call site either.
+    """
+
+
+class NonUtcClock(ValueError):
+    """The injected clock returned a naive or non-UTC datetime.
+
+    Both are silent corruption rather than an error: the monthly segment
+    filename is formatted from this value, so an offset clock files an entry
+    under the wrong month at a boundary, and a naive one raises `TypeError` later
+    when it is compared against the aware timestamps every other producer emits.
+    """
+
+
 class ReconciliationRequired(RuntimeError):
     """AD-20 — a prior attempt reached the provider and its outcome is unknown.
 
@@ -118,32 +145,128 @@ class StorageService:
 
     tier_of_operational = Tier.OPERATIONAL
 
-    def __init__(self, root: Path) -> None:
-        self._root = root
-        root.mkdir(parents=True, exist_ok=True)
-        # Tier 2 is its own file. `reindex` targets Tier 3 and therefore cannot
-        # reach this, which is the structural guarantee AD-3 asks for.
-        self._db = sqlite3.connect(root / "operational.db", check_same_thread=False)
-        self._db.execute("PRAGMA journal_mode=WAL")  # AD-5 — sole writer, WAL
-        self._db.executescript(_SCHEMA)
-        self._db.commit()
+    def __init__(self, paths: ScopePathPort, *, now: Callable[[], datetime]) -> None:
+        """Both dependencies are injected, and neither is optional.
+
+        `paths` arrives from the composition root because `pm_ai.storage` and
+        `pm_ai.platform` are independent siblings in the import graph — the
+        single writer cannot locate a scope itself. One instance serves every
+        scope: the layout is a property of the resolver, not of the service.
+
+        `now` is a required keyword rather than one defaulting to a system-clock
+        read, so a caller that forgets it gets an error instead of a hidden one.
+        This service reads no clock of its own — `pm_ai.app.wiring` supplies the
+        default the daemon shares — though it is not the only default in the
+        process (`GitLabConnector.now` has one too). The monthly segment filename
+        derives from this clock, which is what made the three internal reads this
+        replaces untestable: a test could not name the file it was about to
+        assert on.
+        """
+        self._paths = paths
+        self._now = now
+        # Tier 2 is its own file, in the application scope's enclave and outside
+        # every scope's Markdown tree. `reindex` targets Tier 3 and therefore
+        # cannot reach this, which is the structural guarantee AD-3 asks for.
+        store = paths.resolve(APPLICATION, OPERATIONAL_DB, create=True)
+        try:
+            self._db = sqlite3.connect(store, check_same_thread=False)
+            self._db.execute("PRAGMA journal_mode=WAL")  # AD-5 — sole writer, WAL
+            self._db.executescript(_SCHEMA)
+            self._migrate()
+            self._db.commit()
+        except sqlite3.Error as exc:
+            raise OperationalStoreUnavailable(
+                f"could not open the operational store at {store}: {exc}. Tier 2 "
+                f"holds the job queue, the connector cursors, the executed-key "
+                f"ledger, and the dedup set, and none of it is rebuildable "
+                f"(AD-3) — so the daemon must not start without it."
+            ) from exc
+
+    def _migrate(self) -> None:
+        """Add columns a store created by an earlier version does not have.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op on an existing store, so a schema
+        that grows a column would otherwise fail on the first write against a
+        Tier-2 file that predates it — and Tier 2 is never rebuilt, so
+        "delete it and start again" is not the fix.
+        """
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(executed)")}
+        if "settled_at" not in columns:
+            self._db.execute("ALTER TABLE executed ADD COLUMN settled_at TEXT")
+
+    @property
+    def paths(self) -> ScopePathPort:
+        """The resolver this service writes through.
+
+        Exposed because a caller holding the writer often needs the location of
+        what it just wrote, and re-deriving that location is how a second,
+        divergent copy of the layout appears (AD-4).
+        """
+        return self._paths
+
+    def _at(self) -> datetime:
+        """The current instant, from the injected clock, checked before use.
+
+        Every timestamp this service writes goes through here, so a clock that
+        would file an entry under the wrong month is refused once rather than
+        trusted in three places.
+        """
+        at = self._now()
+        if at.tzinfo is None or at.utcoffset() != timedelta(0):
+            raise NonUtcClock(
+                f"the injected clock returned {at!r}, which is not UTC. Segment "
+                f"filenames are formatted from it and every other producer emits "
+                f"aware UTC, so this silently misfiles entries at a month "
+                f"boundary and raises on comparison afterwards."
+            )
+        return at
 
     # ── Tier 1: append-only markdown segments (AD-5) ─────────────────────────
 
-    def _segment(self, scope: DataScope, ledger: str, at: datetime) -> Path:
-        d = self._root / str(scope).replace(":", "_") / ledger
-        d.mkdir(parents=True, exist_ok=True)
-        return d / f"{at:%Y-%m}.md"
+    def _segment(self, scope: DataScope, artifact: str, at: datetime) -> Path:
+        """The open monthly segment of the `artifact` ledger in `scope`.
+
+        The directory comes from the resolver, so a scope's event log lands in
+        that scope's own tree rather than in a sibling directory named by
+        flattening the scope to a string.
+        """
+        return self._paths.resolve(scope, artifact, create=True) / f"{at:%Y-%m}.md"
 
     def append_event_log(self, entry: str, *, scope: DataScope) -> None:
-        at = datetime.now(timezone.utc)
-        with self._segment(scope, "event_log", at).open("a", encoding="utf-8") as fh:
+        at = self._at()
+        with self._segment(scope, EVENT_LOG, at).open("a", encoding="utf-8") as fh:
             fh.write(entry.rstrip("\n") + "\n")
 
     def persist_events(
         self, events: tuple[NormalizedEvent, ...], *, scope: DataScope
     ) -> PersistResult:
-        at = datetime.now(timezone.utc)
+        """Record a batch, or record none of it (AD-34).
+
+        The `seen` insert and the segment append are one unit. Without the
+        rollback, a refusal between them — AD-38's leak guard, or any of the
+        resolver's refusals, which a scope with a malformed subject id reaches on
+        the very first write — left the dedup rows pending in the implicit
+        transaction, where the next unrelated `commit()` persisted them. Every
+        event in that batch was then a permanent duplicate that had never been
+        written anywhere.
+
+        A crash between the file append and the commit is the remaining window,
+        and it is deliberately the safe side of the trade: a replay then appends
+        a duplicate line, which is visible in the segment and reconcilable,
+        rather than dropping an event, which is not.
+        """
+        at = self._at()
+        try:
+            result = self._append_batch(events, at, scope=scope)
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return result
+
+    def _append_batch(
+        self, events: tuple[NormalizedEvent, ...], at: datetime, *, scope: DataScope
+    ) -> PersistResult:
         persisted = duplicates = 0
         lines: list[str] = []
         for ev in events:
@@ -164,9 +287,8 @@ class StorageService:
             )
             persisted += 1
         if lines:
-            with self._segment(scope, "event_log", at).open("a", encoding="utf-8") as fh:
+            with self._segment(scope, EVENT_LOG, at).open("a", encoding="utf-8") as fh:
                 fh.write("\n".join(lines) + "\n")
-        self._db.commit()
         return PersistResult(persisted=persisted, duplicates=duplicates, at=at)
 
     # ── Tier 2: operational, never rebuilt (AD-3) ────────────────────────────
@@ -227,16 +349,23 @@ class StorageService:
             )
         self._db.execute(
             "INSERT INTO executed (key, lock_key, external_id, state, at) VALUES (?, ?, ?, ?, ?)",
-            (idempotency_key, target.lock_key, None, IN_FLIGHT, datetime.now(timezone.utc).isoformat()),
+            (idempotency_key, target.lock_key, None, IN_FLIGHT, self._at().isoformat()),
         )
         self._db.commit()
         return "new"
 
     def settle_execution(self, idempotency_key: str, external_id: str) -> None:
-        """AD-20/AD-36 — record the outcome, which is what makes it recognisable."""
+        """AD-20/AD-36 — record the outcome, which is what makes it recognisable.
+
+        The settle time is stamped as well as the claim time. With one timestamp
+        only, an execution that reached the provider and returned in a
+        millisecond and one that hung for an hour before settling are the same
+        row, so neither an operator reconciling AD-20's in-flight window nor a
+        test can tell how long the claim was open.
+        """
         self._db.execute(
-            "UPDATE executed SET external_id = ?, state = ? WHERE key = ?",
-            (external_id, SETTLED, idempotency_key),
+            "UPDATE executed SET external_id = ?, state = ?, settled_at = ? WHERE key = ?",
+            (external_id, SETTLED, self._at().isoformat(), idempotency_key),
         )
         self._db.commit()
 

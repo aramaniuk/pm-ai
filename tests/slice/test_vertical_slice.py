@@ -15,6 +15,7 @@ import pytest
 from pm_ai.app.pipelines import run_harvest
 from pm_ai.app.wiring import build
 from pm_ai.domain import (
+    EVENT_LOG,
     CommitmentState,
     DataScope,
     MalformedReference,
@@ -51,11 +52,15 @@ def test_harvest_persists_events_through_the_composition_root(daemon, tmp_path):
     result = run_harvest(daemon, "gitlab:alpha")
     assert (result.persisted, result.duplicates) == (2, 0)
 
-    segments = list((tmp_path / "project_alpha" / "event_log").glob("*.md"))
+    event_log = daemon.storage.paths.resolve(daemon.scope, EVENT_LOG)
+    assert event_log.is_relative_to(tmp_path), "the rooted resolver keeps everything under tmp_path"
+    segments = list(event_log.glob("*.md"))
     assert len(segments) == 1, "AD-5 — one open segment, appended to"
+    assert segments[0].name == f"{NOW:%Y-%m}.md", "the segment filename comes from the injected clock"
     body = segments[0].read_text()
     assert body.count("commit_pushed") == 2
     assert "gitlab:alpha:commit:9f2a1c" in body
+    assert f"ingested_at={NOW.isoformat()}" in body, "the ingestion stamp is the injected clock"
 
 
 def test_reharvest_is_idempotent_on_the_natural_key(daemon):
@@ -70,7 +75,7 @@ def test_reharvest_is_idempotent_on_the_natural_key(daemon):
     assert (second.persisted, second.duplicates) == (0, 2)
 
 
-def test_dedup_survives_a_restart(daemon):
+def test_dedup_survives_a_restart(daemon, tmp_path):
     """AD-34 + AD-3 — the dedup set is Tier 2, so it outlives the process.
 
     While it lived in a set on the instance, "re-harvesting is idempotent" was
@@ -80,7 +85,7 @@ def test_dedup_survives_a_restart(daemon):
     first = run_harvest(daemon, "gitlab:alpha")
     assert first.persisted == 2
 
-    restarted = build(daemon.storage._root, "alpha", now=lambda: NOW)
+    restarted = build(tmp_path, "alpha", now=lambda: NOW)
     restarted.connectors["gitlab:alpha"]._fake_api = daemon.connectors["gitlab:alpha"]._fake_api
     restarted.storage.save_cursor("gitlab:alpha", Cursor(), None)  # replay the window
 
@@ -97,18 +102,18 @@ def test_harvest_records_a_coverage_window(daemon):
     assert start <= NOW - timedelta(minutes=30) <= end
 
 
-def test_unresolved_author_does_not_become_an_identity(daemon):
+def test_unresolved_author_does_not_become_an_identity(daemon, tmp_path):
     """AD-34 — the failure that splits one engineer into four in FR-30."""
     result_before = run_harvest(daemon, "gitlab:alpha")
     assert result_before.persisted == 2
     # No alias registered, so the commit email resolves to UNRESOLVED, not itself.
-    stored = daemon.storage
 
     register_alias("gitlab", "alex@example.com", Actor("actor_alex", "Alex"))
-    d2 = build(stored._root / "second", "alpha", now=lambda: NOW)
+    # A second root, so the events are new to its dedup ledger rather than duplicates.
+    d2 = build(tmp_path / "second", "alpha", now=lambda: NOW)
     d2.connectors["gitlab:alpha"]._fake_api = daemon.connectors["gitlab:alpha"]._fake_api
     run_harvest(d2, "gitlab:alpha")
-    body = next((stored._root / "second" / "project_alpha" / "event_log").glob("*.md")).read_text()
+    body = next(d2.storage.paths.resolve(d2.scope, EVENT_LOG).glob("*.md")).read_text()
     assert "actor=actor_alex" in body
     assert UNRESOLVED_ACTOR not in body
 
@@ -156,7 +161,7 @@ def test_unlisted_skill_is_refused(daemon):
         )
 
 
-def test_mutation_writes_one_event_log_entry(daemon, tmp_path):
+def test_mutation_writes_one_event_log_entry(daemon):
     """AD-1 class M — one entry per invocation, in the owning scope."""
     daemon.skills.invoke(
         "gitlab.post_comment",
@@ -164,7 +169,7 @@ def test_mutation_writes_one_event_log_entry(daemon, tmp_path):
         payload={"comment": "Approved"},
         idempotency_key="idem_log",
     )
-    body = next((tmp_path / "project_alpha" / "event_log").glob("*.md")).read_text()
+    body = next(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md")).read_text()
     assert body.count("[skill] gitlab.post_comment") == 1
 
 
