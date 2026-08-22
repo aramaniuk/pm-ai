@@ -186,14 +186,10 @@
     normalization, hot plugin loading, and encrypted credential storage.
     Delivers CAP-35.
   invoke_dev_with: >-
-    An instance carries an explicit health state distinct from its coverage, and
-    an unhealthy one is surfaced by name rather than counted as silence. A
-    CoverageWindow is a receipt for a harvest that demonstrably succeeded, never
-    a span computed from the clock: the stub at pm_ai/connectors/gitlab.py
-    builds now-minus-4h to now unconditionally, so a provider that declines with
-    an empty 200 would claim full coverage it never had. HarvestResult has no
-    way to say "I ran and learned nothing" - give it one. Re-consent is a staged
-    Proposal, never an interactive prompt inside a background harvest.
+    pm_ai/connectors/gitlab.py:62-71 builds its CoverageWindow as now-minus-4h
+    to now unconditionally, tied to nothing that proves a fetch happened, so a
+    provider declining with an empty 200 claims full coverage it never had.
+    HarvestResult has no way to say "I ran and learned nothing" - give it one.
 - id: "9"
   title: Passive telemetry radar
   spec_checkpoint: true
@@ -202,12 +198,10 @@
     Run the scheduled harvest across configured connectors through the
     sanitization boundary, with backoff on provider failure. Delivers CAP-2.
   invoke_dev_with: >-
-    Record every attempt and its outcome, not only the successes. Story 16's
-    three verdicts rest on telling never-looked from looked-and-failed, and that
-    distinction exists only if a failed harvest leaves a durable record.
-    run_harvest in pm_ai/app/pipelines.py has no try/except today, so a raising
-    connector skips save_cursor entirely and the attempt vanishes. Backoff must
-    not hide a permanent failure as a pending retry forever.
+    run_harvest in pm_ai/app/pipelines.py:20-36 has no try/except, so a raising
+    connector skips save_cursor and the attempt vanishes with it - leaving no
+    record that story 16's three verdicts need in order to tell never-looked
+    from looked-and-failed.
 - id: "10"
   title: Durable job queue and offline replay
   spec_checkpoint: true
@@ -309,12 +303,6 @@
     Generate the telemetry-enriched preparation dashboard on schedule and send
     owner inquiries when an agenda item needs clarification first. Delivers
     CAP-26 and CAP-32.
-  invoke_dev_with: >-
-    An inquiry to a promise-owner is irreversible and cannot be recalled, so it
-    never fires on a commitment at UNKNOWN or ERROR. pm-ai's own blindness is
-    not someone else's accountability: an ERROR raises a private alert to the PM
-    naming the failing instance and what to fix, never a message to the person
-    who made the promise.
 - id: "21"
   title: Autonomous work item execution and MCP tool glue
   spec_checkpoint: true
