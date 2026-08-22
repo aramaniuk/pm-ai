@@ -3,8 +3,9 @@ title: 'Encryption classifier'
 type: 'feature'
 created: '2026-08-21'
 updated: '2026-08-22'
-status: 'ready-for-dev'
-review_loop_iteration: 0
+status: 'done'
+review_loop_iteration: 1
+baseline_commit: '54bf106'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
   - '{project-root}/_bmad-output/specs/spec-pm-ai/scope-model.md'
@@ -26,7 +27,8 @@ context:
 - Encryption is declared where the artifact is declared. Adding a `File` or `Collection` to a tree without an encryption answer is a construction error, not a late default — the same bar the required `Tier` field sets.
 - Classification is decided by what the artifact **is**, not by where it sits. `~/.pm-ai/private/vector_index/index.bin` is plaintext and `~/.pm-ai/private/config.json` is encrypted, and they share a parent directory — so any rule reading the `private/` prefix gets one of them wrong.
 - Encryption and rebuildability are independent properties. `personal_analytics.db` is encrypted *and* not rebuildable; the vector index is plaintext *and* rebuildable. Do not infer either from the other.
-- **All three capture directories carry one answer.** `transcripts/` is encrypted in the project, team-member, and personal scopes alike. The basename is declared once and the answer is global, so no scope can hold a plaintext capture.
+- **The answer is per scope, keyed on `(scope, key)` — renegotiated during implementation, 2026-08-22.** This rule originally read "the basename is declared once and the answer is global". That works for `transcripts/`, which wants the same answer in all three scopes declaring it, and it is impossible for `meetings/` and `event_log/`: both are declared under `people/`, where `storage-contract.md:38` requires a report's records encrypted, *and* in a project, where `:43` requires committed Markdown plaintext. One global slot must be wrong about one of them. So encryption is keyed the way *paths* already are, and `transcripts/` gets one answer by three declarations agreeing — asserted rather than assumed, since per-scope keying makes disagreement expressible.
+- **`gitignored` is declared the same way, on the same nodes.** It had the identical latent defect: `GITIGNORE_REQUIRED` was a global basename set that worked only because it had one member, and `event_log/` is one artifact away from breaking it. Both axes now live on the node, per tree.
 - An **undeclared** path fails closed: it classifies as encrypted. A path no tree names is either a historical name or an artifact someone forgot to declare, and guessing plaintext on either is the guess that leaks.
 - `is_encrypted` takes a path string and returns a boolean. It is pure: it does not touch the filesystem or check whether the file exists.
 - **Tests build their paths from the resolver, never from literals.** The matrix below spells paths out because a reader needs to see them, but a test that hardcodes `~/.pm-ai/private/people/p1/dossier.md` asserts against this story's belief about the layout rather than against the layout — and it keeps passing after the resolver moves the artifact. Call `resolve(scope, artifact)` and classify what comes back. (Instruction restored 2026-08-22: it was attached to this story after 1a and lost when the story was rewritten for the derive-from-trees approach.)
@@ -72,15 +74,18 @@ The question asked of each path is *"is this artifact encrypted at rest?"*
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/scope_model.py` — add the encryption field to the node types as a required argument, answer it on every declared artifact, and derive `ENCRYPTED`. Extend the disjointness assertions to cover it.
-- [ ] `pm_ai/domain/storage_tiers.py` — re-export `ENCRYPTED`.
-- [ ] `pm_ai/storage/crypto.py` — new. `is_encrypted(path: str) -> bool`, resolving against the derived set, failing closed on an undeclared path.
-- [ ] `tests/architecture/test_encryption_policy.py` — new. One test per matrix row, plus one asserting that adding a node without an encryption answer fails at construction.
+- [x] `pm_ai/domain/scope_model.py` — `encrypted` **and** `gitignored` as required keyword-only fields on `File` and `Collection`, optional on `Dir`. Answered on all 37 declarations across the four trees. `ENCRYPTION`/`EXCLUSION` derived as `(scope, key) -> bool` mappings, with `ENCRYPTED`/`GITIGNORED` as membership views. The mapping rather than a set is load-bearing: an artifact can answer yes, answer no, or **declare nothing** — the application scope's `private/`, whose members disagree — and a set cannot tell the last two apart. A classifier that conflates them stops walking at `private/` and reports everything beneath it plaintext, inverting the fail-closed rule exactly where it matters. Caught by two failing matrix rows before it could ship.
+- [x] Scope-root directory names moved into `domain`. `pm_ai.storage` must decide which scope a path is in and may not import `pm_ai.platform`; `paths.py` now reads them from the one definition.
+- [x] `pm_ai/domain/storage_tiers.py` — `GITIGNORE_REQUIRED` retired in favour of `requires_git_exclusion(scope_kind, artifact)`.
+- [x] `pm_ai/storage/service.py` — the capture guard consults it per scope, **memoised per `(scope, artifact)` for the daemon's lifetime**. Without that, marking the enclaves gitignored would spawn `git` on every append to a team-member or personal event log — the write-in-a-loop case AD-43 named as the condition to revisit on. Recorded only on success, so a refusal fires again next time.
+- [x] `pm_ai/storage/crypto.py` — new. `is_encrypted(path)` plus `scope_of(path)`, failing closed on anything undeclared.
+- [x] `tests/architecture/test_encryption_policy.py` — new, 25 tests, every path from the resolver.
+- [x] `tests/conftest.py` — `EXPECTED_SKIPS` 30 → 29, which the ratchet demanded in this same commit.
 
 **Acceptance Criteria:**
-- Given `uv run pytest`, then `test_ad6_markdown_is_never_encrypted` passes and the skip count falls from 30 to 29.
+- Given `uv run pytest`, then `test_ad6_markdown_is_never_encrypted` passes and the skip count falls from 30 to 29. Result: 285 passed, 29 skipped.
 - Given a `File` or `Collection` constructed without an encryption answer, then construction raises rather than defaulting.
-- Given the three `transcripts/` declarations, then all three classify as encrypted, and changing one alone is impossible because the answer is declared once per basename.
+- Given the three `transcripts/` declarations, then all three classify as encrypted. Asserted directly rather than guaranteed structurally: per-scope keying is what makes `meetings/` expressible, and the same freedom lets the three captures drift, so a test holds them together.
 - Given an undeclared path, then `is_encrypted` returns `True`.
 - Given `tests/architecture/test_encryption_policy.py`, then no test contains a literal scope root (`~/.pm-ai`, `~/.manager-ai`, `.project-ai`): every path under test comes from `resolve(scope, artifact)`, so the suite tracks the layout instead of a snapshot of it.
 - Given the `runtime` extra is not installed, then `pm_ai.storage.crypto` imports successfully and no test skips on a missing import.

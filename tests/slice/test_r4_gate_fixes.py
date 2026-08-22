@@ -394,5 +394,15 @@ def test_captures_refuse_to_write_without_a_gitignore_rule():
     with pytest.raises(UnprotectedCaptureDir):
         assert_capture_dir_ignored("transcripts/", "", rule=rule)
 
-    # An artifact the guard does not cover is not silently protected either way.
-    assert_capture_dir_ignored("telegram_cache/", "", rule=rule)
+    # Which artifacts need the guard is no longer this function's decision, and
+    # as of 2026-08-22 it is no longer a global one either: `requires_git_exclusion`
+    # answers per scope, because `event_log/` sits inside the gitignored
+    # team-member enclave and is committed to the repository in a project. A
+    # basename-keyed set could not hold both answers.
+    from pm_ai.domain.identity import ScopeKind
+    from pm_ai.domain.storage_tiers import requires_git_exclusion
+
+    assert requires_git_exclusion(ScopeKind.PEOPLE, "event_log/")
+    assert not requires_git_exclusion(ScopeKind.PROJECT, "event_log/")
+    assert requires_git_exclusion(ScopeKind.PROJECT, "transcripts/")
+    assert not requires_git_exclusion(ScopeKind.APPLICATION, "config.toml")

@@ -37,7 +37,7 @@ import pytest
 from pm_ai.domain import (
     CAPTURES,
     EVENT_LOG,
-    GITIGNORE_REQUIRED,
+    GITIGNORED,
     gitignore_rule_for,
     DataScope,
     ScopeKind,
@@ -64,7 +64,7 @@ PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="alex")
 # Derived exactly as the write path derives it, rather than carried as a
 # literal: moving `transcripts/` changes the rule, and a test with its own copy
 # of the string would keep passing while protecting a directory nothing writes
-# to. `GITIGNORE_REQUIRED` no longer holds rule text at all — it names which
+# to. `GITIGNORED` holds no rule text at all — it names, per scope, which
 # artifacts need the guard, and the rule depends on the working tree.
 RULE = gitignore_rule_for(
     Path("repo/.project-ai/transcripts"), repository=Path("repo")

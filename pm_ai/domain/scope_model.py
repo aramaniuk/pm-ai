@@ -126,7 +126,7 @@ from __future__ import annotations
 import os
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -282,6 +282,8 @@ class File:
 
     name: str
     tier: Tier
+    encrypted: bool = field(kw_only=True)
+    gitignored: bool = field(kw_only=True)
     is_dir: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
@@ -316,6 +318,8 @@ class Dir:
     name: str
     children: tuple[LayoutNode, ...]
     tier: Tier | None = None
+    encrypted: bool | None = field(kw_only=True, default=None)
+    gitignored: bool | None = field(kw_only=True, default=None)
     is_dir: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
@@ -359,6 +363,8 @@ class Collection:
     name: str
     durability: Durability
     namespaces: tuple[Collection, ...] = ()
+    encrypted: bool = field(kw_only=True)
+    gitignored: bool = field(kw_only=True)
     is_dir: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
@@ -391,6 +397,20 @@ class Collection:
 
 LayoutNode = Union[File, Dir, Collection]
 
+# ── Scope root directory names ───────────────────────────────────────────────
+# The *names* a scope is spelled with, as opposed to where it is anchored. The
+# anchoring — a home directory, a registered repository — stays in
+# `pm_ai.platform.paths`, per this module's opening note. These five are the
+# identity half, and they live here because two packages need them and the other
+# one is `pm_ai.storage`, which may not import `platform`: telling which scope a
+# path belongs to is what `is_encrypted` does, and it cannot ask the resolver.
+APPLICATION_DIRNAME = ".pm-ai"
+PERSONAL_DIRNAME = ".manager-ai"
+PROJECT_DIRNAME = ".project-ai"
+ENCLAVE_DIRNAME = "private"
+PEOPLE_DIRNAME = "people"
+
+
 RETAINED = OutsideTierModel.RETENTION_MANAGED
 DIAGNOSTIC = OutsideTierModel.DIAGNOSTIC_ONLY
 
@@ -401,56 +421,57 @@ DIAGNOSTIC = OutsideTierModel.DIAGNOSTIC_ONLY
 
 APPLICATION_TREE: tuple[LayoutNode, ...] = (
     # Daemon settings & global defaults.
-    File("config.toml", Tier.TRUTH),
+    File("config.toml", Tier.TRUTH, encrypted=False, gitignored=False),
     # AD-38 — one ledger, outside every repository. Per-scope would push it into
     # a committed one.
-    File("disclosure.md", Tier.TRUTH),
+    File("disclosure.md", Tier.TRUTH, encrypted=False, gitignored=True),
     # The registry `pm-ai project add` writes. AD-11: this file is the only way a
     # repository enters the system, which is why `production()` takes it as an
     # argument and never searches for `.project-ai` directories. Tier 1 and not
     # rebuildable from anything: lose it and every enrolled project is forgotten.
-    File("projects.toml", Tier.TRUTH),
+    File("projects.toml", Tier.TRUTH, encrypted=False, gitignored=False),
     # Per-project and personal connector configuration, including the
     # team-member career MCP. One file per connector instance, named after the
     # instance — so the directory is the artifact and its members are not
     # declarable here. Backed up rather than rebuilt: no Tier 1 markdown
     # encodes it.
-    Collection("connectors", Tier.TRUTH),
+    Collection("connectors", Tier.TRUTH, encrypted=True, gitignored=True),
     # Rotating structured diagnostic logs, NOT `event_log/`. Outside the tier
     # model on purpose, and it says so here rather than in a set elsewhere.
-    Collection("logs", DIAGNOSTIC),
+    Collection("logs", DIAGNOSTIC, encrypted=False, gitignored=False),
     # DIVERGENCE, kept: `scope-model.md` §A draws no `memory/` here, but the same
     # document's prose says every scope holds "its own `event_log/`" — the
     # diagram and the prose disagree, and the prose is what the daemon has always
     # done. AD-38: an audit trail that lived in one place would be a committed
     # file naming personal material, so per-scope is the requirement.
-    Dir("memory", (Collection("event_log", Tier.TRUTH),)),
+    Dir("memory", (Collection("event_log", Tier.TRUTH, encrypted=False, gitignored=False),)),
     # THE OPERATIONAL ENCLAVE (gitignored).
     Dir(
         "private",
         (
             # Tier 2 — job queue, cursors, executed-key ledger, staged
             # proposals. Encrypted, never rebuilt.
-            File("operational.db", Tier.OPERATIONAL),
+            File("operational.db", Tier.OPERATIONAL, encrypted=True, gitignored=True),
             # Tier 3 — search & commitment indexes. Separate *files* from Tier 2,
             # so a rebuild cannot reach the job queue (AD-3). The shared enclave
             # proves nothing on its own; what holds is the assertion in
             # tests/architecture/test_paths.py that no Tier-1 path lies inside a
             # Tier-3 one, since a rebuild deletes what it names by path.
-            File("derived.db", Tier.DERIVED),
+            File("derived.db", Tier.DERIVED, encrypted=False, gitignored=True),
             # API credentials (encrypted). Tier 2, not Tier 1: it is not derivable
             # from Markdown truth, and Tier 3 would mean a rebuild could delete
             # every connector credential the daemon holds.
-            File("config.json", Tier.OPERATIONAL),
+            File("config.json", Tier.OPERATIONAL, encrypted=True, gitignored=True),
             # Tier 3 — pruned embeddings, not encrypted.
-            Collection("vector_index", Tier.DERIVED),
+            Collection("vector_index", Tier.DERIVED, encrypted=False, gitignored=True),
             # THE TEAM-MEMBER SCOPE. One directory per person id — see
             # PEOPLE_TREE for what is inside one of them. Never committed;
             # deleted on role change. Tier 1 markdown inside the gitignored
             # enclave: career dossiers and agreed 1:1 goals are truth, and
             # encryption is orthogonal to tier.
-            Collection("people", Tier.TRUTH),
+            Collection("people", Tier.TRUTH, encrypted=True, gitignored=True),
         ),
+        gitignored=True,
     ),
 )
 
@@ -464,40 +485,42 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
         "rules",
         (
             # Leadership philosophy & career guidelines.
-            File("manager_principles.md", Tier.TRUTH),
+            File("manager_principles.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Personal coach persona, tone & constructiveness. `persona.md`
             # exists in two scopes with different content — personal and project
             # — and both are Tier 1: plaintext Markdown truth (AD-6), authored or
             # rendered from Tier 1, and no rebuild reconstructs either. The tier
             # is a property of the kind of file, not of the scope holding it.
-            File("persona.md", Tier.TRUTH),
+            File("persona.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Briefing prefs & voice triggers.
-            File("communication_preferences.md", Tier.TRUTH),
+            File("communication_preferences.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # PM-configurable literature & web sources.
-            File("article_sources.md", Tier.TRUTH),
+            File("article_sources.md", Tier.TRUTH, encrypted=False, gitignored=False),
         ),
         tier=Tier.TRUTH,
+        encrypted=False,
+        gitignored=False,
     ),
     Dir(
         "memory",
         (
             # Manager Strategic Focus morning briefing. Two scopes, one tier, for
             # the same reason as `persona.md` above.
-            File("daily_dashboard.md", Tier.TRUTH),
+            File("daily_dashboard.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # All three goal domains live here today. A project artifact citing a
             # personal goal is the cross-scope violation the model exists to
             # prevent, which is why there is no project-scope counterpart.
-            File("strategic_goals.md", Tier.TRUTH),
+            File("strategic_goals.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Socratic 1:1 logs & growth notes.
-            File("coaching_1on1_history.md", Tier.TRUTH),
+            File("coaching_1on1_history.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Personal-scope audit trail; dated segments.
-            Collection("event_log", Tier.TRUTH),
+            Collection("event_log", Tier.TRUTH, encrypted=False, gitignored=False),
             # DIVERGENCE, kept: `ARCHITECTURE-SPINE.md:683` names
             # "meetings/ (personal-subject sessions only)" here; `scope-model.md`
             # §B draws no `meetings/`. Resolved in favour of the spine, and it is
             # what AD-33 requires anyway — a purely personal session's record has
             # to live in the scope that owns the meeting.
-            Collection("meetings", Tier.TRUTH),
+            Collection("meetings", Tier.TRUTH, encrypted=False, gitignored=False),
         ),
     ),
     # PERSONAL CONCIERGE & CAREER SKILLS. The `.py` module names in
@@ -509,7 +532,13 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
     # Tier 1 because nothing regenerates a skill (AD-42.6 leaves authoring to a
     # human), so losing the directory loses the work. `telemetry/` is the
     # cross-project harvesters, as arbitrary inside as its siblings.
-    Collection("skills", Tier.TRUTH, (Collection("telemetry", Tier.TRUTH),)),
+    Collection(
+        "skills",
+        Tier.TRUTH,
+        (Collection("telemetry", Tier.TRUTH, encrypted=False, gitignored=False),),
+        encrypted=False,
+        gitignored=False,
+    ),
     # THE PERSONAL ENCLAVE (gitignored, encrypted).
     Dir(
         "private",
@@ -519,21 +548,23 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
             # target. It is in the PERSONAL enclave by subject, and
             # `test_ad25_...` in tests/architecture treats any path naming
             # `manager-ai` as personal — this is one, deliberately.
-            Collection("telegram_cache", RETAINED),
+            Collection("telegram_cache", RETAINED, encrypted=True, gitignored=True),
             # Tier 2, inside the personal scope, so project-scope rendering has
             # no code path that could join burnout metrics into team-facing
             # output (AD-25). Backed up, never rebuilt: burnout trends outlive
             # the telemetry they came from once FR-37 compaction runs. AD-25
             # calls it "derived telemetry", but that word means *calculated*, not
             # *rebuildable*, and Tier 3's test is the latter.
-            File("personal_analytics.db", Tier.OPERATIONAL),
+            File("personal_analytics.db", Tier.OPERATIONAL, encrypted=True, gitignored=True),
         ),
+        encrypted=True,
+        gitignored=True,
     ),
     # Raw captures of purely personal sessions. `scope-model.md` §B draws none,
     # but its ownership rule is explicit that a capture lives in the scope owning
     # its meeting and that "every scope holds its captures at the same relative
     # path (`transcripts/`)". Current behaviour unchanged.
-    Collection("transcripts", RETAINED),
+    Collection("transcripts", RETAINED, encrypted=True, gitignored=True),
 )
 
 
@@ -548,14 +579,16 @@ PEOPLE_TREE: tuple[LayoutNode, ...] = (
     Dir(
         "memory",
         (
-            Collection("event_log", Tier.TRUTH),
+            Collection("event_log", Tier.TRUTH, encrypted=True, gitignored=True),
             # A 1:1 with a direct report is people-scoped, never project-scoped
             # (AD-33): a report's record must not be readable by that report's
             # peers.
-            Collection("meetings", Tier.TRUTH),
+            Collection("meetings", Tier.TRUTH, encrypted=True, gitignored=True),
         ),
+        encrypted=True,
+        gitignored=True,
     ),
-    Collection("transcripts", RETAINED),
+    Collection("transcripts", RETAINED, encrypted=True, gitignored=True),
 )
 
 
@@ -568,36 +601,38 @@ PROJECT_TREE: tuple[LayoutNode, ...] = (
         "rules",
         (
             # Project assistant persona — NOT the personal one.
-            File("persona.md", Tier.TRUTH),
+            File("persona.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Project team cultural rules.
-            File("conventions.md", Tier.TRUTH),
+            File("conventions.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Architecture & code guidelines.
-            File("engineering_specs.md", Tier.TRUTH),
+            File("engineering_specs.md", Tier.TRUTH, encrypted=False, gitignored=False),
         ),
         tier=Tier.TRUTH,
+        encrypted=False,
+        gitignored=False,
     ),
     Dir(
         "memory",
         (
             # Project daily team dashboard.
-            File("daily_dashboard.md", Tier.TRUTH),
+            File("daily_dashboard.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Spoken commitments & promise tracking.
-            File("commitments_log.md", Tier.TRUTH),
+            File("commitments_log.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Meeting SUMMARIES — the citation root for every extracted fact. A
             # commitment in this scope may cite only a meeting in this scope.
-            Collection("meetings", Tier.TRUTH),
-            Collection("event_log", Tier.TRUTH),
+            Collection("meetings", Tier.TRUTH, encrypted=False, gitignored=False),
+            Collection("event_log", Tier.TRUTH, encrypted=False, gitignored=False),
         ),
     ),
     # PROJECT-SPECIFIC SKILLS. As with the personal scope, the `.py` names in
     # `scope-model.md` §C are the team's to choose and are not declared.
-    Collection("skills", Tier.TRUTH),
+    Collection("skills", Tier.TRUTH, encrypted=False, gitignored=False),
     # RAW CAPTURES (gitignored, encrypted; 30-day purge). At the scope root
     # rather than under `memory/`, because `GITIGNORE_REQUIRED` anchors the
     # exclusion at `/.project-ai/transcripts/`. Move this and
     # `assert_capture_dir_ignored` still reports "protected" for a directory git
     # tracks, which is how verbatim minutes reach the employer's repository.
-    Collection("transcripts", RETAINED),
+    Collection("transcripts", RETAINED, encrypted=True, gitignored=True),
 )
 
 
@@ -772,6 +807,68 @@ RETENTION_MANAGED: frozenset[str] = frozenset(
 DIAGNOSTIC_ONLY: frozenset[str] = frozenset(
     a for a, d in _DURABILITY.items() if d is OutsideTierModel.DIAGNOSTIC_ONLY
 )
+
+
+def _per_scope_answers(attribute: str) -> Mapping[ScopeKind, Mapping[str, bool]]:
+    """Each scope's artifacts and their answer for `attribute`, where one is given.
+
+    Three states, and the third is why this is a mapping rather than a set. An
+    artifact can answer *yes*, answer *no*, or **declare no answer at all** — a
+    `Dir` that is pure structure, like the application scope's `private/`, whose
+    members disagree. A set of the yes-answers cannot tell "declared plaintext"
+    from "declares nothing", and a classifier that conflates them stops walking
+    at `private/` and reports every undeclared artifact beneath it as plaintext,
+    which inverts the fail-closed rule exactly where it matters.
+
+    Keyed on **(scope, key)**, unlike `_DURABILITY` which is keyed on the
+    basename alone — and the difference is forced rather than stylistic.
+    `meetings/` is declared in three trees: under `people/` it holds a direct
+    report's 1:1 records, which `storage-contract.md` requires encrypted, and in
+    a project it holds meeting summaries committed to the repository, which the
+    same document requires plaintext. One basename, two correct answers. A
+    global table cannot hold both, so either a report's record leaks or the
+    project's Markdown stops being readable without the daemon.
+
+    Durability escaped this only because every scope declaring a given basename
+    happens to want the same tier. These two axes do not, so they are keyed the
+    way *paths* already are.
+    """
+    return MappingProxyType(
+        {
+            kind: MappingProxyType(
+                {
+                    node.key: getattr(node, attribute)
+                    for _, node in walk_tree(tree)
+                    if getattr(node, attribute, None) is not None
+                }
+            )
+            for kind, tree in SCOPE_TREES.items()
+        }
+    )
+
+
+def _answering_yes(
+    answers: Mapping[ScopeKind, Mapping[str, bool]],
+) -> Mapping[ScopeKind, frozenset[str]]:
+    """The membership view, for callers that only ask "is it one of these"."""
+    return MappingProxyType(
+        {kind: frozenset(k for k, v in per.items() if v) for kind, per in answers.items()}
+    )
+
+
+# Encrypted at rest (AD-6). Plaintext Markdown is a deliberate product property,
+# so this set is narrow and every membership is a declaration on a node rather
+# than a rule reading a path prefix — `~/.pm-ai/private/vector_index/index.bin`
+# is plaintext and `~/.pm-ai/private/config.json` is encrypted, and they share a
+# parent, so any prefix rule gets one of them wrong.
+ENCRYPTION: Mapping[ScopeKind, Mapping[str, bool]] = _per_scope_answers("encrypted")
+ENCRYPTED: Mapping[ScopeKind, frozenset[str]] = _answering_yes(ENCRYPTION)
+
+# Must never enter version control (AD-23, AD-38, AD-43). Membership means the
+# single writer asks git before writing there; it does not record git's answer,
+# which only git can give.
+EXCLUSION: Mapping[ScopeKind, Mapping[str, bool]] = _per_scope_answers("gitignored")
+GITIGNORED: Mapping[ScopeKind, frozenset[str]] = _answering_yes(EXCLUSION)
 
 
 # The artifacts whose subject is the PM personally (AD-31). Stated separately

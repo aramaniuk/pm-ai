@@ -79,10 +79,10 @@ CASES = {
         "_assert_code_keys_are_declared",
         "m._CODE_KEYS = frozenset({'invented_by_a_constant/'})",
     ),
-    "a_gitignore_rule_naming_no_node": (
+    "a_gitignored_artifact_naming_no_node": (
         "pm_ai.domain.storage_tiers",
         "_assert_code_keys_are_declared",
-        "m.GITIGNORE_REQUIRED = frozenset({'invented_by_a_rule/'})",
+        "m.GITIGNORED = {k: frozenset({'invented_by_a_rule/'}) for k in m.GITIGNORED}",
     ),
     "two_lifecycles_sharing_a_member_name": (
         "pm_ai.domain.lifecycle",

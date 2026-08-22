@@ -65,6 +65,13 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 # `GITIGNORE_FILENAME` is defined in `domain` rather than here: `pm_ai.storage`
 # derives the path from git's reported working-tree root and may not import
 # this package, so one definition serves both.
+from pm_ai.domain.scope_model import (
+    APPLICATION_DIRNAME,
+    ENCLAVE_DIRNAME,
+    PEOPLE_DIRNAME,
+    PERSONAL_DIRNAME,
+    PROJECT_DIRNAME,
+)
 from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
 from pm_ai.domain.scope_model import (
     ADDRESS as _ADDRESS,
@@ -131,9 +138,6 @@ __all__ = [
 # The four scope roots, spelled once each. This is the whole of what this module
 # knows about layout that the trees do not say.
 
-APPLICATION_DIRNAME = ".pm-ai"
-PERSONAL_DIRNAME = ".manager-ai"
-PROJECT_DIRNAME = ".project-ai"
 
 # The exclusion file of the repository a project scope lives in. It sits *outside*
 # `.project-ai/`, so it is not a node in any scope tree and cannot be addressed
@@ -152,12 +156,10 @@ PROJECT_DIRNAME = ".project-ai"
 # path, and never a containing directory. The invariant this module owes AD-3 is
 # therefore the one asserted in tests/architecture/test_paths.py — no Tier-1
 # path lies inside a Tier-3 one — and not "nothing else lives in `private/`".
-ENCLAVE_DIRNAME = "private"
 
 # The team-member scope is stored *under* the application scope but is its own
 # kind, because the rules that separate it from the sovereign personal scope
 # cannot be written against a path (AD-31, UJ-4).
-PEOPLE_DIRNAME = "people"
 
 # Where `rooted()` puts a repository it was not given a path for.
 ROOTED_PROJECTS_DIRNAME = "projects"

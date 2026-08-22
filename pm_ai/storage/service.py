@@ -42,12 +42,12 @@ from pm_ai.domain.storage_tiers import (
     CAPTURES,
     EVENT_LOG,
     GITIGNORE_FILENAME,
-    GITIGNORE_REQUIRED,
     OPERATIONAL_DB,
     Tier,
     UnprotectedCaptureDir,
     assert_capture_dir_untracked,
     gitignore_rule_for,
+    requires_git_exclusion,
 )
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.ports import ScopePathPort, VcsPort
@@ -293,6 +293,7 @@ class StorageService:
         gets a `TypeError` at construction rather than an unprotected write later.
         """
         self._paths = paths
+        self._git_checked: set[tuple[object, ...]] = set()
         self._now = now
         self._vcs = vcs
         # Tier 2 is its own file, in the application scope's enclave and outside
@@ -372,7 +373,7 @@ class StorageService:
         """Refuse a raw capture that git would carry into a commit (AD-23, AD-43).
 
         One condition gates the question, and it is the scope model's:
-        `GITIGNORE_REQUIRED` names the artifacts whose exclusion rests on a
+        `GITIGNORED` names, per scope, the artifacts whose exclusion rests on a
         repository rule rather than on a directory boundary. **Which scope owns
         the capture is not a condition.** It was until 2026-08-22, gated on
         `is_git_committed`, and that was wrong in the direction that leaks:
@@ -407,10 +408,21 @@ class StorageService:
         `/.project-ai/transcripts/` while the operator is looking at
         `~/.manager-ai` sends them to edit a file that is already correct, in a
         repository that is not the one at fault — and a per-scope table cannot
-        hold the alternative, since `GITIGNORE_REQUIRED` is keyed on a basename
-        every scope spells the same way.
+        hold the alternative, since a basename is spelled the same way by every
+        scope that declares it.
+
+        The verdict is cached per `(scope, artifact)` for the daemon's lifetime.
+        Without it this would spawn `git` on every append to a team-member or
+        personal event log, both of which sit inside a gitignored enclave — the
+        write-in-a-loop case AD-43 named as the condition to revisit on. One
+        subprocess per artifact per run keeps the check at the moment of writing,
+        which a startup probe cannot do. The cost is a staleness window: a rule
+        deleted while the daemon runs is not noticed until it restarts.
         """
-        if artifact not in GITIGNORE_REQUIRED:
+        if not requires_git_exclusion(scope.kind, artifact):
+            return
+        seen = (scope.kind, scope.project_id, scope.person_id, artifact)
+        if seen in self._git_checked:
             return
         # Resolved without `create`: asking git about a directory is not a reason
         # to bring it into existence, and git answers the same either way.
@@ -428,6 +440,7 @@ class StorageService:
             # mean missing `git` on the machine.
             marker = self._vcs.repository_marker_above(target)
             if marker is None:
+                self._git_checked.add(seen)
                 return
             raise UnprotectedCaptureDir(
                 f"refusing to write {artifact} into {scope}: {marker} exists, so "
@@ -437,6 +450,7 @@ class StorageService:
                 f"Install git, or put it on the daemon's PATH."
             ) from unanswered
         if repository is None:
+            self._git_checked.add(seen)
             return
         try:
             verdict = self._vcs.tracking(target, repository=repository)
@@ -451,6 +465,9 @@ class StorageService:
             rule=gitignore_rule_for(target, repository=repository),
             gitignore=str(repository / GITIGNORE_FILENAME),
         )
+        # Recorded only on success: a refusal must fire again on the next attempt,
+        # or an operator who fixes nothing sees the write succeed on retry.
+        self._git_checked.add(seen)
 
     def _segment(self, scope: DataScope, artifact: str, at: datetime) -> Path:
         """The open monthly segment of the `artifact` ledger in `scope`.

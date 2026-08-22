@@ -36,10 +36,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pm_ai.domain.identity import ScopeKind
 from pm_ai.domain.scope_model import (
     ARTIFACT_TIER,
     BACKUP_TARGETS,
     DIAGNOSTIC_ONLY,
+    ENCRYPTED,
+    GITIGNORED,
     KEYS,
     REBUILD_TARGETS,
     RETENTION_MANAGED,
@@ -57,7 +60,8 @@ __all__ = [
     "DIAGNOSTIC_ONLY",
     "EVENT_LOG",
     "GITIGNORE_FILENAME",
-    "GITIGNORE_REQUIRED",
+    "ENCRYPTED",
+    "GITIGNORED",
     "OPERATIONAL_DB",
     "OutsideTierModel",
     "REBUILD_TARGETS",
@@ -70,6 +74,7 @@ __all__ = [
     "assert_capture_dir_untracked",
     "assert_reindex_safe",
     "gitignore_rule_for",
+    "requires_git_exclusion",
 ]
 
 
@@ -97,7 +102,20 @@ CAPTURES = "transcripts/"
 # writes a capture, because the failure mode is publishing verbatim meeting
 # transcripts to the employer's repository — the same class of leak AD-38 exists
 # to prevent, arriving by omission instead of by routing.
-GITIGNORE_REQUIRED: frozenset[str] = frozenset({CAPTURES})
+def requires_git_exclusion(scope_kind: ScopeKind, artifact: str) -> bool:
+    """Whether writing `artifact` in this scope must ask git first.
+
+    Replaces the module-level `GITIGNORE_REQUIRED` frozenset, which was keyed on
+    the artifact basename alone and therefore global. That held only while the
+    set had one member: `transcripts/` wants the same answer in all three scopes
+    that declare it. `event_log/` does not — it is inside the gitignored
+    team-member enclave and committed to the repository in a project — so a
+    basename-keyed set had the same defect the encryption axis exposed, one
+    artifact away from mattering.
+
+    The answer is declared on the node, per tree, and derived into `GITIGNORED`.
+    """
+    return artifact in GITIGNORED[scope_kind]
 
 # Named here rather than in `pm_ai.platform`, because `pm_ai.storage` derives
 # the path from git's reported working-tree root and may not import that
@@ -150,7 +168,7 @@ def assert_capture_dir_untracked(
     already in the index, so telling someone to add one when the real problem is
     a tracked directory sends them to fix a file that is already correct.
     """
-    if artifact not in GITIGNORE_REQUIRED or verdict.is_excluded:
+    if verdict.is_excluded:
         return
     if verdict.tracked:
         raise UnprotectedCaptureDir(
@@ -183,8 +201,6 @@ def assert_capture_dir_ignored(artifact: str, gitignore_text: str, *, rule: str)
     transcript is recoverable (it is transient input under NFR-09 and nothing may
     depend on it); committing one is not.
     """
-    if artifact not in GITIGNORE_REQUIRED:
-        return
     lines = {ln.strip().rstrip("/") for ln in gitignore_text.splitlines() if ln.strip()}
     if rule.rstrip("/") not in lines and rule.lstrip("/").rstrip("/") not in lines:
         raise UnprotectedCaptureDir(
@@ -227,13 +243,13 @@ def _assert_code_keys_are_declared() -> None:
             f"{sorted(_CODE_KEYS - KEYS)}"
         )
 
-    # And `GITIGNORE_REQUIRED` keys the same way: a rule whose artifact does not
-    # exist is a rule the write path can never consult, which reads as protection
-    # and is silence.
-    if not GITIGNORE_REQUIRED <= KEYS:
+    # And every gitignored artifact must name a node, in the scope that declares
+    # it: a rule whose artifact does not exist is a rule the write path can never
+    # consult, which reads as protection and is silence.
+    stray = {a for keys in GITIGNORED.values() for a in keys} - KEYS
+    if stray:
         raise InconsistentModel(
-            "a .gitignore rule names no node in any scope tree: "
-            f"{sorted(GITIGNORE_REQUIRED - KEYS)}"
+            f"a gitignored artifact names no node in any scope tree: {sorted(stray)}"
         )
 
 

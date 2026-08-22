@@ -29,7 +29,7 @@ from pm_ai.domain.scope_model import OutsideTierModel
 from pm_ai.domain.storage_tiers import (
     ARTIFACT_TIER,
     DIAGNOSTIC_ONLY,
-    GITIGNORE_REQUIRED,
+    GITIGNORED,
     gitignore_rule_for,
     RETENTION_MANAGED,
     ScopeResolutionError,
@@ -517,7 +517,7 @@ def test_gitignore_rules_cover_the_paths_the_resolver_returns(production):
     forever with no way to satisfy it.
     """
     repo = production.repository("alpha")
-    for artifact in GITIGNORE_REQUIRED:
+    for artifact in GITIGNORED[ScopeKind.PROJECT]:
         rule = gitignore_rule_for(production.resolve(PROJECT, artifact), repository=repo)
         assert ScopeKind.PROJECT in _scopes_of(artifact), (
             f"{artifact} has a .gitignore rule but no path in a committed scope"
@@ -727,16 +727,22 @@ def test_a_collection_cannot_declare_an_artifact_inside_it():
     smuggled inside one would put the ambiguity straight back.
     """
     for intruder in (
-        File("anti_burnout_shield.py", Tier.TRUTH),
-        Dir("x", (File("y.md", Tier.TRUTH),)),
+        File("anti_burnout_shield.py", Tier.TRUTH, encrypted=False, gitignored=False),
+        Dir("x", (File("y.md", Tier.TRUTH, encrypted=False, gitignored=False),)),
     ):
         with pytest.raises(MalformedLayout, match="cannot enumerate"):
-            Collection("skills", Tier.TRUTH, (intruder,))  # type: ignore[arg-type]
+            Collection("skills", Tier.TRUTH, (intruder,), encrypted=False, gitignored=False)  # type: ignore[arg-type]
 
     # A nested Collection is the same statement one level down, and is the one
     # thing that may sit here: `skills/telemetry/` is a known sub-namespace whose
     # own contents are as arbitrary as its siblings'.
-    assert Collection("skills", Tier.TRUTH, (Collection("telemetry", Tier.TRUTH),)).children
+    assert Collection(
+        "skills",
+        Tier.TRUTH,
+        (Collection("telemetry", Tier.TRUTH, encrypted=False, gitignored=False),),
+        encrypted=False,
+        gitignored=False,
+    ).children
 
 
 def test_no_declared_artifact_sits_inside_a_collection_in_any_real_tree():
@@ -765,7 +771,7 @@ def test_a_directory_with_no_declared_members_must_say_it_is_a_collection():
     with pytest.raises(MalformedLayout, match="declares no members"):
         Dir("memory", ())
     with pytest.raises(MalformedLayout, match="one path segment"):
-        File("rules/persona.md", Tier.TRUTH)
+        File("rules/persona.md", Tier.TRUTH, encrypted=False, gitignored=False)
 
 
 def test_a_declared_artifact_carries_its_durability_on_the_node():
@@ -779,13 +785,13 @@ def test_a_declared_artifact_carries_its_durability_on_the_node():
     it from.
     """
     with pytest.raises(TypeError):
-        File("notes.md")  # type: ignore[call-arg]
+        File("notes.md", encrypted=False, gitignored=False)  # type: ignore[call-arg]
     with pytest.raises(MalformedLayout, match="exactly one Tier"):
-        File("notes.md", OutsideTierModel.RETENTION_MANAGED)  # type: ignore[arg-type]
+        File("notes.md", OutsideTierModel.RETENTION_MANAGED, encrypted=False, gitignored=False)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        Collection("logs")  # type: ignore[call-arg]
+        Collection("logs", encrypted=False, gitignored=False)  # type: ignore[call-arg]
     with pytest.raises(MalformedLayout, match="durability"):
-        Collection("logs", "diagnostics")  # type: ignore[arg-type]
+        Collection("logs", "diagnostics", encrypted=False, gitignored=False)  # type: ignore[arg-type]
 
     # Every row of every projection came from a node that declared it, and every
     # node that declared one is in the matching projection.
@@ -910,8 +916,8 @@ def test_an_ambiguous_basename_is_refused_rather_than_picked():
 
     placements, address, ambiguous = _index(
         (
-            Dir("rules", (File("notes.md", Tier.TRUTH),)),
-            Dir("memory", (File("notes.md", Tier.TRUTH),)),
+            Dir("rules", (File("notes.md", Tier.TRUTH, encrypted=False, gitignored=False),)),
+            Dir("memory", (File("notes.md", Tier.TRUTH, encrypted=False, gitignored=False),)),
         )
     )
     assert ambiguous == {"notes.md"}, "the collision was not noticed"

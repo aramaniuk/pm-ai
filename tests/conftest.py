@@ -39,7 +39,7 @@ import pytest
 # `sqlcipher3`) are imported inside the functions that use them precisely so a
 # missing extra cannot turn a test into a skip that reads as coverage. If this
 # number ever has to rise, the reason belongs in the commit message.
-EXPECTED_SKIPS = 30
+EXPECTED_SKIPS = 29
 
 _VERDICT = pytest.StashKey[str]()
 

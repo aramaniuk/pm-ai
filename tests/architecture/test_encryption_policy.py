@@ -1,0 +1,170 @@
+"""Which artifacts are encrypted at rest, asked of real resolved paths (AD-6).
+
+Encryption is declared on the node beside the tier, and `is_encrypted` answers
+from those declarations. Three properties are worth separating:
+
+- the **answers** themselves, one per artifact the storage contract names;
+- **fail-closed** on anything no tree declares, which is what makes a forgotten
+  declaration a grep-able file rather than a leak;
+- **per-scope** resolution, which is the reason this axis could not join the
+  basename-keyed tier tables.
+
+Every path comes from `resolve(scope, artifact)`. A test that hardcoded
+`~/.pm-ai/private/people/p1/dossier.md` would assert against this file's belief
+about the layout rather than the layout, and would keep passing after the
+resolver moved the artifact.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.scope_model import ENCRYPTION, File, Tier
+from pm_ai.platform.paths import ScopePaths
+from pm_ai.storage.crypto import is_encrypted, scope_of
+
+APPLICATION = DataScope(ScopeKind.APPLICATION)
+PERSONAL = DataScope(ScopeKind.PERSONAL)
+PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="p1")
+PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
+
+
+@pytest.fixture
+def paths(tmp_path):
+    return ScopePaths.rooted(tmp_path)
+
+
+# (scope, artifact, filename inside it if it is a directory, expected answer)
+MATRIX = [
+    (PERSONAL, "coaching_1on1_history.md", None, False),
+    (PERSONAL, "strategic_goals.md", None, False),
+    (PROJECT, "commitments_log.md", None, False),
+    (APPLICATION, "vector_index/", "index.bin", False),
+    (APPLICATION, "derived.db", None, False),
+    (APPLICATION, "operational.db", None, True),
+    (APPLICATION, "config.json", None, True),
+    (APPLICATION, "connectors/", "jira.toml", True),
+    (PERSONAL, "telegram_cache/", "state.json", True),
+    (PERSONAL, "personal_analytics.db", None, True),
+    (PROJECT, "transcripts/", "2026-08-18.vtt", True),
+    (PEOPLE, "transcripts/", "2026-08-18.vtt", True),
+    (PERSONAL, "transcripts/", "2026-08-18.vtt", True),
+    (PEOPLE, "meetings/", "1on1.md", True),
+    (PROJECT, "meetings/", "standup.md", False),
+]
+
+
+@pytest.mark.parametrize(
+    ("scope", "artifact", "inside", "expected"),
+    MATRIX,
+    ids=[f"{s.kind.value}-{a.strip('/')}" for s, a, _, _ in MATRIX],
+)
+def test_each_declared_artifact_answers_as_the_contract_says(
+    paths, scope, artifact, inside, expected
+):
+    resolved = paths.resolve(scope, artifact)
+    target = resolved / inside if inside else resolved
+    assert is_encrypted(str(target)) is expected
+
+
+def test_two_artifacts_sharing_a_parent_answer_differently(paths):
+    """The reason classification cannot read a path prefix.
+
+    Both sit directly under `private/`. A rule keyed on that directory gets one
+    of them wrong, whichever way it is written.
+    """
+    enclave = paths.resolve(APPLICATION, "config.json").parent
+    assert enclave == paths.resolve(APPLICATION, "vector_index/").parent
+    assert is_encrypted(str(paths.resolve(APPLICATION, "config.json"))) is True
+    assert is_encrypted(str(paths.resolve(APPLICATION, "vector_index/"))) is False
+
+
+def test_one_basename_answers_differently_in_two_scopes(paths):
+    """`meetings/` is why this axis is keyed on (scope, key) rather than name.
+
+    Under `people/` it holds a direct report's 1:1 records, which the storage
+    contract requires encrypted. In a project it holds summaries committed to the
+    repository, which the same contract requires plaintext. A basename-keyed
+    table has one slot and would have to be wrong about one of them.
+    """
+    report = paths.resolve(PEOPLE, "meetings/") / "1on1.md"
+    team = paths.resolve(PROJECT, "meetings/") / "standup.md"
+
+    assert is_encrypted(str(report)) is True
+    assert is_encrypted(str(team)) is False
+
+
+def test_captures_are_encrypted_in_every_scope_that_holds_them():
+    """One answer, reached by three declarations agreeing rather than by one slot.
+
+    Per-scope keying makes disagreement *possible*, so it has to be asserted
+    rather than assumed the way a global value would have guaranteed it.
+    """
+    holders = [k for k, answers in ENCRYPTION.items() if "transcripts/" in answers]
+    assert {k.value for k in holders} == {"personal", "people", "project"}
+    assert all(ENCRYPTION[k]["transcripts/"] for k in holders)
+
+
+@pytest.mark.parametrize(
+    "undeclared",
+    ["event_telemetry.db", "chat_history/2026-08-18.vtt", "something_nobody_declared.db"],
+)
+def test_an_undeclared_path_fails_closed(paths, undeclared):
+    """A forgotten declaration becomes an unreadable file, never a leaked one.
+
+    `event_telemetry.db` and `chat_history/` are former spellings an older test
+    still asserts. Answering from the trees alone would report both plaintext,
+    which is the wrong direction; failing closed satisfies the old assertions and
+    the current names together, without reviving either name in a tree.
+    """
+    enclave = paths.resolve(APPLICATION, "config.json").parent
+    assert is_encrypted(str(enclave / undeclared)) is True
+
+
+def test_a_path_in_no_scope_at_all_fails_closed():
+    assert is_encrypted("/etc/passwd") is True
+    assert scope_of("/etc/passwd") is None
+
+
+def test_the_team_member_scope_is_recognised_inside_the_application_scope(paths):
+    """PEOPLE nests inside APPLICATION, so marker order decides the answer.
+
+    Checking the outer marker first would file every report's record under the
+    scope documented as holding no personal records — and that scope answers
+    plaintext for `meetings/`.
+    """
+    assert scope_of(str(paths.resolve(PEOPLE, "meetings/"))) is ScopeKind.PEOPLE
+    assert scope_of(str(paths.resolve(APPLICATION, "config.toml"))) is ScopeKind.APPLICATION
+
+
+def test_a_node_without_an_encryption_answer_cannot_be_constructed():
+    """The same bar the required tier sets: forgetting is impossible, not caught.
+
+    A late assert would let the artifact exist unanswered until something read
+    it. A required field means there is nowhere to add an artifact that does not
+    ask.
+    """
+    with pytest.raises(TypeError, match="encrypted"):
+        File("invented.db", Tier.OPERATIONAL)  # type: ignore[call-arg]
+
+    with pytest.raises(TypeError, match="gitignored"):
+        File("invented.db", Tier.OPERATIONAL, encrypted=True)  # type: ignore[call-arg]
+
+
+def test_no_declared_markdown_is_encrypted_outside_the_team_member_enclave():
+    """AD-6 — plaintext Markdown is a product property, with one exception.
+
+    A report's records are encrypted wholesale, and `people/` holds Markdown. So
+    the rule is not "no .md is ever encrypted" but "none is, outside the enclave
+    whose entire contents are" — and stating it that way is what keeps a future
+    encrypted `.md` in a project scope from looking normal.
+    """
+    offenders = [
+        (kind.value, key)
+        for kind, answers in ENCRYPTION.items()
+        if kind is not ScopeKind.PEOPLE
+        for key, encrypted in answers.items()
+        if encrypted and key.endswith(".md")
+    ]
+    assert not offenders, f"Markdown encrypted outside the team-member scope: {offenders}"
