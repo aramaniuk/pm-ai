@@ -2,6 +2,7 @@
 title: 'Envelope cipher and encrypted operational store'
 type: 'feature'
 created: '2026-08-21'
+updated: '2026-08-22'
 status: 'ready-for-dev'
 review_loop_iteration: 0
 context:
@@ -16,7 +17,7 @@ context:
 
 **Approach:** Add a `CryptoPort` and an envelope cipher to `pm_ai/storage/crypto.py` that encrypts and decrypts using a key it is given, writing at file mode `0600`. Have `StorageService` receive the key as a constructor argument and use it when opening the operational store. `pm_ai/app/wiring.py` fetches the key through `KeychainPort` and passes it down.
 
-**Depends on:** story 1d for the keychain port, story 1e for the classifier.
+**Depends on:** story 1d for the keychain port, story 1e for the classifier — which as of 2026-08-22 derives its answer from the scope trees, so `is_encrypted` is the entry point and `ENCRYPTED` in `pm_ai.domain.scope_model` is the authority behind it.
 
 ## Boundaries & Constraints
 
@@ -50,9 +51,9 @@ context:
 ## Code Map
 
 - `pm_ai/storage/crypto.py` — created by story 1e with the classifier; gains the cipher here.
-- `pm_ai/ports/__init__.py:14-51` — the protocol shape `CryptoPort` should follow.
-- `pm_ai/storage/service.py:121-129` — the constructor and the point where the operational store is opened; it gains the key as an argument.
-- `pm_ai/app/wiring.py:36-39` — the only `StorageService` construction site, where the key is fetched through `KeychainPort` and passed down.
+- `pm_ai/ports/__init__.py:20-140` — the five existing protocols (`ConnectorPort:20`, `ScopePathPort:34`, `VcsPort:84`, `StoragePort:119`, `SkillPort:131`), whose shape `CryptoPort` should follow. Note that neither `KeychainPort` nor `CryptoPort` exists yet, despite the spine's ports inventory listing both — 1d adds the first, this story the second.
+- `pm_ai/storage/service.py:263-305` — the constructor and the point where the operational store is opened; it gains the key as an argument. It already requires `paths`, `now` and `vcs` as keyword-only injections with no defaults, and the key follows that pattern.
+- `pm_ai/app/wiring.py:87` — the only `StorageService` construction site, where the key is fetched through `KeychainPort` and passed down.
 - `pyproject.toml` — the `runtime` extra declares `sqlcipher3==0.6.2`, not installed here, which is why its import must be lazy.
 
 ## Tasks & Acceptance

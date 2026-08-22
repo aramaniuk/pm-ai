@@ -2,6 +2,7 @@
 title: 'Derived-tier rebuild'
 type: 'feature'
 created: '2026-08-21'
+updated: '2026-08-22'
 status: 'ready-for-dev'
 review_loop_iteration: 0
 context:
@@ -21,12 +22,13 @@ context:
 ## Boundaries & Constraints
 
 **Always:**
-- Every drop routes through `assert_reindex_safe` (`pm_ai/domain/storage_tiers.py:124`), which raises `TierViolation` for any artifact outside the derived tier. The guarantee then holds by construction rather than by the caller remembering.
+- Every drop routes through `assert_reindex_safe` (`pm_ai/domain/storage_tiers.py:175`), which raises `TierViolation` for any artifact outside the derived tier. The guarantee then holds by construction rather than by the caller remembering.
+- **A drop must also spare the two sets that are in no tier at all.** `RETENTION_MANAGED` (captures, `telegram_cache/`) and `DIAGNOSTIC_ONLY` (`logs/`) are outside the tier model, so a check that only asks "is this Tier 3?" is correct, but a check that asks "is this *not* Tier 1 or 2?" would delete both. Assert against the derived-tier set, never against the complement.
 - The snapshot is deterministic: snapshotting unchanged Markdown twice returns equal results, independent of file order or insertion order.
 - A rebuild reproduces what the Markdown currently holds, not what it once held. Compaction is a deliberate recorded reduction of the Markdown, so a rebuild after compaction reproduces the compacted view — correct behaviour, not loss.
 - Careful naming, because two automated checks match on the *text* of a call rather than its target: a call whose source text contains `event_log` alongside a logging method such as `.info(` is rejected, and in `pm_ai/storage/` any whole-file write whose call text mentions `event_log`, `commitments_log`, or `coaching_1on1_history` is rejected as a ledger overwrite. This story reads those ledgers constantly, so derived outputs must not be named after them — an identifier like `event_log_index` trips the check even when its target is a rebuilt index.
 
-**Ask First:** Adding an artifact to `ARTIFACT_TIER`, whose exact contents are asserted by `tests/slice/test_r4_gate_fixes.py:260-291`.
+**Ask First:** Adding an artifact to `ARTIFACT_TIER`. Its contents are now derived from the scope trees, so adding one means declaring a `File` or `Collection` node — and `tests/slice/test_r4_gate_fixes.py:260-291` asserts the resulting sets.
 
 **Never:** The Markdown is what a rebuild reads; it is never a rebuild target. No new index or cache that cannot be reconstructed from the Markdown — anything that cannot be is not derived state and belongs in a different tier. No schema migration; that is story 1i. No `pm-ai reindex` CLI command; the CLI is story 4.
 
@@ -39,6 +41,8 @@ context:
 | No derived state present at all | the drop runs | completes without error and does nothing |
 | A drop target set containing the operational store | the drop is attempted | raises `TierViolation` before deleting anything |
 | A drop target set containing an event-log directory | the drop is attempted | raises `TierViolation` — the Markdown is the source of truth |
+| A drop target set containing `logs/` | the drop is attempted | raises `TierViolation` — `DIAGNOSTIC_ONLY` is outside the tier model, not inside the disposable one |
+| A drop target set containing a `transcripts/` directory | the drop is attempted | raises `TierViolation` — captures are `RETENTION_MANAGED`, purged on their own schedule after verified conversion, never dropped by a reindex |
 | A drop target set containing only derived artifacts | the drop runs | succeeds, and the operational store is still on disk afterwards |
 | Markdown that was compacted after the first snapshot | the rebuild runs | reproduces the compacted view, and the difference is reported rather than treated as an error |
 
@@ -46,10 +50,11 @@ context:
 
 ## Code Map
 
-- `pm_ai/domain/storage_tiers.py:20-39` — `Tier` with its `rebuildable` and `backed_up` properties, encoding the three promises.
-- `pm_ai/domain/storage_tiers.py:44-66` — `ARTIFACT_TIER` and the rebuild and backup sets derived from it, asserted disjoint at `:140`.
-- `pm_ai/domain/storage_tiers.py:124-136` — `assert_reindex_safe` and `TierViolation`, which every drop routes through.
-- `tests/architecture/test_domain_invariants.py:292-304` — the pre-written contract this story satisfies: snapshot, drop, rebuild, compare. `:684-696` separately asserts a rebuild cannot reach the operational tier.
+- `pm_ai/domain/scope_model.py:163` — `Tier` with its `rebuildable` and `backed_up` properties, encoding the three promises. It moved here on 2026-08-22; `storage_tiers` re-exports it.
+- `pm_ai/domain/scope_model.py:761-775` — `ARTIFACT_TIER`, `REBUILD_TARGETS`, `BACKUP_TARGETS`, `RETENTION_MANAGED` and `DIAGNOSTIC_ONLY`, now **derived from the scope trees** rather than hand-written, with pairwise disjointness asserted at `:844-848`.
+- `pm_ai/domain/storage_tiers.py:171-175` — `TierViolation` and `assert_reindex_safe`, which every drop routes through. This module now holds tier *behaviour* and re-exports the sets.
+- `tests/architecture/test_domain_invariants.py:297-309` — the pre-written contract this story satisfies: snapshot, drop, rebuild, compare.
+- `tests/architecture/test_paths.py:839` — already asserts `logs/` is excluded for a different reason than `transcripts/`, which is the distinction the two new matrix rows test from the rebuild side.
 - `pm_ai/platform/paths.py` — the resolver from story 1a, which supplies the derived-tier paths.
 
 ## Tasks & Acceptance

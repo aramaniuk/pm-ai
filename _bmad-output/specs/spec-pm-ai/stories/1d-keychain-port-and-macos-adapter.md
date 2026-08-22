@@ -2,6 +2,7 @@
 title: 'Keychain port and macOS adapter'
 type: 'feature'
 created: '2026-08-21'
+updated: '2026-08-22'
 status: 'ready-for-dev'
 review_loop_iteration: 0
 context:
@@ -21,12 +22,12 @@ context:
 **Always:**
 - `keyring` is imported **inside the function that uses it**, never at module top level. It is declared in the `runtime` extra and is not installed in this environment, and the test suite's `mod()` helper (`tests/architecture/test_domain_invariants.py:29-32`) turns a `ModuleNotFoundError` into a *skipped* test. A top-level import would therefore convert this story's tests into skips that read as coverage. A lazy import raises a real error at call time.
 - The port is expressed in built-in types (`str`, `bytes`) so it can be implemented by a fake in tests.
-- `pm_ai/ports/` may import only `pm_ai.domain`; follow the existing `@runtime_checkable Protocol` shape at `pm_ai/ports/__init__.py:14-51`.
+- `pm_ai/ports/` may import only `pm_ai.domain`; follow the existing `@runtime_checkable Protocol` shape at `pm_ai/ports/__init__.py:20-140`.
 - OS-specific APIs live only in `pm_ai/platform/`. This is enforced by the `os-behind-platform` contract in `.importlinter`, so `keyring` may be imported there and nowhere else.
 
 **Ask First:** Choosing a key location other than the macOS Keychain, or a service/account naming scheme that a later Linux adapter could not mirror.
 
-**Never:** No real Keychain access in the test suite — tests use a fake implementation of the port. No secret written anywhere durable outside the keychain: not to the event log, not to diagnostics, not to a `Cursor`. No encryption or cipher code; that is stories 1f and 1g.
+**Never:** No probes or health checks; those are story 1g, which now also probes `git`. No real Keychain access in the test suite — tests use a fake implementation of the port. No secret written anywhere durable outside the keychain: not to the event log, not to diagnostics, not to a `Cursor`. No encryption or cipher code; that is stories 1f and 1g.
 
 ## I/O & Edge-Case Matrix
 
@@ -44,8 +45,8 @@ context:
 
 ## Code Map
 
-- `pm_ai/ports/__init__.py:14-51` — the three existing protocols (`ConnectorPort`, `StoragePort`, `SkillPort`), whose shape `KeychainPort` should follow.
-- `pm_ai/platform/__init__.py` — currently a docstring only; this is where OS adapters belong.
+- `pm_ai/ports/__init__.py:20-140` — the five existing protocols (`ConnectorPort:20`, `ScopePathPort:34`, `VcsPort:84`, `StoragePort:119`, `SkillPort:131`), whose shape `KeychainPort` should follow. The spine's ports inventory lists `KeychainPort` already; it does not exist, and this story is what makes that true.
+- `pm_ai/platform/paths.py` and `pm_ai/platform/vcs.py` — the two adapters already here, and the naming precedent: an adapter with no service behind it is named for what it is (`ScopePaths`, `GitVcs`). A keychain adapter does have a service behind it, so `<Service><Noun>Adapter` applies.
 - `pyproject.toml` — the `runtime` extra declares `keyring==25.7.0`; it is not installed here, which is why the import must be lazy.
 - `tests/architecture/test_domain_invariants.py:29-32` — the `mod()` helper whose skip-on-`ModuleNotFoundError` behaviour makes a top-level optional import dangerous.
 

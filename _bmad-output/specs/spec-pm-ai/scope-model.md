@@ -16,7 +16,15 @@ Companion to `SPEC.md`. Four scopes, what each holds, and the rule deciding whic
 
 **Scope is decided by subject, not by convenience.** A meeting record and its transcript live in the scope that owns the meeting: a team meeting in its project, a 1:1 with a direct report in the team-member scope, a purely personal session in the sovereign scope. A committed record may cite only a meeting in its own scope, so the capture is never more or less shareable than the event it records.
 
-Every scope holds its captures at the same relative path (`transcripts/`), the way each holds its own `event_log/`.
+Every scope that owns meetings holds its captures at the same relative path (`transcripts/`), the way each holds its own `event_log/`. That is three of the four:
+
+| Capture location | Holds |
+| --- | --- |
+| `<repo>/.project-ai/transcripts/` | Team meetings belonging to that project |
+| `~/.pm-ai/private/people/<person_id>/transcripts/` | 1:1 sessions with that direct report |
+| `~/.manager-ai/transcripts/` | Purely personal sessions |
+
+The application scope holds none, because it owns no meetings. **All three are equally protected** — encrypted at rest, and excluded from version control wherever version control can reach them.
 
 ## A. Application Scope
 
@@ -38,9 +46,22 @@ Every scope holds its captures at the same relative path (`transcripts/`), the w
     │                                  # rebuilt by pm-ai reindex
     ├── config.json                    # API credentials (encrypted)
     ├── vector_index/                  # Pruned embeddings - NOT encrypted, rebuildable
-    └── people/                        # TEAM-MEMBER SCOPE (encrypted) - career dossiers,
-                                       # agreed 1:1 goals, per-employee metrics.
-                                       # Never committed; deleted on role change.
+    └── people/                        # TEAM-MEMBER SCOPE (encrypted) - never committed;
+        └── <person_id>/               # a single deletable directory per report,
+            │                          # removed on leaving the role.
+            ├── memory/
+            │   ├── meetings/          # 1:1 SUMMARIES - citation root for this
+            │   │                      # report's record. Never readable by that
+            │   │                      # report's peers, so never project-scoped.
+            │   └── event_log/         # Team-member-scope audit trail
+            │
+            ├── transcripts/           # RAW CAPTURES of 1:1 sessions with this
+            │                          # report (encrypted, excluded from version
+            │                          # control, 30-day purge)
+            │
+            └── ...                    # Career dossiers, agreed 1:1 goals and the
+                                       # PM-configured metric files are named at
+                                       # runtime, so none is declared here.
 ```
 
 ## B. Sovereign Personal PM Scope
@@ -65,15 +86,23 @@ Every scope holds its captures at the same relative path (`transcripts/`), the w
 │   ├── synthesize_manager_dashboard.py
 │   └── anti_burnout_shield.py         # Workload telemetry & PTO guardrail analyzer
 │
-└── private/                           # PERSONAL ENCLAVE (gitignored, encrypted)
-    ├── telegram_cache/                # The PM's own voice notes & dialogue state.
-    │                                  # Transient input; never a backup target.
-    └── personal_analytics.db          # Burnout metrics, workload & calendar-density dynamics.
-                                       # Separate DB by design: project-scope rendering never
-                                       # opens it, so personal analytics cannot be joined into
-                                       # team-facing output. Tier 2: backed up, never rebuilt -
-                                       # burnout trends outlive the telemetry they came from
-                                       # once compaction runs.
+├── private/                           # PERSONAL ENCLAVE (gitignored, encrypted)
+│   ├── telegram_cache/                # The PM's own voice notes & dialogue state.
+│   │                                  # Transient input; never a backup target.
+│   └── personal_analytics.db          # Burnout metrics, workload & calendar-density dynamics.
+│                                      # Separate DB by design: project-scope rendering never
+│                                      # opens it, so personal analytics cannot be joined into
+│                                      # team-facing output. Tier 2: backed up, never rebuilt -
+│                                      # burnout trends outlive the telemetry they came from
+│                                      # once compaction runs.
+│
+└── transcripts/                       # RAW CAPTURES of purely personal sessions
+                                       # (encrypted, excluded from version control,
+                                       # 30-day purge). At the scope ROOT, outside
+                                       # private/ - so if the PM keeps this scope as
+                                       # a private git repository, the private/ rule
+                                       # does not cover captures and the capture
+                                       # guard is the only thing that does.
 ```
 
 ## C. Isolated Project Scopes
@@ -101,9 +130,11 @@ Every scope holds its captures at the same relative path (`transcripts/`), the w
 │   └── transcripts/                   # RAW CAPTURES (gitignored, encrypted)
 │                                      # Verbatim transcripts & audio; 30-day purge.
 │                                      # The one gitignored directory inside a committed
-│                                      # scope - the daemon verifies the .gitignore rule
-│                                      # before writing, because that rule is the only thing
-│                                      # keeping verbatim minutes out of the team's repo.
+│                                      # scope, so its exclusion rests on a rule rather
+│                                      # than a directory boundary - and a rule can go
+│                                      # missing. The daemon asks GIT before writing,
+│                                      # never the rule text, because a text check gets
+│                                      # two of three real configurations wrong.
 │                                      # A 1:1 with a direct report is people-scoped instead;
 │                                      # the capture always lives where its meeting lives.
 │
@@ -113,6 +144,7 @@ Every scope holds its captures at the same relative path (`transcripts/`), the w
 ## Boundary rules that follow from this model
 
 - Personal-scope files are never indexed into or committed to project repositories; pre-commit hooks verify the private enclaves are gitignored.
+- A capture write asks **git itself** whether the directory would be carried into a commit, and the question is keyed on whether the path lies inside a git working tree — never on which scope owns it. All three capture locations are covered on the same terms, so a private personal repository is protected exactly as the employer's is. Tracked, or unanswerable, refuses the write; outside a working tree there is nothing to be excluded from and the write proceeds.
 - Anti-burnout indicators and personal workload analytics are excluded from every project-scope file.
 - Custom metrics and dossiers about a report live in the team-member scope only — never the sovereign scope, never a committed project scope, because a report's performance record must not be readable by that report's peers.
 - Only team-member-scope material is ever an HR sync payload, and no payload may draw on personal-scope material, directly or by way of a model that read both.
