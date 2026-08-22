@@ -158,6 +158,65 @@ class VcsPort(Protocol):
         """
 
 
+class KeyNotFound(LookupError):
+    """No secret is stored under that name.
+
+    `LookupError`, and deliberately not a sibling of `KeychainUnavailable`: a
+    caller has to be able to tell "there is no key" from "I could not ask". The
+    first is an ordinary first-run state — nothing has been stored yet. The second
+    means the daemon cannot decrypt anything and must say so rather than behave as
+    though the store were empty, which would present as a fresh install.
+    """
+
+
+class KeychainUnavailable(RuntimeError):
+    """The keychain could not be consulted, so nothing is known about the key.
+
+    Covers every reason the question cannot be answered: the `keyring` package
+    absent, the OS keychain unreachable, a backend that raised. Not a verdict —
+    the same reading `VcsUnavailable` takes, for the same reason. Treating it as
+    "no key" is how an encrypted store gets opened as a plaintext one.
+    """
+
+
+@runtime_checkable
+class KeychainPort(Protocol):
+    """AD-6 — where the master key lives, so the daemon can start unattended.
+
+    Custody only. Nothing here encrypts, derives, or wraps anything; a caller
+    that has the secret decides what to do with it. Keeping this narrow is what
+    lets `pm_ai.storage` receive a key as a value and stay unable to reach the OS.
+
+    Secrets are `bytes` because a master encryption key is arbitrary bytes, not
+    text. Names are `str`, and an implementation maps a name onto whatever
+    (service, account) pair its backend wants — the port does not spend that
+    vocabulary, so a Linux Secret Service adapter can satisfy it unchanged.
+    """
+
+    def store(self, name: str, secret: bytes) -> None:
+        """Store `secret` under `name`, replacing any previous value.
+
+        Raises `KeychainUnavailable` if the keychain could not be reached.
+        """
+
+    def fetch(self, name: str) -> bytes:
+        """The secret stored under `name`.
+
+        Raises `KeyNotFound` when nothing is stored, never returning `None`: a
+        `None` return puts the burden of the distinction on every caller, and the
+        one that forgets opens an encrypted store with no key rather than
+        refusing. Raises `KeychainUnavailable` if the keychain could not be
+        reached.
+        """
+
+    def delete(self, name: str) -> None:
+        """Remove the secret stored under `name`.
+
+        Raises `KeyNotFound` if there was nothing to remove, so a caller cannot
+        read a silent success as proof the secret is gone.
+        """
+
+
 @runtime_checkable
 class StoragePort(Protocol):
     """AD-5 — the single writer, behind a port."""

@@ -3,8 +3,9 @@ title: 'Keychain port and macOS adapter'
 type: 'feature'
 created: '2026-08-21'
 updated: '2026-08-22'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: '182d1f9'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
 ---
@@ -53,22 +54,28 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` — add `KeychainPort` with store, fetch, and delete, plus its typed not-found and unavailable errors.
-- [ ] `pm_ai/platform/keychain.py` — new. macOS adapter over `keyring`, imported inside each method.
-- [ ] `tests/architecture/test_keychain.py` — new. One test per matrix row, using a fake port implementation.
+- [x] `pm_ai/ports/__init__.py` — `KeychainPort` (store, fetch, delete) plus `KeyNotFound(LookupError)` and `KeychainUnavailable(RuntimeError)`, deliberately not related by inheritance so `except` on one cannot swallow the other.
+- [x] `pm_ai/platform/keychain.py` — new. `MacOSKeychainAdapter` over `keyring`, imported inside a `_keyring()` helper that returns the module **and** its error base, so a caller names the exception type it must catch without a second lazy import. `KEYCHAIN_SERVICE = "pm-ai"` fixed, caller's name as the account — a shape Linux Secret Service and Windows Credential Manager both express natively. Secrets cross the port as `bytes` and are base64-encoded for `keyring`'s string storage.
+- [x] `tests/architecture/test_keychain.py` — new. 16 tests, no skips.
 
 **Acceptance Criteria:**
 - Given the `runtime` extra is not installed, when `uv run pytest` runs, then no test is skipped because of a missing `keyring` import, and `pm_ai.platform.keychain` imports successfully.
 - Given `uv run lint-imports`, then all 12 contracts hold and `keyring` is imported nowhere outside `pm_ai/platform/`.
 - Given a fake keychain, when a secret is stored, fetched, deleted, and fetched again, then the second fetch raises a typed not-found error.
-- Given `uv run pytest`, then the skip count stays at 30 — this story un-skips nothing, because no pre-written test covers key custody.
+- Given `uv run pytest`, then the skip count stays at 30 — this story un-skips nothing, because no pre-written test covers key custody. Result: 259 passed, 30 skipped.
 
 ## Design Notes
 
 The reason the lazy import is a hard rule rather than a preference: with `keyring` absent, a module-level import makes every test in this story skip, and the suite reports green. The failure mode is not a crash, it is silent non-coverage — which is exactly what a key-custody test exists to rule out.
 
+**Base64, not a text codec.** `keyring` stores `str` and a master key is arbitrary `bytes`. A text codec round-trips most keys and corrupts a minority, which is a defect that shows up on one machine in a hundred and presents as a corrupted store. Asserted against a deliberately non-UTF-8 secret.
+
+**`delete` is the branchiest code here, and it is not obvious why.** `keyring` raises the same `KeyringError` subclass whether a delete failed or there was simply nothing to delete, so the two arrive indistinguishable and are separated by asking afterwards whether the secret is still present. Getting that backwards means either a locked keychain reported as "already gone" — the operator stops looking — or a clean no-op reported as a fault. When the follow-up question *also* fails, it fails closed on "may still be there": reporting `KeyNotFound` on the strength of two failed calls would be worse than saying nothing. Three tests cover those paths, since the absence of `keyring` cannot reach them.
+
+**An inconsistency created, and named rather than hidden.** These two errors live in `pm_ai/ports/__init__.py`, where this story's frozen plan put them. `VcsUnavailable` — the same kind of thing, for the same kind of reason — lives in `pm_ai/domain/vcs.py` instead. Both are legal (`platform` sits above `ports` in the layers contract, so either is importable from the adapter), and both arguments hold, but the repo now says two things about where a port's errors belong. Worth one tidy later; not worth deviating from frozen intent to avoid.
+
 ## Verification
 
-- `uv run pytest -q -rs` — expected: 30 skipped, and no skip reason mentioning `keyring`.
+- `uv run pytest -q -rs` — expected: 30 skipped, and no skip reason mentioning `keyring`. Confirmed: no skip reason mentions it, and `grep` puts `import keyring` in one file, inside a function.
 - `uv run python -c "import pm_ai.platform.keychain"` — expected: silent success with the `runtime` extra absent.
 - `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
