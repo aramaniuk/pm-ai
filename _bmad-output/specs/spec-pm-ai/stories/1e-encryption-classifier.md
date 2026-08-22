@@ -95,6 +95,7 @@ The question asked of each path is *"is this artifact encrypted at rest?"*
 ## Verification
 
 - `uv run pytest -q -rs` — expected: 29 skipped, with no remaining skip naming `pm_ai.storage.crypto`.
+- **Turn the skip ratchet in this same commit.** `tests/conftest.py` pins `EXPECTED_SKIPS` and fails the run in *both* directions, so landing this story makes the suite red until the constant matches: set it to the new count (29, if the story-1 slices land in order). The failure prints after pytest's stats line and names the direction and the delta, so a wrong number tells you what to write. Leaving it stale is not an option the run permits — which is the point, since the alternative is a story that un-skips one test and silently adds another.
 - `uv run python -c "import pm_ai.storage.crypto"` — expected: silent success.
 - `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
 - Remove the encryption answer from one `transcripts/` declaration and confirm construction fails, then restore it.

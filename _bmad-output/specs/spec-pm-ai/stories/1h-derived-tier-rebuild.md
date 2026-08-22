@@ -78,5 +78,6 @@ context:
 ## Verification
 
 - `uv run pytest -q -rs` — expected: one fewer skip, with no remaining skip naming `pm_ai.storage.reindex`.
+- **Turn the skip ratchet in this same commit.** `tests/conftest.py` pins `EXPECTED_SKIPS` and fails the run in *both* directions, so landing this story makes the suite red until the constant matches: lower it by one (to 28, if the story-1 slices land in order and 1e has already lowered it to 29). The failure prints after pytest's stats line and names the direction and the delta. Do not raise it to absorb a skip this story introduced — a rising count is the regression the ratchet exists to catch.
 - `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
 - Add the operational store to a drop target set and confirm the check goes red, then remove it.
