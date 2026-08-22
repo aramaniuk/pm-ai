@@ -185,6 +185,15 @@
     Build the pull-adapter connector architecture with health probes, event
     normalization, hot plugin loading, and encrypted credential storage.
     Delivers CAP-35.
+  invoke_dev_with: >-
+    An instance carries an explicit health state distinct from its coverage, and
+    an unhealthy one is surfaced by name rather than counted as silence. A
+    CoverageWindow is a receipt for a harvest that demonstrably succeeded, never
+    a span computed from the clock: the stub at pm_ai/connectors/gitlab.py
+    builds now-minus-4h to now unconditionally, so a provider that declines with
+    an empty 200 would claim full coverage it never had. HarvestResult has no
+    way to say "I ran and learned nothing" - give it one. Re-consent is a staged
+    Proposal, never an interactive prompt inside a background harvest.
 - id: "9"
   title: Passive telemetry radar
   spec_checkpoint: true
@@ -192,6 +201,13 @@
   description: >-
     Run the scheduled harvest across configured connectors through the
     sanitization boundary, with backoff on provider failure. Delivers CAP-2.
+  invoke_dev_with: >-
+    Record every attempt and its outcome, not only the successes. Story 16's
+    three verdicts rest on telling never-looked from looked-and-failed, and that
+    distinction exists only if a failed harvest leaves a durable record.
+    run_harvest in pm_ai/app/pipelines.py has no try/except today, so a raising
+    connector skips save_cursor entirely and the attempt vanishes. Backoff must
+    not hide a permanent failure as a pending retry forever.
 - id: "10"
   title: Durable job queue and offline replay
   spec_checkpoint: true
@@ -253,8 +269,15 @@
     met, altered, broken and stalled promises. Delivers CAP-33.
   invoke_dev_with: >-
     pm-ai's own writes are never evidence - every event carries an authorship
-    marker and only external is admissible. An overdue commitment with no
-    harvest coverage for its window resolves to UNKNOWN, never BROKEN.
+    marker and only external is admissible. An overdue commitment resolves by
+    what pm-ai attempted, not only by what it found, and the three outcomes are
+    never collapsed: a harvest that succeeded across the arrival window and
+    found nothing is BROKEN; no successful harvest spanning it with no failed
+    attempt is UNKNOWN, which is temporary and self-resolving; any contributing
+    instance that attempted and failed is ERROR, which waiting never clears.
+    ERROR outranks UNKNOWN when both apply. evaluate_commitment currently takes
+    a single covered boolean and no health input at all - that is the signature
+    to change.
 - id: "17"
   title: Voice and text draft synthesis and dispatch
   spec_checkpoint: true
@@ -286,6 +309,12 @@
     Generate the telemetry-enriched preparation dashboard on schedule and send
     owner inquiries when an agenda item needs clarification first. Delivers
     CAP-26 and CAP-32.
+  invoke_dev_with: >-
+    An inquiry to a promise-owner is irreversible and cannot be recalled, so it
+    never fires on a commitment at UNKNOWN or ERROR. pm-ai's own blindness is
+    not someone else's accountability: an ERROR raises a private alert to the PM
+    naming the failing instance and what to fix, never a message to the person
+    who made the promise.
 - id: "21"
   title: Autonomous work item execution and MCP tool glue
   spec_checkpoint: true

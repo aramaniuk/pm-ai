@@ -30,7 +30,7 @@ Companion to `SPEC.md`. Terms are contract vocabulary: where a capability or con
 
 **Verbal Commitment Sync** — Automatic extraction of spoken meeting promises and staging of timestamped comments attached to target Work Items or tickets.
 
-**Meeting Commitment Ledger & Closed-Loop Lifecycle** — The persistent accountability mechanism (structured Markdown in the project scope's `commitments_log.md`, indexed in `operational.db`) capturing extracted promises, owners, target deadlines, target Work Items, lifecycle statuses `[STAGED_APPROVAL]`, `[PENDING]`, `[FULFILLED]`, `[ALTERED]`, `[BROKEN]`, `[UNKNOWN]`, and cross-referencing incoming commits, PR review latencies, and ticket state to verify real-world execution.
+**Meeting Commitment Ledger & Closed-Loop Lifecycle** — The persistent accountability mechanism (structured Markdown in the project scope's `commitments_log.md`, indexed in `operational.db`) capturing extracted promises, owners, target deadlines, target Work Items, lifecycle statuses `[STAGED_APPROVAL]`, `[PENDING]`, `[FULFILLED]`, `[ALTERED]`, `[BROKEN]`, `[UNKNOWN]` (pm-ai has not yet had a complete successful look; self-resolving), `[ERROR]` (a contributing connector attempted and failed; needs a human to re-authenticate or fix configuration), and cross-referencing incoming commits, PR review latencies, and ticket state to verify real-world execution.
 
 **Spoken Anchor Protocol & Fuzzy Recovery** — The structured speaking convention identifying target Work Item numbers, with automated fuzzy recovery (≥85% confidence) for phonetic or transcription errors.
 
