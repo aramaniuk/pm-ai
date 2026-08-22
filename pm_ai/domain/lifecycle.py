@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
+from pm_ai.domain.invariants import InconsistentModel
 from pm_ai.domain.identity import SkillPermission
 
 
@@ -56,11 +57,20 @@ class CommitmentState(Enum):
         return self in {CommitmentState.FULFILLED, CommitmentState.BROKEN}
 
 
-# ProposalState and CommitmentState must never share a member name; the two
-# lifecycles answer different questions and one overloaded field would conflate
-# them (AD-14). Checked at import so it cannot drift.
-_overlap = {s.value for s in ProposalState} & {s.value for s in CommitmentState}
-assert not _overlap, f"AD-14: lifecycle states overlap: {sorted(_overlap)}"
+def _assert_lifecycles_are_distinct() -> None:
+    """ProposalState and CommitmentState must never share a member name (AD-14).
+
+    The two lifecycles answer different questions, and one overloaded field would
+    conflate them. A function rather than a bare statement so the check can be
+    re-run against a doctored model in a test — which is the only way to prove it
+    still fires under `python -O`.
+    """
+    overlap = {s.value for s in ProposalState} & {s.value for s in CommitmentState}
+    if overlap:
+        raise InconsistentModel(f"AD-14: lifecycle states overlap: {sorted(overlap)}")
+
+
+_assert_lifecycles_are_distinct()
 
 
 DEFAULT_PROPOSAL_TTL = timedelta(days=7)

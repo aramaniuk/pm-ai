@@ -2,8 +2,10 @@
 title: 'Guards that survive optimization'
 type: 'feature'
 created: '2026-08-22'
-status: 'ready-for-dev'
+updated: '2026-08-22'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: '62bffba'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
   - '{project-root}/_bmad-output/specs/spec-pm-ai/scope-model.md'
@@ -15,13 +17,18 @@ context:
 
 **Problem:** The scope model's structural integrity is enforced by ten bare `assert` statements that run at import time. `python -O` strips every one of them.
 
-Verified, not inferred:
+Verified by AST, not inferred: ten `ast.Assert` nodes, in `lifecycle.py`,
+`scope_model.py` and `storage_tiers.py`, and none anywhere else in `pm_ai/`.
+Under `python -O`, `__debug__` is `False` and every one of them is stripped.
 
-```
-normal:  guards active
--O:      module imported, __debug__ = False
--O:      AD-44 duplicate-tier guard is an assert -> INERT
-```
+**A correction to this story's original evidence, on the record.** The block that
+used to sit here ended `-O: AD-44 duplicate-tier guard is an assert -> INERT`,
+and that line was wrong. It came from a probe that only tested `__debug__`; the
+label was mine rather than a measurement, and I presented it as one. The
+duplicate-tier refusal is `raise MalformedLayout` in `_durability_index` and was
+always `-O`-safe — confirmed during implementation, identical message under both
+interpreters. The story's case is unaffected, because ten genuine asserts existed
+and were genuinely stripped, but the headline example was not one of them.
 
 The ten are not sanity checks a programmer leaves behind. They are the *only* thing verifying that the derived sets are coherent — that one artifact name does not mean two relative paths, that the three tiers are disjoint from `RETENTION_MANAGED` and `DIAGNOSTIC_ONLY`, that `GITIGNORE_REQUIRED` names only real keys, that nothing is both a rebuild target and a backup target, and that no proposal state shares a name with a commitment state. Under `-O`, `pm_ai.domain.scope_model` imports clean with none of that established, and the first symptom is a rebuild deleting Tier-2 state or a capture written to a path no rule covers.
 
@@ -36,7 +43,7 @@ Flagged after story 1a as pre-existing in `storage_tiers.py` too, and deferred t
 **Always:**
 - **The message survives the conversion.** Each of these asserts carries a diagnostic that names what disagreed and why it matters; several are the only documentation of the invariant. Moving the condition into an `if` must not shorten the text.
 - Each raise uses a **typed** error, not bare `Exception` — something a caller could catch and a reader can name. Failures of the model are not failures of an argument, so `ValueError` is a poor fit; prefer a dedicated error type in `pm_ai.domain`.
-- Ten sites, exactly: `lifecycle.py:63`, `scope_model.py:818,824,829,841,844,847,855`, `storage_tiers.py:194,202`. An AST sweep confirms there are **no other asserts in `pm_ai/`** — not in functions, not in methods — so this is the complete set and the story has a definite end.
+- Ten sites, exactly: `lifecycle.py`, `scope_model.py` ×7, `storage_tiers.py` ×2. An AST sweep confirms there are **no other assert statements in `pm_ai/`** — not in functions, not in methods — so this is the complete set and the story has a definite end. (Line numbers deliberately unpinned: 1j and 1k moved them between this story being written and being run.)
 - The guards keep running **at import**, not on first use. Their value is that a mis-declared model cannot be loaded at all; deferring them to a call site is a different and weaker property.
 - No new dependency, no behaviour change on the healthy path. A correct model imports exactly as it does today.
 
@@ -57,7 +64,7 @@ Flagged after story 1a as pre-existing in `storage_tiers.py` too, and deferred t
 | `GITIGNORE_REQUIRED` naming a key no tree declares | the import | raises |
 | An artifact in both `REBUILD_TARGETS` and `BACKUP_TARGETS` | the import | raises |
 | A `ProposalState` member sharing a name with a `CommitmentState` member | the import | raises — the AD-14 guard, which matters more once story 16 adds `ERROR` |
-| A grep for `assert` across `pm_ai/` | after this story | returns nothing |
+| An **AST sweep** for `ast.Assert` across `pm_ai/` | after this story | returns nothing. Deliberately not a grep: the word appears in three comments about what a connector may not assert, so a text search reports failures that are not there and could be "fixed" by rewording prose |
 
 </frozen-after-approval>
 
@@ -73,17 +80,17 @@ Flagged after story 1a as pre-existing in `storage_tiers.py` too, and deferred t
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/` — add a typed error for a model that fails its own consistency checks.
-- [ ] `pm_ai/domain/scope_model.py` — convert the seven asserts in `_assert_declarations_agree()`, messages unchanged.
-- [ ] `pm_ai/domain/storage_tiers.py` — convert the two, messages unchanged.
-- [ ] `pm_ai/domain/lifecycle.py` — convert the one, message unchanged.
-- [ ] `tests/architecture/test_guards_survive_o.py` — new. Runs a subprocess under `-O` that monkeypatches a declaration into an inconsistent state and asserts the import raises. One test per class of guard, not one per line.
+- [x] `pm_ai/domain/invariants.py` — new. `InconsistentModel(RuntimeError)`, in its own module because `lifecycle.py` imports only `identity`, and a shared home avoids inventing an edge between the three.
+- [x] `pm_ai/domain/scope_model.py` — seven converted, messages byte-identical.
+- [x] `pm_ai/domain/storage_tiers.py` — two converted, and wrapped in `_assert_code_keys_are_declared()` called at module level. They were bare module statements, so no test could re-run them against a doctored model; every guard is now callable, which is what made all ten testable the same way.
+- [x] `pm_ai/domain/lifecycle.py` — one converted, wrapped in `_assert_lifecycles_are_distinct()` for the same reason.
+- [x] `tests/architecture/test_guards_survive_o.py` — eight `-O` subprocess cases (one per class of guard), one asserting a coherent model still imports silently under `-O`, and one AST sweep for the mechanism. Ten tests.
 
 **Acceptance Criteria:**
 - Given `uv run python -O -c "import pm_ai.domain.scope_model"`, then it succeeds silently on the current, coherent model.
 - Given a deliberately broken declaration, when imported under `-O`, then it raises the typed error with the same message it raises without `-O`.
-- Given `grep -rn "assert " pm_ai/`, then there are no matches.
-- Given `uv run pytest`, then 229 passed and 30 skipped (one new test on top of 1k's), so `EXPECTED_SKIPS` in `tests/conftest.py` needs no change.
+- Given an AST sweep for `ast.Assert` over `pm_ai/`, then there are no matches. The grep form this criterion originally used was wrong: three comments contain the word.
+- Given `uv run pytest`, then 243 passed and 30 skipped (ten new tests on top of 1k's), so `EXPECTED_SKIPS` in `tests/conftest.py` needed no change.
 - Given `uv run mypy pm_ai`, then it still reports success — this story lands after 1k, so a clean type check is the baseline it inherits and must preserve.
 - Given `uv run lint-imports`, then all 12 contracts hold: the new error type lives in `domain`, which every other layer may import.
 
@@ -101,7 +108,9 @@ Flagged after story 1a as pre-existing in `storage_tiers.py` too, and deferred t
 
 - `uv run python -O -c "import pm_ai.domain.scope_model"` — expected: silent success.
 - `uv run python -O -c "import pm_ai.domain.storage_tiers, pm_ai.domain.lifecycle"` — expected: silent success.
-- `grep -rn "assert " pm_ai/` — expected: no matches.
-- `uv run pytest -q` — expected: 229 passed, 30 skipped.
+- `uv run pytest tests/architecture/test_guards_survive_o.py -q` — expected: 10 passed, including the AST sweep that replaces the grep.
+- `uv run pytest -q` — expected: 243 passed, 30 skipped.
 - `uv run mypy pm_ai` — expected: `Success: no issues found`.
-- Declare `daily_dashboard.md` at `Tier.DERIVED` in one tree while it stays `Tier.TRUTH` in another, then import under **both** `python` and `python -O`. Expected: the same raise, with the same message, both times. Restore afterwards. This is the regression the story exists to prevent, so it is the one to run by hand rather than trust.
+- Declare `daily_dashboard.md` at `Tier.DERIVED` in one tree while it stays `Tier.TRUTH` in another, then import under **both** `python` and `python -O`. Expected: the same raise, with the same message, both times.
+
+  **Run, 2026-08-22.** Identical `MalformedLayout: one artifact key, two durability promises: ['daily_dashboard.md is DER…']` under both. And this particular guard turned out never to have needed the story: `_durability_index` already refused with a `raise`, which is what exposed the mislabelled evidence corrected in Intent above. The eight cases in `test_guards_survive_o.py` cover the ten that genuinely were asserts.

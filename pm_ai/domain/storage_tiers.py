@@ -47,6 +47,7 @@ from pm_ai.domain.scope_model import (
     ScopeResolutionError,
     Tier,
 )
+from pm_ai.domain.invariants import InconsistentModel
 from pm_ai.domain.vcs import TrackingVerdict
 
 __all__ = [
@@ -216,15 +217,24 @@ def assert_reindex_safe(artifacts: frozenset[str]) -> None:
 # the one place those two structures still have to agree. A rename of any of them
 # therefore fails here, at import, rather than at the first write.
 _CODE_KEYS = frozenset({EVENT_LOG, OPERATIONAL_DB, CAPTURES})
-assert _CODE_KEYS <= KEYS, (
-    "a key spelled as a constant here names no node in any scope tree: "
-    f"{sorted(_CODE_KEYS - KEYS)}"
-)
 
-# And `GITIGNORE_REQUIRED` keys the same way: a rule whose artifact does not
-# exist is a rule the write path can never consult, which reads as protection
-# and is silence.
-assert GITIGNORE_REQUIRED <= KEYS, (
-    "a .gitignore rule names no node in any scope tree: "
-    f"{sorted(GITIGNORE_REQUIRED - KEYS)}"
-)
+
+def _assert_code_keys_are_declared() -> None:
+    """Both checks, callable, so a test can re-run them under `python -O`."""
+    if not _CODE_KEYS <= KEYS:
+        raise InconsistentModel(
+            "a key spelled as a constant here names no node in any scope tree: "
+            f"{sorted(_CODE_KEYS - KEYS)}"
+        )
+
+    # And `GITIGNORE_REQUIRED` keys the same way: a rule whose artifact does not
+    # exist is a rule the write path can never consult, which reads as protection
+    # and is silence.
+    if not GITIGNORE_REQUIRED <= KEYS:
+        raise InconsistentModel(
+            "a .gitignore rule names no node in any scope tree: "
+            f"{sorted(GITIGNORE_REQUIRED - KEYS)}"
+        )
+
+
+_assert_code_keys_are_declared()

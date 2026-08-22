@@ -133,6 +133,7 @@ from types import MappingProxyType
 from typing import ClassVar, Union
 
 from pm_ai.domain.identity import ScopeKind
+from pm_ai.domain.invariants import InconsistentModel
 
 
 # ── Errors ───────────────────────────────────────────────────────────────────
@@ -815,21 +816,24 @@ def _assert_declarations_agree() -> None:
         for key, placement in ADDRESS[kind].items():
             disagreement.setdefault(key, set()).add(placement.relative.as_posix())
     split = {key: sorted(paths) for key, paths in disagreement.items() if len(paths) > 1}
-    assert not split, (
-        f"a key means two relative paths in two scopes: {split}. Every scope "
-        f"holds a given artifact at the same relative path, which is what lets "
-        f"`ScopePaths.rooted()` reproduce production rather than approximate it."
-    )
+    if split:
+        raise InconsistentModel(
+            f"a key means two relative paths in two scopes: {split}. Every scope "
+            f"holds a given artifact at the same relative path, which is what lets "
+            f"`ScopePaths.rooted()` reproduce production rather than approximate it."
+        )
 
-    assert PERSONAL_SUBJECT_ARTIFACTS <= KEYS, (
-        "a personal artifact with no path: "
-        f"{sorted(PERSONAL_SUBJECT_ARTIFACTS - KEYS)}"
-    )
+    if not PERSONAL_SUBJECT_ARTIFACTS <= KEYS:
+        raise InconsistentModel(
+            "a personal artifact with no path: "
+            f"{sorted(PERSONAL_SUBJECT_ARTIFACTS - KEYS)}"
+        )
 
-    assert all(SCOPE_TREES.get(kind) for kind in ScopeKind), (
-        "a scope kind with no declared tree: "
-        f"{sorted(k.value for k in ScopeKind if not SCOPE_TREES.get(k))}"
-    )
+    if not all(SCOPE_TREES.get(kind) for kind in ScopeKind):
+        raise InconsistentModel(
+            "a scope kind with no declared tree: "
+            f"{sorted(k.value for k in ScopeKind if not SCOPE_TREES.get(k))}"
+        )
 
     # The three ways an artifact can be accounted for, kept pairwise disjoint so
     # that exactly one of them answers "what happens to this on backup and on
@@ -838,24 +842,28 @@ def _assert_declarations_agree() -> None:
     # consequence of losing the property is a raw capture in a backup set or a
     # diagnostic log under a retention promise nothing implements.
     tiered = frozenset(ARTIFACT_TIER)
-    assert not (tiered & RETENTION_MANAGED), (
-        "an artifact is both tiered and retention-managed; it must be exactly one."
-    )
-    assert not (tiered & DIAGNOSTIC_ONLY), (
-        "an artifact is both tiered and diagnostics-only; it must be exactly one."
-    )
-    assert not (DIAGNOSTIC_ONLY & RETENTION_MANAGED), (
-        "an artifact is both diagnostics-only and retention-managed; a diagnostic "
-        "log is not a raw capture and is under no NFR-09 purge."
-    )
+    if tiered & RETENTION_MANAGED:
+        raise InconsistentModel(
+            "an artifact is both tiered and retention-managed; it must be exactly one."
+        )
+    if tiered & DIAGNOSTIC_ONLY:
+        raise InconsistentModel(
+            "an artifact is both tiered and diagnostics-only; it must be exactly one."
+        )
+    if DIAGNOSTIC_ONLY & RETENTION_MANAGED:
+        raise InconsistentModel(
+            "an artifact is both diagnostics-only and retention-managed; a diagnostic "
+            "log is not a raw capture and is under no NFR-09 purge."
+        )
 
     # Tier 2 and Tier 3 must never share a physical artifact — the original
     # defect. `Tier.rebuildable` and `Tier.backed_up` are what keep this true, so
     # this is the assertion that notices either of them being widened.
-    assert not (REBUILD_TARGETS & BACKUP_TARGETS), (
-        "AD-3: an artifact is both a rebuild target and a backup target, so a "
-        "rebuild would destroy state that cannot be reconstructed."
-    )
+    if REBUILD_TARGETS & BACKUP_TARGETS:
+        raise InconsistentModel(
+            "AD-3: an artifact is both a rebuild target and a backup target, so a "
+            "rebuild would destroy state that cannot be reconstructed."
+        )
 
 
 _assert_declarations_agree()
