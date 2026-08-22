@@ -41,11 +41,13 @@ from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.storage_tiers import (
     CAPTURES,
     EVENT_LOG,
+    GITIGNORE_FILENAME,
     GITIGNORE_REQUIRED,
     OPERATIONAL_DB,
     Tier,
     UnprotectedCaptureDir,
     assert_capture_dir_untracked,
+    gitignore_rule_for,
 )
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.ports import ScopePathPort, VcsPort
@@ -367,14 +369,26 @@ class StorageService:
         return self._paths.resolve(scope, artifact, create=True)
 
     def _assert_git_excludes(self, scope: DataScope, artifact: str) -> None:
-        """Refuse a raw capture that git would carry into a commit (AD-23, AD-38).
+        """Refuse a raw capture that git would carry into a commit (AD-23, AD-43).
 
-        Two conditions gate the question, and both are the scope model's:
-        `GITIGNORE_REQUIRED` names the artifacts whose exclusion is a repository
-        rule rather than a directory boundary, and `is_git_committed` names the
-        one scope that has a repository to ask. A capture in the personal or
-        team-member scope is excluded by *where it is*; there is no repository,
-        and git is not consulted at all.
+        One condition gates the question, and it is the scope model's:
+        `GITIGNORE_REQUIRED` names the artifacts whose exclusion rests on a
+        repository rule rather than on a directory boundary. **Which scope owns
+        the capture is not a condition.** It was until 2026-08-22, gated on
+        `is_git_committed`, and that was wrong in the direction that leaks:
+        `is_git_committed` answers "is this scope pushed to the employer", a
+        question about who may read the material, while the guard needs "can git
+        reach this directory", a question about the filesystem. The two agree
+        everywhere except the case Deployment itself creates — keep the personal
+        scope as a private git repository — where `transcripts/` sits at that
+        scope's root, outside the one `private/` rule that scope is told to add.
+        A verbatim coaching transcript was therefore committable, and git was
+        never asked.
+
+        So the working tree decides. `working_tree` returning `None` is an
+        *answer*: this path is in no repository, nothing can carry it into a
+        commit, and the write proceeds. That is not the same as an unanswered
+        question, which refuses.
 
         Git answers, not this process. A `.gitignore` containing the rule can
         still leave the directory tracked — a later negation line re-includes it,
@@ -384,23 +398,46 @@ class StorageService:
         wrong in the direction that publishes a transcript.
 
         `VcsUnavailable` is a refusal, not an exception to it. Unknown is not
-        permission: a machine with no `git`, a project whose registered
-        repository has been moved away, a repository that was never initialised —
-        each leaves the question unanswered, and the only safe answer to an
-        unanswered question here is no.
+        permission: no `git` on PATH, a timeout, an exit code with no documented
+        meaning — each leaves the question unanswered, and the only safe answer
+        to an unanswered question here is no.
 
-        `scope.project_id` is passed as-is rather than cast. `DataScope` refuses
-        a PROJECT scope without one and `is_git_committed` is true for PROJECT
-        alone, so it is a non-empty string here by construction — and if that
-        ever stops being true, the resolver refuses `None` loudly instead of
-        looking up a project named "None".
+        The rule and the `.gitignore` path in the refusal are both derived from
+        the root git reports, never from a table. A message naming
+        `/.project-ai/transcripts/` while the operator is looking at
+        `~/.manager-ai` sends them to edit a file that is already correct, in a
+        repository that is not the one at fault — and a per-scope table cannot
+        hold the alternative, since `GITIGNORE_REQUIRED` is keyed on a basename
+        every scope spells the same way.
         """
-        if not scope.is_git_committed or artifact not in GITIGNORE_REQUIRED:
+        if artifact not in GITIGNORE_REQUIRED:
             return
-        repository = self._paths.repository(scope.project_id)
         # Resolved without `create`: asking git about a directory is not a reason
         # to bring it into existence, and git answers the same either way.
         target = self._paths.resolve(scope, artifact)
+        try:
+            repository = self._vcs.working_tree(target)
+        except VcsUnavailable as unanswered:
+            # git is optional. A machine without it, or a scope that is not a
+            # checkout, must still be able to record a meeting — so the fallback
+            # asks the only question that needs no binary: does a repository
+            # exist here at all? If none does, nothing can commit this capture
+            # and the write proceeds. If one does, pm-ai has a real repository it
+            # cannot interrogate, which is the single case that leaks: `launchd`
+            # gives the daemon a minimal PATH, so missing `git` here does not
+            # mean missing `git` on the machine.
+            marker = self._vcs.repository_marker_above(target)
+            if marker is None:
+                return
+            raise UnprotectedCaptureDir(
+                f"refusing to write {artifact} into {scope}: {marker} exists, so "
+                f"a repository is present, but git could not be consulted about "
+                f"it ({unanswered}). A capture written here may be committed and "
+                f"a verbatim transcript in a repository is not recoverable. "
+                f"Install git, or put it on the daemon's PATH."
+            ) from unanswered
+        if repository is None:
+            return
         try:
             verdict = self._vcs.tracking(target, repository=repository)
         except VcsUnavailable as unanswered:
@@ -409,7 +446,10 @@ class StorageService:
                 f"not be consulted about it: {unanswered}"
             ) from unanswered
         assert_capture_dir_untracked(
-            artifact, verdict, gitignore=str(self._paths.gitignore(scope.project_id))
+            artifact,
+            verdict,
+            rule=gitignore_rule_for(target, repository=repository),
+            gitignore=str(repository / GITIGNORE_FILENAME),
         )
 
     def _segment(self, scope: DataScope, artifact: str, at: datetime) -> Path:

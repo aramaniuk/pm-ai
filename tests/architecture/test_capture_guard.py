@@ -38,6 +38,7 @@ from pm_ai.domain import (
     CAPTURES,
     EVENT_LOG,
     GITIGNORE_REQUIRED,
+    gitignore_rule_for,
     DataScope,
     ScopeKind,
     TrackingVerdict,
@@ -60,10 +61,14 @@ PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="alex")
 
-# The rule as the scope model declares it, rather than as a literal: moving
-# `transcripts/` changes the rule, and a test carrying its own copy of the string
-# would keep passing while protecting a directory nothing writes to.
-RULE = GITIGNORE_REQUIRED[CAPTURES]
+# Derived exactly as the write path derives it, rather than carried as a
+# literal: moving `transcripts/` changes the rule, and a test with its own copy
+# of the string would keep passing while protecting a directory nothing writes
+# to. `GITIGNORE_REQUIRED` no longer holds rule text at all — it names which
+# artifacts need the guard, and the rule depends on the working tree.
+RULE = gitignore_rule_for(
+    Path("repo/.project-ai/transcripts"), repository=Path("repo")
+)
 ENCLAVE_RULE = ".project-ai/"
 
 BODY = "09:01 alex: the migration slips a week\n"
@@ -156,7 +161,33 @@ class FakeVcs:
 
     verdict: TrackingVerdict = TrackingVerdict(ignored=True)
     failure: str | None = None
+    root: Path | None = None
+    marker: Path | None = None
     asked: list[tuple[Path, Path]] = field(default_factory=list)
+    trees_asked: list[Path] = field(default_factory=list)
+
+    def working_tree(self, path: Path) -> Path | None:
+        """`root` is the answer to give; `None` means "no working tree here".
+
+        Recorded separately from `asked`, because the two questions now fail
+        differently: not being in a repository permits the write, while being
+        unable to ask refuses it, and a test that conflated them would pass
+        either way.
+        """
+        self.trees_asked.append(path)
+        if self.failure is not None:
+            raise VcsUnavailable(self.failure)
+        return self.root
+
+    def repository_marker_above(self, path: Path) -> Path | None:
+        """`marker` is what the filesystem would have found: a `.git`, or nothing.
+
+        Separate from `root` because the two are asked in different situations —
+        `root` when git answered, `marker` only when it could not — and because
+        the pair "git unavailable, repository present" is the one combination
+        that refuses.
+        """
+        return self.marker
 
     def tracking(self, path: Path, *, repository: Path) -> TrackingVerdict:
         self.asked.append((path, repository))
@@ -316,8 +347,18 @@ def test_an_already_tracked_capture_directory_refuses_the_capture(tmp_path):
     _assert_nothing_written(fixture, PROJECT, before)
 
 
-def test_a_project_root_that_is_not_a_repository_refuses_the_capture(tmp_path):
-    """Row 8 — git could not be consulted, so the answer is no.
+def test_a_project_root_that_is_not_a_repository_permits_the_capture(tmp_path):
+    """Row 8, re-derived 2026-08-22 — no repository means nothing can commit it.
+
+    This asserted a refusal until the guard stopped keying on scope. The old
+    reasoning read "not a repository" as an inability to consult git, and
+    therefore as unknown. It is not unknown: git answered, and the answer was
+    that this path is in no working tree. Nothing can carry the capture into a
+    commit, so refusing would only stop pm-ai recording a meeting.
+
+    The trade is stated rather than hidden: a project whose checkout was deleted
+    now accepts captures instead of complaining. That is a broken configuration,
+    not a leak, and `pm-ai doctor` is where a broken configuration belongs.
 
     The premise is asserted first: were `tmp_path` inside a git repository, git
     would answer about *that* repository and this test would prove nothing.
@@ -331,13 +372,10 @@ def test_a_project_root_that_is_not_a_repository_refuses_the_capture(tmp_path):
         f"premise changed: {fixture.repository} is inside a git repository "
         f"({outside.stdout.strip()}), so this row cannot test 'not a repository'"
     )
-    before = _snapshot(fixture, PROJECT)
 
-    with pytest.raises(UnprotectedCaptureDir) as refusal:
-        fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
+    written = fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
 
-    assert "could not be consulted" in str(refusal.value)
-    _assert_nothing_written(fixture, PROJECT, before)
+    assert written.read_text(encoding="utf-8") == BODY
 
 
 def test_a_repository_that_has_been_moved_away_says_so(tmp_path):
@@ -352,12 +390,12 @@ def test_a_repository_that_has_been_moved_away_says_so(tmp_path):
         child.unlink() if child.is_file() else child.rmdir()
     fixture.repository.rmdir()
 
-    with pytest.raises(UnprotectedCaptureDir) as refusal:
-        fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
+    written = fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
 
-    assert "not a directory on disk" in str(refusal.value)
-    assert RULE not in str(refusal.value), (
-        "a repository that is not on disk was reported as a missing rule"
+    assert written.read_text(encoding="utf-8") == BODY, (
+        "a registry pointing at a directory that no longer exists is a "
+        "configuration fault, not a leak: with the repository gone there is "
+        "nothing that could commit the capture"
     )
 
 
@@ -383,43 +421,142 @@ def test_a_non_capture_artifact_in_the_same_scope_is_unaffected(tmp_path):
 
 
 @pytest.mark.parametrize("scope", [PERSONAL, PEOPLE], ids=["personal", "people"])
-def test_a_capture_in_an_uncommitted_scope_is_unaffected(tmp_path, scope):
-    """Rows 9 and 11 — no repository, so there is nothing to ask and no rule.
+def test_a_capture_outside_any_working_tree_is_unaffected(tmp_path, scope):
+    """Rows 9 and 11 — no working tree, so nothing can commit it.
 
-    `transcripts/` is homed in every scope at the same relative path, so the
-    artifact key alone cannot decide this: `is_git_committed` does. Keying on the
-    key alone would refuse every personal and team-member capture forever, since
-    no `.gitignore` anywhere excludes `~/.manager-ai/transcripts/` — and it would
-    run git on every 1:1 recording, which is the row the amended matrix adds.
+    Re-derived 2026-08-22. The outcome is unchanged and the *reason* is not. This
+    read `is_git_committed`, so the write proceeded because the scope was not the
+    project one; it now proceeds because git reports no working tree here. The
+    old docstring argued that keying on the artifact name alone would refuse
+    every personal capture forever, since no `.gitignore` excludes
+    `~/.manager-ai/transcripts/` — true, and not an argument against keying on
+    the working tree, which is the option it did not consider.
     """
-    vcs = FakeVcs(failure="git must not be consulted for an uncommitted scope")
+    vcs = FakeVcs(root=None)
     fixture = _fixture(tmp_path, gitignore=None, init=False, vcs=vcs)
 
     written = fixture.storage.write_capture(BODY, scope=scope, name=NAME)
 
     assert written.read_text(encoding="utf-8") == BODY
-    assert vcs.asked == [], "git was consulted about a scope with no repository"
+    assert vcs.trees_asked, "the working-tree question was never asked"
+    assert vcs.asked == [], "tracking was consulted for a path in no repository"
+
+
+@pytest.mark.parametrize("scope", [PERSONAL, PEOPLE], ids=["personal", "people"])
+def test_a_capture_inside_a_private_repository_is_guarded(tmp_path, scope):
+    """The leak this story closes, driven against real `git init`.
+
+    Deployment tells the PM to keep the sovereign personal scope as a private git
+    repository with `private/` gitignored — and `transcripts/` sits at that
+    scope's *root*, outside `private/`. So a verbatim coaching transcript was
+    committable, and the guard never even asked, because `is_git_committed` is
+    true for PROJECT alone.
+
+    No row in this file covered it: every personal and team-member case was built
+    with `init=False`, so the repository-backed case was not wrong here, it was
+    absent.
+    """
+    fixture = _fixture(tmp_path, gitignore=None, init=False)
+    capture = fixture.capture_dir(scope)
+    root = _scope_repository_root(fixture, scope)
+    _git("init", "-q", "--initial-branch=main", ".", cwd=root)
+    before = _snapshot(fixture, scope)
+
+    with pytest.raises(UnprotectedCaptureDir) as refusal:
+        fixture.storage.write_capture(BODY, scope=scope, name=NAME)
+
+    expected = gitignore_rule_for(capture, repository=root)
+    assert expected in str(refusal.value), (
+        f"the refusal must name the rule for THIS repository ({expected}), not "
+        f"the project one — an operator sent to edit {RULE} in {root} is being "
+        f"sent to a file that is already correct"
+    )
+    assert str(root / ".gitignore") in str(refusal.value)
+    _assert_nothing_written(fixture, scope, before)
+
+
+@pytest.mark.parametrize("scope", [PERSONAL, PEOPLE], ids=["personal", "people"])
+def test_a_private_repository_that_excludes_its_captures_permits_them(tmp_path, scope):
+    """The repair the row above prescribes has to actually work.
+
+    A guard that refuses whatever the operator does is worse than no guard: they
+    add the rule it named, nothing changes, and they learn to ignore it.
+    """
+    fixture = _fixture(tmp_path, gitignore=None, init=False)
+    capture = fixture.capture_dir(scope)
+    root = _scope_repository_root(fixture, scope)
+    _git("init", "-q", "--initial-branch=main", ".", cwd=root)
+    rule = gitignore_rule_for(capture, repository=root)
+    (root / ".gitignore").write_text(f"{rule}\n", encoding="utf-8")
+
+    written = fixture.storage.write_capture(BODY, scope=scope, name=NAME)
+
+    assert written.read_text(encoding="utf-8") == BODY
+
+
+def _scope_repository_root(fixture: Fixture, scope: DataScope) -> Path:
+    """The directory to `git init` so that this scope's captures sit inside it.
+
+    Derived from the resolver rather than assembled from the scope's known
+    layout: the personal scope holds captures at its root while the team-member
+    scope holds them under a person's directory, and a test that hardcoded either
+    would stop testing the guard the day the resolver moved one.
+    """
+    root = fixture.capture_dir(scope).parent
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 # ── Storage's own reaction to a verdict it was handed ─────────────────────────
 
 
-def test_any_unanswered_question_is_a_refusal(tmp_path):
-    """Unknown is not permission — whatever the adapter could not do.
+def test_an_unanswerable_question_refuses_only_when_a_repository_exists(tmp_path):
+    """git is optional; a repository pm-ai cannot interrogate is not.
 
-    Driven through a fake because the *cause* is what varies and the reaction must
-    not: a missing binary, a timeout, a path outside the repository. Row 8 proves
-    the real adapter raises this for a real repository-shaped failure; this proves
-    storage refuses on it regardless of which failure it was.
+    Re-derived 2026-08-22. This asserted that any unanswered question refuses.
+    That made git a hard requirement of recording a meeting, which it is not: on
+    a machine with no git, or in a directory that is no checkout, nothing exists
+    that could commit a capture.
+
+    What survives is the narrow case that genuinely leaks. "pm-ai cannot find
+    git" is not the fact "no repository exists" — the daemon runs under `launchd`
+    with a minimal PATH, so it can miss a `git` the developer's shell uses every
+    day, and the capture would land in a genuinely tracked directory. Answering
+    "am I inside a repository" needs no binary, so the refusal narrows to
+    repository-present-and-unaskable.
     """
-    vcs = FakeVcs(failure="no `git` on PATH")
+    marker = tmp_path / "elsewhere" / ".git"
+    marker.mkdir(parents=True)
+    vcs = FakeVcs(failure="no `git` on PATH", marker=marker)
     fixture = _fixture(tmp_path, gitignore=f"{RULE}\n", init=False, vcs=vcs)
+    before = _snapshot(fixture, PROJECT)
 
     with pytest.raises(UnprotectedCaptureDir) as refusal:
         fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
 
     assert "no `git` on PATH" in str(refusal.value), "the cause must survive the refusal"
-    assert vcs.asked, "the fake was never consulted, so this proves nothing"
+    assert str(marker) in str(refusal.value), (
+        "the refusal must name the repository it found, or the operator cannot "
+        "tell this from a missing rule"
+    )
+    _assert_nothing_written(fixture, PROJECT, before)
+
+
+def test_an_unanswerable_question_with_no_repository_permits_the_capture(tmp_path):
+    """The other half, and the reason the case above had to narrow.
+
+    No git and no repository: there is nothing that could ever commit this, so
+    refusing would stop pm-ai doing its job to protect against a risk that does
+    not exist. Asserted separately from the row above because the two differ by
+    one fact, and a single test could satisfy either reading.
+    """
+    vcs = FakeVcs(failure="no `git` on PATH", marker=None)
+    fixture = _fixture(tmp_path, gitignore=None, init=False, vcs=vcs)
+
+    written = fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
+
+    assert written.read_text(encoding="utf-8") == BODY
+    assert vcs.asked == [], "tracking was consulted after git had already failed"
 
 
 def test_the_directory_git_is_asked_about_is_the_one_written_to(tmp_path):
@@ -430,6 +567,10 @@ def test_the_directory_git_is_asked_about_is_the_one_written_to(tmp_path):
     """
     vcs = FakeVcs(verdict=TrackingVerdict(ignored=True))
     fixture = _fixture(tmp_path, gitignore=f"{RULE}\n", vcs=vcs)
+    # The fake now answers both questions, and the working-tree root is what
+    # `tracking` is asked *from* — so it has to be the repository, or this test
+    # would assert against a root the guard invented.
+    vcs.root = fixture.repository
 
     written = fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
 
@@ -447,6 +588,7 @@ def test_a_tracked_directory_is_refused_even_when_the_rules_exclude_it(tmp_path)
     """
     vcs = FakeVcs(verdict=TrackingVerdict(ignored=True, tracked=("t/old.md",)))
     fixture = _fixture(tmp_path, gitignore=f"{RULE}\n", vcs=vcs)
+    vcs.root = fixture.repository
 
     with pytest.raises(UnprotectedCaptureDir) as refusal:
         fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)

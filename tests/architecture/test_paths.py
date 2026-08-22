@@ -30,6 +30,7 @@ from pm_ai.domain.storage_tiers import (
     ARTIFACT_TIER,
     DIAGNOSTIC_ONLY,
     GITIGNORE_REQUIRED,
+    gitignore_rule_for,
     RETENTION_MANAGED,
     ScopeResolutionError,
     Tier,
@@ -516,7 +517,8 @@ def test_gitignore_rules_cover_the_paths_the_resolver_returns(production):
     forever with no way to satisfy it.
     """
     repo = production.repository("alpha")
-    for artifact, rule in GITIGNORE_REQUIRED.items():
+    for artifact in GITIGNORE_REQUIRED:
+        rule = gitignore_rule_for(production.resolve(PROJECT, artifact), repository=repo)
         assert ScopeKind.PROJECT in _scopes_of(artifact), (
             f"{artifact} has a .gitignore rule but no path in a committed scope"
         )

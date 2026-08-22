@@ -47,6 +47,14 @@ GIT_TIMEOUT_SECONDS = 10
 _IGNORED = 0
 _NOT_IGNORED = 1
 
+# `rev-parse` exits 128 with a message naming `.git` when it is run outside a
+# working tree. That is the one 128 with a known meaning, and it is a legitimate
+# answer rather than a failure, so it is matched on the message as well as the
+# code — 128 alone also covers corrupt repositories and unreadable objects, and
+# reading either of those as "not in a repository" would silently permit a write.
+_FATAL = 128
+_OUTSIDE_A_REPOSITORY = "not a git repository"
+
 
 @dataclass(frozen=True, slots=True)
 class GitVcs:
@@ -63,6 +71,59 @@ class GitVcs:
         ignored = self._check_ignore(target, repository=repository)
         tracked = self._ls_files(target, repository=repository)
         return TrackingVerdict(ignored=ignored, tracked=tracked)
+
+    def working_tree(self, path: Path) -> Path | None:
+        """The working-tree root containing `path`, or `None` if there is none.
+
+        Asked from the nearest existing ancestor rather than from `path` itself,
+        because the first capture write concerns a directory that does not exist
+        yet and `git -C` needs somewhere real to stand. Discovery walks upward
+        anyway, so an ancestor gives the same answer the directory would once it
+        exists — and if some ancestor is a working tree, the not-yet-created
+        directory is inside it, which is precisely the case that must not slip
+        through.
+        """
+        anchor = self._nearest_existing(path)
+        if anchor is None:
+            raise VcsUnavailable(
+                f"no existing directory above {path}, so there is nowhere to ask "
+                f"git from. Refusing rather than assuming: an unanswerable "
+                f"question is not permission."
+            )
+        completed = self._git("rev-parse", "--show-toplevel", repository=anchor)
+        if completed.returncode == 0:
+            return Path(completed.stdout.strip())
+        if (
+            completed.returncode == _FATAL
+            and _OUTSIDE_A_REPOSITORY in completed.stderr.lower()
+        ):
+            return None
+        raise VcsUnavailable(
+            f"`git rev-parse --show-toplevel` in {anchor} exited "
+            f"{completed.returncode}: {completed.stderr.strip() or 'no output'}. "
+            f"Whether {path} is inside a working tree is therefore unknown, and "
+            f"unknown is not permission."
+        )
+
+    def repository_marker_above(self, path: Path) -> Path | None:
+        """The first `.git` at or above `path`, by filesystem alone.
+
+        `.git` is a directory in a normal checkout and a file in a worktree or
+        submodule, so existence is the test rather than `is_dir`.
+        """
+        for candidate in (path, *path.parents):
+            marker = candidate / ".git"
+            if marker.exists():
+                return marker
+        return None
+
+    @staticmethod
+    def _nearest_existing(path: Path) -> Path | None:
+        """The first directory at or above `path` that exists."""
+        for candidate in (path, *path.parents):
+            if candidate.is_dir():
+                return candidate
+        return None
 
     # ── The two questions ────────────────────────────────────────────────────
 

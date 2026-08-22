@@ -41,12 +41,14 @@ from pm_ai.domain.scope_model import (
 from pm_ai.domain.storage_tiers import (
     CAPTURES,
     EVENT_LOG,
+    GITIGNORE_FILENAME,
     GITIGNORE_REQUIRED,
     OPERATIONAL_DB,
     TierViolation,
     UnprotectedCaptureDir,
     assert_capture_dir_ignored,
     assert_capture_dir_untracked,
+    gitignore_rule_for,
     assert_reindex_safe,
 )
 from pm_ai.domain.vcs import TrackingVerdict, VcsUnavailable
@@ -91,9 +93,9 @@ __all__ = [
     # tier tables are derived from the trees, so both come from one module.
     "SCOPE_TREES", "File", "Dir", "Collection", "MalformedLayout",
     "OutsideTierModel", "RETENTION_MANAGED", "DIAGNOSTIC_ONLY",
-    "GITIGNORE_REQUIRED", "UnprotectedCaptureDir", "assert_capture_dir_ignored",
+    "GITIGNORE_FILENAME", "GITIGNORE_REQUIRED", "UnprotectedCaptureDir", "assert_capture_dir_ignored",
     # Git is the authority on what git tracks, so the write path asks it through
     # `pm_ai.ports.VcsPort` and refuses on `VcsUnavailable`. The text matcher
     # above is the pure form of the question, not the answer.
-    "TrackingVerdict", "VcsUnavailable", "assert_capture_dir_untracked",
+    "TrackingVerdict", "VcsUnavailable", "assert_capture_dir_untracked", "gitignore_rule_for",
 ]

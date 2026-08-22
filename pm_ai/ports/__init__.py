@@ -114,6 +114,49 @@ class VcsPort(Protocol):
         unknown is not permission.
         """
 
+    def working_tree(self, path: Path) -> Path | None:
+        """The root of the git working tree containing `path`, or `None`.
+
+        `None` is an *answer*, not a failure: this path is not inside a working
+        tree, so there is nothing for git to carry into a commit and nothing to
+        be excluded from. That distinction is what lets the capture guard cover
+        every scope without refusing writes on a machine where the personal scope
+        is an ordinary directory.
+
+        Asked before `tracking`, because `tracking` needs a repository to be
+        asked *from*, and which repository that is cannot be known from the scope
+        — the project scope lives in the employer's checkout, the personal scope
+        may be a private repository of its own, and either may be neither.
+
+        `path` need not exist. Every first capture write concerns a directory
+        about to be created, and the answer must be the one git would give
+        afterwards.
+
+        Raises `pm_ai.domain.VcsUnavailable` when the question cannot be
+        answered at all — no `git` binary, a timeout, an exit code with no
+        documented meaning. Not being in a repository is not one of those.
+        """
+
+    def repository_marker_above(self, path: Path) -> Path | None:
+        """A `.git` at or above `path`, found without running anything.
+
+        The fallback for when `working_tree` could not answer. git is *optional*:
+        a machine without it, or a project that is not a checkout, must still be
+        able to record a meeting. But "pm-ai cannot find git" is not the same
+        fact as "no repository exists" — the daemon runs under `launchd` with a
+        minimal PATH, so it can easily miss a `git` the developer's own shell
+        uses. Captures would then land in a genuinely tracked directory.
+
+        Answering "am I inside a repository at all" needs no binary; only "would
+        git ignore this" does. So this narrows the refusal to the one case that
+        can actually leak: a repository demonstrably present, and no way to ask
+        it anything.
+
+        Returns the `.git` itself, so a refusal can name what it found. Never
+        raises: a directory walk has no failure mode worth propagating, and one
+        that could not read a parent has already been reported by `working_tree`.
+        """
+
 
 @runtime_checkable
 class StoragePort(Protocol):

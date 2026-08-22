@@ -2,8 +2,10 @@
 title: 'Capture guard covers every scope'
 type: 'feature'
 created: '2026-08-22'
-status: 'ready-for-dev'
+updated: '2026-08-22'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: 'c90f1f2'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
   - '{project-root}/_bmad-output/specs/spec-pm-ai/scope-model.md'
@@ -32,7 +34,8 @@ There is a second, structural half. `GITIGNORE_REQUIRED` maps the artifact **bas
 ## Boundaries & Constraints
 
 **Always:**
-- **Unknown is still not permission.** No `git` binary, a timeout, an unrecognised exit — each refuses the write, in every scope. Only *"this path is not inside a working tree"* permits it, because that is an answer git gave rather than one it failed to give.
+- **git is optional, and its absence never blocks recording a meeting.** *(Renegotiated during implementation, 2026-08-22. The rule as approved said any unanswered question refuses in every scope; the user's direction was that a machine without git, and a project that is no checkout, are both legitimate and must not stop pm-ai working.)* No git and no repository writes; a path in no working tree writes.
+- **The refusal narrows to a repository present and unaskable.** "pm-ai cannot find git" is not the fact "no repository exists": the daemon runs under `launchd` with a minimal PATH, so it can miss a `git` the developer's shell uses daily, and the capture would land in a genuinely tracked directory. Whether a repository exists is answerable with no binary at all — walk up looking for `.git` — and only whether git would *ignore* a path needs git. So that one combination refuses, and it names the `.git` it found so the operator can tell it from a missing rule. A timeout or an undocumented exit code, having got past the working-tree question, still refuses: at that point a repository is known to exist.
 - The verdict keeps both facts, `ignored` and `tracked`, and both repairs. A rule does not untrack what is already committed, in a private repository any more than in the employer's.
 - The remedy path is derived from the reported working-tree root. Nothing may reintroduce a per-scope table of rule strings keyed on the `transcripts/` basename.
 - One code path serves all three scopes. A per-scope branch is the shape this story removes; adding a fourth capture location must require no change here.
@@ -48,13 +51,16 @@ There is a second, structural half. `GITIGNORE_REQUIRED` maps the artifact **bas
 | Given | When | Then |
 |---|---|---|
 | PROJECT scope, repository excludes `transcripts/` | a capture is written | git is asked, the verdict is excluded, the write proceeds |
+| PROJECT scope, its registered root is **not** a repository | a capture is written | the write proceeds — nothing can commit it. *Re-derived: this refused before the guard stopped keying on scope* |
+| PROJECT scope, registered root deleted from disk | a capture is written | the write proceeds. A stale registry is a configuration fault for `pm-ai doctor`, not a leak |
 | PERSONAL scope, `~/.manager-ai` is **not** a git repository | a capture is written | git reports no working tree, the write proceeds, and no refusal is raised |
 | PERSONAL scope, `~/.manager-ai` **is** a git repository with no rule for `transcripts/` | a capture is written | refused, naming the `.gitignore` at that repository's root — not `/.project-ai/transcripts/` |
 | PERSONAL scope, a repository whose `.gitignore` excludes `transcripts/` | a capture is written | the write proceeds |
 | PERSONAL scope, a repository where `transcripts/` was committed before the rule was added | a capture is written | refused with the untrack instruction, not the add-a-rule instruction |
 | PEOPLE scope, `~/.pm-ai` is a git repository not excluding the capture directory | a capture is written | refused — a direct report's 1:1 recording is covered on the same terms |
 | PEOPLE scope, `~/.pm-ai` is not a repository | a capture is written | the write proceeds |
-| Any scope, no `git` on `PATH` | a capture is written | refused, whichever scope it was |
+| Any scope, no `git` on `PATH`, no `.git` above the target | a capture is written | the write proceeds — git is optional |
+| Any scope, no `git` on `PATH`, a `.git` **present** above the target | a capture is written | refused, naming both the missing git and the `.git` it found |
 | Any scope, git present but the query times out | a capture is written | refused, and the cause survives into the message |
 | A non-capture artifact in a committed scope | it is written | git is not consulted at all |
 | A capture directory inside a working tree | the guard runs | the directory is not created as a side effect of asking |
@@ -66,7 +72,7 @@ There is a second, structural half. `GITIGNORE_REQUIRED` maps the artifact **bas
 - `pm_ai/storage/service.py:369-413` — `_assert_git_excludes`, the guard. Its first line (`if not scope.is_git_committed or artifact not in GITIGNORE_REQUIRED`) is the gate being replaced, and its docstring states the premise this story falsifies.
 - `pm_ai/storage/service.py:398-399` — `self._paths.repository(scope.project_id)`, project-keyed. The working-tree root replaces it as the thing git is asked from.
 - `pm_ai/storage/service.py:412-413` — `self._paths.gitignore(scope.project_id)`, likewise project-keyed; the derived root replaces it.
-- `pm_ai/ports/__init__.py:84-115` — `VcsPort.tracking`, which already takes `repository` as a keyword. The new discovery method belongs beside it.
+- `pm_ai/ports/__init__.py:84-115` — `VcsPort.tracking`, which already takes `repository` as a keyword. `working_tree` and `repository_marker_above` were added beside it.
 - `pm_ai/platform/vcs.py:52-120` — `GitVcs`, including `_git` with its allowlisted argv and bounded timeout, which the new query reuses.
 - `pm_ai/domain/vcs.py` — `TrackingVerdict` and `VcsUnavailable`, unchanged. Only who gets asked changes, not what the answer means.
 - `pm_ai/domain/storage_tiers.py:95-97` — `GITIGNORE_REQUIRED`, and the basename keying that makes a per-scope table impossible.
@@ -77,10 +83,11 @@ There is a second, structural half. `GITIGNORE_REQUIRED` maps the artifact **bas
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` — add the working-tree discovery method to `VcsPort`, documented so that *not inside one* is a return value and every failure is `VcsUnavailable`.
-- [ ] `pm_ai/platform/vcs.py` — implement it over `git rev-parse --show-toplevel`, through the existing `_git` helper so the argv allowlist and timeout apply unchanged.
-- [ ] `pm_ai/storage/service.py` — drop the `is_git_committed` gate, run the guard for every capture artifact in every scope, and derive both the repository and the `.gitignore` path from the reported working-tree root. Rewrite the docstring, which currently records the false premise.
-- [ ] `tests/architecture/test_capture_guard.py` — re-derive `test_a_capture_in_an_uncommitted_scope_is_unaffected` around the working-tree reason, and add the repository-backed PERSONAL and PEOPLE rows, driven against real `git init` directories.
+- [x] `pm_ai/ports/__init__.py` — `VcsPort.working_tree` (`None` is an answer) and `VcsPort.repository_marker_above` (the no-binary fallback).
+- [x] `pm_ai/platform/vcs.py` — `working_tree` over `git rev-parse --show-toplevel` through the existing `_git` helper, asked from the nearest existing ancestor since the capture directory does not exist yet; `repository_marker_above` by pathlib alone.
+- [x] `pm_ai/domain/storage_tiers.py` — `GITIGNORE_REQUIRED` becomes a frozenset of artifacts needing the guard, and `gitignore_rule_for` derives the rule text from the working-tree root. `GITIGNORE_FILENAME` moved here so `storage` can name it without importing `platform`.
+- [x] `pm_ai/storage/service.py` — the `is_git_committed` gate dropped, guard runs for every capture artifact in every scope, repository and `.gitignore` path both derived from git's reported root, docstring rewritten around the real premise.
+- [x] `tests/architecture/test_capture_guard.py` — five rows re-derived, four new rows against real `git init` for the personal and team-member repositories, one new row for the no-git-no-repository case; `FakeVcs` answers both new questions.
 
 **Acceptance Criteria:**
 - Given `~/.manager-ai` initialised as a git repository with no rule for `transcripts/`, when a personal capture is written, then it is refused and the message names that repository's own `.gitignore`.

@@ -34,6 +34,8 @@ Imports nothing from `pm_ai` outside `pm_ai.domain` (AD-30), and performs no I/O
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pm_ai.domain.scope_model import (
     ARTIFACT_TIER,
     BACKUP_TARGETS,
@@ -53,6 +55,7 @@ __all__ = [
     "CAPTURES",
     "DIAGNOSTIC_ONLY",
     "EVENT_LOG",
+    "GITIGNORE_FILENAME",
     "GITIGNORE_REQUIRED",
     "OPERATIONAL_DB",
     "OutsideTierModel",
@@ -65,6 +68,7 @@ __all__ = [
     "assert_capture_dir_ignored",
     "assert_capture_dir_untracked",
     "assert_reindex_safe",
+    "gitignore_rule_for",
 ]
 
 
@@ -92,9 +96,30 @@ CAPTURES = "transcripts/"
 # writes a capture, because the failure mode is publishing verbatim meeting
 # transcripts to the employer's repository — the same class of leak AD-38 exists
 # to prevent, arriving by omission instead of by routing.
-GITIGNORE_REQUIRED: dict[str, str] = {
-    CAPTURES: "/.project-ai/transcripts/",
-}
+GITIGNORE_REQUIRED: frozenset[str] = frozenset({CAPTURES})
+
+# Named here rather than in `pm_ai.platform`, because `pm_ai.storage` derives
+# the path from git's reported working-tree root and may not import that
+# package. One definition, read by both.
+GITIGNORE_FILENAME = ".gitignore"
+
+
+def gitignore_rule_for(target: Path, *, repository: Path) -> str:
+    """The `.gitignore` line that would exclude `target` from `repository`.
+
+    Derived, never stored. The rule depends on where the capture directory sits
+    relative to its working-tree root, and that differs per scope: a project
+    capture wants `/.project-ai/transcripts/`, a personal one at the root of its
+    own private repository wants `/transcripts/`. A table could not hold both,
+    because `GITIGNORE_REQUIRED` is keyed on the artifact *basename* and every
+    scope spells captures the same way — so one key would have to carry two
+    values. Re-keying the tier tables on `(scope, path)` is the change AD-44
+    defers; deriving the rule sidesteps needing it at all.
+
+    Anchored with a leading slash so it matches at the repository root only, and
+    trailing so it reads as the directory it is.
+    """
+    return "/" + target.relative_to(repository).as_posix() + "/"
 
 
 class UnprotectedCaptureDir(RuntimeError):
@@ -102,7 +127,7 @@ class UnprotectedCaptureDir(RuntimeError):
 
 
 def assert_capture_dir_untracked(
-    artifact: str, verdict: TrackingVerdict, *, gitignore: str
+    artifact: str, verdict: TrackingVerdict, *, rule: str, gitignore: str
 ) -> None:
     """Refuse to write a raw capture git would carry into a commit.
 
@@ -114,16 +139,17 @@ def assert_capture_dir_untracked(
     caller that could not get one must refuse instead of calling this with a
     guess (see `VcsUnavailable`).
 
-    `gitignore` is the path the rule belongs in, for the message only. Naming it
-    is the difference between an error the operator can act on and one they have
-    to go looking for the cause of, and the location is the resolver's to know.
+    `rule` and `gitignore` are both for the message, and both come from the
+    caller rather than a lookup here — the rule that repairs this depends on
+    where the capture sits inside its working tree, which the domain cannot know
+    and `gitignore_rule_for` derives. Naming them is the difference between an
+    error the operator can act on and one they have to go looking for.
 
     The two branches are two different repairs. A rule does not untrack what is
     already in the index, so telling someone to add one when the real problem is
     a tracked directory sends them to fix a file that is already correct.
     """
-    rule = GITIGNORE_REQUIRED.get(artifact)
-    if rule is None or verdict.is_excluded:
+    if artifact not in GITIGNORE_REQUIRED or verdict.is_excluded:
         return
     if verdict.tracked:
         raise UnprotectedCaptureDir(
@@ -143,7 +169,7 @@ def assert_capture_dir_untracked(
     )
 
 
-def assert_capture_dir_ignored(artifact: str, gitignore_text: str) -> None:
+def assert_capture_dir_ignored(artifact: str, gitignore_text: str, *, rule: str) -> None:
     """The `.gitignore` text alone, asked the same question. Not the authority.
 
     Retained as the pure form of the check — no filesystem, no subprocess, one
@@ -156,8 +182,7 @@ def assert_capture_dir_ignored(artifact: str, gitignore_text: str) -> None:
     transcript is recoverable (it is transient input under NFR-09 and nothing may
     depend on it); committing one is not.
     """
-    rule = GITIGNORE_REQUIRED.get(artifact)
-    if rule is None:
+    if artifact not in GITIGNORE_REQUIRED:
         return
     lines = {ln.strip().rstrip("/") for ln in gitignore_text.splitlines() if ln.strip()}
     if rule.rstrip("/") not in lines and rule.lstrip("/").rstrip("/") not in lines:
@@ -199,7 +224,7 @@ assert _CODE_KEYS <= KEYS, (
 # And `GITIGNORE_REQUIRED` keys the same way: a rule whose artifact does not
 # exist is a rule the write path can never consult, which reads as protection
 # and is silence.
-assert set(GITIGNORE_REQUIRED) <= KEYS, (
+assert GITIGNORE_REQUIRED <= KEYS, (
     "a .gitignore rule names no node in any scope tree: "
-    f"{sorted(set(GITIGNORE_REQUIRED) - KEYS)}"
+    f"{sorted(GITIGNORE_REQUIRED - KEYS)}"
 )

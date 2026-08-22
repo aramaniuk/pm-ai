@@ -62,6 +62,10 @@ from pathlib import Path
 from types import MappingProxyType
 
 from pm_ai.domain.identity import DataScope, ScopeKind
+# `GITIGNORE_FILENAME` is defined in `domain` rather than here: `pm_ai.storage`
+# derives the path from git's reported working-tree root and may not import
+# this package, so one definition serves both.
+from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
 from pm_ai.domain.scope_model import (
     ADDRESS as _ADDRESS,
     AMBIGUOUS as _AMBIGUOUS,
@@ -137,7 +141,6 @@ PROJECT_DIRNAME = ".project-ai"
 # a second spelling of a layout fact is a second layout (AD-4). The single writer
 # reads it before writing a raw capture: the rule inside it is the only thing
 # keeping verbatim minutes out of the team's repository.
-GITIGNORE_FILENAME = ".gitignore"
 
 # The gitignored enclave inside a scope. It holds the Tier-2 and Tier-3 stores
 # and, under the application scope, the whole team-member scope — so it is a

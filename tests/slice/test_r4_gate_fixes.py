@@ -379,13 +379,20 @@ def test_captures_refuse_to_write_without_a_gitignore_rule():
         assert_capture_dir_ignored,
     )
 
-    assert_capture_dir_ignored("transcripts/", "node_modules/\n/.project-ai/transcripts/\n")
-    assert_capture_dir_ignored("transcripts/", ".project-ai/transcripts\n")
+    # The rule is now the caller's to supply: it depends on where the capture
+    # sits inside its working tree, which differs per scope, so the domain no
+    # longer holds a table of rule text.
+    rule = "/.project-ai/transcripts/"
+
+    assert_capture_dir_ignored(
+        "transcripts/", "node_modules/\n/.project-ai/transcripts/\n", rule=rule
+    )
+    assert_capture_dir_ignored("transcripts/", ".project-ai/transcripts\n", rule=rule)
 
     with pytest.raises(UnprotectedCaptureDir):
-        assert_capture_dir_ignored("transcripts/", "node_modules/\n*.pyc\n")
+        assert_capture_dir_ignored("transcripts/", "node_modules/\n*.pyc\n", rule=rule)
     with pytest.raises(UnprotectedCaptureDir):
-        assert_capture_dir_ignored("transcripts/", "")
+        assert_capture_dir_ignored("transcripts/", "", rule=rule)
 
-    # An artifact with no rule registered is not silently protected either way.
-    assert_capture_dir_ignored("telegram_cache/", "")
+    # An artifact the guard does not cover is not silently protected either way.
+    assert_capture_dir_ignored("telegram_cache/", "", rule=rule)
