@@ -27,6 +27,7 @@ context:
 - Fail closed. A missing key refuses to open the encrypted store. There is no fallback to plaintext.
 - Encryption may be disabled by an explicit debug flag. It defaults to on, is never off in a fresh installation, and while off it emits **both** a console warning and an event-log entry.
 - Encrypted files are written at mode `0600`.
+- **Directories holding encrypted artifacts are created at mode `0700`.** A `0600` file inside a world-readable directory still leaks its name, its size, and its mtime — enough to show that a 1:1 with a named report happened, on a given day, which is the fact the enclave exists to hide. This story owns file modes, so it owns the directories it creates them in. (Deferred here after story 1a and never recorded in this file until 2026-08-22.)
 
 **Ask First:** Choosing a cipher or key-derivation function other than the AES-256 the storage contract specifies. Encrypting an artifact the classifier reports as plaintext.
 
@@ -38,6 +39,8 @@ context:
 |---|---|---|
 | A key is available | a payload is encrypted, then decrypted | the result equals the original payload |
 | A key is available | a payload is encrypted | the bytes written differ from the payload, and the file's mode is `0600` |
+| A key is available, target directory absent | the encrypted store is opened | every directory created along the way is mode `0700`, and the store itself `0600` |
+| A directory that already exists at `0755` | an encrypted artifact is written into it | the directory is tightened to `0700` rather than left as found |
 | Two different keys | the same payload is encrypted under each | the two outputs differ |
 | A payload encrypted under one key | decryption is attempted with another | raises a typed error rather than returning corrupt data |
 | An empty keychain | the encrypted operational store is opened | raises a typed error; the store is not opened and no plaintext file is created at its path |
@@ -70,6 +73,7 @@ context:
 - Given `uv run lint-imports`, then all 12 contracts hold and no module under `pm_ai/storage/` imports `pm_ai.platform`.
 - Given an empty keychain, when the operational store is opened, then it raises and no plaintext file exists at its path.
 - Given encryption disabled by the debug flag, then both a console warning and an event-log entry are emitted.
+- Given a fresh tree, when the encrypted store is created, then `stat` reports `0700` on each directory created and `0600` on the store.
 - Given the store is written, closed, and reopened with the same key, then the earlier rows are readable.
 
 ## Design Notes
@@ -82,3 +86,4 @@ Encryption and durability are independent properties, and an implementation that
 - `uv run python -c "import pm_ai.storage.crypto"` — expected: silent success with the `runtime` extra absent.
 - `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
 - Introduce a plaintext fallback for a missing key and confirm the test goes red, then remove it.
+- `stat -f '%Sp %N'` on the enclave directory and the store — expected: `drwx------` and `-rw-------`. A `0600` file inside a `0755` directory still publishes its name, size and mtime, which is enough to reveal that a 1:1 with a named report happened on a given day.

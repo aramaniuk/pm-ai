@@ -38,6 +38,23 @@
     only signal that it exists. The concrete type is not an option either, since
     pm_ai.storage may not import pm_ai.platform. Every "type: ignore" carries an
     error code and a reason, and no Any is introduced to make an error go away.
+- id: "1l"
+  title: Guards that survive optimization
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Convert the ten import-time asserts that verify the scope model into typed
+    raises, so `python -O` cannot strip the only checks establishing that the
+    derived tier and exclusion sets are coherent.
+  invoke_dev_with: >-
+    Ten sites, and an AST sweep confirms there are no other asserts in pm_ai/ -
+    lifecycle.py:63, scope_model.py:818/824/829/841/844/847/855,
+    storage_tiers.py:194/202. Keep every message verbatim: several are the
+    clearest statement of their invariant anywhere in the repo, and shortening
+    them during a mechanical conversion is how a refactor deletes documentation.
+    Do not relocate the checks into tests - the guard must refuse a model someone
+    hand-edits after install, not just prove this repo's model is fine. The
+    __post_init__ checks on File, Dir and Collection already raise; follow them.
 - id: "1d"
   title: Keychain port and macOS adapter
   spec_checkpoint: true

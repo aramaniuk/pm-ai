@@ -29,6 +29,7 @@ context:
 - **All three capture directories carry one answer.** `transcripts/` is encrypted in the project, team-member, and personal scopes alike. The basename is declared once and the answer is global, so no scope can hold a plaintext capture.
 - An **undeclared** path fails closed: it classifies as encrypted. A path no tree names is either a historical name or an artifact someone forgot to declare, and guessing plaintext on either is the guess that leaks.
 - `is_encrypted` takes a path string and returns a boolean. It is pure: it does not touch the filesystem or check whether the file exists.
+- **Tests build their paths from the resolver, never from literals.** The matrix below spells paths out because a reader needs to see them, but a test that hardcodes `~/.pm-ai/private/people/p1/dossier.md` asserts against this story's belief about the layout rather than against the layout — and it keeps passing after the resolver moves the artifact. Call `resolve(scope, artifact)` and classify what comes back. (Instruction restored 2026-08-22: it was attached to this story after 1a and lost when the story was rewritten for the derive-from-trees approach.)
 
 **Ask First:** Encrypting any artifact the storage contract lists as plaintext, or leaving any artifact on its encrypted list unencrypted. Making the undeclared-path answer anything other than fail-closed.
 
@@ -81,6 +82,7 @@ The question asked of each path is *"is this artifact encrypted at rest?"*
 - Given a `File` or `Collection` constructed without an encryption answer, then construction raises rather than defaulting.
 - Given the three `transcripts/` declarations, then all three classify as encrypted, and changing one alone is impossible because the answer is declared once per basename.
 - Given an undeclared path, then `is_encrypted` returns `True`.
+- Given `tests/architecture/test_encryption_policy.py`, then no test contains a literal scope root (`~/.pm-ai`, `~/.manager-ai`, `.project-ai`): every path under test comes from `resolve(scope, artifact)`, so the suite tracks the layout instead of a snapshot of it.
 - Given the `runtime` extra is not installed, then `pm_ai.storage.crypto` imports successfully and no test skips on a missing import.
 - Given `uv run lint-imports`, then all 12 contracts hold.
 
