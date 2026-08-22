@@ -28,6 +28,7 @@ runtime = [
 dev = [
     "pytest>=8",
     "import-linter>=2",
+    "mypy>=2",
 ]
 
 [tool.uv]
@@ -40,6 +41,26 @@ python-preference = "only-managed"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests/architecture"]
+
+# Default settings deliberately, not `strict`. Strict adds 14 findings that are
+# about annotation completeness rather than correctness (`Missing type arguments
+# for generic type "dict"`), and a checker that lands with known-acceptable
+# complaints teaches everyone to read red as normal. Zero on arrival is what
+# makes a later red result mean something; tightening earns its own slice.
+#
+# Only `pm_ai` is checked. The suite builds deliberately-wrong values to prove
+# the guards reject them, so type errors there are the point rather than a
+# defect.
+[tool.mypy]
+files = ["pm_ai"]
+python_version = "3.13"
+# The optional runtime extras are not installed in this environment on purpose —
+# `keyring`, `sqlcipher3` and `sqlite_vec` are imported inside the functions that
+# use them so a missing extra cannot become a skipped test that reads as
+# coverage. Their absence must not read as a type error.
+[[tool.mypy.overrides]]
+module = ["keyring.*", "sqlcipher3.*", "sqlite_vec.*"]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["hatchling"]

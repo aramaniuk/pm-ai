@@ -2,8 +2,10 @@
 title: 'Type-checking gate'
 type: 'feature'
 created: '2026-08-22'
-status: 'ready-for-dev'
+updated: '2026-08-22'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: 'a9025b8'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/SPEC.md'
 ---
@@ -72,17 +74,19 @@ Default settings, not `--strict`. Strict returns 24, and the extra 14 are annota
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pyproject.toml` — add `mypy` to the `dev` extra; add `[tool.mypy]` at default settings, pinning `python_version` and the package to check.
-- [ ] `pm_ai/ports/__init__.py` — `ScopePathPort` declares what `pm_ai.storage` calls on it.
-- [ ] `pm_ai/skills/registry.py` — declare the skill type so the permission check is verified rather than assumed.
-- [ ] `pm_ai/platform/paths.py` — widen the field annotation to what callers actually pass, or coerce before construction.
-- [ ] `pm_ai/storage/service.py`, `pm_ai/app/wiring.py` — narrow the two optionals with asserts that state the invariant.
-- [ ] `tests/architecture/test_types.py` — new. Runs mypy as a subprocess and fails on a missing binary.
+- [x] `pyproject.toml` — `mypy>=2` in the `dev` group; `[tool.mypy]` with `files = ["pm_ai"]` and `python_version`, plus `ignore_missing_imports` for the three deliberately-absent runtime extras.
+- [x] ~~`ScopePathPort` declares what `pm_ai.storage` calls~~ — **dissolved before this story ran.** Story 1j replaced the project-keyed `repository()`/`gitignore()` calls with working-tree discovery, so the coupling went away with the calls rather than needing a port change. The error count was 10 when this story was written and 8 when it started.
+- [x] `pm_ai/skills/registry.py` — skills typed `SkillPort`, which declares exactly the four attributes the registry reads.
+- [x] `pm_ai/platform/paths.py` — both factories coerce with `_absolute_map` before construction, so the field's `Mapping[str, Path]` stops being a declaration only the coercion happened to cover.
+- [x] `pm_ai/app/wiring.py` — narrowed by restructuring the XOR check into three branches, **not** by an assert: story 1l removes every assert from `pm_ai/`, and nothing deciding which resolver the daemon gets should depend on `python -O`.
+- [x] `pm_ai/ports/__init__.py` — **not in the original plan.** Typing the registry's `storage` surfaced three more undeclared methods (`begin_execution`, `settle_execution`, `executed_mutations`). `StoragePort` declared only the single-phase `record_execution`, which is a convenience wrapper whose one caller is a test named `idem_legacy`; the two-phase claim-then-settle form AD-20 requires was what the registry actually used. Same shape as the `ScopePathPort` finding, in the class enforcing AD-18.
+- [x] `tests/architecture/test_types.py` — the gate. Runs `mypy` with no arguments so `pyproject.toml` stays the single definition of what is checked, and fails on a missing binary.
+- [x] `.gitignore` — `.mypy_cache/`.
 
 **Acceptance Criteria:**
 - Given `uv run mypy pm_ai`, then it reports success with no issues across all 45 source files.
 - Given mypy is not on PATH, when the gate test runs, then it fails with remediation text and does not skip.
-- Given `uv run pytest`, then 228 passed and 30 skipped — one new test, no change in skips, so the ratchet in `tests/conftest.py` stays satisfied without being touched.
+- Given `uv run pytest`, then 233 passed and 30 skipped — one new test on top of 1j's, no change in skips, so the ratchet in `tests/conftest.py` stayed satisfied without being touched.
 - Given `uv run lint-imports`, then all 12 contracts hold — the `ScopePathPort` change must not create a new import edge.
 - Given the whole story, then no runtime behaviour differs: no test's expected output changes.
 - Given a grep for `type: ignore`, then every occurrence carries an error code.
@@ -100,7 +104,9 @@ Default settings, not `--strict`. Strict returns 24, and the extra 14 are annota
 ## Verification
 
 - `uv run mypy pm_ai` — expected: `Success: no issues found in 45 source files`.
-- `uv run pytest -q` — expected: 228 passed, 30 skipped.
+- `uv run pytest -q` — expected: 233 passed, 30 skipped.
 - `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
 - `env PATH=/usr/bin:/bin .venv/bin/pytest tests/architecture/test_types.py -q` — expected: 1 failed, with remediation text; **not** 1 skipped.
 - Rename one keyword parameter on a `pm_ai/platform` adapter away from its port's spelling, confirm mypy goes red, then restore it. This is the failure the story exists to catch, so it is the one to demonstrate rather than assume.
+
+  **Run, 2026-08-22.** `GitVcs.tracking`'s `repository` keyword renamed to `repo`. mypy: `pm_ai/app/wiring.py:95: error: Argument "vcs" to "StorageService" has incompatible type "VcsPort | GitVcs"; expected "VcsPort"`. The pre-existing `isinstance` conformance tests: **23 passed**, because `tracking` still exists as an attribute and that is all they check. That contrast is the story's whole justification, measured rather than argued.

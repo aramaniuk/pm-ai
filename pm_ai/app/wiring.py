@@ -70,13 +70,21 @@ def build(
     `pm_ai.platform`. A writer built without it refuses every capture into a
     committed scope, which is the safe direction but not a useful one.
     """
-    if (root is None) == (paths is None):
+    # Written as three branches rather than an XOR check followed by a ternary,
+    # so the exclusivity is what narrows the types instead of something a reader
+    # (or a checker) has to infer two statements later. Not an `assert`
+    # deliberately: those vanish under `python -O`, and nothing that decides
+    # which resolver the daemon gets should depend on an interpreter flag.
+    if root is not None and paths is None:
+        resolver = ScopePaths.rooted(root)
+    elif paths is not None and root is None:
+        resolver = paths
+    else:
         raise ValueError(
             "build() needs exactly one of `root` (a rooted layout beneath one "
             "directory, for tests) and `paths` (a resolver you built, which is "
             "how ScopePaths.production() reaches the daemon)."
         )
-    resolver = paths if paths is not None else ScopePaths.rooted(root)
     clock = now or (lambda: datetime.now(timezone.utc))
     scope = DataScope(ScopeKind.PROJECT, project)
     # Eagerly, because every refusal below is about this scope and nothing else

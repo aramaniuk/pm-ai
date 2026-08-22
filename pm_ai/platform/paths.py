@@ -418,7 +418,10 @@ class ScopePaths:
         return cls(
             application_root=base / APPLICATION_DIRNAME,
             personal_root=base / PERSONAL_DIRNAME,
-            project_roots=projects or {},
+            # Coerced here rather than left to `__post_init__`: the field declares
+            # `Mapping[str, Path]`, and a factory that hands it strings makes that
+            # declaration a lie which only the coercion happens to cover.
+            project_roots=_absolute_map(projects or {}),
         )
 
     @classmethod
@@ -444,7 +447,7 @@ class ScopePaths:
         paths = cls(
             application_root=base / APPLICATION_DIRNAME,
             personal_root=base / PERSONAL_DIRNAME,
-            project_roots=projects or {},
+            project_roots=_absolute_map(projects or {}),
             project_parent=base / ROOTED_PROJECTS_DIRNAME,
         )
         outside = sorted(
