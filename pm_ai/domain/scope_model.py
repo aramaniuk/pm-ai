@@ -435,7 +435,7 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
     # instance — so the directory is the artifact and its members are not
     # declarable here. Backed up rather than rebuilt: no Tier 1 markdown
     # encodes it.
-    Collection("connectors", Tier.TRUTH, encrypted=True, gitignored=True),
+    Collection("connectors", Tier.TRUTH, encrypted=False, gitignored=True),
     # Rotating structured diagnostic logs, NOT `event_log/`. Outside the tier
     # model on purpose, and it says so here rather than in a set elsewhere.
     Collection("logs", DIAGNOSTIC, encrypted=False, gitignored=False),

@@ -20,7 +20,6 @@ context:
 | Encrypt | Why it stayed on the list |
 | --- | --- |
 | `~/.pm-ai/private/config.json` | API credentials |
-| `~/.pm-ai/connectors/` | per-connector configuration, which holds provider tokens |
 | `~/.manager-ai/private/telegram_cache/` | the PM's own voice notes and dialogue state |
 | `~/.manager-ai/private/personal_analytics.db` | burnout and workload figures, which are recoverable personal facts |
 

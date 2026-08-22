@@ -34,7 +34,9 @@ The application scope holds none, because it owns no meetings. **All three are e
 ├── config.toml                        # Daemon settings & global defaults
 ├── disclosure.md                      # Frontier-call provenance & cost ledger - never committed
 ├── projects.toml                      # Registry of enrolled projects (pm-ai project add)
-├── connectors/                        # Per-project & personal connector configuration
+├── connectors/                        # Per-project & personal connector configuration -
+│                                      # settings only, at 600. Every token it is
+│                                      # enrolled with goes to private/config.json
 │                                      # incl. team-member career MCP (HR platforms) -
 │                                      # operates on the team-member scope, never the personal one
 ├── logs/                              # Rotating structured diagnostic logs (NOT event_log/)
@@ -147,7 +149,7 @@ The application scope holds none, because it owns no meetings. **All three are e
 - Personal-scope files are never indexed into or committed to project repositories; pre-commit hooks verify the private enclaves are gitignored.
 - A capture write asks **git itself** whether the directory would be carried into a commit, and the question is keyed on whether the path lies inside a git working tree — never on which scope owns it. All three capture locations are covered on the same terms, so a private personal repository is protected exactly as the employer's is. Tracked, or unanswerable, refuses the write; outside a working tree there is nothing to be excluded from and the write proceeds.
 - Anti-burnout indicators and personal workload analytics are excluded from every project-scope file.
-- **Encryption is narrow as of 2026-08-22**: credentials (`config.json`, `connectors/`) and the sovereign personal enclave (`~/.manager-ai/private/`). The operational store, raw captures and team-member records are 600-permissioned and gitignored but not encrypted, with full-disk encryption as the backstop. A report's record being unreadable by that report's peers now rests on file permissions and the directory boundary rather than on a cipher.
+- **Encryption is narrow as of 2026-08-22**: credentials (`config.json`) and the sovereign personal enclave (`~/.manager-ai/private/`). The operational store, raw captures and team-member records are 600-permissioned and gitignored but not encrypted, with full-disk encryption as the backstop. A report's record being unreadable by that report's peers now rests on file permissions and the directory boundary rather than on a cipher.
 - Custom metrics and dossiers about a report live in the team-member scope only — never the sovereign scope, never a committed project scope, because a report's performance record must not be readable by that report's peers.
 - Only team-member-scope material is ever an HR sync payload, and no payload may draw on personal-scope material, directly or by way of a model that read both.
 - `strategic_goals.md` holds all three goal domains in the personal scope today. A project-scope alignment surface would first require project goals to exist as project-scope records — a project artifact citing a personal goal is the cross-scope violation this model exists to prevent.

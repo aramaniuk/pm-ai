@@ -163,7 +163,7 @@ An engineering PM's judgement is spent on retrieval: reconstructing what a team 
 
 - **CAP-35** (FR-35)
   - **intent:** Let the PM add, test, disable, and expand telemetry sources without touching code or restarting anything.
-  - **success:** `pm-ai connector add --type jira --domain company.atlassian.net` prompts for a token, runs a live health probe within 10 seconds, and writes AES-256 encrypted config at 600 permissions; `pm-ai connector disable slack` halts that poller alone; a new connector module registers into the running radar without a daemon restart.
+  - **success:** `pm-ai connector add --type jira --domain company.atlassian.net` prompts for a token, runs a live health probe within 10 seconds, writes the token to the encrypted credential store and the connector's configuration at 600 permissions; `pm-ai connector disable slack` halts that poller alone; a new connector module registers into the running radar without a daemon restart.
 
 - **CAP-36** (FR-36)
   - **intent:** Make it structurally impossible for hostile text or a confused model to reach the operating system.

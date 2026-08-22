@@ -45,7 +45,9 @@ MATRIX = [
     (APPLICATION, "derived.db", None, False),
     (APPLICATION, "operational.db", None, False),
     (APPLICATION, "config.json", None, True),
-    (APPLICATION, "connectors/", "jira.toml", True),
+    # Configuration, not credentials: the token it is enrolled with goes to
+    # config.json, which is encrypted. The split was always in the layout.
+    (APPLICATION, "connectors/", "jira.toml", False),
     (PERSONAL, "telegram_cache/", "state.json", True),
     (PERSONAL, "personal_analytics.db", None, True),
     # Captures are plaintext in all three scopes as of 2026-08-22. What keeps a
