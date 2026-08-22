@@ -7,7 +7,7 @@ paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pip
 scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, connectors, MCP skills, storage'
 status: final
 created: '2026-08-18'
-updated: '2026-08-20'
+updated: '2026-08-22'
 binds: [FR-01..FR-40, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
 sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.14.2']
 companions: ['SOLUTION-DESIGN.md']
@@ -24,7 +24,7 @@ companions: ['SOLUTION-DESIGN.md']
 | Composition root | `pm_ai.app` | Wiring, dependency injection, pipeline orchestration, daemon lifecycle. The only layer that may import every other (AD-30) |
 | Domain | `pm_ai.domain` | Entities, enumerations, state machines, the closed taxonomies (AD-27). Imports nothing from `pm_ai` |
 | Core (I/O-free) | `pm_ai.core` | Services: extraction, commitment lifecycle, proposal lifecycle, alignment/planning, scheduling policy, anchor matching |
-| Ports | `pm_ai.ports` | `ConnectorPort`, `ModelPort`, `StoragePort`, `TranscriptSourcePort`, `SkillPort`, `KeychainPort`, `SurfacePort` — protocols expressed in domain types |
+| Ports | `pm_ai.ports` | `ConnectorPort`, `ModelPort`, `StoragePort`, `ScopePathPort`, `TranscriptSourcePort`, `SkillPort`, `KeychainPort`, `CryptoPort`, `VcsPort`, `SurfacePort` — protocols expressed in domain types |
 | Inbound adapters | `pm_ai.connectors` | Per-service harvesters (GitLab, Teams, Outlook, Slack, Jira, Notion, HR) — hot-loadable plugins |
 | Outbound adapters | `pm_ai.skills` | Registry-authorized MCP skill modules — the only home of **class M** egress (AD-1) |
 | Storage adapter | `pm_ai.storage` | The single writer: markdown, SQLite, vectors, encrypted blobs |
@@ -68,7 +68,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   | **H** — Harvest | Read-only fetches from external systems | `pm_ai.connectors` | Read-only by construction — a connector that mutates is a defect, not a shortcut |
   | **F** — Model | Frontier API calls | `pm_ai.models.frontier`, via the router | Prompt data governed by the model data boundary; can cause an external effect **only** by emitting a tool call that re-enters class M |
   | **S** — Surface | Telegram outbound poll | `pm_ai.surfaces.telegram` | Delivers only to the cryptographically paired user (AD-2) |
-  | **L** — Local subprocess | whisper.cpp | `pm_ai.models.local` only | Allowlisted absolute binary path, argv list, `shell=False`. **No model output may be interpolated into an argv.** |
+  | **L** — Local subprocess | whisper.cpp; read-only local queries (`git check-ignore`, `git ls-files`) | `pm_ai.models.local` for whisper.cpp, `pm_ai.platform` for local queries — nowhere else | argv list, `shell=False`, bounded timeout, and the load-bearing one: **every argv element is supplied by this codebase, never derived from model output or from external payload text.** That — not read-only-ness — is the property holding the line; a mutating local command would be just as dangerous with a model-supplied argv and just as safe without one, which is why the constraint is on argv provenance. A read-only query additionally is not *egress*: nothing external is contacted or mutated. **Enforcement gap, stated not hidden:** `pm_ai.platform` is absent from the AD-1 AST scan's layer list, so `shell=True`, `os.system`, `eval` and `exec` are unchecked there, and `git` is located by `PATH` lookup rather than an allowlisted absolute path. See Open Risks. |
 
   The LLM core holds zero shell capability and no direct network capability. **Its only route to an external effect is class M.** That is the security property; the earlier "100% of reads and writes route through MCP" was a stricter-sounding claim that the connector, frontier, and transcription paths each contradicted.
 
@@ -102,6 +102,8 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   `pm-ai reindex` deletes and rebuilds the Tier-3 artifacts and *cannot* reach Tier 2, because Tier 2 is a different file. That is a structural guarantee rather than a careful implementation. Discarding Tier 2 is a separate, explicitly-named operation whose consequences the CLI states first.
 
   **Raw captures are outside the tier model on purpose.** `transcripts/` and `telegram_cache/` hold transient input the pipeline consumes and NFR-09 purges at 30 days. They are **not Tier 3**: Tier 3 promises *rebuildable from Tier 1 with zero loss*, and no rebuild reconstructs a recording. They are never a backup target and nothing may depend on them surviving (AD-33). The exclusion is asserted in code against the tier table rather than left implicit — an artifact absent from every set is an oversight, which is how `personal_analytics.db` came to be covered by no backup; an artifact named as excluded is a decision.
+
+  **There is a third exclusion set, and finding it proved the rule above.** `logs/` is annotated "diagnostics, not a tier" in the storage diagram, and was in *no* set — precisely the oversight this AD warns about, sitting inside the AD that warns about it. `DIAGNOSTIC_ONLY` now names it, asserted pairwise disjoint from the tier table and from `RETENTION_MANAGED`. It is deliberately **not** folded into `RETENTION_MANAGED`: a rotating diagnostic log is not a raw capture, and putting it there would place it under an NFR-09 purge promise nothing implements. So the complete statement is: every persistent artifact is in exactly one of the three tiers, `RETENTION_MANAGED`, or `DIAGNOSTIC_ONLY` — and the sets are derived from the scope model (AD-44), so an artifact cannot enter one without a declaration to derive it from.
 
   **`personal_analytics.db` is Tier 2, despite being computed.** AD-25 calls it "derived telemetry" in the ordinary sense of *calculated from something else* — which is not what Tier 3's "Derived" means. Tier 3's test is narrow: **rebuildable from Tier 1 with zero loss**. Burnout and workload trends are longitudinal and outlive their inputs, because FR-37 compaction prunes the telemetry they were computed from — so a rebuild after compaction would silently return a shorter history, not the same history. It fails the Tier-3 test and is therefore durable, backed up, and never a rebuild target.
 
@@ -261,7 +263,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** the entire meeting pipeline blocking on tenant-admin consent, and being untestable without a live tenant
 - **Rule:** All transcript ingestion goes through `TranscriptSourcePort`. The primary adapter is Microsoft Graph. A **manual adapter is built from day one**: a watched folder accepting `.vtt` / `.docx` / `.txt`, plus a local-recording-and-transcribe path. The extraction pipeline must be exercisable end-to-end using only the fallback adapter. **Every ingested transcript binds to a `Meeting`** (AD-33) — to its calendar event where one exists, otherwise the drop supplies title, start, and attendees to mint the record. **A transcript is stored in its meeting's scope**, never a scope of its own: the capture cannot be more or less shareable than the event it records, so a project meeting's transcript is project-owned and a report 1:1's transcript is `people`-owned. Every scope holds its captures at the same relative path, `transcripts/`, the way each holds its own `event_log/`.
 
-  Captures are encrypted and never committed. For the project scope that means `<repo>/.project-ai/transcripts/` **excluded by a `.gitignore` rule**, because the scope around it *is* committed — so the exclusion rests on a rule rather than on a directory boundary, and a rule can go missing. **The daemon verifies the rule before writing a capture and refuses if it is absent.** Losing a transcript is recoverable, since it is transient input nothing may depend on (AD-33); publishing verbatim meeting minutes to the team's repository is not. An unbound transcript is rejected rather than allowed to mint attributed provenance from an unattributed file; the manual path is also never an auto-execute source (AD-32).
+  Captures are encrypted and never committed. For the project scope that means `<repo>/.project-ai/transcripts/` **excluded by a `.gitignore` rule**, because the scope around it *is* committed — so the exclusion rests on a rule rather than on a directory boundary, and a rule can go missing. **The daemon verifies exclusion before writing a capture and refuses if it cannot confirm it** — by asking git, not by matching the rule text, which AD-43 shows gets two of three real configurations wrong. Losing a transcript is recoverable, since it is transient input nothing may depend on (AD-33); publishing verbatim meeting minutes to the team's repository is not. An unbound transcript is rejected rather than allowed to mint attributed provenance from an unattributed file; the manual path is also never an auto-execute source (AD-32).
 
 ### AD-24 — The event ledger is domain truth and never carries debug output
 
@@ -497,11 +499,52 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   5. **The Performance Index is application-scoped and labels its own confidence.** It describes the assistant's own behaviour, so it lives beside the disclosure ledger (AD-38) rather than in any per-scope log — never team-facing, and answerable from one file. Each component declares whether it is **measured** or **estimated**: predictive accuracy and recommendation resonance are measured against outcomes pm-ai did not author (AD-36), while *saved managerial hours* is an estimate and must be rendered as one. An index that presents an estimate as a measurement is a system marking its own homework.
 
-  6. **pm-ai does not generate skill code.** Not to execute, not to test, and not as a diff for review — producing a diff *is* authoring, and a rule that forbids authoring while permitting a reviewable patch contradicts itself, which is how a builder ends up reading the second clause as permission. The registry stays a first-party allowlist (AD-18); class L stays whisper.cpp alone (AD-1).
+  6. **pm-ai does not generate skill code.** Not to execute, not to test, and not as a diff for review — producing a diff *is* authoring, and a rule that forbids authoring while permitting a reviewable patch contradicts itself, which is how a builder ends up reading the second clause as permission. The registry stays a first-party allowlist (AD-18). Class L admits nothing model-authored: it was widened on 2026-08-22 to cover read-only local queries in `pm_ai.platform` (AD-1, AD-43), and the bar this clause sets — an explicit AD-1 amendment — is what that was. What stays closed is the part this clause is about: **no argv anywhere in class L is derived from model output.**
 
      What the loop may do instead is **name the gap in prose**: *"a skill that closed stale MR threads would have saved eleven manual approvals this month"*, citing the telemetry that motivates it. A human decides whether to write it, and writes it. The observation is the useful part; the code was never the part only a model could supply.
 
      Generating and running code — the "local sandbox" of the original framing — is the exact capability AD-1 and AD-16 exist to deny, and it is not made safe by being called a sandbox: what is admitted either way is a model-authored program on the PM's machine, holding the PM's credentials.
+
+### AD-43 — Ask version control what it tracks; being unable to ask is a refusal `[NEW]`
+
+- **Binds:** AD-23, AD-38, **AD-19**, FR-03, FR-08, NFR-09, every capture write
+- **Prevents:** a guard that reports *protected* for a directory git actually tracks — worse than no guard, because it is trusted. AD-23 requires the daemon to verify the `transcripts/` gitignore rule before writing a capture, and the obvious reading of that is to look for the rule in `.gitignore`. Three cases verified against real git show why that cannot work:
+
+  | `.gitignore` | git | a text check |
+  | --- | --- | --- |
+  | the rule, then `!/.project-ai/transcripts/` | **tracks** | reports protected |
+  | `.project-ai/` — a parent exclude | ignores | reports unprotected |
+  | the rule, directory committed earlier | **tracks** | reports protected |
+
+  The third is undetectable by *any* text check: a `.gitignore` rule does not untrack a path already in the index. Two of the three publish verbatim meeting minutes into the employer's repository, which AD-23 calls unrecoverable.
+
+- **Rule:** exclusion is answered by **git itself** — `check-ignore` for the rules, `ls-files` for index state — behind `VcsPort`, with the adapter in `pm_ai.platform` per AD-1 class L. Any inability to consult it (not a repository, binary absent, unexpected exit, timeout) **refuses the write**. Unknown is not permission.
+
+  The verdict carries **two independent facts**, `ignored` and `tracked`, never one, because they call for two different repairs — add a rule, versus untrack what is already committed.
+
+  The reason is *not* that collapsing them re-opens the third failure: `check-ignore` consults the index by default, so a one-fact verdict would fail **closed** there. The real hazard is **`--no-index`**, which answers about the rules alone and would report a committed capture directory as protected. It is therefore never passed. `pygit2` is unusable for the same reason: libgit2's ignore check has permanent `--no-index` semantics with no flag to disable them.
+
+  **It is a blocking call inside the single writer.** `git` is spawned synchronously with a bounded timeout on the path that writes a capture, so under AD-19 it is I/O on the one asyncio loop — the carve-out AD-19 grants covers CPU/GPU-bound model work, not this. Acceptable because a capture write is already user-initiated and rare, and because the guard must complete *before* anything is created; unacceptable if a caller ever writes captures in a loop, which is the condition to revisit on.
+
+  A trailing slash is load-bearing. For a path that does not yet exist git answers *not ignored* for `…/transcripts` and *ignored* for `…/transcripts/`, and every first capture write concerns a directory that does not exist yet — so the naive spelling refuses every correctly configured repository until someone creates the directory by hand. Fail-closed, so it presents as the feature not working rather than as a leak, which is why nothing would have caught it in production.
+
+### AD-44 — The scope model is domain data; a path is per-scope, a durability is global `[NEW]`
+
+- **Binds:** AD-3, AD-4, AD-6, AD-23, AD-38, every storage path
+- **Prevents:** two units disagreeing on where an artifact lives or what durability it carries — and specifically the collision where one artifact *name* means two different files. `persona.md` exists in `~/.manager-ai/rules/` and in `<repo>/.project-ai/rules/` with different content; `daily_dashboard.md` exists in both `memory/` directories. A layout keyed by name cannot represent either, so this is a correctness ceiling rather than a matter of taste.
+- **Rule:** the four per-scope layouts live in `pm_ai.domain.scope_model` as literal trees of three node types:
+
+  | Node | Means | Constraint |
+  | --- | --- | --- |
+  | `File` | a declared artifact | carries its `Tier` as a **required** field, so a missing tier is a construction error rather than a late assert |
+  | `Dir` | structure whose members are declared | may not be empty — an empty one is a `Collection` |
+  | `Collection` | structure whose members are named at runtime | declares **no** children |
+
+  `ARTIFACT_TIER`, `BACKUP_TARGETS`, `REBUILD_TARGETS`, `RETENTION_MANAGED` and `DIAGNOSTIC_ONLY` are **derived** from the trees, never maintained beside them.
+
+  **The two halves have different grains, and the difference is a real constraint rather than an oversight.** A *path* is per-scope: `persona.md` resolves differently in the personal and project trees, which is the collision this AD exists to fix. A *durability* is keyed by basename and therefore **global**: one basename carries one tier everywhere, and declaring the same name with two different tiers refuses at import. So a project `daily_dashboard.md` cannot be Tier 3 while the personal one is Tier 1, even though each choice is defensible under AD-3 alone. Both are Tier 1 today so nothing is lost; if a per-scope durability is ever needed, the tier tables have to be re-keyed on `(scope, path)` first, and that is a change to this AD rather than a local workaround. `pm_ai.platform.paths` anchors only: scope roots, the two factories, subject-id validation, `resolve()`.
+
+  `Collection` is the load-bearing member. It states that the contents of `skills/`, `logs/`, `connectors/`, `event_log/`, `meetings/`, `transcripts/`, `vector_index/`, `telegram_cache/` and `people/` cannot be enumerated — which makes absence **a stated decision rather than an omission**, and is what lets the trees be diffed line-by-line against `scope-model.md`. The layout that preceded this declared 14 artifacts against 34 leaves named in that companion, and nobody could tell.
 
 ## Consistency Conventions
 
@@ -510,7 +553,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 | Naming — entities | `Commitment`, `CoachingCommitment`, `CareerGoal`, `Proposal`, `NormalizedEvent`, `Meeting`, `Transcript`, `ConnectorInstance`, `Cursor`, `HarvestResult`, `Actor`, `SourceRef`, `TargetRef`, `Verb`, `DataScope`, `SkillPermission`, `Skill`, `Job`. **No bare `Scope`** — the word meant four things and now names none of them (AD-18) |
 | Scope kinds | `application`, `personal`, `project`, `people` (AD-4). `is_personal` is true for `personal` **only**; `is_git_committed` for `project` only. A scope kind is never inferred from a path, and a project named `personal` satisfies neither |
 | Naming — files/modules | `snake_case.py`; connectors as `pm_ai/connectors/<service>.py`; skills as `pm_ai/skills/<verb>_<object>.py` |
-| Naming — ports | `<Noun>Port` protocol in `pm_ai/ports/`; adapters named `<Service><Noun>Adapter` |
+| Naming — ports | `<Noun>Port` protocol in `pm_ai/ports/`. A **service-backed** adapter is named `<Service><Noun>Adapter`; an adapter with no service behind it is named for what it is (`ScopePaths`, `GitVcs`), because `ScopePathsAdapter` names a service that does not exist |
 | Identifiers | Prefixed ULIDs — `cmt_`, `prp_`, `evt_`, `job_`, `skl_`, `goal_`; sortable by creation time; never reused. These are **surrogates**: deduplication and joins use the natural key `(source_system, source_ref)` (AD-34) |
 | Dates & times | ISO-8601 with explicit offset, stored UTC, rendered local at the surface only. `occurred_at` governs domain reasoning, `ingested_at` operational reasoning; neither substitutes for the other (AD-35) |
 | Event envelope | Every `NormalizedEvent` carries `scope` (`DataScope`), `type` (closed enumeration, AD-27), `source_ref` (AD-34), `actor` (resolved `Actor`, AD-34), `occurred_at` + `ingested_at` (never interchangeable, AD-35), `payload` (the shape registered for its type, AD-27), `authored_by` ∈ `{external, pm_ai, unknown}`, defaulting to `unknown` (AD-36). **No `id` field** — the `evt_` ULID surrogate is minted by storage at persist; a connector that minted one would double-count every re-harvest (AD-34) |
@@ -520,7 +563,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 | Errors | Typed exceptions from `pm_ai.core.errors`; adapters translate external failures into domain errors at the boundary; no external SDK exception escapes an adapter |
 | Retries | Exponential backoff with jitter, owned by the scheduler and job queue — never hand-rolled inside a connector or skill |
 | Concurrency | Proposal and Commitment transitions are versioned CAS; conflict means reload-and-re-evaluate, never blind retry. Mutations on one external entity serialize by `target_ref` (AD-37) |
-| Clocks | No component reads the ambient clock. `now` is injected by the composition root (AD-30) — AD-35's coverage windows are a fail-closed guard, and a guard that cannot be tested deterministically cannot be trusted |
+| Clocks | No component reads the ambient clock. `now` is injected by the composition root (AD-30) — AD-35's coverage windows are a fail-closed guard, and a guard that cannot be tested deterministically cannot be trusted. **Held in `pm_ai.storage` as of 2026-08-22**, where the injected clock also selects the monthly segment filename, so segment naming is deterministic too; a non-UTC or naive clock is refused rather than silently producing a wrong-month segment. **One exception outstanding:** `pm_ai/connectors/gitlab.py` still carries an ambient default for `now`, which the composition root always overrides — unreachable in practice, false as a blanket claim. Closing it needs `kw_only` on that dataclass |
 | Config | TOML under `~/.pm-ai/`; secrets never in TOML — only in the encrypted `config.json` |
 | Logging | Structured JSON to `~/.pm-ai/logs/` (rotating) for diagnostics; `event_log/` segments for domain truth (AD-24); `~/.pm-ai/disclosure.md` for frontier-call provenance and cost (AD-38). Three destinations, no overlap |
 | Model calls | Always via `ModelPort` with an explicit `task_class` argument; a call without a declared task class is a defect |
@@ -553,6 +596,7 @@ recently as this revision. The code owns this table once it exists; a row marked
 | keyring (macOS Keychain backend) | 25.7.0 | macOS 11+; needs a `universal2` interpreter |
 | Scheduler | in-house asyncio scheduler | APScheduler 3.11.3 is the fallback if the in-house one proves thin |
 | Claude models | `claude-opus-5` (coaching, research), `claude-sonnet-5` (briefings, drafts, inquiry) | |
+| `git` CLI | any modern version; verified against 2.50.1 (Apple Git-155) | **A hard runtime dependency of the capture write path** (AD-43), not a developer convenience. Located by `PATH`. `pm-ai doctor` must probe it, since its absence refuses every capture with no other symptom. A library binding is *not* substitutable: libgit2/`pygit2` answer the ignore question with permanent `--no-index` semantics, which reports an already-committed capture directory as protected |
 
 ### Integration prerequisites
 
@@ -732,6 +776,7 @@ erDiagram
 pm_ai/
   app/           # Composition root: wiring, DI, pipeline orchestration, daemon lifecycle (AD-30)
   domain/        # Entities, enums, state machines, closed taxonomies (AD-27). Imports nothing.
+                 #   scope_model.py — the four scope trees, tier on the node (AD-44)
   core/          # I/O-free services: extraction, commitments, proposals, alignment, scheduling policy
   ports/         # Protocol definitions, expressed in domain types
   connectors/    # Inbound adapters, one per service; hot-loadable. Class H egress only.
@@ -740,7 +785,9 @@ pm_ai/
   storage/       # Single-writer storage service: markdown, SQLite, vectors, crypto
   models/        # local/ (Ollama, whisper.cpp — class L) and frontier/ (Tool Runner — class F)
   surfaces/      # telegram/, cli/, api/
-  platform/      # OS adapters: keychain, supervision, paths (macOS today)
+  platform/      # OS adapters: keychain, supervision, packaging (macOS today)
+                 #   paths.py — anchors the AD-44 trees to real roots
+                 #   vcs.py   — GitVcs, the AD-43 authority. Class L, read-only.
 ```
 
 ## Capability → Architecture Map
@@ -763,9 +810,10 @@ pm_ai/
 | Deep inquiry, drift audit, knowledge query (FR-23, FR-24, FR-25) | `core/inquiry` + storage retrieval | AD-15, AD-21, AD-22 |
 | CLI & Telegram surfaces (FR-18, FR-19, FR-20, FR-22) | `surfaces/` | AD-2, AD-7, AD-8, AD-13, AD-21 |
 | External mutation, autonomous WI execution (FR-28, FR-29) | `skills/` | AD-1, AD-18, AD-20 |
-| Security enclave & privacy charter (FR-16, FR-36, NFR-07..NFR-09) | `storage/`, `skills/`, sanitization filter | AD-1, AD-4, AD-6, AD-12, AD-25, AD-31 |
+| Security enclave & privacy charter (FR-16, FR-36, NFR-07..NFR-09) | `storage/`, `skills/`, sanitization filter | AD-1, AD-4, AD-6, AD-12, AD-25, AD-31, AD-44 |
 | In-meeting command authorization (FR-05, FR-07, UJ-7) | `core/extraction` + `skills/` | AD-1, AD-13, AD-32 |
 | Provenance & citation (FR-03, FR-25, FR-33, UJ-8) | `domain/` Meeting + `storage/` | AD-33, AD-3, AD-23 |
+| Scope layout & capture protection (FR-03, FR-08, NFR-09) | `domain/scope_model` + `platform/paths` + `platform/vcs` | **AD-44**, **AD-43**, AD-3, AD-4, AD-23 |
 | Memory pruning & index lifecycle (FR-37, NFR-09) | `storage/` + pruning job | AD-3, AD-20, AD-22 |
 | Resilience & offline buffer (FR-04, NFR-10, NFR-11) | scheduler + job queue | AD-3, AD-20 |
 
@@ -779,7 +827,7 @@ pm_ai/
 - **In-meeting real-time processing.** Explicitly a Non-Goal; all transcript work is post-meeting or on demand.
 - **Encryption of the vector index.** Skipped deliberately (AD-6). Revisit only if the index starts holding recoverable raw text rather than embeddings.
 - **Retention policy beyond raw transcripts.** NFR-09 covers transcripts; retention for telemetry rows and derived summaries is unspecified and can wait for real disk-growth data.
-- **Tier-2 schema migration.** Tier 2 is the one tier no rebuild can reconstruct (AD-3), so its schema changes need a real migration path rather than a drop-and-recreate. Deferred only until Tier 2 is durable at all — it is in-memory today, so there is no schema to migrate yet, and this must be settled before the first release that persists it.
+- ~~**Tier-2 schema migration.**~~ **Retired 2026-08-22 — the deferral outlived its own precondition.** It read "deferred only until Tier 2 is durable at all — it is in-memory today", but `operational.db` (SQLite, WAL) replaced the four in-memory dicts on 2026-08-19, three days before anyone noticed the entry had gone stale. Tier 2 is the one tier no rebuild can reconstruct (AD-3), so its schema changes need forward-only migration rather than drop-and-recreate; that is now scoped work, not a deferral.
 - **Self-authored skill generation and sandboxed execution — deprioritised.** The original framing had pm-ai writing and testing modular Python/Bash skills in a local sandbox. Deliberately not built, and not queued: pm-ai names capability gaps in prose and a human writes the skill (AD-42.6). The bar for revisiting is recorded so a later reader knows this was a decision rather than an oversight — it requires a **real isolation boundary** (process, filesystem, network), **demonstrated red on a planted escape** before it is trusted, and an explicit **AD-1 amendment**. Never a feature increment.
 - **Project-scope goals.** `strategic_goals.md` holds all three domains in the personal scope today (§2.1), which suits FR-11's briefing because that briefing is personal-scope too. If a project-scope dashboard ever needs its own `[Strategic Alignment]` tag, project goals must exist as project-scope records first — a project artifact citing a personal goal is the AD-38 violation that moved meetings. Revisit when a committed surface needs alignment.
 - **The Socratic voice contract.** FR-12's "≥80% of coaching turns end in a question" and the persona system (FR-14, FR-20) are the product's most falsifiable personality claims, and the spine deliberately does not bind them: they are prompt and product-design decisions, revisited here only if a second surface or a second generated-text flow starts diverging on voice.
@@ -794,6 +842,8 @@ document that decays; these checks fail the build instead.
 | Import contracts | `.importlinter` | Dependency direction; forbidden libraries (AD-1, AD-5, AD-7, AD-15, AD-16, AD-26) |
 | AST rules | `tests/architecture/test_static_rules.py` | Calls rather than imports — file writes outside storage, shell execution, connector-owned scheduling, project auto-discovery, debug output in `event_log/` |
 | Behavioural tests | `tests/architecture/test_domain_invariants.py` | Semantics no static check can see — idempotency determinism, closed taxonomies, scope isolation, routing, warn-only budget, rebuildability |
+| Layout resolution | `tests/architecture/test_paths.py` | AD-44 — every (scope, artifact) pinned to a literal path, the tier/exclusion sets derived rather than restated, and no Tier-1 artifact inside anything a rebuild deletes |
+| Capture protection | `tests/architecture/test_capture_guard.py` | AD-43 — driven against real `git init` repositories, because a faked verdict tests our belief about git rather than git |
 
 Run both with `uv run pytest tests/architecture`; `uv run lint-imports` gives
 faster feedback on layering alone. Full AD→check mapping, and the list of ADs
@@ -839,6 +889,15 @@ against the package Phase 1 creates, so the contracts land before the code they
 constrain rather than being retrofitted.
 
 ## Open Risks
+
+- **`pm_ai.platform` shells out and is scanned for it by nothing.** AD-1's class L now admits read-only local queries there, and the AD-1 AST scan's layer list omits `platform` — `SHELL_ALLOWED = {"platform"}` is defined in `test_static_rules.py` and referenced nowhere. So `shell=True`, `os.system`, `eval` and `exec` are unchecked in the one package that legitimately spawns a process, and `git` is found by `PATH` rather than an allowlisted absolute path. This is the same shape as the AD-1 gap this document records as closed for `pm_ai.app` on 2026-08-19: a boundary moved into an unscanned layer. Needs a `platform`-specific check that permits an allowlisted binary and nothing else, and the permitted command set closed in `domain` the way AD-27/32/34/40 close theirs.
+- **`people/` is addressable from two scopes and only one of them carries its guards.** AD-44 declares `people/` as a `Collection` in the application tree, so `resolve(DataScope(APPLICATION), "people/")` returns the same directory as the PEOPLE scope root. Every protection for a direct report keys on the *label* (`is_people`) by AD-4's deliberate design, so material written through the application label sits in the right directory with the wrong guarantees. Either the tree stops exposing it as an application artifact, or resolving it under any scope but PEOPLE is refused.
+- **A scopeless `source_ref` reaches `Provenance.EXTERNAL` without the ledger being read.** `pm_ai/core/normalize.py:69` returns `EXTERNAL` for any ref with no scope, reasoning that global entities are never pm-ai's writes. True for `meeting:`; the scopeless set is `{meeting, goal}` and AD-41 has storage mint goal ids. So a `goal:`-sourced event acquires the one value AD-36 admits as evidence without consulting the executed-mutation ledger — re-opening the closed loop through AD-33's citation rule rather than through a connector, which is where AD-36 was watching.
+- **Personal-scope captures can be committed and git is never asked.** AD-43's guard runs only when `is_git_committed`, which is PROJECT-only, while Deployment instructs keeping the personal scope as a private git repository with `private/` gitignored — and `transcripts/` sits at the personal scope *root*, outside `private/`. AD-43's rule says an absent repository is a refusal *answer*; the implementation reads a non-committed scope as *do not ask*. Either `is_git_committed` is the wrong gate or the personal scope needs its own required rule.
+- **AD-35 and AD-39 give opposite instructions for the same silence.** AD-35 says no harvest coverage means never `BROKEN`, therefore `UNKNOWN`. AD-39 says an unhealthy instance's absence must never contribute "an `UNKNOWN` that looks like patience". AD-39 removes the guard without naming a replacement verdict, so one compliant sweeper waits forever and another fires FR-26's irreversible nudge.
+- **Server-side `fallbacks` is prescribed for a path that cannot accept it.** The Anthropic notes correctly widened the refusal and thinking hazards from Opus 5 to Sonnet 5, then widened the *mitigation* by symmetry: `fallbacks` is documented for Fable 5 and Opus 5 only, and briefings, drafts and inquiry synthesis all run Sonnet 5 under AD-15.
+- **`anthropic` is the one dependency this document says must never float, and it is the only one unpinned.** `pyproject.toml` carries bare `anthropic[mcp]`. Version `1.0.0` shipped 2026-08-20 with breaking changes (httpx 2, `temperature`/`top_p`/`top_k` removed) while the Stack table still reads "`0.124.0` current, verified 2026-08-19". `client.beta.messages.tool_runner` survives 1.0.0, so AD-16's cited path is intact — but the pin is not.
+- **Two AD-43 configurations are uncovered and both leak:** a nested `.gitignore` inside `.project-ai/` re-including the directory, and `check-ignore -v` returning exit 0 on a *negated* match, which reports "ignored" for AD-43's own first failure row. The implementation does not pass `-v`; the risk is a future reader adding it for better diagnostics.
 
 - **Microsoft Graph transcript access depends on tenant-admin cooperation** — application permissions require an admin-created application access policy, personal Microsoft accounts are unsupported, and transcripts exist only where recording was enabled. Outside project control; mitigated by AD-23's fallback adapter.
 - **Concurrent whisper.cpp + Ollama at 16GB** remains unbenchmarked (PRD Open Question 1). AD-19's single-heavy-job default plus the Ollama server-side constraints are the guard until Phase 1 measures it.
