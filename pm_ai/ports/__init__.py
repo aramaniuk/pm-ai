@@ -13,6 +13,7 @@ from typing import Protocol, runtime_checkable
 from pm_ai.domain.events import NormalizedEvent, NormalizedEventType
 from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
+from pm_ai.domain.vcs import TrackingVerdict
 
 
 @runtime_checkable
@@ -39,10 +40,18 @@ class ScopePathPort(Protocol):
     passes it in. Declaring the shape here is what lets the single writer name
     its dependency without reaching across that boundary.
 
-    One method, deliberately. A named accessor per store (`operational_store`,
-    `derived_store`, …) would put the artifact-to-scope mapping on both sides of
-    the boundary; `resolve` keeps that mapping wholly inside the resolver, which
-    is the table that decides whether a record may exist in a scope at all.
+    One method for artifacts, deliberately. A named accessor per store
+    (`operational_store`, `derived_store`, …) would put the artifact-to-scope
+    mapping on both sides of the boundary; `resolve` keeps that mapping wholly
+    inside the resolver, which is the table that decides whether a record may
+    exist in a scope at all.
+
+    `gitignore` is not an exception to that rule but a case outside it: the file
+    it names belongs to the repository *containing* a project scope, so no scope
+    tree declares it and `resolve` cannot address it. The alternative was for the
+    single writer to compose `repository(project_id) / ".gitignore"` itself,
+    which is a second copy of a layout fact (AD-4) in the layer least able to
+    own one.
     """
 
     def resolve(self, scope: DataScope, artifact: str, *, create: bool = False) -> Path:
@@ -57,6 +66,52 @@ class ScopePathPort(Protocol):
         `pm_ai.domain.ScopeResolutionError`, which is the only exception type a
         caller may rely on — the concrete classes live in the resolver's own
         module, which callers of this port are forbidden to import.
+        """
+
+    def gitignore(self, project_id: str) -> Path:
+        """The `.gitignore` of the repository project `project_id` was enrolled from.
+
+        Returned whether or not the file exists: an absent one is precisely the
+        case `assert_capture_dir_ignored` must refuse, so "missing" has to be
+        readable as "no rule" rather than arriving as a resolver refusal.
+
+        Refuses an unregistered project or an unusable id, exactly as `resolve`
+        does, and by the same exception type.
+        """
+
+
+@runtime_checkable
+class VcsPort(Protocol):
+    """AD-23/AD-38 — whether version control would carry a path into a commit.
+
+    The single writer must not write a raw capture into a directory git tracks,
+    and only git can answer whether it does. Text matching cannot: a negation
+    line re-includes an excluded directory, a parent-directory exclude protects a
+    child no rule names, and a directory already in the index is tracked whatever
+    `.gitignore` says afterwards.
+
+    A port rather than a direct call because answering means running `git`, and
+    `.importlinter` forbids `subprocess` in `pm_ai.storage` — the adapter lives in
+    `pm_ai.platform`, which is the layer AD-1 permits to shell out. That is the
+    same boundary `ScopePathPort` exists for, and it lands the same way: the
+    composition root builds the adapter and hands it to the writer.
+
+    Implementations answer or raise. There is no third state and no default: an
+    adapter that returned "probably fine" when git was missing would be the leak
+    this port exists to prevent, arriving as a fallback.
+    """
+
+    def tracking(self, path: Path, *, repository: Path) -> TrackingVerdict:
+        """Git's verdict on `path`, as seen from `repository`.
+
+        `path` need not exist. The first capture write asks about a directory
+        that is about to be created, and the answer must be the same one git
+        would give afterwards.
+
+        Raises `pm_ai.domain.VcsUnavailable` for every reason the question cannot
+        be answered — no repository, no `git` binary, a path outside the
+        repository, a timeout, an unrecognised failure. The caller refuses on it:
+        unknown is not permission.
         """
 
 

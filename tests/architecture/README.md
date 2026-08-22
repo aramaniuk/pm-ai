@@ -50,6 +50,7 @@ Both are fixed and both now have their own regressions in
 | Slice regressions | The five defects the r4 gate verified, each proven red first | `../slice/test_r4_gate_fixes.py` |
 | Meta-checks | The AST helpers themselves — mode detection, alias resolution | `test_enforcement_meta.py` |
 | Layout resolution | Where each scope's artifacts live, what may not live there, and what a subject id may be | `test_paths.py` |
+| Write-time refusals | Writes that must not happen — a raw capture into a directory git would commit, asked of real `git` in real repositories | `test_capture_guard.py` |
 
 ## AD coverage
 
@@ -74,7 +75,7 @@ Both are fixed and both now have their own regressions in
 | AD-20 | `test_ad20_idempotency_keys_are_deterministic`, `test_ad20_mutating_jobs_require_a_key` | |
 | AD-21 | `test_ad21_slow_requests_acknowledge_instead_of_blocking` | |
 | AD-22 | `test_ad22_retrieval_path_never_touches_a_model` | |
-| AD-23 | `test_ad23_transcript_pipeline_works_without_a_live_tenant` | |
+| AD-23 | `test_ad23_transcript_pipeline_works_without_a_live_tenant`, `test_a_negation_line_after_the_rule_refuses_the_capture`, `test_an_already_tracked_capture_directory_refuses_the_capture`, `test_excluding_the_whole_enclave_protects_the_capture_directory`, `test_a_project_root_that_is_not_a_repository_refuses_the_capture` | The capture guard, asked of real `git` in real temporary repositories. Text matching answered the opposite of git for the first three, twice in the direction that publishes a transcript |
 | AD-24 | `test_ad24_event_log_is_not_a_debug_sink` | |
 | AD-25 | `test_ad25_project_rendering_cannot_open_the_personal_store` | |
 | AD-26 | `os-behind-platform` | |
@@ -89,7 +90,7 @@ Both are fixed and both now have their own regressions in
 | AD-35 | `test_ad35_the_two_clocks_are_not_interchangeable`, `test_ad35_ledger_folding_is_deterministic`, `test_ad35_sweeper_will_not_declare_broken_without_coverage` | Two clocks; coverage-aware sweeping |
 | AD-36 | `test_ad36_self_authored_events_are_excluded_from_evidence`, `test_ad36_every_class_m_mutation_is_recorded_for_attribution`, **`test_our_own_write_harvested_back_is_not_evidence`**, `test_connector_never_asserts_external`, `test_unrecognisable_mutation_makes_its_scope_uncertain` | pm-ai's own writes are never evidence. The first two tests passed while the AD was **defeated in code**: they handed `Provenance.PM_AI` straight to the evaluator, proving the downstream half, while the step that *derives* PM_AI from the executed-mutation ledger did not exist and the connector hard-coded `EXTERNAL`. The bolded test drives the real path |
 | AD-37 | `test_ad37_concurrent_approval_from_two_surfaces_yields_one_execution`, `test_ad37_expired_proposals_cannot_execute` | Versioned CAS on shared entities |
-| AD-38 | `test_ad38_disclosure_records_cannot_reach_a_committed_scope`, `test_ad38_no_committed_record_may_reference_personal_scope`, `test_ad38_project_scope_is_the_only_committed_scope`, `test_application_scope_holds_the_disclosure_ledger`, `test_gitignore_rules_cover_the_paths_the_resolver_returns` | Disclosure ledger is application-scoped; committed scopes never name personal material. The gitignore test pairs each `GITIGNORE_REQUIRED` rule with the path the resolver actually returns — move `transcripts/` and the rule still reports "protected" for a directory git tracks |
+| AD-38 | `test_ad38_disclosure_records_cannot_reach_a_committed_scope`, `test_ad38_no_committed_record_may_reference_personal_scope`, `test_ad38_project_scope_is_the_only_committed_scope`, `test_application_scope_holds_the_disclosure_ledger`, `test_gitignore_rules_cover_the_paths_the_resolver_returns`, `test_the_gitignore_is_pinned_to_the_repository_root`, `test_the_capture_directory_lies_inside_the_repository_it_is_checked_against`, `test_a_gitignore_without_the_rule_refuses_the_capture`, `test_a_repository_with_no_gitignore_refuses_the_capture`, `test_any_unanswered_question_is_a_refusal`, `test_a_capture_name_must_be_one_reportable_component` | Disclosure ledger is application-scoped; committed scopes never name personal material. The first three pin the *places*: move the capture directory or the exclusion file and the instruction the refusal gives becomes one the operator cannot satisfy. The rest are the write path — refuse when git says it would commit, refuse when git cannot be asked, refuse a name that would be written outside the directory git was asked about, and refuse before anything is on disk |
 
 ### Not mechanically enforced
 

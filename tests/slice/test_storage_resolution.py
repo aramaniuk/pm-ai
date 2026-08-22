@@ -34,6 +34,7 @@ from pm_ai.domain import (
     Tier,
 )
 from pm_ai.domain.harvest import Cursor
+from pm_ai.platform.vcs import GitVcs
 from pm_ai.platform.paths import (
     APPLICATION_DIRNAME,
     ENCLAVE_DIRNAME,
@@ -210,7 +211,7 @@ def test_an_unopenable_operational_store_names_itself(tmp_path):
     store.mkdir(parents=True)  # a directory where the file belongs
 
     with pytest.raises(OperationalStoreUnavailable) as refusal:
-        StorageService(paths, now=lambda: NOW)
+        StorageService(paths, now=lambda: NOW, vcs=GitVcs())
     assert str(store) in str(refusal.value)
 
 
@@ -241,7 +242,7 @@ def test_a_store_created_before_the_settle_column_still_settles(tmp_path):
     legacy.commit()
     legacy.close()
 
-    storage = StorageService(paths, now=lambda: NOW)
+    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs())
     target = TargetRef.parse("gitlab:alpha:issue:102")
     storage.record_execution("idem_legacy", target, "cmt_1")
 
@@ -296,7 +297,7 @@ def test_a_mutation_is_stamped_from_the_injected_clock_at_both_ends(daemon):
 )
 def test_a_clock_that_is_not_utc_is_refused(tmp_path, clock, why):
     """A wrong-month segment and a `TypeError` on comparison are worse than a raise."""
-    storage = StorageService(ScopePaths.rooted(tmp_path), now=clock)
+    storage = StorageService(ScopePaths.rooted(tmp_path), now=clock, vcs=GitVcs())
     with pytest.raises(NonUtcClock):
         storage.append_event_log(f"- [test] {why}", scope=PERSONAL)
 
@@ -333,7 +334,7 @@ def test_a_refused_write_does_not_swallow_the_batch(daemon, tmp_path):
     of a segment entry that does not exist.
     """
     paths = RefusingPaths(ScopePaths.rooted(tmp_path / "txn"))
-    storage = StorageService(paths, now=lambda: NOW)
+    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs())
     events = _events(daemon)
     assert len(events) == 2
 

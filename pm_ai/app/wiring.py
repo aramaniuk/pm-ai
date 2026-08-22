@@ -17,7 +17,9 @@ from pm_ai.connectors.gitlab import GitLabConnector
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.ports import VcsPort
 from pm_ai.platform.paths import ScopePaths
+from pm_ai.platform.vcs import GitVcs
 from pm_ai.skills.gitlab import PostComment
 from pm_ai.skills.registry import SkillRegistry
 from pm_ai.storage.service import StorageService
@@ -40,6 +42,7 @@ def build(
     *,
     paths: ScopePaths | None = None,
     now: Callable[[], datetime] | None = None,
+    vcs: VcsPort | None = None,
 ) -> Daemon:
     """Wire the daemon against one resolver, which owns all four scopes (AD-4).
 
@@ -59,6 +62,13 @@ def build(
     `now` stays optional and defaults to a system-clock read. It is the default
     for the whole daemon: `StorageService` requires a clock and reads none of its
     own, so every timestamp it writes comes from here.
+
+    `vcs` is the same arrangement for the other question the writer cannot answer
+    itself: whether git would commit a raw capture. It defaults to the real `git`
+    adapter and is overridable so a test can supply a verdict, because this is
+    also the one module that may import both `pm_ai.storage` and
+    `pm_ai.platform`. A writer built without it refuses every capture into a
+    committed scope, which is the safe direction but not a useful one.
     """
     if (root is None) == (paths is None):
         raise ValueError(
@@ -74,7 +84,7 @@ def build(
     # name, or a project no registry knows, would otherwise surface mid-harvest
     # with a batch already in hand.
     resolver.scope_root(scope)
-    storage = StorageService(resolver, now=clock)
+    storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs())
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
     return Daemon(

@@ -131,6 +131,14 @@ APPLICATION_DIRNAME = ".pm-ai"
 PERSONAL_DIRNAME = ".manager-ai"
 PROJECT_DIRNAME = ".project-ai"
 
+# The exclusion file of the repository a project scope lives in. It sits *outside*
+# `.project-ai/`, so it is not a node in any scope tree and cannot be addressed
+# through `resolve` — and it is named here rather than in `pm_ai.storage` because
+# a second spelling of a layout fact is a second layout (AD-4). The single writer
+# reads it before writing a raw capture: the rule inside it is the only thing
+# keeping verbatim minutes out of the team's repository.
+GITIGNORE_FILENAME = ".gitignore"
+
 # The gitignored enclave inside a scope. It holds the Tier-2 and Tier-3 stores
 # and, under the application scope, the whole team-member scope — so it is a
 # mixed directory, not a database-only one, and `private/people/p1/memory/` is
@@ -460,6 +468,19 @@ class ScopePaths:
     def people_root(self) -> Path:
         """The team-member scope as a whole — one directory, deleted on role change."""
         return self.enclave_root / PEOPLE_DIRNAME
+
+    def gitignore(self, project_id: str) -> Path:
+        """The `.gitignore` that decides whether git tracks this project's captures.
+
+        Returned whether or not the file exists — an absent one is the very case
+        `assert_capture_dir_ignored` has to refuse, so the caller reads the path
+        and treats "missing" as "no rule", rather than asking here and getting a
+        refusal it cannot tell apart from a resolver failure.
+
+        Not reachable through `resolve`: this file belongs to the repository, not
+        to the `.project-ai/` scope inside it, so no scope tree declares it.
+        """
+        return self.repository(project_id) / GITIGNORE_FILENAME
 
     def repository(self, project_id: str) -> Path:
         """The repository a project was enrolled from."""

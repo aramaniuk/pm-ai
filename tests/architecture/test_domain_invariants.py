@@ -743,12 +743,17 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
 
     ports = mod("pm_ai.ports")
     paths = mod("pm_ai.platform.paths").ScopePaths.rooted(tmp_path)
+    vcs = mod("pm_ai.platform.vcs").GitVcs()
     clock = lambda: datetime.datetime(2026, 8, 19, tzinfo=datetime.timezone.utc)
-    storage = mod("pm_ai.storage.service").StorageService(paths, now=clock)
+    storage = mod("pm_ai.storage.service").StorageService(paths, now=clock, vcs=vcs)
 
     assert isinstance(paths, ports.ScopePathPort), (
         "the resolver the composition root injects does not satisfy the port "
         "storage names as its dependency"
+    )
+    assert isinstance(vcs, ports.VcsPort), (
+        "the git adapter the composition root injects does not satisfy the port "
+        "the single writer asks `would git commit this capture` through"
     )
     assert isinstance(storage, ports.StoragePort), (
         "the single writer no longer satisfies the port core depends on"

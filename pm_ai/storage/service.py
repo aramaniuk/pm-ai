@@ -10,6 +10,17 @@ persisted row" false in the same breath: a restart silently emptied the job
 state, the connector cursors, the executed-key ledger, and the dedup set — the
 last of which turns AD-34's "re-harvesting is idempotent" into a promise that
 holds only within one process lifetime.
+
+Raw captures are neither tier and are written here anyway. `transcripts/` sits
+inside the one scope that is committed to the employer's repository, so whether
+git would publish a capture is a question about that repository rather than about
+a directory boundary — and being the single writer is what makes this the one
+place it can be asked before anything is on disk.
+
+Asked of git, through `VcsPort`. `.importlinter` forbids `subprocess` here, which
+is not an obstacle but the design: this module states the policy — refuse unless
+git says the directory is excluded and untracked, refuse when git cannot be
+reached at all — and `pm_ai.platform.vcs` runs the commands.
 """
 
 from __future__ import annotations
@@ -27,8 +38,17 @@ from pm_ai.domain.harvest import Cursor, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.proposals import Proposal
-from pm_ai.domain.storage_tiers import EVENT_LOG, OPERATIONAL_DB, Tier
-from pm_ai.ports import ScopePathPort
+from pm_ai.domain.storage_tiers import (
+    CAPTURES,
+    EVENT_LOG,
+    GITIGNORE_REQUIRED,
+    OPERATIONAL_DB,
+    Tier,
+    UnprotectedCaptureDir,
+    assert_capture_dir_untracked,
+)
+from pm_ai.domain.vcs import VcsUnavailable
+from pm_ai.ports import ScopePathPort, VcsPort
 
 # The application scope owns Tier 2 (AD-3). Resolved rather than remembered, so
 # the mapping from artifact to scope stays in the one table that owns it.
@@ -36,6 +56,11 @@ APPLICATION = DataScope(ScopeKind.APPLICATION)
 
 # AD-20 — an execution is recorded *before* the call and settled after, so a
 # crash in between is a reconciliation task rather than a silent second write.
+# A capture filename's ceiling, in bytes. Well under the 255 every filesystem
+# this daemon runs on allows, because the name is one component of a path that
+# also carries a repository root and a scope tree.
+CAPTURE_NAME_LIMIT = 128
+
 IN_FLIGHT = "in_flight"
 SETTLED = "settled"
 NO_EXTERNAL_ID = ""
@@ -76,6 +101,65 @@ def _ulid() -> str:
     import secrets
 
     return "evt_" + secrets.token_hex(10)
+
+
+def _capture_name(name: str) -> str:
+    """Validate a capture filename as the single path component it becomes.
+
+    The refusals, in the order they matter:
+
+    - empty, whitespace-only, or padded — two names differing only in spacing are
+      one name in every log that reports them, and the padding is invisible;
+    - a control character. A newline is the case that makes the whitespace check
+      above a half-measure: a name with one embedded is neither empty nor padded,
+      and it turns one filename into two lines everywhere the daemon reports it;
+    - a path separator, forward or back. This is the one that defeats the git
+      check rather than tripping it: `../memory/leak.md` is written *outside* the
+      directory git was asked about, so the verdict was about somewhere else.
+      Both separators, because a name reaching a Linux daemon from a Windows
+      client is still a traversal there;
+    - a leading dot. `.` and `..` are directories, and a dotfile hides a capture
+      from the operator who has to purge it at thirty days (NFR-09);
+    - length. Past the filesystem's limit the write fails with a bare `OSError`
+      naming neither the capture nor the limit, which is a worse report than this
+      one.
+    """
+    if not name.strip():
+        raise MalformedCaptureName(
+            f"a capture needs a name and {name!r} is empty or only whitespace. "
+            f"The name is the only handle the purge at thirty days has on it."
+        )
+    if name != name.strip():
+        raise MalformedCaptureName(
+            f"{name!r} is padded with whitespace, which makes two distinguishable "
+            f"captures indistinguishable in every log and directory listing."
+        )
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
+        raise MalformedCaptureName(
+            f"{name!r} contains a control character. A newline in particular "
+            f"splits one filename across two lines in every message that reports "
+            f"it, including the refusals in this module."
+        )
+    if "/" in name or "\\" in name:
+        raise MalformedCaptureName(
+            f"{name!r} contains a path separator. A capture is one file in the "
+            f"capture directory: a nested or absolute path is written somewhere "
+            f"git was never asked about, so the check that just passed was about "
+            f"a different directory."
+        )
+    if name.startswith("."):
+        raise MalformedCaptureName(
+            f"{name!r} starts with a dot. `.` and `..` are directories rather "
+            f"than captures, and a dotfile hides a capture from the operator who "
+            f"has to purge it at thirty days (NFR-09)."
+        )
+    if len(name.encode("utf-8")) > CAPTURE_NAME_LIMIT:
+        raise MalformedCaptureName(
+            f"{name!r} is {len(name.encode('utf-8'))} bytes; the limit is "
+            f"{CAPTURE_NAME_LIMIT}. Past the filesystem's own limit the write "
+            f"fails with an `OSError` that names neither the capture nor why."
+        )
+    return name
 
 
 def _dump_proposal(p: Proposal) -> str:
@@ -132,6 +216,37 @@ class NonUtcClock(ValueError):
     """
 
 
+class MalformedCaptureName(ValueError):
+    """A capture filename that is not a single name inside the capture directory.
+
+    The name reaches this service from a meeting id, a dropped filename, or a
+    connector handle, so none of it is the daemon's own string — and it is
+    interpolated into a path. `pm_ai.platform.paths` validates the subject ids it
+    interpolates for the same reason; this is the one path component that module
+    never sees, because it names a record rather than a scope.
+    """
+
+
+class EmptyCapture(ValueError):
+    """A capture with no content, which would consume a name and say nothing.
+
+    A zero-length transcript reads downstream exactly like a real one — a meeting
+    that happened and in which nobody spoke — and it occupies the name the real
+    capture would have used, so the retry that carries the content is refused as
+    a duplicate. Refusing here keeps the failure attached to its cause.
+    """
+
+
+class CaptureAlreadyExists(FileExistsError):
+    """A capture already occupies this name, and neither outcome is acceptable.
+
+    Appending would splice two recordings into one file that reads as a single
+    meeting; truncating would destroy the first. Subclasses `FileExistsError`
+    because that is what the exclusive open raises and a caller may reasonably
+    already catch it — the name and the message are what this adds.
+    """
+
+
 class ReconciliationRequired(RuntimeError):
     """AD-20 — a prior attempt reached the provider and its outcome is unknown.
 
@@ -145,8 +260,14 @@ class StorageService:
 
     tier_of_operational = Tier.OPERATIONAL
 
-    def __init__(self, paths: ScopePathPort, *, now: Callable[[], datetime]) -> None:
-        """Both dependencies are injected, and neither is optional.
+    def __init__(
+        self,
+        paths: ScopePathPort,
+        *,
+        now: Callable[[], datetime],
+        vcs: VcsPort,
+    ) -> None:
+        """Every dependency is injected, and none is optional.
 
         `paths` arrives from the composition root because `pm_ai.storage` and
         `pm_ai.platform` are independent siblings in the import graph — the
@@ -161,9 +282,17 @@ class StorageService:
         derives from this clock, which is what made the three internal reads this
         replaces untestable: a test could not name the file it was about to
         assert on.
+
+        `vcs` is required for the same reason as `now`, and more sharply: a
+        default would have to be either the real adapter — which this package may
+        not import, `pm_ai.platform` being an independent sibling — or a stand-in
+        that answers without asking git. The second is the leak this dependency
+        exists to prevent, so there is no default and a caller that forgets it
+        gets a `TypeError` at construction rather than an unprotected write later.
         """
         self._paths = paths
         self._now = now
+        self._vcs = vcs
         # Tier 2 is its own file, in the application scope's enclave and outside
         # every scope's Markdown tree. `reindex` targets Tier 3 and therefore
         # cannot reach this, which is the structural guarantee AD-3 asks for.
@@ -223,6 +352,66 @@ class StorageService:
 
     # ── Tier 1: append-only markdown segments (AD-5) ─────────────────────────
 
+    def _writable_dir(self, scope: DataScope, artifact: str) -> Path:
+        """Resolve a directory artifact for writing, having first earned the right.
+
+        Every write that needs a directory goes through here — the event-log
+        segments and the raw captures alike — so the git check cannot be bypassed
+        by adding a write path that resolves for itself. It is a no-op for an
+        artifact no rule covers, which is all of them but one.
+
+        The refusal happens *before* `create=True`, so a refused write does not
+        even leave behind the directory it was about to fill.
+        """
+        self._assert_git_excludes(scope, artifact)
+        return self._paths.resolve(scope, artifact, create=True)
+
+    def _assert_git_excludes(self, scope: DataScope, artifact: str) -> None:
+        """Refuse a raw capture that git would carry into a commit (AD-23, AD-38).
+
+        Two conditions gate the question, and both are the scope model's:
+        `GITIGNORE_REQUIRED` names the artifacts whose exclusion is a repository
+        rule rather than a directory boundary, and `is_git_committed` names the
+        one scope that has a repository to ask. A capture in the personal or
+        team-member scope is excluded by *where it is*; there is no repository,
+        and git is not consulted at all.
+
+        Git answers, not this process. A `.gitignore` containing the rule can
+        still leave the directory tracked — a later negation line re-includes it,
+        or it was committed before the rule existed — and a `.gitignore` that
+        never names the directory can still exclude it through its parent. All
+        three are ordinary repository states, and text matching gets two of them
+        wrong in the direction that publishes a transcript.
+
+        `VcsUnavailable` is a refusal, not an exception to it. Unknown is not
+        permission: a machine with no `git`, a project whose registered
+        repository has been moved away, a repository that was never initialised —
+        each leaves the question unanswered, and the only safe answer to an
+        unanswered question here is no.
+
+        `scope.project_id` is passed as-is rather than cast. `DataScope` refuses
+        a PROJECT scope without one and `is_git_committed` is true for PROJECT
+        alone, so it is a non-empty string here by construction — and if that
+        ever stops being true, the resolver refuses `None` loudly instead of
+        looking up a project named "None".
+        """
+        if not scope.is_git_committed or artifact not in GITIGNORE_REQUIRED:
+            return
+        repository = self._paths.repository(scope.project_id)
+        # Resolved without `create`: asking git about a directory is not a reason
+        # to bring it into existence, and git answers the same either way.
+        target = self._paths.resolve(scope, artifact)
+        try:
+            verdict = self._vcs.tracking(target, repository=repository)
+        except VcsUnavailable as unanswered:
+            raise UnprotectedCaptureDir(
+                f"refusing to write {artifact} into {scope}, because git could "
+                f"not be consulted about it: {unanswered}"
+            ) from unanswered
+        assert_capture_dir_untracked(
+            artifact, verdict, gitignore=str(self._paths.gitignore(scope.project_id))
+        )
+
     def _segment(self, scope: DataScope, artifact: str, at: datetime) -> Path:
         """The open monthly segment of the `artifact` ledger in `scope`.
 
@@ -230,12 +419,73 @@ class StorageService:
         that scope's own tree rather than in a sibling directory named by
         flattening the scope to a string.
         """
-        return self._paths.resolve(scope, artifact, create=True) / f"{at:%Y-%m}.md"
+        return self._writable_dir(scope, artifact) / f"{at:%Y-%m}.md"
 
     def append_event_log(self, entry: str, *, scope: DataScope) -> None:
         at = self._at()
         with self._segment(scope, EVENT_LOG, at).open("a", encoding="utf-8") as fh:
             fh.write(entry.rstrip("\n") + "\n")
+
+    # ── Raw captures: outside the tier model, inside a committed scope ───────
+    # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on
+    # one (AD-33), which is why `RETENTION_MANAGED` holds them instead of
+    # `ARTIFACT_TIER`. They still pass through the single writer, because asking
+    # git first has to happen somewhere no caller can skip.
+
+    def write_capture(self, body: str, *, scope: DataScope, name: str) -> Path:
+        """Write one raw capture into `scope`, or refuse to write it at all.
+
+        The capture lives in the scope that owns the meeting it records, so a
+        team meeting's transcript lands in a committed repository and a 1:1's
+        does not. That is why the refusal is here and not in the caller: the
+        writer is the only component that knows a write is about to happen.
+
+        Refuses, and each refusal is a different repair:
+
+        - `UnprotectedCaptureDir` — git would commit the capture directory, or
+          could not be asked. The message says which, and what to change.
+        - `MalformedCaptureName` — the name is not a single component of a path,
+          or not one this daemon will report legibly.
+        - `EmptyCapture` — there is no content, so the name would be spent on
+          nothing and the retry that carries the real transcript refused.
+        - `CaptureAlreadyExists` — the name is taken. A capture is verbatim
+          input, never amended.
+        - `pm_ai.domain.ScopeResolutionError` — the scope holds no capture
+          directory (the application scope), its subject id cannot be a
+          directory name, or its project is not registered.
+
+        Returns the path written, because the caller that has just produced a
+        capture is the one that has to purge it at thirty days (NFR-09) and
+        re-deriving the path is how a second copy of the layout appears (AD-4).
+        """
+        if not body.strip():
+            raise EmptyCapture(
+                f"refusing to write an empty capture as {name!r}. A zero-length "
+                f"transcript reads downstream as a meeting in which nobody spoke, "
+                f"and it takes the name the real capture would have used."
+            )
+        # The name is checked before the directory is resolved, so a malformed
+        # one is reported as itself rather than as whatever the resolver or the
+        # git check happens to say first — and creates nothing.
+        filename = _capture_name(name)
+        capture = self._writable_dir(scope, CAPTURES) / filename
+        try:
+            with capture.open("x", encoding="utf-8") as fh:
+                fh.write(body)
+        except FileExistsError as taken:
+            raise CaptureAlreadyExists(
+                f"{capture} already exists. Appending would splice two recordings "
+                f"into one transcript and truncating would destroy the first, so "
+                f"a second capture needs its own name."
+            ) from taken
+        except BaseException:
+            # Exclusive creation has already claimed the name at this point. A
+            # failure mid-write would otherwise leave a zero-length file owning
+            # it permanently, and every retry — including the one carrying the
+            # content — would then be refused as a duplicate.
+            capture.unlink(missing_ok=True)
+            raise
+        return capture
 
     def persist_events(
         self, events: tuple[NormalizedEvent, ...], *, scope: DataScope

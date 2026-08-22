@@ -508,10 +508,12 @@ def test_no_tier_one_artifact_lives_inside_a_rebuildable_one(production):
 def test_gitignore_rules_cover_the_paths_the_resolver_returns(production):
     """AD-38 — the rule and the path must be the same place, or the rule is a lie.
 
-    `assert_capture_dir_ignored` reports "protected" when it finds its rule in a
-    `.gitignore`. If the resolver puts the capture directory somewhere the rule
-    does not cover, that check passes over a directory git tracks, and verbatim
-    meeting transcripts are committed to the employer's repository.
+    Git is what the write path asks, so this is no longer a check on a matcher —
+    it is a check on the *instruction*. `assert_capture_dir_untracked` tells the
+    operator to add `rule` when git says the directory is not excluded. If the
+    resolver puts the capture directory somewhere that rule does not cover, the
+    operator adds it, git still tracks the directory, and the refusal repeats
+    forever with no way to satisfy it.
     """
     repo = production.repository("alpha")
     for artifact, rule in GITIGNORE_REQUIRED.items():
@@ -523,6 +525,50 @@ def test_gitignore_rules_cover_the_paths_the_resolver_returns(production):
             f"AD-38: {artifact} resolves to {path.relative_to(repo)} inside the "
             f"repository, but its .gitignore rule only covers {rule!r}."
         )
+
+
+def test_the_gitignore_is_pinned_to_the_repository_root():
+    """The exclusion file the capture guard names, as a literal string.
+
+    Hand-written rather than composed from `repository()` or `GITIGNORE_FILENAME`,
+    for the reason `test_every_scope_and_artifact_resolves_to_its_pinned_path`
+    gives: an expectation derived from the code under test moves when the code
+    moves and therefore cannot fail. This accessor had exactly that problem —
+    changing it to `repository(project_id).parent / ".gitignore"` left the entire
+    suite green, because the one test that used it wrote the rule *through* this
+    accessor before reading it back, so the two agreed wherever it pointed.
+
+    Nothing about this path is arbitrary. Git reads the exclusion file at the root
+    of the worktree; a `.gitignore` one directory up governs a different
+    repository, and one inside `.project-ai/` anchors its rules to that
+    subdirectory instead — so `/.project-ai/transcripts/` would match nothing.
+    """
+    paths = ScopePaths.production(home="/home/pm", projects={"alpha": "/repositories/alpha"})
+
+    assert paths.gitignore("alpha") == Path("/repositories/alpha/.gitignore")
+
+
+def test_the_capture_directory_lies_inside_the_repository_it_is_checked_against(production):
+    """The guard asks git about one path, using the `.gitignore` of another.
+
+    Both come from this resolver, and the guard is only meaningful if they are the
+    same repository: a verdict obtained from one worktree says nothing about a
+    capture written into another. This is the relation the pinned literals above
+    cannot state, because either of them could move consistently with the other.
+    """
+    repository = production.repository("alpha")
+    capture = production.resolve(PROJECT, "transcripts/")
+    exclusion = production.gitignore("alpha")
+
+    assert capture.is_relative_to(repository), (
+        f"the capture directory {capture} is not inside the repository "
+        f"{repository} whose git state the guard consults"
+    )
+    assert exclusion.parent == repository, (
+        f"{exclusion} does not sit at the root of {repository}, so git reads its "
+        f"rules relative to somewhere else"
+    )
+    assert not exclusion.is_relative_to(capture)
 
 
 def _scopes_of(artifact: str) -> set[ScopeKind]:
@@ -600,6 +646,12 @@ def test_every_refusal_is_catchable_as_one_error(production):
         lambda: production.resolve(PROJECT, "strategic_goals.md"),
         lambda: production.repository("beta"),
         lambda: production.repository("../evil"),
+        # The capture guard reads this one, and a fail-soft reimplementation that
+        # returned `<unregistered>/.gitignore` instead of raising would have the
+        # writer tell an operator to add a rule to a repository that was never
+        # registered — for a project the daemon must refuse outright (AD-11).
+        lambda: production.gitignore("beta"),
+        lambda: production.gitignore("../evil"),
         lambda: ScopePaths.rooted("/tmp/rooted-check", projects={"b": "/elsewhere"}),
     )
     for refuse in refusals:
