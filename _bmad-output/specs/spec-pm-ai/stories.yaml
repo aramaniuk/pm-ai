@@ -22,6 +22,22 @@
     Ask git whether a capture directory would be carried into a commit, and
     refuse the write when it would or when git cannot answer. Delivers the
     project-scope half of the capture guard.
+- id: "1k"
+  title: Type-checking gate
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Add mypy at default settings, fix the ten errors it reports, and gate it
+    inside pytest the way import-linter already is. Makes every Protocol in
+    pm_ai/ports/ enforced rather than documented.
+  invoke_dev_with: >-
+    A missing mypy binary fails the gate, never skips it - the same rule as the
+    import-linter gate, for the same reason. Do not silence
+    storage/service.py:400 ("ScopePathPort has no attribute repository") with a
+    cast: the error is not the problem, the coupling is, and a cast removes the
+    only signal that it exists. The concrete type is not an option either, since
+    pm_ai.storage may not import pm_ai.platform. Every "type: ignore" carries an
+    error code and a reason, and no Any is introduced to make an error go away.
 - id: "1d"
   title: Keychain port and macOS adapter
   spec_checkpoint: true
