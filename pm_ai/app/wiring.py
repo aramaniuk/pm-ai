@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pm_ai.connectors.gitlab import GitLabConnector
+from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -29,7 +29,7 @@ from pm_ai.storage.service import StorageService
 class Daemon:
     storage: StorageService
     skills: SkillRegistry
-    connectors: dict[str, GitLabConnector]
+    connectors: dict[str, GitLabConnectorAdapter]
     transcripts: dict[str, object]
     meetings: dict[str, object]
     scope: DataScope
@@ -90,7 +90,11 @@ def build(
     return Daemon(
         storage=storage,
         skills=skills,
-        connectors={f"gitlab:{project}": GitLabConnector(project=project, scope=scope, now=clock)},
+        connectors={
+            f"gitlab:{project}": GitLabConnectorAdapter(
+                project=project, scope=scope, now=clock
+            )
+        },
         # AD-23 — both adapters wired from day one, so the pipeline is exercisable
         # without a live tenant.
         transcripts={"graph": GraphTranscriptAdapter(), "manual": ManualTranscriptAdapter()},

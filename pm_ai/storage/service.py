@@ -278,7 +278,7 @@ class StorageService:
         read, so a caller that forgets it gets an error instead of a hidden one.
         This service reads no clock of its own — `pm_ai.app.wiring` supplies the
         default the daemon shares — though it is not the only default in the
-        process (`GitLabConnector.now` has one too). The monthly segment filename
+        process (`GitLabConnectorAdapter.now` has one too). The monthly segment filename
         derives from this clock, which is what made the three internal reads this
         replaces untestable: a test could not name the file it was about to
         assert on.
