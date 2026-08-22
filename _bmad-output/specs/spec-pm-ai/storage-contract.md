@@ -41,7 +41,7 @@ Encryption applies to a **defined set** rather than to all local state, because 
 | `operational.db` | 600 permissions and full-disk encryption. It holds queue state and cursors rather than record content |
 | Raw captures, in all three scopes | The git guard below, plus the 30-day purge. A transcript's exposure is publishing it to a repository, and a cipher never addressed that |
 | Team-member records (`~/.pm-ai/private/people/`) | 600 permissions, gitignored, and a single deletable directory |
-| Connector configuration (`~/.pm-ai/connectors/`) | 600 permissions and gitignored. It holds *configuration* — type, domain, cadence — and no secret: the token it is enrolled with goes to `config.json`, which is encrypted. That split was always in the layout; only CAP-35's wording conflated the two |
+| Connectors (`~/.pm-ai/connectors/`) | 600 permissions and gitignored. It holds *configuration* — type, domain, cadence, enabled — and the hot-loadable *implementation* modules, and **no secret of any kind**: every connector credential goes to `config.json`, which is encrypted. That split was always in the layout; only CAP-35's wording conflated the two. What matters for this directory is integrity rather than confidentiality, since its contents are executed |
 
 **This is a real reduction in protection, recorded rather than glossed.** A report's performance record is now readable by anything running as the PM's user, and the requirement that a report's peers cannot read it rests on file permissions and the enclave's directory boundary alone. Full-disk encryption is the backstop for all three rows. The captures row is the least changed in substance: their risk was always the repository, not the disk.
 

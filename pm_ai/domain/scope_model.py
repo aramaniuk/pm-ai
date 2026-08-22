@@ -430,11 +430,16 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
     # argument and never searches for `.project-ai` directories. Tier 1 and not
     # rebuildable from anything: lose it and every enrolled project is forgotten.
     File("projects.toml", Tier.TRUTH, encrypted=False, gitignored=False),
-    # Per-project and personal connector configuration, including the
-    # team-member career MCP. One file per connector instance, named after the
-    # instance — so the directory is the artifact and its members are not
-    # declarable here. Backed up rather than rebuilt: no Tier 1 markdown
-    # encodes it.
+    # Per-project and personal connector configuration *and* the hot-loadable
+    # implementation modules, including the team-member career MCP. One entry per
+    # connector instance, named after the instance — so the directory is the
+    # artifact and its members are not declarable here. Backed up rather than
+    # rebuilt: no Tier 1 markdown encodes it, and nothing regenerates a plugin.
+    #
+    # Not encrypted, and deliberately holding nothing that would want to be:
+    # every connector credential lives in `private/config.json`. What this
+    # directory needs is integrity, not confidentiality — its contents are
+    # executed — and a cipher over it would have addressed neither.
     Collection("connectors", Tier.TRUTH, encrypted=False, gitignored=True),
     # Rotating structured diagnostic logs, NOT `event_log/`. Outside the tier
     # model on purpose, and it says so here rather than in a set elsewhere.

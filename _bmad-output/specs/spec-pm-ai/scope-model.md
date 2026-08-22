@@ -34,11 +34,16 @@ The application scope holds none, because it owns no meetings. **All three are e
 ├── config.toml                        # Daemon settings & global defaults
 ├── disclosure.md                      # Frontier-call provenance & cost ledger - never committed
 ├── projects.toml                      # Registry of enrolled projects (pm-ai project add)
-├── connectors/                        # Per-project & personal connector configuration -
-│                                      # settings only, at 600. Every token it is
-│                                      # enrolled with goes to private/config.json
-│                                      # incl. team-member career MCP (HR platforms) -
-│                                      # operates on the team-member scope, never the personal one
+├── connectors/                        # Per-project & personal connector CONFIGURATION
+│                                      # and IMPLEMENTATION - the hot-loadable plugin
+│                                      # modules, plus each instance's settings
+│                                      # (type, domain, cadence, enabled). At 600,
+│                                      # gitignored, NOT encrypted.
+│                                      # Carries no token and no secret of any kind:
+│                                      # every credential goes to private/config.json,
+│                                      # which is encrypted. Incl. team-member career
+│                                      # MCP (HR platforms) - operates on the
+│                                      # team-member scope, never the personal one
 ├── logs/                              # Rotating structured diagnostic logs (NOT event_log/)
 │
 └── private/                           # OPERATIONAL ENCLAVE (gitignored)
