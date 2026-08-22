@@ -8,7 +8,7 @@ Companion to `SPEC.md`. Four scopes, what each holds, and the rule deciding whic
 
 **Sovereign Personal PM Scope (`~/.manager-ai/`)** — The independent personal coaching hub: leadership philosophy, 3-tier goals, Socratic 1:1 coaching logs, literature subscriptions, anti-burnout metrics. Contains **no** project-specific information or configuration. Survives independently across project, role, and company transitions. Governed by the User Privacy & Data Boundary Charter.
 
-**Team-Member Scope (`~/.pm-ai/private/people/`)** — Encrypted, gitignored records *about direct reports*: career dossiers, goals agreed in a team 1:1, per-employee monitored metrics. Stored under the application scope but governed by its own rules, because two requirements turn on telling it apart from the sovereign personal scope: **these records may sync to an external HR platform on explicit PM approval, and personal-scope records never may.** Deliberately **not** part of the sovereign scope and does not survive a company transition — a single directory, deleted on leaving the role.
+**Team-Member Scope (`~/.pm-ai/private/people/`)** — Gitignored, 600-permissioned records *about direct reports*: career dossiers, goals agreed in a team 1:1, per-employee monitored metrics. Stored under the application scope but governed by its own rules, because two requirements turn on telling it apart from the sovereign personal scope: **these records may sync to an external HR platform on explicit PM approval, and personal-scope records never may.** Deliberately **not** part of the sovereign scope and does not survive a company transition — a single directory, deleted on leaving the role.
 
 **Isolated Project Scopes (`<project-root>/.project-ai/`)** — Repository-specific, committed to version control: project rules, task automation scripts, team cultural conventions, local daily dashboards, meeting records, and the commitments ledger. Its one gitignored subdirectory, `transcripts/`, holds raw meeting captures.
 
@@ -24,7 +24,7 @@ Every scope that owns meetings holds its captures at the same relative path (`tr
 | `~/.pm-ai/private/people/<person_id>/transcripts/` | 1:1 sessions with that direct report |
 | `~/.manager-ai/transcripts/` | Purely personal sessions |
 
-The application scope holds none, because it owns no meetings. **All three are equally protected** — encrypted at rest, and excluded from version control wherever version control can reach them.
+The application scope holds none, because it owns no meetings. **All three are equally protected** — by exclusion from version control, wherever version control can reach them. They are not encrypted at rest: a capture's exposure is publication to a repository, not the disk.
 
 ## A. Application Scope
 
@@ -41,12 +41,12 @@ The application scope holds none, because it owns no meetings. **All three are e
 │
 └── private/                           # OPERATIONAL ENCLAVE (gitignored)
     ├── operational.db                 # Tier 2: job queue, cursors, executed-key ledger,
-    │                                  # staged proposals (encrypted, never rebuilt)
+    │                                  # staged proposals (600, never rebuilt)
     ├── derived.db                     # Tier 3: search & commitment indexes - disposable,
     │                                  # rebuilt by pm-ai reindex
     ├── config.json                    # API credentials (encrypted)
     ├── vector_index/                  # Pruned embeddings - NOT encrypted, rebuildable
-    └── people/                        # TEAM-MEMBER SCOPE (encrypted) - never committed;
+    └── people/                        # TEAM-MEMBER SCOPE - never committed;
         └── <person_id>/               # a single deletable directory per report,
             │                          # removed on leaving the role.
             ├── memory/
@@ -56,7 +56,7 @@ The application scope holds none, because it owns no meetings. **All three are e
             │   └── event_log/         # Team-member-scope audit trail
             │
             ├── transcripts/           # RAW CAPTURES of 1:1 sessions with this
-            │                          # report (encrypted, excluded from version
+            │                          # report (excluded from version
             │                          # control, 30-day purge)
             │
             └── ...                    # Career dossiers, agreed 1:1 goals and the
@@ -86,7 +86,8 @@ The application scope holds none, because it owns no meetings. **All three are e
 │   ├── synthesize_manager_dashboard.py
 │   └── anti_burnout_shield.py         # Workload telemetry & PTO guardrail analyzer
 │
-├── private/                           # PERSONAL ENCLAVE (gitignored, encrypted)
+├── private/                           # PERSONAL ENCLAVE (gitignored, encrypted -
+│                                      # the one enclave still encrypted in full)
 │   ├── telegram_cache/                # The PM's own voice notes & dialogue state.
 │   │                                  # Transient input; never a backup target.
 │   └── personal_analytics.db          # Burnout metrics, workload & calendar-density dynamics.
@@ -97,7 +98,7 @@ The application scope holds none, because it owns no meetings. **All three are e
 │                                      # once compaction runs.
 │
 └── transcripts/                       # RAW CAPTURES of purely personal sessions
-                                       # (encrypted, excluded from version control,
+                                       # (excluded from version control,
                                        # 30-day purge). At the scope ROOT, outside
                                        # private/ - so if the PM keeps this scope as
                                        # a private git repository, the private/ rule
@@ -127,7 +128,7 @@ The application scope holds none, because it owns no meetings. **All three are e
 │   │   ├── parse_standup.py
 │   │   └── sync_gitlab_wi.py
 │   │
-│   └── transcripts/                   # RAW CAPTURES (gitignored, encrypted)
+│   └── transcripts/                   # RAW CAPTURES (gitignored, not encrypted)
 │                                      # Verbatim transcripts & audio; 30-day purge.
 │                                      # The one gitignored directory inside a committed
 │                                      # scope, so its exclusion rests on a rule rather
@@ -146,6 +147,7 @@ The application scope holds none, because it owns no meetings. **All three are e
 - Personal-scope files are never indexed into or committed to project repositories; pre-commit hooks verify the private enclaves are gitignored.
 - A capture write asks **git itself** whether the directory would be carried into a commit, and the question is keyed on whether the path lies inside a git working tree — never on which scope owns it. All three capture locations are covered on the same terms, so a private personal repository is protected exactly as the employer's is. Tracked, or unanswerable, refuses the write; outside a working tree there is nothing to be excluded from and the write proceeds.
 - Anti-burnout indicators and personal workload analytics are excluded from every project-scope file.
+- **Encryption is narrow as of 2026-08-22**: credentials (`config.json`, `connectors/`) and the sovereign personal enclave (`~/.manager-ai/private/`). The operational store, raw captures and team-member records are 600-permissioned and gitignored but not encrypted, with full-disk encryption as the backstop. A report's record being unreadable by that report's peers now rests on file permissions and the directory boundary rather than on a cipher.
 - Custom metrics and dossiers about a report live in the team-member scope only — never the sovereign scope, never a committed project scope, because a report's performance record must not be readable by that report's peers.
 - Only team-member-scope material is ever an HR sync payload, and no payload may draw on personal-scope material, directly or by way of a model that read both.
 - `strategic_goals.md` holds all three goal domains in the personal scope today. A project-scope alignment surface would first require project goals to exist as project-scope records — a project artifact citing a personal goal is the cross-scope violation this model exists to prevent.

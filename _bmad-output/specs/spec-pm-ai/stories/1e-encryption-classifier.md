@@ -48,14 +48,16 @@ The question asked of each path is *"is this artifact encrypted at rest?"*
 | `<repo>/.project-ai/memory/commitments_log.md` | no | all Markdown is plaintext by design |
 | `~/.pm-ai/private/vector_index/index.bin` | no | rebuildable derived index, despite sitting under `private/` |
 | `~/.pm-ai/private/derived.db` | no | rebuildable derived store |
-| `~/.pm-ai/private/operational.db` | yes | operational state no rebuild can reconstruct |
+| `~/.pm-ai/private/operational.db` | **no** | queue state and cursors rather than record content; 600 and full-disk encryption |
 | `~/.pm-ai/private/config.json` | yes | API credentials |
-| `~/.pm-ai/private/people/p1/dossier.md` | yes | a direct report's career record — the one place a `.md` file is encrypted, because the enclave rule wins |
+| `~/.pm-ai/private/people/p1/dossier.md` | **no** | gitignored, 600-permissioned, and a single deletable directory |
 | `~/.manager-ai/private/telegram_cache/state.json` | yes | the PM's own voice notes and dialogue state |
 | `~/.manager-ai/private/personal_analytics.db` | yes | burnout and workload figures are recoverable personal facts |
-| `<repo>/.project-ai/transcripts/2026-08-18.vtt` | yes | raw meeting capture |
-| `~/.pm-ai/private/people/p1/transcripts/2026-08-18.vtt` | yes | raw capture of a 1:1 — same answer, different scope |
-| `~/.manager-ai/transcripts/2026-08-18.vtt` | yes | raw capture of a personal session — same answer again |
+| `<repo>/.project-ai/transcripts/2026-08-18.vtt` | **no** | a capture's exposure is publication to a repository; the git guard is what addresses it |
+| `~/.pm-ai/private/people/p1/transcripts/2026-08-18.vtt` | **no** | same answer, different scope |
+| `~/.manager-ai/transcripts/2026-08-18.vtt` | **no** | same answer again |
+
+> **Amended 2026-08-22, after this story shipped.** The user narrowed the encrypted set to credentials and the sovereign personal enclave. Five rows flipped from yes to no; they are edited rather than annotated one by one, because a matrix that states answers the system does not give is worse than one that shows its history. The mechanism this story built is unchanged — the answers are still declared on the node and derived per scope — and `storage-contract.md` records what protects each dropped artifact instead.
 | `~/.pm-ai/private/event_telemetry.db` | yes | a historical name, undeclared, so fail-closed — see Design Notes |
 | `~/.pm-ai/private/chat_history/2026-08-18.vtt` | yes | likewise a historical name, and likewise fail-closed |
 

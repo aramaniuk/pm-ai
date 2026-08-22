@@ -29,14 +29,21 @@ An artifact in none of the five is an oversight, not a category. Deleting Tier 3
 
 Encryption applies to a **defined set** rather than to all local state, because plaintext Markdown is a deliberate product property.
 
-**Encrypted** (AES-256, 600 permissions):
+**Encrypted** (AES-256, 600 permissions) — narrowed 2026-08-22 to credentials and the sovereign personal enclave:
 
-- The Tier-2 operational store (`operational.db`)
-- Raw meeting transcripts and audio, in all three scopes that hold them — `<repo>/.project-ai/transcripts/`, `~/.pm-ai/private/people/<person_id>/transcripts/`, and `~/.manager-ai/transcripts/`. Equally protected: one classification, one cipher, one set of permissions, whichever scope owns the meeting.
-- The PM's own voice notes and dialogue state (`~/.manager-ai/private/telegram_cache/`)
-- API credentials (`config.json`)
-- Team-member records (`~/.pm-ai/private/people/`)
-- The personal analytics store (`~/.manager-ai/private/personal_analytics.db`)
+- API credentials (`~/.pm-ai/private/config.json`)
+- Per-connector configuration (`~/.pm-ai/connectors/`), which holds provider tokens
+- The sovereign personal enclave in full (`~/.manager-ai/private/`): the PM's own voice notes and dialogue state (`telegram_cache/`) and the personal analytics store (`personal_analytics.db`)
+
+**Deliberately dropped from that set**, and what protects each instead:
+
+| No longer encrypted | What holds the line now |
+| --- | --- |
+| `operational.db` | 600 permissions and full-disk encryption. It holds queue state and cursors rather than record content |
+| Raw captures, in all three scopes | The git guard below, plus the 30-day purge. A transcript's exposure is publishing it to a repository, and a cipher never addressed that |
+| Team-member records (`~/.pm-ai/private/people/`) | 600 permissions, gitignored, and a single deletable directory |
+
+**This is a real reduction in protection, recorded rather than glossed.** A report's performance record is now readable by anything running as the PM's user, and the requirement that a report's peers cannot read it rests on file permissions and the enclave's directory boundary alone. Full-disk encryption is the backstop for all three rows. The captures row is the least changed in substance: their risk was always the repository, not the disk.
 
 **Explicitly not encrypted:**
 

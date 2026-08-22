@@ -451,7 +451,7 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
         (
             # Tier 2 — job queue, cursors, executed-key ledger, staged
             # proposals. Encrypted, never rebuilt.
-            File("operational.db", Tier.OPERATIONAL, encrypted=True, gitignored=True),
+            File("operational.db", Tier.OPERATIONAL, encrypted=False, gitignored=True),
             # Tier 3 — search & commitment indexes. Separate *files* from Tier 2,
             # so a rebuild cannot reach the job queue (AD-3). The shared enclave
             # proves nothing on its own; what holds is the assertion in
@@ -469,7 +469,7 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
             # deleted on role change. Tier 1 markdown inside the gitignored
             # enclave: career dossiers and agreed 1:1 goals are truth, and
             # encryption is orthogonal to tier.
-            Collection("people", Tier.TRUTH, encrypted=True, gitignored=True),
+            Collection("people", Tier.TRUTH, encrypted=False, gitignored=True),
         ),
         gitignored=True,
     ),
@@ -564,7 +564,7 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
     # but its ownership rule is explicit that a capture lives in the scope owning
     # its meeting and that "every scope holds its captures at the same relative
     # path (`transcripts/`)". Current behaviour unchanged.
-    Collection("transcripts", RETAINED, encrypted=True, gitignored=True),
+    Collection("transcripts", RETAINED, encrypted=False, gitignored=True),
 )
 
 
@@ -579,16 +579,16 @@ PEOPLE_TREE: tuple[LayoutNode, ...] = (
     Dir(
         "memory",
         (
-            Collection("event_log", Tier.TRUTH, encrypted=True, gitignored=True),
+            Collection("event_log", Tier.TRUTH, encrypted=False, gitignored=True),
             # A 1:1 with a direct report is people-scoped, never project-scoped
             # (AD-33): a report's record must not be readable by that report's
             # peers.
-            Collection("meetings", Tier.TRUTH, encrypted=True, gitignored=True),
+            Collection("meetings", Tier.TRUTH, encrypted=False, gitignored=True),
         ),
-        encrypted=True,
+        encrypted=False,
         gitignored=True,
     ),
-    Collection("transcripts", RETAINED, encrypted=True, gitignored=True),
+    Collection("transcripts", RETAINED, encrypted=False, gitignored=True),
 )
 
 
@@ -632,7 +632,7 @@ PROJECT_TREE: tuple[LayoutNode, ...] = (
     # exclusion at `/.project-ai/transcripts/`. Move this and
     # `assert_capture_dir_ignored` still reports "protected" for a directory git
     # tracks, which is how verbatim minutes reach the employer's repository.
-    Collection("transcripts", RETAINED, encrypted=True, gitignored=True),
+    Collection("transcripts", RETAINED, encrypted=False, gitignored=True),
 )
 
 

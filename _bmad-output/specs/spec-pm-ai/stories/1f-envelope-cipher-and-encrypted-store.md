@@ -1,5 +1,5 @@
 ---
-title: 'Envelope cipher and encrypted operational store'
+title: 'Envelope cipher for credentials and the personal enclave'
 type: 'feature'
 created: '2026-08-21'
 updated: '2026-08-22'
@@ -13,9 +13,20 @@ context:
 
 ## Intent
 
-**Problem:** The classifier from story 1e knows which artifacts should be encrypted, and the keychain from story 1d can hold a key, but nothing encrypts anything. The operational store — pending external writes, connector cursors, and the ledger of mutations already sent to external systems — sits on disk in plaintext.
+**Problem:** The classifier from story 1e knows which artifacts should be encrypted, and the keychain from story 1d can hold a key, but nothing encrypts anything.
 
-**Approach:** Add a `CryptoPort` and an envelope cipher to `pm_ai/storage/crypto.py` that encrypts and decrypts using a key it is given, writing at file mode `0600`. Have `StorageService` receive the key as a constructor argument and use it when opening the operational store. `pm_ai/app/wiring.py` fetches the key through `KeychainPort` and passes it down.
+**Retargeted 2026-08-22, before implementation.** This story was *"Envelope cipher and encrypted operational store"*, and the operational store is no longer encrypted — the user narrowed the encrypted set to credentials and the sovereign personal enclave. What survives is the whole cipher half; only its subjects changed:
+
+| Encrypt | Why it stayed on the list |
+| --- | --- |
+| `~/.pm-ai/private/config.json` | API credentials |
+| `~/.pm-ai/connectors/` | per-connector configuration, which holds provider tokens |
+| `~/.manager-ai/private/telegram_cache/` | the PM's own voice notes and dialogue state |
+| `~/.manager-ai/private/personal_analytics.db` | burnout and workload figures, which are recoverable personal facts |
+
+The SQLite half did not disappear with `operational.db`: `personal_analytics.db` is also SQLite, so `sqlcipher3` is still the dependency and still lazily imported. What *has* gone is any reason for `StorageService` to hold a key — it opens the operational store, and that store is now plaintext.
+
+**Approach:** Add a `CryptoPort` and an envelope cipher to `pm_ai/storage/crypto.py` that encrypts and decrypts using a key it is given, writing at file mode `0600` inside directories at `0700`. `pm_ai/app/wiring.py` fetches the key through `KeychainPort` and passes it to whatever opens an encrypted artifact — which, after the narrowing, is the personal-analytics store and the two credential files rather than the single writer.
 
 **Depends on:** story 1d for the keychain port, story 1e for the classifier — which as of 2026-08-22 derives its answer from the scope trees, so `is_encrypted` is the entry point and `ENCRYPTED` in `pm_ai.domain.scope_model` is the authority behind it.
 
@@ -24,7 +35,7 @@ context:
 **Always:**
 - `pm_ai.storage` and `pm_ai.platform` are sibling layers that may not import each other (`.importlinter`), so `crypto.py` cannot call the keychain adapter. The key is fetched in `pm_ai/app/wiring.py` — the only module permitted to import both — and passed down as a value.
 - `sqlcipher3` is imported **inside the function that uses it**. It is in the `runtime` extra and not installed here, and a module-level import would turn this story's tests into skips that read as coverage.
-- Fail closed. A missing key refuses to open the encrypted store. There is no fallback to plaintext.
+- Fail closed. A missing key refuses to open an encrypted artifact. There is no fallback to plaintext — a store that silently opens unencrypted is worse than one that will not open.
 - Encryption may be disabled by an explicit debug flag. It defaults to on, is never off in a fresh installation, and while off it emits **both** a console warning and an event-log entry.
 - Encrypted files are written at mode `0600`.
 - **Directories holding encrypted artifacts are created at mode `0700`.** A `0600` file inside a world-readable directory still leaks its name, its size, and its mtime — enough to show that a 1:1 with a named report happened, on a given day, which is the fact the enclave exists to hide. This story owns file modes, so it owns the directories it creates them in. (Deferred here after story 1a and never recorded in this file until 2026-08-22.)
@@ -37,16 +48,17 @@ context:
 
 | Given | When | Then |
 |---|---|---|
+| `is_encrypted` reports an artifact plaintext | it is written | no cipher is involved, and no key is fetched for it |
 | A key is available | a payload is encrypted, then decrypted | the result equals the original payload |
 | A key is available | a payload is encrypted | the bytes written differ from the payload, and the file's mode is `0600` |
 | A key is available, target directory absent | the encrypted store is opened | every directory created along the way is mode `0700`, and the store itself `0600` |
 | A directory that already exists at `0755` | an encrypted artifact is written into it | the directory is tightened to `0700` rather than left as found |
 | Two different keys | the same payload is encrypted under each | the two outputs differ |
 | A payload encrypted under one key | decryption is attempted with another | raises a typed error rather than returning corrupt data |
-| An empty keychain | the encrypted operational store is opened | raises a typed error; the store is not opened and no plaintext file is created at its path |
-| A valid key | the operational store is opened, written, closed, and reopened | the rows written before closing are readable afterwards |
-| Encryption disabled by the debug flag | the daemon starts | the store opens in plaintext, and both a console warning and an event-log entry are emitted |
-| Encryption disabled, then re-enabled with the original key | the store is opened | the mismatch is reported as a typed error rather than read as corruption |
+| An empty keychain | an encrypted artifact is opened | raises a typed error; it is not opened and no plaintext file is created at its path |
+| A valid key | `personal_analytics.db` is opened, written, closed, and reopened | the rows written before closing are readable afterwards |
+| Encryption disabled by the debug flag | the daemon starts | encrypted artifacts open in plaintext, and both a console warning and an event-log entry are emitted |
+| Encryption disabled, then re-enabled with the original key | the artifact is opened | the mismatch is reported as a typed error rather than read as corruption |
 | `pm_ai.storage.crypto` | imported while the `runtime` extra is absent | imports successfully |
 
 </frozen-after-approval>

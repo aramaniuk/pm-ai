@@ -21,6 +21,7 @@ import pytest
 
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ENCRYPTION, File, Tier
+from pm_ai.domain.storage_tiers import requires_git_exclusion
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.storage.crypto import is_encrypted, scope_of
 
@@ -42,16 +43,19 @@ MATRIX = [
     (PROJECT, "commitments_log.md", None, False),
     (APPLICATION, "vector_index/", "index.bin", False),
     (APPLICATION, "derived.db", None, False),
-    (APPLICATION, "operational.db", None, True),
+    (APPLICATION, "operational.db", None, False),
     (APPLICATION, "config.json", None, True),
     (APPLICATION, "connectors/", "jira.toml", True),
     (PERSONAL, "telegram_cache/", "state.json", True),
     (PERSONAL, "personal_analytics.db", None, True),
-    (PROJECT, "transcripts/", "2026-08-18.vtt", True),
-    (PEOPLE, "transcripts/", "2026-08-18.vtt", True),
-    (PERSONAL, "transcripts/", "2026-08-18.vtt", True),
-    (PEOPLE, "meetings/", "1on1.md", True),
+    # Captures are plaintext in all three scopes as of 2026-08-22. What keeps a
+    # verbatim transcript out of a repository is the git guard, not a cipher.
+    (PROJECT, "transcripts/", "2026-08-18.vtt", False),
+    (PEOPLE, "transcripts/", "2026-08-18.vtt", False),
+    (PERSONAL, "transcripts/", "2026-08-18.vtt", False),
+    (PEOPLE, "meetings/", "1on1.md", False),
     (PROJECT, "meetings/", "standup.md", False),
+    (PEOPLE, "event_log/", "2026-08.md", False),
 ]
 
 
@@ -81,29 +85,33 @@ def test_two_artifacts_sharing_a_parent_answer_differently(paths):
 
 
 def test_one_basename_answers_differently_in_two_scopes(paths):
-    """`meetings/` is why this axis is keyed on (scope, key) rather than name.
+    """Per-scope keying, now carried by git-exclusion rather than by encryption.
 
-    Under `people/` it holds a direct report's 1:1 records, which the storage
-    contract requires encrypted. In a project it holds summaries committed to the
-    repository, which the same contract requires plaintext. A basename-keyed
-    table has one slot and would have to be wrong about one of them.
+    `meetings/` motivated the move: it was encrypted under `people/` and
+    plaintext in a project, which a basename-keyed table cannot express. The
+    2026-08-22 loosening made both plaintext, so encryption no longer
+    demonstrates the need — and the need did not go away with it. `event_log/`
+    is excluded from version control inside the team-member enclave and
+    committed in a project, so the same one-name-two-answers problem holds on
+    the axis that is still asymmetric. Asserted here rather than in the
+    encryption matrix so a future re-tightening does not quietly become the only
+    thing justifying the design.
     """
-    report = paths.resolve(PEOPLE, "meetings/") / "1on1.md"
-    team = paths.resolve(PROJECT, "meetings/") / "standup.md"
-
-    assert is_encrypted(str(report)) is True
-    assert is_encrypted(str(team)) is False
+    assert requires_git_exclusion(ScopeKind.PEOPLE, "event_log/") is True
+    assert requires_git_exclusion(ScopeKind.PROJECT, "event_log/") is False
 
 
-def test_captures_are_encrypted_in_every_scope_that_holds_them():
+def test_captures_agree_across_every_scope_that_holds_them():
     """One answer, reached by three declarations agreeing rather than by one slot.
 
-    Per-scope keying makes disagreement *possible*, so it has to be asserted
-    rather than assumed the way a global value would have guaranteed it.
+    Per-scope keying makes disagreement *possible*, so agreement has to be
+    asserted rather than assumed the way a global value would have guaranteed it.
+    The answer itself is plaintext as of 2026-08-22; what this holds is that the
+    three cannot drift apart, whichever way it is later set.
     """
     holders = [k for k, answers in ENCRYPTION.items() if "transcripts/" in answers]
     assert {k.value for k in holders} == {"personal", "people", "project"}
-    assert all(ENCRYPTION[k]["transcripts/"] for k in holders)
+    assert len({ENCRYPTION[k]["transcripts/"] for k in holders}) == 1
 
 
 @pytest.mark.parametrize(
