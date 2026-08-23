@@ -21,6 +21,10 @@ runtime = [
     "fastapi==0.141.1",
     "uvicorn==0.52.3",
     "keyring==25.7.0",
+    # AES-256-GCM for the two encrypted files (AD-6). Wheels for macOS arm64, so
+    # no source build — the property `sqlcipher3` lacked. Imported lazily in
+    # `pm_ai.storage.crypto`, so the package loads without this extra.
+    "cryptography>=50.0.0",
 ]
 
 [dependency-groups]
@@ -28,6 +32,10 @@ dev = [
     "pytest>=8",
     "import-linter>=2",
     "mypy>=2",
+    # Also a dev dependency, deliberately. It is an optional runtime extra so the
+    # package imports without it, and the suite must still exercise the real
+    # cipher rather than skip — a skipped encryption test reads as coverage.
+    "cryptography>=50.0.0",
 ]
 
 [tool.uv]

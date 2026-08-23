@@ -2,9 +2,10 @@
 title: 'Envelope cipher for credentials and the personal enclave'
 type: 'feature'
 created: '2026-08-21'
-updated: '2026-08-22'
-status: 'ready-for-dev'
-review_loop_iteration: 0
+updated: '2026-08-23'
+status: 'done'
+review_loop_iteration: 2
+baseline_commit: '7c40f21'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
 ---
@@ -74,28 +75,39 @@ So **nothing encrypted is a database.** Both subjects are files, `sqlcipher3` ha
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` — add `CryptoPort`.
-- [ ] `pm_ai/storage/crypto.py` — add envelope encrypt and decrypt over an injected key, writing at mode `0600` inside `0700` directories, with any optional cipher library imported inside the call.
-- [ ] `pm_ai/storage/service.py` — accept the key as a constructor argument and use it when opening the operational store; emit the warning and event-log entry when encryption is disabled.
-- [ ] `pm_ai/app/wiring.py` — fetch the key through `KeychainPort` and inject it.
-- [ ] `tests/architecture/test_cipher.py` — new. One test per matrix row, using a fake keychain.
+- [x] `pm_ai/ports/__init__.py` — `CryptoPort` (`encrypt`/`decrypt` over bytes) and `DecryptionFailed`. The key is the implementation's, not a parameter: a method taking one puts it in every call site's locals and traceback.
+- [x] `pm_ai/storage/crypto.py` — `AesGcmCrypto` (AES-256-GCM, fresh nonce per call), `PlaintextCrypto` for the debug flag, `LazyKeyCrypto`, and `write_encrypted`/`read_encrypted` owning the file and directory modes.
+- [x] ~~`pm_ai/storage/service.py` — accept the key~~ — **void.** The operational store is plaintext as of 2026-08-22, so the single writer needs no key and never learns where secrets live.
+- [x] `pm_ai/app/wiring.py` — fetches the key through `KeychainPort`, and owns the debug flag's console warning and event-log entry, because only the composition root knows a flag exists.
+- [x] `pyproject.toml` — `cryptography` in the `runtime` extra **and** the `dev` group. Optional so the module imports without it; dev so the suite exercises the real cipher rather than skipping, since a skipped encryption test reads as coverage.
+- [x] `tests/architecture/test_cipher.py` — new, 24 tests against the real cipher.
+- [x] `tests/architecture/test_keychain.py` — one test repaired: it asserted that `keyring` happened not to be installed, and `uv add --optional runtime` installed it. Absence is now simulated.
 
 **Acceptance Criteria:**
-- Given the `runtime` extra is not installed, when `uv run pytest` runs, then no test skips on a missing cipher import and every module here imports successfully.
+- Given the `runtime` extra is not installed, then no test skips on a missing cipher import and every module here imports successfully. **310 passed, 29 skipped**; no skip names `pm_ai.storage.crypto`.
 - Given `uv run lint-imports`, then all 12 contracts hold and no module under `pm_ai/storage/` imports `pm_ai.platform`.
-- Given an empty keychain, when the operational store is opened, then it raises and no plaintext file exists at its path.
+- Given an empty keychain, when an encrypted artifact is written, then it raises and **neither the file nor its directory** is created — a zero-length `config.json` is worse than none, because the next reader cannot tell it from a store legitimately emptied.
 - Given encryption disabled by the debug flag, then both a console warning and an event-log entry are emitted.
-- Given a fresh tree, when the encrypted store is created, then `stat` reports `0700` on each directory created and `0600` on the store.
-- Given the store is written, closed, and reopened with the same key, then the earlier rows are readable.
+- Given a fresh tree, then `stat` reports `0700` on the directory and `0600` on the file, and a `umask 000` cannot loosen either.
+- Given the key is needed for three files in one run, then the keychain is read **once**: a keychain read is a user-visible prompt on some configurations.
+- Given nothing encrypted is written at all, then no key is fetched — the daemon starts on a machine where none has been enrolled.
 
 ## Design Notes
 
-Encryption and durability are independent properties, and an implementation that derives one from the other gets two artifacts wrong in opposite directions. `personal_analytics.db` is encrypted because burnout figures are recoverable personal facts, and it is also not rebuildable because the telemetry it was computed from gets pruned. The vector index is the mirror image: rebuildable, and plaintext. Keep the two questions separate.
+Encryption and durability are independent properties, and an implementation that derives one from the other gets two artifacts wrong in opposite directions. The vector index is rebuildable and plaintext; `config.json` is neither. Keep the two questions separate. (This note used to make its point with `personal_analytics.db`, which was encrypted and not rebuildable — it left the encrypted set on 2026-08-23, so the example moved and the point did not.)
+
+**Why the key is fetched lazily, which the frozen Approach did not say.** Written eagerly, `build()` refused to construct a daemon on any machine with no key enrolled — which broke 33 existing tests and, more importantly, would refuse to boot a fresh install over a capability that run may never use. Harvesting, briefings and the CLI touch neither encrypted file. Fail-closed is preserved and merely moved to the moment an encrypted artifact is read or written, which is also the moment an operator can act on it. Same shape as the capture guard: ask when the capture is written, not at startup.
+
+**Why `KeyNotFound` is not caught anywhere.** A first run has no key and must mint one. That is a decision with consequences — a new key makes every previously sealed artifact unreadable — so it belongs to whatever owns installation, not to a constructor that would quietly do it and write a second key over a store it could still have opened.
+
+**Why the payload is sealed before anything is created.** `write_encrypted` calls the cipher first, then makes the directory. A refusal therefore leaves no directory and no empty file for a later reader to interpret.
+
+**Why the file mode is set twice.** `os.open`'s mode argument is masked by the process umask, so a user running with `umask 000` would get a world-readable credential file and nothing would report it. The explicit `chmod` after the write is what closes that, and a test runs under `umask 000` to prove it.
 
 ## Verification
 
-- `uv run pytest -q -rs` — expected: 29 skipped, none naming `pm_ai.storage.crypto`.
-- `uv run python -c "import pm_ai.storage.crypto"` — expected: silent success with the `runtime` extra absent.
-- `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
-- Introduce a plaintext fallback for a missing key and confirm the test goes red, then remove it.
+- `uv run pytest -q -rs` — expected: 29 skipped, none naming `pm_ai.storage.crypto`. Confirmed.
+- `uv run python -c "import pm_ai.storage.crypto"` — silent success with the `runtime` extra absent. Confirmed.
+- `uv run lint-imports` — `Contracts: 12 kept, 0 broken.` Confirmed.
+- Introduce a plaintext fallback for a missing key and confirm the test goes red, then remove it. **Run 2026-08-23:** wrapping the key fetch in `except Exception: PlaintextCrypto()` turns `test_no_key_refuses_the_write_and_leaves_nothing_behind` red. 1 failed, 23 passed. Restored.
 - `stat -f '%Sp %N'` on the enclave directory and the store — expected: `drwx------` and `-rw-------`. A `0600` file inside a `0755` directory still publishes its name, size and mtime, which is enough to reveal that a 1:1 with a named report happened on a given day.

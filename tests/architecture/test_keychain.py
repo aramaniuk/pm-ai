@@ -103,14 +103,21 @@ def test_deleting_something_absent_is_not_a_silent_success():
 
 
 @pytest.mark.parametrize("call", ["store", "fetch", "delete"])
-def test_a_missing_keyring_package_raises_at_call_time_naming_it(call):
-    """The real state of this environment: `keyring` is in the `runtime` extra.
+def test_a_missing_keyring_package_raises_at_call_time_naming_it(call, monkeypatch):
+    """Absence is *simulated*, not assumed from the environment.
 
-    At *call* time, not import time — which is the whole reason the import is
-    inside the method. The message names the package, because "keychain
-    unavailable" with no cause sends an operator to Keychain Access rather than
-    to `uv sync`.
+    This test read the real state of the interpreter until 2026-08-23, when a
+    `uv add --optional runtime` installed the whole runtime extra and keyring
+    with it — and the test failed for a reason that had nothing to do with the
+    code. An assertion about which packages happen to be installed is an
+    assertion about somebody's last command.
+
+    What matters is unchanged: the failure arrives at *call* time rather than
+    import time, which is the whole reason the import is inside the method, and
+    the message names the package — "keychain unavailable" with no cause sends an
+    operator to Keychain Access instead of to `uv sync`.
     """
+    monkeypatch.setitem(sys.modules, "keyring", None)
     adapter = MacOSKeychainAdapter()
     arguments = {"store": (NAME, SECRET), "fetch": (NAME,), "delete": (NAME,)}[call]
 

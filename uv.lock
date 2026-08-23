@@ -886,6 +886,7 @@ source = { editable = "." }
 [package.optional-dependencies]
 runtime = [
     { name = "anthropic", extra = ["mcp"] },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "keyring" },
     { name = "ollama" },
@@ -896,6 +897,7 @@ runtime = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cryptography" },
     { name = "import-linter" },
     { name = "mypy" },
     { name = "pytest" },
@@ -904,6 +906,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", extras = ["mcp"], marker = "extra == 'runtime'" },
+    { name = "cryptography", marker = "extra == 'runtime'", specifier = ">=50.0.0" },
     { name = "fastapi", marker = "extra == 'runtime'", specifier = "==0.141.1" },
     { name = "keyring", marker = "extra == 'runtime'", specifier = "==25.7.0" },
     { name = "ollama", marker = "extra == 'runtime'" },
@@ -915,6 +918,7 @@ provides-extras = ["runtime"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cryptography", specifier = ">=50.0.0" },
     { name = "import-linter", specifier = ">=2" },
     { name = "mypy", specifier = ">=2" },
     { name = "pytest", specifier = ">=8" },

@@ -217,6 +217,43 @@ class KeychainPort(Protocol):
         """
 
 
+class DecryptionFailed(Exception):
+    """The bytes did not decrypt under this key.
+
+    One error for every cause — a wrong key, a truncated file, a plaintext file
+    read as though it were encrypted, a tampered tag — because the caller's
+    response is the same in all of them and the distinctions are exactly what an
+    attacker would like reported back. What must never happen is returning
+    plausible-looking garbage: AES-GCM authenticates, so a failure is knowable
+    rather than guessable, and this is that knowledge made explicit.
+    """
+
+
+@runtime_checkable
+class CryptoPort(Protocol):
+    """AD-6 — the cipher over the encrypted set, holding its key.
+
+    Two artifacts are encrypted: the API credential store and the PM's own voice
+    notes. Both are files, so this is a bytes-in, bytes-out envelope rather than
+    anything page-level — nothing encrypted is a database.
+
+    The key is the implementation's, not the caller's. A method taking a key
+    would put it in every call site's local scope and its traceback; holding it
+    once means `pm_ai.app.wiring` is the only place that ever names it.
+    """
+
+    def encrypt(self, plaintext: bytes) -> bytes:
+        """Seal `plaintext`, returning a self-describing envelope.
+
+        Encrypting the same payload twice must not give the same bytes: a
+        deterministic envelope over a small credential file lets an observer
+        confirm a guess at its contents.
+        """
+
+    def decrypt(self, envelope: bytes) -> bytes:
+        """Open an envelope, or raise `DecryptionFailed`. Never a partial read."""
+
+
 @runtime_checkable
 class StoragePort(Protocol):
     """AD-5 — the single writer, behind a port."""

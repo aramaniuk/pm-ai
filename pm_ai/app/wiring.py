@@ -8,6 +8,7 @@ before it did.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,17 +18,23 @@ from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.ports import VcsPort
+from pm_ai.ports import CryptoPort, KeychainPort, VcsPort
+from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.platform.vcs import GitVcs
 from pm_ai.skills.gitlab import PostComment
 from pm_ai.skills.registry import SkillRegistry
+from pm_ai.storage.crypto import LazyKeyCrypto, PlaintextCrypto
 from pm_ai.storage.service import StorageService
+
+
+MASTER_KEY_NAME = "master"
 
 
 @dataclass
 class Daemon:
     storage: StorageService
+    crypto: CryptoPort
     skills: SkillRegistry
     connectors: dict[str, GitLabConnectorAdapter]
     transcripts: dict[str, object]
@@ -43,6 +50,8 @@ def build(
     paths: ScopePaths | None = None,
     now: Callable[[], datetime] | None = None,
     vcs: VcsPort | None = None,
+    keychain: KeychainPort | None = None,
+    encryption_disabled: bool = False,
 ) -> Daemon:
     """Wire the daemon against one resolver, which owns all four scopes (AD-4).
 
@@ -93,10 +102,17 @@ def build(
     # with a batch already in hand.
     resolver.scope_root(scope)
     storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs())
+    crypto = _build_crypto(
+        keychain or MacOSKeychainAdapter(),
+        storage=storage,
+        scope=scope,
+        encryption_disabled=encryption_disabled,
+    )
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
     return Daemon(
         storage=storage,
+        crypto=crypto,
         skills=skills,
         connectors={
             f"gitlab:{project}": GitLabConnectorAdapter(
@@ -109,3 +125,43 @@ def build(
         meetings={},
         scope=scope,
     )
+
+
+def _build_crypto(
+    keychain: KeychainPort,
+    *,
+    storage: StorageService,
+    scope: DataScope,
+    encryption_disabled: bool,
+) -> CryptoPort:
+    """The cipher for the encrypted set, or the pass-through the debug flag asks for.
+
+    The key is fetched *here* and nowhere else. `pm_ai.storage` may not import
+    `pm_ai.platform`, so the single writer cannot reach a keychain — which is the
+    property that keeps a key out of every module that merely writes files.
+
+    `KeyNotFound` is deliberately **not** caught. A first run has no key and must
+    mint one, and that is a decision with consequences — a new key makes every
+    previously sealed artifact unreadable — so it belongs to whatever owns
+    installation rather than to a constructor that would silently do it. Refusing
+    here means the daemon says what is wrong instead of quietly writing a second
+    key over a store it could still have opened.
+    """
+    if encryption_disabled:
+        # Announced twice on purpose: the console reaches whoever is running it
+        # now, the event log reaches whoever reads the record later and would
+        # otherwise find plaintext with no explanation. Only this module knows the
+        # flag exists, so only this module can say so.
+        print(
+            "WARNING: encryption is disabled by an explicit debug flag. "
+            "Credentials and voice notes are being written in plaintext. This is "
+            "never the default in a fresh installation.",
+            file=sys.stderr,
+        )
+        storage.append_event_log(
+            "- [security] encryption disabled by debug flag; the encrypted set is "
+            "being written in plaintext",
+            scope=scope,
+        )
+        return PlaintextCrypto()
+    return LazyKeyCrypto(keychain, MASTER_KEY_NAME)
