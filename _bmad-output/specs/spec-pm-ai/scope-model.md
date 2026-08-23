@@ -93,8 +93,11 @@ The application scope holds none, because it owns no meetings. **All three are e
 │   ├── synthesize_manager_dashboard.py
 │   └── anti_burnout_shield.py         # Workload telemetry & PTO guardrail analyzer
 │
-├── private/                           # PERSONAL ENCLAVE (gitignored, encrypted -
-│                                      # the one enclave still encrypted in full)
+├── private/                           # PERSONAL ENCLAVE (gitignored, 600).
+│                                      # Mixed, as of 2026-08-23: telegram_cache/
+│                                      # is encrypted and personal_analytics.db
+│                                      # is not, so the directory carries no
+│                                      # encryption answer of its own
 │   ├── telegram_cache/                # The PM's own voice notes & dialogue state.
 │   │                                  # Transient input; never a backup target.
 │   └── personal_analytics.db          # Burnout metrics, workload & calendar-density dynamics.
@@ -154,7 +157,7 @@ The application scope holds none, because it owns no meetings. **All three are e
 - Personal-scope files are never indexed into or committed to project repositories; pre-commit hooks verify the private enclaves are gitignored.
 - A capture write asks **git itself** whether the directory would be carried into a commit, and the question is keyed on whether the path lies inside a git working tree — never on which scope owns it. All three capture locations are covered on the same terms, so a private personal repository is protected exactly as the employer's is. Tracked, or unanswerable, refuses the write; outside a working tree there is nothing to be excluded from and the write proceeds.
 - Anti-burnout indicators and personal workload analytics are excluded from every project-scope file.
-- **Encryption is narrow as of 2026-08-22**: credentials (`config.json`) and the sovereign personal enclave (`~/.manager-ai/private/`). The operational store, raw captures and team-member records are 600-permissioned and gitignored but not encrypted, with full-disk encryption as the backstop. A report's record being unreadable by that report's peers now rests on file permissions and the directory boundary rather than on a cipher.
+- **Encryption is narrow as of 2026-08-23**, and covers two files: API credentials (`~/.pm-ai/private/config.json`) and the PM's own voice notes and dialogue state (`~/.manager-ai/private/telegram_cache/`). Everything else — both operational stores, raw captures, team-member records, connector configuration and code — is 600-permissioned, gitignored where it matters, and unencrypted, with full-disk encryption as the backstop. A report's record being unreadable by that report's peers rests on file permissions and the directory boundary rather than on a cipher.
 - Custom metrics and dossiers about a report live in the team-member scope only — never the sovereign scope, never a committed project scope, because a report's performance record must not be readable by that report's peers.
 - Only team-member-scope material is ever an HR sync payload, and no payload may draw on personal-scope material, directly or by way of a model that read both.
 - `strategic_goals.md` holds all three goal domains in the personal scope today. A project-scope alignment surface would first require project goals to exist as project-scope records — a project artifact citing a personal goal is the cross-scope violation this model exists to prevent.

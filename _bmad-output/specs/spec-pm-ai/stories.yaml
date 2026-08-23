@@ -93,15 +93,14 @@
     store encrypted at mode 0600. Delivers the encrypted-set half of
     storage-contract.md.
   invoke_dev_with: >-
-    Retargeted 2026-08-22: the operational store is no longer encrypted, so the
-    subjects are config.json, connectors/, telegram_cache/ and
-    personal_analytics.db, and StorageService needs no key at all. sqlcipher3 is
-    still required - personal_analytics.db is SQLite too - and still imported
-    inside the function that uses it, for the same skip-as-coverage reason as
-    1d. Fail closed: a missing key refuses to open an encrypted artifact, with
-    no fallback to plaintext. pm_ai.storage may not import pm_ai.platform, so
-    the key is fetched in app/wiring.py, the only module permitted to import
-    both.
+    Retargeted through 2026-08-23: the encrypted set is two files, config.json
+    and telegram_cache/. Nothing encrypted is a database, so sqlcipher3 has left
+    the dependency set and this story needs one file cipher and no page-level
+    one. StorageService needs no key at all. Fail closed: a missing key refuses
+    to open an encrypted artifact, with no fallback to plaintext. Directories
+    holding encrypted artifacts are created at 0700, files at 0600.
+    pm_ai.storage may not import pm_ai.platform, so the key is fetched in
+    app/wiring.py, the only module permitted to import both.
 - id: "1g"
   title: Startup diagnostics
   spec_checkpoint: true

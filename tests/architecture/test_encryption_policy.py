@@ -49,7 +49,10 @@ MATRIX = [
     # config.json, which is encrypted. The split was always in the layout.
     (APPLICATION, "connectors/", "jira.toml", False),
     (PERSONAL, "telegram_cache/", "state.json", True),
-    (PERSONAL, "personal_analytics.db", None, True),
+    # Dropped 2026-08-23. Also SQLite and also Tier 2, and left encrypted it
+    # would have been the only reason `sqlcipher3` stayed a dependency — a
+    # source build on the one platform v1 targets, for one file.
+    (PERSONAL, "personal_analytics.db", None, False),
     # Captures are plaintext in all three scopes as of 2026-08-22. What keeps a
     # verbatim transcript out of a repository is the git guard, not a cipher.
     (PROJECT, "transcripts/", "2026-08-18.vtt", False),

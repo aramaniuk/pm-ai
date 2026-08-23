@@ -38,7 +38,7 @@ Default settings, not `--strict`. Strict returns 24, and the extra 14 are annota
 
 **Ask First:**
 - Enabling `--strict`, or any per-module override that switches checking off for a whole module.
-- `ignore_missing_imports` for anything beyond the optional runtime extras that are deliberately not installed here (`keyring`, `sqlcipher3`, `sqlite_vec`).
+- `ignore_missing_imports` for anything beyond the optional runtime extras that are deliberately not installed here (`keyring`, `sqlite_vec`; `sqlcipher3` was in this list until it left the dependency set on 2026-08-23).
 - Adding `repository`/`gitignore` to `ScopePathPort` when story 1j is expected to replace both calls with working-tree discovery. Adding them is still the correct fix — a port must declare what its consumers call, and 1j removes them from the port if it removes the calls — but the churn is worth a moment's thought rather than none.
 
 **Never:** No `# type: ignore` without a specific error code and a reason on the same line. No `Any` introduced to make an error disappear. No `--strict` in this story. No new *runtime* dependency — mypy is `dev` only.
@@ -52,7 +52,7 @@ Default settings, not `--strict`. Strict returns 24, and the extra 14 are annota
 | an adapter method whose keyword name differs from its port's | mypy runs | reported, before any call site executes |
 | a port missing a method a consumer calls | mypy runs | `attr-defined`, as `ScopePathPort.repository` is today |
 | a new port added with no adapter satisfying it | mypy runs | reported at the wiring site |
-| the `runtime` extra absent | mypy runs | no error attributable to `keyring`, `sqlcipher3` or `sqlite_vec` |
+| the `runtime` extra absent | mypy runs | no error attributable to `keyring` or `sqlite_vec` |
 | `uv run pytest` with no arguments | the suite runs | the mypy gate is one of its tests, so one command still checks every invariant |
 | a `# type: ignore` with no error code | the gate runs | reported — bare ignores are what turn a checker into decoration |
 

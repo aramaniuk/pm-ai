@@ -560,9 +560,12 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
             # the telemetry they came from once FR-37 compaction runs. AD-25
             # calls it "derived telemetry", but that word means *calculated*, not
             # *rebuildable*, and Tier 3's test is the latter.
-            File("personal_analytics.db", Tier.OPERATIONAL, encrypted=True, gitignored=True),
+            File("personal_analytics.db", Tier.OPERATIONAL, encrypted=False, gitignored=True),
         ),
-        encrypted=True,
+        # No encryption answer of its own as of 2026-08-23: `telegram_cache/` is
+        # encrypted and `personal_analytics.db` is not, so this enclave is mixed
+        # exactly as the application one is. A `Dir` that answered here would be
+        # a prefix rule, and it would be wrong about one of its two members.
         gitignored=True,
     ),
     # Raw captures of purely personal sessions. `scope-model.md` §B draws none,

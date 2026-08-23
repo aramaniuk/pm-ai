@@ -32,13 +32,16 @@ Encryption applies to a **defined set** rather than to all local state, because 
 **Encrypted** (AES-256, 600 permissions) — narrowed 2026-08-22 to credentials and the sovereign personal enclave:
 
 - API credentials (`~/.pm-ai/private/config.json`) — every provider token lands here, including the one `pm-ai connector add` prompts for
-- The sovereign personal enclave in full (`~/.manager-ai/private/`): the PM's own voice notes and dialogue state (`telegram_cache/`) and the personal analytics store (`personal_analytics.db`)
+- The PM's own voice notes and dialogue state (`~/.manager-ai/private/telegram_cache/`)
+
+Both are **files**. Nothing encrypted is a database, which is what removed `sqlcipher3` from the dependency set — it had no macOS wheel and would have needed a source build on the one platform v1 targets, for a single file.
 
 **Deliberately dropped from that set**, and what protects each instead:
 
 | No longer encrypted | What holds the line now |
 | --- | --- |
 | `operational.db` | 600 permissions and full-disk encryption. It holds queue state and cursors rather than record content |
+| `personal_analytics.db` | 600 permissions, gitignored, and full-disk encryption — the same terms as `operational.db`, which it matches in every structural respect. What keeps burnout figures away from an employer is the scope boundary and the egress rules, not a cipher: encryption at rest only answers someone reading the disk, and full-disk encryption already answers that |
 | Raw captures, in all three scopes | The git guard below, plus the 30-day purge. A transcript's exposure is publishing it to a repository, and a cipher never addressed that |
 | Team-member records (`~/.pm-ai/private/people/`) | 600 permissions, gitignored, and a single deletable directory |
 | Connectors (`~/.pm-ai/connectors/`) | 600 permissions and gitignored. It holds *configuration* — type, domain, cadence, enabled — and the hot-loadable *implementation* modules, and **no secret of any kind**: every connector credential goes to `config.json`, which is encrypted. That split was always in the layout; only CAP-35's wording conflated the two. What matters for this directory is integrity rather than confidentiality, since its contents are executed |

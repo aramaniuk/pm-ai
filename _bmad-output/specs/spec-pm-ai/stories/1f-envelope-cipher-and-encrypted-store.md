@@ -19,11 +19,12 @@ context:
 
 | Encrypt | Why it stayed on the list |
 | --- | --- |
-| `~/.pm-ai/private/config.json` | API credentials |
+| `~/.pm-ai/private/config.json` | API credentials — every provider token lands here |
 | `~/.manager-ai/private/telegram_cache/` | the PM's own voice notes and dialogue state |
-| `~/.manager-ai/private/personal_analytics.db` | burnout and workload figures, which are recoverable personal facts |
 
-The SQLite half did not disappear with `operational.db`: `personal_analytics.db` is also SQLite, so `sqlcipher3` is still the dependency and still lazily imported. What *has* gone is any reason for `StorageService` to hold a key — it opens the operational store, and that store is now plaintext.
+**Narrowed again 2026-08-23.** `personal_analytics.db` was dropped too. It is Tier 2 SQLite under a gitignored 600 enclave — structurally identical to `operational.db`, which had already gone — and it was the *only* remaining reason for `sqlcipher3`, a dependency with no macOS wheel that builds from source on the one platform v1 targets. What keeps burnout figures from an employer is the scope boundary and the egress rules; encryption at rest only answers someone reading the disk, and full-disk encryption already answers that.
+
+So **nothing encrypted is a database.** Both subjects are files, `sqlcipher3` has left `pyproject.toml`, and this story needs one file cipher and no page-level one. `StorageService` needs no key at all — the store it opens is plaintext.
 
 **Approach:** Add a `CryptoPort` and an envelope cipher to `pm_ai/storage/crypto.py` that encrypts and decrypts using a key it is given, writing at file mode `0600` inside directories at `0700`. `pm_ai/app/wiring.py` fetches the key through `KeychainPort` and passes it to whatever opens an encrypted artifact — which, after the narrowing, is the personal-analytics store and the two credential files rather than the single writer.
 
@@ -33,7 +34,7 @@ The SQLite half did not disappear with `operational.db`: `personal_analytics.db`
 
 **Always:**
 - `pm_ai.storage` and `pm_ai.platform` are sibling layers that may not import each other (`.importlinter`), so `crypto.py` cannot call the keychain adapter. The key is fetched in `pm_ai/app/wiring.py` — the only module permitted to import both — and passed down as a value.
-- `sqlcipher3` is imported **inside the function that uses it**. It is in the `runtime` extra and not installed here, and a module-level import would turn this story's tests into skips that read as coverage.
+- Whatever cipher library this adds is imported **inside the function that uses it** if it is an optional extra. A module-level import of something absent turns this story's tests into skips that read as coverage — the rule story 1d established for `keyring`.
 - Fail closed. A missing key refuses to open an encrypted artifact. There is no fallback to plaintext — a store that silently opens unencrypted is worse than one that will not open.
 - Encryption may be disabled by an explicit debug flag. It defaults to on, is never off in a fresh installation, and while off it emits **both** a console warning and an event-log entry.
 - Encrypted files are written at mode `0600`.
@@ -55,7 +56,7 @@ The SQLite half did not disappear with `operational.db`: `personal_analytics.db`
 | Two different keys | the same payload is encrypted under each | the two outputs differ |
 | A payload encrypted under one key | decryption is attempted with another | raises a typed error rather than returning corrupt data |
 | An empty keychain | an encrypted artifact is opened | raises a typed error; it is not opened and no plaintext file is created at its path |
-| A valid key | `personal_analytics.db` is opened, written, closed, and reopened | the rows written before closing are readable afterwards |
+| A valid key | an encrypted file is written, closed, and read back | the content written before closing is recovered exactly |
 | Encryption disabled by the debug flag | the daemon starts | encrypted artifacts open in plaintext, and both a console warning and an event-log entry are emitted |
 | Encryption disabled, then re-enabled with the original key | the artifact is opened | the mismatch is reported as a typed error rather than read as corruption |
 | `pm_ai.storage.crypto` | imported while the `runtime` extra is absent | imports successfully |
@@ -68,19 +69,19 @@ The SQLite half did not disappear with `operational.db`: `personal_analytics.db`
 - `pm_ai/ports/__init__.py:20-140` — the five existing protocols (`ConnectorPort:20`, `ScopePathPort:34`, `VcsPort:84`, `StoragePort:119`, `SkillPort:131`), whose shape `CryptoPort` should follow. Note that neither `KeychainPort` nor `CryptoPort` exists yet, despite the spine's ports inventory listing both — 1d adds the first, this story the second.
 - `pm_ai/storage/service.py:263-305` — the constructor and the point where the operational store is opened; it gains the key as an argument. It already requires `paths`, `now` and `vcs` as keyword-only injections with no defaults, and the key follows that pattern.
 - `pm_ai/app/wiring.py:87` — the only `StorageService` construction site, where the key is fetched through `KeychainPort` and passed down.
-- `pyproject.toml` — the `runtime` extra declares `sqlcipher3==0.6.2`, not installed here, which is why its import must be lazy.
+- `pyproject.toml` — the `runtime` extra no longer declares `sqlcipher3`; it left with the last encrypted database on 2026-08-23. Whatever this story adds for file encryption is a new entry, and the lazy-import rule applies to it.
 
 ## Tasks & Acceptance
 
 **Execution:**
 - [ ] `pm_ai/ports/__init__.py` — add `CryptoPort`.
-- [ ] `pm_ai/storage/crypto.py` — add envelope encrypt and decrypt over an injected key, writing at mode `0600`, with `sqlcipher3` imported inside the call.
+- [ ] `pm_ai/storage/crypto.py` — add envelope encrypt and decrypt over an injected key, writing at mode `0600` inside `0700` directories, with any optional cipher library imported inside the call.
 - [ ] `pm_ai/storage/service.py` — accept the key as a constructor argument and use it when opening the operational store; emit the warning and event-log entry when encryption is disabled.
 - [ ] `pm_ai/app/wiring.py` — fetch the key through `KeychainPort` and inject it.
 - [ ] `tests/architecture/test_cipher.py` — new. One test per matrix row, using a fake keychain.
 
 **Acceptance Criteria:**
-- Given the `runtime` extra is not installed, when `uv run pytest` runs, then no test skips on a missing `sqlcipher3` import and every module here imports successfully.
+- Given the `runtime` extra is not installed, when `uv run pytest` runs, then no test skips on a missing cipher import and every module here imports successfully.
 - Given `uv run lint-imports`, then all 12 contracts hold and no module under `pm_ai/storage/` imports `pm_ai.platform`.
 - Given an empty keychain, when the operational store is opened, then it raises and no plaintext file exists at its path.
 - Given encryption disabled by the debug flag, then both a console warning and an event-log entry are emitted.
