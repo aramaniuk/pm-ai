@@ -172,6 +172,7 @@ class FakeVcs:
     failure: str | None = None
     root: Path | None = None
     marker: Path | None = None
+    tracking_failure: str | None = None
     asked: list[tuple[Path, Path]] = field(default_factory=list)
     trees_asked: list[Path] = field(default_factory=list)
 
@@ -200,6 +201,8 @@ class FakeVcs:
 
     def tracking(self, path: Path, *, repository: Path) -> TrackingVerdict:
         self.asked.append((path, repository))
+        if self.tracking_failure is not None:
+            raise VcsUnavailable(self.tracking_failure)
         if self.failure is not None:
             raise VcsUnavailable(self.failure)
         return self.verdict
@@ -711,3 +714,51 @@ def test_a_write_that_fails_does_not_leave_the_name_taken(tmp_path):
     )
     retried = fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
     assert retried.read_text(encoding="utf-8") == BODY
+
+
+def test_a_working_tree_found_but_unaskable_still_refuses(tmp_path):
+    """The second unanswered-question branch, which the first cannot reach.
+
+    Two things can fail, and they fail in sequence. `working_tree` answers first;
+    if *that* is what breaks, the fallback asks the filesystem whether a `.git`
+    exists at all and the refusal names it. But git can answer the working-tree
+    question and then fail the exclusion query — a timeout on a network
+    filesystem, an exit code this adapter does not recognise — and at that point
+    a repository is known to exist, so there is nothing left to fall back on.
+
+    Covered here because it was not. Before story 1j the fake's single failure
+    flag landed on this branch; 1j made `working_tree` the first call, so the same
+    flag now stops one step earlier and this refusal went bare. A coverage sweep
+    on 2026-08-24 found it — the branch had a test, and re-deriving that test
+    moved the coverage without moving the assertion.
+    """
+    vcs = FakeVcs(tracking_failure="`git check-ignore` timed out after 10s")
+    fixture = _fixture(tmp_path, gitignore=f"{RULE}\n", vcs=vcs)
+    vcs.root = fixture.repository
+    before = _snapshot(fixture, PROJECT)
+
+    with pytest.raises(UnprotectedCaptureDir) as refusal:
+        fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
+
+    assert "timed out" in str(refusal.value), "the cause must survive the refusal"
+    assert vcs.asked, "tracking was never reached, so this proves nothing"
+    _assert_nothing_written(fixture, PROJECT, before)
+
+
+def test_a_refused_capture_is_asked_again_on_the_next_attempt(tmp_path):
+    """The memo must not cache a refusal.
+
+    `_git_checked` exists so the guard costs one subprocess per artifact per
+    daemon rather than one per write. Recording a *failed* check would mean an
+    operator who fixes nothing sees the second write succeed — the worst possible
+    reading of a security guard.
+    """
+    vcs = FakeVcs(tracking_failure="`git check-ignore` timed out after 10s")
+    fixture = _fixture(tmp_path, gitignore=f"{RULE}\n", vcs=vcs)
+    vcs.root = fixture.repository
+
+    for _ in range(2):
+        with pytest.raises(UnprotectedCaptureDir):
+            fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
+
+    assert len(vcs.asked) == 2, "the refusal was cached and the second write let through"
