@@ -185,6 +185,15 @@
   description: >-
     Stand up the single long-lived daemon with loopback-only binding and the
     terminal REPL client that reaches it. Delivers CAP-18.
+  invoke_dev_with: >-
+    Also owns master-key enrolment, which no story owned until 2026-08-24. The
+    key must be configured before pm-ai is first run, so this needs a command
+    that mints one and stores it through KeychainPort. The daemon must never mint
+    one itself: a new key makes every previously sealed artifact unreadable, and
+    that is not a decision a process start may take. 1d built the custody, and
+    1g's keychain probe already reports "reachable, key absent" - point its
+    remediation text at this command. Worth splitting out if the REPL work is
+    large enough that setup would ride along unreviewed.
 - id: "5"
   title: Telegram bridge and cryptographic pairing
   spec_checkpoint: true
@@ -192,6 +201,15 @@
   description: >-
     Add the outbound long-polling Telegram surface locked to paired user-IDs,
     rejecting everything else. Delivers CAP-19; webhooks are prohibited.
+  invoke_dev_with: >-
+    telegram_cache/ is one of the two encrypted artifacts, and the key is fetched
+    lazily - the daemon boots without one and the refusal lands when an encrypted
+    write is attempted. So in any operation writing both secret and non-secret
+    state, write the secret FIRST: a refusal then leaves nothing behind, whereas
+    writing the plaintext half first leaves a half-configured surface pointing at
+    a cache that was never created. Every write goes through
+    StorageService.write_artifact; the declaration decides whether it is sealed,
+    never the caller.
 - id: "6"
   title: Dynamic persona engine
   spec_checkpoint: true
@@ -226,6 +244,14 @@
     to now unconditionally, tied to nothing that proves a fetch happened, so a
     provider declining with an empty 200 claims full coverage it never had.
     HarvestResult has no way to say "I ran and learned nothing" - give it one.
+    Write ordering matters here more than anywhere. Enrolling a connector writes
+    a token to the encrypted config.json and configuration to the unencrypted
+    connectors/, and the key is fetched lazily, so the encrypted write is the one
+    that can refuse. Write the token FIRST: a refusal then leaves nothing behind.
+    The other order leaves a connector configured, enabled and holding no
+    credential - which reads as a working connector silently harvesting nothing.
+    Every write goes through StorageService.write_artifact; the declaration
+    decides whether it is sealed, never the caller.
 - id: "9"
   title: Passive telemetry radar
   spec_checkpoint: true

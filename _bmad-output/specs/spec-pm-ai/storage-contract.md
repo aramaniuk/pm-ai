@@ -55,6 +55,10 @@ Both are **files**. Nothing encrypted is a database, which is what removed `sqlc
 
 **Key custody.** The master key is held in the OS keychain so the daemon can start unattended; raw key export is the supported migration path.
 
+**The key is enrolled before pm-ai is first run.** It is a setup step, not something the daemon arranges for itself — minting a key is irreversible in the only way that matters, because a new one makes every previously sealed artifact unreadable, and a process start is the wrong place to make that decision. The daemon therefore fetches the key **lazily**: it starts without one and harvests, briefs and answers the CLI as normal, and the refusal lands at the moment an encrypted artifact is actually read or written — where an operator can act on it. `pm-ai doctor` reports "reachable, key absent" as a state distinct from an unreachable keychain, which is how a machine that skipped setup says so.
+
+The consequence for anything writing both secret and non-secret state: **write the secret first.** A refused encrypted write leaves nothing behind, so ordering it first makes the whole operation atomic enough. The other order leaves configuration referring to a credential that was never stored — which reads as working.
+
 **Debug toggle.** Encryption may be disabled by an explicit debug flag. It is never the default in a fresh install, and while active it must emit both a console warning and an event-log entry.
 
 ## Retention
