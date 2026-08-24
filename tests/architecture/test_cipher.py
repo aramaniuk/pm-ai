@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 import pytest
 
 from pm_ai.app.wiring import build
+from pm_ai.storage.service import AppendToSealedArtifact
 from pm_ai.domain.storage_tiers import EVENT_LOG
 
 from pm_ai.ports import CryptoPort, DecryptionFailed
@@ -389,3 +390,79 @@ def test_the_disabled_daemon_still_needs_no_key(tmp_path):
 
     _seal(daemon)
     assert keychain.reads == 0
+
+
+# ── The routing itself: is_encrypted consulted per operation ──────────────────
+#
+# Story 1e built the authority and story 1f, as first written, did not ask it —
+# `write_encrypted` encrypted whatever it was handed, so *which* artifacts are
+# sealed still depended on a caller reaching for the right helper. These are the
+# tests for the seam that closed: the service asks, and the declaration decides.
+
+PERSONAL = DataScope(ScopeKind.PERSONAL)
+
+
+def test_a_plaintext_artifact_is_written_unsealed_and_needs_no_key(tmp_path):
+    """The matrix row that had no real test until now.
+
+    The earlier attempt asserted `keychain.reads == 0` on a fake it never handed
+    to anything, which cannot fail. This routes a genuinely plaintext artifact
+    through the writer and checks both halves: the bytes land as themselves, and
+    the keychain is never touched.
+    """
+    keychain = FakeKeychain(os.urandom(AES_KEY_BYTES))
+    daemon = _daemon(tmp_path, disabled=False, keychain=keychain)
+
+    written = daemon.storage.write_artifact(
+        PAYLOAD, scope=PERSONAL, artifact="strategic_goals.md"
+    )
+
+    assert written.read_bytes() == PAYLOAD
+    assert keychain.reads == 0, "a plaintext artifact reached for a key"
+
+
+def test_an_encrypted_artifact_is_sealed_and_does_need_a_key(tmp_path):
+    """The other half, so the pair together shows the decision being made."""
+    keychain = FakeKeychain(os.urandom(AES_KEY_BYTES))
+    daemon = _daemon(tmp_path, disabled=False, keychain=keychain)
+
+    written = _seal(daemon)
+
+    assert written.read_bytes() != PAYLOAD
+    assert keychain.reads == 1
+
+
+def test_appending_to_a_declared_encrypted_artifact_is_refused(tmp_path):
+    """`telegram_cache/` is encrypted, so appending to it cannot be honoured.
+
+    AES-GCM covers the whole payload, so an append would mean read, decrypt,
+    concatenate, re-seal, rewrite — and rewriting in place is what AD-5 forbids
+    for a ledger and what segmented compaction exists to avoid. This is the
+    reachable case: no Markdown is encrypted anywhere, so a ledger cannot get
+    here today, but the PM's voice notes are sealed and are a directory of files
+    something could reasonably try to append to.
+    """
+    daemon = _daemon(tmp_path, disabled=False)
+    target = daemon.storage.paths.resolve(PERSONAL, "telegram_cache/") / "state.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(AppendToSealedArtifact) as refusal:
+        daemon.storage._append(target, "one more line\n")
+
+    assert "telegram_cache" in str(refusal.value)
+    assert not target.exists(), "the refusal created the file it refused to write"
+
+
+def test_appending_to_a_plaintext_ledger_still_works(tmp_path):
+    """The negative half. A guard that refused both would pass the test above.
+
+    Asserted through the public method rather than the primitive, because this is
+    the path every audit-trail line in the system takes.
+    """
+    daemon = _daemon(tmp_path, disabled=False)
+
+    daemon.storage.append_event_log("- [test] a line", scope=daemon.scope)
+    daemon.storage.append_event_log("- [test] another", scope=daemon.scope)
+
+    body = _event_log_text(daemon)
+    assert body.count("[test]") == 2, "appending replaced rather than appended"
