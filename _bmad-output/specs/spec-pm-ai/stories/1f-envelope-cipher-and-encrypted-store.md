@@ -2,9 +2,9 @@
 title: 'Envelope cipher for credentials and the personal enclave'
 type: 'feature'
 created: '2026-08-21'
-updated: '2026-08-23'
+updated: '2026-08-24'
 status: 'done'
-review_loop_iteration: 2
+review_loop_iteration: 3
 baseline_commit: '7c40f21'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
@@ -80,14 +80,16 @@ So **nothing encrypted is a database.** Both subjects are files, `sqlcipher3` ha
 - [x] ~~`pm_ai/storage/service.py` — accept the key~~ — **void.** The operational store is plaintext as of 2026-08-22, so the single writer needs no key and never learns where secrets live.
 - [x] `pm_ai/app/wiring.py` — fetches the key through `KeychainPort`, and owns the debug flag's console warning and event-log entry, because only the composition root knows a flag exists.
 - [x] `pyproject.toml` — `cryptography` in the `runtime` extra **and** the `dev` group. Optional so the module imports without it; dev so the suite exercises the real cipher rather than skipping, since a skipped encryption test reads as coverage.
-- [x] `tests/architecture/test_cipher.py` — new, 24 tests against the real cipher.
+- [x] `tests/architecture/test_cipher.py` — new, **32** tests against the real cipher.
+- [x] **Gap closed 2026-08-24.** This story was first marked done with the debug-flag path implemented and untested — the one path that deliberately writes secrets in plaintext was the one path nothing verified, including whether the event-log entry landed at all. Eight tests added, and each proved against a mutation rather than assumed: dropping the console warning, dropping the event-log entry, giving `PlaintextCrypto` a secret cipher, and announcing on the healthy path each turn exactly the intended test red.
 - [x] `tests/architecture/test_keychain.py` — one test repaired: it asserted that `keyring` happened not to be installed, and `uv add --optional runtime` installed it. Absence is now simulated.
 
 **Acceptance Criteria:**
 - Given the `runtime` extra is not installed, then no test skips on a missing cipher import and every module here imports successfully. **310 passed, 29 skipped**; no skip names `pm_ai.storage.crypto`.
 - Given `uv run lint-imports`, then all 12 contracts hold and no module under `pm_ai/storage/` imports `pm_ai.platform`.
 - Given an empty keychain, when an encrypted artifact is written, then it raises and **neither the file nor its directory** is created — a zero-length `config.json` is worse than none, because the next reader cannot tell it from a store legitimately emptied.
-- Given encryption disabled by the debug flag, then both a console warning and an event-log entry are emitted.
+- Given encryption disabled by the debug flag, then both a console warning **on stderr** and an event-log entry tagged `[security]` are emitted; the artifact is written in plaintext but still at `0600` inside `0700`; and no key is fetched, since the flag exists precisely for a machine where none is enrolled.
+- Given encryption **enabled**, then neither channel says anything. A warning that also fires on the healthy path is a warning nobody reads, and a log that records normal operation as a security event is one nobody can grep. Asserted on both channels, because emitting to only one would still be wrong and would still pass a single-channel test.
 - Given a fresh tree, then `stat` reports `0700` on the directory and `0600` on the file, and a `umask 000` cannot loosen either.
 - Given the key is needed for three files in one run, then the keychain is read **once**: a keychain read is a user-visible prompt on some configurations.
 - Given nothing encrypted is written at all, then no key is fetched — the daemon starts on a machine where none has been enrolled.
@@ -101,6 +103,8 @@ Encryption and durability are independent properties, and an implementation that
 **Why `KeyNotFound` is not caught anywhere.** A first run has no key and must mint one. That is a decision with consequences — a new key makes every previously sealed artifact unreadable — so it belongs to whatever owns installation, not to a constructor that would quietly do it and write a second key over a store it could still have opened.
 
 **Why the payload is sealed before anything is created.** `write_encrypted` calls the cipher first, then makes the directory. A refusal therefore leaves no directory and no empty file for a later reader to interpret.
+
+**Encryption off is not permissions off.** The disabled path still writes at `0600` inside `0700`. Plaintext credentials in a world-readable directory would be two failures where the flag asked for one, and the flag's whole purpose is to get a machine working — not to take the enclave apart.
 
 **Why the file mode is set twice.** `os.open`'s mode argument is masked by the process umask, so a user running with `umask 000` would get a world-readable credential file and nothing would report it. The explicit `chmod` after the write is what closes that, and a test runs under `umask 000` to prove it.
 

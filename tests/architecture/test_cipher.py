@@ -23,8 +23,12 @@ from __future__ import annotations
 
 import os
 import stat
+from datetime import datetime, timezone
 
 import pytest
+
+from pm_ai.app.wiring import build
+from pm_ai.domain.storage_tiers import EVENT_LOG
 
 from pm_ai.ports import CryptoPort, DecryptionFailed, KeyNotFound
 from pm_ai.storage.crypto import (
@@ -252,3 +256,124 @@ def test_the_module_imports_without_the_runtime_extra():
     import importlib
 
     assert importlib.import_module("pm_ai.storage.crypto") is not None
+
+
+# ── The debug flag: the one path that writes secrets in plaintext ─────────────
+#
+# Story 1f's matrix requires that disabling encryption be announced *twice* — a
+# console warning for whoever is running the daemon now, an event-log entry for
+# whoever reads the record later and would otherwise find plaintext credentials
+# with no explanation. This section was missing when 1f was first marked done:
+# the code existed and nothing verified it, so the single most dangerous path in
+# the story was the one path with no test.
+
+NOW = datetime(2026, 8, 24, 9, 0, tzinfo=timezone.utc)
+
+
+def _daemon(tmp_path, *, disabled: bool, keychain=None):
+    return build(
+        tmp_path,
+        "alpha",
+        now=lambda: NOW,
+        keychain=keychain or FakeKeychain(os.urandom(AES_KEY_BYTES)),
+        encryption_disabled=disabled,
+    )
+
+
+def _event_log_text(daemon) -> str:
+    segments = list(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md"))
+    return "".join(s.read_text(encoding="utf-8") for s in segments)
+
+
+def test_the_debug_flag_selects_the_pass_through_cipher(tmp_path):
+    daemon = _daemon(tmp_path, disabled=True)
+    assert isinstance(daemon.crypto, PlaintextCrypto)
+
+
+def test_the_debug_flag_actually_leaves_the_bytes_on_disk_readable(tmp_path):
+    """Selecting the cipher is not the claim; what reaches the disk is.
+
+    A test that only asserted the type would pass against a `PlaintextCrypto`
+    that had quietly grown a cipher.
+    """
+    daemon = _daemon(tmp_path, disabled=True)
+    target = tmp_path / "enclave" / "config.json"
+
+    write_encrypted(target, PAYLOAD, crypto=daemon.crypto)
+
+    assert target.read_bytes() == PAYLOAD
+
+
+def test_the_debug_flag_still_writes_at_enclave_permissions(tmp_path):
+    """Encryption off is not permissions off.
+
+    Plaintext credentials in a world-readable directory would be two failures
+    where the flag only asked for one.
+    """
+    daemon = _daemon(tmp_path, disabled=True)
+    target = tmp_path / "enclave" / "config.json"
+
+    write_encrypted(target, PAYLOAD, crypto=daemon.crypto)
+
+    assert stat.S_IMODE(target.stat().st_mode) == ENCRYPTED_FILE_MODE
+    assert stat.S_IMODE(target.parent.stat().st_mode) == ENCLAVE_DIR_MODE
+
+
+def test_the_debug_flag_warns_on_the_console(tmp_path, capsys):
+    """On stderr, so it survives a caller piping stdout somewhere."""
+    _daemon(tmp_path, disabled=True)
+
+    captured = capsys.readouterr()
+    assert "encryption is disabled" in captured.err
+    assert "plaintext" in captured.err
+    assert captured.err.strip(), "the warning went nowhere a human would see it"
+
+
+def test_the_debug_flag_writes_an_event_log_entry(tmp_path):
+    """The half that outlives the session.
+
+    A console warning is gone the moment the terminal scrolls. Someone auditing
+    the record later has to be able to find out why a credential file is
+    readable, and that answer has to be in the log rather than in someone's
+    memory of a startup message.
+    """
+    daemon = _daemon(tmp_path, disabled=True)
+
+    body = _event_log_text(daemon)
+    assert "encryption disabled" in body
+    assert "[security]" in body, "the entry must be findable by category"
+
+
+def test_encryption_on_announces_nothing_at_all(tmp_path, capsys):
+    """The other half of "never the default in a fresh installation".
+
+    A warning that also fires on the healthy path is a warning nobody reads, and
+    an event log that records normal operation as a security event is one nobody
+    can grep. Asserted on both channels, because emitting to only one of them
+    would still be wrong and would still pass a single-channel test.
+    """
+    daemon = _daemon(tmp_path, disabled=False)
+
+    assert not isinstance(daemon.crypto, PlaintextCrypto)
+    assert "encryption is disabled" not in capsys.readouterr().err
+    assert "encryption disabled" not in _event_log_text(daemon)
+
+
+def test_encryption_is_on_when_nobody_says_otherwise(tmp_path):
+    """The default is not a keyword a caller has to remember to pass."""
+    daemon = build(tmp_path, "alpha", now=lambda: NOW, keychain=FakeKeychain(b"x" * 32))
+    assert isinstance(daemon.crypto, LazyKeyCrypto)
+
+
+def test_the_disabled_daemon_still_needs_no_key(tmp_path):
+    """The flag exists to get a machine working, so it cannot want a key.
+
+    An empty keychain plus the flag has to start; if it did not, the flag would
+    be useless in exactly the situation it is for.
+    """
+    keychain = FakeKeychain()  # nothing stored
+
+    daemon = _daemon(tmp_path, disabled=True, keychain=keychain)
+
+    write_encrypted(tmp_path / "config.json", PAYLOAD, crypto=daemon.crypto)
+    assert keychain.reads == 0
