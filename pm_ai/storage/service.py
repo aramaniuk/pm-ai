@@ -205,6 +205,23 @@ def _load_proposal(body: str) -> Proposal:
     )
 
 
+class ProposalNotFound(KeyError):
+    """No staged proposal carries that id.
+
+    Named rather than a bare `KeyError`, which is what this raised until
+    2026-08-24 — the only built-in exception left in a module where every other
+    failure has a type. A caller that wants to tell "this proposal expired or was
+    never staged" from a dictionary miss somewhere inside the writer had no way
+    to, and the two call for different responses: the first is a surface telling
+    the PM the card is gone, the second is a defect.
+
+    Subclasses `KeyError` deliberately, following `UnknownVerb` in
+    `pm_ai.domain.lifecycle`: a registry miss *is* a key error, and inheriting it
+    means adding the type cannot break a caller that already catches the general
+    case.
+    """
+
+
 class AppendToSealedArtifact(RuntimeError):
     """An artifact declared encrypted was appended to, which cannot be done.
 
@@ -820,7 +837,11 @@ class StorageService:
             "SELECT body FROM proposals WHERE proposal_id = ?", (proposal_id,)
         ).fetchone()
         if row is None:
-            raise KeyError(proposal_id)
+            raise ProposalNotFound(
+                f"no proposal is staged under {proposal_id!r}. A proposal that "
+                f"expired, was executed, or was never staged is absent rather "
+                f"than empty, so this is not a state to read through."
+            )
         return _load_proposal(row[0])
 
     def transition_proposal(self, proposal_id: str, to: ProposalState, *, expected_version: int) -> Proposal:
