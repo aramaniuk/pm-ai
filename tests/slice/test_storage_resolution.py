@@ -53,6 +53,13 @@ from pm_ai.storage.service import (
     StorageService,
 )
 
+from pm_ai.storage.crypto import AesGcmCrypto
+
+# A real cipher with a fixed key: these tests never touch an encrypted
+# artifact, and passing `PlaintextCrypto` would wire them as though the
+# debug flag were on — a difference that would matter the day one does.
+TEST_CIPHER = AesGcmCrypto(b"0" * 32)
+
 NOW = datetime(2026, 8, 19, 9, 0, tzinfo=timezone.utc)
 # Deliberately not this month: the clock's only observable in `append_event_log`
 # is the `%Y-%m` segment filename, so a fixture that happens to agree with the
@@ -211,7 +218,7 @@ def test_an_unopenable_operational_store_names_itself(tmp_path):
     store.mkdir(parents=True)  # a directory where the file belongs
 
     with pytest.raises(OperationalStoreUnavailable) as refusal:
-        StorageService(paths, now=lambda: NOW, vcs=GitVcs())
+        StorageService(paths, now=lambda: NOW, vcs=GitVcs(), crypto=TEST_CIPHER)
     assert str(store) in str(refusal.value)
 
 
@@ -242,7 +249,7 @@ def test_a_store_created_before_the_settle_column_still_settles(tmp_path):
     legacy.commit()
     legacy.close()
 
-    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs())
+    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs(), crypto=TEST_CIPHER)
     target = TargetRef.parse("gitlab:alpha:issue:102")
     storage.record_execution("idem_legacy", target, "cmt_1")
 
@@ -297,7 +304,9 @@ def test_a_mutation_is_stamped_from_the_injected_clock_at_both_ends(daemon):
 )
 def test_a_clock_that_is_not_utc_is_refused(tmp_path, clock, why):
     """A wrong-month segment and a `TypeError` on comparison are worse than a raise."""
-    storage = StorageService(ScopePaths.rooted(tmp_path), now=clock, vcs=GitVcs())
+    storage = StorageService(
+        ScopePaths.rooted(tmp_path), now=clock, vcs=GitVcs(), crypto=TEST_CIPHER
+    )
     with pytest.raises(NonUtcClock):
         storage.append_event_log(f"- [test] {why}", scope=PERSONAL)
 
@@ -334,7 +343,7 @@ def test_a_refused_write_does_not_swallow_the_batch(daemon, tmp_path):
     of a segment entry that does not exist.
     """
     paths = RefusingPaths(ScopePaths.rooted(tmp_path / "txn"))
-    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs())
+    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs(), crypto=TEST_CIPHER)
     events = _events(daemon)
     assert len(events) == 2
 

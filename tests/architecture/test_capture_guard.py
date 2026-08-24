@@ -55,6 +55,13 @@ from pm_ai.storage.service import (
     StorageService,
 )
 
+from pm_ai.storage.crypto import AesGcmCrypto
+
+# A real cipher with a fixed key: these tests never touch an encrypted
+# artifact, and passing `PlaintextCrypto` would wire them as though the
+# debug flag were on — a difference that would matter the day one does.
+TEST_CIPHER = AesGcmCrypto(b"0" * 32)
+
 NOW = datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc)
 
 PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
@@ -146,7 +153,9 @@ def _fixture(
     if gitignore is not None:
         paths.gitignore("alpha").write_text(gitignore, encoding="utf-8")
     return Fixture(
-        storage=StorageService(paths, now=lambda: NOW, vcs=vcs or GitVcs()),
+        storage=StorageService(
+            paths, now=lambda: NOW, vcs=vcs or GitVcs(), crypto=TEST_CIPHER
+        ),
         repository=repository,
     )
 

@@ -30,7 +30,9 @@ import pytest
 from pm_ai.app.wiring import build
 from pm_ai.domain.storage_tiers import EVENT_LOG
 
-from pm_ai.ports import CryptoPort, DecryptionFailed, KeyNotFound
+from pm_ai.ports import CryptoPort, DecryptionFailed
+from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.ports import KeyNotFound
 from pm_ai.storage.crypto import (
     AES_KEY_BYTES,
     ENCLAVE_DIR_MODE,
@@ -40,9 +42,25 @@ from pm_ai.storage.crypto import (
     LazyKeyCrypto,
     PlaintextCrypto,
     is_encrypted,
-    read_encrypted,
-    write_encrypted,
 )
+
+APPLICATION = DataScope(ScopeKind.APPLICATION)
+PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
+
+
+def _seal(daemon, payload=None, *, name=None):
+    """Write the credential store through the single writer.
+
+    Every encrypted read and write goes through `StorageService`, so a test that
+    called a cipher helper directly would be exercising a path production code
+    is forbidden to use.
+    """
+    return daemon.storage.write_artifact(
+        payload if payload is not None else PAYLOAD,
+        scope=APPLICATION,
+        artifact="config.json",
+        name=name,
+    )
 
 PAYLOAD = b'{"jira": "token-\xff\x00-not-utf8"}'
 
@@ -125,18 +143,19 @@ def test_an_envelope_too_short_to_be_one_is_refused(crypto, truncated):
         crypto.decrypt(truncated)
 
 
-def test_a_plaintext_file_read_as_encrypted_is_refused(tmp_path, crypto):
+def test_a_plaintext_file_read_as_encrypted_is_refused(tmp_path):
     """The debug flag's other direction: disabled, then re-enabled with the key.
 
-    The file on disk is plaintext and the cipher is real. That must be reported,
-    not read as corruption and not decoded into nonsense.
+    Written by a daemon with the flag on, read by one with it off. The file is
+    plaintext and the cipher is real, and that must be reported rather than read
+    as corruption or decoded into nonsense.
     """
-    plain = tmp_path / "config.json"
-    write_encrypted(plain, PAYLOAD, crypto=PlaintextCrypto())
-    assert plain.read_bytes() == PAYLOAD
+    written = _seal(_daemon(tmp_path, disabled=True))
+    assert written.read_bytes() == PAYLOAD
 
+    resealed = _daemon(tmp_path, disabled=False)
     with pytest.raises(DecryptionFailed):
-        read_encrypted(plain, crypto=crypto)
+        resealed.storage.read_artifact(scope=APPLICATION, artifact="config.json")
 
 
 @pytest.mark.parametrize("length", [0, 16, 31, 33, 64])
@@ -149,26 +168,26 @@ def test_a_key_of_the_wrong_length_is_refused_at_construction(length):
 # ── Permissions ──────────────────────────────────────────────────────────────
 
 
-def test_a_fresh_tree_is_created_at_enclave_permissions(tmp_path, crypto):
-    target = tmp_path / "manager-ai" / "private" / "telegram_cache" / "state.json"
-
-    write_encrypted(target, PAYLOAD, crypto=crypto)
+def test_a_fresh_tree_is_created_at_enclave_permissions(tmp_path):
+    target = _seal(_daemon(tmp_path, disabled=False))
 
     assert stat.S_IMODE(target.stat().st_mode) == ENCRYPTED_FILE_MODE
     assert stat.S_IMODE(target.parent.stat().st_mode) == ENCLAVE_DIR_MODE
 
 
-def test_a_directory_that_already_exists_too_open_is_tightened(tmp_path, crypto):
+def test_a_directory_that_already_exists_too_open_is_tightened(tmp_path):
     """Story 1a created these directories before anything was encrypted in them.
 
     So inheriting a `0755` is the ordinary case rather than the exotic one, and
     leaving it as found would put a `0600` file in a listable directory.
     """
-    enclave = tmp_path / "private"
-    enclave.mkdir(mode=0o755)
+    daemon = _daemon(tmp_path, disabled=False)
+    enclave = daemon.storage.paths.resolve(APPLICATION, "config.json").parent
+    enclave.mkdir(parents=True, exist_ok=True)
+    enclave.chmod(0o755)
     assert stat.S_IMODE(enclave.stat().st_mode) == 0o755
 
-    write_encrypted(enclave / "config.json", PAYLOAD, crypto=crypto)
+    _seal(daemon)
 
     assert stat.S_IMODE(enclave.stat().st_mode) == ENCLAVE_DIR_MODE
 
@@ -181,8 +200,7 @@ def test_a_permissive_umask_cannot_loosen_the_file(tmp_path, crypto):
     """
     previous = os.umask(0o000)
     try:
-        target = tmp_path / "config.json"
-        write_encrypted(target, PAYLOAD, crypto=crypto)
+        target = _seal(_daemon(tmp_path, disabled=False))
         assert stat.S_IMODE(target.stat().st_mode) == ENCRYPTED_FILE_MODE
     finally:
         os.umask(previous)
@@ -197,22 +215,22 @@ def test_no_key_refuses_the_write_and_leaves_nothing_behind(tmp_path):
     A zero-length `config.json` is worse than none: the next reader cannot tell
     it from a store that was legitimately emptied.
     """
-    target = tmp_path / "enclave" / "config.json"
+    daemon = _daemon(tmp_path, disabled=False, keychain=FakeKeychain())
+    target = daemon.storage.paths.resolve(APPLICATION, "config.json")
 
     with pytest.raises(KeyNotFound):
-        write_encrypted(target, PAYLOAD, crypto=LazyKeyCrypto(FakeKeychain(), "master"))
+        _seal(daemon)
 
     assert not target.exists()
-    assert not target.parent.exists()
 
 
 def test_the_key_is_fetched_once_per_daemon_not_once_per_file(tmp_path):
     """A keychain read is a user-visible prompt on some configurations."""
     keychain = FakeKeychain(os.urandom(AES_KEY_BYTES))
-    crypto = LazyKeyCrypto(keychain, "master")
+    daemon = _daemon(tmp_path, disabled=False, keychain=keychain)
 
-    for name in ("a.json", "b.json", "c.json"):
-        write_encrypted(tmp_path / name, PAYLOAD, crypto=crypto)
+    for _ in range(3):
+        _seal(daemon)
 
     assert keychain.reads == 1
 
@@ -296,10 +314,7 @@ def test_the_debug_flag_actually_leaves_the_bytes_on_disk_readable(tmp_path):
     A test that only asserted the type would pass against a `PlaintextCrypto`
     that had quietly grown a cipher.
     """
-    daemon = _daemon(tmp_path, disabled=True)
-    target = tmp_path / "enclave" / "config.json"
-
-    write_encrypted(target, PAYLOAD, crypto=daemon.crypto)
+    target = _seal(_daemon(tmp_path, disabled=True))
 
     assert target.read_bytes() == PAYLOAD
 
@@ -310,10 +325,7 @@ def test_the_debug_flag_still_writes_at_enclave_permissions(tmp_path):
     Plaintext credentials in a world-readable directory would be two failures
     where the flag only asked for one.
     """
-    daemon = _daemon(tmp_path, disabled=True)
-    target = tmp_path / "enclave" / "config.json"
-
-    write_encrypted(target, PAYLOAD, crypto=daemon.crypto)
+    target = _seal(_daemon(tmp_path, disabled=True))
 
     assert stat.S_IMODE(target.stat().st_mode) == ENCRYPTED_FILE_MODE
     assert stat.S_IMODE(target.parent.stat().st_mode) == ENCLAVE_DIR_MODE
@@ -375,5 +387,5 @@ def test_the_disabled_daemon_still_needs_no_key(tmp_path):
 
     daemon = _daemon(tmp_path, disabled=True, keychain=keychain)
 
-    write_encrypted(tmp_path / "config.json", PAYLOAD, crypto=daemon.crypto)
+    _seal(daemon)
     assert keychain.reads == 0

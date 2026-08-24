@@ -44,11 +44,9 @@ visible and recoverable.
 
 from __future__ import annotations
 
-import os
 import secrets
-import stat
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import PurePath
 
 from pm_ai.domain.identity import ScopeKind
 from pm_ai.domain.scope_model import (
@@ -70,9 +68,7 @@ __all__ = [
     "LazyKeyCrypto",
     "PlaintextCrypto",
     "is_encrypted",
-    "read_encrypted",
     "scope_of",
-    "write_encrypted",
 ]
 
 _PEOPLE_MARKER = (APPLICATION_DIRNAME, ENCLAVE_DIRNAME, PEOPLE_DIRNAME)
@@ -221,45 +217,6 @@ class PlaintextCrypto:
 
     def decrypt(self, envelope: bytes) -> bytes:
         return envelope
-
-
-def write_encrypted(path: Path, payload: bytes, *, crypto: CryptoPort) -> Path:
-    """Seal `payload` into `path`, at `0600` inside a `0700` directory.
-
-    The directory is created at `0700` rather than created and then tightened,
-    so there is no window in which the enclave is readable. An existing parent
-    that is looser *is* tightened: story 1a created these directories before
-    anything was encrypted in them, so inheriting a `0755` from then is the
-    ordinary case rather than the exotic one.
-
-    Only the immediate parent. Walking further up would eventually chmod a home
-    directory, and an ancestor does not hold the encrypted artifact — the
-    directory whose listing leaks a name, a size and an mtime is this one.
-    """
-    # Sealed first, deliberately. If the cipher refuses — no key enrolled, a key
-    # of the wrong length — nothing has been created yet, so the refusal leaves
-    # no directory and no empty file behind for a later reader to interpret.
-    sealed = crypto.encrypt(payload)
-
-    parent = path.parent
-    parent.mkdir(parents=True, mode=ENCLAVE_DIR_MODE, exist_ok=True)
-    if stat.S_IMODE(parent.stat().st_mode) != ENCLAVE_DIR_MODE:
-        parent.chmod(ENCLAVE_DIR_MODE)
-    # Opened with the mode on creation, then set unconditionally: `os.open`'s
-    # mode is masked by the process umask, so a permissive umask would otherwise
-    # leave a credential file group-readable.
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, ENCRYPTED_FILE_MODE)
-    try:
-        os.write(descriptor, sealed)
-    finally:
-        os.close(descriptor)
-    path.chmod(ENCRYPTED_FILE_MODE)
-    return path
-
-
-def read_encrypted(path: Path, *, crypto: CryptoPort) -> bytes:
-    """Open what `write_encrypted` sealed, or raise `DecryptionFailed`."""
-    return crypto.decrypt(path.read_bytes())
 
 
 @dataclass

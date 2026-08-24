@@ -10,7 +10,7 @@ import ast
 
 import pytest
 
-from conftest import calls, format_violations, source_files
+from conftest import calls, canonical_name, format_violations, source_files
 
 # Layers permitted to perform each restricted operation.
 WRITE_ALLOWED = {"storage"}
@@ -18,6 +18,22 @@ SHELL_ALLOWED = {"platform"}
 
 WRITE_CALLS = {
     "open",
+    # The low-level API, added 2026-08-24 after a probe proved the guard blind to
+    # it: a real file write was added to `pm_ai.platform` using `os.open` plus
+    # `os.write` and this check passed. Worse, that is the idiom the codebase now
+    # uses on purpose — `os.open` is how a mode survives the umask — so the one
+    # shape the guard missed was the one shape in use.
+    #
+    # `mkdir` and `chmod` are deliberately absent. Creating a directory is not
+    # opening a file for writing, and the resolver legitimately creates scope
+    # directories for the writer to write into (`platform/paths.py`). Naming the
+    # distinction here is the point: it was previously true by accident.
+    "os.open",
+    "os.write",
+    "os.writev",
+    "os.pwrite",
+    "os.truncate",
+    "os.ftruncate",
     "write_text",
     "write_bytes",
     "Path.write_text",
@@ -296,4 +312,43 @@ def test_ad5_storage_never_rewrites_a_markdown_ledger_in_place():
         violations,
         "AD-5: ledgers are append-only. A status change is a new entry keyed by "
         "id (AD-14), never an in-place edit.",
+    )
+
+
+def test_ad5_encrypted_io_belongs_to_the_single_writer_alone():
+    """AD-5 — only `StorageService` performs file I/O, even inside its own package.
+
+    The check above exempts `pm_ai.storage` wholesale, so it enforces AD-5 at
+    *package* granularity while AD-5 and `StorageService`'s own docstring both
+    claim the *service*: "Owns every write. Nothing else opens a file for
+    writing." Story 1f briefly made that false — `crypto.py` grew
+    `write_encrypted`/`read_encrypted` and wrote files without going through the
+    service, so the package had two writers and nothing noticed.
+
+    The resolution was structural rather than advisory: those functions are gone,
+    and the cipher is bytes-in bytes-out with no filesystem access at all. This
+    test is what stops them coming back, because the reason they were tempting —
+    the modes and the seal live naturally beside the cipher — has not gone away.
+
+    Deliberately scoped to *file* I/O. `crypto.py` may read and write bytes all
+    day; what it may not do is touch a path.
+    """
+    forbidden = WRITE_CALLS | {"read_text", "read_bytes", "Path.open"}
+    violations = []
+    for f in source_files("storage"):
+        if f.path.name == "service.py":
+            continue
+        for node in ast.walk(f.tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = canonical_name(f, node)
+            if name in forbidden or name.rsplit(".", 1)[-1] in {
+                "read_text", "read_bytes", "write_text", "write_bytes",
+            }:
+                violations.append(f"{f.location(node)}  {name}(...)")
+    assert not violations, format_violations(
+        violations,
+        "AD-5: file I/O inside pm_ai.storage belongs to StorageService alone. A "
+        "cipher takes bytes and returns bytes; the service decides what to do "
+        "with a path.",
     )

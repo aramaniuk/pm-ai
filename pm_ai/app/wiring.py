@@ -101,13 +101,16 @@ def build(
     # name, or a project no registry knows, would otherwise surface mid-harvest
     # with a batch already in hand.
     resolver.scope_root(scope)
-    storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs())
-    crypto = _build_crypto(
-        keychain or MacOSKeychainAdapter(),
-        storage=storage,
-        scope=scope,
-        encryption_disabled=encryption_disabled,
+    # The cipher is chosen before storage, because storage performs every
+    # encrypted read and write and therefore holds it. The *announcement* of a
+    # disabled cipher needs storage, so it happens after — splitting the two is
+    # what keeps this acyclic.
+    crypto = _choose_crypto(
+        keychain or MacOSKeychainAdapter(), encryption_disabled=encryption_disabled
     )
+    storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs(), crypto=crypto)
+    if encryption_disabled:
+        _announce_disabled_encryption(storage, scope=scope)
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
     return Daemon(
@@ -127,41 +130,42 @@ def build(
     )
 
 
-def _build_crypto(
-    keychain: KeychainPort,
-    *,
-    storage: StorageService,
-    scope: DataScope,
-    encryption_disabled: bool,
-) -> CryptoPort:
+def _choose_crypto(keychain: KeychainPort, *, encryption_disabled: bool) -> CryptoPort:
     """The cipher for the encrypted set, or the pass-through the debug flag asks for.
 
-    The key is fetched *here* and nowhere else. `pm_ai.storage` may not import
-    `pm_ai.platform`, so the single writer cannot reach a keychain — which is the
-    property that keeps a key out of every module that merely writes files.
+    The keychain is reached *here* and nowhere else. `pm_ai.storage` may not
+    import `pm_ai.platform`, so the single writer cannot fetch a key itself —
+    which is the property that keeps one out of every module that merely writes
+    files.
 
-    `KeyNotFound` is deliberately **not** caught. A first run has no key and must
-    mint one, and that is a decision with consequences — a new key makes every
+    `KeyNotFound` is deliberately not caught, and not raised here either: the
+    cipher returned is lazy, so a machine with no key enrolled still boots and the
+    refusal lands when an encrypted artifact is actually touched. A first run must
+    mint a key, and that is a decision with consequences — a new key makes every
     previously sealed artifact unreadable — so it belongs to whatever owns
-    installation rather than to a constructor that would silently do it. Refusing
-    here means the daemon says what is wrong instead of quietly writing a second
-    key over a store it could still have opened.
+    installation, not to a constructor that would quietly do it.
     """
     if encryption_disabled:
-        # Announced twice on purpose: the console reaches whoever is running it
-        # now, the event log reaches whoever reads the record later and would
-        # otherwise find plaintext with no explanation. Only this module knows the
-        # flag exists, so only this module can say so.
-        print(
-            "WARNING: encryption is disabled by an explicit debug flag. "
-            "Credentials and voice notes are being written in plaintext. This is "
-            "never the default in a fresh installation.",
-            file=sys.stderr,
-        )
-        storage.append_event_log(
-            "- [security] encryption disabled by debug flag; the encrypted set is "
-            "being written in plaintext",
-            scope=scope,
-        )
         return PlaintextCrypto()
     return LazyKeyCrypto(keychain, MASTER_KEY_NAME)
+
+
+def _announce_disabled_encryption(storage: StorageService, *, scope: DataScope) -> None:
+    """Say so twice, because the two audiences are different.
+
+    The console reaches whoever is running the daemon now. The event log reaches
+    whoever reads the record later and would otherwise find plaintext credentials
+    with no explanation — and a console warning is gone the moment the terminal
+    scrolls. Only the composition root knows the flag exists, so only it can say.
+    """
+    print(
+        "WARNING: encryption is disabled by an explicit debug flag. "
+        "Credentials and voice notes are being written in plaintext. This is "
+        "never the default in a fresh installation.",
+        file=sys.stderr,
+    )
+    storage.append_event_log(
+        "- [security] encryption disabled by debug flag; the encrypted set is "
+        "being written in plaintext",
+        scope=scope,
+    )

@@ -26,7 +26,9 @@ reached at all — and `pm_ai.platform.vcs` runs the commands.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import stat
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -50,7 +52,12 @@ from pm_ai.domain.storage_tiers import (
     requires_git_exclusion,
 )
 from pm_ai.domain.vcs import VcsUnavailable
-from pm_ai.ports import ScopePathPort, VcsPort
+from pm_ai.ports import CryptoPort, ScopePathPort, VcsPort
+from pm_ai.storage.crypto import (
+    ENCLAVE_DIR_MODE,
+    ENCRYPTED_FILE_MODE,
+    is_encrypted,
+)
 
 # The application scope owns Tier 2 (AD-3). Resolved rather than remembered, so
 # the mapping from artifact to scope stays in the one table that owns it.
@@ -198,6 +205,14 @@ def _load_proposal(body: str) -> Proposal:
     )
 
 
+class AppendToSealedArtifact(RuntimeError):
+    """An artifact declared encrypted was appended to, which cannot be done.
+
+    Not a caller error to be worked around: it means a declaration and a write
+    shape disagree, and the resolution is to change one of them.
+    """
+
+
 class OperationalStoreUnavailable(RuntimeError):
     """Tier 2 could not be opened, and the daemon has no state without it.
 
@@ -268,6 +283,7 @@ class StorageService:
         *,
         now: Callable[[], datetime],
         vcs: VcsPort,
+        crypto: CryptoPort,
     ) -> None:
         """Every dependency is injected, and none is optional.
 
@@ -293,6 +309,7 @@ class StorageService:
         gets a `TypeError` at construction rather than an unprotected write later.
         """
         self._paths = paths
+        self._crypto = crypto
         self._git_checked: set[tuple[object, ...]] = set()
         self._now = now
         self._vcs = vcs
@@ -478,10 +495,120 @@ class StorageService:
         """
         return self._writable_dir(scope, artifact) / f"{at:%Y-%m}.md"
 
+    # ── Every file operation asks the model first (AD-5, AD-6) ──────────────
+    #
+    # `is_encrypted` is consulted here rather than by callers, so which artifacts
+    # are sealed is decided by their declaration in the scope trees and not by a
+    # caller remembering which helper to reach for. The classifier knew the answer
+    # before this; nothing asked it at the moment it mattered.
+
+    def _append(self, path: Path, text: str) -> None:
+        """Append to a plaintext artifact, or refuse if it is declared encrypted.
+
+        There is no such thing as appending to a sealed file. AES-GCM covers the
+        whole payload, so an append would mean read, decrypt, concatenate,
+        re-seal, rewrite — and rewriting a ledger in place is precisely what AD-5
+        forbids and what segmented compaction exists to avoid.
+
+        So declaring a ledger encrypted is refused loudly here rather than
+        honoured by quietly rewriting the file. No ledger is encrypted today; this
+        is the guard that makes changing that a decision rather than an accident.
+        """
+        if is_encrypted(str(path)):
+            raise AppendToSealedArtifact(
+                f"{path} is declared encrypted, and appending to a sealed file "
+                f"means rewriting it whole — which AD-5 forbids for a ledger and "
+                f"segmented compaction exists to avoid. Either the declaration is "
+                f"wrong, or this artifact needs a segment-per-write shape."
+            )
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _create_exclusively(self, path: Path, text: str) -> None:
+        """Create an artifact that must not exist yet, sealing it if declared.
+
+        Exclusive creation is the capture path's guarantee: two recordings must
+        never splice into one file. Sealing does not change that — the name is
+        claimed the same way whether the bytes are ciphertext or not.
+        """
+        if is_encrypted(str(path)):
+            self._seal(path, text.encode("utf-8"), exclusive=True)
+            return
+        with path.open("x", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _replace(self, path: Path, payload: bytes) -> None:
+        """Write an artifact whole, sealing it if declared. Credentials live here.
+
+        Distinct from `_append` because a credential store *is* replaced — it has
+        no history and no segments — and from `_create_exclusively` because
+        rotating a token must overwrite rather than refuse.
+        """
+        if is_encrypted(str(path)):
+            self._seal(path, payload, exclusive=False)
+            return
+        path.write_bytes(payload)
+
+    def _read(self, path: Path) -> bytes:
+        """Read an artifact, unsealing it if declared encrypted."""
+        raw = path.read_bytes()
+        return self._crypto.decrypt(raw) if is_encrypted(str(path)) else raw
+
+    def _seal(self, path: Path, payload: bytes, *, exclusive: bool) -> None:
+        """The encrypted write, at `0600` inside `0700`.
+
+        Sealed before anything is created, so a refusal — no key enrolled, a key
+        of the wrong length — leaves no directory and no empty file behind for a
+        later reader to interpret.
+        """
+        sealed = self._crypto.encrypt(payload)
+        parent = path.parent
+        parent.mkdir(parents=True, mode=ENCLAVE_DIR_MODE, exist_ok=True)
+        if stat.S_IMODE(parent.stat().st_mode) != ENCLAVE_DIR_MODE:
+            parent.chmod(ENCLAVE_DIR_MODE)
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
+        # `os.open`'s mode is masked by the process umask, so it is set again
+        # afterwards: at `umask 000` a credential file would be world-readable and
+        # nothing would report it.
+        descriptor = os.open(path, flags, ENCRYPTED_FILE_MODE)
+        try:
+            os.write(descriptor, sealed)
+        finally:
+            os.close(descriptor)
+        path.chmod(ENCRYPTED_FILE_MODE)
+
+    def write_artifact(
+        self, payload: bytes, *, scope: DataScope, artifact: str, name: str | None = None
+    ) -> Path:
+        """Write a declared artifact whole, sealed or not as the model says.
+
+        The entry point for the encrypted set — the credential store and the PM's
+        voice notes — and the reason no caller decides whether to encrypt. Callers
+        name *what* they are writing; the declaration in the scope trees decides
+        *how*.
+
+        `name` is for an artifact whose members are created at runtime: a
+        `Collection` resolves to its directory, so the file inside it has to be
+        named by the caller. A `File` resolves to itself and takes none.
+        """
+        target = self._writable_dir(scope, artifact)
+        if name is not None:
+            target = target / name
+        self._replace(target, payload)
+        return target
+
+    def read_artifact(
+        self, *, scope: DataScope, artifact: str, name: str | None = None
+    ) -> bytes:
+        """Read a declared artifact, unsealing it if the model says it is sealed."""
+        target = self._paths.resolve(scope, artifact)
+        if name is not None:
+            target = target / name
+        return self._read(target)
+
     def append_event_log(self, entry: str, *, scope: DataScope) -> None:
         at = self._at()
-        with self._segment(scope, EVENT_LOG, at).open("a", encoding="utf-8") as fh:
-            fh.write(entry.rstrip("\n") + "\n")
+        self._append(self._segment(scope, EVENT_LOG, at), entry.rstrip("\n") + "\n")
 
     # ── Raw captures: outside the tier model, inside a committed scope ───────
     # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on
@@ -527,8 +654,7 @@ class StorageService:
         filename = _capture_name(name)
         capture = self._writable_dir(scope, CAPTURES) / filename
         try:
-            with capture.open("x", encoding="utf-8") as fh:
-                fh.write(body)
+            self._create_exclusively(capture, body)
         except FileExistsError as taken:
             raise CaptureAlreadyExists(
                 f"{capture} already exists. Appending would splice two recordings "
@@ -594,8 +720,7 @@ class StorageService:
             )
             persisted += 1
         if lines:
-            with self._segment(scope, EVENT_LOG, at).open("a", encoding="utf-8") as fh:
-                fh.write("\n".join(lines) + "\n")
+            self._append(self._segment(scope, EVENT_LOG, at), "\n".join(lines) + "\n")
         return PersistResult(persisted=persisted, duplicates=duplicates, at=at)
 
     # ── Tier 2: operational, never rebuilt (AD-3) ────────────────────────────

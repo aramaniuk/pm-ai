@@ -745,7 +745,9 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     paths = mod("pm_ai.platform.paths").ScopePaths.rooted(tmp_path)
     vcs = mod("pm_ai.platform.vcs").GitVcs()
     clock = lambda: datetime.datetime(2026, 8, 19, tzinfo=datetime.timezone.utc)
-    storage = mod("pm_ai.storage.service").StorageService(paths, now=clock, vcs=vcs)
+    storage = mod("pm_ai.storage.service").StorageService(
+        paths, now=clock, vcs=vcs, crypto=mod("pm_ai.storage.crypto").AesGcmCrypto(b"0" * 32)
+    )
 
     assert isinstance(paths, ports.ScopePathPort), (
         "the resolver the composition root injects does not satisfy the port "
