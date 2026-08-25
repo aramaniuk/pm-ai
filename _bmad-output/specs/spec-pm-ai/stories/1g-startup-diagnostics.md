@@ -4,7 +4,7 @@ type: 'feature'
 created: '2026-08-21'
 updated: '2026-08-25'
 status: 'done'
-review_loop_iteration: 1
+review_loop_iteration: 2
 baseline_commit: 'fd71a03'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
@@ -75,7 +75,7 @@ The third is `git`. The capture write path asks git whether a transcript directo
 - [x] `pm_ai/platform/environment.py` — new, and **folded in from open question 4**, resolved 2026-08-25: encryption is disabled only by `PM_AI_DISABLE_ENCRYPTION`, for one process, for short-term debugging. An environment variable needs no config loader and no entry point, which is what unblocked the toggle — story 1f had left it a `build()` keyword with no user-facing path. `TRUTHY` is an explicit allowlist rather than a truthiness test, because `=0` reads to a human as *off* and truthiness would read it as *on* — the one direction this flag must never fail in.
 - [x] `pm_ai/platform/doctor.py` — new. `Health` (four states), `Probe`, `Report`, the four probes, `run_all`, and a `python -m` runner.
 - [x] `pm_ai/app/wiring.py` — `encryption_disabled` becomes `bool | None`; `None` consults the environment, an explicit value overrides. The composition root is the one place ambient state may enter, and tests state intent rather than mutating the environment.
-- [x] `tests/architecture/test_doctor.py` — new, 32 tests. Every row simulated rather than read off this machine: a test asserting the current interpreter's state would be asserting somebody's last command.
+- [x] `tests/architecture/test_doctor.py` — new, 35 tests. Every row simulated rather than read off this machine: a test asserting the current interpreter's state would be asserting somebody's last command.
 
 **Acceptance Criteria:**
 - Given an interpreter without `enable_load_extension`, when the probe runs, then it returns a failure result and raises nothing.
@@ -86,6 +86,18 @@ The third is `git`. The capture write path asks git whether a transcript directo
 - Given `uv run python -m pm_ai.platform.doctor` on this machine, then it exits reporting extension support present. Confirmed: extension support OK, git 2.50.1 answering, encryption enabled, keychain FAILING because `keyring` is an uninstalled `runtime` extra — an honest report of this repo rather than a green one.
 - Given `uv run pytest`, then all previously passing tests still pass and the skip count is unchanged. Result: 359 passed, 29 skipped.
 - Given the process environment, then `PM_AI_DISABLE_ENCRYPTION` is named in code in exactly one module. A second reader is how a flag ends up honoured on one path and ignored on another, so it is enforced by AST rather than by convention.
+
+## Spec Change Log
+
+**2026-08-25, review pass 2.** Three things found by checking the story against what shipped rather than by reading it. All twelve matrix rows and every acceptance criterion were met; these were introduced around them.
+
+- **`keychain_reachable` and `run_all` took an unannotated `keychain`** — implicitly `Any`, so every attribute read on the port was unverified. That is exactly the shape story 1k found in `SkillRegistry` and fixed, in a module written *after* that fix. Now annotated `KeychainPort`, and it earned its place immediately: the annotation exposed that the test fake implemented only `fetch` and had satisfied the parameter purely because the parameter was `Any`. Both fakes — here and in `test_cipher.py` — are now whole ports, with an `isinstance` assertion so a partial one cannot come back.
+- **The `sqlite3.Error` branch was `# pragma: no cover`** when a raising `sqlite3.connect` is one monkeypatch away. Excluding a branch from *measurement* is not the same as it working, and this session already produced two guards shipped untested. Covered, and proved by letting the error propagate.
+- **`main()` reports as uncovered and is not.** The `python -m` test exercises it in a child process, which `coverage` cannot observe. Recorded so 96% is not read as 4% untested — the real gaps were the two above.
+
+Two pragmas remain, both defensible: constructing the real `MacOSKeychainAdapter` (which the story forbids a test from touching) and the `__main__` guard.
+
+Also noted, not acted on: `LazyKeyCrypto` and `keychain_reachable` both take a whole `KeychainPort` while calling only `fetch`. A read-only sub-protocol would be least-privilege — neither has business storing or deleting a key — but that is a design change rather than a defect.
 
 ## Design Notes
 

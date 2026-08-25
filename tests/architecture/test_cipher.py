@@ -77,11 +77,22 @@ def crypto(key):
 
 
 class FakeKeychain:
-    """Only the one method `LazyKeyCrypto` uses, so the test cannot lean on more."""
+    """A whole `KeychainPort`, counting reads.
+
+    All three methods, though `LazyKeyCrypto` calls only `fetch`. The docstring
+    here used to say "only the one method it uses, so the test cannot lean on
+    more" — which sounded like discipline and was actually an over-claim: the
+    parameter is typed `KeychainPort`, so a partial fake asserts conformance it
+    does not have, and `isinstance` would have said so. Completed 2026-08-25
+    alongside the same fix in `test_doctor.py`.
+    """
 
     def __init__(self, secret: bytes | None = None):
         self.secret = secret
         self.reads = 0
+
+    def store(self, name: str, secret: bytes) -> None:
+        self.secret = secret
 
     def fetch(self, name: str) -> bytes:
         self.reads += 1
@@ -89,8 +100,18 @@ class FakeKeychain:
             raise KeyNotFound(f"nothing stored under {name!r}")
         return self.secret
 
+    def delete(self, name: str) -> None:
+        if self.secret is None:
+            raise KeyNotFound(f"nothing stored under {name!r}")
+        self.secret = None
+
 
 def test_both_ciphers_satisfy_the_port(crypto):
+    from pm_ai.ports import KeychainPort
+
+    assert isinstance(FakeKeychain(), KeychainPort), (
+        "a partial fake makes every row that uses it prove less than it looks"
+    )
     assert isinstance(crypto, CryptoPort)
     assert isinstance(PlaintextCrypto(), CryptoPort)
     assert isinstance(LazyKeyCrypto(FakeKeychain(), "master"), CryptoPort)

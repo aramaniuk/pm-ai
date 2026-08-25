@@ -36,17 +36,32 @@ SECRET = b"\x00\x01\xfe a-real-looking-key"
 
 
 class Keychain:
-    """A keychain that fails however a row needs it to."""
+    """A whole `KeychainPort`, which fails however a row needs it to.
+
+    All three methods, not just the one the probe calls. Annotating
+    `keychain_reachable` with the port on 2026-08-25 immediately caught this as a
+    partial fake: it had satisfied the parameter only because the parameter was
+    implicit `Any`. A fake that claims to be a port and is not means every row
+    using it proves less than it appears to.
+    """
 
     def __init__(self, *, secret=None, raises=None):
         self._secret, self._raises = secret, raises
 
-    def fetch(self, name):
+    def store(self, name: str, secret: bytes) -> None:
+        self._secret = secret
+
+    def fetch(self, name: str) -> bytes:
         if self._raises is not None:
             raise self._raises
         if self._secret is None:
             raise KeyNotFound(f"nothing stored under {name!r}")
         return self._secret
+
+    def delete(self, name: str) -> None:
+        if self._secret is None:
+            raise KeyNotFound(f"nothing stored under {name!r}")
+        self._secret = None
 
 
 # ── sqlite extension support ─────────────────────────────────────────────────
@@ -357,3 +372,52 @@ def test_the_environment_is_read_in_exactly_one_place():
         "the process environment is read in pm_ai/platform/environment.py alone: "
         + ", ".join(offenders)
     )
+
+
+def test_an_unusable_sqlite3_module_is_reported_not_raised(monkeypatch):
+    """The branch that was `# pragma: no cover` until 2026-08-25.
+
+    Excluding it from *measurement* is not the same as it working, and it is
+    trivially reachable — a `sqlite3.connect` that raises is one monkeypatch. The
+    probe must still report, because a caller that got an exception here would
+    lose the three probes after it, which is the one thing this module promises.
+    """
+
+    def unusable(*_a, **_k):
+        raise doctor.sqlite3.Error("unable to open database file")
+
+    monkeypatch.setattr(doctor.sqlite3, "connect", unusable)
+
+    probe = sqlite_extension_support()
+
+    assert probe.health is Health.FAILING
+    assert "unusable" in probe.detail
+    assert "unable to open database file" in probe.detail, "the cause must survive"
+    assert probe.remediation, "a failure with no remediation makes the operator guess"
+
+
+def test_an_unusable_sqlite3_does_not_stop_the_other_probes(monkeypatch):
+    """The reason the branch reports rather than raises, asserted end to end."""
+
+    def unusable(*_a, **_k):
+        raise doctor.sqlite3.Error("unable to open database file")
+
+    monkeypatch.setattr(doctor.sqlite3, "connect", unusable)
+    monkeypatch.delenv(DISABLE_ENCRYPTION_VAR, raising=False)
+
+    report = run_all(keychain=Keychain(secret=SECRET))
+
+    assert len(report.probes) == 4
+    assert not report.healthy
+
+
+def test_every_probe_the_report_carries_satisfies_the_port_it_was_given():
+    """The fake must really be a KeychainPort, or every keychain row is theatre.
+
+    `keychain_reachable` is annotated with the port as of 2026-08-25; before that
+    the parameter was implicit `Any`, so a fake missing `fetch` would have type-
+    checked and the probe would have failed at runtime instead.
+    """
+    from pm_ai.ports import KeychainPort
+
+    assert isinstance(Keychain(secret=SECRET), KeychainPort)

@@ -45,6 +45,7 @@ from enum import Enum
 from pathlib import Path
 
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR, TRUTHY, raw_toggle
+from pm_ai.ports import KeychainPort, KeychainUnavailable, KeyNotFound
 
 __all__ = ["Health", "Probe", "Report", "run_all"]
 
@@ -120,7 +121,7 @@ def sqlite_extension_support() -> Probe:
     try:
         with sqlite3.connect(":memory:") as connection:
             supported = hasattr(connection, "enable_load_extension")
-    except sqlite3.Error as broken:  # pragma: no cover - a broken sqlite3 module
+    except sqlite3.Error as broken:
         return Probe(name, Health.FAILING, f"sqlite3 is unusable: {broken}",
                      "Reinstall the interpreter; nothing here can proceed without sqlite.")
     if supported:
@@ -137,18 +138,19 @@ def sqlite_extension_support() -> Probe:
     )
 
 
-def keychain_reachable(keychain, key_name: str = "master") -> Probe:
+def keychain_reachable(keychain: KeychainPort, key_name: str = "master") -> Probe:
     """Whether the master key can be reached, and whether one is stored.
 
     `keychain` is injected rather than constructed so the probe can be exercised
     against every failure a real keychain has, none of which a test may provoke
-    for real.
+    for real. Typed as the port rather than left implicit: story 1k found exactly
+    this shape in `SkillRegistry` — an unannotated dependency is `Any`, so every
+    attribute read on it is unverified — and this module was written after that
+    fix and repeated it.
 
     The key's value is never placed in the result. A diagnostic that prints a
     secret turns a support request into a disclosure.
     """
-    from pm_ai.ports import KeychainUnavailable, KeyNotFound
-
     name = "keychain"
     try:
         keychain.fetch(key_name)
@@ -253,7 +255,7 @@ def git_available(timeout_seconds: float = 10.0) -> Probe:
     return Probe(name, Health.OK, f"{version.stdout.strip() or binary} answers exclusion queries")
 
 
-def run_all(keychain=None) -> Report:
+def run_all(keychain: KeychainPort | None = None) -> Report:
     """Every probe, whatever any single one of them says.
 
     Sequential and independent on purpose: one failure must not stop the others,
