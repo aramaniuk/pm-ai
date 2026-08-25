@@ -19,6 +19,7 @@ from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import CryptoPort, KeychainPort, VcsPort
+from pm_ai.platform.environment import encryption_disabled as encryption_off
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.platform.vcs import GitVcs
@@ -51,7 +52,7 @@ def build(
     now: Callable[[], datetime] | None = None,
     vcs: VcsPort | None = None,
     keychain: KeychainPort | None = None,
-    encryption_disabled: bool = False,
+    encryption_disabled: bool | None = None,
 ) -> Daemon:
     """Wire the daemon against one resolver, which owns all four scopes (AD-4).
 
@@ -105,11 +106,15 @@ def build(
     # encrypted read and write and therefore holds it. The *announcement* of a
     # disabled cipher needs storage, so it happens after — splitting the two is
     # what keeps this acyclic.
-    crypto = _choose_crypto(
-        keychain or MacOSKeychainAdapter(), encryption_disabled=encryption_disabled
-    )
+    # `None` means consult the environment, which is the only way a user may
+    # disable encryption — no config key, no stored profile, nothing that
+    # survives a restart. Reading ambient state is the composition root's job and
+    # nobody else's; an explicit `True`/`False` overrides it, which is how tests
+    # state their intent instead of mutating the environment.
+    disabled = encryption_disabled if encryption_disabled is not None else encryption_off()
+    crypto = _choose_crypto(keychain or MacOSKeychainAdapter(), encryption_disabled=disabled)
     storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs(), crypto=crypto)
-    if encryption_disabled:
+    if disabled:
         _announce_disabled_encryption(storage, scope=scope)
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage

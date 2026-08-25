@@ -2,9 +2,10 @@
 title: 'Startup diagnostics'
 type: 'feature'
 created: '2026-08-21'
-updated: '2026-08-22'
-status: 'ready-for-dev'
-review_loop_iteration: 0
+updated: '2026-08-25'
+status: 'done'
+review_loop_iteration: 1
+baseline_commit: 'fd71a03'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
 ---
@@ -71,8 +72,10 @@ The third is `git`. The capture write path asks git whether a transcript directo
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/platform/doctor.py` — new. A result type, four probes (extension support, keychain reachability, encryption-toggle state, `git` availability), a summary that runs all of them, and a `python -m` entry point.
-- [ ] `tests/architecture/test_doctor.py` — new. One test per matrix row, faking an absent attribute, an unreachable keychain, an absent `git`, and a `git` that cannot answer.
+- [x] `pm_ai/platform/environment.py` — new, and **folded in from open question 4**, resolved 2026-08-25: encryption is disabled only by `PM_AI_DISABLE_ENCRYPTION`, for one process, for short-term debugging. An environment variable needs no config loader and no entry point, which is what unblocked the toggle — story 1f had left it a `build()` keyword with no user-facing path. `TRUTHY` is an explicit allowlist rather than a truthiness test, because `=0` reads to a human as *off* and truthiness would read it as *on* — the one direction this flag must never fail in.
+- [x] `pm_ai/platform/doctor.py` — new. `Health` (four states), `Probe`, `Report`, the four probes, `run_all`, and a `python -m` runner.
+- [x] `pm_ai/app/wiring.py` — `encryption_disabled` becomes `bool | None`; `None` consults the environment, an explicit value overrides. The composition root is the one place ambient state may enter, and tests state intent rather than mutating the environment.
+- [x] `tests/architecture/test_doctor.py` — new, 32 tests. Every row simulated rather than read off this machine: a test asserting the current interpreter's state would be asserting somebody's last command.
 
 **Acceptance Criteria:**
 - Given an interpreter without `enable_load_extension`, when the probe runs, then it returns a failure result and raises nothing.
@@ -80,10 +83,15 @@ The third is `git`. The capture write path asks git whether a transcript directo
 - Given a keychain holding a key, when the probe runs, then the key's value appears nowhere in the result.
 - Given no `git` on `PATH`, when the git probe runs, then it returns a failure result stating that captures will be refused, and raises nothing.
 - Given a `git` that is present but cannot answer an exclusion query, then the result is distinguishable from the absent case.
-- Given `uv run python -m pm_ai.platform.doctor` on this machine, then it exits reporting extension support present.
-- Given `uv run pytest`, then all previously passing tests still pass and the skip count is unchanged.
+- Given `uv run python -m pm_ai.platform.doctor` on this machine, then it exits reporting extension support present. Confirmed: extension support OK, git 2.50.1 answering, encryption enabled, keychain FAILING because `keyring` is an uninstalled `runtime` extra — an honest report of this repo rather than a green one.
+- Given `uv run pytest`, then all previously passing tests still pass and the skip count is unchanged. Result: 359 passed, 29 skipped.
+- Given the process environment, then `PM_AI_DISABLE_ENCRYPTION` is named in code in exactly one module. A second reader is how a flag ends up honoured on one path and ignored on another, so it is enforced by AST rather than by convention.
 
 ## Design Notes
+
+**Four health states, not two.** `ABSENT` is separate from `FAILING` because "reachable, nothing stored" is an ordinary first run and "cannot reach it at all" is a broken machine — collapsing them sends an operator to fix a keychain that is fine. `WARNING` is separate from `OK` because encryption being off is not healthy even though nothing is broken, and separate from `FAILING` because the daemon is doing exactly what it was told. A `Report` is unhealthy if *anything* is not `OK`: encryption-off is the case that matters, since every other probe can pass while credentials sit in plaintext, and a summary reporting healthy then would be worse than no summary.
+
+**An unrecognised toggle value gets its own report.** Someone who exported `PM_AI_DISABLE_ENCRYPTION=please` believes they disabled encryption and did not. Encryption stays on — fail-secure — but silently ignoring the value looks identical to honouring it, and the probe is the only place that confusion can surface.
 
 The extension probe checks `hasattr(connection, "enable_load_extension")` rather than comparing version numbers, because the failure is a property of how the interpreter was built, not of which version it is. A correct version compiled without the feature passes a version check and fails on first use — which is exactly the sequence this probe exists to break.
 
