@@ -59,7 +59,9 @@ Both are **files**. Nothing encrypted is a database, which is what removed `sqlc
 
 The consequence for anything writing both secret and non-secret state: **write the secret first.** A refused encrypted write leaves nothing behind, so ordering it first makes the whole operation atomic enough. The other order leaves configuration referring to a credential that was never stored — which reads as working.
 
-**Debug toggle.** Encryption may be disabled by an explicit debug flag. It is never the default in a fresh install, and while active it must emit both a console warning and an event-log entry.
+**Debug toggle.** Encryption may be disabled only by an **environment variable**, set for the lifetime of one process, and only for short-term debugging. While active it emits both a console warning and an event-log entry.
+
+Deliberately not a config key, and this supersedes the spine's Deployment note putting it in `~/.pm-ai/config.toml`. A flag that writes credentials in plaintext must not be able to outlive the session that set it: the console warning scrolls away within minutes, and a startup event-log entry is weeks old by the time anyone wonders why a credential file is readable. An environment variable dies with the process, so **restarting restores encryption unconditionally** — no audit, no expiry logic, and nothing to forget. There is no other legitimate reason to run pm-ai with encryption off.
 
 ## Retention
 
