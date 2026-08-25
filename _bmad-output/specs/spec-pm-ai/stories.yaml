@@ -192,8 +192,25 @@
     one itself: a new key makes every previously sealed artifact unreadable, and
     that is not a decision a process start may take. 1d built the custody, and
     1g's keychain probe already reports "reachable, key absent" - point its
-    remediation text at this command. Worth splitting out if the REPL work is
-    large enough that setup would ride along unreviewed.
+    remediation text at this command.
+    And config loading, which no story owned either. config.toml is declared in
+    the application tree and read by nothing; no tomllib import exists anywhere.
+    The spine's debug profile toggles encryption from there, and story 1f left
+    encryption_disabled as a build() keyword with no user-facing path, because
+    until this story there is no entry point to configure - no [project.scripts],
+    no __main__. That is the blocker, not a deferral.
+    Unsettled and deliberately not decided in advance: whether a persistent file
+    is the right home for a flag that writes credentials in plaintext. Set once
+    and forgotten it survives every restart, the console warning scrolls away
+    within minutes, and the event-log entry fires only at startup - so a daemon
+    running for weeks announced it once, long ago. Consider re-announcing on an
+    interval, or requiring the flag to carry an expiry after which the daemon
+    refuses to start with it still set. A debug affordance that cannot be
+    permanent cannot be forgotten.
+    THREE separate concerns now land here - REPL, key enrolment, config loading.
+    Split before building unless there is a reason not to; the two setup concerns
+    arrived by having nowhere else to go, which is how a story becomes too large
+    to review.
 - id: "5"
   title: Telegram bridge and cryptographic pairing
   spec_checkpoint: true
