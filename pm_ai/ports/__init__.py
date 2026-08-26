@@ -179,6 +179,23 @@ class KeychainUnavailable(RuntimeError):
     """
 
 
+class KeychainBackendMissing(KeychainUnavailable):
+    """The keychain library itself is not installed, so there is nothing to ask.
+
+    A subclass rather than a sibling: it *is* a case of the keychain being
+    unavailable, and every existing `except KeychainUnavailable` must keep
+    catching it. What it adds is the one distinction that changes the repair —
+    an incomplete installation, fixed with a package manager, versus a keychain
+    that is present and refusing, fixed by unlocking or investigating it.
+
+    Separated because the git probe already sets that bar: it reports the binary
+    and the answer separately, on the grounds that telling an operator to install
+    something they already have sends them in a circle. The keychain collapsed the
+    same two cases into one result until 2026-08-26 and made the reader parse a
+    message to tell them apart.
+    """
+
+
 @runtime_checkable
 class KeychainPort(Protocol):
     """AD-6 — where the master key lives, so the daemon can start unattended.

@@ -36,18 +36,26 @@ console entry point and the CLI is story 4. This ships callables plus a
 
 from __future__ import annotations
 
+import importlib.metadata
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR, TRUTHY, raw_toggle
-from pm_ai.ports import KeychainPort, KeychainUnavailable, KeyNotFound
+from pm_ai.ports import (
+    KeychainBackendMissing,
+    KeychainPort,
+    KeychainUnavailable,
+    KeyNotFound,
+)
 
-__all__ = ["Health", "Probe", "Report", "run_all"]
+__all__ = ["Health", "Probe", "Report", "packages_installed", "run_all"]
 
 
 class Health(Enum):
@@ -105,7 +113,99 @@ class Report:
         return "\n".join([*(str(p) for p in self.probes), "", f"pm-ai is {verdict}."])
 
 
+# ── Dependencies ─────────────────────────────────────────────────────────────
+
+DISTRIBUTION = "pm-ai"
+
+
+def _normalise(name: str) -> str:
+    """PEP 503 name comparison: case-insensitive, with `-_.` runs equivalent."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _requirement_name(requirement: str) -> str:
+    """The bare distribution name from a requirement string.
+
+    `anthropic[mcp]; extra == "runtime"` and `keyring==25.7.0` both reduce to a
+    name. Parsed rather than pattern-matched against a hardcoded list, so the
+    answer comes from the same `pyproject.toml` that decides what to install and
+    cannot drift from it.
+    """
+    return _normalise(re.split(r"[\[<>=!~;\s]", requirement.strip(), maxsplit=1)[0])
+
+
+def required_distributions(extra: str, *, distribution: str = DISTRIBUTION) -> tuple[str, ...]:
+    """What `distribution`'s `extra` declares, from installed metadata.
+
+    Derived, never listed here. A hardcoded set would be a second place to edit
+    when a dependency is added and would silently stop covering the new one.
+    """
+    requirements = importlib.metadata.requires(distribution) or []
+    marker = f'extra == "{extra}"'
+    alternate = f"extra == '{extra}'"
+    return tuple(
+        _requirement_name(r)
+        for r in requirements
+        if marker in r or alternate in r
+    )
+
+
+def missing_distributions(names: Iterable[str]) -> tuple[str, ...]:
+    """Which of `names` are not installed, without importing any of them.
+
+    Importing to find out would be the obvious implementation and the wrong one:
+    `fastapi`, `uvicorn` and `ollama` all cost real time to import and some have
+    side effects, and a diagnostic must not pay a startup cost to report that a
+    startup cost exists. Distribution metadata answers without loading code.
+    """
+    installed = {
+        _normalise(dist)
+        for dists in importlib.metadata.packages_distributions().values()
+        for dist in dists
+    }
+    return tuple(sorted(n for n in {_normalise(x) for x in names} if n not in installed))
+
+
 # ── The probes ───────────────────────────────────────────────────────────────
+
+
+def packages_installed(
+    names: Iterable[str] | None = None, *, extra: str = "runtime"
+) -> Probe:
+    """Whether the packages pm-ai depends on are actually installed.
+
+    First among the probes, because when the answer is no, three of the four
+    after it are answering questions that do not matter yet — and one of them,
+    the keychain, was the only thing reporting this at all until 2026-08-26. An
+    operator learned that their whole runtime stack was absent through a message
+    about a keychain, which is an oblique way to say that nothing works.
+
+    Generic by design: `names` checks any set of distributions, so this is not a
+    keyring probe wearing a different hat. The default derives the `runtime`
+    extra from installed metadata, so adding a dependency extends the check with
+    no edit here.
+    """
+    name = f"{extra} packages" if names is None else "packages"
+    wanted = tuple(names) if names is not None else required_distributions(extra)
+    if not wanted:
+        return Probe(
+            name, Health.ABSENT,
+            f"no packages to check — {DISTRIBUTION!r} metadata declares no {extra!r} "
+            f"extra, or the distribution is not installed",
+            f"Install pm-ai itself before diagnosing it: an editable install is "
+            f"what makes its own metadata readable.",
+        )
+    missing = missing_distributions(wanted)
+    if not missing:
+        return Probe(name, Health.OK, f"all {len(wanted)} present")
+    return Probe(
+        name,
+        Health.FAILING,
+        f"{len(missing)} of {len(wanted)} not installed: {', '.join(missing)}",
+        f"Install them with `uv sync --extra {extra}`. Until then the features "
+        f"they back are unavailable, and the probes below will report the "
+        f"consequences rather than this cause.",
+    )
 
 
 def sqlite_extension_support() -> Probe:
@@ -163,11 +263,23 @@ def keychain_reachable(keychain: KeychainPort, key_name: str = "master") -> Prob
             "a setup step, never minted by the daemon: a new key makes every "
             "previously sealed artifact unreadable.",
         )
+    except KeychainBackendMissing as absent:
+        # Split from the refusal below on 2026-08-26, to the same bar the git
+        # probe already met: an incomplete install and a keychain that is present
+        # and refusing take different repairs, and making the reader parse a
+        # message to tell them apart is what telling someone to install git they
+        # already have looks like.
+        return Probe(
+            name, Health.FAILING, f"the keychain backend is not installed: {absent}",
+            "An incomplete installation rather than a broken keychain — see the "
+            "packages probe above. Nothing about the OS keychain needs attention.",
+        )
     except KeychainUnavailable as unreachable:
         return Probe(
-            name, Health.FAILING, f"the keychain could not be consulted: {unreachable}",
-            "Encrypted artifacts cannot be read or written until this is fixed. "
-            "If the message names a missing package, install the `runtime` extra.",
+            name, Health.FAILING, f"the keychain is present and refused: {unreachable}",
+            "The backend is installed, so this is the keychain itself: unlock it, "
+            "or check that this process may reach it. Encrypted artifacts cannot "
+            "be read or written until it answers.",
         )
     return Probe(name, Health.OK, f"a key named {key_name!r} is present and readable")
 
@@ -267,6 +379,7 @@ def run_all(keychain: KeychainPort | None = None) -> Report:
         keychain = MacOSKeychainAdapter()
     return Report(
         (
+            packages_installed(),
             sqlite_extension_support(),
             keychain_reachable(keychain),
             encryption_toggle(),

@@ -39,7 +39,7 @@ import base64
 from dataclasses import dataclass
 from typing import Any
 
-from pm_ai.ports import KeychainUnavailable, KeyNotFound
+from pm_ai.ports import KeychainBackendMissing, KeychainUnavailable, KeyNotFound
 
 __all__ = ["KEYCHAIN_SERVICE", "MacOSKeychainAdapter"]
 
@@ -58,7 +58,7 @@ def _keyring() -> tuple[Any, type[BaseException]]:
         import keyring
         from keyring.errors import KeyringError
     except ModuleNotFoundError as missing:
-        raise KeychainUnavailable(
+        raise KeychainBackendMissing(
             f"the `keyring` package is not installed, so the master key cannot be "
             f"reached ({missing}). It is declared in the `runtime` extra: install "
             f"it with `uv sync --extra runtime`. pm-ai refuses rather than "

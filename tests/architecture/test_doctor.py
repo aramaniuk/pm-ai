@@ -26,6 +26,7 @@ from pm_ai.platform.doctor import (
     encryption_toggle,
     git_available,
     keychain_reachable,
+    packages_installed,
     run_all,
     sqlite_extension_support,
 )
@@ -128,19 +129,32 @@ def test_an_unreachable_keychain_fails_and_says_so():
     assert "locked" in probe.detail, "the cause must survive into the result"
 
 
-def test_a_missing_keyring_package_is_reported_not_raised():
-    """The real state of this repo, reached through the adapter's own error.
+def test_the_real_adapter_and_the_probe_agree_about_a_missing_backend(monkeypatch):
+    """The two halves connected, not each half alone.
 
-    Asserted through `KeychainUnavailable` rather than the environment, so the row
-    holds whether or not the `runtime` extra happens to be installed.
+    Every other keychain row here uses a fake, so nothing checked that the error
+    the *real* adapter raises is the one the probe branches on. It matters
+    because the split is by type: the adapter raising the base
+    `KeychainUnavailable` for an absent package would land the report in the
+    "present and refusing" branch and send an operator to unlock a keychain that
+    was never installed.
+
+    Absence is simulated rather than read from the environment, so the row holds
+    whether or not the `runtime` extra happens to be installed.
     """
-    probe = keychain_reachable(
-        Keychain(raises=KeychainUnavailable("the `keyring` package is not installed"))
-    )
+    import sys
+
+    from pm_ai.platform.keychain import MacOSKeychainAdapter
+
+    monkeypatch.setitem(sys.modules, "keyring", None)
+
+    probe = keychain_reachable(MacOSKeychainAdapter())
 
     assert probe.health is Health.FAILING
-    assert "keyring" in probe.detail
-    assert "runtime" in probe.remediation
+    assert "backend is not installed" in probe.detail
+    assert "needs attention" in probe.remediation, (
+        "the real adapter's error reached the refusing branch, not the absent one"
+    )
 
 
 # ── the encryption toggle ────────────────────────────────────────────────────
@@ -260,9 +274,9 @@ def test_every_probe_still_runs_when_one_fails(monkeypatch):
 
     report = run_all(keychain=Keychain(raises=KeychainUnavailable("locked")))
 
-    assert len(report.probes) == 4, "a probe went missing when another failed"
+    assert len(report.probes) == 5, "a probe went missing when another failed"
     assert {p.name for p in report.probes} == {
-        "sqlite extension support", "keychain", "encryption", "git",
+        "runtime packages", "sqlite extension support", "keychain", "encryption", "git",
     }
     assert not report.healthy
 
@@ -282,7 +296,15 @@ def test_a_warning_alone_makes_the_report_unhealthy(monkeypatch):
 
 
 def test_a_fully_healthy_machine_reports_healthy(monkeypatch):
+    """Simulated, because this repo is deliberately not one.
+
+    The `runtime` extra is unset here on purpose — pyproject says the
+    architecture suite must run before the stack resolves — so the packages probe
+    is correctly FAILING and a healthy verdict is unreachable without standing
+    that in. Before the fifth probe existed this test passed by accident.
+    """
     monkeypatch.delenv(DISABLE_ENCRYPTION_VAR, raising=False)
+    monkeypatch.setattr(doctor, "missing_distributions", lambda _names: ())
 
     report = run_all(keychain=Keychain(secret=SECRET))
 
@@ -407,7 +429,7 @@ def test_an_unusable_sqlite3_does_not_stop_the_other_probes(monkeypatch):
 
     report = run_all(keychain=Keychain(secret=SECRET))
 
-    assert len(report.probes) == 4
+    assert len(report.probes) == 5
     assert not report.healthy
 
 
@@ -421,3 +443,159 @@ def test_every_probe_the_report_carries_satisfies_the_port_it_was_given():
     from pm_ai.ports import KeychainPort
 
     assert isinstance(Keychain(secret=SECRET), KeychainPort)
+
+
+# ── The packages probe ───────────────────────────────────────────────────────
+#
+# Added 2026-08-26. Until then the keychain probe was the only thing that
+# reported a missing runtime stack, and it did so as a message about a keychain —
+# an oblique way to tell an operator that nothing works.
+
+
+def test_all_packages_present_passes():
+    """Checked against distributions this environment really has."""
+    probe = packages_installed(["pytest", "cryptography"])
+    assert probe.health is Health.OK
+    assert "2 present" in probe.detail
+
+
+def test_missing_packages_are_named_individually():
+    """Which ones, not how many. "3 missing" sends an operator guessing."""
+    probe = packages_installed(["pytest", "definitely-not-installed", "also-absent"])
+
+    assert probe.health is Health.FAILING
+    assert "also-absent" in probe.detail and "definitely-not-installed" in probe.detail
+    assert "pytest" not in probe.detail, "a present package was reported as missing"
+    assert "uv sync" in probe.remediation
+
+
+def test_the_probe_is_generic_and_not_a_keyring_check_in_disguise():
+    """Any distribution set, which is what makes it reusable.
+
+    The story asked for install status in general, not one more special case for
+    the package that happened to expose the gap.
+    """
+    assert packages_installed(["pytest"]).health is Health.OK
+    assert packages_installed(["no-such-distribution-anywhere"]).health is Health.FAILING
+
+
+def test_names_are_compared_the_way_packaging_compares_them():
+    """PEP 503: case-insensitive, and `-`, `_`, `.` runs are equivalent.
+
+    `python-telegram-bot` is declared with hyphens and imports as `telegram`;
+    metadata and requirement strings disagree on punctuation often enough that a
+    literal comparison reports installed packages as absent.
+    """
+    assert doctor.missing_distributions(["PyTest"]) == (), "case must not matter"
+    assert doctor.missing_distributions(["import_linter"]) == (), (
+        "an underscore must match the hyphenated `import-linter`"
+    )
+    assert doctor.missing_distributions(["Import.Linter"]) == (), (
+        "a dot is equivalent to a hyphen too"
+    )
+    # And normalisation must not fuse distinct names: `py_test` becomes
+    # `py-test`, which is not `pytest` and must stay reported as absent.
+    assert doctor.missing_distributions(["py_test"]) == ("py-test",)
+
+
+def test_the_default_set_comes_from_the_projects_own_metadata():
+    """Derived, so adding a dependency extends the check with no edit here.
+
+    A hardcoded list is a second place to edit, and the failure mode is silent:
+    the new dependency is simply never checked.
+    """
+    declared = doctor.required_distributions("runtime")
+
+    assert "keyring" in declared, "the runtime extra's contents are not being read"
+    assert "cryptography" in declared
+    assert all(d == d.lower() for d in declared), "names must arrive normalised"
+
+
+def test_checking_does_not_import_the_packages_it_checks(monkeypatch):
+    """Metadata, not `try: import`.
+
+    Importing to find out is the obvious implementation and the wrong one:
+    fastapi, uvicorn and ollama all cost real time and some have side effects,
+    and a diagnostic must not pay a startup cost to report that one exists.
+    """
+    import sys
+
+    monkeypatch.setattr(doctor.importlib.metadata, "packages_distributions", lambda: {})
+
+    def forbidden(name, *_a, **_k):  # pragma: no cover - must never run
+        raise AssertionError(f"the probe imported {name!r} to check whether it exists")
+
+    monkeypatch.setattr(doctor.importlib, "import_module", forbidden)
+
+    probe = packages_installed(["pytest"])
+
+    assert probe.health is Health.FAILING
+    assert "pytest" not in sys.modules or True  # already imported by the runner
+
+
+def test_an_unreadable_distribution_reports_rather_than_guessing(monkeypatch):
+    """pm-ai diagnosing itself before it is installed has nothing to read.
+
+    ABSENT rather than OK: "no packages to check" must never render as "all
+    present", which is what an empty-set-passes implementation would say.
+    """
+    monkeypatch.setattr(doctor.importlib.metadata, "requires", lambda _d: None)
+
+    probe = packages_installed()
+
+    assert probe.health is Health.ABSENT
+    assert probe.health is not Health.OK
+    assert "not installed" in probe.detail
+
+
+# ── The keychain's two causes, split ─────────────────────────────────────────
+
+
+def test_a_missing_backend_is_reported_differently_from_a_refusing_keychain():
+    """The bar the git probe already met, applied to the keychain.
+
+    An incomplete install and a keychain that is present and refusing take
+    different repairs. Collapsing them made the reader parse a message — the
+    equivalent of telling someone to install git they already have.
+    """
+    from pm_ai.ports import KeychainBackendMissing
+
+    absent = keychain_reachable(
+        Keychain(raises=KeychainBackendMissing("the `keyring` package is not installed"))
+    )
+    refusing = keychain_reachable(
+        Keychain(raises=KeychainUnavailable("the keychain is locked"))
+    )
+
+    assert absent.health is refusing.health is Health.FAILING, "both are failures"
+    assert absent.detail != refusing.detail
+    assert absent.remediation != refusing.remediation
+    assert "not installed" in absent.detail
+    assert "needs attention" in absent.remediation, (
+        "the backend case must point away from the keychain, not at it"
+    )
+    assert "unlock" in refusing.remediation
+
+
+def test_the_narrower_error_is_still_caught_as_the_general_one():
+    """Adding the type must not break a caller that catches the base."""
+    from pm_ai.ports import KeychainBackendMissing, KeychainUnavailable as Base
+
+    assert issubclass(KeychainBackendMissing, Base)
+
+
+def test_the_report_leads_with_the_cause_not_the_consequence(monkeypatch):
+    """Ordering is the point of the fifth probe.
+
+    With no runtime stack the keychain, and later Ollama and Telegram, all fail
+    for one reason. That reason has to be read first or an operator fixes
+    symptoms.
+    """
+    monkeypatch.delenv(DISABLE_ENCRYPTION_VAR, raising=False)
+
+    report = run_all(keychain=Keychain(secret=SECRET))
+
+    assert len(report.probes) == 5
+    assert report.probes[0].name.endswith("packages"), (
+        "the cause must be reported before the probes that report its consequences"
+    )

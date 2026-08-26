@@ -4,7 +4,7 @@ type: 'feature'
 created: '2026-08-21'
 updated: '2026-08-25'
 status: 'done'
-review_loop_iteration: 2
+review_loop_iteration: 3
 baseline_commit: 'fd71a03'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
@@ -75,7 +75,7 @@ The third is `git`. The capture write path asks git whether a transcript directo
 - [x] `pm_ai/platform/environment.py` — new, and **folded in from open question 4**, resolved 2026-08-25: encryption is disabled only by `PM_AI_DISABLE_ENCRYPTION`, for one process, for short-term debugging. An environment variable needs no config loader and no entry point, which is what unblocked the toggle — story 1f had left it a `build()` keyword with no user-facing path. `TRUTHY` is an explicit allowlist rather than a truthiness test, because `=0` reads to a human as *off* and truthiness would read it as *on* — the one direction this flag must never fail in.
 - [x] `pm_ai/platform/doctor.py` — new. `Health` (four states), `Probe`, `Report`, the four probes, `run_all`, and a `python -m` runner.
 - [x] `pm_ai/app/wiring.py` — `encryption_disabled` becomes `bool | None`; `None` consults the environment, an explicit value overrides. The composition root is the one place ambient state may enter, and tests state intent rather than mutating the environment.
-- [x] `tests/architecture/test_doctor.py` — new, 35 tests. Every row simulated rather than read off this machine: a test asserting the current interpreter's state would be asserting somebody's last command.
+- [x] `tests/architecture/test_doctor.py` — new, 45 tests. Every row simulated rather than read off this machine: a test asserting the current interpreter's state would be asserting somebody's last command.
 
 **Acceptance Criteria:**
 - Given an interpreter without `enable_load_extension`, when the probe runs, then it returns a failure result and raises nothing.
@@ -88,6 +88,14 @@ The third is `git`. The capture write path asks git whether a transcript directo
 - Given the process environment, then `PM_AI_DISABLE_ENCRYPTION` is named in code in exactly one module. A second reader is how a flag ends up honoured on one path and ignored on another, so it is enforced by AST rather than by convention.
 
 ## Spec Change Log
+
+**2026-08-26, review pass 3 — a fifth probe, and the keychain's two causes split.** Prompted by reading the report the doctor actually prints: `keychain: the keyring package is not installed` was accurate and badly shaped.
+
+- **`packages_installed`, and it runs first.** The keychain probe had become the de-facto detector for "the runtime stack is not installed" — a much larger fact reported obliquely, as a message about a keychain. Generic over any distribution set rather than a keyring check in disguise, and the default derives the `runtime` extra from installed metadata, so adding a dependency extends the check with no edit. It reports **before** the others because when the answer is no, three of the four after it are answering questions that do not matter yet.
+- **Detected without importing.** `importlib.metadata.packages_distributions()` rather than `try: import`. Importing to find out is the obvious implementation and the wrong one — `fastapi`, `uvicorn` and `ollama` all cost real time and some have side effects, and a diagnostic must not pay a startup cost to report that one exists.
+- **`KeychainBackendMissing`**, a subclass of `KeychainUnavailable`, so the probe branches on type rather than on message text. An incomplete install and a keychain that is present and refusing take different repairs, and the git probe already set that bar: it reports the binary and the answer separately because telling an operator to install something they already have sends them in a circle. The keychain now says *"Nothing about the OS keychain needs attention"* and points at the packages probe.
+
+Three older tests had assumed four probes and, in one case, that this repo could report healthy — which it cannot, since the `runtime` extra is deliberately absent. That test had been passing by accident; it now stands the packages probe in explicitly. One assertion of mine was simply wrong: `py_test` normalises to `py-test`, which is *not* `pytest`, so PEP 503 must not fuse them — now asserted in both directions.
 
 **2026-08-25, review pass 2.** Three things found by checking the story against what shipped rather than by reading it. All twelve matrix rows and every acceptance criterion were met; these were introduced around them.
 
