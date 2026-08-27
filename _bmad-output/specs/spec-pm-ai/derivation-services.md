@@ -110,7 +110,7 @@ A job never enqueues its successor. It declares what it produced; the task manag
 | **Search indexing** | `rules/`, `event_log/`, `meetings/` | `event_index.db` | filesystem event under any of them |
 | **Embedding** | `event_log/`, `meetings/`, `coaching_1on1_history.md` | `vector_index/` | filesystem event under any of them |
 | **Commitment lifecycle** | harvested telemetry + the clock (**not** the index, which it only reads) | commitment state transitions in `commitments_log.md` | schedule |
-| **Compaction** | ageing `event_log/` segments | milestone summary segments; index bounded | schedule (7d / 500MB) |
+| **Compaction** | ageing sealed `event_log/` segments | milestone summary segments, **a `COMPACTION` record in the open segment**, index bounded | schedule (7d / 500MB) |
 
 The chain the design must support, end to end: a meeting ends → the Graph adapter fetches and validates the transcript → the capture lands in `transcripts/` → transcript processing runs → `commitments_log.md` gains entries → commitment indexing runs → the index is current. Each step is one job with one responsibility, and no step names the next.
 
@@ -143,6 +143,14 @@ Without these, three jobs parse the same Markdown three ways and the fourth read
 
 The cost of that placement is named in 1h's own Problem statement: "the property most likely to quietly stop being true, since every index added later has to be reconstructible and nothing checks." Stories 2, 15 and 18 each add derived state before 1h can check it, so each carries a dispatch note: whatever you add must be reconstructible from Markdown alone.
 
+## Answered: no job output is a backup target, and compaction is not a derivation job
+
+Resolved 2026-08-27. On the backup axis the answer is no, and the guard exists: `BACKUP_TARGETS` and `REBUILD_TARGETS` are asserted disjoint and `assert_reindex_safe` refuses any artifact whose tier is not `DERIVED` — the pre-written suite already proves it rejects `event_log/`. The wiring requirement that follows: a rebuild path must derive its target set from jobs' `outputs()` and pass it through that function, at which point a Tier-1 output is refused without anyone deciding to refuse it.
+
+Compaction's output being Tier 1 *and* a backup target is correct. It only means "derivation job" was the wrong label — this is the job inventory, and jobs are classified by the tier of what they produce.
+
+Walking the question surfaced the two real gaps, which are not about backup at all: compaction had no precondition for destroying Tier 1, and its record had no location. Both are now rules in `storage-contract.md` under *What authorises the deletion, and where it is recorded*. One residue is parked with story 19: monthly segments and a 7-day threshold do not line up.
+
 ## Answered: the coalescing window is not on the correctness path
 
 Q2 asked what the debounce interval should be. Resolved 2026-08-27 by unfolding the three write shapes in `storage-contract.md` instead of picking a number, because a debounce is a *guess about when writing stopped* and the one case where guessing wrong is unrecoverable — a duplicated meeting summary and duplicated commitments in an append-only ledger — is fixed by making the capture's appearance atomic. There is then no interval for a job to fall into.
@@ -162,4 +170,6 @@ The bound has a cause rather than being a count of today's seven jobs: it holds 
 
 ## Open questions
 
-- **Is a derivation job's output ever a backup target?** No, by the tier model — but a compaction job's *milestone summary* is Tier 1, which means one job in this table writes truth rather than derived state. That is correct (compaction is a recorded reduction of the record, per AD-5) and it is the one row where "derivation job" is the wrong mental model.
+All three questions this file opened on 2026-08-27 were answered the same day; the sections above hold the resolutions. What remains open is one residue, owned by story 19:
+
+- **Compaction's threshold and the event log's segment granularity do not line up.** Segments are monthly and the threshold is "older than 7 days", but the smallest deletable unit is a whole sealed month and the current month is never compactable — so the youngest deletable content is 1 to 31 days old depending on when compaction runs. Either the threshold means something other than what it says, or segments need a finer granularity, or compaction summarises *within* a sealed segment rather than replacing whole ones.

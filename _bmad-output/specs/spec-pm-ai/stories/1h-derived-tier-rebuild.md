@@ -71,6 +71,8 @@ context:
 
 ## Design Notes
 
+**The compaction row is what keeps the headline property true after story 19.** This story now runs after compaction exists, and compaction deletes sealed `event_log/` segments — so a rebuild after a compaction has fewer sources than the snapshot had and cannot reproduce it. The matrix answers that by reporting the difference rather than failing, which is the right answer: it needs no background job frozen for the duration of a test, and it makes the lossiness visible instead of hidden. The alternative considered on 2026-08-27 — forbidding compaction between the snapshot and the rebuild — was rejected for both reasons.
+
 **Why the drop is validated against a table rather than written carefully.** The failure being prevented is not a typo, it is a future caller. Growing the rebuild to cover a second index is a small, reasonable change, and nothing about it signals that adding the wrong path silently destroys pending external writes. Checking the target set against the tier table makes that change fail immediately instead of on the day someone runs a rebuild.
 
 **Why determinism gets its own matrix row.** The main test compares a snapshot from before deletion with one from after. If the snapshot depends on the order files happen to be read, that comparison can fail on a correct rebuild or pass on a broken one. The order-independence row is what makes the main test mean something.

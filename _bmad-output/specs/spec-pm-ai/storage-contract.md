@@ -103,6 +103,27 @@ Activity streams older than 7 days compress into structured long-term milestone 
 
 Bounded forgetting is this recorded compaction and nothing else. Retrieval weighting may reorder what surfaces; it may never edit, delete, or rewrite what was logged.
 
+### What authorises the deletion, and where it is recorded
+
+Added 2026-08-27. Compaction is the only job that destroys Tier 1; everything else adds. Two rules were missing, and the asymmetry that exposed them is in this file: the retention purge may delete a *raw capture* — `RETENTION_MANAGED`, outside the tier model, depended on by nothing — only **after verified conversion**, while compaction had a precondition of age alone for the tier defined as *"it is the source"*.
+
+**A sealed segment is deleted only after its milestone summary is written and confirmed present.** Summary first, verify, then delete. Without the ordering a crash between the two loses the segment with nothing replacing it, and there is no source to rebuild from — that is what Tier 1 means.
+
+**Every compaction is recorded in the open segment of the same scope's event log**, in the ordinary entry format, naming each replaced segment with the MD5 it had when deleted, and the summary that replaced it:
+
+```
+- [01J9Q4T…] COMPACTION actor=pm-ai src=event_log/2026-06
+  replaced=2026-06.md:d41d8cd9… summary=2026-06-milestone.md:9b2c77e0…
+```
+
+The **open** segment specifically, because compaction deletes only *sealed* segments — a record written into a sealed one is deletable by the next compaction. Each scope records into its own event log, since each holds one.
+
+Checksums rather than filenames alone: a filename says *a file called this was deleted*, a checksum says *this exact content was deleted*, and filenames are reused across months while content is not. It also makes a restore decidable — a backup copy whose MD5 matches the record is content compaction already replaced and may be discarded again; a mismatch means something other than compaction touched it. The cost is nothing, since compaction reads those files to summarise them.
+
+**A milestone summary carries forward the compaction entries of the segments it replaces.** The open segment is eventually sealed and eventually compacted itself, so without this the audit trail is the first thing compaction erases.
+
+**Open for story 19: the threshold and the segment granularity do not line up.** Segments are monthly (`service.py:513` builds `%Y-%m.md`) and the threshold is "older than 7 days", but the smallest deletable unit is a whole sealed month and the current month is never compactable — so the youngest deletable content is between 1 and 31 days old depending on when compaction runs.
+
 ## Latency split
 
 Retrieval (SQLite plus vector lookup, no model in the path) holds **50–150 ms**. Synthesis (retrieval followed by a model call) holds **≤60 s** and is always delivered asynchronously. No synthesized response is expected inside the retrieval budget — the two describe different operations. Full budgets in `nfr-budgets.md`.

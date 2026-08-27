@@ -522,6 +522,36 @@
   description: >-
     Compress ageing streams into milestone summaries, cap the vector index, and
     hold the retrieval budget with no model in the path. Delivers CAP-37.
+  invoke_dev_with: >-
+    OWNS THE ONLY OPERATION THAT DESTROYS TIER 1. Two rules added 2026-08-27, see
+    storage-contract.md "What authorises the deletion, and where it is recorded".
+    Order is load-bearing: write the milestone summary, CONFIRM it is present, only
+    then delete the sealed segments. A crash between the delete and the summary
+    loses the segment with nothing replacing it and no source to rebuild from. The
+    asymmetry this fixes was in the same file - the retention purge may delete a
+    raw capture, which nothing depends on, only after verified conversion, while
+    compaction had age alone for the tier defined as "it is the source".
+    Record every compaction in the OPEN segment of the same scope's event log, in
+    the ordinary entry format, naming each replaced segment with the MD5 it had
+    when deleted and the summary that replaced it. The open segment specifically -
+    compaction deletes only sealed segments, so a record in a sealed one is
+    deletable by the next compaction. Each scope records into its own log.
+    Checksums not filenames alone: a filename says a file called this was deleted,
+    a checksum says this exact content was; filenames are reused across months.
+    It also makes a restore decidable - a backup copy whose MD5 matches the record
+    is content compaction already replaced, a mismatch means something else touched
+    it. Costs nothing, since compaction reads those files to summarise them.
+    A milestone summary CARRIES FORWARD the compaction entries of the segments it
+    replaces, or the audit trail is the first thing compaction erases.
+    OPEN ISSUE to resolve in this story: segments are monthly (service.py:513
+    builds %Y-%m.md) and the threshold is "older than 7 days", but the smallest
+    deletable unit is a whole sealed month and the current month is never
+    compactable - so the youngest deletable content is 1 to 31 days old depending
+    on when compaction runs. Either the threshold means something other than what
+    it says, or segments need finer granularity, or compaction summarises WITHIN a
+    sealed segment rather than replacing whole ones.
+    Story 1h's matrix expects a rebuild after compaction to reproduce the compacted
+    view and REPORT the difference rather than fail. Do not break that.
 - id: "1h"
   title: Derived-tier rebuild
   spec_checkpoint: true
