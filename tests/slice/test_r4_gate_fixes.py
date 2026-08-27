@@ -278,9 +278,12 @@ def test_personal_analytics_is_backed_up_and_never_rebuilt():
     assert "personal_analytics.db" in BACKUP_TARGETS
     assert "personal_analytics.db" not in REBUILD_TARGETS
 
-    # `pm-ai reindex` must not be able to reach it.
+    # `pm-ai reindex` must not be able to reach it. The Tier-3 companion is
+    # named `event_index.db` since the 2026-08-27 rename; left as `derived.db`
+    # this call would still raise, but for the *other* member of the set, and
+    # would no longer prove anything about `personal_analytics.db`.
     with pytest.raises(TierViolation):
-        assert_reindex_safe(frozenset({"derived.db", "personal_analytics.db"}))
+        assert_reindex_safe(frozenset({"event_index.db", "personal_analytics.db"}))
 
 
 def test_every_artifact_still_has_exactly_one_tier():

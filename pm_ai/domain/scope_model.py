@@ -457,12 +457,18 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
             # Tier 2 — job queue, cursors, executed-key ledger, staged
             # proposals. Encrypted, never rebuilt.
             File("operational.db", Tier.OPERATIONAL, encrypted=False, gitignored=True),
-            # Tier 3 — search & commitment indexes. Separate *files* from Tier 2,
-            # so a rebuild cannot reach the job queue (AD-3). The shared enclave
-            # proves nothing on its own; what holds is the assertion in
-            # tests/architecture/test_paths.py that no Tier-1 path lies inside a
-            # Tier-3 one, since a rebuild deletes what it names by path.
-            File("derived.db", Tier.DERIVED, encrypted=False, gitignored=True),
+            # Tier 3 — one index per job, not one file per tier. Renamed and
+            # split from a single `derived.db` on 2026-08-27: the search index
+            # and the commitment index have different owners (stories 18 and 15),
+            # different inputs and different rebuild costs, and a job that
+            # declares `outputs()` cannot name half a file. Separate *files* from
+            # Tier 2 as well, so a rebuild cannot reach the job queue (AD-3). The
+            # shared enclave proves nothing on its own; what holds is the
+            # assertion in tests/architecture/test_paths.py that no Tier-1 path
+            # lies inside a Tier-3 one, since a rebuild deletes what it names by
+            # path.
+            File("event_index.db", Tier.DERIVED, encrypted=False, gitignored=True),
+            File("commitment_index.db", Tier.DERIVED, encrypted=False, gitignored=True),
             # API credentials (encrypted). Tier 2, not Tier 1: it is not derivable
             # from Markdown truth, and Tier 3 would mean a rebuild could delete
             # every connector credential the daemon holds.

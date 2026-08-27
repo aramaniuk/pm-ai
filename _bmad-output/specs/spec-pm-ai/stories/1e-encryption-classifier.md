@@ -47,7 +47,8 @@ The question asked of each path is *"is this artifact encrypted at rest?"*
 | `~/.manager-ai/memory/strategic_goals.md` | no | all Markdown is plaintext by design |
 | `<repo>/.project-ai/memory/commitments_log.md` | no | all Markdown is plaintext by design |
 | `~/.pm-ai/private/vector_index/index.bin` | no | rebuildable derived index, despite sitting under `private/` |
-| `~/.pm-ai/private/derived.db` | no | rebuildable derived store |
+| `~/.pm-ai/private/event_index.db` | no | rebuildable derived index |
+| `~/.pm-ai/private/commitment_index.db` | no | rebuildable derived index |
 | `~/.pm-ai/private/operational.db` | **no** | queue state and cursors rather than record content; 600 and full-disk encryption |
 | `~/.pm-ai/private/config.json` | yes | API credentials |
 | `~/.pm-ai/private/people/p1/dossier.md` | **no** | gitignored, 600-permissioned, and a single deletable directory |
@@ -97,7 +98,9 @@ The question asked of each path is *"is this artifact encrypted at rest?"*
 
 **Why declaring it on the node beats a classifier.** The classifier answers the same question the trees already answer for durability, from a second structure. Adding an artifact would mean editing the tree and remembering the classifier, and the failure mode of forgetting is a plaintext secret rather than a crash. Declaring encryption where the artifact is declared makes forgetting impossible: there is nowhere to add an artifact that does not ask.
 
-**Two stale assertions to expect, and why fail-closed handles both.** The pre-written test asserts that `~/.pm-ai/private/event_telemetry.db` and `~/.pm-ai/private/chat_history/` are encrypted. Neither exists. `event_telemetry.db` was the original mistake — one file mixing operational state with rebuildable indexes — later split into `operational.db` and `derived.db`; `chat_history/` is an early name for captures. A pure tree lookup would answer *no* for both and fail the test, which is exactly the wrong direction. Failing closed on an undeclared path satisfies both old assertions and the current names together, without reviving either name in a tree. Report the stale names rather than declaring them.
+**Two stale assertions to expect, and why fail-closed handles both.** The pre-written test asserts that `~/.pm-ai/private/event_telemetry.db` and `~/.pm-ai/private/chat_history/` are encrypted. Neither exists. `event_telemetry.db` was the original mistake — one file mixing operational state with rebuildable indexes — later split into `operational.db` and (as of 2026-08-27) `event_index.db` plus `commitment_index.db`; `chat_history/` is an early name for captures. A pure tree lookup would answer *no* for both and fail the test, which is exactly the wrong direction. Failing closed on an undeclared path satisfies both old assertions and the current names together, without reviving either name in a tree. Report the stale names rather than declaring them.
+
+**One frozen row was edited on 2026-08-27, and only its name.** The user renamed the derived tier's single `derived.db` into `event_index.db` and `commitment_index.db`, one file per rebuilding job. The matrix row for it became two rows with the same answer, *no*, for the same reason. Nothing in this story's intent or boundaries moved: the artifact the row pointed at was renamed under it, and leaving the old name would have left the matrix asserting about a path no scope tree declares — where `is_encrypted` fails closed and would answer *yes*, contradicting the row.
 
 **Why the undeclared answer is fail-closed rather than an exception.** `is_encrypted` is called on the write path. Raising would turn every unrecognised path into an outage; answering *encrypted* turns it into a file the PM cannot grep until someone declares it. The second failure is visible and recoverable; the first is an incident, and the third option — answering *plaintext* — is the leak.
 

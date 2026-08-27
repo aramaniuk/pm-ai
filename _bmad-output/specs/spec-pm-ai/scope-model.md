@@ -49,8 +49,9 @@ The application scope holds none, because it owns no meetings. **All three are e
 └── private/                           # OPERATIONAL ENCLAVE (gitignored)
     ├── operational.db                 # Tier 2: job queue, cursors, executed-key ledger,
     │                                  # staged proposals (600, never rebuilt)
-    ├── derived.db                     # Tier 3: search & commitment indexes - disposable,
-    │                                  # rebuilt by pm-ai reindex
+    ├── event_index.db                 # Tier 3: search index over rules/, event_log/,
+    │                                  # meetings/ - disposable, rebuilt by pm-ai reindex
+    ├── commitment_index.db            # Tier 3: index over commitments_log.md - disposable
     ├── config.json                    # API credentials (encrypted)
     ├── vector_index/                  # Pruned embeddings - NOT encrypted, rebuildable
     └── people/                        # TEAM-MEMBER SCOPE - never committed;

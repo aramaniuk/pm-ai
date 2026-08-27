@@ -41,7 +41,7 @@ class ScopePathPort(Protocol):
     its dependency without reaching across that boundary.
 
     One method for artifacts, deliberately. A named accessor per store
-    (`operational_store`, `derived_store`, …) would put the artifact-to-scope
+    (`operational_store`, `event_index_store`, …) would put the artifact-to-scope
     mapping on both sides of the boundary; `resolve` keeps that mapping wholly
     inside the resolver, which is the table that decides whether a record may
     exist in a scope at all.

@@ -130,8 +130,10 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.pm-ai/private",
     (ScopeKind.APPLICATION, "operational.db"):
         "/home/pm/.pm-ai/private/operational.db",
-    (ScopeKind.APPLICATION, "derived.db"):
-        "/home/pm/.pm-ai/private/derived.db",
+    (ScopeKind.APPLICATION, "event_index.db"):
+        "/home/pm/.pm-ai/private/event_index.db",
+    (ScopeKind.APPLICATION, "commitment_index.db"):
+        "/home/pm/.pm-ai/private/commitment_index.db",
     (ScopeKind.APPLICATION, "config.json"):
         "/home/pm/.pm-ai/private/config.json",
     (ScopeKind.APPLICATION, "vector_index/"):
@@ -320,7 +322,11 @@ def test_tier_three_shares_no_file_or_directory_with_tier_two(production):
     "rebuild Tier 3 only" unimplementable while its test stayed green.
     """
     tier_two = (production.operational_store, production.personal_analytics_store)
-    tier_three = (production.derived_store, production.vector_index)
+    tier_three = (
+        production.event_index_store,
+        production.commitment_index_store,
+        production.vector_index,
+    )
 
     # The acceptance criterion in its strongest form: no delete of one path,
     # recursive or not, can remove another.
@@ -330,7 +336,10 @@ def test_tier_three_shares_no_file_or_directory_with_tier_two(production):
             assert not keep.is_relative_to(drop), f"rebuilding {drop} would remove {keep}"
             assert not drop.is_relative_to(keep), f"deleting {keep} would remove {drop}"
 
-    assert production.derived_store != production.vector_index
+    assert len(set(tier_three)) == len(tier_three), (
+        "the two indexes and the vector index are three distinct paths, so "
+        "rebuilding one cannot delete another"
+    )
     assert production.operational_store != production.personal_analytics_store
 
 

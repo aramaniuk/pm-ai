@@ -306,12 +306,19 @@
     that makes stale. Same principle as the scope model deriving tier sets from
     node declarations, and it fails the same way if abandoned: two structures that
     can disagree.
-    Change detection needs BOTH mechanisms. pm-ai is the single writer, so its own
-    writes publish events from StorageService - exact, immediate, and impossible
-    for a caller to forget. But Markdown is hand-editable by design, so a PM
-    editing commitments_log.md produces a change pm-ai never saw; a periodic
-    reconciliation sweep is the cost of plaintext truth, not redundancy. Build
-    both or derived state goes stale with nothing having happened.
+    Change detection is ONE pipeline: system-wide filesystem notifications. Ruled
+    2026-08-27, superseding an earlier design where StorageService published its
+    own write events. Do not add that second channel - two pipelines answering one
+    question can disagree, each needs its own tests, and a job gets triggered twice
+    or not at all depending on which fired. The OS sees the hand-editing PM and
+    pm-ai with one mechanism. Watching is an OS API, so it goes behind a
+    FileWatcherPort with its adapter in pm_ai/platform (AD-26); the task manager
+    must not import the watching library. Watch Tier-1 paths ONLY, or commitment
+    indexing writing commitment_index.db triggers commitment indexing. Coalesce
+    per path: one editor save arrives as several events. The one gap the pipeline
+    cannot close is writes made while nothing was watching - resume the event
+    stream from a persisted id where the backend supports it, otherwise a
+    reconciliation scan at startup only, never periodic.
     Every job is a queue row per AD-20, never an in-memory timer. Shared resources
     go through one accessor each (CommitmentLog, EventLog, MeetingRecords), and
     those perform their I/O through StorageService rather than touching files -
@@ -427,7 +434,7 @@
   done_checkpoint: true
   invoke_dev_with: >-
     Moved here from position 9 on 2026-08-27. Nothing populated the derived tier
-    at that point - derived.db and vector_index/ were declared and written by
+    at that point - the index files and vector_index/ were declared and written by
     nothing - so snapshot, drop and rebuild would all have been no-ops and the
     headline property, that a rebuild reproduces the snapshot, would have been
     vacuously true. By this position the commitment index (15), the search index

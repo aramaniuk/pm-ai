@@ -42,7 +42,8 @@ MATRIX = [
     (PERSONAL, "strategic_goals.md", None, False),
     (PROJECT, "commitments_log.md", None, False),
     (APPLICATION, "vector_index/", "index.bin", False),
-    (APPLICATION, "derived.db", None, False),
+    (APPLICATION, "event_index.db", None, False),
+    (APPLICATION, "commitment_index.db", None, False),
     (APPLICATION, "operational.db", None, False),
     (APPLICATION, "config.json", None, True),
     # Configuration, not credentials: the token it is enrolled with goes to

@@ -692,11 +692,19 @@ def test_ad3_reindex_cannot_reach_tier_2():
     The earlier spine put the job queue and the search indexes in one file, so
     the obvious rebuild (drop the file, recreate) destroyed pending external
     writes and every cursor while the AD-3 test stayed green.
+
+    `derived.db` was renamed and split on 2026-08-27 into `event_index.db` and
+    `commitment_index.db`, one file per rebuilding job. The names here were
+    updated with it: the positive assertion below fails outright against a name
+    no scope tree declares, since `assert_reindex_safe` fails closed on an
+    unknown artifact.
     """
     d = mod("pm_ai.domain")
-    d.assert_reindex_safe(frozenset({"derived.db", "vector_index/"}))
+    d.assert_reindex_safe(
+        frozenset({"event_index.db", "commitment_index.db", "vector_index/"})
+    )
     with pytest.raises(d.TierViolation):
-        d.assert_reindex_safe(frozenset({"derived.db", "operational.db"}))
+        d.assert_reindex_safe(frozenset({"event_index.db", "operational.db"}))
     with pytest.raises(d.TierViolation):
         d.assert_reindex_safe(frozenset({"event_log/"}))
 

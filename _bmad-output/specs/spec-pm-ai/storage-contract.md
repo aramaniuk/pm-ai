@@ -8,9 +8,9 @@ Companion to `SPEC.md`. What persists, which tier it belongs to, what is encrypt
 | --- | --- | --- | --- |
 | **1 — Truth** | Plaintext Markdown: event log segments, `commitments_log.md`, coaching history, goals, rules, meeting records, disclosure ledger | Yes | n/a — it *is* the source |
 | **2 — Operational** | Job queue and retry buffer, connector cursors, executed-idempotency-key ledger, staged proposals, key material, personal analytics | Yes | **Never** — not derivable from Markdown |
-| **3 — Derived** | Search and commitment indexes (`derived.db`), vector index | No | Yes, entirely from Truth, with zero loss |
+| **3 — Derived** | Search index (`event_index.db`), commitment index (`commitment_index.db`), vector index (`vector_index/`) | No | Yes, entirely from Truth, with zero loss |
 
-Nothing builds the Tier-3 contents today, and no story claimed to until 2026-08-27. `derivation-services.md` holds the design that closes it, the job that owns each artifact, and the constraint that follows for everything in this tier: **an artifact is Tier 3 only if a declared job can rebuild it from Tier 1 alone.** Anything that cannot belongs in another tier. ("Caches" was struck from the row above on the same date: no capability asked for one, and an undefined member of the disposable tier is an invitation to put something non-rebuildable there.)
+Nothing builds the Tier-3 contents today, and no story claimed to until 2026-08-27. `derivation-services.md` holds the design that closes it, the job that owns each artifact, and the constraint that follows for everything in this tier — and it is why the single `derived.db` became two files on that date: one index per rebuilding job, because a job declares its whole output and two jobs cannot each own half a file. The rule: **an artifact is Tier 3 only if a declared job can rebuild it from Tier 1 alone.** Anything that cannot belongs in another tier. ("Caches" was struck from the row above on the same date: no capability asked for one, and an undefined member of the disposable tier is an invitation to put something non-rebuildable there.)
 
 **Three tiers are not the whole partition.** Every persistent artifact is in exactly one of the three tiers, `RETENTION_MANAGED`, or `DIAGNOSTIC_ONLY` — five sets, pairwise disjoint:
 

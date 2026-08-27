@@ -566,9 +566,19 @@ class ScopePaths:
         return self.resolve(DataScope(ScopeKind.APPLICATION), "operational.db")
 
     @property
-    def derived_store(self) -> Path:
-        """Tier 3. Search and commitment indexes; `pm-ai reindex` may delete this."""
-        return self.resolve(DataScope(ScopeKind.APPLICATION), "derived.db")
+    def event_index_store(self) -> Path:
+        """Tier 3. The search index over rules, event log and meetings.
+
+        `pm-ai reindex` may delete this. One file per index rather than one per
+        tier, because the job that rebuilds it declares this path as its whole
+        output and two jobs sharing one file could not.
+        """
+        return self.resolve(DataScope(ScopeKind.APPLICATION), "event_index.db")
+
+    @property
+    def commitment_index_store(self) -> Path:
+        """Tier 3. The commitment index over `commitments_log.md`."""
+        return self.resolve(DataScope(ScopeKind.APPLICATION), "commitment_index.db")
 
     @property
     def vector_index(self) -> Path:
