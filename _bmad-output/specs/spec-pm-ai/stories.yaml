@@ -316,9 +316,17 @@
     or not at all depending on which fired. The OS sees the hand-editing PM and
     pm-ai with one mechanism. Watching is an OS API, so it goes behind a
     FileWatcherPort with its adapter in pm_ai/platform (AD-26); the task manager
-    must not import the watching library. Watch Tier-1 paths ONLY, or commitment
-    indexing writing commitment_index.db triggers commitment indexing. Coalesce
-    per path: one editor save arrives as several events. The one gap the pipeline
+    must not import the watching library. Only Tier-1 and RETENTION_MANAGED
+    artifacts are eligible to be watched - transcripts/ is RETENTION_MANAGED and
+    must be watched, so Tier 1 alone was too strict. The bound is a permission,
+    not a selector: an artifact is watched because a job declares it in inputs().
+    What it excludes is Tier 3, which is what stops commitment indexing
+    re-triggering itself. ONE WATCHER OWNS EACH WATCHED ARTIFACT and a watcher may
+    cover several, so the map is a partition: a change cannot arrive twice by two
+    routes or fall between two watchers that each assumed the other had it. A
+    watcher then enqueues EVERY job declaring that artifact as an input, not one -
+    event_log/ and meetings/ each feed two jobs. Coalesce per path: one editor save
+    arrives as several events. The one gap the pipeline
     cannot close is writes made while nothing was watching: the daemon reconciles
     every watched path at boot, mtime or digest against what the last derivation
     saw. Never periodic - that would be the excluded second pipeline. Attach the
@@ -339,9 +347,25 @@
     go through one accessor each (CommitmentLog, EventLog, MeetingRecords), and
     those perform their I/O through StorageService rather than touching files -
     pm_ai/storage forbids file I/O outside service.py.
-    Check derivation-services.md's first open question before building a
-    topological sort: if no chain exceeds two hops, "enqueue the direct consumers
-    of what changed" is sufficient and the sort is unbuilt machinery.
+    Enqueue direct consumers; build no topological sort. Settled 2026-08-27 by
+    deriving the live graph: every job either produces Tier 1 and is woken by a
+    schedule or an external capture, or produces Tier 3 and is a LEAF, because
+    nothing follows an unwatched index being written. No chain exceeds one
+    job-to-job edge. Depth is deliberately NOT enforced in code - but no job may
+    write an artifact that re-triggers it, or it spins forever. Compaction is one
+    predicate from that shape (reads event_log/, writes event_log/) and is saved
+    only by being schedule-triggered.
+    Three trigger kinds, not two: a change to a watched artifact, a schedule, and a
+    DIRECT REQUEST from pm-ai business logic into the task manager (ruled
+    2026-08-27) - that is what rule 5's triggering interface is for, and pm-ai
+    reindex is the obvious caller. Trigger kind and job identity are independent; a
+    requested job whose inputs are unchanged does no work, because staleness is the
+    stored per-entry MD5 versus the file, not the word of whoever asked.
+    inputs() declares STALENESS, NOT FILE ACCESS. The commitment lifecycle job
+    reads commitment_index.db to list open commitments and must NOT declare it:
+    that edge means "re-run me when the index changes", which can never fire (Tier
+    3 is unwatched) and is not what the job needs - elapsed time is. Blur the two
+    meanings and the derived graph stops describing when things run.
 - id: "11"
   title: Meeting records and transcript ingestion
   spec_checkpoint: true

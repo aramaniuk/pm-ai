@@ -24,7 +24,7 @@ The same gap explains a second smell. `pm_ai/app/pipelines.py` holds `run_harves
 
 1. **Every job is a row in the queue.** Not a rule this design invents — AD-20 already requires it: "nothing is scheduled in memory only." FR-04's offline buffer is the same queue in `PENDING_RETRY`.
 2. **One job, one task, declared inputs and outputs.** A transcript job processes transcripts and nothing else. Inputs and outputs are named artifacts (plus parameters where a file cannot carry them).
-3. **A resource shared by several jobs is reached through one accessor.** `commitments_log.md` is written by transcript processing and read by indexing and by the sweeper; they use a common interface for create/append/read rather than each parsing Markdown their own way.
+3. **A resource shared by several jobs is reached through one accessor.** `commitments_log.md` is written by transcript processing and read by indexing and by the lifecycle job; they use a common interface for create/append/read rather than each parsing Markdown their own way.
 4. **The task manager owns the inventory and the scheduling.** Which jobs exist, what each needs, when it runs.
 5. **The task manager exposes triggering and publishes state changes.** A caller can request a job; anything interested can observe `queued → running → done | failed`.
 
@@ -36,7 +36,21 @@ The superseded argument was that pm-ai is the single writer (AD-5), so its own w
 
 **What this costs, stated rather than discovered later.** A filesystem notification is not a write: one saved file arrives as several events, and the watcher cannot tell pm-ai's own write from a hand edit. So the watcher **coalesces** — a quiet interval per path before a job is enqueued — where the write path would have been exact and immediate. Latency and a debounce window are the price of the single pipeline.
 
-**Only Tier-1 paths are watched.** A job's own output must never be a watched path, or commitment indexing writing `commitment_index.db` triggers commitment indexing. The invalidation graph already handles the real case: a change to an input invalidates its consumers, and derived outputs have no consumers to invalidate.
+### What may be watched, and who owns each watch
+
+**Only Tier-1 and `RETENTION_MANAGED` artifacts may be watched.** Corrected 2026-08-27: the rule first said Tier 1 alone, which the transcript job's own trigger row contradicted three lines below it — `transcripts/` is `RETENTION_MANAGED`, not Tier 1, and it has to be watched or nothing notices a meeting recording landing.
+
+The bound is a **permission, not a selector**: an artifact is watched because some job declares it in `inputs()`, and the tier rule says which artifacts are eligible at all. So `telegram_cache/` is eligible and unwatched, because no job consumes it. What the bound really excludes is Tier 3 — no index can ever be watched, which is what stops commitment indexing from re-triggering itself by writing `commitment_index.db`.
+
+**One watcher per watched artifact; one watcher may cover several.** The map from watcher to artifacts is a partition, never an overlap. That is what makes an event unambiguous: exactly one watcher owns the path that changed, so a change cannot arrive twice by two routes or fall between two watchers that each assumed the other had it. Ownership of the resource is what selects the work.
+
+Note the plural, because it is where the ownership rule meets the derived graph: a watcher enqueues **every** job declaring the changed artifact as an input, not one job. `event_log/` feeds both search indexing and embedding, and `meetings/` feeds both as well. One owner of the path, one or more jobs woken by it.
+
+### A job must not write what re-triggers it
+
+Tier-1 outputs *are* watched — they have to be, or the chain breaks: `commitments_log.md` is transcript processing's output and commitment indexing's input, and watching it is exactly how the second follows the first. So the tier bound cannot be what prevents a loop, and nothing enforces this rule in code today (decided 2026-08-27: documented, not tested).
+
+**Be deliberate about it.** A job whose output re-triggers the same job spins forever. Compaction is one predicate away from that shape right now — it reads ageing `event_log/` segments and writes milestone summary segments back into `event_log/` — and the only thing saving it is that its trigger is a schedule rather than an event. Make it event-driven and it feeds itself. The same trap waits for any future job that reads Tier 1 and writes Tier 1 in response to a change: a "regenerate `daily_dashboard.md` whenever `meetings/` changes" job is unremarkable to propose and is a loop if its output is watched by anything upstream of it.
 
 **The watcher is an OS API, so it lives behind a platform port** (AD-26) — `FileWatcherPort` in `pm_ai.ports`, its adapter in `pm_ai.platform`, alongside the keychain, the clock, git and the environment. The task manager consumes the port and never imports the watching library, which is what keeps a macOS-only FSEvents backend from being a fact about the core. It is a new runtime dependency; `pm-ai doctor`'s package probe covers it without change.
 
@@ -65,10 +79,20 @@ Per-entry rather than per-index is what makes the re-index unit small. Group the
 ## The job contract
 
 ```
-inputs()  -> frozenset[ArtifactRef]     what this job reads
+inputs()  -> frozenset[ArtifactRef]     what makes this job stale — NOT what it opens
 outputs() -> frozenset[ArtifactRef]     what it creates or updates
 run(ctx)  -> JobResult                  one task, no orchestration
 ```
+
+**`inputs()` declares staleness, not file access.** A job that opens a file for reference has not thereby acquired a trigger. The commitment lifecycle job is the case that forced the distinction: it reads `commitment_index.db` to list the open commitments, and declaring that as an input created an edge meaning *re-run me when the index changes* — which can never fire (Tier 3 is unwatched) and is not what the job needs anyway. What makes it stale is elapsed time. Blur the two meanings and the derived graph stops describing when things run, which is the one thing it exists to describe.
+
+### Three ways a job is triggered
+
+1. **A change to a watched artifact** — the filesystem pipeline above. The edges this produces are exactly `outputs() ∩ inputs()`.
+2. **A schedule** — for work no file change can announce. Harvest and compaction are periodic by policy; the commitment lifecycle job is scheduled because two of its three transitions are *the target date passed* and *48 hours before the milestone*, and nothing is written when a deadline arrives.
+3. **A direct request from pm-ai's business logic** into the task manager (ruled 2026-08-27). Rule 5's triggering interface is this: a surface, a skill, or a CLI command asks for a named job. `pm-ai reindex` is the obvious one; so is re-running an ingestion the PM knows failed.
+
+Trigger kind and job identity are independent — the same job runs the same way whichever woke it. That is what makes kind 3 safe: a requested job that finds its inputs unchanged does no work, because staleness is decided by comparing the stored per-entry MD5 against the file, not by trusting whoever asked.
 
 **The dependency graph is derived, never configured.** One job's `outputs()` intersecting another's `inputs()` *is* the edge. Transcript processing outputs `commitments_log.md`; commitment indexing inputs it; the chain follows without anybody writing it down twice. That is the same principle the scope model already uses — tier and exclusion sets derived from node declarations rather than maintained beside them — and it fails the same way if abandoned: two structures that can disagree.
 
@@ -83,7 +107,7 @@ A job never enqueues its successor. It declares what it produced; the task manag
 | **Commitment indexing** | `commitments_log.md` | `commitment_index.db` | filesystem event on that file |
 | **Search indexing** | `rules/`, `event_log/`, `meetings/` | `event_index.db` | filesystem event under any of them |
 | **Embedding** | `event_log/`, `meetings/`, `coaching_1on1_history.md` | `vector_index/` | filesystem event under any of them |
-| **Commitment sweep** | commitment index + harvested telemetry | commitment state transitions | schedule |
+| **Commitment lifecycle** | harvested telemetry + the clock (**not** the index, which it only reads) | commitment state transitions in `commitments_log.md` | schedule |
 | **Compaction** | ageing `event_log/` segments | milestone summary segments; index bounded | schedule (7d / 500MB) |
 
 The chain the design must support, end to end: a meeting ends → the Graph adapter fetches and validates the transcript → the capture lands in `transcripts/` → transcript processing runs → `commitments_log.md` gains entries → commitment indexing runs → the index is current. Each step is one job with one responsibility, and no step names the next.
@@ -94,7 +118,7 @@ Rule 3, made concrete. Each is a class with a narrow interface over one Tier-1 r
 
 | accessor | resource | used by |
 | --- | --- | --- |
-| `CommitmentLog` | `commitments_log.md` | transcript processing (append), indexing (read), sweeper (append transitions) |
+| `CommitmentLog` | `commitments_log.md` | transcript processing (append), indexing (read), the lifecycle job (append transitions) |
 | `EventLog` | `event_log/` segments | harvest, transcript processing, every audit write |
 | `MeetingRecords` | `meetings/` | transcript processing (write), search indexing (read) |
 
@@ -117,8 +141,13 @@ Without these, three jobs parse the same Markdown three ways and the fourth read
 
 The cost of that placement is named in 1h's own Problem statement: "the property most likely to quietly stop being true, since every index added later has to be reconstructible and nothing checks." Stories 2, 15 and 18 each add derived state before 1h can check it, so each carries a dispatch note: whatever you add must be reconstructible from Markdown alone.
 
+## Answered: one hop, no sort
+
+Resolved 2026-08-27 by deriving the live graph rather than estimating it. Every job either produces Tier 1 and is woken by a schedule or an external capture, or produces Tier 3 and is a **leaf** — because Tier 3 is not watched, nothing follows an index being written. So no chain exceeds one job-to-job edge and **the task manager enqueues direct consumers, with no topological sort.**
+
+The bound has a cause rather than being a count of today's seven jobs: it holds as long as no event-triggered job writes an artifact that something upstream of it watches. Nothing enforces that; the section above is the whole of the protection, by decision.
+
 ## Open questions
 
-- **Does the task manager need a DAG walk, or is one hop enough?** Transcript processing → commitment indexing is one hop. Compaction rewriting `event_log/` segments invalidates both the search index and the embeddings, which invalidate nothing further. If no chain exceeds two hops, "enqueue direct consumers of what changed" is sufficient and a topological sort is unbuilt machinery.
 - **What is the coalescing window per watched path?** Replaces the reconciliation-interval question, which the single-pipeline ruling answered. Too short re-runs a job on each of the several events one save produces; too long leaves a hand-edited commitment unindexed. Wants measuring against real editor save behaviour rather than guessing, and probably differs between a transcript landing and a Markdown edit.
 - **Is a derivation job's output ever a backup target?** No, by the tier model — but a compaction job's *milestone summary* is Tier 1, which means one job in this table writes truth rather than derived state. That is correct (compaction is a recorded reduction of the record, per AD-5) and it is the one row where "derivation job" is the wrong mental model.
