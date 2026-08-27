@@ -4,6 +4,7 @@ companions:
   - glossary.md
   - scope-model.md
   - storage-contract.md
+  - derivation-services.md
   - user-journeys.md
   - nfr-budgets.md
   - success-metrics.md
@@ -217,6 +218,8 @@ An engineering PM's judgement is spent on retrieval: reconstructing what a team 
 - Unaligned work is never hidden — it ranks lower, stays individually visible, and is surfaced *as a set*. Nothing may be marked aligned in order to promote it; rank follows a resolvable `goal:<id>` citation.
 - A task the alignment engine cannot align renders `UNALIGNED`, never untagged.
 - Raw transcripts purge after 30 days (configurable), only once conversion into summaries, Work Item updates, and decision logs is verified.
+- **Every derived artifact is produced by a declared job, and nothing enters Tier 3 that a job cannot rebuild from Tier 1 alone.** A job takes named inputs, produces named outputs, and does one thing; the dependency graph is *derived* from those declarations rather than configured, so a producer and its consumer cannot disagree about what makes what stale. Jobs are rows in the durable queue, never in-memory timers.
+- **Derived state is invalidated by two mechanisms, because one is not enough.** pm-ai is the single writer, so its own writes publish change events directly — but Markdown is hand-editable by design, and a PM editing `commitments_log.md` produces a change pm-ai never saw. A periodic reconciliation sweep is therefore not redundancy; it is the cost of plaintext truth, and without it derived state goes stale with nothing having happened.
 - Recovery is **tier-scoped**: Truth and Operational state are backup targets that must survive; only Derived state is disposable and rebuilds with zero loss. Operational state is never a rebuild target, and restoring it opens a re-execution window the CLI must warn about.
 - **Scope is decided by subject, not convenience.** A meeting record and its transcript live in the scope that owns the meeting, and a committed record may cite only a meeting in its own scope. Three scopes therefore hold captures at the same relative path — project, team-member, and personal; the application scope holds none, because it owns no meetings.
 - Whether a capture may be written is answered by **git itself**, never by matching rule text in `.gitignore` — `check-ignore` for the rules, `ls-files` for the index. The verdict carries two independent facts, *ignored* and *tracked*, because they call for two different repairs: add a rule, versus untrack what is already committed. A negation line, a parent-directory exclude, and a directory committed before the rule was added each make a text check disagree with git, two of them in the direction that publishes a transcript.

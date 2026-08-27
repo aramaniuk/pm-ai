@@ -117,14 +117,6 @@
     query: shutil.which passes for a stub that would still refuse every capture.
     Report binary-absent and cannot-answer as distinct results, and let every
     probe run even when one fails.
-- id: "1h"
-  title: Derived-tier rebuild
-  spec_checkpoint: true
-  done_checkpoint: true
-  description: >-
-    Snapshot, drop and rebuild the derived tier from the Markdown, every drop
-    validated against the tier table first. Proves the Tier-3 zero-loss promise
-    in storage-contract.md.
 - id: "1i"
   title: Operational schema versioning
   spec_checkpoint: true
@@ -162,9 +154,19 @@
   spec_checkpoint: true
   done_checkpoint: true
   description: >-
-    Implement the segmented, append-only per-scope event log with typed entries
-    and the separate application-scoped disclosure ledger for frontier-call
-    provenance and cost. Delivers CAP-10 and CAP-27.
+    Implement the segmented, append-only per-scope event log with typed entries,
+    the separate application-scoped disclosure ledger for frontier-call
+    provenance and cost, and the embedding job that makes CAP-27's semantic
+    query possible. Delivers CAP-10 and CAP-27.
+  invoke_dev_with: >-
+    OWNS THE EMBEDDINGS. CAP-27's second clause - semantic query across past
+    decisions within 5 seconds - is the first capability that cannot work without
+    vector_index/, and until 2026-08-27 no story claimed to build it. See
+    derivation-services.md: the embedding job takes event_log/, meetings/ and
+    coaching history as declared inputs and produces vector_index/, and it must be
+    reconstructible from Tier-1 Markdown alone, because story 1h will later drop
+    the whole derived tier and require a rebuild to reproduce it byte for byte.
+    Nothing that cannot be rebuilt that way belongs in Tier 3.
 - id: "3"
   title: MCP execution firewall and skill registry
   spec_checkpoint: true
@@ -281,6 +283,42 @@
     Make every unit of deferred work a durable row with idempotent external
     mutations, buffering offline and replaying in order on reconnect. Delivers
     CAP-4.
+- id: "10a"
+  title: Task manager and derivation jobs
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Build the task manager that owns the job inventory, schedules onto story 10's
+    durable queue, and publishes job state changes - plus the change events and
+    shared resource accessors every derivation job needs. See
+    derivation-services.md.
+  invoke_dev_with: >-
+    Added 2026-08-27 to close a layer the architecture had assumed and nobody
+    owned. AD-9 says "sanitization, dedup, indexing, and persistence happen
+    outside the connector, uniformly" without naming what indexes; the pre-written
+    suite already expects pm_ai.core.scheduler (test_domain_invariants.py:148);
+    and app/pipelines.py holds run_harvest and run_transcript_ingestion as
+    functions nothing calls - jobs without a job runner.
+    A job declares inputs() and outputs() and does ONE thing. The dependency graph
+    is DERIVED from those declarations, never configured: one job's outputs
+    intersecting another's inputs is the edge. A job must never enqueue its
+    successor - it declares what it produced and the task manager decides what
+    that makes stale. Same principle as the scope model deriving tier sets from
+    node declarations, and it fails the same way if abandoned: two structures that
+    can disagree.
+    Change detection needs BOTH mechanisms. pm-ai is the single writer, so its own
+    writes publish events from StorageService - exact, immediate, and impossible
+    for a caller to forget. But Markdown is hand-editable by design, so a PM
+    editing commitments_log.md produces a change pm-ai never saw; a periodic
+    reconciliation sweep is the cost of plaintext truth, not redundancy. Build
+    both or derived state goes stale with nothing having happened.
+    Every job is a queue row per AD-20, never an in-memory timer. Shared resources
+    go through one accessor each (CommitmentLog, EventLog, MeetingRecords), and
+    those perform their I/O through StorageService rather than touching files -
+    pm_ai/storage forbids file I/O outside service.py.
+    Check derivation-services.md's first open question before building a
+    topological sort: if no chain exceeds two hops, "enqueue the direct consumers
+    of what changed" is sufficient and the sort is unbuilt machinery.
 - id: "11"
   title: Meeting records and transcript ingestion
   spec_checkpoint: true
@@ -323,8 +361,18 @@
   spec_checkpoint: true
   done_checkpoint: true
   description: >-
-    Persist extracted spoken commitments with their full lifecycle states and
-    an append-only audit trail carrying evidence references. Delivers CAP-34.
+    Persist extracted spoken commitments with their full lifecycle states, an
+    append-only audit trail carrying evidence references, and the index CAP-34
+    requires. Delivers CAP-34.
+  invoke_dev_with: >-
+    OWNS THE COMMITMENT INDEX. CAP-34 says "an indexed row at [PENDING]", so the
+    story that persists commitments writes the index too - assigned 2026-08-27,
+    when it turned out nothing had. Reach commitments_log.md through the shared
+    CommitmentLog accessor rather than parsing Markdown here: transcript
+    processing appends to it, this indexes it and the sweeper appends transitions,
+    and three parsers of one file is three chances to disagree. The index must be
+    reconstructible from the Markdown alone - story 1h drops it and requires an
+    exact rebuild.
 - id: "16"
   title: Closed-loop verification and evidence admissibility
   spec_checkpoint: true
@@ -356,9 +404,16 @@
   spec_checkpoint: true
   done_checkpoint: true
   description: >-
-    Answer multi-source activity questions, retrieve operational procedure, and
-    compare meeting decisions against committed documentation. Delivers CAP-23,
-    CAP-24 and CAP-25.
+    Answer multi-source activity questions, retrieve operational procedure,
+    compare meeting decisions against committed documentation, and build the
+    search index those queries read. Delivers CAP-23, CAP-24 and CAP-25.
+  invoke_dev_with: >-
+    OWNS THE SEARCH INDEX. CAP-23 (activity query within 60s) and CAP-24
+    (procedure retrieval within 15s) both need it and this story owns both, so it
+    builds it - assigned 2026-08-27, when it turned out nothing had. Declared
+    inputs are rules/, event_log/ and meetings/; see derivation-services.md. It
+    must be reconstructible from Tier-1 Markdown alone, because story 1h drops the
+    derived tier and requires the rebuild to reproduce it exactly.
 - id: "19"
   title: Memory pruning and retrieval budget
   spec_checkpoint: true
@@ -366,6 +421,25 @@
   description: >-
     Compress ageing streams into milestone summaries, cap the vector index, and
     hold the retrieval budget with no model in the path. Delivers CAP-37.
+- id: "1h"
+  title: Derived-tier rebuild
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Moved here from position 9 on 2026-08-27. Nothing populated the derived tier
+    at that point - derived.db and vector_index/ were declared and written by
+    nothing - so snapshot, drop and rebuild would all have been no-ops and the
+    headline property, that a rebuild reproduces the snapshot, would have been
+    vacuously true. By this position the commitment index (15), the search index
+    (18) and the embeddings (2) all exist and the vector index has its 500MB
+    bound, so the snapshot has content and the rebuild has something to
+    reproduce. Also: pm_ai/storage may not perform file I/O outside service.py,
+    so reindex.py holds the logic and the single writer performs the drop - which
+    needs a validated delete routed through assert_reindex_safe.
+  description: >-
+    Snapshot, drop and rebuild the derived tier from the Markdown, every drop
+    validated against the tier table first. Proves the Tier-3 zero-loss promise
+    in storage-contract.md.
 - id: "20"
   title: Pre-meeting prep dashboard and inquiry proxy
   spec_checkpoint: true
