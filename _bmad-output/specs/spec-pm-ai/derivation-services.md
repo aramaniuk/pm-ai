@@ -40,7 +40,17 @@ The superseded argument was that pm-ai is the single writer (AD-5), so its own w
 
 **The watcher is an OS API, so it lives behind a platform port** (AD-26) — `FileWatcherPort` in `pm_ai.ports`, its adapter in `pm_ai.platform`, alongside the keychain, the clock, git and the environment. The task manager consumes the port and never imports the watching library, which is what keeps a macOS-only FSEvents backend from being a fact about the core. It is a new runtime dependency; `pm-ai doctor`'s package probe covers it without change.
 
-**One gap the pipeline cannot close by itself: writes that happened while nothing was watching.** A daemon that was stopped missed them, and no notification is coming. This is not a second pipeline — it is the same stream resumed, or a catch-up. FSEvents can replay from a persisted event id, which is the preferred form because the events are the same events. Where the backend has no history to replay, the fallback is a **reconciliation scan at startup only** — mtime or digest against what the last derivation saw. Not periodic: a periodic sweep is the second pipeline the ruling excludes.
+### Boot reconciliation closes the one gap the pipeline cannot
+
+A stopped daemon missed every write made while it was down, and no notification is coming for them. **The daemon reconciles the state of all watched files at boot** — mtime or digest against what the last derivation saw — and enqueues a job for each path that moved. Confirmed 2026-08-27.
+
+Not periodic. A periodic sweep would be the second pipeline the ruling excludes; a boot scan is not, because it answers a different question — *what did we miss while not listening* rather than *what is changing now* — and it runs exactly when the answer is unknown.
+
+**Replay from a persisted FSEvents id was considered and rejected.** It is more precise, and it is a backend-specific second code path answering the question the boot scan already answers, with its own tests and its own way to be wrong. The same objection that killed the dual pipeline applies one level down.
+
+**Start the watcher first, then scan.** The reverse loses any write landing between the scan finishing and the watcher attaching — a window that is small, real, and silent. In this order the overlap produces duplicate work instead, which costs nothing: a job rebuilds from its declared inputs, so running it twice yields the same output.
+
+**Each index carries its own input watermark, inside itself.** `event_index.db` records what it last saw of `rules/`, `event_log/` and `meetings/`; `commitment_index.db` records what it last saw of `commitments_log.md`. Not in `operational.db`: a watermark in Tier 2 survives the Tier-3 drop that `pm-ai reindex` performs, so the rebuilt index would inherit a claim about inputs it never read, and the two could disagree with nothing to detect it. Held inside the index, the drop takes the watermark with it and a rebuilt index correctly believes it has seen nothing. It is also why the watermark's loss costs only a re-derivation, which is what makes it Tier 3 rather than Tier 2 state.
 
 ## The job contract
 

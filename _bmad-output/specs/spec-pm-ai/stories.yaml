@@ -316,9 +316,15 @@
     must not import the watching library. Watch Tier-1 paths ONLY, or commitment
     indexing writing commitment_index.db triggers commitment indexing. Coalesce
     per path: one editor save arrives as several events. The one gap the pipeline
-    cannot close is writes made while nothing was watching - resume the event
-    stream from a persisted id where the backend supports it, otherwise a
-    reconciliation scan at startup only, never periodic.
+    cannot close is writes made while nothing was watching: the daemon reconciles
+    every watched path at boot, mtime or digest against what the last derivation
+    saw. Never periodic - that would be the excluded second pipeline. Attach the
+    watcher BEFORE scanning, or a write landing between the scan and the attach is
+    lost silently; in that order the overlap is duplicate work, which costs nothing
+    because a job rebuilds from its declared inputs. Each index stores its own
+    input watermark inside itself, not in operational.db - a Tier-2 watermark
+    survives the Tier-3 drop that pm-ai reindex performs, and the rebuilt index
+    would inherit a claim about inputs it never read.
     Every job is a queue row per AD-20, never an in-memory timer. Shared resources
     go through one accessor each (CommitmentLog, EventLog, MeetingRecords), and
     those perform their I/O through StorageService rather than touching files -
