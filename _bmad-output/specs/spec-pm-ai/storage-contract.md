@@ -65,6 +65,28 @@ The consequence for anything writing both secret and non-secret state: **write t
 
 Deliberately not a config key, and this supersedes the spine's Deployment note putting it in `~/.pm-ai/config.toml`. A flag that writes credentials in plaintext must not be able to outlive the session that set it: the console warning scrolls away within minutes, and a startup event-log entry is weeks old by the time anyone wonders why a credential file is readable. An environment variable dies with the process, so **restarting restores encryption unconditionally** — no audit, no expiry logic, and nothing to forget. There is no other legitimate reason to run pm-ai with encryption off.
 
+## How a write becomes visible
+
+Added 2026-08-27. Until a filesystem watcher existed, a half-written file had no observer and only crash durability mattered. Now the moment a name appears is the moment a job starts, so *when* a write becomes visible is part of the contract. Three write shapes, three different answers.
+
+**Append — `event_log/` segments, `commitments_log.md`.** Cannot be made atomic: rename-into-place means rewriting the whole file, which the append-only rule below forbids. It does not need to be. Records are one per line, newline-terminated, so a reader that lands mid-flush sees every complete record plus a fragment at the tail. **The rule is therefore a parser rule: a record without its terminating newline is not a record.** A fragment is a boundary, not corruption. A job that ran early is corrected by the next event, since indexers delete and rebuild a source file's entries rather than adding to them.
+
+**Exclusive create — captures in `transcripts/`.** `O_CREAT|O_EXCL` claims the name before the content exists, so a watcher sees a capture that is still growing. This is the one shape where an early read is unrecoverable: transcript processing appends a summary, decisions and commitments to Tier-1 ledgers, and re-running on the completed file appends all of them a second time with nothing to distinguish the two. **A capture becomes visible atomically or not at all:**
+
+1. Write the whole body into `transcripts/temp/`, flush and `fsync`.
+2. `os.link` it to the final name — atomic *and* refusing a name already taken, so exclusivity stays kernel-enforced exactly as `O_EXCL` made it.
+3. Unlink the temp name; `fsync` the directory.
+
+`transcripts/temp/` is inside the capture directory deliberately: the derived gitignore rule is a directory rule (`/.project-ai/transcripts/`), so the temp is already excluded from version control with no second rule, and it is on the same filesystem, which `link` requires. **It must be excluded from the watcher** — a recursive watch would otherwise see every temp file. That is an explicit exclusion, not an implied one.
+
+This also closes a hole the current code cannot: `write_capture` unlinks a partly-written capture in an exception handler, which does nothing for `SIGKILL` or a power loss, and the docstring names the consequence — a zero-length file owns the name and every retry, including the one carrying the content, is refused as a duplicate. Under temp-then-link the final name is never claimed until the content is complete, so there is nothing to clean up and nothing to block the retry.
+
+Where `link` is unsupported — exFAT, some network mounts, reachable only through an *enrolled project repository*, never through `~/.pm-ai` or `~/.manager-ai` — fall back to check-then-rename rather than refusing to record the meeting. Exclusivity then rests on writer serialization (AD-5, AD-19) instead of the kernel, which covers the real case: a duplicate name arrives as a later retry, not as a concurrent write. Detect it by attempting the link and catching the error, never by inspecting filesystem type.
+
+**Whole-file replace — `config.json`.** `O_TRUNC` destroys the old content before the new content is written, and an AES-GCM file truncated part-way does not degrade, it fails its tag and becomes unreadable. A crash mid-rotation therefore loses every connector credential. **Write to a temp file in the same directory at `0600`, `fsync`, then `os.replace`.** Here `replace` is right where `link` was right for captures: rotating a token *must* overwrite, so overwrite-on-rename is the wanted behaviour and refusing a taken name would be the defect.
+
+**And every raw write loops.** `os.write` returns how many bytes it wrote and a short write silently truncates — same total unreadability for a sealed file. Write until the payload is exhausted; never discard the return value.
+
 ## Retention
 
 Raw transcript text in the encrypted `transcripts/` directories is retained for a default 30 days (configurable), on identical terms in all three scopes. The background runner purges past the threshold **only after verified conversion** into Markdown summaries, Work Item updates, decision logs, and pruned memory indexes.

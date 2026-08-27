@@ -46,6 +46,8 @@ The bound is a **permission, not a selector**: an artifact is watched because so
 
 Note the plural, because it is where the ownership rule meets the derived graph: a watcher enqueues **every** job declaring the changed artifact as an input, not one job. `event_log/` feeds both search indexing and embedding, and `meetings/` feeds both as well. One owner of the path, one or more jobs woken by it.
 
+**A recursive watch needs an explicit exclusion list, and `transcripts/temp/` is its first member.** The capture writer stages a transcript there before linking it to its final name (see `storage-contract.md`), so a watch that covered it would fire on every staging write and hand transcript processing a file that is still growing — the exact failure the staging exists to prevent. Nobody declaring `transcripts/temp/` in `inputs()` is not sufficient protection: a recursive watch sees subdirectories whether a job asked for them or not.
+
 ### A job must not write what re-triggers it
 
 Tier-1 outputs *are* watched — they have to be, or the chain breaks: `commitments_log.md` is transcript processing's output and commitment indexing's input, and watching it is exactly how the second follows the first. So the tier bound cannot be what prevents a loop, and nothing enforces this rule in code today (decided 2026-08-27: documented, not tested).
@@ -141,6 +143,17 @@ Without these, three jobs parse the same Markdown three ways and the fourth read
 
 The cost of that placement is named in 1h's own Problem statement: "the property most likely to quietly stop being true, since every index added later has to be reconstructible and nothing checks." Stories 2, 15 and 18 each add derived state before 1h can check it, so each carries a dispatch note: whatever you add must be reconstructible from Markdown alone.
 
+## Answered: the coalescing window is not on the correctness path
+
+Q2 asked what the debounce interval should be. Resolved 2026-08-27 by unfolding the three write shapes in `storage-contract.md` instead of picking a number, because a debounce is a *guess about when writing stopped* and the one case where guessing wrong is unrecoverable — a duplicated meeting summary and duplicated commitments in an append-only ledger — is fixed by making the capture's appearance atomic. There is then no interval for a job to fall into.
+
+What remains of the question is efficiency, and it has two answers better than a timer:
+
+- **Whole-record parsing** for appends. A fragment without its terminating newline is not a record, so an early read is harmless rather than something to wait out.
+- **Queue-level deduplication** for bursts. A harvest appends per event, which naively means one indexing run per append. If a job for an artifact is pending and not yet started, do not enqueue another — the idempotency key is `(job, artifact)`, which AD-20's durable queue already provides. Exact, and nothing to tune.
+
+A coalescing window survives only as a guard against external editors that truncate and rewrite in place, where the worst case is one wasted indexer pass. Ship a safe default; measure only if it ever shows up as a cost.
+
 ## Answered: one hop, no sort
 
 Resolved 2026-08-27 by deriving the live graph rather than estimating it. Every job either produces Tier 1 and is woken by a schedule or an external capture, or produces Tier 3 and is a **leaf** — because Tier 3 is not watched, nothing follows an index being written. So no chain exceeds one job-to-job edge and **the task manager enqueues direct consumers, with no topological sort.**
@@ -149,5 +162,4 @@ The bound has a cause rather than being a count of today's seven jobs: it holds 
 
 ## Open questions
 
-- **What is the coalescing window per watched path?** Replaces the reconciliation-interval question, which the single-pipeline ruling answered. Too short re-runs a job on each of the several events one save produces; too long leaves a hand-edited commitment unindexed. Wants measuring against real editor save behaviour rather than guessing, and probably differs between a transcript landing and a Markdown edit.
 - **Is a derivation job's output ever a backup target?** No, by the tier model — but a compaction job's *milestone summary* is Tier 1, which means one job in this table writes truth rather than derived state. That is correct (compaction is a recorded reduction of the record, per AD-5) and it is the one row where "derivation job" is the wrong mental model.

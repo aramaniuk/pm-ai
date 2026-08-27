@@ -325,8 +325,17 @@
     cover several, so the map is a partition: a change cannot arrive twice by two
     routes or fall between two watchers that each assumed the other had it. A
     watcher then enqueues EVERY job declaring that artifact as an input, not one -
-    event_log/ and meetings/ each feed two jobs. Coalesce per path: one editor save
-    arrives as several events. The one gap the pipeline
+    event_log/ and meetings/ each feed two jobs. A recursive watch needs an EXPLICIT
+    exclusion list and transcripts/temp/ is its first member - the capture writer
+    stages there before linking to the final name, so a watch covering it fires on
+    every staging write and hands transcript processing a growing file, the exact
+    failure the staging prevents. Nobody declaring it in inputs() is not protection:
+    a recursive watch sees subdirectories whether a job asked or not.
+    Do NOT tune a coalescing window for correctness - see storage-contract.md's
+    write shapes. Appends need whole-record parsing (no terminating newline, no
+    record); bursts need queue dedup on (job, artifact) using AD-20's idempotency
+    key, not a timer; captures are atomic already. A window survives only against
+    external editors that rewrite in place, worst case one wasted indexer pass. The one gap the pipeline
     cannot close is writes made while nothing was watching: the daemon reconciles
     every watched path at boot, mtime or digest against what the last derivation
     saw. Never periodic - that would be the excluded second pipeline. Attach the
