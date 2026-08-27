@@ -167,6 +167,9 @@
     reconstructible from Tier-1 Markdown alone, because story 1h will later drop
     the whole derived tier and require a rebuild to reproduce it byte for byte.
     Nothing that cannot be rebuilt that way belongs in Tier 3.
+    Each embedding record stores the MD5 of the source file it was computed from,
+    beside the record, so one edited meeting re-embeds one file (see
+    derivation-services.md).
 - id: "3"
   title: MCP execution firewall and skill registry
   spec_checkpoint: true
@@ -321,10 +324,17 @@
     saw. Never periodic - that would be the excluded second pipeline. Attach the
     watcher BEFORE scanning, or a write landing between the scan and the attach is
     lost silently; in that order the overlap is duplicate work, which costs nothing
-    because a job rebuilds from its declared inputs. Each index stores its own
-    input watermark inside itself, not in operational.db - a Tier-2 watermark
-    survives the Tier-3 drop that pm-ai reindex performs, and the rebuilt index
-    would inherit a claim about inputs it never read.
+    because a job rebuilds from its declared inputs. Every index ENTRY stores the
+    MD5 of the source file it came from - per entry, not per index, so the
+    re-index unit is one source file rather than the whole index. It is also the
+    only way a source deleted while the daemon was down is detectable: the index
+    holds the set of paths it derived from, so a path with entries and no file
+    gets its entries dropped. The checksums live inside the index, never in
+    operational.db, which survives the Tier-3 drop that pm-ai reindex performs and
+    would leave a rebuilt index skipping files it never read. Hash every source
+    file at boot; mtime alone is not trustworthy for exactly the writes this scan
+    exists for. MD5 is a change-detection claim only and must never be read as
+    integrity or authenticity.
     Every job is a queue row per AD-20, never an in-memory timer. Shared resources
     go through one accessor each (CommitmentLog, EventLog, MeetingRecords), and
     those perform their I/O through StorageService rather than touching files -
@@ -386,6 +396,8 @@
     and three parsers of one file is three chances to disagree. The index must be
     reconstructible from the Markdown alone - story 1h drops it and requires an
     exact rebuild.
+    Each indexed row stores the MD5 of commitments_log.md as of the derivation that
+    produced it; per row, not per index (see derivation-services.md).
 - id: "16"
   title: Closed-loop verification and evidence admissibility
   spec_checkpoint: true
@@ -427,6 +439,9 @@
     inputs are rules/, event_log/ and meetings/; see derivation-services.md. It
     must be reconstructible from Tier-1 Markdown alone, because story 1h drops the
     derived tier and requires the rebuild to reproduce it exactly.
+    Each indexed row stores the MD5 of the source file it came from, so the
+    re-index unit is one rule, segment or meeting record rather than all three
+    trees (see derivation-services.md).
 - id: "19"
   title: Memory pruning and retrieval budget
   spec_checkpoint: true
