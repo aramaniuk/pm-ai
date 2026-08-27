@@ -132,6 +132,46 @@
     code refuses to open, naming both versions. Replace the existing PRAGMA
     table_info sniff in _migrate rather than adding beside it, and leave the
     version unchanged when a migration fails partway.
+- id: "1m"
+  title: Atomic and durable writes
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Stage every whole-file write and publish it only when complete and fsynced,
+    so a crash mid-rotation cannot destroy the credential store and a capture's
+    name cannot appear before its content.
+  invoke_dev_with: >-
+    Added 2026-08-27 as a story-1 slice, not part of 10a: the credential-loss
+    path exists today with no watcher anywhere near it, and carrying it into 10a
+    would gate a live data-loss fix behind a feature it does not depend on.
+    Three defects, all in pm_ai/storage/service.py. _replace truncates before
+    writing (:567) and _seal opens O_TRUNC (:586), so a crash mid-rotation leaves
+    config.json empty - and an AES-GCM file cut part-way fails its tag rather than
+    degrading, so every connector credential is unreadable. os.write's return value
+    is discarded (:592): a short write silently truncates, same total loss. And
+    _create_exclusively (:554) claims a capture's name before the content exists;
+    write_capture's except BaseException unlink (:681) does nothing for SIGKILL or
+    power loss, and its own docstring names the result - a zero-length file owns
+    the name and every retry, including the one carrying the content, is refused.
+    One staging primitive serves both paths, differing only in how the staged file
+    is published. os.link for captures: it refuses a taken name, so exclusivity
+    stays kernel-enforced exactly as O_EXCL made it and CaptureAlreadyExists stays
+    reachable - os.replace would overwrite silently and splice two recordings.
+    os.replace for config.json: rotating a token MUST overwrite, so refusing a
+    taken name would be the defect there. Stage in transcripts/temp/, fsync the
+    file before publishing and the directory after, and create staged files at
+    their final mode so nothing is briefly world-readable awaiting a chmod.
+    Where link is unsupported - exFAT, some network mounts, reachable only through
+    an enrolled project repository and never through the two home-directory scopes
+    - fall back to check-then-rename rather than refusing to record the meeting.
+    Detect by attempting the link and catching the error, never by inspecting
+    filesystem type. The TOCTOU race that makes the fallback weaker needs two
+    CONCURRENT writers; AD-5 and AD-19 serialize writes and the real duplicate
+    arrives as a later retry.
+    NO timer, delay or settle-detection anywhere. Completeness is never inferred
+    from elapsed time. The append path is unchanged - rewriting a ledger is what
+    AD-5 forbids - and the whole-record parser rule belongs to whoever reads a
+    segment, not here. No watcher and no exclusion list: that is 10a.
 - id: "1j"
   title: Capture guard covers every scope
   spec_checkpoint: true
