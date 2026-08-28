@@ -2,8 +2,8 @@
 title: 'Operational schema versioning'
 type: 'feature'
 created: '2026-08-21'
-updated: '2026-08-22'
-status: 'ready-for-dev'
+updated: '2026-08-28'
+status: 'done'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
@@ -80,6 +80,19 @@ context:
 
 ## Verification
 
-- `uv run pytest -q -rs` — expected: no previously passing test regresses; skip count unchanged.
-- `uv run pytest tests/slice/test_r4_gate_fixes.py -q` — expected: green, confirming the ledger survives the migration path.
-- Stamp a test store one version ahead of the code and confirm the refusal fires.
+- `uv run pytest -q -rs` — **404 passed, 29 skipped**; skip count unchanged, so `EXPECTED_SKIPS` needed no edit.
+- `uv run mypy` — **Success**. `uv run lint-imports` — **12 contracts kept**.
+- `uv run pytest tests/slice/test_r4_gate_fixes.py -q` — green; the ledger survives the migration path.
+- A store stamped `SCHEMA_VERSION + 5` refuses to open, names both versions, and leaves the file byte-identical.
+
+**Mutations run, and what each proved:**
+
+| mutation | result |
+| --- | --- |
+| drop the too-new refusal | red — `test_a_store_stamped_newer_than_the_code_refuses_to_open` |
+| remove the savepoint rollback | red — the failed step's `half_done` table persisted |
+| run every migration regardless of `current` | red — a second open re-ran an applied step |
+| treat an unversioned legacy store as fresh | red — two tests, the pre-written legacy-store slice among them |
+| stamp the version *before* applying | **green, and correctly so** — the savepoint covers both, so the orderings are observably identical. Reported as an equivalent mutation rather than a missing test; it is what surfaced the no-commit rule below |
+
+**A pre-written test caught a real defect during the build.** The first discriminator between a brand-new store and an unversioned one asked whether a `cursors` table existed. `tests/slice/test_storage_resolution.py:233` builds a legacy store holding `executed` alone — which would have been read as brand new, stamped current, never migrated, and would have failed on the first settle with "no such column": precisely the failure this story exists to prevent, reintroduced by its own fix. The discriminator now asks whether *any* non-internal table exists, which is shape-independent.

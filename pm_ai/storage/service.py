@@ -102,7 +102,50 @@ CREATE TABLE IF NOT EXISTS proposals (
     version     INTEGER NOT NULL,
     state       TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
 """
+
+# What this code expects the operational store to look like. Bumped in the same
+# commit that appends to `MIGRATIONS`, never separately: a version with no
+# migration behind it stamps a store that was never changed, and a migration
+# with no version behind it runs on every open.
+SCHEMA_VERSION = 1
+
+# Version 0 is the *unversioned era* — every store written before this story.
+# It is not a shape: two stores can both be at 0 and differ, because the era had
+# no way to record which. That is why migration 1 is the one migration allowed
+# to inspect the schema before acting, and the last: from 1 onward each step
+# knows exactly what its predecessor left.
+UNVERSIONED = 0
+
+
+def _m1_settled_at(db: sqlite3.Connection) -> None:
+    """Add `executed.settled_at` (AD-20 — an execution is recorded, then settled).
+
+    Conditional, uniquely. This replaces the `PRAGMA table_info` sniff that used
+    to run on every open, and it inherits that sniff's problem exactly once:
+    a version-0 store may or may not already have the column, and nothing
+    recorded which. Every later migration starts from a known version and must
+    act unconditionally, or it is not a migration but a second sniff.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(executed)")}
+    if "settled_at" not in columns:
+        db.execute("ALTER TABLE executed ADD COLUMN settled_at TEXT")
+
+
+# Ordered, ascending, contiguous from 1. Append only: editing a shipped entry
+# changes what a store that already ran it believes about itself.
+#
+# A migration MUST NOT commit. The runner wraps each step in a savepoint and
+# stamps the version inside it, so the change and its version land together or
+# neither does. A step that commits releases that savepoint early, and a failure
+# after it leaves the store half-migrated with a stamp claiming success — in the
+# one tier no rebuild can repair.
+MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
+    (1, "add executed.settled_at", _m1_settled_at),
+)
 
 
 def _ulid() -> str:
@@ -240,6 +283,18 @@ class OperationalStoreUnavailable(RuntimeError):
     """
 
 
+class SchemaVersionTooNew(RuntimeError):
+    """The store was written by a later version of pm-ai than this one.
+
+    Refusing is the only response that cannot make things worse. A later version
+    may have added columns this code does not know about; opening the store and
+    proceeding writes rows it will then misread, and the corruption surfaces long
+    after the mistake — in Tier 2, which no rebuild reconstructs (AD-3). There is
+    no automatic downgrade, because a downgrade would mean deciding what to do
+    with data this code cannot interpret.
+    """
+
+
 class NonUtcClock(ValueError):
     """The injected clock returned a naive or non-UTC datetime.
 
@@ -337,9 +392,26 @@ class StorageService:
         try:
             self._db = sqlite3.connect(store, check_same_thread=False)
             self._db.execute("PRAGMA journal_mode=WAL")  # AD-5 — sole writer, WAL
+            # Asked BEFORE `_SCHEMA` runs, because afterwards every store looks
+            # created-by-us. It is the only way to tell a brand-new file from one
+            # written in the unversioned era, and the two need opposite handling:
+            # a new store is stamped current and migrates nothing, an old one is
+            # version 0 and migrates from there.
+            #
+            # "Any table at all", not a named one. Naming `cursors` looked
+            # equivalent and was not: a store from the unversioned era holds
+            # whatever subset of tables the code of its day created, and the
+            # pre-written legacy fixture has `executed` alone. That store would
+            # have been read as brand new, stamped current, and never migrated —
+            # the first settle failing on a missing column, which is the exact
+            # failure this story exists to prevent.
+            preexisting = self._db.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchone() is not None
             self._db.executescript(_SCHEMA)
-            self._migrate()
             self._db.commit()
+            self._migrate(preexisting=preexisting)
         except sqlite3.Error as exc:
             raise OperationalStoreUnavailable(
                 f"could not open the operational store at {store}: {exc}. Tier 2 "
@@ -348,17 +420,58 @@ class StorageService:
                 f"(AD-3) — so the daemon must not start without it."
             ) from exc
 
-    def _migrate(self) -> None:
-        """Add columns a store created by an earlier version does not have.
+    def _migrate(self, *, preexisting: bool) -> None:
+        """Bring the store forward to `SCHEMA_VERSION`, or refuse to open it.
 
-        `CREATE TABLE IF NOT EXISTS` is a no-op on an existing store, so a schema
-        that grows a column would otherwise fail on the first write against a
-        Tier-2 file that predates it — and Tier 2 is never rebuilt, so
-        "delete it and start again" is not the fix.
+        Runs at construction, after the connection is open and before any other
+        statement, so nothing can read a half-migrated schema.
+
+        Replaces a `PRAGMA table_info` sniff that worked exactly once per column,
+        could not express an ordered sequence, and could not detect a store
+        written by a *later* version at all. `CREATE TABLE IF NOT EXISTS` is a
+        no-op on an existing store, so a schema that grows a column still fails
+        on the first write against a Tier-2 file that predates it — and Tier 2 is
+        never rebuilt, so "delete it and start again" is not the fix.
         """
-        columns = {row[1] for row in self._db.execute("PRAGMA table_info(executed)")}
-        if "settled_at" not in columns:
-            self._db.execute("ALTER TABLE executed ADD COLUMN settled_at TEXT")
+        row = self._db.execute("SELECT version FROM schema_version").fetchone()
+        if row is None:
+            # A store with no stamp is either brand new — created by `_SCHEMA`
+            # moments ago, therefore already current — or one from the
+            # unversioned era, which is version 0 and has migrations to run.
+            current = UNVERSIONED if preexisting else SCHEMA_VERSION
+            self._db.execute("INSERT INTO schema_version (version) VALUES (?)", (current,))
+            self._db.commit()
+        else:
+            current = int(row[0])
+
+        if current > SCHEMA_VERSION:
+            raise SchemaVersionTooNew(
+                f"the operational store is stamped schema version {current} and "
+                f"this pm-ai expects {SCHEMA_VERSION}. It was written by a later "
+                f"version, which may have added columns this code would misread. "
+                f"Refusing to open it: upgrade pm-ai, or restore a Tier-2 backup "
+                f"written by this version — and note that restoring an older copy "
+                f"opens a re-execution window, because mutations performed after "
+                f"the backup are missing from the executed-key ledger."
+            )
+
+        for version, name, apply in MIGRATIONS:
+            if version <= current:
+                continue
+            # One savepoint per migration, so a failure leaves the store at the
+            # version before *that* step rather than partly through it. Steps
+            # that already succeeded are committed and stay: forward-only means
+            # the next open resumes rather than restarts.
+            self._db.execute("SAVEPOINT pm_ai_migration")
+            try:
+                apply(self._db)
+                self._db.execute("UPDATE schema_version SET version = ?", (version,))
+            except BaseException:
+                self._db.execute("ROLLBACK TO pm_ai_migration")
+                self._db.execute("RELEASE pm_ai_migration")
+                raise
+            self._db.execute("RELEASE pm_ai_migration")
+            self._db.commit()
 
     @property
     def paths(self) -> ScopePathPort:
