@@ -197,6 +197,8 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.manager-ai/private/personal_analytics.db",
     (ScopeKind.PERSONAL, "transcripts/"):
         "/home/pm/.manager-ai/transcripts",
+    (ScopeKind.PERSONAL, "temp/"):
+        "/home/pm/.manager-ai/transcripts/temp",
     # ── people — /home/pm/.pm-ai/private/people/p1/ ──────────────────────────
     (ScopeKind.PEOPLE, "memory/"):
         "/home/pm/.pm-ai/private/people/p1/memory",
@@ -206,6 +208,8 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.pm-ai/private/people/p1/memory/meetings",
     (ScopeKind.PEOPLE, "transcripts/"):
         "/home/pm/.pm-ai/private/people/p1/transcripts",
+    (ScopeKind.PEOPLE, "temp/"):
+        "/home/pm/.pm-ai/private/people/p1/transcripts/temp",
     # ── project — /repositories/alpha/.project-ai/ (scope-model.md §C) ───────
     (ScopeKind.PROJECT, "rules/"):
         "/repositories/alpha/.project-ai/rules",
@@ -229,6 +233,10 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/repositories/alpha/.project-ai/skills",
     (ScopeKind.PROJECT, "transcripts/"):
         "/repositories/alpha/.project-ai/transcripts",
+    # AD-47's staging area. Declared, so the writer resolves it and AD-46's watch
+    # excludes it from the model rather than from a literal in two packages.
+    (ScopeKind.PROJECT, "temp/"):
+        "/repositories/alpha/.project-ai/transcripts/temp",
 }
 
 

@@ -366,7 +366,12 @@ def test_raw_captures_are_excluded_from_the_tier_model_on_purpose():
     """
     from pm_ai.domain.storage_tiers import ARTIFACT_TIER, BACKUP_TARGETS, RETENTION_MANAGED
 
-    assert RETENTION_MANAGED == {"transcripts/", "telegram_cache/"}
+    # `temp/` joined on 2026-08-28: AD-47's staging area, declared as a namespace
+    # of `transcripts/` in all three trees that hold captures. It belongs here for
+    # the same reason its parent does — a half-written capture is raw input, not
+    # state — and being a declared member is what gives the NFR-09 purge a named
+    # target rather than sweeping it by accident of where it sits.
+    assert RETENTION_MANAGED == {"transcripts/", "temp/", "telegram_cache/"}
     assert not (RETENTION_MANAGED & set(ARTIFACT_TIER)), "exactly one of tiered or retention-managed"
     assert not (RETENTION_MANAGED & BACKUP_TARGETS), "raw captures are never a backup target"
 

@@ -24,6 +24,17 @@ Every scope that owns meetings holds its captures at the same relative path (`tr
 | `~/.pm-ai/private/people/<person_id>/transcripts/` | 1:1 sessions with that direct report |
 | `~/.manager-ai/transcripts/` | Purely personal sessions |
 
+Each of the three also holds `transcripts/temp/`, declared 2026-08-28 as a *namespace* of its parent — the `skills/telemetry/` shape. It is where AD-47 stages a capture before linking it to its final name, so that the name appears only when the content is complete. Every flag matches the parent and each for its own reason rather than by inheritance:
+
+| flag | value | why, specifically |
+| --- | --- | --- |
+| durability | `RETENTION_MANAGED` | a half-written capture is raw input, not state. Being a *declared* member is what gives the 30-day purge a named target instead of sweeping it by accident of where it sits — and that purge is the only cleanup: **no startup sweep** (decided 2026-08-28) |
+| encrypted | **no** | it must match `transcripts/`. `is_encrypted` fails closed on an undeclared path, so leaving this out would seal the staged bytes and publish ciphertext under a name every reader treats as plaintext |
+| gitignored | **yes** | the derived rule is a *directory* rule covering the parent and everything under it, so this adds no rule text. Declared anyway, because a node answering "no" here would contradict the parent it lives inside |
+| watched | **never** | AD-46's recursive watch excludes it explicitly. A watch covering the staging directory would hand transcript processing a file that is still growing — the exact failure the staging prevents |
+
+Declared rather than composed in the writer because **two packages need the name**: `pm_ai.storage` stages there and the watcher excludes it. A literal shared by two packages with no declaration behind it is the second copy of the layout AD-4 warns about.
+
 The application scope holds none, because it owns no meetings. **All three are equally protected** — by exclusion from version control, wherever version control can reach them. They are not encrypted at rest: a capture's exposure is publication to a repository, not the disk.
 
 ## A. Application Scope
@@ -64,8 +75,11 @@ The application scope holds none, because it owns no meetings. **All three are e
             │   └── event_log/         # Team-member-scope audit trail
             │
             ├── transcripts/           # RAW CAPTURES of 1:1 sessions with this
-            │                          # report (excluded from version
-            │                          # control, 30-day purge)
+            │   │                      # report (excluded from version
+            │   │                      # control, 30-day purge)
+            │   └── temp/              # AD-47 staging. RETENTION_MANAGED,
+            │                          # plaintext, gitignored - every flag the
+            │                          # same as its parent. NOT watched.
             │
             └── ...                    # Career dossiers, agreed 1:1 goals and the
                                        # PM-configured metric files are named at
@@ -109,12 +123,15 @@ The application scope holds none, because it owns no meetings. **All three are e
 │                                      # once compaction runs.
 │
 └── transcripts/                       # RAW CAPTURES of purely personal sessions
-                                       # (excluded from version control,
-                                       # 30-day purge). At the scope ROOT, outside
-                                       # private/ - so if the PM keeps this scope as
-                                       # a private git repository, the private/ rule
-                                       # does not cover captures and the capture
-                                       # guard is the only thing that does.
+    │                                  # (excluded from version control,
+    │                                  # 30-day purge). At the scope ROOT, outside
+    │                                  # private/ - so if the PM keeps this scope as
+    │                                  # a private git repository, the private/ rule
+    │                                  # does not cover captures and the capture
+    │                                  # guard is the only thing that does.
+    └── temp/                          # AD-47 staging. RETENTION_MANAGED,
+                                       # plaintext, gitignored - every flag the
+                                       # same as its parent. NOT watched.
 ```
 
 ## C. Isolated Project Scopes
@@ -140,7 +157,10 @@ The application scope holds none, because it owns no meetings. **All three are e
 │   │   └── sync_gitlab_wi.py
 │   │
 │   └── transcripts/                   # RAW CAPTURES (gitignored, not encrypted)
-│                                      # Verbatim transcripts & audio; 30-day purge.
+│       │                              # Verbatim transcripts & audio; 30-day purge.
+│       └── temp/                      # AD-47 staging. RETENTION_MANAGED,
+│                                      # plaintext, gitignored - every flag the
+│                                      # same as its parent. NOT watched.
 │                                      # The one gitignored directory inside a committed
 │                                      # scope, so its exclusion rests on a rule rather
 │                                      # than a directory boundary - and a rule can go

@@ -26,6 +26,8 @@ A second defect is currently invisible and will not stay that way. `_create_excl
 
 **Always:**
 - Every raw write loops until the payload is exhausted. `os.write`'s return value is never discarded.
+- `transcripts/temp/` is **already declared** in all three capture-holding trees, as a namespace of `transcripts/` — `RETENTION_MANAGED`, plaintext, gitignored. Resolve it; never compose it. The declaration is not cosmetic: `is_encrypted` fails closed on an undeclared path, so an undeclared staging directory would seal the staged bytes and `os.link` would publish ciphertext under a name every reader treats as plaintext.
+- A stale staged file is cleaned by the **30-day retention purge and nothing else**. No startup sweep, no boot-time cleanup, no sweep inside this story — decided 2026-08-28. A file left behind by a `SIGKILL` is gitignored litter that owns no capture name, so nothing is blocked by it and nothing needs to hurry.
 - A capture becomes visible atomically or not at all: staged in `transcripts/temp/`, fsynced, linked to its final name, temp unlinked, directory fsynced.
 - Capture exclusivity survives. A name already taken is refused, as `O_EXCL` refuses it today, and `CaptureAlreadyExists` stays reachable.
 - Staged files carry their final permissions from creation — `0600` for anything sealed — never a chmod after the content is visible.
@@ -34,8 +36,7 @@ A second defect is currently invisible and will not stay that way. `_create_excl
 - A failure before the final name appears leaves the final name unclaimed, so a retry is not refused as a duplicate.
 
 **Ask First:**
-- Whether `transcripts/temp/` is declared as a node in the scope trees or is private to the capture writer. Declaring it means every scope holding captures gains a node, a tier and a git answer; not declaring it means one directory pm-ai writes that the model does not describe.
-- Whether a stale staged file is swept at boot, and by whom. It is gitignored litter rather than a leak, and the 30-day retention purge covers the directory eventually.
+- Any staging primitive that does not route through the resolver. `transcripts/temp/` is declared (see below), so the writer asks `resolve` for it; recomposing it from a dirname is the second copy of the layout AD-4 warns about.
 
 **Never:** No debounce, delay or settle-detection anywhere in this story — completeness is never inferred from elapsed time. No change to the append path's shape: `event_log/` and `commitments_log.md` are appended, not rewritten, and rewriting a ledger is what AD-5 forbids. No watcher, no exclusion list, no job — that is story 10a.
 

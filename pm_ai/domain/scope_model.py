@@ -597,7 +597,36 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
     # but its ownership rule is explicit that a capture lives in the scope owning
     # its meeting and that "every scope holds its captures at the same relative
     # path (`transcripts/`)". Current behaviour unchanged.
-    Collection("transcripts", RETAINED, encrypted=False, gitignored=True),
+    Collection(
+        "transcripts",
+        RETAINED,
+        encrypted=False,
+        gitignored=True,
+        # AD-47's staging area, declared 2026-08-28 rather than composed in the
+        # writer. Two packages need this name — `pm_ai.storage` stages here, and
+        # AD-46's recursive watch must exclude it — and a literal shared by two
+        # packages with no declaration behind it is the second copy of the layout
+        # AD-4 warns about.
+        #
+        # Every flag is the same answer its parent gives, and each for its own
+        # reason rather than by inheritance:
+        #   RETAINED      — a half-written capture is raw input, not state. It
+        #                   falls under the same NFR-09 purge, which is what
+        #                   sweeps a file left behind by a kill (decided
+        #                   2026-08-28: monthly cleanup only, no startup sweep).
+        #   encrypted=False — it MUST match `transcripts/`. `is_encrypted` fails
+        #                   closed on an undeclared path, so leaving this out
+        #                   would seal the staged bytes and `os.link` would
+        #                   publish ciphertext under a name every reader treats
+        #                   as plaintext.
+        #   gitignored=True — the derived rule is a directory rule covering
+        #                   `transcripts/` and everything under it, so this
+        #                   changes no rule text. Declared anyway: the guard asks
+        #                   git about the final capture directory, and a node
+        #                   that answered "no" here would contradict the parent
+        #                   it lives inside.
+        namespaces=(Collection("temp", RETAINED, encrypted=False, gitignored=True),),
+    ),
 )
 
 
@@ -621,7 +650,36 @@ PEOPLE_TREE: tuple[LayoutNode, ...] = (
         encrypted=False,
         gitignored=True,
     ),
-    Collection("transcripts", RETAINED, encrypted=False, gitignored=True),
+    Collection(
+        "transcripts",
+        RETAINED,
+        encrypted=False,
+        gitignored=True,
+        # AD-47's staging area, declared 2026-08-28 rather than composed in the
+        # writer. Two packages need this name — `pm_ai.storage` stages here, and
+        # AD-46's recursive watch must exclude it — and a literal shared by two
+        # packages with no declaration behind it is the second copy of the layout
+        # AD-4 warns about.
+        #
+        # Every flag is the same answer its parent gives, and each for its own
+        # reason rather than by inheritance:
+        #   RETAINED      — a half-written capture is raw input, not state. It
+        #                   falls under the same NFR-09 purge, which is what
+        #                   sweeps a file left behind by a kill (decided
+        #                   2026-08-28: monthly cleanup only, no startup sweep).
+        #   encrypted=False — it MUST match `transcripts/`. `is_encrypted` fails
+        #                   closed on an undeclared path, so leaving this out
+        #                   would seal the staged bytes and `os.link` would
+        #                   publish ciphertext under a name every reader treats
+        #                   as plaintext.
+        #   gitignored=True — the derived rule is a directory rule covering
+        #                   `transcripts/` and everything under it, so this
+        #                   changes no rule text. Declared anyway: the guard asks
+        #                   git about the final capture directory, and a node
+        #                   that answered "no" here would contradict the parent
+        #                   it lives inside.
+        namespaces=(Collection("temp", RETAINED, encrypted=False, gitignored=True),),
+    ),
 )
 
 
@@ -665,7 +723,36 @@ PROJECT_TREE: tuple[LayoutNode, ...] = (
     # exclusion at `/.project-ai/transcripts/`. Move this and
     # `assert_capture_dir_ignored` still reports "protected" for a directory git
     # tracks, which is how verbatim minutes reach the employer's repository.
-    Collection("transcripts", RETAINED, encrypted=False, gitignored=True),
+    Collection(
+        "transcripts",
+        RETAINED,
+        encrypted=False,
+        gitignored=True,
+        # AD-47's staging area, declared 2026-08-28 rather than composed in the
+        # writer. Two packages need this name — `pm_ai.storage` stages here, and
+        # AD-46's recursive watch must exclude it — and a literal shared by two
+        # packages with no declaration behind it is the second copy of the layout
+        # AD-4 warns about.
+        #
+        # Every flag is the same answer its parent gives, and each for its own
+        # reason rather than by inheritance:
+        #   RETAINED      — a half-written capture is raw input, not state. It
+        #                   falls under the same NFR-09 purge, which is what
+        #                   sweeps a file left behind by a kill (decided
+        #                   2026-08-28: monthly cleanup only, no startup sweep).
+        #   encrypted=False — it MUST match `transcripts/`. `is_encrypted` fails
+        #                   closed on an undeclared path, so leaving this out
+        #                   would seal the staged bytes and `os.link` would
+        #                   publish ciphertext under a name every reader treats
+        #                   as plaintext.
+        #   gitignored=True — the derived rule is a directory rule covering
+        #                   `transcripts/` and everything under it, so this
+        #                   changes no rule text. Declared anyway: the guard asks
+        #                   git about the final capture directory, and a node
+        #                   that answered "no" here would contradict the parent
+        #                   it lives inside.
+        namespaces=(Collection("temp", RETAINED, encrypted=False, gitignored=True),),
+    ),
 )
 
 

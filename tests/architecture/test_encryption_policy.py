@@ -62,6 +62,15 @@ MATRIX = [
     (PEOPLE, "meetings/", "1on1.md", False),
     (PROJECT, "meetings/", "standup.md", False),
     (PEOPLE, "event_log/", "2026-08.md", False),
+    # AD-47's staging area, in all three capture-holding scopes. This row is the
+    # one that matters most in this file: `is_encrypted` fails closed, so an
+    # UNDECLARED `temp/` would answer True, the staged bytes would be sealed, and
+    # `os.link` would publish ciphertext under a name every reader downstream
+    # treats as plaintext. Declaring it plaintext is what makes staging safe, and
+    # these rows are what keep the declaration honest.
+    (PROJECT, "temp/", "01J9Q4T.vtt", False),
+    (PEOPLE, "temp/", "01J9Q4T.vtt", False),
+    (PERSONAL, "temp/", "01J9Q4T.vtt", False),
 ]
 
 
@@ -182,3 +191,37 @@ def test_no_declared_markdown_is_encrypted_outside_the_team_member_enclave():
         if encrypted and key.endswith(".md")
     ]
     assert not offenders, f"Markdown encrypted outside the team-member scope: {offenders}"
+
+
+# ── AD-47 staging (2026-08-28) ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("scope", [PROJECT, PEOPLE, PERSONAL])
+def test_the_staging_area_is_excluded_from_version_control(scope):
+    """AD-43 — `temp/` holds capture bytes, so it answers git the way captures do.
+
+    The derived rule is a *directory* rule covering `transcripts/` and everything
+    beneath it, so declaring this changes no rule text. It is declared anyway:
+    a node answering "no" here would contradict the parent it lives inside, and
+    the contradiction would be invisible until someone moved staging out of that
+    parent.
+    """
+    assert requires_git_exclusion(scope.kind, "temp/"), (
+        "AD-47 stages verbatim capture bytes here; a staging directory git would "
+        "carry into a commit is the same leak as an unprotected transcripts/."
+    )
+
+
+@pytest.mark.parametrize("scope", [PROJECT, PEOPLE, PERSONAL])
+def test_the_staging_area_sits_inside_the_capture_directory(paths, scope):
+    """`os.link` cannot cross a filesystem, and neither can `os.replace`.
+
+    Staging beside the captures rather than in a sibling tree is what keeps the
+    publish atomic — and it is also why no second `.gitignore` rule is needed.
+    """
+    staging = paths.resolve(scope, "temp/")
+    captures = paths.resolve(scope, "transcripts/")
+    assert staging.parent == captures, (
+        f"{staging} is not inside {captures}; a link across filesystems fails, "
+        f"and the directory rule that excludes captures would stop covering it."
+    )
