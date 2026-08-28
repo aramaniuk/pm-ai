@@ -3,7 +3,10 @@
 Three convergent reviewer findings live here:
 
 - `CommitmentState` had no way to say "unknown", so a harvest gap read as a
-  broken promise and fired an irreversible nudge about delivered work.
+  broken promise and fired an irreversible nudge about delivered work. It then
+  had no way to say *why* it did not know, so a permanently dead connector was
+  indistinguishable from a laptop that had been asleep — `ERROR` closes that
+  (AD-35, 2026-08-27).
 - "reversible" was defined per verb, when it is really per verb *per provider*:
   a Jira priority change is quiet, the same change in GitLab notifies thirty
   people, and one-tap undo cannot recall a notification.
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
+from pm_ai.domain.invariants import InconsistentModel
 from pm_ai.domain.identity import SkillPermission
 
 
@@ -49,18 +53,40 @@ class CommitmentState(Enum):
     FULFILLED = "fulfilled"
     ALTERED = "altered"
     BROKEN = "broken"
-    UNKNOWN = "unknown"  # overdue, but the window has no harvest coverage
+    UNKNOWN = "unknown"  # overdue, no coverage, and nothing tried to harvest
+    ERROR = "error"  # overdue, no coverage, because harvesting FAILED
 
     @property
     def is_terminal(self) -> bool:
         return self in {CommitmentState.FULFILLED, CommitmentState.BROKEN}
 
+    @property
+    def is_verdict(self) -> bool:
+        """Whether this says something about the promise rather than about us.
 
-# ProposalState and CommitmentState must never share a member name; the two
-# lifecycles answer different questions and one overloaded field would conflate
-# them (AD-14). Checked at import so it cannot drift.
-_overlap = {s.value for s in ProposalState} & {s.value for s in CommitmentState}
-assert not _overlap, f"AD-14: lifecycle states overlap: {sorted(_overlap)}"
+        `UNKNOWN` and `ERROR` are the two epistemic members: they report that the
+        system cannot answer, and why. Everything else is a claim about the
+        world. A surface that renders a commitment has to know the difference —
+        "we could not check" must never be presented in the register of "you
+        broke this".
+        """
+        return self not in {CommitmentState.UNKNOWN, CommitmentState.ERROR}
+
+
+def _assert_lifecycles_are_distinct() -> None:
+    """ProposalState and CommitmentState must never share a member name (AD-14).
+
+    The two lifecycles answer different questions, and one overloaded field would
+    conflate them. A function rather than a bare statement so the check can be
+    re-run against a doctored model in a test — which is the only way to prove it
+    still fires under `python -O`.
+    """
+    overlap = {s.value for s in ProposalState} & {s.value for s in CommitmentState}
+    if overlap:
+        raise InconsistentModel(f"AD-14: lifecycle states overlap: {sorted(overlap)}")
+
+
+_assert_lifecycles_are_distinct()
 
 
 DEFAULT_PROPOSAL_TTL = timedelta(days=7)
@@ -150,18 +176,41 @@ def evaluate_commitment(
     overdue: bool,
     evidence_admissible: bool,
     covered: bool,
+    harvest_failed: bool,
 ) -> CommitmentState:
     """The fail-closed rule of AD-35 and AD-36, in one place.
 
     Both reviewers found this reasoning scattered and inconsistent. Two ways it
     silently goes wrong: counting pm-ai's own writes as evidence, and reading a
     harvest gap as a broken promise. FR-26 nudges are irreversible, so the
-    absence of data resolves to UNKNOWN and never to BROKEN.
+    absence of data never resolves to BROKEN.
+
+    **Two silences, and they are distinguishable** (AD-35, revised 2026-08-27).
+    A sleeping laptop made no harvest attempts at all: nothing tried, nothing
+    failed, genuinely missing data — `UNKNOWN`, and waiting is the right
+    behaviour. A connector with a dead token *did* try, and the attempts are in
+    the log marked failed. That is not missing data; it is a machine reporting
+    that it is broken, and it will keep reporting it forever. `ERROR` says so,
+    and says the repair is a human's: refresh the token, re-authenticate, fix
+    the link or the configuration. Collapsed into one value, a permanently dead
+    connector read as patience.
+
+    `harvest_failed` is **required and has no default**, deliberately. A default
+    of `False` would be the safe verdict — `UNKNOWN` never fires an irreversible
+    nudge — and would silently reintroduce exactly the indefinite waiting this
+    parameter exists to end. AD-9 put `CoverageWindow` in `HarvestResult`'s
+    return type for the same reason: so a caller cannot omit it and leave the
+    guard unarmed without noticing.
+
+    Order matters. `covered` is consulted before `harvest_failed`: if the window
+    *was* harvested, absence of evidence within it is real evidence of absence,
+    and a connector that broke afterwards does not retract that. `ERROR`
+    competes only with `UNKNOWN`, never with `BROKEN`.
     """
     if evidence_admissible:
         return CommitmentState.FULFILLED
     if not overdue:
         return CommitmentState.PENDING
-    if not covered:
-        return CommitmentState.UNKNOWN
-    return CommitmentState.BROKEN
+    if covered:
+        return CommitmentState.BROKEN
+    return CommitmentState.ERROR if harvest_failed else CommitmentState.UNKNOWN

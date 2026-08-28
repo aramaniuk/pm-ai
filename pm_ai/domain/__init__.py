@@ -23,13 +23,43 @@ from pm_ai.domain.events import (
     PayloadMismatch,
     Provenance,
 )
-from pm_ai.domain.storage_tiers import (
+from pm_ai.domain.scope_model import (
     ARTIFACT_TIER,
     BACKUP_TARGETS,
+    DIAGNOSTIC_ONLY,
+    FOREIGN_ROOTS,
     REBUILD_TARGETS,
+    RETENTION_MANAGED,
+    SCOPE_TREES,
+    Collection,
+    Dir,
+    File,
+    MalformedLayout,
+    OutsideTierModel,
+    ScopeResolutionError,
     Tier,
+)
+from pm_ai.domain.storage_tiers import (
+    CAPTURES,
+    CAPTURE_STAGING,
+    EVENT_LOG,
+    GITIGNORE_FILENAME,
+    ENCRYPTED,
+    GITIGNORED,
+    OPERATIONAL_DB,
     TierViolation,
+    UnprotectedCaptureDir,
+    assert_capture_dir_ignored,
+    assert_capture_dir_untracked,
+    gitignore_rule_for,
+    requires_git_exclusion,
     assert_reindex_safe,
+)
+from pm_ai.domain.vcs import (
+    GIT_SUBCOMMANDS,
+    TrackingVerdict,
+    UnpermittedGitSubcommand,
+    VcsUnavailable,
 )
 from pm_ai.domain.identity import (
     PM_AI,
@@ -42,6 +72,7 @@ from pm_ai.domain.identity import (
     NonDurableReferent,
     ScopeKind,
     SkillPermission,
+    PM_AI_MINTED,
     SourceRef,
     TargetRef,
 )
@@ -63,8 +94,18 @@ __all__ = [
     "DataScope", "MalformedReference", "NonDurableReferent", "NormalizedEvent",
     "NormalizedEventType", "PAYLOAD_FOR", "PM_AI", "PM_AI_ACTOR",
     "PayloadMismatch", "ProposalState", "Provenance", "ScopeKind",
-    "SkillPermission", "SourceRef", "TargetRef", "UNRESOLVED",
+    "PM_AI_MINTED", "SkillPermission", "SourceRef", "TargetRef", "UNRESOLVED",
     "UNRESOLVED_ACTOR", "UnknownVerb", "VERB_REGISTRY", "Verb",
     "evaluate_commitment", "lookup_verb", "ARTIFACT_TIER", "BACKUP_TARGETS",
     "REBUILD_TARGETS", "Tier", "TierViolation", "assert_reindex_safe",
+    "CAPTURES", "CAPTURE_STAGING", "EVENT_LOG", "OPERATIONAL_DB", "ScopeResolutionError",
+    # The scope layout and the durability each of its artifacts declares. The
+    # tier tables are derived from the trees, so both come from one module.
+    "SCOPE_TREES", "File", "Dir", "Collection", "MalformedLayout",
+    "OutsideTierModel", "RETENTION_MANAGED", "DIAGNOSTIC_ONLY", "FOREIGN_ROOTS",
+    "ENCRYPTED", "GITIGNORED", "GITIGNORE_FILENAME", "UnprotectedCaptureDir", "assert_capture_dir_ignored",
+    # Git is the authority on what git tracks, so the write path asks it through
+    # `pm_ai.ports.VcsPort` and refuses on `VcsUnavailable`. The text matcher
+    # above is the pure form of the question, not the answer.
+    "GIT_SUBCOMMANDS", "TrackingVerdict", "UnpermittedGitSubcommand", "VcsUnavailable", "assert_capture_dir_untracked", "gitignore_rule_for", "requires_git_exclusion",
 ]

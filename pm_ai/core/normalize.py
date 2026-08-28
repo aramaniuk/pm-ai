@@ -16,6 +16,7 @@ returns re-attributed events, so it is testable without a daemon.
 from __future__ import annotations
 
 from pm_ai.domain.events import NormalizedEvent, Provenance
+from pm_ai.domain.identity import PM_AI_MINTED
 
 # The ledger records an execution whose provider returned no usable identifier
 # with this sentinel. Such a mutation is invisible to the join below, so events
@@ -63,12 +64,27 @@ def attribute(event: NormalizedEvent, artifacts, blind) -> Provenance:
     3. otherwise external, unless we hold an unmatched
        mutation in the same scope, in which case we
        cannot prove it isn't ours                      -> UNKNOWN
+
+    **A scopeless reference is global, not necessarily foreign.** This branch
+    used to answer EXTERNAL for every scopeless ref, commented "global entities
+    (meetings) are never our writes". That is true of `meeting:` — a meeting
+    happens in the world and pm-ai only records it — and false of `goal:`, whose
+    id AD-41 rule 2 has *storage* mint. EXTERNAL is the one value AD-36 admits
+    as evidence, so a goal-sourced event could prove that pm-ai's own promise
+    had been kept: the same defect this module exists to close, reached through
+    AD-33's citation rule instead of through a connector, which is the door the
+    original fix was watching.
+
+    The ledger join cannot decide it either way. That join is keyed
+    `(system, scope, external_id)` and a scopeless ref has no scope, so the
+    answer has to come from a declaration. `PM_AI_MINTED` is that declaration,
+    closed in `domain` beside the scopeless set it partitions.
     """
     if event.actor.is_pm_ai:
         return Provenance.PM_AI
     ref = event.source_ref
     if ref.scope is None:
-        return Provenance.EXTERNAL  # global entities (meetings) are never our writes
+        return Provenance.PM_AI if ref.system in PM_AI_MINTED else Provenance.EXTERNAL
     if (ref.system, ref.scope, ref.native_id) in artifacts:
         return Provenance.PM_AI
     if (ref.system, ref.scope) in blind:

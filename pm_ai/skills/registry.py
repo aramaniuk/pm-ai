@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import lookup_verb
+from pm_ai.ports import SkillPort, StoragePort
 
 
 class MissingIdempotencyKey(ValueError):
@@ -33,14 +34,37 @@ class Invocation:
 
 
 class SkillRegistry:
-    def __init__(self, storage, *, scope: DataScope) -> None:
+    def __init__(self, storage: StoragePort, *, scope: DataScope) -> None:
         self._storage = storage
         self._scope = scope
-        self._skills: dict[str, object] = {}
+        # `SkillPort`, not `object`. This registry is what enforces AD-18, and
+        # every check it makes reads an attribute — `system`, `name`,
+        # `permission`, `execute`. Typed as `object` those reads were unverified,
+        # which made the security boundary the least-checked code in the package:
+        # a skill missing `permission` would have passed registration and failed
+        # at the moment of the mutation it was supposed to authorize.
+        self._skills: dict[str, SkillPort] = {}
         self._locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 
-    def register(self, skill) -> None:
-        self._skills[f"{skill.system}.{skill.name}"] = skill
+    def register(self, skill: SkillPort, *, replace: bool = False) -> None:
+        """Add a skill under its qualified name, refusing a name already taken.
+
+        Silent replacement was the previous behaviour, and in the module that
+        *is* the AD-18 allowlist that means a later registration swaps the code
+        behind an authorized name with nobody deciding it — the permission
+        checks would then authorize the old skill's contract and execute the
+        new skill's code. `replace=True` is the deciding: it exists for a test
+        substituting a double, and for whatever hot-reload story later owns
+        skill updates, so the substitution is spelled at the call site.
+        """
+        qualified = f"{skill.system}.{skill.name}"
+        if qualified in self._skills and not replace:
+            raise ValueError(
+                f"{qualified} is already registered. A second registration "
+                f"replaces the code behind an authorized name (AD-18); if the "
+                f"replacement is intended, say so with replace=True."
+            )
+        self._skills[qualified] = skill
 
     def invoke(
         self, qualified_name: str, *, target: TargetRef, payload: dict, idempotency_key: str | None

@@ -19,3 +19,6 @@ _bmad/**/config.user.*
 
 # Scratch used by the architecture test suite
 /tmp/pm-ai-*
+
+# mypy incremental cache
+.mypy_cache/

@@ -15,13 +15,18 @@ import pytest
 from conftest import REPO_ROOT
 
 
-def _daemon(tmp: str = "/tmp/pm-ai-slice"):
-    """A wired daemon from the composition root (AD-30)."""
-    import shutil, pathlib
-    wiring = mod("pm_ai.app.wiring")
-    root = pathlib.Path(tmp)
-    shutil.rmtree(root, ignore_errors=True)
-    return wiring.build(root, "alpha")
+def _daemon(tmp):
+    """A wired daemon from the composition root (AD-30), beneath `tmp`.
+
+    `tmp` is the caller's `tmp_path`, not a fixed `/tmp` directory: the resolver
+    now creates all four scope roots under it, so a hardcoded location left
+    `.pm-ai/`, `.manager-ai/`, and `projects/alpha/.project-ai/` behind on the
+    developer's machine after every run.
+
+    Deliberately called without a clock — `now` staying optional on `build()` is
+    what this call site proves.
+    """
+    return mod("pm_ai.app.wiring").build(tmp, "alpha")
 
 
 def mod(dotted: str):
@@ -72,11 +77,11 @@ def test_ad20_idempotency_keys_are_deterministic():
     assert first != other, "AD-20: distinct payloads must not collide onto one key."
 
 
-def test_ad20_mutating_jobs_require_a_key():
+def test_ad20_mutating_jobs_require_a_key(tmp_path):
     """AD-20 — ADVERSARIAL. The skill layer refuses unkeyed external mutations."""
     reg = mod("pm_ai.skills.registry")
     d = mod("pm_ai.domain")
-    daemon = _daemon()
+    daemon = _daemon(tmp_path)
     with pytest.raises(reg.MissingIdempotencyKey):
         daemon.skills.invoke(
             "gitlab.post_comment",
@@ -537,10 +542,10 @@ def test_ad36_self_authored_events_are_excluded_from_evidence():
     )
 
 
-def test_ad36_every_class_m_mutation_is_recorded_for_attribution():
+def test_ad36_every_class_m_mutation_is_recorded_for_attribution(tmp_path):
     """AD-36 — attribution needs both mechanisms; one of them will have gaps."""
     d = mod("pm_ai.domain")
-    daemon = _daemon()
+    daemon = _daemon(tmp_path)
     target = d.TargetRef.parse("gitlab:alpha:issue:102")
     daemon.skills.invoke(
         "gitlab.post_comment", target=target,
@@ -626,11 +631,63 @@ def test_reversibility_is_per_verb_per_provider():
 
 
 def test_coverage_gap_resolves_to_unknown_not_broken():
-    """AD-35 — FR-26 nudges are irreversible, so absence of data fails closed."""
+    """AD-35 — FR-26 nudges are irreversible, so absence of data fails closed.
+
+    `harvest_failed` was added to the signature on 2026-08-28 and is required, so
+    these three calls gained it. Each passes `False`: the case this test is about
+    is a coverage gap with nothing having failed, which is still `UNKNOWN`. The
+    failed-harvest case is `test_a_failed_harvest_is_error_not_unknown` below.
+    """
     d = mod("pm_ai.domain")
-    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=False) is d.CommitmentState.UNKNOWN
-    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=True) is d.CommitmentState.BROKEN
-    assert d.evaluate_commitment(overdue=True, evidence_admissible=True, covered=True) is d.CommitmentState.FULFILLED
+    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=False, harvest_failed=False) is d.CommitmentState.UNKNOWN
+    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=True, harvest_failed=False) is d.CommitmentState.BROKEN
+    assert d.evaluate_commitment(overdue=True, evidence_admissible=True, covered=True, harvest_failed=False) is d.CommitmentState.FULFILLED
+
+
+def test_a_failed_harvest_is_error_not_unknown():
+    """AD-35 — the two silences are distinguishable, and one of them never clears.
+
+    A sleeping laptop made no attempts: `UNKNOWN`, and waiting is right. A dead
+    token made attempts that failed: `ERROR`, and waiting is wrong, because
+    nothing about it will change until a human refreshes the credential. Before
+    2026-08-27 both were `UNKNOWN`, so a permanently dead connector read forever
+    as patience.
+    """
+    d = mod("pm_ai.domain")
+    gap = dict(overdue=True, evidence_admissible=False, covered=False)
+    assert d.evaluate_commitment(**gap, harvest_failed=False) is d.CommitmentState.UNKNOWN
+    assert d.evaluate_commitment(**gap, harvest_failed=True) is d.CommitmentState.ERROR
+
+    # A window that WAS harvested yields a real verdict, and a connector that
+    # broke afterwards does not retract it. ERROR competes with UNKNOWN only.
+    assert d.evaluate_commitment(
+        overdue=True, evidence_admissible=False, covered=True, harvest_failed=True
+    ) is d.CommitmentState.BROKEN
+
+    # Neither epistemic member may be terminal: both clear when the world or the
+    # machine changes, and a terminal state is one nothing revisits.
+    assert not d.CommitmentState.ERROR.is_terminal
+    assert not d.CommitmentState.UNKNOWN.is_terminal
+    assert not d.CommitmentState.ERROR.is_verdict
+    assert not d.CommitmentState.UNKNOWN.is_verdict
+    # And the positive half, or `is_verdict` could regress to `return False`
+    # with the suite green: every non-epistemic member is a claim about the
+    # world, and the first surface to render one inherits this contract.
+    for state in d.CommitmentState:
+        if state not in {d.CommitmentState.ERROR, d.CommitmentState.UNKNOWN}:
+            assert state.is_verdict, f"{state} is a claim about the world"
+
+
+def test_the_signature_cannot_be_called_without_answering_the_harvest_question():
+    """AD-9's discipline, applied here: a guard must not be silently unarmed.
+
+    A default of `False` would be the *safe* verdict and would quietly restore
+    the indefinite waiting `ERROR` exists to end, which is the worst kind of
+    default: correct-looking and self-defeating.
+    """
+    d = mod("pm_ai.domain")
+    with pytest.raises(TypeError):
+        d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=False)
 
 
 def test_ad38_disclosure_records_cannot_reach_a_committed_scope():
@@ -687,11 +744,19 @@ def test_ad3_reindex_cannot_reach_tier_2():
     The earlier spine put the job queue and the search indexes in one file, so
     the obvious rebuild (drop the file, recreate) destroyed pending external
     writes and every cursor while the AD-3 test stayed green.
+
+    `derived.db` was renamed and split on 2026-08-27 into `event_index.db` and
+    `commitment_index.db`, one file per rebuilding job. The names here were
+    updated with it: the positive assertion below fails outright against a name
+    no scope tree declares, since `assert_reindex_safe` fails closed on an
+    unknown artifact.
     """
     d = mod("pm_ai.domain")
-    d.assert_reindex_safe(frozenset({"derived.db", "vector_index/"}))
+    d.assert_reindex_safe(
+        frozenset({"event_index.db", "commitment_index.db", "vector_index/"})
+    )
     with pytest.raises(d.TierViolation):
-        d.assert_reindex_safe(frozenset({"derived.db", "operational.db"}))
+        d.assert_reindex_safe(frozenset({"event_index.db", "operational.db"}))
     with pytest.raises(d.TierViolation):
         d.assert_reindex_safe(frozenset({"event_log/"}))
 
@@ -715,3 +780,131 @@ def test_ad3_every_artifact_has_exactly_one_tier():
     assert d.Tier.OPERATIONAL.rebuildable is False
     assert d.Tier.OPERATIONAL.backed_up is True
     assert d.Tier.DERIVED.backed_up is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AD-30 — an adapter that does not satisfy its port
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
+    """AD-30 — the annotations are documentation until something checks them.
+
+    There is no type checker in this repository, so `paths: ScopePathPort` in the
+    storage constructor is a comment: a resolver missing `resolve`, or a storage
+    service that dropped a method `core` calls through `StoragePort`, would be
+    caught at the first call site instead of here.
+
+    `isinstance` rather than `issubclass`: a runtime-checkable protocol refuses
+    `issubclass` the moment it gains a non-method member, so the class-level form
+    would start raising `TypeError` on a change that is not an error.
+    """
+    import datetime
+
+    ports = mod("pm_ai.ports")
+    paths = mod("pm_ai.platform.paths").ScopePaths.rooted(tmp_path)
+    vcs = mod("pm_ai.platform.vcs").GitVcs()
+    clock = lambda: datetime.datetime(2026, 8, 19, tzinfo=datetime.timezone.utc)
+    storage = mod("pm_ai.storage.service").StorageService(
+        paths, now=clock, vcs=vcs, crypto=mod("pm_ai.storage.crypto").AesGcmCrypto(b"0" * 32)
+    )
+
+    assert isinstance(paths, ports.ScopePathPort), (
+        "the resolver the composition root injects does not satisfy the port "
+        "storage names as its dependency"
+    )
+    assert isinstance(vcs, ports.VcsPort), (
+        "the git adapter the composition root injects does not satisfy the port "
+        "the single writer asks `would git commit this capture` through"
+    )
+    assert isinstance(storage, ports.StoragePort), (
+        "the single writer no longer satisfies the port core depends on"
+    )
+
+
+# ── AD-36 vs AD-34: a scopeless reference is global, not foreign ─────────────
+# Added 2026-08-28. `attribute` answered EXTERNAL for every scopeless ref, on
+# the reasoning that global entities are never our writes — true of `meeting:`,
+# false of `goal:`, whose id AD-41 rule 2 has storage mint. EXTERNAL is the one
+# value AD-36 admits as evidence.
+
+
+def _scopeless_event(raw: str):
+    """One event carrying a scopeless SourceRef and a non-pm-ai actor.
+
+    Deliberately not a real `NormalizedEvent`: `attribute` reads exactly two
+    attributes, and building the full envelope would couple this test to every
+    unrelated field it happens to require today.
+    """
+    identity = mod("pm_ai.domain.identity")
+
+    class _Actor:
+        is_pm_ai = False
+
+    class _Event:
+        actor = _Actor()
+        source_ref = identity.SourceRef.parse(raw)
+
+    return _Event()
+
+
+def test_ad36_a_goal_reference_is_never_admissible_as_evidence():
+    """AD-36 — pm-ai's own record cannot prove pm-ai's own promise was kept.
+
+    The failure this rules out is quiet: a `goal:`-sourced event attributed
+    EXTERNAL is admissible, so the closed loop reopens through AD-33's citation
+    rule rather than through a connector — which is where the original AD-36 fix
+    was watching.
+    """
+    normalize = mod("pm_ai.core.normalize")
+    events = mod("pm_ai.domain.events")
+
+    verdict = normalize.attribute(_scopeless_event("goal:goal_01HX"), frozenset(), frozenset())
+    assert verdict is events.Provenance.PM_AI, (
+        "AD-41 rule 2 has storage mint a goal id, so a goal reference names our "
+        "own artifact."
+    )
+    assert not verdict.admissible_as_evidence
+
+
+def test_ad36_a_meeting_reference_stays_external():
+    """The fix must not swallow the case the original reasoning got right.
+
+    A meeting happens in the world and pm-ai only records it. Attributing it to
+    pm-ai would make genuine calendar evidence inadmissible, so nothing would
+    ever verify — the opposite failure, and just as silent.
+    """
+    normalize = mod("pm_ai.core.normalize")
+    events = mod("pm_ai.domain.events")
+
+    verdict = normalize.attribute(_scopeless_event("meeting:mtg_01HX"), frozenset(), frozenset())
+    assert verdict is events.Provenance.EXTERNAL
+    assert verdict.admissible_as_evidence
+
+
+def test_ad34_every_scopeless_system_is_classified():
+    """No scopeless system may be neither minted-by-us nor external by default.
+
+    The whole defect was one member of a closed set acquiring a default nobody
+    chose for it. Adding a third scopeless system without deciding which side it
+    falls on would repeat it exactly, so the decision is forced here.
+    """
+    identity = mod("pm_ai.domain.identity")
+    assert identity.PM_AI_MINTED <= identity._SCOPELESS
+    assert identity._SCOPELESS == frozenset({"meeting", "goal"}), (
+        "a scopeless system was added or removed; classify it in PM_AI_MINTED "
+        "and extend the two attribution tests above before updating this literal."
+    )
+
+
+def test_ad34_the_reference_set_guard_survives_o():
+    """A `raise`, not an `assert`, so `python -O` cannot switch the check off."""
+    identity = mod("pm_ai.domain.identity")
+    original = identity.PM_AI_MINTED
+    try:
+        identity.PM_AI_MINTED = frozenset({"gitlab"})  # scoped, not scopeless
+        with pytest.raises(identity.InconsistentReferenceModel):
+            identity._assert_reference_sets_agree()
+    finally:
+        identity.PM_AI_MINTED = original
+    identity._assert_reference_sets_agree()

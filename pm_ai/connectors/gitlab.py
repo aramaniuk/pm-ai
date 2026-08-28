@@ -17,7 +17,7 @@ from pm_ai.domain.lifecycle import CoverageWindow
 
 
 @dataclass
-class GitLabConnector:
+class GitLabConnectorAdapter:
     project: str
     scope: DataScope
     name: str = "gitlab"

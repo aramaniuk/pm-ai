@@ -1,31 +1,223 @@
-- id: "1"
-  title: Scope and storage foundation
-  description: >-
-    Establish the four scopes, the three storage tiers, the encrypted set with
-    keychain key custody, and the gitignore verification that guards captures.
-    Covers the storage and scope Constraints plus scope-model.md and
-    storage-contract.md, which everything later depends on.
+- id: "1a"
+  title: Scope path resolver
   spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Anchor the four scope trees to real filesystem roots behind a single
+    resolver, so no component derives its own path for an artifact. Foundation
+    for the scope Constraints and scope-model.md.
+- id: "1b"
+  title: Storage writes through the resolver
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Route every storage write through that resolver with an injected clock, so
+    the open monthly segment filename is deterministic and testable. Holds the
+    single-writer rule in storage-contract.md.
+- id: "1c"
+  title: Refuse unprotected captures
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Ask git whether a capture directory would be carried into a commit, and
+    refuse the write when it would or when git cannot answer. Delivers the
+    project-scope half of the capture guard.
+- id: "1k"
+  title: Type-checking gate
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Add mypy at default settings, fix the ten errors it reports, and gate it
+    inside pytest the way import-linter already is. Makes every Protocol in
+    pm_ai/ports/ enforced rather than documented.
   invoke_dev_with: >-
-    Tier 2 is in-memory today and has no migration path yet; settle Tier-2
-    schema durability before persisting it. Assert
-    hasattr(conn, "enable_load_extension") in pm-ai doctor - a stock macOS
-    Python cannot load sqlite-vec at all, and the failure surfaces deep inside
-    the single writer on a clean install.
+    A missing mypy binary fails the gate, never skips it - the same rule as the
+    import-linter gate, for the same reason. Do not silence
+    storage/service.py:400 ("ScopePathPort has no attribute repository") with a
+    cast: the error is not the problem, the coupling is, and a cast removes the
+    only signal that it exists. The concrete type is not an option either, since
+    pm_ai.storage may not import pm_ai.platform. Every "type: ignore" carries an
+    error code and a reason, and no Any is introduced to make an error go away.
+- id: "1l"
+  title: Guards that survive optimization
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Convert the ten import-time asserts that verify the scope model into typed
+    raises, so `python -O` cannot strip the only checks establishing that the
+    derived tier and exclusion sets are coherent.
+  invoke_dev_with: >-
+    Ten sites, and an AST sweep confirms there are no other asserts in pm_ai/ -
+    lifecycle.py:63, scope_model.py:818/824/829/841/844/847/855,
+    storage_tiers.py:194/202. Keep every message verbatim: several are the
+    clearest statement of their invariant anywhere in the repo, and shortening
+    them during a mechanical conversion is how a refactor deletes documentation.
+    Do not relocate the checks into tests - the guard must refuse a model someone
+    hand-edits after install, not just prove this repo's model is fine. The
+    __post_init__ checks on File, Dir and Collection already raise; follow them.
+- id: "1d"
+  title: Keychain port and macOS adapter
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Establish master-key custody in the OS keychain behind a port, so the daemon
+    starts unattended without a passphrase prompt. Custody only; nothing
+    encrypts anything yet.
+  invoke_dev_with: >-
+    Import keyring inside the function that uses it, never at module top level.
+    It is not installed here, and the suite's mod() helper turns a
+    ModuleNotFoundError into a skipped test - so a top-level import converts
+    this story's tests into skips that read as coverage. No real keychain access
+    in the suite, and no secret written anywhere durable outside the keychain.
+- id: "1e"
+  title: Encryption classifier
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Declare encryption on each scope-tree node and derive the encrypted set from
+    the trees, exposing one pure predicate over a path. Policy only - no cipher,
+    no key.
+  invoke_dev_with: >-
+    An undeclared path classifies as encrypted, never plaintext: that is what
+    satisfies the two stale assertions (event_telemetry.db, chat_history/)
+    without reviving either name in a tree. Declare encryption where the
+    artifact is declared, so a new artifact cannot be added without an answer -
+    do not maintain a second table beside the trees. All three transcripts/
+    declarations take one answer.
+- id: "1f"
+  title: Envelope cipher and encrypted operational store
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Add an envelope cipher over an injected key and open the Tier-2 operational
+    store encrypted at mode 0600. Delivers the encrypted-set half of
+    storage-contract.md.
+  invoke_dev_with: >-
+    Retargeted through 2026-08-23: the encrypted set is two files, config.json
+    and telegram_cache/. Nothing encrypted is a database, so sqlcipher3 has left
+    the dependency set and this story needs one file cipher and no page-level
+    one. StorageService needs no key at all. Fail closed: a missing key refuses
+    to open an encrypted artifact, with no fallback to plaintext. Directories
+    holding encrypted artifacts are created at 0700, files at 0600.
+    pm_ai.storage may not import pm_ai.platform, so the key is fetched in
+    app/wiring.py, the only module permitted to import both.
+- id: "1g"
+  title: Startup diagnostics
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Four read-only probes that report rather than raise: sqlite extension
+    support, keychain reachability, encryption-toggle state, and the git
+    dependency of the capture write path.
+  invoke_dev_with: >-
+    Assert hasattr(conn, "enable_load_extension") on a real connection object,
+    not on the Python version string - a stock macOS Python cannot load
+    sqlite-vec at all, and the failure surfaces deep inside the single writer on
+    a clean install. Probe git the same way, by running one real exclusion
+    query: shutil.which passes for a stub that would still refuse every capture.
+    Report binary-absent and cannot-answer as distinct results, and let every
+    probe run even when one fails.
+- id: "1i"
+  title: Operational schema versioning
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Stamp the operational store with a schema version and apply forward-only
+    ordered migrations that preserve existing rows. Covers the one tier no
+    rebuild can reconstruct.
+  invoke_dev_with: >-
+    Forward-only and ordered, each migration applied at most once, never
+    drop-and-recreate on the tier nothing rebuilds. Migrations run at
+    construction before any other statement, and a store stamped newer than the
+    code refuses to open, naming both versions. Replace the existing PRAGMA
+    table_info sniff in _migrate rather than adding beside it, and leave the
+    version unchanged when a migration fails partway.
+- id: "1m"
+  title: Atomic and durable writes
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Stage every whole-file write and publish it only when complete and fsynced,
+    so a crash mid-rotation cannot destroy the credential store and a capture's
+    name cannot appear before its content.
+  invoke_dev_with: >-
+    Added 2026-08-27 as a story-1 slice, not part of 10a: the credential-loss
+    path exists today with no watcher anywhere near it, and carrying it into 10a
+    would gate a live data-loss fix behind a feature it does not depend on.
+    Three defects, all in pm_ai/storage/service.py. _replace truncates before
+    writing (:567) and _seal opens O_TRUNC (:586), so a crash mid-rotation leaves
+    config.json empty - and an AES-GCM file cut part-way fails its tag rather than
+    degrading, so every connector credential is unreadable. os.write's return value
+    is discarded (:592): a short write silently truncates, same total loss. And
+    _create_exclusively (:554) claims a capture's name before the content exists;
+    write_capture's except BaseException unlink (:681) does nothing for SIGKILL or
+    power loss, and its own docstring names the result - a zero-length file owns
+    the name and every retry, including the one carrying the content, is refused.
+    One staging primitive serves both paths, differing only in how the staged file
+    is published. os.link for captures: it refuses a taken name, so exclusivity
+    stays kernel-enforced exactly as O_EXCL made it and CaptureAlreadyExists stays
+    reachable - os.replace would overwrite silently and splice two recordings.
+    os.replace for config.json: rotating a token MUST overwrite, so refusing a
+    taken name would be the defect there. Stage in transcripts/temp/, fsync the
+    file before publishing and the directory after, and create staged files at
+    their final mode so nothing is briefly world-readable awaiting a chmod.
+    Where link is unsupported - exFAT, some network mounts, reachable only through
+    an enrolled project repository and never through the two home-directory scopes
+    - fall back to check-then-rename rather than refusing to record the meeting.
+    Detect by attempting the link and catching the error, never by inspecting
+    filesystem type. The TOCTOU race that makes the fallback weaker needs two
+    CONCURRENT writers; AD-5 and AD-19 serialize writes and the real duplicate
+    arrives as a later retry.
+    NO timer, delay or settle-detection anywhere. Completeness is never inferred
+    from elapsed time. The append path is unchanged - rewriting a ledger is what
+    AD-5 forbids - and the whole-record parser rule belongs to whoever reads a
+    segment, not here. No watcher and no exclusion list: that is 10a.
+- id: "1j"
+  title: Capture guard covers every scope
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Widen the capture guard from the project scope to every capture location,
+    keyed on whether the path lies inside a git working tree. Closes the gap
+    where personal and team-member captures were written without asking git.
+  invoke_dev_with: >-
+    Unknown is not permission: no git binary, a timeout, or an unrecognised exit
+    refuses the write, in every scope. Only "this path is not inside a working
+    tree" permits it, because that is an answer git gave rather than one it
+    failed to give. Derive the .gitignore path from the working-tree root git
+    reports - never re-key GITIGNORE_REQUIRED per scope, which the basename rule
+    forbids. test_a_capture_in_an_uncommitted_scope_is_unaffected asserts the
+    behaviour this story replaces: re-derive it around the working-tree reason,
+    do not delete it.
 - id: "2"
   title: Event log and disclosure ledger
-  description: >-
-    Implement the segmented, append-only per-scope event log with typed entries
-    and the separate application-scoped disclosure ledger for frontier-call
-    provenance and cost. Delivers CAP-10 and CAP-27.
   spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Implement the segmented, append-only per-scope event log with typed entries,
+    the separate application-scoped disclosure ledger for frontier-call
+    provenance and cost, and the embedding job that makes CAP-27's semantic
+    query possible. Delivers CAP-10 and CAP-27.
+  invoke_dev_with: >-
+    OWNS THE EMBEDDINGS. CAP-27's second clause - semantic query across past
+    decisions within 5 seconds - is the first capability that cannot work without
+    vector_index/, and until 2026-08-27 no story claimed to build it. See
+    derivation-services.md: the embedding job takes event_log/, meetings/ and
+    coaching history as declared inputs and produces vector_index/, and it must be
+    reconstructible from Tier-1 Markdown alone, because story 1h will later drop
+    the whole derived tier and require a rebuild to reproduce it byte for byte.
+    Nothing that cannot be rebuilt that way belongs in Tier 3.
+    Each embedding record stores the MD5 of the source file it was computed from,
+    beside the record, so one edited meeting re-embeds one file (see
+    derivation-services.md).
 - id: "3"
   title: MCP execution firewall and skill registry
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Build the execution boundary, the non-destructive input sanitization layer,
     and the allowlisted skill registry with declared permissions. Delivers
     CAP-36 and gates every later story that mutates external state.
-  spec_checkpoint: true
   invoke_dev_with: >-
     The firewall is fully binding even though skill signing is deferred. The
     registry is a first-party local allowlist with declared permissions; keep
@@ -33,27 +225,60 @@
     restructuring.
 - id: "4"
   title: Daemon, loopback API and CLI REPL
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Stand up the single long-lived daemon with loopback-only binding and the
     terminal REPL client that reaches it. Delivers CAP-18.
+  invoke_dev_with: >-
+    Also owns master-key enrolment, which no story owned until 2026-08-24. The
+    key must be configured before pm-ai is first run, so this needs a command
+    that mints one and stores it through KeychainPort. The daemon must never mint
+    one itself: a new key makes every previously sealed artifact unreadable, and
+    that is not a decision a process start may take. 1d built the custody, and
+    1g's keychain probe already reports "reachable, key absent" - point its
+    remediation text at this command.
+    And config loading, which no story owned either. config.toml is declared in
+    the application tree and read by nothing; no tomllib import exists anywhere.
+    config.toml must NOT carry the encryption toggle: as of 2026-08-25 no
+    persistent setting may disable encryption, and the spine's Deployment note
+    putting a debug profile there is superseded. Whatever config.toml comes to
+    hold, that is not part of it.
+    THREE separate concerns land here - REPL, key enrolment, config loading.
+    Split before building unless there is a reason not to; the two setup concerns
+    arrived by having nowhere else to go, which is how a story becomes too large
+    to review.
 - id: "5"
   title: Telegram bridge and cryptographic pairing
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Add the outbound long-polling Telegram surface locked to paired user-IDs,
     rejecting everything else. Delivers CAP-19; webhooks are prohibited.
-  spec_checkpoint: true
+  invoke_dev_with: >-
+    telegram_cache/ is one of the two encrypted artifacts, and the key is fetched
+    lazily - the daemon boots without one and the refusal lands when an encrypted
+    write is attempted. So in any operation writing both secret and non-secret
+    state, write the secret FIRST: a refusal then leaves nothing behind, whereas
+    writing the plaintext half first leaves a half-configured surface pointing at
+    a cache that was never created. Every write goes through
+    StorageService.write_artifact; the declaration decides whether it is sealed,
+    never the caller.
 - id: "6"
   title: Dynamic persona engine
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Load persona profiles per scope and let the PM adjust tone and directness
     from either surface without a daemon restart. Delivers CAP-20.
 - id: "7"
   title: Local model pipeline - Whisper and Ollama
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Wire local transcription and the 8B-class parsing model behind the model
     port, and benchmark them running concurrently. Delivers the NFR-01 and
     NFR-12 substrate that CAP-1 and CAP-21 build on.
-  done_checkpoint: true
   invoke_dev_with: >-
     Set OLLAMA_MAX_LOADED_MODELS=1, OLLAMA_NUM_PARALLEL=1 and keep_alive: 0
     before dispatching a whisper.cpp job - a client-side pool bound does not
@@ -62,46 +287,165 @@
     that this story is meant to answer.
 - id: "8"
   title: Connector framework and credential lifecycle
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Build the pull-adapter connector architecture with health probes, event
     normalization, hot plugin loading, and encrypted credential storage.
     Delivers CAP-35.
+  invoke_dev_with: >-
+    pm_ai/connectors/gitlab.py:62-71 builds its CoverageWindow as now-minus-4h
+    to now unconditionally, tied to nothing that proves a fetch happened, so a
+    provider declining with an empty 200 claims full coverage it never had.
+    HarvestResult has no way to say "I ran and learned nothing" - give it one.
+    Write ordering matters here more than anywhere. Enrolling a connector writes
+    a token to the encrypted config.json and configuration to the unencrypted
+    connectors/, and the key is fetched lazily, so the encrypted write is the one
+    that can refuse. Write the token FIRST: a refusal then leaves nothing behind.
+    The other order leaves a connector configured, enabled and holding no
+    credential - which reads as a working connector silently harvesting nothing.
+    Every write goes through StorageService.write_artifact; the declaration
+    decides whether it is sealed, never the caller.
 - id: "9"
   title: Passive telemetry radar
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Run the scheduled harvest across configured connectors through the
     sanitization boundary, with backoff on provider failure. Delivers CAP-2.
+  invoke_dev_with: >-
+    run_harvest in pm_ai/app/pipelines.py:20-36 has no try/except, so a raising
+    connector skips save_cursor and the attempt vanishes with it - leaving no
+    record that story 16's three verdicts need in order to tell never-looked
+    from looked-and-failed.
 - id: "10"
   title: Durable job queue and offline replay
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Make every unit of deferred work a durable row with idempotent external
     mutations, buffering offline and replaying in order on reconnect. Delivers
     CAP-4.
+- id: "10a"
+  title: Task manager and derivation jobs
+  spec_checkpoint: true
   done_checkpoint: true
+  description: >-
+    Build the task manager that owns the job inventory, schedules onto story 10's
+    durable queue, and publishes job state changes - plus the change events and
+    shared resource accessors every derivation job needs. See
+    derivation-services.md.
+  invoke_dev_with: >-
+    Added 2026-08-27 to close a layer the architecture had assumed and nobody
+    owned. AD-9 says "sanitization, dedup, indexing, and persistence happen
+    outside the connector, uniformly" without naming what indexes; the pre-written
+    suite already expects pm_ai.core.scheduler (test_domain_invariants.py:148);
+    and app/pipelines.py holds run_harvest and run_transcript_ingestion as
+    functions nothing calls - jobs without a job runner.
+    A job declares inputs() and outputs() and does ONE thing. The dependency graph
+    is DERIVED from those declarations, never configured: one job's outputs
+    intersecting another's inputs is the edge. A job must never enqueue its
+    successor - it declares what it produced and the task manager decides what
+    that makes stale. Same principle as the scope model deriving tier sets from
+    node declarations, and it fails the same way if abandoned: two structures that
+    can disagree.
+    Change detection is ONE pipeline: system-wide filesystem notifications. Ruled
+    2026-08-27, superseding an earlier design where StorageService published its
+    own write events. Do not add that second channel - two pipelines answering one
+    question can disagree, each needs its own tests, and a job gets triggered twice
+    or not at all depending on which fired. The OS sees the hand-editing PM and
+    pm-ai with one mechanism. Watching is an OS API, so it goes behind a
+    FileWatcherPort with its adapter in pm_ai/platform (AD-26); the task manager
+    must not import the watching library. Only Tier-1 and RETENTION_MANAGED
+    artifacts are eligible to be watched - transcripts/ is RETENTION_MANAGED and
+    must be watched, so Tier 1 alone was too strict. The bound is a permission,
+    not a selector: an artifact is watched because a job declares it in inputs().
+    What it excludes is Tier 3, which is what stops commitment indexing
+    re-triggering itself. ONE WATCHER OWNS EACH WATCHED ARTIFACT and a watcher may
+    cover several, so the map is a partition: a change cannot arrive twice by two
+    routes or fall between two watchers that each assumed the other had it. A
+    watcher then enqueues EVERY job declaring that artifact as an input, not one -
+    event_log/ and meetings/ each feed two jobs. A recursive watch needs an EXPLICIT
+    exclusion list and transcripts/temp/ is its first member - the capture writer
+    stages there before linking to the final name, so a watch covering it fires on
+    every staging write and hands transcript processing a growing file, the exact
+    failure the staging prevents. Nobody declaring it in inputs() is not protection:
+    a recursive watch sees subdirectories whether a job asked or not.
+    Do NOT tune a coalescing window for correctness - see storage-contract.md's
+    write shapes. Appends need whole-record parsing (no terminating newline, no
+    record); bursts need queue dedup on (job, artifact) using AD-20's idempotency
+    key, not a timer; captures are atomic already. A window survives only against
+    external editors that rewrite in place, worst case one wasted indexer pass. The one gap the pipeline
+    cannot close is writes made while nothing was watching: the daemon reconciles
+    every watched path at boot, mtime or digest against what the last derivation
+    saw. Never periodic - that would be the excluded second pipeline. Attach the
+    watcher BEFORE scanning, or a write landing between the scan and the attach is
+    lost silently; in that order the overlap is duplicate work, which costs nothing
+    because a job rebuilds from its declared inputs. Every index ENTRY stores the
+    MD5 of the source file it came from - per entry, not per index, so the
+    re-index unit is one source file rather than the whole index. It is also the
+    only way a source deleted while the daemon was down is detectable: the index
+    holds the set of paths it derived from, so a path with entries and no file
+    gets its entries dropped. The checksums live inside the index, never in
+    operational.db, which survives the Tier-3 drop that pm-ai reindex performs and
+    would leave a rebuilt index skipping files it never read. Hash every source
+    file at boot; mtime alone is not trustworthy for exactly the writes this scan
+    exists for. MD5 is a change-detection claim only and must never be read as
+    integrity or authenticity.
+    Every job is a queue row per AD-20, never an in-memory timer. Shared resources
+    go through one accessor each (CommitmentLog, EventLog, MeetingRecords), and
+    those perform their I/O through StorageService rather than touching files -
+    pm_ai/storage forbids file I/O outside service.py.
+    Enqueue direct consumers; build no topological sort. Settled 2026-08-27 by
+    deriving the live graph: every job either produces Tier 1 and is woken by a
+    schedule or an external capture, or produces Tier 3 and is a LEAF, because
+    nothing follows an unwatched index being written. No chain exceeds one
+    job-to-job edge. Depth is deliberately NOT enforced in code - but no job may
+    write an artifact that re-triggers it, or it spins forever. Compaction is one
+    predicate from that shape (reads event_log/, writes event_log/) and is saved
+    only by being schedule-triggered.
+    Three trigger kinds, not two: a change to a watched artifact, a schedule, and a
+    DIRECT REQUEST from pm-ai business logic into the task manager (ruled
+    2026-08-27) - that is what rule 5's triggering interface is for, and pm-ai
+    reindex is the obvious caller. Trigger kind and job identity are independent; a
+    requested job whose inputs are unchanged does no work, because staleness is the
+    stored per-entry MD5 versus the file, not the word of whoever asked.
+    inputs() declares STALENESS, NOT FILE ACCESS. The commitment lifecycle job
+    reads commitment_index.db to list open commitments and must NOT declare it:
+    that edge means "re-run me when the index changes", which can never fire (Tier
+    3 is unwatched) and is not what the job needs - elapsed time is. Blur the two
+    meanings and the derived graph stops describing when things run.
 - id: "11"
   title: Meeting records and transcript ingestion
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Introduce the Meeting entity as citation root, the provider transcript path
     and the manual fallback, with cost metrics in the summary header. Delivers
     CAP-3 and CAP-8.
 - id: "12"
   title: Spoken anchor resolution and fuzzy recovery
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Match spoken Work Item references against real ids, recovering at
     confidence and staging an unmatched-anchor prompt below it. Delivers CAP-1.
 - id: "13"
   title: Proposal engine and interactive approval cards
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Build the one Proposal entity behind every staged-then-approved flow, and
     render approval cards on both surfaces. Delivers CAP-6 and gives story 14 a
     staging path to fall back to.
 - id: "14"
   title: In-meeting command authorization
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Add explicit spoken command handling behind the three-condition
     authorization test, in-band fact-checking, and async research dispatch.
     Delivers CAP-5 and CAP-7.
-  spec_checkpoint: true
   invoke_dev_with: >-
     Auto-execution requires all three of authenticated source, speaker
     resolving to the PM, and a reversible non-notifying verb. When any is
@@ -110,104 +454,205 @@
     source.
 - id: "15"
   title: Commitment ledger and lifecycle
-  description: >-
-    Persist extracted spoken commitments with their full lifecycle states and
-    an append-only audit trail carrying evidence references. Delivers CAP-34.
   spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    Persist extracted spoken commitments with their full lifecycle states, an
+    append-only audit trail carrying evidence references, and the index CAP-34
+    requires. Delivers CAP-34.
+  invoke_dev_with: >-
+    OWNS THE COMMITMENT INDEX. CAP-34 says "an indexed row at [PENDING]", so the
+    story that persists commitments writes the index too - assigned 2026-08-27,
+    when it turned out nothing had. Reach commitments_log.md through the shared
+    CommitmentLog accessor rather than parsing Markdown here: transcript
+    processing appends to it, this indexes it and the sweeper appends transitions,
+    and three parsers of one file is three chances to disagree. The index must be
+    reconstructible from the Markdown alone - story 1h drops it and requires an
+    exact rebuild.
+    Each indexed row stores the MD5 of commitments_log.md as of the derivation that
+    produced it; per row, not per index (see derivation-services.md).
 - id: "16"
   title: Closed-loop verification and evidence admissibility
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Transition commitment states from harvested execution telemetry and surface
     met, altered, broken and stalled promises. Delivers CAP-33.
-  spec_checkpoint: true
-  done_checkpoint: true
   invoke_dev_with: >-
     pm-ai's own writes are never evidence - every event carries an authorship
-    marker and only external is admissible. An overdue commitment with no
-    harvest coverage for its window resolves to UNKNOWN, never BROKEN.
+    marker and only external is admissible. An overdue commitment resolves by
+    what pm-ai attempted, not only by what it found, and the three outcomes are
+    never collapsed: a harvest that succeeded across the arrival window and
+    found nothing is BROKEN; no successful harvest spanning it with no failed
+    attempt is UNKNOWN, which is temporary and self-resolving; any contributing
+    instance that attempted and failed is ERROR, which waiting never clears.
+    ERROR outranks UNKNOWN when both apply. evaluate_commitment currently takes
+    a single covered boolean and no health input at all - that is the signature
+    to change.
 - id: "17"
   title: Voice and text draft synthesis and dispatch
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Expand short instructions into cited draft cards that stay staged until
     approved, plus direct comment and ticket dispatch. Delivers CAP-21 and
     CAP-22.
 - id: "18"
   title: Deep inquiry, knowledge query and drift audit
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
-    Answer multi-source activity questions, retrieve operational procedure, and
-    compare meeting decisions against committed documentation. Delivers CAP-23,
-    CAP-24 and CAP-25.
+    Answer multi-source activity questions, retrieve operational procedure,
+    compare meeting decisions against committed documentation, and build the
+    search index those queries read. Delivers CAP-23, CAP-24 and CAP-25.
+  invoke_dev_with: >-
+    OWNS THE SEARCH INDEX. CAP-23 (activity query within 60s) and CAP-24
+    (procedure retrieval within 15s) both need it and this story owns both, so it
+    builds it - assigned 2026-08-27, when it turned out nothing had. Declared
+    inputs are rules/, event_log/ and meetings/; see derivation-services.md. It
+    must be reconstructible from Tier-1 Markdown alone, because story 1h drops the
+    derived tier and requires the rebuild to reproduce it exactly.
+    Each indexed row stores the MD5 of the source file it came from, so the
+    re-index unit is one rule, segment or meeting record rather than all three
+    trees (see derivation-services.md).
 - id: "19"
   title: Memory pruning and retrieval budget
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Compress ageing streams into milestone summaries, cap the vector index, and
     hold the retrieval budget with no model in the path. Delivers CAP-37.
+  invoke_dev_with: >-
+    OWNS THE ONLY OPERATION THAT DESTROYS TIER 1. Two rules added 2026-08-27, see
+    storage-contract.md "What authorises the deletion, and where it is recorded".
+    Order is load-bearing: write the milestone summary, CONFIRM it is present, only
+    then delete the sealed segments. A crash between the delete and the summary
+    loses the segment with nothing replacing it and no source to rebuild from. The
+    asymmetry this fixes was in the same file - the retention purge may delete a
+    raw capture, which nothing depends on, only after verified conversion, while
+    compaction had age alone for the tier defined as "it is the source".
+    Record every compaction in the OPEN segment of the same scope's event log, in
+    the ordinary entry format, naming each replaced segment with the MD5 it had
+    when deleted and the summary that replaced it. The open segment specifically -
+    compaction deletes only sealed segments, so a record in a sealed one is
+    deletable by the next compaction. Each scope records into its own log.
+    Checksums not filenames alone: a filename says a file called this was deleted,
+    a checksum says this exact content was; filenames are reused across months.
+    It also makes a restore decidable - a backup copy whose MD5 matches the record
+    is content compaction already replaced, a mismatch means something else touched
+    it. Costs nothing, since compaction reads those files to summarise them.
+    A milestone summary CARRIES FORWARD the compaction entries of the segments it
+    replaces, or the audit trail is the first thing compaction erases.
+    OPEN ISSUE to resolve in this story: segments are monthly (service.py:513
+    builds %Y-%m.md) and the threshold is "older than 7 days", but the smallest
+    deletable unit is a whole sealed month and the current month is never
+    compactable - so the youngest deletable content is 1 to 31 days old depending
+    on when compaction runs. Either the threshold means something other than what
+    it says, or segments need finer granularity, or compaction summarises WITHIN a
+    sealed segment rather than replacing whole ones.
+    Story 1h's matrix expects a rebuild after compaction to reproduce the compacted
+    view and REPORT the difference rather than fail. Do not break that.
+- id: "1h"
+  title: Derived-tier rebuild
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Moved here from position 9 on 2026-08-27. Nothing populated the derived tier
+    at that point - the index files and vector_index/ were declared and written by
+    nothing - so snapshot, drop and rebuild would all have been no-ops and the
+    headline property, that a rebuild reproduces the snapshot, would have been
+    vacuously true. By this position the commitment index (15), the search index
+    (18) and the embeddings (2) all exist and the vector index has its 500MB
+    bound, so the snapshot has content and the rebuild has something to
+    reproduce. Also: pm_ai/storage may not perform file I/O outside service.py,
+    so reindex.py holds the logic and the single writer performs the drop - which
+    needs a validated delete routed through assert_reindex_safe.
+  description: >-
+    Snapshot, drop and rebuild the derived tier from the Markdown, every drop
+    validated against the tier table first. Proves the Tier-3 zero-loss promise
+    in storage-contract.md.
 - id: "20"
   title: Pre-meeting prep dashboard and inquiry proxy
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Generate the telemetry-enriched preparation dashboard on schedule and send
     owner inquiries when an agenda item needs clarification first. Delivers
     CAP-26 and CAP-32.
 - id: "21"
   title: Autonomous work item execution and MCP tool glue
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Execute simple labelled work items into ready-to-merge changes, and reach
     presentation and spreadsheet tools through MCP. Delivers CAP-28 and CAP-29.
-  done_checkpoint: true
 - id: "22"
   title: Goals and micro-decision alignment engine
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Model goals on the Domain and Horizon axes and tag every recommendation
     with a resolvable goal citation that drives rank. Delivers CAP-11.
 - id: "23"
   title: Daily briefing and notification discipline
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Pre-render the multi-tier strategic focus briefing and enforce the declared
     occasions on which the system may interrupt. Delivers CAP-9 and CAP-13.
 - id: "24"
   title: Socratic 1:1 protocol and meta-coaching scorecard
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Run the telemetry-opened coaching dialogue and capture the three ratings of
     pm-ai plus Domain Distress. Delivers CAP-12 and CAP-14.
 - id: "25"
   title: Literature and web recommendation engine
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Poll configured sources, embed updated content, and cite situationally
     within the weekly cap. Delivers CAP-17.
 - id: "26"
   title: Anti-burnout shield and charter enforcement
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Detect workload and calendar-density risk inside private surfaces only, and
     enforce the privacy charter's destination rule. Delivers CAP-16.
-  spec_checkpoint: true
 - id: "27"
   title: Leadership auditing and guided experiments
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Detect repeated patterns across sprints and propose structured behavioural
     experiments in the next 1:1. Delivers CAP-15.
-  done_checkpoint: true
 - id: "28"
   title: Team-member scope, custom metrics and dossiers
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Define PM-configured metrics per person or cohort and assemble career
     dossiers, stored in the team-member scope alone. Delivers CAP-30.
-  spec_checkpoint: true
 - id: "29"
   title: HR MCP integration and approval-gated sync
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Connect HR platforms for dossier input and sync agreed 1:1 goals outward
     only on explicit approval. Delivers CAP-31.
-  spec_checkpoint: true
   invoke_dev_with: >-
     Only team-member-scope material may enter the sync payload, and never by
     way of a model that also read personal-scope material. A PM-to-pm-ai
     Socratic 1:1 produces the PM's own record and never syncs anywhere.
 - id: "30"
   title: Adaptive persona self-tuning
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Turn coaching feedback into staged, revertible persona proposals under the
     anti-agreement guard. Delivers CAP-38.
-  spec_checkpoint: true
   invoke_dev_with: >-
     Refuse the adaptation when ratings rise while question ratio, blind spots
     surfaced, or experiments proposed decline, and log it as a suppressed
@@ -216,16 +661,19 @@
     scope boundaries.
 - id: "31"
   title: Self-retrospective and Performance Index
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Produce the application-scoped index reporting pm-ai's own usefulness, with
     every component labelled measured or estimated. Delivers CAP-39, whose
     exact inputs remain an open question in SPEC.md.
 - id: "32"
   title: Dynamic memory evolution
+  spec_checkpoint: true
+  done_checkpoint: true
   description: >-
     Learn retrieval weighting from what the PM acts on, bounded by novelty and
     explainable per item. Delivers CAP-40.
-  done_checkpoint: true
   invoke_dev_with: >-
     Weighting changes ordering, never the record - the ledgers stay append-only
     and bounded forgetting remains story 19's recorded compaction. Refuse the

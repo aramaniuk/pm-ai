@@ -116,6 +116,48 @@ _REF = re.compile(r"^(?P<system>[a-z0-9_]+):(?P<scope>[A-Za-z0-9_.-]+):(?P<kind>
 _SCOPELESS = frozenset({"meeting", "goal"})
 _NON_DURABLE = frozenset({"transcript", "file", "chat_history"})
 
+# Of the scopeless systems, those whose identifiers pm-ai itself mints. AD-41
+# rule 2: "a `goal_` id is minted by storage." A meeting happens in the world
+# and pm-ai only records it; a goal is pm-ai's own artifact from the moment it
+# has an id.
+#
+# The distinction is load-bearing for AD-36, not bookkeeping. `attribute` used
+# to answer EXTERNAL for *any* scopeless ref, on the reasoning that global
+# entities are never our writes — true of `meeting:` and false of `goal:`. And
+# EXTERNAL is the one value AD-36 admits as evidence, so a goal-sourced event
+# could prove that pm-ai's own promise had been kept, reached through AD-33's
+# citation rule rather than through a connector, which is the door AD-36 was
+# watching.
+PM_AI_MINTED = frozenset({"goal"})
+
+
+class InconsistentReferenceModel(RuntimeError):
+    """A reference set contradicts another at import (AD-34)."""
+
+
+def _assert_reference_sets_agree() -> None:
+    """A `raise`, not an `assert`, so `python -O` cannot switch it off.
+
+    Callable so a test can re-run it against a doctored model, which is the only
+    way to prove the guard still fires under `-O`.
+    """
+    stray = PM_AI_MINTED - _SCOPELESS
+    if stray:
+        raise InconsistentReferenceModel(
+            f"PM_AI_MINTED names systems that are not scopeless: {sorted(stray)}. "
+            f"A scoped reference is attributed by the ledger join, so declaring "
+            f"one here would silently shadow that join."
+        )
+    overlap = PM_AI_MINTED & _NON_DURABLE
+    if overlap:
+        raise InconsistentReferenceModel(
+            f"PM_AI_MINTED names non-durable systems: {sorted(overlap)}. AD-33 "
+            f"rejects those at parse time, so the entry could never be reached."
+        )
+
+
+_assert_reference_sets_agree()
+
 
 class MalformedReference(ValueError):
     """The reference does not parse under the AD-34 grammar."""

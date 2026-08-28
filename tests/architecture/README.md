@@ -49,6 +49,8 @@ Both are fixed and both now have their own regressions in
 | Behavioural tests | Semantics no static check can see | `test_domain_invariants.py` |
 | Slice regressions | The five defects the r4 gate verified, each proven red first | `../slice/test_r4_gate_fixes.py` |
 | Meta-checks | The AST helpers themselves — mode detection, alias resolution | `test_enforcement_meta.py` |
+| Layout resolution | Where each scope's artifacts live, what may not live there, and what a subject id may be | `test_paths.py` |
+| Write-time refusals | Writes that must not happen — a raw capture into a directory git would commit, asked of real `git` in real repositories | `test_capture_guard.py` |
 
 ## AD coverage
 
@@ -57,13 +59,14 @@ Both are fixed and both now have their own regressions in
 | Paradigm | `layering` contract | Adapters are independent siblings, so no adapter imports another |
 | AD-1 | `core-is-io-free`, `http-confined-to-adapters`, `test_ad1_no_shell_execution_outside_platform` | |
 | AD-2 | `test_ad2_telegram_uses_outbound_polling_only` | |
-| AD-3 | `test_ad3_indexes_rebuild_from_markdown_without_loss`, `test_ad3_reindex_cannot_reach_tier_2`, `test_ad3_no_artifact_is_both_rebuilt_and_backed_up`, `test_ad3_every_artifact_has_exactly_one_tier` | Tier separation is physical; rebuild and backup sets are disjoint |
+| AD-3 | `test_ad3_indexes_rebuild_from_markdown_without_loss`, `test_ad3_reindex_cannot_reach_tier_2`, `test_ad3_no_artifact_is_both_rebuilt_and_backed_up`, `test_ad3_every_artifact_has_exactly_one_tier`, `test_tier_three_shares_no_file_or_directory_with_tier_two`, `test_no_tier_one_artifact_lives_inside_a_rebuildable_one`, `test_operational_store_sits_outside_every_markdown_tree` | Tier separation is physical; rebuild and backup sets are disjoint. The last three check it on the *paths*, which is where a rebuild actually reaches: the tier table can be perfect while `vector_index/` contains a Tier-1 file |
+| AD-4 | `test_paths.py` — the layout rows, `test_personal_material_has_no_path_in_a_committed_scope`, `test_every_tiered_and_retention_managed_artifact_has_a_home` | `pm_ai/platform/paths.py` is the only place a directory layout is written down, so the four scope roots and every artifact's place in them are now asserted rather than remembered. Which scope a *new* record belongs to is still judgement — see below |
 | AD-5 | `test_ad5_single_writer_owns_all_file_writes`, `db-confined-to-storage` | |
 | AD-6 | `test_ad6_markdown_is_never_encrypted` | |
 | AD-7 | `cli-owns-no-scheduling` | |
 | AD-8 | `test_ad8_loopback_api_rejects_unauthenticated_requests` | |
 | AD-9 | `test_ad9_connectors_own_no_scheduling`, `test_ad9_cursor_is_opaque_to_the_core` | |
-| AD-11 | `test_ad11_no_filesystem_discovery_of_projects` | |
+| AD-11 | `test_ad11_no_filesystem_discovery_of_projects`, `test_an_unregistered_project_is_an_error_not_a_guess`, `test_registry_repository_paths_are_expanded_and_absolute` | The AST check forbids scanning for `.project-ai`; the resolver has no way to *invent* a repository path, so an unregistered project raises instead of resolving |
 | AD-13 | `test_ad13_features_cannot_implement_their_own_proposal_expiry` | |
 | AD-14 | `test_ad14_proposal_and_commitment_lifecycles_stay_distinct` | |
 | AD-15 | `model-clients-confined`, `test_ad15_*` | Local-only classes; frontier tiering |
@@ -72,7 +75,7 @@ Both are fixed and both now have their own regressions in
 | AD-20 | `test_ad20_idempotency_keys_are_deterministic`, `test_ad20_mutating_jobs_require_a_key` | |
 | AD-21 | `test_ad21_slow_requests_acknowledge_instead_of_blocking` | |
 | AD-22 | `test_ad22_retrieval_path_never_touches_a_model` | |
-| AD-23 | `test_ad23_transcript_pipeline_works_without_a_live_tenant` | |
+| AD-23 | `test_ad23_transcript_pipeline_works_without_a_live_tenant`, `test_a_negation_line_after_the_rule_refuses_the_capture`, `test_an_already_tracked_capture_directory_refuses_the_capture`, `test_excluding_the_whole_enclave_protects_the_capture_directory`, `test_a_project_root_that_is_not_a_repository_refuses_the_capture` | The capture guard, asked of real `git` in real temporary repositories. Text matching answered the opposite of git for the first three, twice in the direction that publishes a transcript |
 | AD-24 | `test_ad24_event_log_is_not_a_debug_sink` | |
 | AD-25 | `test_ad25_project_rendering_cannot_open_the_personal_store` | |
 | AD-26 | `os-behind-platform` | |
@@ -80,22 +83,27 @@ Both are fixed and both now have their own regressions in
 | AD-28 | `test_ad28_project_ledger_rejects_personal_commitments` | |
 | AD-29 | `test_ad29_sanitization_leaves_the_raw_payload_intact` | |
 | AD-30 | `layering` + `surfaces-through-core` + `domain-imports-nothing` contracts | Composition root; `domain` imports nothing |
-| AD-31 | `test_ad31_every_frontier_call_records_scope_provenance`, `test_ad31_personal_material_cannot_reach_a_project_destination` | D1 — disclosure log + destination boundary |
+| AD-31 | `test_ad31_every_frontier_call_records_scope_provenance`, `test_ad31_personal_material_cannot_reach_a_project_destination`, `test_personal_material_has_no_path_in_a_committed_scope`, `test_the_personal_only_set_matches_the_scope_table`, `test_a_traversing_person_id_cannot_leave_the_enclave` | D1 — disclosure log + destination boundary. The three path tests close the layer below it: personal material has no *path* in a committed scope, and a `person_id` of `../..` cannot walk a report's record out of the enclave |
 | AD-32 | `test_ad32_auto_execute_requires_all_three_conditions` (5 cases), `test_ad32_manual_transcripts_never_auto_execute` | D2 — source × speaker × verb |
 | AD-33 | `test_ad33_source_refs_never_point_at_a_transcript`, `test_ad33_ledger_entries_are_self_contained`, `test_ad23_transcript_without_a_meeting_is_rejected` | D3 — cite the meeting, not the capture |
 | AD-34 | `test_ad34_source_refs_follow_the_fixed_grammar`, `test_ad34_unresolvable_actors_never_become_raw_string_identities`, `test_ad34_connectors_do_not_mint_event_ids` | Reference grammar, actor resolution, natural key |
 | AD-35 | `test_ad35_the_two_clocks_are_not_interchangeable`, `test_ad35_ledger_folding_is_deterministic`, `test_ad35_sweeper_will_not_declare_broken_without_coverage` | Two clocks; coverage-aware sweeping |
 | AD-36 | `test_ad36_self_authored_events_are_excluded_from_evidence`, `test_ad36_every_class_m_mutation_is_recorded_for_attribution`, **`test_our_own_write_harvested_back_is_not_evidence`**, `test_connector_never_asserts_external`, `test_unrecognisable_mutation_makes_its_scope_uncertain` | pm-ai's own writes are never evidence. The first two tests passed while the AD was **defeated in code**: they handed `Provenance.PM_AI` straight to the evaluator, proving the downstream half, while the step that *derives* PM_AI from the executed-mutation ledger did not exist and the connector hard-coded `EXTERNAL`. The bolded test drives the real path |
 | AD-37 | `test_ad37_concurrent_approval_from_two_surfaces_yields_one_execution`, `test_ad37_expired_proposals_cannot_execute` | Versioned CAS on shared entities |
-| AD-38 | `test_ad38_disclosure_records_cannot_reach_a_committed_scope`, `test_ad38_no_committed_record_may_reference_personal_scope`, `test_ad38_project_scope_is_the_only_committed_scope` | Disclosure ledger is application-scoped; committed scopes never name personal material |
+| AD-38 | `test_ad38_disclosure_records_cannot_reach_a_committed_scope`, `test_ad38_no_committed_record_may_reference_personal_scope`, `test_ad38_project_scope_is_the_only_committed_scope`, `test_application_scope_holds_the_disclosure_ledger`, `test_gitignore_rules_cover_the_paths_the_resolver_returns`, `test_the_gitignore_is_pinned_to_the_repository_root`, `test_the_capture_directory_lies_inside_the_repository_it_is_checked_against`, `test_a_gitignore_without_the_rule_refuses_the_capture`, `test_a_repository_with_no_gitignore_refuses_the_capture`, `test_any_unanswered_question_is_a_refusal`, `test_a_capture_name_must_be_one_reportable_component` | Disclosure ledger is application-scoped; committed scopes never name personal material. The first three pin the *places*: move the capture directory or the exclusion file and the instruction the refusal gives becomes one the operator cannot satisfy. The rest are the write path — refuse when git says it would commit, refuse when git cannot be asked, refuse a name that would be written outside the directory git was asked about, and refuse before anything is on disk |
 
 ### Not mechanically enforced
 
 Judgement calls that stay human — worth knowing so nobody assumes green means
 compliant:
 
-- **AD-4** (three-scope ownership) — partly covered via AD-25 and AD-28, but
-  "is this configuration project-specific?" needs a reviewer.
+- **AD-4** (scope ownership) — the *layout* is now mechanical: `test_paths.py`
+  asserts the four scope roots and every artifact's place in them, and
+  `pm_ai/platform/paths.py` refuses an artifact/scope pair the table forbids. The
+  *ownership decision* is what stays human — "is this configuration
+  project-specific?", "does this record's subject make it personal or
+  team-member?" — and nothing here can answer it. Adding an artifact to the
+  layout tables is therefore a review point, not a mechanical step.
 - **AD-10** (connector instances per project) — shape is testable, correct
   per-project cursor isolation needs an integration environment.
 - **AD-12** (sanitize every inbound payload) — the pipeline enforces it

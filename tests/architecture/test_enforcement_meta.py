@@ -83,6 +83,21 @@ class TestAliasResolution:
         f = _file("import subprocess as _sp\nhelper(x)")
         assert canonical_name(f, _call("helper(x)")) == "helper"
 
+    def test_dotted_import_does_not_remap_its_root(self):
+        """The other regression: `import os.path` used to map `os → os.path`.
+
+        Under that mapping `os.system(x)` resolved to `os.path.system`, which
+        matches no forbidden-call set — one character of import style disabled
+        the AD-1 shell guard in any module using a dotted import, and
+        `pm_ai.platform.paths` uses one. The fix was proved by planting a
+        violation and left no test behind (review 2026-08-28); this is that
+        test, so the next tidy-up of `alias_map` cannot silently undo it.
+        """
+        f = _file("import os.path\nos.system(x)")
+        resolved = canonical_name(f, _call("os.system(x)"))
+        assert resolved == "os.system"
+        assert resolved in SHELL_CALLS, "a dotted import must not evade the shell scan"
+
 
 def test_shell_scan_covers_every_layer_that_may_not_spawn():
     """AD-1 — `app` was the one layer excluded, and the one that imports everything.

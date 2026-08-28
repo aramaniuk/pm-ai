@@ -98,7 +98,21 @@ def alias_map(tree: ast.AST) -> dict[str, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
-                mapping[a.asname or a.name.split(".")[0]] = a.name
+                if a.asname:
+                    # `import a.b as x` binds `x`, and `x` *is* `a.b`.
+                    mapping[a.asname] = a.name
+                else:
+                    # `import a.b` binds `a`, and `a` is `a` — not `a.b`. Mapping
+                    # it to `a.b` was a live bypass of every check here: with
+                    # `import os.path` in a file, `os.system(...)` resolved to
+                    # `os.path.system`, which is in no forbidden set. Proved
+                    # 2026-08-24 by planting the same `os.system` call twice in
+                    # `pm_ai.core` — caught under `import os`, invisible under
+                    # `import os.path`. One character of import style disabled the
+                    # AD-1 shell guard, and `pm_ai/platform/paths.py` already
+                    # imports that way.
+                    head = a.name.split(".")[0]
+                    mapping[head] = head
         elif isinstance(node, ast.ImportFrom) and node.module:
             for a in node.names:
                 mapping[a.asname or a.name] = f"{node.module}.{a.name}"

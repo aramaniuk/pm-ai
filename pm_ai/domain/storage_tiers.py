@@ -1,83 +1,109 @@
-"""Storage tiers and their physical artifacts (AD-3, AD-5).
+"""What the tier model *does*, and the artifact keys code spells by name (AD-3, AD-5).
 
-The earlier spine named three tiers while the job queue (Tier 2) and the search
-indexes (Tier 3) shared one `event_telemetry.db`. "Rebuild Tier 3 only" was
-therefore unimplementable, and the obvious implementation of a rebuild — delete
-the file, recreate it — would have destroyed every pending external write and
-every connector cursor, silently, with the AD-3 test still green.
+The three tiers themselves, and every artifact's place in them, are declared on
+the nodes of the scope trees in `pm_ai.domain.scope_model` — one tier per `File`,
+one durability per `Collection` — and `ARTIFACT_TIER`, `BACKUP_TARGETS`,
+`REBUILD_TARGETS`, `RETENTION_MANAGED` and `DIAGNOSTIC_ONLY` are derived from
+them there. They used to be hand-written here, in a flat table beside a tree that
+described structure only, and the cost was three things: two edits in two modules
+to add one artifact, a basename key that could not tell personal
+`daily_dashboard.md` from project `daily_dashboard.md`, and a pair of import-time
+assertions whose only job was to catch the two structures drifting apart.
 
-Separation is physical here, so `reindex` cannot reach Tier 2 by construction
-rather than by careful coding.
+This module keeps what operates on that model rather than restating it:
 
-Imports nothing from `pm_ai` (AD-30).
+- `assert_reindex_safe` — the Tier-3-only guarantee `pm-ai reindex` owes AD-3.
+- `assert_capture_dir_untracked` and `requires_git_exclusion` — the check
+  `pm_ai.storage.service` runs before writing a raw capture into a committed
+  scope. Its input is git's own verdict, obtained through `pm_ai.ports.VcsPort`,
+  because only git can say what git tracks.
+- `assert_capture_dir_ignored` — the same question asked of `.gitignore` text
+  alone. Kept, and no longer the authority: a negation line, a parent-directory
+  exclude, and a directory already in the index each make it disagree with git,
+  the first two in the direction that publishes a transcript. See
+  `pm_ai.domain.vcs`.
+- `EVENT_LOG`, `OPERATIONAL_DB` and `CAPTURES` — the three artifact keys that
+  appear in *code* rather than only in a tree, spelled once.
+
+Everything the previous shape exported is re-exported here, so `pm_ai.storage`,
+`pm_ai.domain`, and the suite keep importing tiers from the module that owns tier
+*behaviour*.
+
+Imports nothing from `pm_ai` outside `pm_ai.domain` (AD-30), and performs no I/O.
 """
 
 from __future__ import annotations
 
-from enum import Enum
+from pathlib import Path
+
+from pm_ai.domain.identity import ScopeKind
+from pm_ai.domain.scope_model import (
+    ADDRESS,
+    ARTIFACT_TIER,
+    BACKUP_TARGETS,
+    DIAGNOSTIC_ONLY,
+    ENCRYPTED,
+    GITIGNORED,
+    KEYS,
+    REBUILD_TARGETS,
+    RETENTION_MANAGED,
+    OutsideTierModel,
+    ScopeResolutionError,
+    Tier,
+)
+from pm_ai.domain.invariants import InconsistentModel
+from pm_ai.domain.vcs import TrackingVerdict
+
+__all__ = [
+    "ARTIFACT_TIER",
+    "BACKUP_TARGETS",
+    "CAPTURES",
+    "DIAGNOSTIC_ONLY",
+    "EVENT_LOG",
+    "GITIGNORE_FILENAME",
+    "ENCRYPTED",
+    "GITIGNORED",
+    "OPERATIONAL_DB",
+    "OutsideTierModel",
+    "REBUILD_TARGETS",
+    "RETENTION_MANAGED",
+    "ScopeResolutionError",
+    "Tier",
+    "TierViolation",
+    "UnprotectedCaptureDir",
+    "assert_capture_dir_ignored",
+    "assert_capture_dir_untracked",
+    "assert_reindex_safe",
+    "gitignore_rule_for",
+    "is_append_only",
+    "requires_git_exclusion",
+]
 
 
-class Tier(Enum):
-    """AD-3. Exactly one tier per artifact."""
+# ── Artifact keys ────────────────────────────────────────────────────────────
+# The scope trees spell every key as a literal, so they read like the document
+# they mirror. These three are also named in code — `pm_ai.storage.service`
+# appends to the first, opens the second, and refuses to write into the third
+# unless git excludes it — rather than only in a tree, so they are spelled once
+# here: `domain` is the only package `storage`, `core`, and `surfaces` may all
+# import (AD-30), so this is the single home for them rather than a fourth copy
+# of the string. The assertion at the bottom of this module is what makes a
+# rename of any of them fail at import instead of at the first write.
+EVENT_LOG = "event_log/"
+OPERATIONAL_DB = "operational.db"
 
-    TRUTH = 1
-    OPERATIONAL = 2
-    DERIVED = 3
+# Raw captures. Homed in every scope at the same relative path, so the key alone
+# does not say whether git can see it — `requires_git_exclusion` below is what
+# pairs it with the scopes where that question has an answer.
+CAPTURES = "transcripts/"
 
-    @property
-    def rebuildable(self) -> bool:
-        """Only Tier 3 can be reconstructed; the others must survive."""
-        return self is Tier.DERIVED
+# AD-47's staging area, declared as a namespace of `transcripts/` in every tree
+# that holds captures. A constant here rather than a literal in the writer,
+# because two packages need the name: the single writer stages into it and
+# AD-46's recursive watch excludes it. It is spelled as the canonical key the
+# resolver answers to, so the writer asks for it instead of composing it.
+CAPTURE_STAGING = "temp/"
 
-    @property
-    def backed_up(self) -> bool:
-        """Tier 2 is a backup target precisely because it is NOT rebuildable.
-
-        Backing up markdown alone — the earlier rule — would have lost the job
-        queue, cursors, and executed-key ledger.
-        """
-        return self in (Tier.TRUTH, Tier.OPERATIONAL)
-
-
-# Every persistent artifact, assigned once. A path that appears in two tiers is
-# the bug this table exists to prevent.
-ARTIFACT_TIER: dict[str, Tier] = {
-    "event_log/": Tier.TRUTH,
-    "commitments_log.md": Tier.TRUTH,
-    "coaching_1on1_history.md": Tier.TRUTH,
-    "strategic_goals.md": Tier.TRUTH,
-    "meetings/": Tier.TRUTH,
-    "disclosure.md": Tier.TRUTH,
-    "rules/": Tier.TRUTH,
-    "config.toml": Tier.TRUTH,
-    "operational.db": Tier.OPERATIONAL,
-    # Tier 2, not Tier 3, despite AD-25 calling it "derived telemetry" — that
-    # word means *calculated*, not *rebuildable*. Tier 3's test is rebuildable
-    # from Tier 1 with zero loss, and burnout trends outlive the telemetry they
-    # were computed from once FR-37 compaction prunes it. It had no tier at all
-    # until 2026-08-20, so the one store holding months of personal trend data
-    # was in neither the backup set nor the rebuild set.
-    "personal_analytics.db": Tier.OPERATIONAL,
-    "derived.db": Tier.DERIVED,
-    "vector_index/": Tier.DERIVED,
-}
-
-REBUILD_TARGETS = frozenset(a for a, t in ARTIFACT_TIER.items() if t.rebuildable)
-BACKUP_TARGETS = frozenset(a for a, t in ARTIFACT_TIER.items() if t.backed_up)
-
-
-# Raw input under a retention policy is deliberately OUTSIDE the tier model.
-# AD-3 tiers "persistent state"; these are transient material the pipeline
-# consumes and NFR-09 purges at 30 days. They are not Tier 3 — Tier 3 promises
-# *rebuildable from Tier 1 with zero loss*, and no rebuild reconstructs a
-# recording. Listing them here rather than omitting them is the point: an
-# artifact absent from both sets is an oversight (that is how
-# personal_analytics.db ended up backed up by nothing), while an artifact named
-# here is an excluded-on-purpose decision that the assertion below keeps honest.
-#
-# Per-scope, like `event_log/`: a transcript lives in the scope owning its
-# meeting (AD-33). Nothing may depend on them surviving.
-RETENTION_MANAGED: frozenset[str] = frozenset({"transcripts/", "telegram_cache/"})
 
 # `transcripts/` sits INSIDE a committed scope, so its exclusion from git is a
 # `.gitignore` rule rather than a directory boundary. A rule can go missing; a
@@ -85,25 +111,161 @@ RETENTION_MANAGED: frozenset[str] = frozenset({"transcripts/", "telegram_cache/"
 # writes a capture, because the failure mode is publishing verbatim meeting
 # transcripts to the employer's repository — the same class of leak AD-38 exists
 # to prevent, arriving by omission instead of by routing.
-GITIGNORE_REQUIRED: dict[str, str] = {
-    "transcripts/": "/.project-ai/transcripts/",
-}
+def _qualified(scope_kind: ScopeKind, artifact: str) -> str:
+    """The tree-qualified spelling of `artifact`, or the string unchanged.
+
+    The resolver accepts one node under several spellings — `temp/` and
+    `transcripts/temp/` reach the same directory — while the derived tables are
+    keyed on exactly one. Answering a membership question on the caller's
+    spelling is how a guard says no to one name for a directory and yes to
+    another for the same directory: review on 2026-08-28 demonstrated
+    `requires_git_exclusion(PERSONAL, "private/telegram_cache/")` returning
+    False for the very node it returns True for as `telegram_cache/`. So every
+    membership check below canonicalises first, through the same `ADDRESS`
+    index `resolve` uses. A spelling no index knows is returned unchanged: the
+    resolver will refuse it anyway, and inventing an answer here would hide
+    that refusal.
+    """
+    placement = ADDRESS[scope_kind].get(artifact)
+    if placement is None:
+        return artifact
+    key = placement.relative.as_posix()
+    return f"{key}/" if placement.node.is_dir else key
+
+
+def requires_git_exclusion(scope_kind: ScopeKind, artifact: str) -> bool:
+    """Whether writing `artifact` in this scope must ask git first.
+
+    Replaces the module-level `GITIGNORE_REQUIRED` table, which was keyed on
+    the artifact basename alone and therefore global. That held only while the
+    set had one member: `transcripts/` wants the same answer in all three scopes
+    that declare it. `event_log/` does not — it is inside the gitignored
+    team-member enclave and committed to the repository in a project — so a
+    basename-keyed set had the same defect the encryption axis exposed, one
+    artifact away from mattering.
+
+    The answer is declared on the node, per tree, and derived into `GITIGNORED`,
+    which is keyed on qualified relative keys — hence `_qualified` first, so
+    every spelling the resolver accepts gets the node's answer.
+    """
+    return _qualified(scope_kind, artifact) in GITIGNORED[scope_kind]
+
+
+# The append set, verbatim from `storage-contract.md` §"Append": ledgers whose
+# history is the artifact. `write_artifact` routes everything else through
+# whole-file replacement, and replacing a ledger destroys every entry but the
+# last write's — so the single writer refuses these by name. Node keys, not
+# spellings: `is_append_only` canonicalises the same way the git guard does.
+_APPEND_ONLY_KEYS = frozenset({EVENT_LOG, "commitments_log.md"})
+
+
+def is_append_only(scope_kind: ScopeKind, artifact: str) -> bool:
+    """Whether `artifact` is a ledger that only `append` may touch (AD-5)."""
+    placement = ADDRESS[scope_kind].get(artifact)
+    key = placement.node.key if placement is not None else artifact
+    return key in _APPEND_ONLY_KEYS
+
+# Named here rather than in `pm_ai.platform`, because `pm_ai.storage` derives
+# the path from git's reported working-tree root and may not import that
+# package. One definition, read by both.
+GITIGNORE_FILENAME = ".gitignore"
+
+
+def gitignore_rule_for(target: Path, *, repository: Path) -> str:
+    """The `.gitignore` line that would exclude `target` from `repository`.
+
+    Derived, never stored. The rule depends on where the capture directory sits
+    relative to its working-tree root, and that differs per scope: a project
+    capture wants `/.project-ai/transcripts/`, a personal one at the root of its
+    own private repository wants `/transcripts/`. A table keyed on the artifact
+    *basename* could not hold both, because every scope spells captures the same
+    way — so one key would have to carry two values. Deriving the rule
+    sidesteps needing a `(scope, path)` table at all.
+
+    Anchored with a leading slash so it matches at the repository root only, and
+    trailing so it reads as the directory it is.
+
+    `repository` comes from `git rev-parse`, which resolves symlinks; `target`
+    comes from the resolver, which deliberately does not. On a symlinked root
+    (macOS `/tmp`, a symlinked home) the two spell the same directory two ways
+    and `relative_to` cannot relate them. The caller is expected to hand in
+    comparable paths (`pm_ai.storage.service` realpaths the target before
+    calling); if they still do not relate, the refusal is typed rather than a
+    bare `ValueError` escaping a path that promised typed refusals.
+    """
+    try:
+        relative = target.relative_to(repository)
+    except ValueError as unrelated:
+        raise UnprotectedCaptureDir(
+            f"cannot derive the .gitignore rule for {target}: it does not sit "
+            f"under the working tree git reported, {repository}. The two "
+            f"usually differ only through a symlink somewhere in the capture "
+            f"path — the write is refused because a rule this function cannot "
+            f"derive is one the operator cannot be told to add."
+        ) from unrelated
+    return "/" + relative.as_posix() + "/"
 
 
 class UnprotectedCaptureDir(RuntimeError):
     """A capture directory is not excluded from version control."""
 
 
-def assert_capture_dir_ignored(artifact: str, gitignore_text: str) -> None:
-    """Refuse to write a raw capture into a directory git would track.
+def assert_capture_dir_untracked(
+    artifact: str, verdict: TrackingVerdict, *, rule: str, gitignore: str
+) -> None:
+    """Refuse to write a raw capture git would carry into a commit.
 
-    Fails closed: no `.gitignore`, no writing. Losing a transcript is recoverable
-    (it is transient input under NFR-09 and nothing may depend on it); committing
-    one is not.
+    `verdict` is git's own answer, from `pm_ai.ports.VcsPort`. This function
+    turns it into the refusal and the instruction that repairs it, which is the
+    part that belongs in the domain: `storage` owns the plumbing, not the rule.
+
+    Fails closed by construction — it is only ever called with an answer. A
+    caller that could not get one must refuse instead of calling this with a
+    guess (see `VcsUnavailable`).
+
+    `rule` and `gitignore` are both for the message, and both come from the
+    caller rather than a lookup here — the rule that repairs this depends on
+    where the capture sits inside its working tree, which the domain cannot know
+    and `gitignore_rule_for` derives. Naming them is the difference between an
+    error the operator can act on and one they have to go looking for.
+
+    The two branches are two different repairs. A rule does not untrack what is
+    already in the index, so telling someone to add one when the real problem is
+    a tracked directory sends them to fix a file that is already correct.
     """
-    rule = GITIGNORE_REQUIRED.get(artifact)
-    if rule is None:
+    if verdict.is_excluded:
         return
+    if verdict.tracked:
+        raise UnprotectedCaptureDir(
+            f"{artifact} holds raw captures and git already tracks "
+            f"{len(verdict.tracked)} file(s) under it, including "
+            f"{verdict.tracked[0]!r}. A .gitignore rule does not untrack what is "
+            f"already in the index: run `git rm -r --cached` on that directory "
+            f"and commit the removal first. Refusing to write — a verbatim "
+            f"transcript in the team's repository is not recoverable."
+        )
+    raise UnprotectedCaptureDir(
+        f"{artifact} holds raw captures and lives inside a committed scope, but "
+        f"git does not exclude it. Add {rule!r} to {gitignore}, and check for a "
+        f"later negation line (`!{rule}`) — that re-includes the directory an "
+        f"earlier rule excluded. Refusing to write: a verbatim transcript in the "
+        f"team's repository is not recoverable."
+    )
+
+
+def assert_capture_dir_ignored(artifact: str, gitignore_text: str, *, rule: str) -> None:
+    """The `.gitignore` text alone, asked the same question. Not the authority.
+
+    Retained as the pure form of the check — no filesystem, no subprocess, one
+    string in — and because it is the shape the rule was first written in. The
+    write path uses `assert_capture_dir_untracked` instead: this function reads
+    text, and text cannot see a negation line's effect, a parent-directory
+    exclude, or an index. See `pm_ai.domain.vcs` for all three.
+
+    Fails closed on what it can see: no `.gitignore`, no writing. Losing a
+    transcript is recoverable (it is transient input under NFR-09 and nothing may
+    depend on it); committing one is not.
+    """
     lines = {ln.strip().rstrip("/") for ln in gitignore_text.splitlines() if ln.strip()}
     if rule.rstrip("/") not in lines and rule.lstrip("/").rstrip("/") not in lines:
         raise UnprotectedCaptureDir(
@@ -111,10 +273,6 @@ def assert_capture_dir_ignored(artifact: str, gitignore_text: str) -> None:
             f"{rule!r} is not in .gitignore. Refusing to write: a verbatim transcript "
             f"in the team's repository is not recoverable."
         )
-
-assert not (RETENTION_MANAGED & set(ARTIFACT_TIER)), (
-    "an artifact is both tiered and retention-managed; it must be exactly one."
-)
 
 
 class TierViolation(ValueError):
@@ -136,8 +294,28 @@ def assert_reindex_safe(artifacts: frozenset[str]) -> None:
         )
 
 
-# Tier 2 and Tier 3 must never share a physical artifact — the original defect.
-assert not (REBUILD_TARGETS & BACKUP_TARGETS), (
-    "AD-3: an artifact is both a rebuild target and a backup target, so a "
-    "rebuild would destroy state that cannot be reconstructed."
-)
+# The keys above are literals in this module and literals in the trees, which is
+# the one place those two structures still have to agree. A rename of any of them
+# therefore fails here, at import, rather than at the first write.
+_CODE_KEYS = frozenset({EVENT_LOG, OPERATIONAL_DB, CAPTURES, CAPTURE_STAGING})
+
+
+def _assert_code_keys_are_declared() -> None:
+    """Both checks, callable, so a test can re-run them under `python -O`."""
+    if not _CODE_KEYS <= KEYS:
+        raise InconsistentModel(
+            "a key spelled as a constant here names no node in any scope tree: "
+            f"{sorted(_CODE_KEYS - KEYS)}"
+        )
+
+    # And every gitignored artifact must name a node, in the scope that declares
+    # it: a rule whose artifact does not exist is a rule the write path can never
+    # consult, which reads as protection and is silence.
+    stray = {a for keys in GITIGNORED.values() for a in keys} - KEYS
+    if stray:
+        raise InconsistentModel(
+            f"a gitignored artifact names no node in any scope tree: {sorted(stray)}"
+        )
+
+
+_assert_code_keys_are_declared()

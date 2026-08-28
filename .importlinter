@@ -178,6 +178,15 @@ forbidden_modules =
 
 # ── AD-1 class L: whisper.cpp is the one permitted subprocess ──────────────────
 # pm_ai.models.local may spawn an allowlisted binary; nothing else may.
+#
+# This contract counts INDIRECT imports, which is what makes it worth having: a
+# module that reaches subprocess through two hops has the capability just the
+# same. The composition root is the one exception, and it is a structural one
+# rather than a concession — pm_ai.app exists to construct the adapters, and
+# pm_ai.platform is the layer AD-1 permits to shell out, so forbidding app from
+# importing it leaves the git adapter with no legal way to be built. `pm_ai.app`
+# calling subprocess *itself* is still caught, by
+# test_ad1_no_shell_execution_outside_platform, which scans app deliberately.
 [importlinter:contract:subprocess-confined]
 name = AD-1 — subprocess confined to pm_ai.models.local and pm_ai.platform
 type = forbidden
@@ -193,6 +202,8 @@ source_modules =
     pm_ai.models.frontier
 forbidden_modules =
     subprocess
+ignore_imports =
+    pm_ai.app.wiring -> pm_ai.platform.vcs
 
 
 # ── AD-30: ports declare protocols, they do not depend on implementations ──────

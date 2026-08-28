@@ -6,7 +6,7 @@ requires-python = ">=3.13"
 
 # Runtime dependencies are declared under [project.optional-dependencies] rather
 # than here, deliberately: the architecture suite must be runnable before the
-# stack resolves. Installing sqlcipher3 and friends is a Phase 1 concern, and the
+# stack resolves. Installing the runtime extra is a Phase 1 concern, and the
 # `[mcp]` extra pulls a second web stack that deserves its own resolution pass.
 dependencies = []
 
@@ -14,20 +14,49 @@ dependencies = []
 # The Stack table from ARCHITECTURE-SPINE.md, made executable.
 # Versions re-verified against their registries 2026-08-19.
 runtime = [
-    "anthropic[mcp]",
+    # PINNED EXACTLY 2026-08-28, verified against PyPI and by introspection.
+    # The spine calls this the one dependency that must never float, because
+    # AD-16 makes the BETA `client.beta.messages.tool_runner` load-bearing for
+    # the execution firewall — and it was the only unpinned one.
+    #
+    # 1.2.0 rather than the 0.124.0 the lockfile had resolved: `messages.create`
+    # in 1.x no longer accepts `temperature`/`top_p`/`top_k`, which is what the
+    # Claude 5 API already rejects with a 400. The older SDK is the riskier one
+    # here — it accepts parameters the API refuses. Confirmed present in 1.2.0:
+    # `beta.messages.tool_runner`, and `mcp<3,>=1.0` behind the extra.
+    # Confirmed absent: the three sampling parameters. `[mcp]` also pulls
+    # `httpx2>=2`, the second web stack the Stack table budgets for.
+    "anthropic[mcp]==1.2.0",
     "python-telegram-bot==22.8",   # NOT [job-queue] — it embeds a second scheduler
     "ollama",
-    "sqlcipher3==0.6.2",           # NOT sqlcipher3-binary — Linux-x86_64 wheels only
     "sqlite-vec==0.1.9",           # pre-1.0; a minor bump is a reindex event (AD-3)
     "fastapi==0.141.1",
     "uvicorn==0.52.3",
     "keyring==25.7.0",
+    # AES-256-GCM for the two encrypted files (AD-6). Wheels for macOS arm64, so
+    # no source build — the property `sqlcipher3` lacked. Imported lazily in
+    # `pm_ai.storage.crypto`, so the package loads without this extra.
+    "cryptography>=50.0.0",
+    # AD-46's FileWatcherPort adapter — the single change-detection pipeline.
+    # Declared here though nothing imports it yet, which is this extra's whole
+    # pattern: five of the six entries above have no importer either. It was
+    # named in the spine's Stack table on 2026-08-27 and left undeclared, so the
+    # table asserted a pin the build did not hold — the same drift the anthropic
+    # entry had in the other direction. Latest release is 2024-11-01, a standing
+    # currency risk of `sqlite-vec`'s shape over a far smaller surface, and
+    # behind a port, so replacing the backend stays local.
+    "watchdog==6.0.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "import-linter>=2",
+    "mypy>=2",
+    # Also a dev dependency, deliberately. It is an optional runtime extra so the
+    # package imports without it, and the suite must still exercise the real
+    # cipher rather than skip — a skipped encryption test reads as coverage.
+    "cryptography>=50.0.0",
 ]
 
 [tool.uv]
@@ -40,6 +69,26 @@ python-preference = "only-managed"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests/architecture"]
+
+# Default settings deliberately, not `strict`. Strict adds 14 findings that are
+# about annotation completeness rather than correctness (`Missing type arguments
+# for generic type "dict"`), and a checker that lands with known-acceptable
+# complaints teaches everyone to read red as normal. Zero on arrival is what
+# makes a later red result mean something; tightening earns its own slice.
+#
+# Only `pm_ai` is checked. The suite builds deliberately-wrong values to prove
+# the guards reject them, so type errors there are the point rather than a
+# defect.
+[tool.mypy]
+files = ["pm_ai"]
+python_version = "3.13"
+# The optional runtime extras are not installed in this environment on purpose —
+# `keyring` and `sqlite_vec` are imported inside the functions that
+# use them so a missing extra cannot become a skipped test that reads as
+# coverage. Their absence must not read as a type error.
+[[tool.mypy.overrides]]
+module = ["keyring.*", "sqlite_vec.*"]
+ignore_missing_imports = true
 
 [build-system]
 requires = ["hatchling"]

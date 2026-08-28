@@ -103,6 +103,7 @@ def test_our_own_write_harvested_back_is_not_evidence(daemon):
         overdue=True,
         evidence_admissible=attributed[0].authored_by.admissible_as_evidence,
         covered=True,
+        harvest_failed=False,
     )
     assert verdict is CommitmentState.BROKEN, "self-authored activity must never prove fulfilment"
 
@@ -111,7 +112,7 @@ def test_a_genuine_external_write_still_counts(daemon):
     """The guard must not swallow real evidence — otherwise nothing ever FULFILS."""
     attributed = attribute_all((_commit_event("9f2a1c"),), daemon.storage.executed_mutations())
     assert attributed[0].authored_by is Provenance.EXTERNAL
-    assert evaluate_commitment(overdue=True, evidence_admissible=True, covered=True) is (
+    assert evaluate_commitment(overdue=True, evidence_admissible=True, covered=True, harvest_failed=False) is (
         CommitmentState.FULFILLED
     )
 
@@ -175,7 +176,12 @@ def test_a_crash_between_call_and_record_cannot_double_write(daemon):
             return f"note_{self.calls}"
 
     flaky = FlakyPostComment()
-    daemon.skills.register(flaky)
+    # `replace=True` is required: a second registration under an authorized
+    # name is a decision, not a default (review 2026-08-28), and this test is
+    # deliberately substituting a double for the wired skill.
+    with pytest.raises(ValueError, match="already registered"):
+        daemon.skills.register(flaky)
+    daemon.skills.register(flaky, replace=True)
     target = TargetRef.parse("gitlab:alpha:issue:WI-108")
     key = idempotency_key("post_comment", target.lock_key, {"comment": "ping"})
 
@@ -278,9 +284,12 @@ def test_personal_analytics_is_backed_up_and_never_rebuilt():
     assert "personal_analytics.db" in BACKUP_TARGETS
     assert "personal_analytics.db" not in REBUILD_TARGETS
 
-    # `pm-ai reindex` must not be able to reach it.
+    # `pm-ai reindex` must not be able to reach it. The Tier-3 companion is
+    # named `event_index.db` since the 2026-08-27 rename; left as `derived.db`
+    # this call would still raise, but for the *other* member of the set, and
+    # would no longer prove anything about `personal_analytics.db`.
     with pytest.raises(TierViolation):
-        assert_reindex_safe(frozenset({"derived.db", "personal_analytics.db"}))
+        assert_reindex_safe(frozenset({"event_index.db", "personal_analytics.db"}))
 
 
 def test_every_artifact_still_has_exactly_one_tier():
@@ -362,7 +371,12 @@ def test_raw_captures_are_excluded_from_the_tier_model_on_purpose():
     """
     from pm_ai.domain.storage_tiers import ARTIFACT_TIER, BACKUP_TARGETS, RETENTION_MANAGED
 
-    assert RETENTION_MANAGED == {"transcripts/", "telegram_cache/"}
+    # `temp/` joined on 2026-08-28: AD-47's staging area, declared as a namespace
+    # of `transcripts/` in all three trees that hold captures. It belongs here for
+    # the same reason its parent does — a half-written capture is raw input, not
+    # state — and being a declared member is what gives the NFR-09 purge a named
+    # target rather than sweeping it by accident of where it sits.
+    assert RETENTION_MANAGED == {"transcripts/", "temp/", "telegram_cache/"}
     assert not (RETENTION_MANAGED & set(ARTIFACT_TIER)), "exactly one of tiered or retention-managed"
     assert not (RETENTION_MANAGED & BACKUP_TARGETS), "raw captures are never a backup target"
 
@@ -379,13 +393,30 @@ def test_captures_refuse_to_write_without_a_gitignore_rule():
         assert_capture_dir_ignored,
     )
 
-    assert_capture_dir_ignored("transcripts/", "node_modules/\n/.project-ai/transcripts/\n")
-    assert_capture_dir_ignored("transcripts/", ".project-ai/transcripts\n")
+    # The rule is now the caller's to supply: it depends on where the capture
+    # sits inside its working tree, which differs per scope, so the domain no
+    # longer holds a table of rule text.
+    rule = "/.project-ai/transcripts/"
+
+    assert_capture_dir_ignored(
+        "transcripts/", "node_modules/\n/.project-ai/transcripts/\n", rule=rule
+    )
+    assert_capture_dir_ignored("transcripts/", ".project-ai/transcripts\n", rule=rule)
 
     with pytest.raises(UnprotectedCaptureDir):
-        assert_capture_dir_ignored("transcripts/", "node_modules/\n*.pyc\n")
+        assert_capture_dir_ignored("transcripts/", "node_modules/\n*.pyc\n", rule=rule)
     with pytest.raises(UnprotectedCaptureDir):
-        assert_capture_dir_ignored("transcripts/", "")
+        assert_capture_dir_ignored("transcripts/", "", rule=rule)
 
-    # An artifact with no rule registered is not silently protected either way.
-    assert_capture_dir_ignored("telegram_cache/", "")
+    # Which artifacts need the guard is no longer this function's decision, and
+    # as of 2026-08-22 it is no longer a global one either: `requires_git_exclusion`
+    # answers per scope, because `event_log/` sits inside the gitignored
+    # team-member enclave and is committed to the repository in a project. A
+    # basename-keyed set could not hold both answers.
+    from pm_ai.domain.identity import ScopeKind
+    from pm_ai.domain.storage_tiers import requires_git_exclusion
+
+    assert requires_git_exclusion(ScopeKind.PEOPLE, "event_log/")
+    assert not requires_git_exclusion(ScopeKind.PROJECT, "event_log/")
+    assert requires_git_exclusion(ScopeKind.PROJECT, "transcripts/")
+    assert not requires_git_exclusion(ScopeKind.APPLICATION, "config.toml")

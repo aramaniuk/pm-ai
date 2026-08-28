@@ -17,6 +17,7 @@ from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.proposals import TerminalState, VersionConflict
+from pm_ai.storage.service import ProposalNotFound
 from pm_ai.domain.transcripts import (
     Transcript,
     TranscriptSource,
@@ -202,3 +203,41 @@ def test_proposal_and_commitment_states_never_collide(tmp_path):
 
     assert not ({s.value for s in ProposalState} & {s.value for s in CommitmentState})
     assert "staged_approval" not in {s.value for s in CommitmentState}
+
+
+def test_an_unknown_proposal_id_is_refused_by_type(tmp_path):
+    """A missing proposal is a named absence, not a bare `KeyError`.
+
+    Until 2026-08-24 this raised `KeyError(proposal_id)` — the only built-in
+    exception left in the storage service, and untested, which is how a coverage
+    sweep found it. It matters because a surface has to tell "the card the PM
+    just tapped has expired or been executed" from a dictionary miss inside the
+    writer: the first is something to say to the PM, the second is a defect.
+
+    Still a `KeyError` subclass, so catching the general case keeps working.
+    """
+    d = _daemon(tmp_path)
+
+    with pytest.raises(ProposalNotFound) as refusal:
+        d.storage.load_proposal("prop_never_staged")
+
+    assert "prop_never_staged" in str(refusal.value)
+    assert isinstance(refusal.value, KeyError), (
+        "the type must stay catchable as the general case it specialises"
+    )
+
+
+def test_transitioning_an_unknown_proposal_reports_the_same_absence(tmp_path):
+    """The read-modify-write path must not turn the absence into something else.
+
+    `transition_proposal` loads before it transitions, so an unknown id has to
+    surface as the absence rather than as a version conflict — which is what an
+    implementation that defaulted the missing row would produce, and which would
+    send an operator looking for a concurrent writer that does not exist.
+    """
+    d = _daemon(tmp_path)
+
+    with pytest.raises(ProposalNotFound):
+        d.storage.transition_proposal(
+            "prop_never_staged", ProposalState.APPROVED, expected_version=1
+        )

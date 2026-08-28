@@ -3,11 +3,11 @@ name: 'pm-ai'
 type: architecture-spine
 purpose: build-substrate
 altitude: initiative
-paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pipes-and-filters'
+paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pipes-and-filters; derivation as declared jobs over a single change-notification pipeline'
 scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, connectors, MCP skills, storage'
 status: final
 created: '2026-08-18'
-updated: '2026-08-20'
+updated: '2026-08-27'
 binds: [FR-01..FR-40, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
 sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.14.2']
 companions: ['SOLUTION-DESIGN.md']
@@ -24,7 +24,7 @@ companions: ['SOLUTION-DESIGN.md']
 | Composition root | `pm_ai.app` | Wiring, dependency injection, pipeline orchestration, daemon lifecycle. The only layer that may import every other (AD-30) |
 | Domain | `pm_ai.domain` | Entities, enumerations, state machines, the closed taxonomies (AD-27). Imports nothing from `pm_ai` |
 | Core (I/O-free) | `pm_ai.core` | Services: extraction, commitment lifecycle, proposal lifecycle, alignment/planning, scheduling policy, anchor matching |
-| Ports | `pm_ai.ports` | `ConnectorPort`, `ModelPort`, `StoragePort`, `TranscriptSourcePort`, `SkillPort`, `KeychainPort`, `SurfacePort` — protocols expressed in domain types |
+| Ports | `pm_ai.ports` | `ConnectorPort`, `ModelPort`, `StoragePort`, `ScopePathPort`, `TranscriptSourcePort`, `SkillPort`, `KeychainPort`, `CryptoPort`, `VcsPort`, `SurfacePort` — protocols expressed in domain types |
 | Inbound adapters | `pm_ai.connectors` | Per-service harvesters (GitLab, Teams, Outlook, Slack, Jira, Notion, HR) — hot-loadable plugins |
 | Outbound adapters | `pm_ai.skills` | Registry-authorized MCP skill modules — the only home of **class M** egress (AD-1) |
 | Storage adapter | `pm_ai.storage` | The single writer: markdown, SQLite, vectors, encrypted blobs |
@@ -68,7 +68,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   | **H** — Harvest | Read-only fetches from external systems | `pm_ai.connectors` | Read-only by construction — a connector that mutates is a defect, not a shortcut |
   | **F** — Model | Frontier API calls | `pm_ai.models.frontier`, via the router | Prompt data governed by the model data boundary; can cause an external effect **only** by emitting a tool call that re-enters class M |
   | **S** — Surface | Telegram outbound poll | `pm_ai.surfaces.telegram` | Delivers only to the cryptographically paired user (AD-2) |
-  | **L** — Local subprocess | whisper.cpp | `pm_ai.models.local` only | Allowlisted absolute binary path, argv list, `shell=False`. **No model output may be interpolated into an argv.** |
+  | **L** — Local subprocess | whisper.cpp; read-only local queries (`git check-ignore`, `git ls-files`) | `pm_ai.models.local` for whisper.cpp, `pm_ai.platform` for local queries — nowhere else | argv list, `shell=False`, bounded timeout, and the load-bearing one: **every argv element is supplied by this codebase, never derived from model output or from external payload text.** That — not read-only-ness — is the property holding the line; a mutating local command would be just as dangerous with a model-supplied argv and just as safe without one, which is why the constraint is on argv provenance. A read-only query additionally is not *egress*: nothing external is contacted or mutated. **Enforcement gap, stated not hidden:** `pm_ai.platform` is absent from the AD-1 AST scan's layer list, so `shell=True`, `os.system`, `eval` and `exec` are unchecked there, and `git` is located by `PATH` lookup rather than an allowlisted absolute path. See Open Risks. |
 
   The LLM core holds zero shell capability and no direct network capability. **Its only route to an external effect is class M.** That is the security property; the earlier "100% of reads and writes route through MCP" was a stricter-sounding claim that the connector, frontier, and transcription paths each contradicted.
 
@@ -78,7 +78,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** an inbound listener appearing on a public interface as a side effect of a feature
 - **Rule:** The daemon binds strictly to `127.0.0.1`. Zero public listening ports, ever. Telegram uses **outbound long-polling only** — webhooks are prohibited, because they require a publicly reachable HTTPS endpoint or tunnel. Access is restricted to cryptographically paired Telegram user IDs; unpaired senders are rejected and logged.
 
-### AD-3 — Three storage tiers; only Tier 3 is disposable `[ADOPTED — revised 2026-08-19]`
+### AD-3 — Three storage tiers; only Tier 3 is disposable `[ADOPTED — revised 2026-08-27]`
 
 - **Binds:** storage, NFR-11, FR-02, FR-37, AD-9, AD-20
 - **Prevents:** the earlier version's own contradiction — it called `event_telemetry.db` disposable while the job queue, connector cursors, and idempotency ledger lived inside it, so the documented recovery path would have silently discarded pending external writes and reset every cursor, with the AD-3 test still passing
@@ -87,25 +87,31 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   | Tier | Contents | Promise |
   | --- | --- | --- |
   | **1 — Truth** | `event_log/` segments per scope (incl. harvested telemetry per FR-27), `commitments_log.md`, coaching history, goals, rules, meeting records, and the application-scoped `disclosure.md` ledger (AD-38) | Plaintext markdown, append-only, hand-editable, git-diffable. A backup target. Bounded by FR-37 compaction, which replaces whole sealed segments rather than rewriting lines (AD-5). |
-  | **2 — Operational** | Job queue and its `PENDING_RETRY` buffer, connector cursors, executed-idempotency-key ledger, the harvest dedup set, staged proposals, key material, and `personal_analytics.db` | Durable and **not derivable from Tier 1**. Must be backed up. Losing it loses pending external writes and resets harvest position — a real consequence, not a cache miss. |
-  | **3 — Derived** | Search and commitment indexes, `vector_index/`, caches | Disposable. Rebuildable from Tier 1 with zero loss. |
+  | **2 — Operational** | Job queue and its `PENDING_RETRY` buffer, connector cursors, executed-idempotency-key ledger, the harvest dedup set, staged proposals, `config.json`, and `personal_analytics.db` | Durable and **not derivable from Tier 1**. Must be backed up. Losing it loses pending external writes and resets harvest position — a real consequence, not a cache miss. |
+  | **3 — Derived** | `event_index.db` (search), `commitment_index.db`, `vector_index/` | Disposable. Rebuildable from Tier 1 with zero loss, **by a declared job** (AD-45). |
 
   **Tiers are physically separated, not merely labelled.** The earlier version named three tiers while the job queue (Tier 2) and the search indexes (Tier 3) shared one `event_telemetry.db` file — so "rebuild Tier 3 only" was unimplementable, and the natural implementation of a rebuild (delete the file, recreate it) would have destroyed pending external writes and every connector cursor.
 
   | Tier | Artifact | Rebuild target? | Backup target? |
   | --- | --- | --- | --- |
   | 1 | markdown segments per scope, `~/.pm-ai/disclosure.md`, config | no | **yes** |
-  | 2 | `~/.pm-ai/private/operational.db` (SQLCipher) | **never** | **yes** |
-  | 2 | `~/.manager-ai/private/personal_analytics.db` (SQLCipher) | **never** | **yes** |
-  | 3 | `~/.pm-ai/private/derived.db`, `vector_index/` | yes | no |
+  | 2 | `~/.pm-ai/private/operational.db` (plaintext, `0600`) | **never** | **yes** |
+  | 2 | `~/.manager-ai/private/personal_analytics.db` (plaintext, `0600`) | **never** | **yes** |
+  | 3 | `~/.pm-ai/private/event_index.db`, `commitment_index.db`, `vector_index/` | yes | no |
 
   `pm-ai reindex` deletes and rebuilds the Tier-3 artifacts and *cannot* reach Tier 2, because Tier 2 is a different file. That is a structural guarantee rather than a careful implementation. Discarding Tier 2 is a separate, explicitly-named operation whose consequences the CLI states first.
 
   **Raw captures are outside the tier model on purpose.** `transcripts/` and `telegram_cache/` hold transient input the pipeline consumes and NFR-09 purges at 30 days. They are **not Tier 3**: Tier 3 promises *rebuildable from Tier 1 with zero loss*, and no rebuild reconstructs a recording. They are never a backup target and nothing may depend on them surviving (AD-33). The exclusion is asserted in code against the tier table rather than left implicit — an artifact absent from every set is an oversight, which is how `personal_analytics.db` came to be covered by no backup; an artifact named as excluded is a decision.
 
+  **There is a third exclusion set, and finding it proved the rule above.** `logs/` is annotated "diagnostics, not a tier" in the storage diagram, and was in *no* set — precisely the oversight this AD warns about, sitting inside the AD that warns about it. `DIAGNOSTIC_ONLY` now names it, asserted pairwise disjoint from the tier table and from `RETENTION_MANAGED`. It is deliberately **not** folded into `RETENTION_MANAGED`: a rotating diagnostic log is not a raw capture, and putting it there would place it under an NFR-09 purge promise nothing implements. So the complete statement is: every persistent artifact is in exactly one of the three tiers, `RETENTION_MANAGED`, or `DIAGNOSTIC_ONLY` — and the sets are derived from the scope model (AD-44), so an artifact cannot enter one without a declaration to derive it from.
+
   **`personal_analytics.db` is Tier 2, despite being computed.** AD-25 calls it "derived telemetry" in the ordinary sense of *calculated from something else* — which is not what Tier 3's "Derived" means. Tier 3's test is narrow: **rebuildable from Tier 1 with zero loss**. Burnout and workload trends are longitudinal and outlive their inputs, because FR-37 compaction prunes the telemetry they were computed from — so a rebuild after compaction would silently return a shorter history, not the same history. It fails the Tier-3 test and is therefore durable, backed up, and never a rebuild target.
 
   It previously had **no tier at all**: it appeared in neither the rebuild set nor the backup set, so the one artifact holding months of personal trend data was the one artifact no backup covered. Two words meaning different things — "derived" as a calculation and "Derived" as a durability class — is the same collision that split `scope` four ways.
+
+  **One index file per rebuilding job, not one file per tier `[2026-08-27]`.** The single `derived.db` split into `event_index.db` and `commitment_index.db` because a job declares its whole `outputs()` (AD-45) and two jobs cannot each own half a file — and because their owners ship at different times, so one file would have to exist before either index did. `event_index.db` is named for its principal input and also covers `rules/` and `meetings/`.
+
+  **"Caches" left the tier on the same date.** No capability asked for one, and an undefined member of the disposable tier is an invitation to put something non-rebuildable there. The entry rule is now explicit: **an artifact is Tier 3 only if a declared job can rebuild it from Tier 1 alone.** Anything that cannot belongs in another tier.
 
   **Two boundaries on the zero-loss guarantee, stated rather than implied:**
 
@@ -133,7 +139,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   So `people` is `is_personal = false` (AD-31's prohibition does not apply to it) and `is_git_committed = false` (AD-38's prohibition does apply to it). Filing it under the application scope means that scope no longer holds "no personal records", and the compensating obligation is that **`people/` is a single deletable directory**: leaving a role is one removal, not an audit. Retention beyond that is the employer's policy, not this system's to assume.
 
-### AD-5 — One writer for all persistent state
+### AD-5 — One writer for all persistent state `[revised 2026-08-27]`
 
 - **Binds:** all
 - **Prevents:** two components racing on the same file or row; half-written ledger entries
@@ -143,13 +149,25 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   - Each ledger is a directory of dated segments (`event_log/2026-08.md`). Exactly one segment is *open* and appended to; all earlier segments are **sealed and immutable**.
   - **Compaction never edits a file.** It writes a *new* summary segment, records which sealed segments it supersedes, and only then may the superseded segments be pruned. Boundedness comes from replacing whole segments, not from rewriting lines.
+  - **Compaction is the only operation that destroys Tier 1, and both halves of that are now bound `[2026-08-27]`.** The ordering above was right and incomplete: a sealed segment is deleted only after its milestone summary is **confirmed present**, because a crash between the delete and the summary loses the segment with nothing replacing it and Tier 1 means there is no source to rebuild from. The asymmetry that exposed the gap: the NFR-09 purge may delete a *raw capture* — outside the tier model, depended on by nothing (AD-33) — only after verified conversion, while compaction had a precondition of age alone for the tier defined as *"it is the source"*.
+  - **The record goes in the open segment, and names checksums.** Every compaction appends an entry to the **open** segment of the *same scope's* event log, in the ordinary entry format, naming each replaced segment with the MD5 it had when deleted and the summary that replaced it. The open segment specifically: compaction deletes only *sealed* segments, so a record written into a sealed one is deletable by the next compaction. Checksums rather than filenames alone — a filename says *a file called this was deleted*, a checksum says *this exact content was*, and it makes a restore decidable: a backup copy whose MD5 matches the record is content compaction already replaced. **A milestone summary carries forward the compaction entries of the segments it replaces**, or the audit trail is the first thing compaction erases.
   - A reader folds across segments deterministically by `(occurred_at, entry_id)` (AD-35), so the result does not depend on segment boundaries.
 
-### AD-6 — Scoped encryption, keychain-held key, debug toggle
+### AD-6 — Scoped encryption, keychain-held key, no persistent off switch `[revised 2026-08-27]`
 
 - **Binds:** storage service, NFR-08
 - **Prevents:** a future feature encrypting a markdown file "for consistency" and destroying git-diffability and hand-editability
-- **Rule:** Only these are encrypted: `operational.db` (Tier 2, SQLCipher), `personal_analytics.db` (SQLCipher), `transcripts/` **in whichever scope owns the meeting** and `~/.manager-ai/private/telegram_cache/` (envelope-encrypted files), and `config.json` (credentials). **All `.md` files in every scope stay plaintext by design** — transparency over one's own record is a product principle, not an oversight. The Tier-3 artifacts `derived.db` and `vector_index/` are unencrypted: both are rebuildable and hold indexes and embeddings rather than recoverable raw text, protected by `0600` perms and FileVault. **Encryption tracks confidentiality; the tier tracks durability, and the two are independent** — `personal_analytics.db` is encrypted because burnout and workload figures are recoverable personal facts, which the embeddings argument never covered. The master key lives in the macOS Keychain so the daemon starts unattended; raw key export/import is the documented migration path. Encryption is toggleable for local debugging (default **on**); when off the daemon must emit a CLI banner and an `event_log/` entry, and off is never the default in a fresh install.
+- **Rule:** **Exactly two artifacts are encrypted:** `~/.pm-ai/private/config.json` (credentials) and `~/.manager-ai/private/telegram_cache/` (the PM's own voice notes and dialogue state). Everything else on disk is plaintext at `0600` inside `0700`, under FileVault.
+
+  **All `.md` files in every scope stay plaintext by design** — transparency over one's own record is a product principle, not an oversight.
+
+  **Dropped from the encrypted set on 2026-08-27**, and SQLCipher with them: `operational.db` (queue state and cursors rather than record content), `personal_analytics.db`, `transcripts/` in every scope that holds them, the derived indexes, `connectors/`, and `private/people/`. Nothing encrypted is a database any more, which is why the dependency left entirely — it had no macOS wheel and would have been a source build for one file. `connectors/` holds connector configuration and implementation; anything confidentiality-critical a connector needs is in `config.json`.
+
+  **Encryption tracks confidentiality; the tier tracks durability, and the two are independent.** `config.json` is Tier 2 and encrypted; `operational.db` is Tier 2 and not.
+
+  The master key lives in the macOS Keychain so the daemon starts unattended, fetched lazily on first use so a fresh install boots without one; raw key export/import is the documented migration path. **The key must be configured before the first run that writes an encrypted artifact** — the invariant is restored by that ordering, not by an eager fetch that would refuse to boot.
+
+  **There is no persistent way to disable encryption.** No `config.toml` key, no stored debug profile, no CLI flag that survives a restart. The whole mechanism is the `PM_AI_DISABLE_ENCRYPTION` environment variable, which dies with the process — so **restarting restores encryption unconditionally**, with no expiry mechanism, no re-announcement schedule, and nothing to audit. A console warning scrolls away within minutes and a startup ledger entry is weeks old by the time anyone wonders why a credential file is readable, which is why a durable switch is not an acceptable substitute. Parsed against an explicit allowlist, never truthiness: `=0` reads to a human as *off* and must not read as *on*. Read in exactly one place, `pm_ai.platform.environment`, because two callers need the same answer — the composition root, which acts on it, and `pm-ai doctor`, which reports it. When off, the daemon emits a CLI banner and an `event_log/` entry, and off is never the state of a fresh install.
 
 ### AD-7 — One long-lived daemon; every other process is a thin client
 
@@ -167,7 +185,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** FR-02, FR-35, every connector
 - **Prevents:** per-connector schedulers competing for rate limits; each connector inventing its own event shape or applying sanitization inconsistently
-- **Rule:** Every connector implements one *behavioural* method — `harvest(since: Cursor) -> HarvestResult` — plus one declaration, `emits() -> frozenset[NormalizedEventType]`, naming the subset of AD-27's taxonomy it produces. Nothing else. A connector does only auth, fetch, and map-to-schema. A connector never runs its own thread, timer, or polling loop. `HarvestResult` carries the events, the next `Cursor`, **and the `CoverageWindow`** (AD-35): the window rides in the return type precisely so a connector cannot omit it and leave the sweeper's fail-closed guard silently unarmed. The daemon's scheduler invokes it (4h default per FR-02) and owns cursors, backoff, and rate limiting. Sanitization, dedup, indexing, and persistence happen outside the connector, uniformly. `Cursor` is **opaque to everything but its own connector** — provider-defined bytes the scheduler persists and replays verbatim, never parsed or compared by core; cross-connector ordering uses the envelope's `ingested_at` watermark, never cursor contents.
+- **Rule:** Every connector implements one *behavioural* method — `harvest(since: Cursor) -> HarvestResult` — plus one declaration, `emits() -> frozenset[NormalizedEventType]`, naming the subset of AD-27's taxonomy it produces. Nothing else. A connector does only auth, fetch, and map-to-schema. A connector never runs its own thread, timer, or polling loop. `HarvestResult` carries the events, the next `Cursor`, **and the `CoverageWindow`** (AD-35): the window rides in the return type precisely so a connector cannot omit it and leave the sweeper's fail-closed guard silently unarmed. The daemon's scheduler invokes it (4h default per FR-02) and owns cursors, backoff, and rate limiting. Sanitization, dedup, indexing, and persistence happen outside the connector, uniformly — **indexing specifically belongs to a declared job under a task manager (AD-45)**, which is who "outside the connector" means; before 2026-08-27 this clause named the work without naming an owner. `Cursor` is **opaque to everything but its own connector** — provider-defined bytes the scheduler persists and replays verbatim, never parsed or compared by core; cross-connector ordering uses the envelope's `ingested_at` watermark, never cursor contents.
 
 ### AD-10 — Connector instances are per-project
 
@@ -261,7 +279,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** the entire meeting pipeline blocking on tenant-admin consent, and being untestable without a live tenant
 - **Rule:** All transcript ingestion goes through `TranscriptSourcePort`. The primary adapter is Microsoft Graph. A **manual adapter is built from day one**: a watched folder accepting `.vtt` / `.docx` / `.txt`, plus a local-recording-and-transcribe path. The extraction pipeline must be exercisable end-to-end using only the fallback adapter. **Every ingested transcript binds to a `Meeting`** (AD-33) — to its calendar event where one exists, otherwise the drop supplies title, start, and attendees to mint the record. **A transcript is stored in its meeting's scope**, never a scope of its own: the capture cannot be more or less shareable than the event it records, so a project meeting's transcript is project-owned and a report 1:1's transcript is `people`-owned. Every scope holds its captures at the same relative path, `transcripts/`, the way each holds its own `event_log/`.
 
-  Captures are encrypted and never committed. For the project scope that means `<repo>/.project-ai/transcripts/` **excluded by a `.gitignore` rule**, because the scope around it *is* committed — so the exclusion rests on a rule rather than on a directory boundary, and a rule can go missing. **The daemon verifies the rule before writing a capture and refuses if it is absent.** Losing a transcript is recoverable, since it is transient input nothing may depend on (AD-33); publishing verbatim meeting minutes to the team's repository is not. An unbound transcript is rejected rather than allowed to mint attributed provenance from an unattributed file; the manual path is also never an auto-execute source (AD-32).
+  Captures are encrypted and never committed. For the project scope that means `<repo>/.project-ai/transcripts/` **excluded by a `.gitignore` rule**, because the scope around it *is* committed — so the exclusion rests on a rule rather than on a directory boundary, and a rule can go missing. **The daemon verifies exclusion before writing a capture and refuses if it cannot confirm it** — by asking git, not by matching the rule text, which AD-43 shows gets two of three real configurations wrong. Losing a transcript is recoverable, since it is transient input nothing may depend on (AD-33); publishing verbatim meeting minutes to the team's repository is not. An unbound transcript is rejected rather than allowed to mint attributed provenance from an unattributed file; the manual path is also never an auto-execute source (AD-32).
 
 ### AD-24 — The event ledger is domain truth and never carries debug output
 
@@ -377,7 +395,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
      **`scope` is part of the key, and the dedup set is durable.** Without the scope component, AD-38's mandated cross-scope split — one operation writing a project entry and a personal entry — has its second entry silently swallowed as a duplicate, so the rule that exists to prevent a leak instead drops the record. And because the set decides whether a re-harvest doubles a metric, it is **Tier-2 state** by AD-3's own test: not derivable from Tier 1, and required to survive a restart. An in-memory set makes idempotency true only within one daemon lifetime.
 
-### AD-35 — Two clocks, never mixed; and absence of telemetry is not evidence `[NEW]`
+### AD-35 — Two clocks, never mixed; and absence of telemetry is not evidence `[revised 2026-08-27]`
 
 - **Binds:** AD-9, AD-3, FR-26, FR-33, FR-34
 - **Prevents:** a verifier comparing `occurred_at` to a due date while a sweeper reasons in `ingested_at` — so a laptop asleep over a weekend fires irreversible "why isn't this done" messages about work already delivered — and a ledger that folds by file order producing different commitment states after a rebuild
@@ -387,6 +405,8 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   - The two are never substituted for one another. An absent or implausible `occurred_at` (future-dated, or preceding its meeting or repository epoch) is **flagged**, not silently backfilled from `ingested_at`.
   - **Ledger folding is deterministic**: entries fold by `(occurred_at, entry_id)`, a total order stable across rebuilds. Never file order — otherwise `pm-ai reindex` changes commitment states while AD-3's test still passes.
   - **Coverage is recorded.** Every harvest returns its `CoverageWindow` in `HarvestResult` (AD-9), and the commitment sweeper must not declare `BROKEN` across a window it has no coverage for. Silence from a sleeping laptop is missing data, not evidence of a broken promise — and FR-26's nudges are irreversible, so this must fail closed.
+  - **Two silences are distinguishable, and collapsing them was a defect.** A sleeping laptop made **no harvest attempts at all** — no attempt rows, no failures, genuinely missing data: `UNKNOWN`, fail closed. A connector with a dead token **did attempt**, and the attempts are in the log marked failed. That is not missing data; it is a machine reporting that it is broken. So the verdict set carries **`ERROR`** — harvesting failed for a reason a human must clear: refresh the token, re-authenticate, fix the link or the configuration. `ERROR` is never fail-closed patience and never a coverage gap; it is surfaced. Without it a permanently dead connector read forever as `UNKNOWN`, which looks like waiting.
+  - **`ERROR` is a `CommitmentState`, and the input that produces it is required** (`pm_ai/domain/lifecycle.py`, 2026-08-28). It is the sixth member, alongside `UNKNOWN`, and `is_verdict` marks both as *epistemic*: they report that the system cannot answer, and why, rather than making a claim about the promise. Neither is terminal — both clear when the world or the machine changes. `evaluate_commitment` takes `harvest_failed` with **no default**, on AD-9's discipline: a default of `False` would be the *safe* verdict and would silently restore the indefinite waiting `ERROR` exists to end, which is the worst kind of default — correct-looking and self-defeating. **Order is fixed**: `covered` is consulted first, so a window that was harvested yields a real verdict and a connector breaking afterwards does not retract it. `ERROR` competes with `UNKNOWN` alone, never with `BROKEN`.
   - **The coverage question is asked in one clock, and it is `ingested_at`.** A `CoverageWindow` describes what the daemon did, so its operands are local. A commitment's deadline is `occurred_at`, so comparing the two directly re-introduces exactly the mixed-clock bug this AD forbids. The rule: a commitment overdue at `occurred_at = T` is covered only if every connector instance that could evidence it has a window enclosing **the ingestion interval in which a T-dated event would have arrived** — deadline plus the instance's harvest cadence and the provider's own publication lag. Absent a stated lag, the instance is treated as not covering, because `UNKNOWN` is the safe verdict and `BROKEN` is the irreversible one.
 
 ### AD-36 — pm-ai's own writes are never evidence `[NEW]`
@@ -432,14 +452,14 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   `event_log/` routing is therefore unambiguous: an entry belongs to the scope that owns its subject, and an entry that would need two scopes is two entries.
 
-### AD-39 — Credentials have a lifecycle, and its failure is never silent `[NEW]`
+### AD-39 — Credentials have a lifecycle, and its failure is never silent `[revised 2026-08-27]`
 
 - **Binds:** every connector, AD-9, AD-18, AD-26, AD-35, FR-02, FR-35
 - **Prevents:** a whole dimension nobody owned. Seven OAuth-bearing services are in scope, AD-9 forbids a connector its own thread or loop, and nothing said how a token gets refreshed or how the user re-consents — so each connector would invent it. Worse, an expired credential and a sleeping laptop are **indistinguishable** under AD-35: both produce no telemetry, both resolve to `UNKNOWN`, and a permanently dead connector reads forever as "no coverage yet" instead of raising its hand
 - **Rule:** Credentials are storage-held and daemon-refreshed:
   - **Acquisition and refresh belong to the daemon**, never to a connector. The composition root (AD-30) retrieves credentials from encrypted storage and injects them; refresh runs on the scheduler like any other job (AD-20). A connector never persists, refreshes, or prompts for a credential.
   - **Re-consent is a Proposal** (AD-13). Interactive re-authorization cannot happen inside a background harvest, so a connector needing human consent raises it as a staged item on both surfaces rather than blocking, failing silently, or dying.
-  - **A connector instance carries an explicit health state** — `healthy | degraded | needs_consent | failed` — distinct from its coverage. **Absence of telemetry from an unhealthy instance is never reported as a coverage gap**, and never contributes an `UNKNOWN` that looks like patience. `pm-ai doctor` and the briefing both surface any instance not `healthy`.
+  - **A connector instance carries an explicit health state** — `healthy | degraded | needs_consent | failed` — distinct from its coverage. **Absence of telemetry from an unhealthy instance is never reported as a coverage gap**, and never contributes an `UNKNOWN` that looks like patience — it contributes **`ERROR`** (AD-35). This AD already forbade the coverage-gap reading but named no verdict to report instead, which left `UNKNOWN` as the only available answer: the one that looks like waiting. `pm-ai doctor` and the briefing both surface any instance not `healthy`.
   - **Secrets never leave the encrypted store in a durable form**: not into `event_log/`, not into diagnostics, not into a model prompt, not into a `Cursor`.
 
 ### AD-40 — The system may interrupt only on a declared occasion `[NEW]`
@@ -497,11 +517,126 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   5. **The Performance Index is application-scoped and labels its own confidence.** It describes the assistant's own behaviour, so it lives beside the disclosure ledger (AD-38) rather than in any per-scope log — never team-facing, and answerable from one file. Each component declares whether it is **measured** or **estimated**: predictive accuracy and recommendation resonance are measured against outcomes pm-ai did not author (AD-36), while *saved managerial hours* is an estimate and must be rendered as one. An index that presents an estimate as a measurement is a system marking its own homework.
 
-  6. **pm-ai does not generate skill code.** Not to execute, not to test, and not as a diff for review — producing a diff *is* authoring, and a rule that forbids authoring while permitting a reviewable patch contradicts itself, which is how a builder ends up reading the second clause as permission. The registry stays a first-party allowlist (AD-18); class L stays whisper.cpp alone (AD-1).
+  6. **pm-ai does not generate skill code.** Not to execute, not to test, and not as a diff for review — producing a diff *is* authoring, and a rule that forbids authoring while permitting a reviewable patch contradicts itself, which is how a builder ends up reading the second clause as permission. The registry stays a first-party allowlist (AD-18). Class L admits nothing model-authored: it was widened on 2026-08-22 to cover read-only local queries in `pm_ai.platform` (AD-1, AD-43), and the bar this clause sets — an explicit AD-1 amendment — is what that was. What stays closed is the part this clause is about: **no argv anywhere in class L is derived from model output.**
 
      What the loop may do instead is **name the gap in prose**: *"a skill that closed stale MR threads would have saved eleven manual approvals this month"*, citing the telemetry that motivates it. A human decides whether to write it, and writes it. The observation is the useful part; the code was never the part only a model could supply.
 
      Generating and running code — the "local sandbox" of the original framing — is the exact capability AD-1 and AD-16 exist to deny, and it is not made safe by being called a sandbox: what is admitted either way is a model-authored program on the PM's machine, holding the PM's credentials.
+
+### AD-43 — Ask version control what it tracks; being unable to ask is a refusal `[NEW]`
+
+- **Binds:** AD-23, AD-38, **AD-19**, FR-03, FR-08, NFR-09, every capture write
+- **Prevents:** a guard that reports *protected* for a directory git actually tracks — worse than no guard, because it is trusted. AD-23 requires the daemon to verify the `transcripts/` gitignore rule before writing a capture, and the obvious reading of that is to look for the rule in `.gitignore`. Three cases verified against real git show why that cannot work:
+
+  | `.gitignore` | git | a text check |
+  | --- | --- | --- |
+  | the rule, then `!/.project-ai/transcripts/` | **tracks** | reports protected |
+  | `.project-ai/` — a parent exclude | ignores | reports unprotected |
+  | the rule, directory committed earlier | **tracks** | reports protected |
+
+  The third is undetectable by *any* text check: a `.gitignore` rule does not untrack a path already in the index. Two of the three publish verbatim meeting minutes into the employer's repository, which AD-23 calls unrecoverable.
+
+- **Rule:** exclusion is answered by **git itself** — `check-ignore` for the rules, `ls-files` for index state — behind `VcsPort`, with the adapter in `pm_ai.platform` per AD-1 class L. Any inability to consult it (not a repository, binary absent, unexpected exit, timeout) **refuses the write**. Unknown is not permission.
+
+  The verdict carries **two independent facts**, `ignored` and `tracked`, never one, because they call for two different repairs — add a rule, versus untrack what is already committed.
+
+  The reason is *not* that collapsing them re-opens the third failure: `check-ignore` consults the index by default, so a one-fact verdict would fail **closed** there. The real hazard is **`--no-index`**, which answers about the rules alone and would report a committed capture directory as protected. It is therefore never passed. `pygit2` is unusable for the same reason: libgit2's ignore check has permanent `--no-index` semantics with no flag to disable them.
+
+  **It is a blocking call inside the single writer.** `git` is spawned synchronously with a bounded timeout on the path that writes a capture, so under AD-19 it is I/O on the one asyncio loop — the carve-out AD-19 grants covers CPU/GPU-bound model work, not this. Acceptable because a capture write is already user-initiated and rare, and because the guard must complete *before* anything is created; unacceptable if a caller ever writes captures in a loop, which is the condition to revisit on.
+
+  A trailing slash is load-bearing. For a path that does not yet exist git answers *not ignored* for `…/transcripts` and *ignored* for `…/transcripts/`, and every first capture write concerns a directory that does not exist yet — so the naive spelling refuses every correctly configured repository until someone creates the directory by hand. Fail-closed, so it presents as the feature not working rather than as a leak, which is why nothing would have caught it in production.
+
+### AD-44 — The scope model is domain data; a path is per-scope, a durability is global `[revised 2026-08-27]`
+
+- **Binds:** AD-3, AD-4, AD-6, AD-23, AD-38, every storage path
+- **Prevents:** two units disagreeing on where an artifact lives or what durability it carries — and specifically the collision where one artifact *name* means two different files. `persona.md` exists in `~/.manager-ai/rules/` and in `<repo>/.project-ai/rules/` with different content; `daily_dashboard.md` exists in both `memory/` directories. A layout keyed by name cannot represent either, so this is a correctness ceiling rather than a matter of taste.
+- **Rule:** the four per-scope layouts live in `pm_ai.domain.scope_model` as literal trees of three node types:
+
+  | Node | Means | Constraint |
+  | --- | --- | --- |
+  | `File` | a declared artifact | carries its `Tier` as a **required** field, so a missing tier is a construction error rather than a late assert |
+  | `Dir` | structure whose members are declared | may not be empty — an empty one is a `Collection` |
+  | `Collection` | structure whose members are named at runtime | declares **no** children |
+
+  `ARTIFACT_TIER`, `BACKUP_TARGETS`, `REBUILD_TARGETS`, `RETENTION_MANAGED` and `DIAGNOSTIC_ONLY` are **derived** from the trees, never maintained beside them.
+
+  **The two halves have different grains, and the difference is a real constraint rather than an oversight.** A *path* is per-scope: `persona.md` resolves differently in the personal and project trees, which is the collision this AD exists to fix. A *durability* is keyed by basename and therefore **global**: one basename carries one tier everywhere, and declaring the same name with two different tiers refuses at import. So a project `daily_dashboard.md` cannot be Tier 3 while the personal one is Tier 1, even though each choice is defensible under AD-3 alone. Both are Tier 1 today so nothing is lost; if a per-scope durability is ever needed, the tier tables have to be re-keyed on `(scope, path)` first, and that is a change to this AD rather than a local workaround. `pm_ai.platform.paths` anchors only: the two factories, subject-id validation, `resolve()` — the scope-root *directory names* moved into `pm_ai.domain.scope_model` on 2026-08-27, so the platform anchors roots it no longer names.
+
+  **A third grain, forced by a real collision: encryption and git-exclusion answers are keyed `(scope, key)`.** `meetings/` and `event_log/` exist in several scopes and disagree on git exclusion, so a single global slot per basename must be wrong for at least one scope. Tier stays global by basename, as above; confidentiality and version-control exclusion are per-scope. Two of the three grains are now per-scope and one is global, which is a distinction to state rather than a symmetry to restore.
+
+  `Collection` is the load-bearing member. It states that the contents of `skills/`, `logs/`, `connectors/`, `event_log/`, `meetings/`, `transcripts/`, `vector_index/`, `telegram_cache/` and `people/` cannot be enumerated — which makes absence **a stated decision rather than an omission**, and is what lets the trees be diffed line-by-line against `scope-model.md`. The layout that preceded this declared 14 artifacts against 34 leaves named in that companion, and nobody could tell.
+
+### AD-45 — Derived state is produced by declared jobs; a task manager owns the inventory `[NEW]`
+
+- **Binds:** AD-3, AD-5, AD-9, AD-19, AD-20, AD-44, AD-46, FR-37, CAP-23, CAP-24, CAP-27, CAP-34
+- **Prevents:** a layer the spine assumed and never assigned. AD-9 says "sanitization, dedup, **indexing**, and persistence happen outside the connector, uniformly" without naming what indexes; the pre-written suite already expects a `pm_ai.core.scheduler` no unit builds; and `app/pipelines.py` holds `run_harvest` and `run_transcript_ingestion` with **no production caller** — only the slice tests drive them, which is the definition of a job without a job runner. Left unassigned, three separate stories each build a third of a scheduler, or nobody builds it and the indexes CAP-23, CAP-24, CAP-27 and CAP-34 depend on never exist
+- **Rule:** every derived artifact is produced by a declared job, and nothing enters Tier 3 that a job cannot rebuild from Tier 1 alone.
+
+  ```
+  inputs()  -> frozenset[ArtifactRef]     what makes this job stale — NOT what it opens
+  outputs() -> frozenset[ArtifactRef]     what it creates or updates
+  run(ctx)  -> JobResult                  one task, no orchestration
+  ```
+
+  **The dependency graph is derived, never configured.** One job's `outputs()` intersecting another's `inputs()` *is* the edge. A job never enqueues its successor: it declares what it produced and the task manager decides what that makes stale. Same principle as this document's AD-44 deriving tier sets from node declarations, and it fails the same way if abandoned — two structures that can disagree.
+
+  **`inputs()` declares staleness, not file access.** A job that opens a file for reference has not thereby acquired a trigger. The commitment lifecycle job reads `commitment_index.db` to list open commitments and must **not** declare it: that edge means *re-run me when the index changes*, which can never fire (Tier 3 is unwatched, AD-46) and is not what makes the job stale — elapsed time is. Blur the two meanings and the derived graph stops describing when things run, which is the one thing it exists to describe.
+
+  **Three trigger kinds.** A change to a watched artifact (AD-46); a schedule, for work no file change can announce — a deadline passing writes nothing; and a **direct request from pm-ai's business logic** into the task manager, which is what `pm-ai reindex` uses. Trigger kind and job identity are independent, and that is what makes a request safe: a requested job whose inputs are unchanged does no work, because staleness is the stored per-entry checksum against the file (AD-46) rather than the word of whoever asked.
+
+  **Every job is a row in the durable queue** (AD-20), never an in-memory timer. **A resource shared by several jobs is reached through one accessor** — `CommitmentLog`, `EventLog`, `MeetingRecords` — each performing its I/O through the single writer (AD-5) rather than touching files, because three jobs parsing one Markdown file three ways is three chances to disagree.
+
+  **The task manager enqueues direct consumers and builds no topological sort.** Derived, not estimated: every job either produces Tier 1 and is woken by a schedule or an external capture, or produces Tier 3 and is a **leaf**, since nothing follows an unwatched index. No chain exceeds one job-to-job edge. **Depth is deliberately not enforced in code**, but a job must not write an artifact that re-triggers it, or it spins forever. Compaction is one predicate from that shape already — it reads ageing `event_log/` segments and writes summary segments back into `event_log/` — and is saved only by being schedule-triggered. Making it event-driven feeds it to itself.
+
+### AD-46 — One change-detection pipeline: OS filesystem events behind a port `[NEW]`
+
+- **Binds:** AD-3, AD-5, AD-19, AD-26, AD-44, AD-45, AD-47
+- **Prevents:** two notification pipelines answering one question. They can disagree, each needs its own tests, and a job gets triggered twice or not at all depending on which fired
+- **Rule:** derived state is invalidated by **system-wide filesystem notifications and nothing else**. pm-ai publishes no change events from its own write path.
+
+  The argument for write-path events was true and insufficient: pm-ai is the single writer (AD-5), so its own writes are already known — but Markdown is hand-editable **by design** (AD-3, Tier 1), so write-path events cover only some of the writes and would have needed a second mechanism beside them. The OS sees the hand-editing PM and the daemon with one mechanism.
+
+  **Watching is an OS API, so it sits behind `FileWatcherPort`** with its adapter in `pm_ai.platform` (AD-26), beside the keychain, the clock, git and the environment. The task manager consumes the port and never imports the watching library, which is what keeps a macOS FSEvents backend from becoming a fact about the core.
+
+  **What may be watched:** Tier-1 and `RETENTION_MANAGED` artifacts only. Tier 1 alone is too strict — `transcripts/` is `RETENTION_MANAGED` and must be watched. The bound is a **permission, not a selector**: an artifact is watched because a job declares it in `inputs()`; the tier rule says which are eligible. What it excludes is **Tier 3**, which is what stops an indexing job re-triggering itself by writing its own output.
+
+  **One watcher owns each watched artifact; one watcher may cover several.** The map is a partition, never an overlap, so a change cannot arrive twice by two routes or fall between two watchers that each assumed the other had it. A watcher then enqueues **every** job declaring that artifact as an input — `event_log/` and `meetings/` each feed two. **The task manager owns that map and derives it from the union of all jobs' `inputs()`; a job never creates a watcher.** Watchers created per job would give `event_log/` two owners, each unit believing it held the only one, which violates the partition by construction rather than by mistake.
+
+  **A recursive watch carries an explicit exclusion list, and `transcripts/temp/` is its first member.** Nobody declaring it in `inputs()` is not protection: a recursive watch sees subdirectories whether a job asked for them or not, and a watch covering the staging directory (AD-47) would hand transcript processing a file that is still growing — the exact failure staging prevents.
+
+  **Boot reconciliation closes the one gap the pipeline cannot.** A stopped daemon missed every write made while it was down and no notification is coming, so the daemon reconciles **every watched path at boot** — the stored per-entry MD5 against the file, never mtime, which is untrustworthy for exactly the class of writes this scan exists for: a restore from backup, a clock change, or an editor that preserves mtime — and enqueues a job per path that moved. Not periodic: a periodic sweep would be the second pipeline this AD excludes. Replay from a persisted FSEvents id is rejected for the same reason one level down — a backend-specific second code path answering the question the boot scan already answers. **Attach the watcher before scanning**, or a write landing between the scan finishing and the watcher attaching is lost silently; in that order the overlap is duplicate work, which costs nothing because a job rebuilds from its declared inputs.
+
+  **Every index entry stores the MD5 of the source file it derived from, inside the index itself.** Per entry, not per index: group entries by source path, compare stored against current, and the re-index unit is **one source file**. **For an append-only artifact the unit of comparison is the whole file**, and re-indexing replaces that file's entries: an append changes the file's checksum, so every entry derived from that segment is stale together. Storing per-record offsets to append incrementally is an allowed optimisation and must not change what a rebuild produces, or AD-3's zero-loss guarantee means two different things in two indexes. It is also the only way a source **deleted** while the daemon was down is detectable at all — the index holds the set of paths it derived from, so a path with entries and no file gets its entries dropped. Never in `operational.db`: Tier 2 survives the Tier-3 drop `pm-ai reindex` performs, so a rebuilt index would inherit checksums for files it never read and skip them. MD5 here is a **change-detection claim only** and must never be read as integrity or authenticity.
+
+  **One function computes that checksum, over the raw bytes as stored, with no normalisation of any kind.** Three components need the number — the indexing job that writes an entry, the boot reconciler that compares, and the shared accessor that owns reads of the file (AD-45) — and if any of them normalises line endings or whitespace while another does not, they disagree on every file forever: the reconciler finds a mismatch at every boot and re-indexes the whole tree, permanently, while each unit passes its own tests. `pm_ai/core/jobs.py` already states the same discipline for idempotency keys — *"two components computing the key must agree byte-for-byte, so the encoding is pinned here rather than left to whoever calls first."*
+
+  **A coalescing window per watched path is efficiency, not correctness** (AD-47 removes the correctness case). Appends need whole-record parsing; bursts need queue-level deduplication on `(job, artifact)` using the idempotency key AD-20 already requires. A window survives only against external editors that rewrite in place, where the worst case is one wasted indexer pass.
+
+### AD-47 — A write becomes visible only when it is complete `[NEW]`
+
+- **Binds:** AD-5, AD-6, AD-19, AD-23, AD-43, AD-45, AD-46, NFR-08
+- **Prevents:** two failures with one cause. A crash mid-rotation truncating `config.json` — which AES-GCM makes *unreadable* rather than partly readable, losing every connector credential — and, once AD-46's watcher exists, a job triggered on a capture that is still growing, appending a meeting summary and its commitments to append-only ledgers and then appending both again when the file completes, with nothing to distinguish the two and no undo, because AD-5 forbids rewriting a ledger
+- **Rule:** completeness is **never inferred from elapsed time**. No debounce, delay, or settle-detection is load-bearing anywhere. Three write shapes, three answers:
+
+  | Shape | Artifacts | Rule |
+  | --- | --- | --- |
+  | **append** | `event_log/` segments, `commitments_log.md` | cannot be atomic — rename means rewriting a ledger (AD-5) — and does not need to be: **a record without its terminating newline is not a record** |
+  | **exclusive create** | captures in `transcripts/` | stage in `transcripts/temp/`, `fsync`, **`os.link`** to the final name, unlink the temp, `fsync` the directory |
+  | **whole-file replace** | `config.json` | stage in the same directory at `0600`, `fsync`, **`os.replace`** |
+
+  **`link` for captures and `replace` for everything else, and the difference is the point.** Both are atomic; they differ on a taken name. `rename` overwrites silently, which for a capture means splicing two recordings and making AD-23's refusal unreachable. `link` fails with `EEXIST`, so exclusivity stays kernel-enforced exactly as `O_CREAT|O_EXCL` made it. For `config.json` the opposite is wanted: rotating a token *must* overwrite, and refusing a taken name would be the defect.
+
+  **AD-43's guard is asked about the *final* capture directory, before staging, and staging never re-asks.** Asking about `transcripts/temp/` instead is the more literal reading and the wrong one: the two answers can differ, and a `.gitignore` negation line re-including a subdirectory is exactly the case AD-43's rationale calls out. One question, about the directory the capture will live in.
+
+  **`transcripts/temp/` is a declared node, not a path the writer composes** (2026-08-28). A namespace of `transcripts/` in all three capture-holding trees — the `skills/telemetry/` shape — carrying `RETENTION_MANAGED`, plaintext, gitignored. Two packages need the name: `pm_ai.storage` stages there and AD-46's watch excludes it, and a literal shared by two packages with no declaration behind it is the second copy of the layout AD-4 warns about. The plaintext flag is load-bearing rather than tidy: `is_encrypted` fails closed on an undeclared path, so an undeclared staging directory would seal the staged bytes and `link` would publish ciphertext under a name every reader treats as plaintext. **A stale staged file is cleaned by the NFR-09 purge and nothing else** — no startup sweep, since it owns no capture name and blocks no retry.
+
+  **`transcripts/temp/` sits inside the capture directory deliberately.** The AD-43 gitignore rule is a *directory* rule, so the staging area is already excluded from version control with no second rule to forget; it is on the same filesystem, which `link` requires; and it is excludable from AD-46's watcher wholesale rather than by name filter.
+
+  Staging also closes a hole no exception handler can: a partly-written capture is currently unlinked in an `except` block, which does nothing for `SIGKILL` or a power loss — after which a zero-length file owns the name and every retry, *including the one carrying the content*, is refused as a duplicate. Under stage-then-link the final name is never claimed until the content is complete, so there is nothing to clean up and nothing to block the retry.
+
+  **Every raw write loops.** `os.write`'s return value is never discarded; a short write silently truncates, which for a sealed file is total unreadability.
+
+  Where `link` is unsupported — exFAT, some network mounts, reachable only through an enrolled project repository and never through the two home-directory scopes — fall back to **check-then-rename** rather than refusing to record the meeting. Exclusivity then rests on writer serialization (AD-5, AD-19) instead of the kernel, which covers the real case: a duplicate name arrives as a later retry, not a concurrent write. Detect by attempting the link and catching the error, never by inspecting filesystem type.
 
 ## Consistency Conventions
 
@@ -510,7 +645,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 | Naming — entities | `Commitment`, `CoachingCommitment`, `CareerGoal`, `Proposal`, `NormalizedEvent`, `Meeting`, `Transcript`, `ConnectorInstance`, `Cursor`, `HarvestResult`, `Actor`, `SourceRef`, `TargetRef`, `Verb`, `DataScope`, `SkillPermission`, `Skill`, `Job`. **No bare `Scope`** — the word meant four things and now names none of them (AD-18) |
 | Scope kinds | `application`, `personal`, `project`, `people` (AD-4). `is_personal` is true for `personal` **only**; `is_git_committed` for `project` only. A scope kind is never inferred from a path, and a project named `personal` satisfies neither |
 | Naming — files/modules | `snake_case.py`; connectors as `pm_ai/connectors/<service>.py`; skills as `pm_ai/skills/<verb>_<object>.py` |
-| Naming — ports | `<Noun>Port` protocol in `pm_ai/ports/`; adapters named `<Service><Noun>Adapter` |
+| Naming — ports | `<Noun>Port` protocol in `pm_ai/ports/`. A **service-backed** adapter is named `<Service><Noun>Adapter`; an adapter with no service behind it is named for what it is (`ScopePaths`, `GitVcs`), because `ScopePathsAdapter` names a service that does not exist |
 | Identifiers | Prefixed ULIDs — `cmt_`, `prp_`, `evt_`, `job_`, `skl_`, `goal_`; sortable by creation time; never reused. These are **surrogates**: deduplication and joins use the natural key `(source_system, source_ref)` (AD-34) |
 | Dates & times | ISO-8601 with explicit offset, stored UTC, rendered local at the surface only. `occurred_at` governs domain reasoning, `ingested_at` operational reasoning; neither substitutes for the other (AD-35) |
 | Event envelope | Every `NormalizedEvent` carries `scope` (`DataScope`), `type` (closed enumeration, AD-27), `source_ref` (AD-34), `actor` (resolved `Actor`, AD-34), `occurred_at` + `ingested_at` (never interchangeable, AD-35), `payload` (the shape registered for its type, AD-27), `authored_by` ∈ `{external, pm_ai, unknown}`, defaulting to `unknown` (AD-36). **No `id` field** — the `evt_` ULID surrogate is minted by storage at persist; a connector that minted one would double-count every re-harvest (AD-34) |
@@ -520,7 +655,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 | Errors | Typed exceptions from `pm_ai.core.errors`; adapters translate external failures into domain errors at the boundary; no external SDK exception escapes an adapter |
 | Retries | Exponential backoff with jitter, owned by the scheduler and job queue — never hand-rolled inside a connector or skill |
 | Concurrency | Proposal and Commitment transitions are versioned CAS; conflict means reload-and-re-evaluate, never blind retry. Mutations on one external entity serialize by `target_ref` (AD-37) |
-| Clocks | No component reads the ambient clock. `now` is injected by the composition root (AD-30) — AD-35's coverage windows are a fail-closed guard, and a guard that cannot be tested deterministically cannot be trusted |
+| Clocks | No component reads the ambient clock. `now` is injected by the composition root (AD-30) — AD-35's coverage windows are a fail-closed guard, and a guard that cannot be tested deterministically cannot be trusted. **Held in `pm_ai.storage` as of 2026-08-22**, where the injected clock also selects the monthly segment filename, so segment naming is deterministic too; a non-UTC or naive clock is refused rather than silently producing a wrong-month segment. **One exception outstanding:** `pm_ai/connectors/gitlab.py` still carries an ambient default for `now`, which the composition root always overrides — unreachable in practice, false as a blanket claim. Closing it needs `kw_only` on that dataclass |
 | Config | TOML under `~/.pm-ai/`; secrets never in TOML — only in the encrypted `config.json` |
 | Logging | Structured JSON to `~/.pm-ai/logs/` (rotating) for diagnostics; `event_log/` segments for domain truth (AD-24); `~/.pm-ai/disclosure.md` for frontier-call provenance and cost (AD-38). Three destinations, no overlap |
 | Model calls | Always via `ModelPort` with an explicit `task_class` argument; a call without a declared task class is a defect |
@@ -539,20 +674,22 @@ recently as this revision. The code owns this table once it exists; a row marked
 | --- | --- | --- |
 | Python | 3.13 (3.14 is the upgrade path) | Must be a **uv-managed** interpreter — see the extension-loading prerequisite below |
 | uv | latest | Install with `uv tool install --managed-python` |
-| anthropic (Python SDK) | **pin exactly** (`0.124.0` current), `[mcp]` extra | Never float: `tool_runner` is a **beta** surface and AD-16 makes it load-bearing for the execution firewall. The extra pulls a second web stack including its own HTTP client; budget for it |
+| anthropic (Python SDK) | **`==1.2.0`**, `[mcp]` extra — pinned 2026-08-28 | Never float: `tool_runner` is a **beta** surface and AD-16 makes it load-bearing for the execution firewall. Verified by introspection at the pin, not assumed: `client.beta.messages.tool_runner` **present** (and still beta-only — absent from `client.messages`), `mcp<3,>=1.0` behind the extra, and `temperature`/`top_p`/`top_k` **removed** from `messages.create`. That removal is why 1.2.0 beats the 0.124.0 the lockfile had resolved: the Claude 5 API already rejects those three with a 400, so the older SDK is the riskier one — it accepts parameters the API refuses. The extra pulls `httpx2>=2`, the second web stack this row has always warned about |
 | python-telegram-bot | 22.8 | Install **without** the `[job-queue]` extra — it embeds a second scheduler |
 | Ollama | latest | Server-side residency is configured by the daemon, not by AD-19 alone |
 | Ollama Python client | `ollama` (pin at build time) | Was previously unstated |
 | Local parsing model | **an 8B-class instruct model at `Q4_K_M`, selected in Phase 1** | Verified candidates: `llama3.1:8b` (4.9 GB), `qwen3:8b`. **Not** `llama3.3` — it ships 70B only |
 | Embedding model + dimension | Phase 1 | Must be pinned before the first index is written; a change is a reindex event |
 | whisper.cpp | v1.9.x, `small.en`, **Metal only** | Core ML deferred — see below |
-| SQLCipher via `sqlcipher3` | 0.6.2 | **Not** `sqlcipher3-binary`, which publishes Linux-x86_64 wheels only |
+| ~~SQLCipher via `sqlcipher3`~~ | — | **Removed 2026-08-27.** Nothing encrypted is a database any more (AD-6), so the one artifact keeping it — `personal_analytics.db` — no longer needs it. It had no macOS wheel (`sqlcipher3-binary` publishes Linux-x86_64 only), meaning a source build on the one platform v1 targets, for one file. |
+| `watchdog` (FSEvents observer) | **`==6.0.0`**, verified on PyPI 2026-08-27, declared 2026-08-28 | AD-46's `FileWatcherPort` adapter. Latest release is 2024-11-01, so ~21 months without one — a standing currency risk of the same shape as `sqlite-vec` below, though a far smaller surface. macOS FSEvents and kqueue backends; requires Python ≥3.9 against this project's ≥3.13. AD-46 deliberately does not depend on historical replay from a persisted event id, so no backend-specific capability is load-bearing here. |
 | sqlite-vec | `==0.1.9` (exact) | Pre-1.0; the `vec0` on-disk format is not frozen. Single-maintainer, last commit 2026-05-18, `0.1.10` alpha since April — a standing supply risk under a load-bearing retrieval path (AD-22) |
 | FastAPI | 0.141.1 | |
 | uvicorn | 0.52.4 | |
 | keyring (macOS Keychain backend) | 25.7.0 | macOS 11+; needs a `universal2` interpreter |
 | Scheduler | in-house asyncio scheduler | APScheduler 3.11.3 is the fallback if the in-house one proves thin |
 | Claude models | `claude-opus-5` (coaching, research), `claude-sonnet-5` (briefings, drafts, inquiry) | |
+| `git` CLI | any modern version; verified against 2.50.1 (Apple Git-155) | **A hard runtime dependency of the capture write path** (AD-43), not a developer convenience. Located by `PATH`. `pm-ai doctor` must probe it, since its absence refuses every capture with no other symptom. A library binding is *not* substitutable: libgit2/`pygit2` answer the ignore question with permanent `--no-index` semantics, which reports an already-committed capture directory as protected |
 
 ### Integration prerequisites
 
@@ -587,7 +724,9 @@ each fails in Phase 1 if ignored.
 Thinking is **on by default across the Claude 5 family — Opus 5 and Sonnet 5
 alike**, and `max_tokens` caps thinking plus response text together, so a route
 sized tightly around its answer will truncate. `temperature` / `top_p` / `top_k`
-are rejected (400). Assistant prefill is rejected; use `output_config.format` for
+are rejected (400) — and since the `==1.2.0` pin the SDK no longer accepts them
+either, so the mistake now fails at the call site rather than as a 400 in
+production. Assistant prefill is rejected; use `output_config.format` for
 structured output. `output_config.effort` controls depth.
 
 **Both hazards below apply to Sonnet 5 as well as Opus 5.** An earlier revision
@@ -634,7 +773,9 @@ graph TB
     end
     subgraph Daemon["pm-ai daemon (launchd, 127.0.0.1)"]
         API[Loopback HTTP API + token]
-        SCHED[Scheduler + job queue]
+        SCHED[Task manager<br/>job inventory + durable queue]
+        WATCH[FileWatcherPort adapter<br/>OS filesystem events]
+        JOBS[Derivation jobs<br/>declared inputs/outputs]
         CORE[Core domain services]
         SAN[Sanitization filter]
         POOL[Bounded worker pool]
@@ -650,6 +791,12 @@ graph TB
     CLI --> API
     API --> CORE
     SCHED --> CORE
+    SCHED --> JOBS
+    JOBS --> STORE
+    WATCH -->|"change to a watched Tier-1<br/>or RETENTION_MANAGED path"| SCHED
+    FSW[("Markdown truth<br/>+ captures")] -.observed by.-> WATCH
+    STORE --> FSW
+    PM(("the PM<br/>hand-editing")) -.-> FSW
     SCHED --> CONN[Connector adapters]
     CONN --> SAN
     SAN --> CORE
@@ -673,21 +820,21 @@ graph LR
         A2["projects registry — T1"]
         A3["disclosure.md — T1<br/>frontier provenance + cost (AD-38)"]
         A4["logs/ — diagnostics, not a tier"]
-        A5["private/operational.db — T2, SQLCipher<br/>jobs, cursors, executed keys, proposals"]
-        A6["private/derived.db + vector_index/ — T3<br/>plaintext, rebuildable"]
-        A7["private/config.json — enc<br/>credentials only"]
+        A5["private/operational.db — T2, plaintext 0600<br/>jobs, cursors, executed keys, proposals"]
+        A6["private/event_index.db + commitment_index.db<br/>+ vector_index/ — T3, plaintext<br/>rebuilt by declared jobs (AD-45)<br/>each entry stores its source MD5 (AD-46)"]
+        A7["private/config.json — ENCRYPTED<br/>credentials only — one of two"]
         A8["private/people/&lt;person&gt;/ — PEOPLE scope kind, enc<br/>dossiers, CareerGoals, FR-30 metrics,<br/>1:1 meetings + their transcripts/<br/>not personal · not committed · deleted on role change"]
     end
     subgraph PERS["~/.manager-ai/ — sovereign personal scope"]
         P1["rules/ — T1, plaintext md"]
         P2["memory/: goals, coaching, dashboard,<br/>event_log/ segments, meetings/ (personal-subject<br/>sessions only) — T1, plaintext md"]
-        P3["private/ — enc, gitignored<br/>personal_analytics.db (T2, SQLCipher)<br/>telegram_cache/ — voice notes + dialogue state"]
+        P3["private/ — gitignored<br/>personal_analytics.db (T2, plaintext 0600)<br/>telegram_cache/ — ENCRYPTED, the other of two"]
     end
     subgraph PROJ["repo/.project-ai/ — COMMITTED, plaintext md, T1"]
         R1[rules/]
         R2["memory/: dashboard, commitments_log,<br/>event_log/ segments, meetings/ (summaries)"]
         R3[skills/]
-        R4["transcripts/ — raw captures + audio, enc<br/>GITIGNORED inside a committed scope;<br/>daemon verifies the rule before writing<br/>NFR-09 purge at 30d · outside the tier model"]
+        R4["transcripts/ — raw captures + audio, PLAINTEXT<br/>GITIGNORED inside a committed scope;<br/>daemon verifies the rule before writing<br/>temp/ stages atomic writes (AD-47), unwatched<br/>NFR-09 purge at 30d · outside the tier model"]
     end
     PERS -.reads.-> APP
     PROJ -.reads.-> APP
@@ -722,9 +869,10 @@ erDiagram
 
 - **Supervision:** `launchd` user agent, `KeepAlive`, starts at login. Single daemon instance.
 - **Install / update:** isolated install via `uv tool install`.
-- **Health:** `pm-ai doctor` — keychain access, Ollama reachability, per-connector probe status, index and disk sizes, encryption-toggle state.
+- **Health:** `pm-ai doctor` — declared-package install status (the first probe: a missing package is why every other probe would fail), SQLite extension support, keychain access, Ollama reachability, git presence, per-connector probe status and health state (AD-39), index and disk sizes, encryption-toggle state including a value set but *unrecognised*, which a boolean cannot carry.
 - **Backup:** Tier 1 **and Tier 2** — the markdown scopes (project rides in git; personal may be its own private repository), `~/.pm-ai/disclosure.md`, `operational.db`, and `~/.manager-ai/private/personal_analytics.db`, plus an exported keychain key. Tier 3 is explicitly **not** a backup target; `pm-ai reindex` rebuilds it. Backing up markdown alone would lose the job queue, cursors, executed-key ledger, and every burnout and workload trend — state AD-3 requires to survive and that no rebuild can reconstruct. **If the personal scope is kept as a private git repository, `private/` must be gitignored there**: the store is encrypted, but a personal-analytics history does not belong in version control even privately. Raw captures (`transcripts/`, `telegram_cache/`) are **not** a backup target in any scope — they are transient input under NFR-09's purge, outside the tier model, and nothing may depend on them (AD-33).
-- **Environments:** one — the user's Mac. No staging tier; a debug profile (`~/.pm-ai/config.toml`) toggles encryption and verbose logging.
+- **Environments:** one — the user's Mac. No staging tier. A debug profile (`~/.pm-ai/config.toml`) may toggle **verbose logging**; it may **not** toggle encryption. Superseded 2026-08-27: encryption has no persistent off switch at all, only the `PM_AI_DISABLE_ENCRYPTION` environment variable, which dies with the process (AD-6).
+- **Boot sequence:** the daemon attaches AD-46's watchers **before** reconciling every watched path, so a write landing between the two is duplicate work rather than a silent miss. Boot reconciliation is unconditional and never periodic.
 
 ### Source tree
 
@@ -732,7 +880,10 @@ erDiagram
 pm_ai/
   app/           # Composition root: wiring, DI, pipeline orchestration, daemon lifecycle (AD-30)
   domain/        # Entities, enums, state machines, closed taxonomies (AD-27). Imports nothing.
+                 #   scope_model.py — the four scope trees, tier on the node (AD-44)
   core/          # I/O-free services: extraction, commitments, proposals, alignment, scheduling policy
+                 #   jobs.py      — deterministic idempotency keys only (AD-20)
+                 #   scheduler.py — task manager: job inventory, derived DAG, triggers (AD-45)
   ports/         # Protocol definitions, expressed in domain types
   connectors/    # Inbound adapters, one per service; hot-loadable. Class H egress only.
     transcripts/ # TranscriptSourcePort adapters: graph (authenticated), manual (untrusted)
@@ -740,7 +891,12 @@ pm_ai/
   storage/       # Single-writer storage service: markdown, SQLite, vectors, crypto
   models/        # local/ (Ollama, whisper.cpp — class L) and frontier/ (Tool Runner — class F)
   surfaces/      # telegram/, cli/, api/
-  platform/      # OS adapters: keychain, supervision, paths (macOS today)
+  platform/      # OS adapters: keychain, supervision, packaging (macOS today)
+                 #   paths.py — anchors the AD-44 trees to real roots
+                 #   vcs.py   — GitVcs, the AD-43 authority. Class L, read-only.
+                 #   watcher.py — FileWatcherPort adapter, OS filesystem events (AD-46)
+                 #   environment.py — the ONLY reader of the process environment (AD-6)
+                 #   doctor.py  — startup probes, packages first
 ```
 
 ## Capability → Architecture Map
@@ -763,10 +919,13 @@ pm_ai/
 | Deep inquiry, drift audit, knowledge query (FR-23, FR-24, FR-25) | `core/inquiry` + storage retrieval | AD-15, AD-21, AD-22 |
 | CLI & Telegram surfaces (FR-18, FR-19, FR-20, FR-22) | `surfaces/` | AD-2, AD-7, AD-8, AD-13, AD-21 |
 | External mutation, autonomous WI execution (FR-28, FR-29) | `skills/` | AD-1, AD-18, AD-20 |
-| Security enclave & privacy charter (FR-16, FR-36, NFR-07..NFR-09) | `storage/`, `skills/`, sanitization filter | AD-1, AD-4, AD-6, AD-12, AD-25, AD-31 |
+| Security enclave & privacy charter (FR-16, FR-36, NFR-07..NFR-09) | `storage/`, `skills/`, sanitization filter | AD-1, AD-4, AD-6, AD-12, AD-25, AD-31, AD-44 |
 | In-meeting command authorization (FR-05, FR-07, UJ-7) | `core/extraction` + `skills/` | AD-1, AD-13, AD-32 |
 | Provenance & citation (FR-03, FR-25, FR-33, UJ-8) | `domain/` Meeting + `storage/` | AD-33, AD-3, AD-23 |
-| Memory pruning & index lifecycle (FR-37, NFR-09) | `storage/` + pruning job | AD-3, AD-20, AD-22 |
+| Scope layout & capture protection (FR-03, FR-08, NFR-09) | `domain/scope_model` + `platform/paths` + `platform/vcs` | **AD-44**, **AD-43**, AD-3, AD-4, AD-23 |
+| Memory pruning & index lifecycle (FR-37, NFR-09) | `storage/` + compaction job | AD-3, **AD-5**, AD-20, AD-22, AD-45 |
+| Derived-artifact construction & invalidation (CAP-23, CAP-24, CAP-27, CAP-34) | `core/scheduler` + jobs + `platform/watcher` | **AD-45**, **AD-46**, AD-3, AD-9, AD-20 |
+| Write visibility & durability (NFR-08) | `storage/service.py` alone | **AD-47**, AD-5, AD-6, AD-23, AD-43 |
 | Resilience & offline buffer (FR-04, NFR-10, NFR-11) | scheduler + job queue | AD-3, AD-20 |
 
 ## Deferred
@@ -777,9 +936,12 @@ pm_ai/
 - **Local-model selection.** The Stack names a *class* (8B-class instruct at `Q4_K_M`), not a pin. Phase 1 benchmarks the verified candidates — `llama3.1:8b`, `qwen3:8b` — running concurrently with whisper.cpp at the 16 GB baseline, and picks. Anything above 8B-class is out: the smallest `llama3.3` build is 26 GB.
 - **Multi-user and shared deployment.** Single-user, single-machine by design; nothing in the scope model assumes otherwise.
 - **In-meeting real-time processing.** Explicitly a Non-Goal; all transcript work is post-meeting or on demand.
-- **Encryption of the vector index.** Skipped deliberately (AD-6). Revisit only if the index starts holding recoverable raw text rather than embeddings.
+- **Encryption of the derived tier.** Skipped deliberately (AD-6). Revisit only if an index starts holding recoverable raw text rather than embeddings and lookup structures. Widened 2026-08-27 from "the vector index" to the whole tier, since `derived.db` split in two.
+- **A coalescing window for AD-46's watcher.** No number is load-bearing once AD-47 makes a capture's appearance atomic; a window survives only against external editors that rewrite in place, worst case one wasted indexer pass. Revisit with a measurement, never a guess.
+- **Enforcing AD-45's graph depth.** Deliberately unenforced: the one-hop bound holds by cause rather than by count, and the loopback rule is documented. Revisit if a job is ever added that reads Tier 1 and writes Tier 1 in response to a change — a "regenerate `daily_dashboard.md` whenever `meetings/` changes" job is unremarkable to propose and is a loop if its output is watched upstream.
+- **Compaction's threshold against segment granularity.** Segments are monthly and the threshold is "older than 7 days", but the smallest deletable unit is a whole sealed month and the current month is never compactable — so the youngest deletable content is 1 to 31 days old depending on when compaction runs. Either the threshold means something other than what it says, segments need finer granularity, or compaction summarises *within* a sealed segment. Owned by the story that builds compaction.
 - **Retention policy beyond raw transcripts.** NFR-09 covers transcripts; retention for telemetry rows and derived summaries is unspecified and can wait for real disk-growth data.
-- **Tier-2 schema migration.** Tier 2 is the one tier no rebuild can reconstruct (AD-3), so its schema changes need a real migration path rather than a drop-and-recreate. Deferred only until Tier 2 is durable at all — it is in-memory today, so there is no schema to migrate yet, and this must be settled before the first release that persists it.
+- ~~**Tier-2 schema migration.**~~ **Retired 2026-08-22 — the deferral outlived its own precondition.** It read "deferred only until Tier 2 is durable at all — it is in-memory today", but `operational.db` (SQLite, WAL) replaced the four in-memory dicts on 2026-08-19, three days before anyone noticed the entry had gone stale. Tier 2 is the one tier no rebuild can reconstruct (AD-3), so its schema changes need forward-only migration rather than drop-and-recreate; that is now scoped work, not a deferral.
 - **Self-authored skill generation and sandboxed execution — deprioritised.** The original framing had pm-ai writing and testing modular Python/Bash skills in a local sandbox. Deliberately not built, and not queued: pm-ai names capability gaps in prose and a human writes the skill (AD-42.6). The bar for revisiting is recorded so a later reader knows this was a decision rather than an oversight — it requires a **real isolation boundary** (process, filesystem, network), **demonstrated red on a planted escape** before it is trusted, and an explicit **AD-1 amendment**. Never a feature increment.
 - **Project-scope goals.** `strategic_goals.md` holds all three domains in the personal scope today (§2.1), which suits FR-11's briefing because that briefing is personal-scope too. If a project-scope dashboard ever needs its own `[Strategic Alignment]` tag, project goals must exist as project-scope records first — a project artifact citing a personal goal is the AD-38 violation that moved meetings. Revisit when a committed surface needs alignment.
 - **The Socratic voice contract.** FR-12's "≥80% of coaching turns end in a question" and the persona system (FR-14, FR-20) are the product's most falsifiable personality claims, and the spine deliberately does not bind them: they are prompt and product-design decisions, revisited here only if a second surface or a second generated-text flow starts diverging on voice.
@@ -794,6 +956,12 @@ document that decays; these checks fail the build instead.
 | Import contracts | `.importlinter` | Dependency direction; forbidden libraries (AD-1, AD-5, AD-7, AD-15, AD-16, AD-26) |
 | AST rules | `tests/architecture/test_static_rules.py` | Calls rather than imports — file writes outside storage, shell execution, connector-owned scheduling, project auto-discovery, debug output in `event_log/` |
 | Behavioural tests | `tests/architecture/test_domain_invariants.py` | Semantics no static check can see — idempotency determinism, closed taxonomies, scope isolation, routing, warn-only budget, rebuildability |
+| Layout resolution | `tests/architecture/test_paths.py` | AD-44 — every (scope, artifact) pinned to a literal path, the tier/exclusion sets derived rather than restated, and no Tier-1 artifact inside anything a rebuild deletes |
+| Capture protection | `tests/architecture/test_capture_guard.py` | AD-43 — driven against real `git init` repositories, because a faked verdict tests our belief about git rather than git |
+| Encryption policy | `tests/architecture/test_encryption_policy.py` | AD-6 — the encrypted set is exactly what the scope model declares, asserted per `(scope, artifact)` (AD-44) |
+| Single-writer file I/O | `tests/architecture/test_static_rules.py` | AD-5, AD-47 — every write primitive, `os.write`/`os.open`/`os.truncate` included, confined to `service.py` |
+| Startup diagnostics | `tests/architecture/test_doctor.py` | AD-6, AD-39 — probe outcomes including an unrecognised encryption-toggle value |
+| Skip ratchet | `tests/conftest.py` | A skipped test reading as coverage: the expected skip count is asserted in **both** directions |
 
 Run both with `uv run pytest tests/architecture`; `uv run lint-imports` gives
 faster feedback on layering alone. Full AD→check mapping, and the list of ADs
@@ -840,9 +1008,18 @@ constrain rather than being retrofitted.
 
 ## Open Risks
 
+- **`pm_ai.platform` shells out and is scanned for it by nothing.** AD-1's class L now admits read-only local queries there, and the AD-1 AST scan's layer list omits `platform` — `SHELL_ALLOWED = {"platform"}` is defined in `test_static_rules.py` and referenced nowhere. So `shell=True`, `os.system`, `eval` and `exec` are unchecked in the one package that legitimately spawns a process, and `git` is found by `PATH` rather than an allowlisted absolute path. This is the same shape as the AD-1 gap this document records as closed for `pm_ai.app` on 2026-08-19: a boundary moved into an unscanned layer. Needs a `platform`-specific check that permits an allowlisted binary and nothing else, and the permitted command set closed in `domain` the way AD-27/32/34/40 close theirs.
+- ~~**`people/` is addressable from two scopes and only one of them carries its guards.**~~ **Retired 2026-08-28 — closed by the second option, and neither of the two this entry offered was quite right.** The node has to stay declared in the application tree or its tier and its git exclusion stop deriving; and refusing it "under any scope but PEOPLE" would have left PEOPLE addressing a container that is its own root rather than an artifact of its tree. So it is refused under *every* label, and `governed_by` is declared on the node — AD-44's rule, since a list of such nodes maintained beside the trees is the second structure that can disagree with them. `FOREIGN_ROOTS` derives from it. The container's location, which the Tier-1-inside-Tier-3 assertions need because it shares the `private/` enclave, comes from a separate narrow accessor that cannot be mistaken for addressing.
+- ~~**A scopeless `source_ref` reaches `Provenance.EXTERNAL` without the ledger being read.**~~ **Retired 2026-08-28 — closed.** The reasoning was right about `meeting:` and wrong about `goal:`, and the ledger could not settle it either way: that join is keyed `(system, scope, external_id)` and a scopeless ref has no scope, so the answer had to come from a declaration. `PM_AI_MINTED` is now that declaration — closed in `pm_ai.domain.identity` beside the scopeless set it partitions, guarded at import by a `raise` rather than an `assert`, and asserted exhaustive so a third scopeless system cannot acquire a default nobody chose. `goal:` attributes to `PM_AI` and is inadmissible; `meeting:` stays `EXTERNAL`, because attributing calendar evidence to pm-ai would mean nothing ever verifies — the opposite failure and just as silent.
+- ~~**Personal-scope captures can be committed and git is never asked.**~~ **Retired 2026-08-28 — closed on 2026-08-22 and the entry outlived it by six days.** `is_git_committed` was the wrong gate, in the direction that leaks: it answers *"is this scope pushed to the employer"*, a question about who may read the material, while the guard needs *"can git reach this directory"*, a question about the filesystem. Which scope owns the capture is no longer a condition; the guard asks git in every scope. `pm_ai/storage/service.py:406-421` carries the reasoning.
+- ~~**AD-35 and AD-39 give opposite instructions for the same silence.**~~ **Retired 2026-08-28 — closed by the AD-35 revision of 2026-08-27, which this list should have reflected the same day.** The contradiction was real and its cause was a missing verdict: the two silences are *distinguishable* and the spine had collapsed them. A sleeping laptop made no harvest attempts at all — `UNKNOWN`, fail closed. A dead token made attempts that are in the log marked failed — `ERROR`, surfaced, never patience. AD-39 now names `ERROR` as the replacement verdict it previously removed without providing.
+- **Server-side `fallbacks` is prescribed for a path that cannot accept it.** The Anthropic notes correctly widened the refusal and thinking hazards from Opus 5 to Sonnet 5, then widened the *mitigation* by symmetry: `fallbacks` is documented for Fable 5 and Opus 5 only, and briefings, drafts and inquiry synthesis all run Sonnet 5 under AD-15.
+- ~~**`anthropic` is the one dependency this document says must never float, and it is the only one unpinned.**~~ **Retired 2026-08-28 — pinned at `==1.2.0`.** The breaking changes were real and verified at the pin: `httpx2>=2` and the three sampling parameters gone from `messages.create`. AD-16's `client.beta.messages.tool_runner` survives, checked by introspection rather than inferred. Pinning *forward* rather than back to the lockfile's `0.124.0` because this document's own Anthropic notes say the API rejects `temperature`/`top_p`/`top_k` with a 400 — the older SDK accepts parameters the API refuses, which makes it the more dangerous pin. **Residual, and it is not small:** nothing in the codebase imports `anthropic` yet, so no test exercises this. A signature check is not an integration test, and the story that builds the frontier adapter must validate against the live API before AD-16 is treated as proven.
+- **Two AD-43 configurations are uncovered and both leak:** a nested `.gitignore` inside `.project-ai/` re-including the directory, and `check-ignore -v` returning exit 0 on a *negated* match, which reports "ignored" for AD-43's own first failure row. The implementation does not pass `-v`; the risk is a future reader adding it for better diagnostics.
+
 - **Microsoft Graph transcript access depends on tenant-admin cooperation** — application permissions require an admin-created application access policy, personal Microsoft accounts are unsupported, and transcripts exist only where recording was enabled. Outside project control; mitigated by AD-23's fallback adapter.
 - **Concurrent whisper.cpp + Ollama at 16GB** remains unbenchmarked (PRD Open Question 1). AD-19's single-heavy-job default plus the Ollama server-side constraints are the guard until Phase 1 measures it.
-- **A system Python silently breaks all persistence.** `sqlite-vec` needs `enable_load_extension`, which is absent from python.org and macOS system CPython. If uv resolves a system interpreter, install succeeds, the daemon starts, and the first embedding write fails inside the single writer — passing on the developer's machine and failing on a clean install. Guarded by `--managed-python` and a `pm-ai doctor` probe; unguarded it is a start-up success followed by a total storage failure.
+- **A system Python silently breaks all persistence.** `sqlite-vec` needs `enable_load_extension`, which is absent from python.org and macOS system CPython. If uv resolves a system interpreter, install succeeds, the daemon starts, and the first embedding write fails inside the single writer — passing on the developer's machine and failing on a clean install. Guarded by `--managed-python` and a `pm-ai doctor` probe — the probe is now real (`pm_ai/platform/doctor.py:211`, `sqlite_extension_support`), where this entry originally named it as a plan. Unguarded it is a start-up success followed by a total storage failure.
 - **The Keychain-across-upgrade path is unverified.** Key retrieval after an OS or interpreter upgrade is the one failure mode here that is silent, unattended, and security-relevant — the 07:00 briefing simply stops. Needs a Phase 1 test.
 - **`tool_runner` is a beta SDK surface** (AD-16). Accepted deliberately, since it is the only tool loop without built-in shell and filesystem tools, but a beta API underpinning the execution firewall is a standing dependency risk.
 - **The ADs above are now true of the code, and that is recent.** On 2026-08-19 three were not, and each read as satisfied with a passing test: AD-36 was **defeated** (the skill layer recorded class-M mutations and nothing read the ledger back, while the GitLab connector hard-coded `authored_by=EXTERNAL`, so pm-ai's own comment harvested back was admissible evidence that pm-ai's own promise was kept); AD-38's write guard was **vacuous** (it inspected a `contributing_scopes` attribute `NormalizedEvent` does not have, a no-op on the only record type persisted); and Tier 2 was **four in-memory dicts** rather than `operational.db`, taking the dedup set with it so re-harvest idempotency held only within one process. All are fixed, each proven red against its own pre-fix code first. The standing lesson is not the bugs: it is that a passing test proved the downstream half of AD-36 while the step that *derives* provenance did not exist. Prefer a test that drives the real path over one that hands the answer in.
