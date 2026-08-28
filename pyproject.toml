@@ -37,6 +37,15 @@ runtime = [
     # no source build — the property `sqlcipher3` lacked. Imported lazily in
     # `pm_ai.storage.crypto`, so the package loads without this extra.
     "cryptography>=50.0.0",
+    # AD-46's FileWatcherPort adapter — the single change-detection pipeline.
+    # Declared here though nothing imports it yet, which is this extra's whole
+    # pattern: five of the six entries above have no importer either. It was
+    # named in the spine's Stack table on 2026-08-27 and left undeclared, so the
+    # table asserted a pin the build did not hold — the same drift the anthropic
+    # entry had in the other direction. Latest release is 2024-11-01, a standing
+    # currency risk of `sqlite-vec`'s shape over a far smaller surface, and
+    # behind a port, so replacing the backend stays local.
+    "watchdog==6.0.0",
 ]
 
 [dependency-groups]
