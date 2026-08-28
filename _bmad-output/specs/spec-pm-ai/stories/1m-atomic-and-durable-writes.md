@@ -2,8 +2,8 @@
 title: 'Atomic and durable writes'
 type: 'fix'
 created: '2026-08-27'
-updated: '2026-08-27'
-status: 'ready-for-dev'
+updated: '2026-08-28'
+status: 'done'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/storage-contract.md'
@@ -94,9 +94,30 @@ A second defect is currently invisible and will not stay that way. `_create_excl
 
 **Why no timer appears anywhere here.** A debounce is a guess about when writing stopped, and the interval that would be long enough is unknowable — a two-minute standup and a four-hour workshop transcript on a slow disk want different numbers, and the way you learn the number was too short is finding duplicate commitments in the ledger afterwards. `link` makes the name's appearance and the content's completeness one event, which is why `storage-contract.md` states that completeness is never inferred from elapsed time.
 
+**Two things the build corrected, both found by making a test real rather than by review.**
+
+*The code's own rationale for the explicit mode was wrong.* It said `umask 000` would leave a credential "briefly world-readable". Measured: it does not. umask only *removes* bits and `0o600` requests none for group or other, so `umask 000` yields exactly `0o600`. What a mask can do is strip **owner** bits — at `umask 200` the same open yields `0o400`, and pm-ai could not finish writing its own credential store. So the explicit set is for **determinism, never for confidentiality**, and the comment now says so.
+
+*The first version of that test could not fail.* It monkeypatched `os.umask`, which replaces the function without changing the mask the kernel applies — so removing the `fchmod` left the suite green. The mask is now real, set on the process and restored after, and set only once the enclave exists, because `0o200` strips owner-write from directory creation too.
+
+**A pre-written test caught a rule violation during the build.** Staging first resolved through `_writable_dir`, which asks git — so AD-43 was consulted twice, once about `transcripts/` and once about `temp/`. `test_the_directory_git_is_asked_about_is_the_one_written_to` failed on the duplicate question. That is the cheap version of the expensive failure: two questions can get two answers, and then *which directory the verdict was about* has no fixed answer. Staging now resolves without re-asking, which is what AD-47 said all along.
+
 ## Verification
 
-- `uv run pytest -q -rs` — expected: no previously passing test regresses; skip count unchanged or `EXPECTED_SKIPS` updated in the same commit.
-- `uv run mypy` — expected: Success.
-- `uv run lint-imports` — expected: all contracts kept; the new primitives add no import.
-- Mutation: revert the `os.write` loop to a single call and confirm the short-write test goes red. Replace `os.link` with `os.replace` and confirm the taken-name test goes red. Publish before fsync and confirm the ordering assertion goes red.
+- `uv run pytest -q -rs` — **416 passed, 29 skipped**; skip count unchanged, so `EXPECTED_SKIPS` needed no edit.
+- `uv run mypy` — **Success**. `uv run lint-imports` — **12 contracts kept**.
+- The AD-5 static rule still confines every write primitive to `service.py`; `WRITE_CALLS` already covers `os.open`, `os.write` and `os.truncate`.
+
+**Mutations run, all seven red:**
+
+| mutation | caught by |
+| --- | --- |
+| publish captures with `os.replace` instead of `os.link` | 3 tests — the taken name is silently overwritten |
+| drop the `os.write` loop | the short-write test |
+| drop the `fchmod` on the staged file | the mode test, *after* it was made real |
+| refuse instead of falling back where `link` is unsupported | the exFAT test |
+| let the fallback skip its exclusivity check | the same test's second half |
+| leave the staged file behind on publish failure | 2 tests — the staging directory leaks |
+| skip the `fsync` before publish | the ordering test |
+
+The `fsync` test is an **ordering** test and says so: whether bytes reached stable storage cannot be observed without a power loss. It asserts the only observable thing — that the sync precedes the publish — and exists because deleting the `fsync` otherwise left the suite entirely green.

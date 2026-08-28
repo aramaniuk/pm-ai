@@ -41,6 +41,7 @@ from pm_ai.domain.scope_model import (
 )
 from pm_ai.domain.storage_tiers import (
     CAPTURES,
+    CAPTURE_STAGING,
     EVENT_LOG,
     GITIGNORE_FILENAME,
     ENCRYPTED,
@@ -97,7 +98,7 @@ __all__ = [
     "UNRESOLVED_ACTOR", "UnknownVerb", "VERB_REGISTRY", "Verb",
     "evaluate_commitment", "lookup_verb", "ARTIFACT_TIER", "BACKUP_TARGETS",
     "REBUILD_TARGETS", "Tier", "TierViolation", "assert_reindex_safe",
-    "CAPTURES", "EVENT_LOG", "OPERATIONAL_DB", "ScopeResolutionError",
+    "CAPTURES", "CAPTURE_STAGING", "EVENT_LOG", "OPERATIONAL_DB", "ScopeResolutionError",
     # The scope layout and the durability each of its artifacts declares. The
     # tier tables are derived from the trees, so both come from one module.
     "SCOPE_TREES", "File", "Dir", "Collection", "MalformedLayout",

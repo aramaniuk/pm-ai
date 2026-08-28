@@ -25,6 +25,7 @@ reached at all — and `pm_ai.platform.vcs` runs the commands.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sqlite3
@@ -42,6 +43,7 @@ from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.storage_tiers import (
     CAPTURES,
+    CAPTURE_STAGING,
     EVENT_LOG,
     GITIGNORE_FILENAME,
     OPERATIONAL_DB,
@@ -146,6 +148,43 @@ def _m1_settled_at(db: sqlite3.Connection) -> None:
 MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (1, "add executed.settled_at", _m1_settled_at),
 )
+
+
+# `link` is not a filesystem-independent operation. exFAT and some network
+# mounts refuse it; the errno differs by platform, so both are named rather than
+# one assumed.
+_LINK_UNSUPPORTED = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS})
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    """Write every byte, because `os.write` may write fewer than asked.
+
+    Its return value used to be discarded. A short write is rare on a regular
+    file and not impossible, and for a sealed artifact the consequence is not a
+    truncated file but an unreadable one: AES-GCM fails its tag rather than
+    degrading, so the loss is total and silent until the next read.
+    """
+    written = 0
+    while written < len(payload):
+        written += os.write(descriptor, payload[written:])
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Make a newly-visible name durable, not just its content.
+
+    Best-effort: a directory `fsync` is unsupported on some filesystems, and
+    failing a write that already succeeded would be the worse outcome.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:  # pragma: no cover — directory we just wrote into
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _ulid() -> str:
@@ -654,18 +693,27 @@ class StorageService:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(text)
 
-    def _create_exclusively(self, path: Path, text: str) -> None:
+    def _create_exclusively(self, path: Path, text: str, *, staging: Path) -> None:
         """Create an artifact that must not exist yet, sealing it if declared.
 
         Exclusive creation is the capture path's guarantee: two recordings must
         never splice into one file. Sealing does not change that — the name is
         claimed the same way whether the bytes are ciphertext or not.
+
+        Published with `os.link`, so the name appears only once the content is
+        complete *and* a name already taken is refused. `os.replace` would give
+        the first property and destroy the second, silently splicing the two
+        recordings this refusal exists to keep apart.
         """
-        if is_encrypted(str(path)):
-            self._seal(path, text.encode("utf-8"), exclusive=True)
-            return
-        with path.open("x", encoding="utf-8") as fh:
-            fh.write(text)
+        payload = text.encode("utf-8")
+        sealed = is_encrypted(str(path))
+        self._publish(
+            path,
+            self._crypto.encrypt(payload) if sealed else payload,
+            staging=staging,
+            mode=ENCRYPTED_FILE_MODE if sealed else None,
+            exclusive=True,
+        )
 
     def _replace(self, path: Path, payload: bytes) -> None:
         """Write an artifact whole, sealing it if declared. Credentials live here.
@@ -673,39 +721,128 @@ class StorageService:
         Distinct from `_append` because a credential store *is* replaced — it has
         no history and no segments — and from `_create_exclusively` because
         rotating a token must overwrite rather than refuse.
+
+        Published with `os.replace`, and here overwriting is the point: refusing
+        a taken name would make token rotation impossible. `O_TRUNC` used to
+        destroy the old bytes *before* writing the new ones, so a crash between
+        the two left `config.json` empty — and an AES-GCM file cut part-way does
+        not degrade, it fails its tag and becomes unreadable. Every connector
+        credential, lost, with the daemon having done nothing wrong.
         """
-        if is_encrypted(str(path)):
-            self._seal(path, payload, exclusive=False)
-            return
-        path.write_bytes(payload)
+        sealed = is_encrypted(str(path))
+        self._publish(
+            path,
+            self._crypto.encrypt(payload) if sealed else payload,
+            staging=path.parent,
+            mode=ENCRYPTED_FILE_MODE if sealed else None,
+            exclusive=False,
+        )
 
     def _read(self, path: Path) -> bytes:
         """Read an artifact, unsealing it if declared encrypted."""
         raw = path.read_bytes()
         return self._crypto.decrypt(raw) if is_encrypted(str(path)) else raw
 
-    def _seal(self, path: Path, payload: bytes, *, exclusive: bool) -> None:
-        """The encrypted write, at `0600` inside `0700`.
+    def _publish(
+        self,
+        target: Path,
+        payload: bytes,
+        *,
+        staging: Path,
+        mode: int | None,
+        exclusive: bool,
+    ) -> None:
+        """Write `payload` where nobody can see it, then make it visible at once.
 
-        Sealed before anything is created, so a refusal — no key enrolled, a key
-        of the wrong length — leaves no directory and no empty file behind for a
-        later reader to interpret.
+        The one primitive behind every whole-file write. Before a filesystem
+        watcher existed (AD-46) a half-written file had no observer and only
+        crash durability mattered; now the moment a name appears is the moment a
+        job starts, so *when* a write becomes visible is part of the contract.
+
+        Publication is the only difference between the two callers, and it is the
+        interesting one:
+
+        - `exclusive` — `os.link`, which fails `EEXIST` on a taken name. Atomic
+          *and* exclusive, exactly as `O_CREAT|O_EXCL` was, so the capture
+          refusal stays kernel-enforced rather than becoming a check.
+        - otherwise — `os.replace`, which overwrites deliberately, because a
+          rotated credential must land on top of the old one.
+
+        `fsync` before publishing and on the directory after: without the first,
+        a crash can leave a visible, complete-looking name whose content never
+        reached stable storage, which is the same problem one layer down.
         """
-        sealed = self._crypto.encrypt(payload)
-        parent = path.parent
-        parent.mkdir(parents=True, mode=ENCLAVE_DIR_MODE, exist_ok=True)
-        if stat.S_IMODE(parent.stat().st_mode) != ENCLAVE_DIR_MODE:
-            parent.chmod(ENCLAVE_DIR_MODE)
-        flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
-        # `os.open`'s mode is masked by the process umask, so it is set again
-        # afterwards: at `umask 000` a credential file would be world-readable and
-        # nothing would report it.
-        descriptor = os.open(path, flags, ENCRYPTED_FILE_MODE)
+        parent = target.parent
+        enclave = mode is not None
+        if enclave:
+            parent.mkdir(parents=True, mode=ENCLAVE_DIR_MODE, exist_ok=True)
+            if stat.S_IMODE(parent.stat().st_mode) != ENCLAVE_DIR_MODE:
+                parent.chmod(ENCLAVE_DIR_MODE)
+            staging.mkdir(parents=True, mode=ENCLAVE_DIR_MODE, exist_ok=True)
+        else:
+            staging.mkdir(parents=True, exist_ok=True)
+
+        staged = staging / f".{target.name}.{_ulid()}.part"
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode or 0o666)
         try:
-            os.write(descriptor, sealed)
+            if mode is not None:
+                # `os.open`'s mode is masked by the process umask, so it is set
+                # again — on the STAGED file, before anything is visible under
+                # the final name, which is what makes the window zero rather
+                # than short.
+                #
+                # The rationale this replaces was wrong and worth correcting:
+                # it said `umask 000` would leave a credential "briefly
+                # world-readable". Measured 2026-08-28, it does not — umask only
+                # *removes* bits, and `0o600` requests none for group or other,
+                # so `umask 000` yields exactly `0o600`. What the mask can do is
+                # strip owner bits: at `umask 200` the same open yields `0o400`,
+                # and pm-ai could not finish writing its own credential store.
+                # The set is for determinism, never for confidentiality.
+                os.fchmod(descriptor, mode)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        path.chmod(ENCRYPTED_FILE_MODE)
+
+        try:
+            self._make_visible(staged, target, exclusive=exclusive)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+        _fsync_dir(parent)
+
+    def _make_visible(self, staged: Path, target: Path, *, exclusive: bool) -> None:
+        """The publish step, and the fallback for filesystems without hardlinks.
+
+        `os.link` is unsupported on exFAT and on some network mounts. Those are
+        reachable only through an *enrolled project repository* — never through
+        `~/.pm-ai` or `~/.manager-ai`, which sit on the home filesystem — so the
+        case is real but narrow. Declining to record a meeting because a
+        repository lives on a USB stick is the wrong trade, so the fallback is
+        check-then-rename.
+
+        That is weaker, and precisely how much weaker is worth stating: the race
+        it opens needs two *concurrent* writers, while AD-5 makes one component
+        the sole writer and AD-19 puts it on a single loop. The real duplicate
+        arrives as a later retry, which the check catches. Detected by attempting
+        the link and reading the error, never by inspecting filesystem type.
+        """
+        if not exclusive:
+            os.replace(staged, target)
+            return
+        try:
+            os.link(staged, target)
+        except FileExistsError:
+            raise
+        except OSError as unsupported:
+            if unsupported.errno not in _LINK_UNSUPPORTED:
+                raise
+            if target.exists():
+                raise FileExistsError(errno.EEXIST, "target exists", str(target))
+            os.replace(staged, target)
+            return
+        staged.unlink(missing_ok=True)
 
     def write_artifact(
         self, payload: bytes, *, scope: DataScope, artifact: str, name: str | None = None
@@ -784,7 +921,23 @@ class StorageService:
         filename = _capture_name(name)
         capture = self._writable_dir(scope, CAPTURES) / filename
         try:
-            self._create_exclusively(capture, body)
+            # Staged in the scope's declared `transcripts/temp/`, resolved
+            # rather than composed: two packages need that name — this one and
+            # AD-46's watcher, which must exclude it — and re-deriving a path is
+            # how a second copy of the layout appears (AD-4).
+            #
+            # Resolved WITHOUT `_writable_dir`, deliberately. That helper asks
+            # git, and the question was already asked above about the capture
+            # directory this one sits inside — the answer is a directory rule
+            # covering both. Asking twice made the guard's own pre-written test
+            # fail on a duplicate question, which is the cheap version of the
+            # expensive failure: a second question can get a second answer, and
+            # then "which directory was the verdict about" has no fixed answer.
+            self._create_exclusively(
+                capture,
+                body,
+                staging=self._paths.resolve(scope, CAPTURE_STAGING, create=True),
+            )
         except FileExistsError as taken:
             raise CaptureAlreadyExists(
                 f"{capture} already exists. Appending would splice two recordings "
@@ -792,11 +945,12 @@ class StorageService:
                 f"a second capture needs its own name."
             ) from taken
         except BaseException:
-            # Exclusive creation has already claimed the name at this point. A
-            # failure mid-write would otherwise leave a zero-length file owning
-            # it permanently, and every retry — including the one carrying the
-            # content — would then be refused as a duplicate.
-            capture.unlink(missing_ok=True)
+            # The final name is never claimed until the content is complete, so
+            # there is nothing here to clean up. The unlink this replaces ran
+            # only for *exceptions* and could do nothing for `SIGKILL` or a power
+            # loss — after which a zero-length file owned the name permanently
+            # and every retry, including the one carrying the content, was
+            # refused as a duplicate. Staging closes that unconditionally.
             raise
         return capture
 

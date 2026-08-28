@@ -95,6 +95,13 @@ OPERATIONAL_DB = "operational.db"
 # it with the one scope where that question has an answer.
 CAPTURES = "transcripts/"
 
+# AD-47's staging area, declared as a namespace of `transcripts/` in every tree
+# that holds captures. A constant here rather than a literal in the writer,
+# because two packages need the name: the single writer stages into it and
+# AD-46's recursive watch excludes it. It is spelled as the canonical key the
+# resolver answers to, so the writer asks for it instead of composing it.
+CAPTURE_STAGING = "temp/"
+
 
 # `transcripts/` sits INSIDE a committed scope, so its exclusion from git is a
 # `.gitignore` rule rather than a directory boundary. A rule can go missing; a
@@ -232,7 +239,7 @@ def assert_reindex_safe(artifacts: frozenset[str]) -> None:
 # The keys above are literals in this module and literals in the trees, which is
 # the one place those two structures still have to agree. A rename of any of them
 # therefore fails here, at import, rather than at the first write.
-_CODE_KEYS = frozenset({EVENT_LOG, OPERATIONAL_DB, CAPTURES})
+_CODE_KEYS = frozenset({EVENT_LOG, OPERATIONAL_DB, CAPTURES, CAPTURE_STAGING})
 
 
 def _assert_code_keys_are_declared() -> None:
