@@ -14,7 +14,19 @@ dependencies = []
 # The Stack table from ARCHITECTURE-SPINE.md, made executable.
 # Versions re-verified against their registries 2026-08-19.
 runtime = [
-    "anthropic[mcp]",
+    # PINNED EXACTLY 2026-08-28, verified against PyPI and by introspection.
+    # The spine calls this the one dependency that must never float, because
+    # AD-16 makes the BETA `client.beta.messages.tool_runner` load-bearing for
+    # the execution firewall — and it was the only unpinned one.
+    #
+    # 1.2.0 rather than the 0.124.0 the lockfile had resolved: `messages.create`
+    # in 1.x no longer accepts `temperature`/`top_p`/`top_k`, which is what the
+    # Claude 5 API already rejects with a 400. The older SDK is the riskier one
+    # here — it accepts parameters the API refuses. Confirmed present in 1.2.0:
+    # `beta.messages.tool_runner`, and `mcp<3,>=1.0` behind the extra.
+    # Confirmed absent: the three sampling parameters. `[mcp]` also pulls
+    # `httpx2>=2`, the second web stack the Stack table budgets for.
+    "anthropic[mcp]==1.2.0",
     "python-telegram-bot==22.8",   # NOT [job-queue] — it embeds a second scheduler
     "ollama",
     "sqlite-vec==0.1.9",           # pre-1.0; a minor bump is a reindex event (AD-3)
