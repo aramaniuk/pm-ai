@@ -32,7 +32,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from pm_ai.domain.vcs import TrackingVerdict, VcsUnavailable
+from pm_ai.domain.vcs import (
+    GIT_SUBCOMMANDS,
+    TrackingVerdict,
+    UnpermittedGitSubcommand,
+    VcsUnavailable,
+)
 
 __all__ = ["GIT_TIMEOUT_SECONDS", "GitVcs"]
 
@@ -176,6 +181,16 @@ class GitVcs:
         with a message about `.git`, which sends an operator looking for a
         `.gitignore` problem in a directory that is not there at all.
         """
+        subcommand = arguments[0] if arguments else ""
+        if subcommand not in GIT_SUBCOMMANDS:
+            # Checked before anything is spawned, and before the PATH lookup, so
+            # the refusal is about what was asked rather than about the machine.
+            raise UnpermittedGitSubcommand(
+                f"`git {subcommand}` is not in the permitted set "
+                f"{sorted(GIT_SUBCOMMANDS)}. AD-1 admits this package as class L "
+                f"on the strength of every one of them being read-only; adding a "
+                f"subcommand is a change to pm_ai.domain.vcs, not to this adapter."
+            )
         git = shutil.which("git")
         if git is None:
             raise VcsUnavailable(

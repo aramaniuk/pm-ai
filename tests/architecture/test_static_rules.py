@@ -14,7 +14,17 @@ from conftest import calls, canonical_name, format_violations, source_files
 
 # Layers permitted to perform each restricted operation.
 WRITE_ALLOWED = {"storage"}
-SHELL_ALLOWED = {"platform"}
+
+# Layers that may spawn a process at all. Both are conditional, not exempt, and
+# `test_ad1_a_spawning_layer_is_scanned_too` is what makes the distinction real:
+# until 2026-08-28 this constant was defined here and referenced nowhere, so
+# `platform` was simply absent from the scanned layer list. Three planted
+# violations — os.system, exec, and subprocess.run(shell=True) in
+# pm_ai/platform/vcs.py — left the whole suite green.
+SHELL_ALLOWED = {"platform", "models"}
+
+# What a spawning layer may still never do, whatever else it is permitted.
+NEVER_SPAWNABLE = {"os.system", "os.popen", "os.execv", "eval", "exec"}
 
 WRITE_CALLS = {
     "open",
@@ -127,31 +137,98 @@ def test_ad1_no_shell_execution_outside_platform():
     # unscanned `subprocess.run(shell=True)` was invisible to both this check and
     # .importlinter. It passed a planted violation until 2026-08-19.
     layers = ["app", "domain", "core", "ports", "connectors", "skills", "surfaces", "storage"]
+    assert not (set(layers) & SHELL_ALLOWED), (
+        "a layer cannot be both totally banned and conditionally permitted; "
+        "SHELL_ALLOWED and this list must stay disjoint"
+    )
     violations = [
         f"{f.location(node)}  {name}(...)"
         for f, node, name in calls(source_files(*layers))
         if name in SHELL_CALLS
     ]
-    # pm_ai.models.local is class L under AD-1: it may spawn whisper.cpp, but only
-    # as an allowlisted absolute path with shell=False. os.system/popen and eval/exec
-    # remain banned there too — only the subprocess family is carved out.
-    for f, node, name in calls(source_files("models")):
-        if name not in SHELL_CALLS:
-            continue
-        in_local = "local" in f.path.parts
-        if in_local and name.startswith("subprocess."):
-            if any(
-                kw.arg == "shell" and getattr(kw.value, "value", None) is True
-                for kw in node.keywords
-            ):
-                violations.append(f"{f.location(node)}  {name}(shell=True) — AD-1 class L requires shell=False")
-            continue
-        violations.append(f"{f.location(node)}  {name}(...)")
     assert not violations, format_violations(
         violations,
-        "AD-1: shell execution is confined to pm_ai.platform and, for whisper.cpp "
-        "only, pm_ai.models.local (class L — allowlisted absolute path, argv list, "
-        "shell=False). Everything else routes through an MCP skill.",
+        "AD-1: shell execution is confined to the SHELL_ALLOWED layers, and "
+        "conditionally even there. Everything else routes through an MCP skill.",
+    )
+
+
+@pytest.mark.parametrize("layer", sorted(SHELL_ALLOWED))
+def test_ad1_a_spawning_layer_is_scanned_too(layer):
+    """AD-1 — a layer permitted to spawn is *conditionally* permitted, not exempt.
+
+    `pm_ai.models.local` may run whisper.cpp and `pm_ai.platform` may run git.
+    Neither may reach a shell, evaluate a string, or replace its own image.
+
+    The gap this closes: `platform` was never in the banned-layer list above, and
+    `SHELL_ALLOWED = {"platform"}` was defined and read by nothing — so the one
+    package that legitimately spawns a process was the one package with no rule
+    at all. Measured on 2026-08-28 by planting `os.system("echo pwned")`,
+    `exec(...)` and `subprocess.run(..., shell=True)` in `pm_ai/platform/vcs.py`:
+    373 passed, 12 import contracts kept. This is the same shape as the AD-1 gap
+    closed for `pm_ai.app` on 2026-08-19 — a boundary moved into an unscanned
+    layer — which is why the fix is a rule rather than one more entry in a list.
+    """
+    violations: list[str] = []
+    for f, node, name in calls(source_files(layer)):
+        if name in NEVER_SPAWNABLE:
+            violations.append(
+                f"{f.location(node)}  {name}(...) — banned in every layer, "
+                f"including one permitted to spawn"
+            )
+            continue
+        if name not in SHELL_CALLS:
+            continue
+        if any(
+            kw.arg == "shell" and getattr(kw.value, "value", None) is True
+            for kw in node.keywords
+        ):
+            violations.append(
+                f"{f.location(node)}  {name}(shell=True) — AD-1 class L requires "
+                f"an argv list, never a command line"
+            )
+    assert not violations, format_violations(
+        violations,
+        f"AD-1: pm_ai.{layer} may spawn an allowlisted binary with an argv list "
+        f"and shell=False. It may not reach a shell, evaluate a string, or "
+        f"replace its own image.",
+    )
+
+
+def test_ad1_the_git_subcommand_set_is_closed_in_domain():
+    """AD-1 — *which* git commands `platform` may run is a domain decision.
+
+    Permitting the package to spawn `git` is not the same as permitting it to
+    spawn any git. All three permitted subcommands are read-only, which is the
+    property AD-1 admits this package as class L on the strength of; a `git rm`
+    reached through the same helper would be an egress class change with no
+    review, inside a package the scan above treats as trusted.
+
+    Closed in `domain` for the reason AD-27's taxonomy and AD-32's verb list are:
+    a set that lives where the caller lives grows by whoever is in a hurry.
+    """
+    # Imported directly rather than through the suite's `mod()` helper: that
+    # helper turns a missing module into a *skip*, and a security rule that can
+    # skip itself is the failure mode `tests/conftest.py`'s ratchet exists for.
+    # `pm_ai.domain` imports nothing optional, so there is nothing to tolerate.
+    from pm_ai.domain import GIT_SUBCOMMANDS
+
+    assert GIT_SUBCOMMANDS == frozenset({"rev-parse", "check-ignore", "ls-files"})
+
+    # Every subcommand the adapter actually passes must be in the set — a literal
+    # the domain does not know about is the drift this test exists to catch.
+    passed: set[str] = set()
+    for f, node, name in calls(source_files("platform")):
+        if not name.endswith("_git") or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            passed.add(first.value)
+    assert passed, "no `_git(...)` call sites found — has the helper been renamed?"
+    assert passed <= GIT_SUBCOMMANDS, (
+        f"pm_ai.platform passes git subcommands the domain does not permit: "
+        f"{sorted(passed - GIT_SUBCOMMANDS)}. Add them to "
+        f"pm_ai.domain.vcs.GIT_SUBCOMMANDS, where a reviewer sees them."
     )
 
 

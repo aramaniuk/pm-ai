@@ -27,7 +27,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["TrackingVerdict", "VcsUnavailable"]
+__all__ = ["GIT_SUBCOMMANDS", "TrackingVerdict", "UnpermittedGitSubcommand", "VcsUnavailable"]
+
+
+# The complete set of git subcommands pm-ai may run. Closed here, in domain,
+# for the same reason AD-27's event taxonomy and AD-32's verb list are closed
+# here: a set that lives where the caller lives grows by whoever is in a hurry.
+# The adapter reads this; it does not extend it.
+#
+# All three are read-only. That is the property worth protecting — AD-1 admits
+# `pm_ai.platform` as class L on the strength of it, and a `git rm` or a `git
+# checkout` reached through the same helper would be an egress class change
+# with no review, in a package the shell scan treats as trusted.
+#
+# Adding one is a domain change, which is the point: it lands in a diff
+# somebody reviews rather than as a new string literal in an adapter.
+GIT_SUBCOMMANDS = frozenset({
+    "rev-parse",     # locate the working-tree root (AD-43)
+    "check-ignore",  # do the exclusion rules cover this path
+    "ls-files",      # is this path already in the index
+})
+
+
+class UnpermittedGitSubcommand(ValueError):
+    """A git subcommand outside `GIT_SUBCOMMANDS` was attempted.
+
+    A programming error rather than an operational one, so it is raised at the
+    call rather than folded into `VcsUnavailable` — a caller that cannot tell
+    "git could not answer" from "this code tried to run something it may not"
+    would retry the second forever.
+    """
 
 
 class VcsUnavailable(RuntimeError):

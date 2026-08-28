@@ -53,7 +53,12 @@ from pm_ai.domain.storage_tiers import (
     requires_git_exclusion,
     assert_reindex_safe,
 )
-from pm_ai.domain.vcs import TrackingVerdict, VcsUnavailable
+from pm_ai.domain.vcs import (
+    GIT_SUBCOMMANDS,
+    TrackingVerdict,
+    UnpermittedGitSubcommand,
+    VcsUnavailable,
+)
 from pm_ai.domain.identity import (
     PM_AI,
     PM_AI_ACTOR,
@@ -99,5 +104,5 @@ __all__ = [
     # Git is the authority on what git tracks, so the write path asks it through
     # `pm_ai.ports.VcsPort` and refuses on `VcsUnavailable`. The text matcher
     # above is the pure form of the question, not the answer.
-    "TrackingVerdict", "VcsUnavailable", "assert_capture_dir_untracked", "gitignore_rule_for", "requires_git_exclusion",
+    "GIT_SUBCOMMANDS", "TrackingVerdict", "UnpermittedGitSubcommand", "VcsUnavailable", "assert_capture_dir_untracked", "gitignore_rule_for", "requires_git_exclusion",
 ]
