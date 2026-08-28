@@ -27,6 +27,7 @@ from pm_ai.domain.scope_model import (
     ARTIFACT_TIER,
     BACKUP_TARGETS,
     DIAGNOSTIC_ONLY,
+    FOREIGN_ROOTS,
     REBUILD_TARGETS,
     RETENTION_MANAGED,
     SCOPE_TREES,
@@ -100,7 +101,7 @@ __all__ = [
     # The scope layout and the durability each of its artifacts declares. The
     # tier tables are derived from the trees, so both come from one module.
     "SCOPE_TREES", "File", "Dir", "Collection", "MalformedLayout",
-    "OutsideTierModel", "RETENTION_MANAGED", "DIAGNOSTIC_ONLY",
+    "OutsideTierModel", "RETENTION_MANAGED", "DIAGNOSTIC_ONLY", "FOREIGN_ROOTS",
     "ENCRYPTED", "GITIGNORED", "GITIGNORE_FILENAME", "UnprotectedCaptureDir", "assert_capture_dir_ignored",
     # Git is the authority on what git tracks, so the write path asks it through
     # `pm_ai.ports.VcsPort` and refuses on `VcsUnavailable`. The text matcher

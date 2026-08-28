@@ -358,6 +358,13 @@ class Collection:
     known sub-namespace of an unenumerable directory. A `File` or `Dir` here
     would be a declared artifact inside a namespace that just said it declares
     nothing, so it is refused.
+
+    `governed_by` names a *different* scope kind that owns everything inside.
+    `people/` is the only one today: declared here so its tier and its git
+    exclusion derive from this tree like any other node, while what it *contains*
+    is a direct report's record, addressable only under the PEOPLE label. On the
+    node rather than in a list beside the trees, for AD-44's reason — a set
+    maintained separately is a second structure that can disagree with them.
     """
 
     name: str
@@ -365,6 +372,7 @@ class Collection:
     namespaces: tuple[Collection, ...] = ()
     encrypted: bool = field(kw_only=True)
     gitignored: bool = field(kw_only=True)
+    governed_by: ScopeKind | None = field(kw_only=True, default=None)
     is_dir: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
@@ -480,7 +488,18 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
             # deleted on role change. Tier 1 markdown inside the gitignored
             # enclave: career dossiers and agreed 1:1 goals are truth, and
             # encryption is orthogonal to tier.
-            Collection("people", Tier.TRUTH, encrypted=False, gitignored=True),
+            Collection(
+                "people",
+                Tier.TRUTH,
+                encrypted=False,
+                gitignored=True,
+                # Addressable only under the PEOPLE label. Until 2026-08-28
+                # `resolve(DataScope(APPLICATION), "people/")` returned this
+                # directory, so a caller could write a direct report's record
+                # into exactly the right place while carrying a label under
+                # which none of AD-38's guards fire — they key on `is_people`.
+                governed_by=ScopeKind.PEOPLE,
+            ),
         ),
         gitignored=True,
     ),
@@ -883,6 +902,41 @@ ENCRYPTED: Mapping[ScopeKind, frozenset[str]] = _answering_yes(ENCRYPTION)
 # which only git can give.
 EXCLUSION: Mapping[ScopeKind, Mapping[str, bool]] = _per_scope_answers("gitignored")
 GITIGNORED: Mapping[ScopeKind, frozenset[str]] = _answering_yes(EXCLUSION)
+
+
+def _foreign_roots() -> Mapping[str, ScopeKind]:
+    """Keys that are the root of *another* scope, mapped to the kind that owns it.
+
+    Derived from the `governed_by` declaration on the node, never listed beside
+    the trees — the AD-44 rule that a second structure is a structure that can
+    disagree.
+
+    Such a node is declared where it physically sits, so its tier and its git
+    exclusion derive normally, but it is not addressable there: everything inside
+    belongs to the other scope, and the guards that protect it key on that
+    scope's label rather than on the directory.
+    """
+    roots: dict[str, ScopeKind] = {}
+    for kind, tree in SCOPE_TREES.items():
+        for placement in PLACEMENTS[kind]:
+            owner = getattr(placement.node, "governed_by", None)
+            if owner is None:
+                continue
+            if owner is kind:
+                raise InconsistentModel(
+                    f"{placement.key!r} declares itself governed by the scope it "
+                    f"already sits in ({kind.value}), which forbids the only "
+                    f"label that could address it."
+                )
+            roots[placement.key] = owner
+    return MappingProxyType(roots)
+
+
+# `people/` is the only member today: `~/.pm-ai/private/people/` sits in the
+# application tree and holds PEOPLE-scope records. Before 2026-08-28 it was
+# addressable under the application label, so a write could land in exactly the
+# right directory carrying a label under which none of AD-38's guards fire.
+FOREIGN_ROOTS: Mapping[str, ScopeKind] = _foreign_roots()
 
 
 # The artifacts whose subject is the PM personally (AD-31). Stated separately

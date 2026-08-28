@@ -25,7 +25,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 
 # The durability marker a node carries when it is outside the tier model. It
 # lives with the trees, because that is where it is declared.
-from pm_ai.domain.scope_model import OutsideTierModel
+from pm_ai.domain.scope_model import FOREIGN_ROOTS, OutsideTierModel
 from pm_ai.domain.storage_tiers import (
     ARTIFACT_TIER,
     DIAGNOSTIC_ONLY,
@@ -36,6 +36,8 @@ from pm_ai.domain.storage_tiers import (
     Tier,
 )
 from pm_ai.platform.paths import (
+    _ADDRESS,
+    ForeignScopeRoot,
     PERSONAL_SUBJECT_ARTIFACTS,
     SCOPE_TREES,
     AmbiguousArtifact,
@@ -86,11 +88,25 @@ def _resolved(paths: ScopePaths, tier: Tier | None) -> list[tuple[DataScope, str
     `None` means every tier, retention-managed artifacts included.
     """
     return [
-        (scope, artifact, paths.resolve(scope, artifact))
+        (scope, artifact, _path_of(paths, scope, artifact))
         for scope in SCOPES
         for artifact in sorted(artifacts_in(scope.kind))
         if tier is None or ARTIFACT_TIER.get(artifact) is tier
     ]
+
+
+def _path_of(paths: ScopePaths, scope: DataScope, artifact: str) -> Path:
+    """Where a declared node sits, including the ones `resolve` refuses.
+
+    `people/` is Tier 1 and shares the `private/` enclave with the Tier-3 stores,
+    so the containment assertions below have to include it — but it is a foreign
+    scope root, and addressing it through `resolve` is exactly what was closed on
+    2026-08-28. Routed by `FOREIGN_ROOTS` rather than by name, so a second such
+    node is covered without editing this helper.
+    """
+    if artifact in FOREIGN_ROOTS:
+        return paths.foreign_scope_root(artifact)
+    return paths.resolve(scope, artifact)
 
 
 def _personal_only() -> set[str]:
@@ -128,6 +144,11 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.pm-ai/memory/event_log",
     (ScopeKind.APPLICATION, "private/"):
         "/home/pm/.pm-ai/private",
+    # Pinned like any other node — its location is load-bearing, since it shares
+    # the `private/` enclave with the Tier-3 stores. `resolve` refuses it (it is
+    # a foreign scope root); `_path_of` routes to `foreign_scope_root`.
+    (ScopeKind.APPLICATION, "people/"):
+        "/home/pm/.pm-ai/private/people",
     (ScopeKind.APPLICATION, "operational.db"):
         "/home/pm/.pm-ai/private/operational.db",
     (ScopeKind.APPLICATION, "event_index.db"):
@@ -138,8 +159,6 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.pm-ai/private/config.json",
     (ScopeKind.APPLICATION, "vector_index/"):
         "/home/pm/.pm-ai/private/vector_index",
-    (ScopeKind.APPLICATION, "people/"):
-        "/home/pm/.pm-ai/private/people",
     # ── personal — /home/pm/.manager-ai/ (scope-model.md §B) ─────────────────
     (ScopeKind.PERSONAL, "rules/"):
         "/home/pm/.manager-ai/rules",
@@ -246,9 +265,9 @@ def test_every_scope_and_artifact_resolves_to_its_pinned_path():
     for (kind, artifact), expected in sorted(
         RESOLUTION_TABLE.items(), key=lambda item: (item[0][0].value, item[0][1])
     ):
-        assert paths.resolve(scopes[kind], artifact) == Path(expected), (
+        assert _path_of(paths, scopes[kind], artifact) == Path(expected), (
             f"{artifact} in the {kind.value} scope moved: it now resolves to "
-            f"{paths.resolve(scopes[kind], artifact)}, not {expected}. If the move "
+            f"{_path_of(paths, scopes[kind], artifact)}, not {expected}. If the move "
             f"is intended, migrating whatever the old path already holds is part "
             f"of it."
         )
@@ -352,7 +371,7 @@ def test_rooted_resolver_reproduces_production_structure_beneath_its_root(
     for scope in SCOPES:
         assert rooted.scope_root(scope).is_relative_to(tmp_path)
         for artifact in sorted(artifacts_in(scope.kind)):
-            path = rooted.resolve(scope, artifact)
+            path = _path_of(rooted, scope, artifact)
             resolved.append(path)
             covered.add(artifact)
             assert path.is_absolute()
@@ -361,7 +380,7 @@ def test_rooted_resolver_reproduces_production_structure_beneath_its_root(
             assert ".." not in path.parts, f"{path} carries an unnormalized .."
             # Same relative structure as production: identical path below the
             # scope root, which is the part any caller actually depends on.
-            assert path.relative_to(rooted.scope_root(scope)) == production.resolve(
+            assert path.relative_to(rooted.scope_root(scope)) == _path_of(production,
                 scope, artifact
             ).relative_to(production.scope_root(scope))
 
@@ -885,9 +904,20 @@ def test_an_artifact_resolves_the_same_by_relative_path_and_by_basename(producti
     assert production.resolve(PROJECT, "memory/event_log/") == production.resolve(
         PROJECT, "event_log/"
     )
-    assert production.resolve(
-        APPLICATION, "private/people/"
-    ) == production.resolve(APPLICATION, "people/")
+    # `people/` is the exception, and it proves the same property harder: both
+    # spellings reach one node, so both must be REFUSED identically. A string
+    # check on the artifact name caught `people/` and missed `private/people/` —
+    # the guard reappearing one spelling to the left — so it keys on the node.
+    for spelling in ("people/", "private/people/"):
+        with pytest.raises(ForeignScopeRoot):
+            production.resolve(APPLICATION, spelling)
+    # `foreign_scope_root` takes the canonical key only, like `artifacts_in`,
+    # which reports one spelling per node. The two-spelling property is carried
+    # by the refusal above — that is where it matters, because that is the
+    # boundary a caller could have crossed.
+    assert production.foreign_scope_root("people/") == (
+        HOME / ".pm-ai" / "private" / "people"
+    )
 
 
 def test_the_same_basename_in_two_scopes_is_two_different_declarations(production):
@@ -976,3 +1006,75 @@ def test_the_project_registry_is_application_scoped(production):
     """AD-11 — the one door into the system, outside every repository."""
     assert production.project_registry == HOME / ".pm-ai" / "projects.toml"
     assert scopes_of("projects.toml") == {ScopeKind.APPLICATION}
+
+
+# ── Foreign scope roots (2026-08-28) ─────────────────────────────────────────
+
+
+def test_a_foreign_scope_root_is_not_addressable_under_any_label(production):
+    """A node that is another scope's root is declared here and addressed there.
+
+    `~/.pm-ai/private/people/` sits in the application tree so its tier and its
+    git exclusion derive from that tree like any other node. What it *contains*
+    is a direct report's record, and every protection for one keys on the PEOPLE
+    label (`is_people`, AD-38) rather than on the directory. So while `resolve`
+    answered for it under the application label, a caller could write a dossier
+    into exactly the right place carrying a label under which none of those
+    guards fire — the right directory with the wrong guarantees.
+
+    Refused under *every* label, PEOPLE included: the container is never a write
+    target, only the records inside it are, and those are reached as
+    `DataScope(ScopeKind.PEOPLE, person_id=...)`.
+    """
+    assert FOREIGN_ROOTS, "no foreign roots declared — this check would be vacuous"
+
+    for artifact, owner in FOREIGN_ROOTS.items():
+        for kind in ScopeKind:
+            scope = (
+                DataScope(kind, person_id="p1")
+                if kind is ScopeKind.PEOPLE
+                else DataScope(kind, project_id="alpha")
+                if kind is ScopeKind.PROJECT
+                else DataScope(kind)
+            )
+            with pytest.raises(ScopeResolutionError):
+                production.resolve(scope, artifact)
+        assert owner is not ScopeKind.APPLICATION or artifact not in artifacts_in(owner)
+
+
+def test_every_spelling_of_a_foreign_root_is_refused(production):
+    """The refusal keys on the node, never on the artifact string.
+
+    One node is addressable under several spellings — `people/` and
+    `private/people/` both reach this one. A string check caught the first and
+    missed the second, which is the same hole one spelling to the left. Caught
+    while building the fix, and this is what keeps it caught.
+    """
+    canonical = "people/"
+    spellings = [
+        key
+        for key, placement in _ADDRESS[ScopeKind.APPLICATION].items()
+        if placement is _ADDRESS[ScopeKind.APPLICATION][canonical]
+    ]
+    assert len(spellings) > 1, (
+        "the people node is reachable under one spelling only, so this test no "
+        "longer covers the case it was written for"
+    )
+    for spelling in spellings:
+        with pytest.raises(ForeignScopeRoot):
+            production.resolve(APPLICATION, spelling)
+
+
+def test_the_records_inside_a_foreign_root_still_resolve(production):
+    """The refusal must not wall off the scope it protects.
+
+    A guard that made a direct report's record unreachable would be caught by no
+    test in this file, because nothing else here resolves under the PEOPLE label
+    — and it would be discovered as a broken feature rather than a broken guard.
+    """
+    people = DataScope(ScopeKind.PEOPLE, person_id="p1")
+    root = production.foreign_scope_root("people/")
+    resolved = [production.resolve(people, a) for a in sorted(artifacts_in(ScopeKind.PEOPLE))]
+    assert resolved, "the people tree declares nothing — the check is vacuous"
+    for path in resolved:
+        assert path.is_relative_to(root / "p1")

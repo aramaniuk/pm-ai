@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from pm_ai.app.wiring import build
+from pm_ai.domain.scope_model import FOREIGN_ROOTS
 from pm_ai.domain import (
     ARTIFACT_TIER,
     EVENT_LOG,
@@ -200,7 +201,14 @@ def test_the_operational_store_is_outside_every_tier_one_path(daemon):
         for artifact in artifacts_in(scope.kind):
             if ARTIFACT_TIER.get(artifact) is not Tier.TRUTH:
                 continue
-            tier_one = paths.resolve(scope, artifact)
+            # `people/` is Tier 1 and is a foreign scope root, which `resolve`
+            # refuses since 2026-08-28. Its location still has to be checked:
+            # it shares the `private/` enclave with the operational store.
+            tier_one = (
+                paths.foreign_scope_root(artifact)
+                if artifact in FOREIGN_ROOTS
+                else paths.resolve(scope, artifact)
+            )
             assert store != tier_one and not store.is_relative_to(tier_one), (
                 f"the operational store lies inside {artifact} of the "
                 f"{scope.kind.value} scope"

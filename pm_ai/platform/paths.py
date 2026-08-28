@@ -68,6 +68,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import (
     APPLICATION_DIRNAME,
     ENCLAVE_DIRNAME,
+    FOREIGN_ROOTS,
     PEOPLE_DIRNAME,
     PERSONAL_DIRNAME,
     PROJECT_DIRNAME,
@@ -185,6 +186,10 @@ class ScopePathError(ScopeResolutionError):
     none of which may import this module — can still catch a refusal by type
     instead of by catching `Exception`.
     """
+
+
+class ForeignScopeRoot(ScopeResolutionError):
+    """The artifact is another scope's root, addressable only under its label."""
 
 
 class UnknownArtifact(ScopePathError, LookupError):
@@ -340,6 +345,25 @@ def _place(kind: ScopeKind, artifact: str) -> Placement:
         )
     placement = _ADDRESS[kind].get(artifact)
     if placement is not None:
+        # Checked on the NODE, not on the artifact string. One node is addressable
+        # under several spellings — `people/` and `private/people/` both reach
+        # this one — and a string check caught the first and missed the second,
+        # which is the whole bug reappearing one spelling to the left.
+        owner = getattr(placement.node, "governed_by", None)
+        if owner is not None:
+            # Declared in this tree so its tier and git exclusion derive from it,
+            # and deliberately not addressable through it: everything inside
+            # belongs to `owner`, whose guards key on the scope label rather than
+            # on the directory. Refused under *every* label, `owner` included —
+            # the container is never a write target, and `ScopePaths.people_root`
+            # composes it structurally for the one caller that needs it.
+            raise ForeignScopeRoot(
+                f"{artifact!r} is the root of the {owner.value} scope, not an "
+                f"artifact of the {kind.value} scope. Address a record inside it "
+                f"as DataScope(ScopeKind.{owner.name}, ...) — writing through "
+                f"another label puts the record in the right directory with none "
+                f"of the guarantees that label carries."
+            )
         return placement
     homes = _KEY_SCOPES.get(artifact)
     if homes is None:
@@ -348,6 +372,16 @@ def _place(kind: ScopeKind, artifact: str) -> Placement:
         f"{artifact!r} does not exist in the {kind.value} scope. It belongs to "
         f"{sorted(k.value for k in homes)}."
     )
+
+
+# Foreign roots by key, so `foreign_scope_root` reaches the same Placement
+# `resolve` would have used rather than recomposing the path from a dirname —
+# two ways of building one path is the disagreement AD-44 exists to prevent.
+_PLACEMENTS_BY_KEY: dict[str, Placement] = {
+    key: _ADDRESS[ScopeKind.APPLICATION][key]
+    for key in FOREIGN_ROOTS
+    if key in _ADDRESS[ScopeKind.APPLICATION]
+}
 
 
 def _unknown_message(artifact: str) -> str:
@@ -554,6 +588,32 @@ class ScopePaths:
     def disclosure_ledger(self) -> Path:
         """AD-38 — the single frontier-call provenance and cost ledger."""
         return self.resolve(DataScope(ScopeKind.APPLICATION), "disclosure.md")
+
+    def foreign_scope_root(self, artifact: str) -> Path:
+        """The path of a node that is another scope's root (`FOREIGN_ROOTS`).
+
+        `resolve` refuses these deliberately, because addressing a direct
+        report's directory under the application label writes the record into
+        exactly the right place with none of the guarantees that label carries.
+        Some callers legitimately need the *location* without addressing
+        anything in it — the layout assertions that check no Tier-1 path sits
+        inside a rebuildable one have to include `people/`, since it shares the
+        `private/` enclave with the Tier-3 stores.
+
+        Named so it cannot be reached for by accident, and narrow: it answers
+        only for a declared foreign root, so it cannot become a second `resolve`
+        that skips the refusal.
+        """
+        owner = FOREIGN_ROOTS.get(artifact)
+        if owner is None:
+            raise ArtifactNotInScope(
+                f"{artifact!r} is not a foreign scope root. This accessor exists "
+                f"for the nodes `resolve` refuses; everything else goes through "
+                f"`resolve`. Known: {sorted(FOREIGN_ROOTS)}."
+            )
+        return self.scope_root(DataScope(ScopeKind.APPLICATION)) / _PLACEMENTS_BY_KEY[
+            artifact
+        ].relative
 
     @property
     def project_registry(self) -> Path:
