@@ -51,6 +51,7 @@ from pm_ai.domain.storage_tiers import (
     UnprotectedCaptureDir,
     assert_capture_dir_untracked,
     gitignore_rule_for,
+    is_append_only,
     requires_git_exclusion,
 )
 from pm_ai.domain.vcs import VcsUnavailable
@@ -65,13 +66,13 @@ from pm_ai.storage.crypto import (
 # the mapping from artifact to scope stays in the one table that owns it.
 APPLICATION = DataScope(ScopeKind.APPLICATION)
 
-# AD-20 — an execution is recorded *before* the call and settled after, so a
-# crash in between is a reconciliation task rather than a silent second write.
 # A capture filename's ceiling, in bytes. Well under the 255 every filesystem
 # this daemon runs on allows, because the name is one component of a path that
 # also carries a repository root and a scope tree.
 CAPTURE_NAME_LIMIT = 128
 
+# AD-20 — an execution is recorded *before* the call and settled after, so a
+# crash in between is a reconciliation task rather than a silent second write.
 IN_FLIGHT = "in_flight"
 SETTLED = "settled"
 NO_EXTERNAL_ID = ""
@@ -166,7 +167,31 @@ def _write_all(descriptor: int, payload: bytes) -> None:
     """
     written = 0
     while written < len(payload):
-        written += os.write(descriptor, payload[written:])
+        progressed = os.write(descriptor, payload[written:])
+        if progressed == 0:
+            # POSIX permits a zero-byte result; looping on it would hang the
+            # single writer forever, which is the one failure mode that neither
+            # refuses nor succeeds.
+            raise OSError(errno.EIO, f"os.write made no progress at byte {written}")
+        written += progressed
+
+
+def _mkdir_enclave(directory: Path) -> None:
+    """Create `directory` and any missing ancestors, each at `ENCLAVE_DIR_MODE`.
+
+    `mkdir(parents=True, mode=...)` applies the mode only to the last component;
+    the ancestors it creates get the umask default, which for an enclave means a
+    world-readable `private/` around 0700 leaves. Walked explicitly so every
+    directory this write brings into existence is 0700 (story 1f). Directories
+    that already exist are left alone — their mode is their owner's decision.
+    """
+    missing: list[Path] = []
+    for candidate in (directory, *directory.parents):
+        if candidate.exists():
+            break
+        missing.append(candidate)
+    for candidate in reversed(missing):
+        candidate.mkdir(mode=ENCLAVE_DIR_MODE, exist_ok=True)
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -312,6 +337,19 @@ class AppendToSealedArtifact(RuntimeError):
     """
 
 
+class AppendOnlyArtifact(RuntimeError):
+    """A ledger was asked to be rewritten whole, which destroys its history.
+
+    The mirror of `AppendToSealedArtifact`, guarding the other direction: that
+    one refuses appending to what only replacement can write, this one refuses
+    replacing what only appending may touch. The membership comes from
+    `storage-contract.md`'s append set, spelled once in
+    `pm_ai.domain.storage_tiers.is_append_only` — AD-5's static scan cannot see
+    an artifact name that arrives as a runtime parameter, so the check is here,
+    at the moment the name is known.
+    """
+
+
 class OperationalStoreUnavailable(RuntimeError):
     """Tier 2 could not be opened, and the daemon has no state without it.
 
@@ -430,6 +468,19 @@ class StorageService:
         store = paths.resolve(APPLICATION, OPERATIONAL_DB, create=True)
         try:
             self._db = sqlite3.connect(store, check_same_thread=False)
+        except sqlite3.Error as exc:
+            raise OperationalStoreUnavailable(
+                f"could not open the operational store at {store}: {exc}. Tier 2 "
+                f"holds the job queue, the connector cursors, the executed-key "
+                f"ledger, and the dedup set, and none of it is rebuildable "
+                f"(AD-3) — so the daemon must not start without it."
+            ) from exc
+        # From here the connection exists, so every refusal below — a schema
+        # from a later version, a failing migration — closes it before leaving.
+        # A refused open used to leak the handle and its WAL sidecars: the
+        # process exit reclaimed them eventually, but a caller that catches the
+        # refusal and retries held one leaked connection per attempt.
+        try:
             self._db.execute("PRAGMA journal_mode=WAL")  # AD-5 — sole writer, WAL
             # Asked BEFORE `_SCHEMA` runs, because afterwards every store looks
             # created-by-us. It is the only way to tell a brand-new file from one
@@ -452,12 +503,20 @@ class StorageService:
             self._db.commit()
             self._migrate(preexisting=preexisting)
         except sqlite3.Error as exc:
+            self._db.close()
+            # Worded as what failed — preparing, not opening. A migration that
+            # raises `sqlite3.Error` used to be reported as "could not open",
+            # sending the operator to permissions and paths when the store
+            # opened fine and a schema step is what refused.
             raise OperationalStoreUnavailable(
-                f"could not open the operational store at {store}: {exc}. Tier 2 "
-                f"holds the job queue, the connector cursors, the executed-key "
-                f"ledger, and the dedup set, and none of it is rebuildable "
-                f"(AD-3) — so the daemon must not start without it."
+                f"opened the operational store at {store} but could not prepare "
+                f"its schema: {exc}. Tier 2 is never rebuilt (AD-3), so the "
+                f"daemon must not start against a store it could not bring to "
+                f"the expected version."
             ) from exc
+        except BaseException:
+            self._db.close()
+            raise
 
     def _migrate(self, *, preexisting: bool) -> None:
         """Bring the store forward to `SCHEMA_VERSION`, or refuse to open it.
@@ -547,7 +606,8 @@ class StorageService:
         Every write that needs a directory goes through here — the event-log
         segments and the raw captures alike — so the git check cannot be bypassed
         by adding a write path that resolves for itself. It is a no-op for an
-        artifact no rule covers, which is all of them but one.
+        artifact whose node declares `gitignored=False`; `GITIGNORED` derives
+        several members per scope, so the guard is live for more than captures.
 
         The refusal happens *before* `create=True`, so a refused write does not
         even leave behind the directory it was about to fill.
@@ -648,7 +708,12 @@ class StorageService:
         assert_capture_dir_untracked(
             artifact,
             verdict,
-            rule=gitignore_rule_for(target, repository=repository),
+            # Realpathed for the rule derivation only: `repository` comes from
+            # `git rev-parse`, which resolves symlinks, and `target` from the
+            # resolver, which does not — on a symlinked root (macOS `/tmp`, a
+            # symlinked home) the two spell one directory two ways and the rule
+            # cannot be derived from the unresolved form.
+            rule=gitignore_rule_for(Path(os.path.realpath(target)), repository=repository),
             gitignore=str(repository / GITIGNORE_FILENAME),
         )
         # Recorded only on success: a refusal must fire again on the next attempt,
@@ -775,37 +840,46 @@ class StorageService:
         parent = target.parent
         enclave = mode is not None
         if enclave:
-            parent.mkdir(parents=True, mode=ENCLAVE_DIR_MODE, exist_ok=True)
+            # Every directory created along the way is 0700, not just the
+            # immediate parent (story 1f): `mkdir(parents=True, mode=...)`
+            # applies the mode to the final directory only, so a missing
+            # `private/` above `telegram_cache/` used to land at umask default —
+            # publishing the names, sizes and mtimes the enclave exists to hide.
+            _mkdir_enclave(parent)
             if stat.S_IMODE(parent.stat().st_mode) != ENCLAVE_DIR_MODE:
                 parent.chmod(ENCLAVE_DIR_MODE)
-            staging.mkdir(parents=True, mode=ENCLAVE_DIR_MODE, exist_ok=True)
+            _mkdir_enclave(staging)
         else:
             staging.mkdir(parents=True, exist_ok=True)
 
         staged = staging / f".{target.name}.{_ulid()}.part"
         descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode or 0o666)
+        # One cleanup for every failure past this point: the staged name is
+        # dot-prefixed — invisible to the operator NFR-09's purge rule serves —
+        # so a failure that leaves it behind (ENOSPC mid-write as much as a
+        # refused publish) must remove it. Only a kill can orphan one now.
         try:
-            if mode is not None:
-                # `os.open`'s mode is masked by the process umask, so it is set
-                # again — on the STAGED file, before anything is visible under
-                # the final name, which is what makes the window zero rather
-                # than short.
-                #
-                # The rationale this replaces was wrong and worth correcting:
-                # it said `umask 000` would leave a credential "briefly
-                # world-readable". Measured 2026-08-28, it does not — umask only
-                # *removes* bits, and `0o600` requests none for group or other,
-                # so `umask 000` yields exactly `0o600`. What the mask can do is
-                # strip owner bits: at `umask 200` the same open yields `0o400`,
-                # and pm-ai could not finish writing its own credential store.
-                # The set is for determinism, never for confidentiality.
-                os.fchmod(descriptor, mode)
-            _write_all(descriptor, payload)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
-        try:
+            try:
+                if mode is not None:
+                    # `os.open`'s mode is masked by the process umask, so it is
+                    # set again — on the STAGED file, before anything is visible
+                    # under the final name, which is what makes the window zero
+                    # rather than short.
+                    #
+                    # The rationale this replaces was wrong and worth correcting:
+                    # it said `umask 000` would leave a credential "briefly
+                    # world-readable". Measured 2026-08-28, it does not — umask
+                    # only *removes* bits, and `0o600` requests none for group or
+                    # other, so `umask 000` yields exactly `0o600`. What the mask
+                    # can do is strip owner bits: at `umask 200` the same open
+                    # yields `0o400`, and pm-ai could not finish writing its own
+                    # credential store. The set is for determinism, never for
+                    # confidentiality.
+                    os.fchmod(descriptor, mode)
+                _write_all(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
             self._make_visible(staged, target, exclusive=exclusive)
         except BaseException:
             staged.unlink(missing_ok=True)
@@ -856,9 +930,32 @@ class StorageService:
 
         `name` is for an artifact whose members are created at runtime: a
         `Collection` resolves to its directory, so the file inside it has to be
-        named by the caller. A `File` resolves to itself and takes none.
+        named by the caller. A `File` resolves to itself and takes none. The name
+        is validated exactly as a capture's is — it is interpolated into a path,
+        and `../` or an absolute name would write outside the directory every
+        guard above just answered for.
+
+        Ledgers are refused. This path replaces the file whole, and replacing a
+        ledger keeps the last write and destroys every entry before it — the
+        rewrite-in-place AD-5 forbids and `append_event_log` exists to avoid.
+
+        Resolved *without* `create`, deliberately: the cipher runs before the
+        first directory is made, so a refused write — no key enrolled, a sealed
+        artifact on a machine that cannot seal — leaves neither the file nor the
+        directory behind (story 1f). `_publish` creates what the successful
+        write actually needs.
         """
-        target = self._writable_dir(scope, artifact)
+        if is_append_only(scope.kind, artifact):
+            raise AppendOnlyArtifact(
+                f"{artifact} in {scope} is append-only, and write_artifact "
+                f"replaces a file whole — which keeps this write and destroys "
+                f"every entry before it. Append through the writer's append "
+                f"path instead; a ledger's history is the artifact."
+            )
+        if name is not None:
+            name = _capture_name(name)
+        self._assert_git_excludes(scope, artifact)
+        target = self._paths.resolve(scope, artifact)
         if name is not None:
             target = target / name
         self._replace(target, payload)
@@ -867,7 +964,14 @@ class StorageService:
     def read_artifact(
         self, *, scope: DataScope, artifact: str, name: str | None = None
     ) -> bytes:
-        """Read a declared artifact, unsealing it if the model says it is sealed."""
+        """Read a declared artifact, unsealing it if the model says it is sealed.
+
+        `name` is validated as `write_artifact` validates it — this writer only
+        ever mints single-component names, so a traversal here is a request to
+        read something the layout never placed in this directory.
+        """
+        if name is not None:
+            name = _capture_name(name)
         target = self._paths.resolve(scope, artifact)
         if name is not None:
             target = target / name
@@ -1078,11 +1182,24 @@ class StorageService:
         millisecond and one that hung for an hour before settling are the same
         row, so neither an operator reconciling AD-20's in-flight window nor a
         test can tell how long the claim was open.
+
+        Settling a key that was never claimed is refused, not ignored. An UPDATE
+        matching zero rows used to succeed silently, so a caller that settled
+        the wrong key — a typo, a key minted twice — believed the outcome was
+        recorded while the real claim stayed in flight and blocked every retry.
         """
-        self._db.execute(
+        settled = self._db.execute(
             "UPDATE executed SET external_id = ?, state = ?, settled_at = ? WHERE key = ?",
             (external_id, SETTLED, self._at().isoformat(), idempotency_key),
         )
+        if settled.rowcount == 0:
+            self._db.rollback()
+            raise ReconciliationRequired(
+                f"{idempotency_key} has no claim to settle — begin_execution "
+                f"never recorded it. The outcome being reported belongs to some "
+                f"claim, and it is not this one: reconcile before retrying, "
+                f"because whichever key was actually claimed is still in flight."
+            )
         self._db.commit()
 
     def record_execution(self, idempotency_key: str, target: TargetRef, external_id: str) -> None:

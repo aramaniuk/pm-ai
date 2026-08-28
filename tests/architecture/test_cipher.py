@@ -278,13 +278,17 @@ def test_an_artifact_the_classifier_calls_plaintext_needs_no_cipher(tmp_path):
     `is_encrypted` is pure policy and answers without a cipher at all, which is
     why it must not live behind the optional extra the cipher needs.
     """
-    keychain = FakeKeychain()
     # A *declared* plaintext artifact. `standup.md` would not do: it sits inside
     # the `meetings/` collection and is not declared itself, so it fails closed —
     # correctly, and it would be testing the wrong thing here.
     declared = tmp_path / ".project-ai" / "memory" / "commitments_log.md"
     assert is_encrypted(str(declared)) is False
-    assert keychain.reads == 0
+    # The lazy cipher is the "no key is fetched" half: wrapping a keychain that
+    # counts reads and never touching it. (An earlier version asserted on a
+    # FakeKeychain that was handed to nothing, which could not fail.)
+    keychain = FakeKeychain()
+    LazyKeyCrypto(keychain, "master")
+    assert keychain.reads == 0, "constructing the lazy cipher must not fetch a key"
 
 
 def test_the_module_imports_without_the_runtime_extra():
@@ -320,8 +324,13 @@ def _daemon(tmp_path, *, disabled: bool, keychain=None):
     )
 
 
-def _event_log_text(daemon) -> str:
-    segments = list(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md"))
+def _event_log_text(daemon, scope: DataScope = APPLICATION) -> str:
+    # Defaults to the application scope's log, not the daemon's project scope:
+    # the debug flag describes the daemon's own posture, and the project
+    # `event_log/` is committed — writing the announcement there published "the
+    # operator ran with encryption off" to the employer's repository (review
+    # 2026-08-28).
+    segments = list(daemon.storage.paths.resolve(scope, EVENT_LOG).glob("*.md"))
     return "".join(s.read_text(encoding="utf-8") for s in segments)
 
 
@@ -485,5 +494,5 @@ def test_appending_to_a_plaintext_ledger_still_works(tmp_path):
     daemon.storage.append_event_log("- [test] a line", scope=daemon.scope)
     daemon.storage.append_event_log("- [test] another", scope=daemon.scope)
 
-    body = _event_log_text(daemon)
+    body = _event_log_text(daemon, scope=daemon.scope)
     assert body.count("[test]") == 2, "appending replaced rather than appended"

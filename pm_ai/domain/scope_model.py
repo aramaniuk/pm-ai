@@ -463,7 +463,8 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
         "private",
         (
             # Tier 2 — job queue, cursors, executed-key ledger, staged
-            # proposals. Encrypted, never rebuilt.
+            # proposals. Never rebuilt. Plaintext since the 2026-08-23 narrowing:
+            # its protection is the gitignored enclave and file permissions.
             File("operational.db", Tier.OPERATIONAL, encrypted=False, gitignored=True),
             # Tier 3 — one index per job, not one file per tier. Renamed and
             # split from a single `derived.db` on 2026-08-27: the search index
@@ -569,7 +570,8 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
         encrypted=False,
         gitignored=False,
     ),
-    # THE PERSONAL ENCLAVE (gitignored, encrypted).
+    # THE PERSONAL ENCLAVE (gitignored; only `telegram_cache/` inside it is
+    # encrypted since the 2026-08-23 narrowing).
     Dir(
         "private",
         (
@@ -718,9 +720,9 @@ PROJECT_TREE: tuple[LayoutNode, ...] = (
     # PROJECT-SPECIFIC SKILLS. As with the personal scope, the `.py` names in
     # `scope-model.md` §C are the team's to choose and are not declared.
     Collection("skills", Tier.TRUTH, encrypted=False, gitignored=False),
-    # RAW CAPTURES (gitignored, encrypted; 30-day purge). At the scope root
-    # rather than under `memory/`, because `GITIGNORE_REQUIRED` anchors the
-    # exclusion at `/.project-ai/transcripts/`. Move this and
+    # RAW CAPTURES (gitignored, plaintext since the 2026-08-23 narrowing;
+    # 30-day purge). At the scope root rather than under `memory/`, because the
+    # derived rule anchors the exclusion at `/.project-ai/transcripts/`. Move this and
     # `assert_capture_dir_ignored` still reports "protected" for a directory git
     # tracks, which is how verbatim minutes reach the employer's repository.
     Collection(
@@ -940,14 +942,15 @@ def _per_scope_answers(attribute: str) -> Mapping[ScopeKind, Mapping[str, bool]]
     at `private/` and reports every undeclared artifact beneath it as plaintext,
     which inverts the fail-closed rule exactly where it matters.
 
-    Keyed on **(scope, key)**, unlike `_DURABILITY` which is keyed on the
-    basename alone — and the difference is forced rather than stylistic.
-    `meetings/` is declared in three trees: under `people/` it holds a direct
-    report's 1:1 records, which `storage-contract.md` requires encrypted, and in
-    a project it holds meeting summaries committed to the repository, which the
-    same document requires plaintext. One basename, two correct answers. A
-    global table cannot hold both, so either a report's record leaks or the
-    project's Markdown stops being readable without the daemon.
+    Keyed on **(scope, qualified relative key)** — the key `walk_tree` yields,
+    `"transcripts/temp/"` rather than `"temp/"` — unlike `_DURABILITY` which is
+    keyed on the basename alone. Scope-qualification is forced rather than
+    stylistic: `meetings/` is declared in three trees with two different
+    encryption answers, so a global table cannot hold both. Qualification
+    *within* the scope was added 2026-08-28, when review showed a basename key
+    let any file share a declared artifact's name and inherit its answer — a
+    capture named `config.json` classified by the credential store's declaration
+    instead of by the collection it actually sits in.
 
     Durability escaped this only because every scope declaring a given basename
     happens to want the same tier. These two axes do not, so they are keyed the
@@ -957,8 +960,8 @@ def _per_scope_answers(attribute: str) -> Mapping[ScopeKind, Mapping[str, bool]]
         {
             kind: MappingProxyType(
                 {
-                    node.key: getattr(node, attribute)
-                    for _, node in walk_tree(tree)
+                    key: getattr(node, attribute)
+                    for key, node in walk_tree(tree)
                     if getattr(node, attribute, None) is not None
                 }
             )

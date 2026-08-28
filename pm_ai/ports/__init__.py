@@ -196,6 +196,15 @@ class KeychainBackendMissing(KeychainUnavailable):
     """
 
 
+# The name the master key is enrolled under. Spelled here because two callers
+# that may not import each other both need it: the composition root builds the
+# lazy cipher with it, and the doctor probes for it. Two independent literals
+# was the previous shape (review 2026-08-28), and a rename in one left the
+# other probing a key that no longer exists — ABSENT reported on a healthy
+# machine.
+MASTER_KEY_NAME = "master"
+
+
 @runtime_checkable
 class KeychainPort(Protocol):
     """AD-6 — where the master key lives, so the daemon can start unattended.

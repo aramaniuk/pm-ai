@@ -167,9 +167,20 @@ def test_staging_never_re_asks_git(tmp_path):
     the verdict about" has no fixed answer. A `.gitignore` negation re-including
     a subdirectory is exactly the case AD-43's rationale calls out.
     """
+    trees_asked: list[Path] = []
     asked: list[Path] = []
 
     class _Counting(_AlwaysUntracked):
+        # `working_tree` answers with a repository rather than inheriting the
+        # `None` that short-circuits the guard: with `None`, `tracking` was
+        # never reached and the counter below could not move however many times
+        # the guard ran — the assertion held vacuously even with staging
+        # rerouted through it (review 2026-08-28). Counting both calls is what
+        # makes "asked once" a claim that can fail.
+        def working_tree(self, path):
+            trees_asked.append(path)
+            return tmp_path
+
         def tracking(self, path, *, repository):
             asked.append(path)
             return super().tracking(path, repository=repository)
@@ -178,7 +189,8 @@ def test_staging_never_re_asks_git(tmp_path):
         ScopePaths.rooted(tmp_path), now=lambda: NOW, vcs=_Counting(), crypto=PlaintextCrypto()
     )
     storage.write_capture(BODY, scope=PERSONAL, name="once.vtt")
-    assert len(asked) <= 1, f"git was asked {len(asked)} times: {asked}"
+    assert len(trees_asked) == 1, f"git was asked about {len(trees_asked)} trees: {trees_asked}"
+    assert len(asked) == 1, f"git tracking was asked {len(asked)} times: {asked}"
 
 
 # ── Whole-file replacement: the credential store ─────────────────────────────

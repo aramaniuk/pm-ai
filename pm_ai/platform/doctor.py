@@ -40,15 +40,17 @@ import importlib.metadata
 import re
 import shutil
 import sqlite3
-import subprocess
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR, TRUTHY, raw_toggle
+from pm_ai.platform.vcs import GitVcs
 from pm_ai.ports import (
+    MASTER_KEY_NAME,
     KeychainBackendMissing,
     KeychainPort,
     KeychainUnavailable,
@@ -63,7 +65,11 @@ class Health(Enum):
 
     `ABSENT` is separate from `FAILING` because "reachable, nothing stored" is an
     ordinary first-run state and "cannot reach it at all" is a broken machine.
-    Collapsing them would tell an operator to fix a keychain that is fine.
+    Collapsing them would tell an operator to fix a keychain that is fine. It is
+    still not `is_healthy` — expected on a fresh install and a pass are different
+    claims: setup is incomplete, encrypted writes will be refused until the key
+    is enrolled, and a doctor that exits 0 over that would be the summary an
+    operator trusts while the morning briefing quietly cannot decrypt anything.
 
     `WARNING` is separate from `OK` because encryption being off is not healthy
     even though nothing is broken — and separate from `FAILING` because the
@@ -238,7 +244,7 @@ def sqlite_extension_support() -> Probe:
     )
 
 
-def keychain_reachable(keychain: KeychainPort, key_name: str = "master") -> Probe:
+def keychain_reachable(keychain: KeychainPort, key_name: str = MASTER_KEY_NAME) -> Probe:
     """Whether the master key can be reached, and whether one is stored.
 
     `keychain` is injected rather than constructed so the probe can be exercised
@@ -317,7 +323,7 @@ def encryption_toggle() -> Probe:
     )
 
 
-def git_available(timeout_seconds: float = 10.0) -> Probe:
+def git_available() -> Probe:
     """Whether `git` is present *and* able to answer, reported separately.
 
     `shutil.which` proves a file exists. The capture guard needs git to *answer a
@@ -336,17 +342,18 @@ def git_available(timeout_seconds: float = 10.0) -> Probe:
             "Install git, or add it to the daemon's PATH (`launchd` supplies a "
             "minimal one).",
         )
+    # Through the adapter, never `subprocess` beside it. This probe used to
+    # spawn git directly, which put two invocations outside `GIT_SUBCOMMANDS`
+    # and made that set's "complete" claim false the day it shipped (review
+    # 2026-08-28) — the closed set is only closed if the doctor is inside it.
+    # `check-ignore` is asked from the home directory: exit 128 ("not a
+    # repository") is an expected answer there, and the probe is about whether
+    # git answers, not about any particular repository.
+    vcs = GitVcs()
     try:
-        version = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True,
-            timeout=timeout_seconds, check=False,
-        )
-        answering = subprocess.run(
-            [binary, "check-ignore", "--quiet", "--", "probe/"],
-            cwd=Path.home(), capture_output=True, text=True,
-            timeout=timeout_seconds, check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as unusable:
+        version = vcs.probe("--version", repository=Path.home())
+        answering = vcs.probe("check-ignore", "--quiet", "--", "probe/", repository=Path.home())
+    except VcsUnavailable as unusable:
         return Probe(
             name, Health.FAILING, f"`git` is present at {binary} but unusable: {unusable}",
             "Distinct from git being absent: something is there and cannot answer. "

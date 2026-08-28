@@ -213,7 +213,9 @@ def test_ad1_the_git_subcommand_set_is_closed_in_domain():
     # `pm_ai.domain` imports nothing optional, so there is nothing to tolerate.
     from pm_ai.domain import GIT_SUBCOMMANDS
 
-    assert GIT_SUBCOMMANDS == frozenset({"rev-parse", "check-ignore", "ls-files"})
+    assert GIT_SUBCOMMANDS == frozenset(
+        {"rev-parse", "check-ignore", "ls-files", "--version"}
+    )
 
     # Every subcommand the adapter actually passes must be in the set — a literal
     # the domain does not know about is the drift this test exists to catch.

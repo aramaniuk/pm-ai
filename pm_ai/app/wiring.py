@@ -18,7 +18,7 @@ from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.ports import CryptoPort, KeychainPort, VcsPort
+from pm_ai.ports import MASTER_KEY_NAME, CryptoPort, KeychainPort, VcsPort
 from pm_ai.platform.environment import encryption_disabled as encryption_off
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
@@ -28,8 +28,7 @@ from pm_ai.skills.registry import SkillRegistry
 from pm_ai.storage.crypto import LazyKeyCrypto, PlaintextCrypto
 from pm_ai.storage.service import StorageService
 
-
-MASTER_KEY_NAME = "master"
+__all__ = ["Daemon", "MASTER_KEY_NAME", "build"]
 
 
 @dataclass
@@ -115,7 +114,7 @@ def build(
     crypto = _choose_crypto(keychain or MacOSKeychainAdapter(), encryption_disabled=disabled)
     storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs(), crypto=crypto)
     if disabled:
-        _announce_disabled_encryption(storage, scope=scope)
+        _announce_disabled_encryption(storage)
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
     return Daemon(
@@ -155,13 +154,21 @@ def _choose_crypto(keychain: KeychainPort, *, encryption_disabled: bool) -> Cryp
     return LazyKeyCrypto(keychain, MASTER_KEY_NAME)
 
 
-def _announce_disabled_encryption(storage: StorageService, *, scope: DataScope) -> None:
+def _announce_disabled_encryption(storage: StorageService) -> None:
     """Say so twice, because the two audiences are different.
 
     The console reaches whoever is running the daemon now. The event log reaches
     whoever reads the record later and would otherwise find plaintext credentials
     with no explanation — and a console warning is gone the moment the terminal
     scrolls. Only the composition root knows the flag exists, so only it can say.
+
+    Into the *application* scope's event log, always. The flag describes the
+    daemon's own posture on this machine — application-scope subject matter —
+    and until 2026-08-28 this wrote into the daemon's project scope, whose
+    `event_log/` is committed: the fact that the operator ran with encryption
+    off landed in the employer's repository, the exact misfiling-by-convenience
+    the scope model exists to refuse (and the reason AD-38 homes the disclosure
+    ledger the same way).
     """
     print(
         "WARNING: encryption is disabled by an explicit debug flag. "
@@ -172,5 +179,5 @@ def _announce_disabled_encryption(storage: StorageService, *, scope: DataScope) 
     storage.append_event_log(
         "- [security] encryption disabled by debug flag; the encrypted set is "
         "being written in plaintext",
-        scope=scope,
+        scope=DataScope(ScopeKind.APPLICATION),
     )

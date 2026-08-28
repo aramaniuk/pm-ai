@@ -176,12 +176,15 @@ def test_a_node_without_an_encryption_answer_cannot_be_constructed():
 
 
 def test_no_declared_markdown_is_encrypted_outside_the_team_member_enclave():
-    """AD-6 — plaintext Markdown is a product property, with one exception.
+    """AD-6 — plaintext Markdown is a product property, with one carve-out.
 
-    A report's records are encrypted wholesale, and `people/` holds Markdown. So
-    the rule is not "no .md is ever encrypted" but "none is, outside the enclave
-    whose entire contents are" — and stating it that way is what keeps a future
-    encrypted `.md` in a project scope from looking normal.
+    Since the 2026-08-23 narrowing no declared Markdown is encrypted anywhere —
+    a report's records rest on the gitignored enclave and file permissions, not
+    on the cipher. The team-member scope is still exempted from this rule's
+    scan, deliberately: it is the one enclave whose contents *may* be sealed
+    wholesale if that decision is ever taken, and stating the rule this way is
+    what keeps a future encrypted `.md` in a project scope from looking normal
+    without re-litigating the enclave.
     """
     offenders = [
         (kind.value, key)

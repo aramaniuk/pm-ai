@@ -156,6 +156,26 @@ def _install_fake_keyring(monkeypatch, *, behaviour):
     return KeyringError
 
 
+def test_a_corrupted_entry_is_a_refusal_not_a_wrong_key(monkeypatch):
+    """A stored value that is not this adapter's base64 must not decode at all.
+
+    `b64decode` without `validate=True` silently *discards* invalid characters,
+    so a corrupted or hand-edited entry decoded to differently-sized bytes and
+    failed later as `KeyUnusable` — an error about the cipher, when the keychain
+    entry is what is broken. The refusal is `KeychainUnavailable`, because
+    "cannot hand back the enrolled key" is the same operational state as
+    "cannot ask".
+    """
+
+    def corrupted(module, _error):
+        module.get_password = lambda service, account: "not!base64@at#all"
+
+    _install_fake_keyring(monkeypatch, behaviour=corrupted)
+
+    with pytest.raises(KeychainUnavailable, match="not the base64"):
+        MacOSKeychainAdapter().fetch(NAME)
+
+
 def test_an_unreachable_keychain_is_distinguishable_from_an_absent_key(monkeypatch):
     """The distinction the whole port rests on.
 

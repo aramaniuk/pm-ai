@@ -13,7 +13,7 @@ assertions whose only job was to catch the two structures drifting apart.
 This module keeps what operates on that model rather than restating it:
 
 - `assert_reindex_safe` — the Tier-3-only guarantee `pm-ai reindex` owes AD-3.
-- `assert_capture_dir_untracked` and `GITIGNORE_REQUIRED` — the check
+- `assert_capture_dir_untracked` and `requires_git_exclusion` — the check
   `pm_ai.storage.service` runs before writing a raw capture into a committed
   scope. Its input is git's own verdict, obtained through `pm_ai.ports.VcsPort`,
   because only git can say what git tracks.
@@ -38,6 +38,7 @@ from pathlib import Path
 
 from pm_ai.domain.identity import ScopeKind
 from pm_ai.domain.scope_model import (
+    ADDRESS,
     ARTIFACT_TIER,
     BACKUP_TARGETS,
     DIAGNOSTIC_ONLY,
@@ -74,6 +75,7 @@ __all__ = [
     "assert_capture_dir_untracked",
     "assert_reindex_safe",
     "gitignore_rule_for",
+    "is_append_only",
     "requires_git_exclusion",
 ]
 
@@ -91,8 +93,8 @@ EVENT_LOG = "event_log/"
 OPERATIONAL_DB = "operational.db"
 
 # Raw captures. Homed in every scope at the same relative path, so the key alone
-# does not say whether git can see it — `GITIGNORE_REQUIRED` below is what pairs
-# it with the one scope where that question has an answer.
+# does not say whether git can see it — `requires_git_exclusion` below is what
+# pairs it with the scopes where that question has an answer.
 CAPTURES = "transcripts/"
 
 # AD-47's staging area, declared as a namespace of `transcripts/` in every tree
@@ -109,10 +111,32 @@ CAPTURE_STAGING = "temp/"
 # writes a capture, because the failure mode is publishing verbatim meeting
 # transcripts to the employer's repository — the same class of leak AD-38 exists
 # to prevent, arriving by omission instead of by routing.
+def _qualified(scope_kind: ScopeKind, artifact: str) -> str:
+    """The tree-qualified spelling of `artifact`, or the string unchanged.
+
+    The resolver accepts one node under several spellings — `temp/` and
+    `transcripts/temp/` reach the same directory — while the derived tables are
+    keyed on exactly one. Answering a membership question on the caller's
+    spelling is how a guard says no to one name for a directory and yes to
+    another for the same directory: review on 2026-08-28 demonstrated
+    `requires_git_exclusion(PERSONAL, "private/telegram_cache/")` returning
+    False for the very node it returns True for as `telegram_cache/`. So every
+    membership check below canonicalises first, through the same `ADDRESS`
+    index `resolve` uses. A spelling no index knows is returned unchanged: the
+    resolver will refuse it anyway, and inventing an answer here would hide
+    that refusal.
+    """
+    placement = ADDRESS[scope_kind].get(artifact)
+    if placement is None:
+        return artifact
+    key = placement.relative.as_posix()
+    return f"{key}/" if placement.node.is_dir else key
+
+
 def requires_git_exclusion(scope_kind: ScopeKind, artifact: str) -> bool:
     """Whether writing `artifact` in this scope must ask git first.
 
-    Replaces the module-level `GITIGNORE_REQUIRED` frozenset, which was keyed on
+    Replaces the module-level `GITIGNORE_REQUIRED` table, which was keyed on
     the artifact basename alone and therefore global. That held only while the
     set had one member: `transcripts/` wants the same answer in all three scopes
     that declare it. `event_log/` does not — it is inside the gitignored
@@ -120,9 +144,26 @@ def requires_git_exclusion(scope_kind: ScopeKind, artifact: str) -> bool:
     basename-keyed set had the same defect the encryption axis exposed, one
     artifact away from mattering.
 
-    The answer is declared on the node, per tree, and derived into `GITIGNORED`.
+    The answer is declared on the node, per tree, and derived into `GITIGNORED`,
+    which is keyed on qualified relative keys — hence `_qualified` first, so
+    every spelling the resolver accepts gets the node's answer.
     """
-    return artifact in GITIGNORED[scope_kind]
+    return _qualified(scope_kind, artifact) in GITIGNORED[scope_kind]
+
+
+# The append set, verbatim from `storage-contract.md` §"Append": ledgers whose
+# history is the artifact. `write_artifact` routes everything else through
+# whole-file replacement, and replacing a ledger destroys every entry but the
+# last write's — so the single writer refuses these by name. Node keys, not
+# spellings: `is_append_only` canonicalises the same way the git guard does.
+_APPEND_ONLY_KEYS = frozenset({EVENT_LOG, "commitments_log.md"})
+
+
+def is_append_only(scope_kind: ScopeKind, artifact: str) -> bool:
+    """Whether `artifact` is a ledger that only `append` may touch (AD-5)."""
+    placement = ADDRESS[scope_kind].get(artifact)
+    key = placement.node.key if placement is not None else artifact
+    return key in _APPEND_ONLY_KEYS
 
 # Named here rather than in `pm_ai.platform`, because `pm_ai.storage` derives
 # the path from git's reported working-tree root and may not import that
@@ -136,16 +177,33 @@ def gitignore_rule_for(target: Path, *, repository: Path) -> str:
     Derived, never stored. The rule depends on where the capture directory sits
     relative to its working-tree root, and that differs per scope: a project
     capture wants `/.project-ai/transcripts/`, a personal one at the root of its
-    own private repository wants `/transcripts/`. A table could not hold both,
-    because `GITIGNORE_REQUIRED` is keyed on the artifact *basename* and every
-    scope spells captures the same way — so one key would have to carry two
-    values. Re-keying the tier tables on `(scope, path)` is the change AD-44
-    defers; deriving the rule sidesteps needing it at all.
+    own private repository wants `/transcripts/`. A table keyed on the artifact
+    *basename* could not hold both, because every scope spells captures the same
+    way — so one key would have to carry two values. Deriving the rule
+    sidesteps needing a `(scope, path)` table at all.
 
     Anchored with a leading slash so it matches at the repository root only, and
     trailing so it reads as the directory it is.
+
+    `repository` comes from `git rev-parse`, which resolves symlinks; `target`
+    comes from the resolver, which deliberately does not. On a symlinked root
+    (macOS `/tmp`, a symlinked home) the two spell the same directory two ways
+    and `relative_to` cannot relate them. The caller is expected to hand in
+    comparable paths (`pm_ai.storage.service` realpaths the target before
+    calling); if they still do not relate, the refusal is typed rather than a
+    bare `ValueError` escaping a path that promised typed refusals.
     """
-    return "/" + target.relative_to(repository).as_posix() + "/"
+    try:
+        relative = target.relative_to(repository)
+    except ValueError as unrelated:
+        raise UnprotectedCaptureDir(
+            f"cannot derive the .gitignore rule for {target}: it does not sit "
+            f"under the working tree git reported, {repository}. The two "
+            f"usually differ only through a symlink somewhere in the capture "
+            f"path — the write is refused because a rule this function cannot "
+            f"derive is one the operator cannot be told to add."
+        ) from unrelated
+    return "/" + relative.as_posix() + "/"
 
 
 class UnprotectedCaptureDir(RuntimeError):

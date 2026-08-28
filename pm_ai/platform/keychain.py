@@ -36,6 +36,7 @@ in a hundred.
 from __future__ import annotations
 
 import base64
+import binascii
 from dataclasses import dataclass
 from typing import Any
 
@@ -104,7 +105,19 @@ class MacOSKeychainAdapter:
                 f"no secret is stored under {name!r} in the {KEYCHAIN_SERVICE!r} "
                 f"keychain service."
             )
-        return base64.b64decode(encoded)
+        try:
+            # `validate=True`, because the default silently *discards* invalid
+            # characters — a corrupted entry would decode to a differently-sized
+            # key and fail later as `KeyUnusable`, pointing at the cipher when
+            # the keychain entry is what is broken.
+            return base64.b64decode(encoded, validate=True)
+        except binascii.Error as corrupt:
+            raise KeychainUnavailable(
+                f"the secret stored under {name!r} is not the base64 this "
+                f"adapter writes ({corrupt}). It was not written by pm-ai's "
+                f"`store`, or it has been altered since; refusing to hand back "
+                f"bytes that are not the enrolled key."
+            ) from corrupt
 
     def delete(self, name: str) -> None:
         keyring, KeyringError = _keyring()

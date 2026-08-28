@@ -439,6 +439,12 @@ def test_a_traversing_person_id_cannot_leave_the_enclave(production):
         "Alice",
         " alice",
         "alice ",
+        # Interior control characters: neither empty nor padded, so the checks
+        # above cannot see them — and a newline splits one directory name across
+        # two lines in every message that reports it (review 2026-08-28).
+        "alice\nbob",
+        "alice\x00bob",
+        "alice\tbob",
     ],
 )
 def test_a_subject_id_that_is_not_a_directory_name_is_refused(production, bad):
@@ -610,7 +616,15 @@ def test_the_capture_directory_lies_inside_the_repository_it_is_checked_against(
 
 
 def _scopes_of(artifact: str) -> set[ScopeKind]:
-    return {kind for kind in ScopeKind if artifact in artifacts_in(kind)}
+    # Through `scopes_of` rather than `artifacts_in`, so every spelling the
+    # resolver accepts is an answer: `GITIGNORED` is keyed on qualified relative
+    # keys (`transcripts/temp/`), while `artifacts_in` reports the canonical
+    # spelling (`temp/`), and a membership check on the wrong one of the two is
+    # the same bug the qualified keying exists to close.
+    try:
+        return set(scopes_of(artifact))
+    except UnknownArtifact:
+        return set()
 
 
 def test_the_resolver_agrees_with_the_bare_string_it_replaces():
@@ -691,6 +705,10 @@ def test_every_refusal_is_catchable_as_one_error(production):
         lambda: production.gitignore("beta"),
         lambda: production.gitignore("../evil"),
         lambda: ScopePaths.rooted("/tmp/rooted-check", projects={"b": "/elsewhere"}),
+        # The foreign-root refusal, which subclassed the domain base directly
+        # until 2026-08-28 and was the one refusal a ScopePathError clause
+        # missed — untested, because this list never provoked it.
+        lambda: production.resolve(APPLICATION, "people/"),
     )
     for refuse in refusals:
         with pytest.raises(ScopePathError):

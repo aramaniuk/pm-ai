@@ -122,6 +122,20 @@ class GitVcs:
                 return marker
         return None
 
+    def probe(self, *arguments: str, repository: Path) -> subprocess.CompletedProcess[str]:
+        """One raw git invocation for diagnostics, through the same gate as all.
+
+        Exists so `pm_ai.platform.doctor` asks its liveness questions through
+        the adapter instead of spawning `git` beside it — which is how the
+        doctor's `check-ignore` came to run outside `GIT_SUBCOMMANDS` and made
+        that set's completeness claim false (review 2026-08-28). The closed-set
+        check, the PATH lookup, the timeout and the typed refusals in `_git`
+        all still apply; this adds no capability, only an entry point that does
+        not interpret the answer, because a probe's job is to report the raw
+        exit rather than act on it.
+        """
+        return self._git(*arguments, repository=repository)
+
     @staticmethod
     def _nearest_existing(path: Path) -> Path | None:
         """The first directory at or above `path` that exists."""

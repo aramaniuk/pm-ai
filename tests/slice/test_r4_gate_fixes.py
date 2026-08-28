@@ -176,7 +176,12 @@ def test_a_crash_between_call_and_record_cannot_double_write(daemon):
             return f"note_{self.calls}"
 
     flaky = FlakyPostComment()
-    daemon.skills.register(flaky)
+    # `replace=True` is required: a second registration under an authorized
+    # name is a decision, not a default (review 2026-08-28), and this test is
+    # deliberately substituting a double for the wired skill.
+    with pytest.raises(ValueError, match="already registered"):
+        daemon.skills.register(flaky)
+    daemon.skills.register(flaky, replace=True)
     target = TargetRef.parse("gitlab:alpha:issue:WI-108")
     key = idempotency_key("post_comment", target.lock_key, {"comment": "ping"})
 

@@ -21,6 +21,7 @@ import sys
 import pytest
 
 from pm_ai.platform import doctor
+from pm_ai.platform import vcs as vcs_module
 from pm_ai.platform.doctor import (
     Health,
     encryption_toggle,
@@ -233,8 +234,10 @@ def test_git_present_but_unanswering_is_distinguishable_from_absent(monkeypatch)
     sends them in a circle.
     """
     monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/git")
+    # Patched in the adapter, not in the doctor: the probe now asks through
+    # `GitVcs.probe`, so the doctor module holds no `subprocess` to patch.
     monkeypatch.setattr(
-        doctor.subprocess,
+        vcs_module.subprocess,
         "run",
         lambda *_a, **_k: subprocess.CompletedProcess([], 3, "", "unrecognised subcommand"),
     )
@@ -252,7 +255,9 @@ def test_a_git_that_times_out_is_reported_not_raised(monkeypatch):
     def hang(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd="git", timeout=10)
 
-    monkeypatch.setattr(doctor.subprocess, "run", hang)
+    # The adapter turns the timeout into `VcsUnavailable`; the probe's job is
+    # to report that as FAILING rather than let it escape.
+    monkeypatch.setattr(vcs_module.subprocess, "run", hang)
 
     probe = git_available()
 
@@ -374,10 +379,18 @@ def test_the_environment_is_read_in_exactly_one_place():
     another. `pm_ai.platform.environment` is the only module that may name it.
     """
     import ast
-    import pathlib
+
+    from tests.architecture.conftest import PACKAGE_ROOT
+
+    # Anchored on the repository, not the working directory: `Path("pm_ai")`
+    # relative to any other CWD finds zero files, collects zero offenders, and
+    # passes vacuously — a guard on the most dangerous setting that proves
+    # nothing (review 2026-08-28).
+    sources = sorted(PACKAGE_ROOT.rglob("*.py"))
+    assert sources, f"no sources under {PACKAGE_ROOT} — the scan would be vacuous"
 
     offenders = []
-    for source in sorted(pathlib.Path("pm_ai").rglob("*.py")):
+    for source in sources:
         if source.name == "environment.py":
             continue
         tree = ast.parse(source.read_text(encoding="utf-8"))
@@ -518,8 +531,6 @@ def test_checking_does_not_import_the_packages_it_checks(monkeypatch):
     fastapi, uvicorn and ollama all cost real time and some have side effects,
     and a diagnostic must not pay a startup cost to report that one exists.
     """
-    import sys
-
     monkeypatch.setattr(doctor.importlib.metadata, "packages_distributions", lambda: {})
 
     def forbidden(name, *_a, **_k):  # pragma: no cover - must never run
@@ -529,8 +540,10 @@ def test_checking_does_not_import_the_packages_it_checks(monkeypatch):
 
     probe = packages_installed(["pytest"])
 
+    # The `forbidden` stub above is the real assertion: reaching this line at
+    # all proves nothing was imported. (An earlier version also asserted on
+    # `sys.modules` with an `or True` tail, which could not fail.)
     assert probe.health is Health.FAILING
-    assert "pytest" not in sys.modules or True  # already imported by the runner
 
 
 def test_an_unreadable_distribution_reports_rather_than_guessing(monkeypatch):

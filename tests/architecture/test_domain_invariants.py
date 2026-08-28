@@ -670,6 +670,12 @@ def test_a_failed_harvest_is_error_not_unknown():
     assert not d.CommitmentState.UNKNOWN.is_terminal
     assert not d.CommitmentState.ERROR.is_verdict
     assert not d.CommitmentState.UNKNOWN.is_verdict
+    # And the positive half, or `is_verdict` could regress to `return False`
+    # with the suite green: every non-epistemic member is a claim about the
+    # world, and the first surface to render one inherits this contract.
+    for state in d.CommitmentState:
+        if state not in {d.CommitmentState.ERROR, d.CommitmentState.UNKNOWN}:
+            assert state.is_verdict, f"{state} is a claim about the world"
 
 
 def test_the_signature_cannot_be_called_without_answering_the_harvest_question():

@@ -111,6 +111,7 @@ __all__ = [
     "Dir",
     "ENCLAVE_DIRNAME",
     "File",
+    "ForeignScopeRoot",
     "LayoutNode",
     "MalformedLayout",
     "MalformedSubjectId",
@@ -188,8 +189,15 @@ class ScopePathError(ScopeResolutionError):
     """
 
 
-class ForeignScopeRoot(ScopeResolutionError):
-    """The artifact is another scope's root, addressable only under its label."""
+class ForeignScopeRoot(ScopePathError):
+    """The artifact is another scope's root, addressable only under its label.
+
+    A `ScopePathError` like every other refusal here — it subclassed the domain
+    base directly until 2026-08-28, which made "Every failure below is one of
+    these" false for exactly one failure: a caller catching `ScopePathError`
+    caught every refusal but this one, untested because the catchability test
+    never provoked a foreign root.
+    """
 
 
 class UnknownArtifact(ScopePathError, LookupError):
@@ -279,6 +287,17 @@ def _directory_name(label: str, value: str | None) -> str:
         raise MalformedSubjectId(
             f"{label}={value!r} has surrounding whitespace, which makes two "
             f"distinguishable ids indistinguishable in every log and path."
+        )
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        # The case the whitespace check above cannot catch: an id with an
+        # *embedded* newline is neither empty nor padded, and it splits one
+        # directory name across two lines in every message that reports it —
+        # including the refusals in this module. `_capture_name` in
+        # `pm_ai.storage.service` refuses the same class for the same reason.
+        raise MalformedSubjectId(
+            f"{label}={value!r} contains a control character. A subject id names "
+            f"a directory and appears in every log line about it; a newline or "
+            f"NUL inside one corrupts both."
         )
     if any(sep and sep in value for sep in _SEPARATORS):
         raise MalformedSubjectId(

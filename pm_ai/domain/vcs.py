@@ -46,6 +46,10 @@ GIT_SUBCOMMANDS = frozenset({
     "rev-parse",     # locate the working-tree root (AD-43)
     "check-ignore",  # do the exclusion rules cover this path
     "ls-files",      # is this path already in the index
+    "--version",     # the doctor's liveness probe — not a subcommand to git,
+                     # but an entry in the closed set of things pm-ai may ask
+                     # it, which is what this set actually is (review 2026-08-28:
+                     # the probe ran outside the set, making "complete" false)
 })
 
 

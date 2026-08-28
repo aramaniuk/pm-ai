@@ -390,12 +390,17 @@ def test_a_project_root_that_is_not_a_repository_permits_the_capture(tmp_path):
     assert written.read_text(encoding="utf-8") == BODY
 
 
-def test_a_repository_that_has_been_moved_away_says_so(tmp_path):
-    """A stale registry is not a missing rule, and must not be reported as one.
+def test_a_repository_that_has_been_moved_away_permits_the_capture(tmp_path):
+    """A stale registry is not a missing rule, and must not be refused as one.
 
     `pm-ai project add` writes a path; the directory can be renamed afterwards.
-    Telling the operator to add a `.gitignore` rule sends them to a repository
-    that is not there.
+    With the repository gone, `working_tree` anchors on the nearest existing
+    ancestor, finds no working tree, and answers `None` — which is an answer:
+    nothing can commit this capture, so the write proceeds. (The previous name
+    promised the write "says so"; it does not — `GitVcs._git`'s stale-registry
+    refusal lives on the `tracking` path, which a vanished repository never
+    reaches, and no message is emitted on this one. What is pinned here is the
+    verdict, deliberately: recording the meeting beats blocking on a rename.)
     """
     fixture = _fixture(tmp_path, gitignore=f"{RULE}\n")
     for child in sorted(fixture.repository.rglob("*"), reverse=True):
@@ -762,3 +767,35 @@ def test_a_refused_capture_is_asked_again_on_the_next_attempt(tmp_path):
             fixture.storage.write_capture(BODY, scope=PROJECT, name=NAME)
 
     assert len(vcs.asked) == 2, "the refusal was cached and the second write let through"
+
+
+# ── The marker walk itself, on the real adapter ───────────────────────────────
+# `repository_marker_above` decides the one fallback that can leak a transcript:
+# with git unreachable, `None` permits the write and a marker refuses it. Every
+# test of that fallback injects a fake and supplies the marker answer itself, so
+# until 2026-08-28 the real walk was never executed by any test — `exists()`
+# could regress to `is_dir()`, or the walk could skip `path` itself, with the
+# whole capture-guard suite green.
+
+
+def test_the_marker_walk_finds_a_git_directory_above(tmp_path):
+    (tmp_path / ".git").mkdir()
+    below = tmp_path / "a" / "b"
+    assert GitVcs().repository_marker_above(below) == tmp_path / ".git"
+
+
+def test_the_marker_walk_finds_a_git_file_too(tmp_path):
+    """A worktree or submodule spells `.git` as a *file* — the reason the walk
+    uses `exists()` rather than `is_dir()`, and the natural tidy-up regression."""
+    (tmp_path / ".git").write_text("gitdir: /somewhere/else\n", encoding="utf-8")
+    assert GitVcs().repository_marker_above(tmp_path / "deep") == tmp_path / ".git"
+
+
+def test_the_marker_walk_includes_the_path_itself(tmp_path):
+    inside = tmp_path / "repo"
+    (inside / ".git").mkdir(parents=True)
+    assert GitVcs().repository_marker_above(inside) == inside / ".git"
+
+
+def test_an_unmarked_tree_has_no_marker(tmp_path):
+    assert GitVcs().repository_marker_above(tmp_path / "plain" / "dir") is None
