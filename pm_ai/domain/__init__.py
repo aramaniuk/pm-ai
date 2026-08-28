@@ -70,6 +70,7 @@ from pm_ai.domain.identity import (
     NonDurableReferent,
     ScopeKind,
     SkillPermission,
+    PM_AI_MINTED,
     SourceRef,
     TargetRef,
 )
@@ -91,7 +92,7 @@ __all__ = [
     "DataScope", "MalformedReference", "NonDurableReferent", "NormalizedEvent",
     "NormalizedEventType", "PAYLOAD_FOR", "PM_AI", "PM_AI_ACTOR",
     "PayloadMismatch", "ProposalState", "Provenance", "ScopeKind",
-    "SkillPermission", "SourceRef", "TargetRef", "UNRESOLVED",
+    "PM_AI_MINTED", "SkillPermission", "SourceRef", "TargetRef", "UNRESOLVED",
     "UNRESOLVED_ACTOR", "UnknownVerb", "VERB_REGISTRY", "Verb",
     "evaluate_commitment", "lookup_verb", "ARTIFACT_TIER", "BACKUP_TARGETS",
     "REBUILD_TARGETS", "Tier", "TierViolation", "assert_reindex_safe",

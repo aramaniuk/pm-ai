@@ -814,3 +814,91 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     assert isinstance(storage, ports.StoragePort), (
         "the single writer no longer satisfies the port core depends on"
     )
+
+
+# ── AD-36 vs AD-34: a scopeless reference is global, not foreign ─────────────
+# Added 2026-08-28. `attribute` answered EXTERNAL for every scopeless ref, on
+# the reasoning that global entities are never our writes — true of `meeting:`,
+# false of `goal:`, whose id AD-41 rule 2 has storage mint. EXTERNAL is the one
+# value AD-36 admits as evidence.
+
+
+def _scopeless_event(raw: str):
+    """One event carrying a scopeless SourceRef and a non-pm-ai actor.
+
+    Deliberately not a real `NormalizedEvent`: `attribute` reads exactly two
+    attributes, and building the full envelope would couple this test to every
+    unrelated field it happens to require today.
+    """
+    identity = mod("pm_ai.domain.identity")
+
+    class _Actor:
+        is_pm_ai = False
+
+    class _Event:
+        actor = _Actor()
+        source_ref = identity.SourceRef.parse(raw)
+
+    return _Event()
+
+
+def test_ad36_a_goal_reference_is_never_admissible_as_evidence():
+    """AD-36 — pm-ai's own record cannot prove pm-ai's own promise was kept.
+
+    The failure this rules out is quiet: a `goal:`-sourced event attributed
+    EXTERNAL is admissible, so the closed loop reopens through AD-33's citation
+    rule rather than through a connector — which is where the original AD-36 fix
+    was watching.
+    """
+    normalize = mod("pm_ai.core.normalize")
+    events = mod("pm_ai.domain.events")
+
+    verdict = normalize.attribute(_scopeless_event("goal:goal_01HX"), frozenset(), frozenset())
+    assert verdict is events.Provenance.PM_AI, (
+        "AD-41 rule 2 has storage mint a goal id, so a goal reference names our "
+        "own artifact."
+    )
+    assert not verdict.admissible_as_evidence
+
+
+def test_ad36_a_meeting_reference_stays_external():
+    """The fix must not swallow the case the original reasoning got right.
+
+    A meeting happens in the world and pm-ai only records it. Attributing it to
+    pm-ai would make genuine calendar evidence inadmissible, so nothing would
+    ever verify — the opposite failure, and just as silent.
+    """
+    normalize = mod("pm_ai.core.normalize")
+    events = mod("pm_ai.domain.events")
+
+    verdict = normalize.attribute(_scopeless_event("meeting:mtg_01HX"), frozenset(), frozenset())
+    assert verdict is events.Provenance.EXTERNAL
+    assert verdict.admissible_as_evidence
+
+
+def test_ad34_every_scopeless_system_is_classified():
+    """No scopeless system may be neither minted-by-us nor external by default.
+
+    The whole defect was one member of a closed set acquiring a default nobody
+    chose for it. Adding a third scopeless system without deciding which side it
+    falls on would repeat it exactly, so the decision is forced here.
+    """
+    identity = mod("pm_ai.domain.identity")
+    assert identity.PM_AI_MINTED <= identity._SCOPELESS
+    assert identity._SCOPELESS == frozenset({"meeting", "goal"}), (
+        "a scopeless system was added or removed; classify it in PM_AI_MINTED "
+        "and extend the two attribution tests above before updating this literal."
+    )
+
+
+def test_ad34_the_reference_set_guard_survives_o():
+    """A `raise`, not an `assert`, so `python -O` cannot switch the check off."""
+    identity = mod("pm_ai.domain.identity")
+    original = identity.PM_AI_MINTED
+    try:
+        identity.PM_AI_MINTED = frozenset({"gitlab"})  # scoped, not scopeless
+        with pytest.raises(identity.InconsistentReferenceModel):
+            identity._assert_reference_sets_agree()
+    finally:
+        identity.PM_AI_MINTED = original
+    identity._assert_reference_sets_agree()
