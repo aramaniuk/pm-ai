@@ -61,3 +61,21 @@ the queue begins after `1i`.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1b-storage-writes-through-the-resolver.md`
   summary: Moving off the flattened `<root>/<scope>_<id>/event_log/` layout has no migration, so Tier-1 segments written under the old layout would be orphaned and the daemon would start an empty ledger.
   evidence: No deployment exists and no data is at risk today, so this is correctly out of scope for 1b. It becomes real the moment anything writes segments before story 4 stands up the daemon.
+
+## Deferred from: code review of story-1 branch (2026-08-28)
+
+- `PlaintextCrypto.decrypt` silently returns ciphertext when the debug flag is set over previously sealed files; the envelope carries no magic header to detect it. Debug-only path, documented as never-the-default. [pm_ai/storage/crypto.py:218]
+- `schema_version` has no single-row constraint and a non-integer value raises unwrapped; single-writer + WAL makes both remote. [pm_ai/storage/service.py:475]
+- The skip ratchet stands down for `pytest .` or absolute-path invocations — it judges only `[]`/`["tests"]` argument spellings. [tests/conftest.py]
+- NFR-09's staged-file monthly cleanup is decided in comments but owned by no story; `.part` files are dot-prefixed, hidden from the operator the purge rule serves.
+- `_PLACEMENTS_BY_KEY[...]` direct indexing can `KeyError` if a future `FOREIGN_ROOTS` node is declared outside the application tree. [pm_ai/platform/paths.py:614]
+
+## Deferred by decision at the story-1 review gate (2026-08-28)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1h-derived-tier-rebuild.md`
+  summary: Story 1h (derived-tier rebuild — `pm_ai/storage/reindex.py`, `test_ad3_indexes_rebuild_from_markdown_without_loss` un-skipped) ships as its own follow-up story rather than on the story-1 branch.
+  evidence: The story is still `ready-for-dev` with nothing depending on it yet — the derived tier it rebuilds is written by later stories. The decomposition table above lists 1h inside story 1; this entry records the explicit decision (review gate, 2026-08-28) to merge story 1 without it rather than hold a 70-file branch for an independent slice. It remains the next `ready-for-dev` story in the queue.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/SPEC.md` (constraint: "Everything else … is 600-permissioned and unencrypted")
+  summary: Implement 600 permissions for the whole plaintext set — every file `_publish` writes plaintext, `operational.db` at creation, captures, and team-member records — as a follow-up story; today only the two encrypted files and their enclave directories are tightened (0600/0700).
+  evidence: `storage-contract.md` makes 600 the load-bearing substitute for the encryption dropped on 2026-08-23, and nothing implements it for the plaintext set (story-1 code review, 2026-08-28). Deferred by decision at the review gate: the change concentrates in the single writer but touches every write path and deserves its own matrix (umask interaction, git-committed project files, sqlite sidecar files) rather than riding a review patch.

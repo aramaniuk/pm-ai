@@ -87,6 +87,11 @@ Note: the anchors cited in this spec's frozen Intent and Ask First sections pred
 
 ## Spec Change Log
 
+- **2026-08-28 — iteration 2, recording an override story 1j made without one.**
+  *Finding:* this story froze `assert_capture_dir_ignored` at the pure signature `(artifact, gitignore_text)` and named `tests/slice/test_r4_gate_fixes.py`'s direct call as the thing to preserve. Story 1j retired the global `GITIGNORE_REQUIRED` table in favour of per-node declarations and derived rules, which forced a required `rule` keyword onto the function — and shipped it without amending this story, leaving the two specs contradicting each other (surfaced by the story-1 code review).
+  *Amended:* the frozen constraint now reads — `assert_capture_dir_ignored` keeps a pure signature `(artifact, gitignore_text, *, rule)`, no filesystem and no subprocess, with the rule supplied by the caller because it is derived from the working tree the capture sits in and a global table cannot hold one rule per scope. The r4 test was rewritten to pass `rule=` in the same change.
+  *Why the code stands rather than the freeze:* the freeze predates 1j's finding that one basename needs different rules in different working trees; restoring the two-argument form would restore the single-rule assumption 1j exists to remove.
+
 - **2026-08-22 — iteration 1, triggered by review of the first implementation.**
   *Finding:* the guard could not answer the question it exists to answer. Verified against real git: a `.gitignore` carrying the rule followed by `!/.project-ai/transcripts/` makes git **track** the directory while the guard reported it protected — publishing a verbatim transcript, the outcome this story calls unrecoverable. Two further disagreements: a parent-directory exclude (`.project-ai/`) protects the directory but was refused, and a directory already tracked before the rule was added stays tracked, which no text check can ever detect.
   *Root cause:* this spec's own frozen constraint required `assert_capture_dir_ignored` to remain the write path's authority with a pure `(artifact, gitignore_text)` signature. Text matching cannot express git's negation precedence, parent-directory semantics, or index state, so the constraint forced the defect.
