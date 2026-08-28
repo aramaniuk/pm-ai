@@ -631,11 +631,57 @@ def test_reversibility_is_per_verb_per_provider():
 
 
 def test_coverage_gap_resolves_to_unknown_not_broken():
-    """AD-35 — FR-26 nudges are irreversible, so absence of data fails closed."""
+    """AD-35 — FR-26 nudges are irreversible, so absence of data fails closed.
+
+    `harvest_failed` was added to the signature on 2026-08-28 and is required, so
+    these three calls gained it. Each passes `False`: the case this test is about
+    is a coverage gap with nothing having failed, which is still `UNKNOWN`. The
+    failed-harvest case is `test_a_failed_harvest_is_error_not_unknown` below.
+    """
     d = mod("pm_ai.domain")
-    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=False) is d.CommitmentState.UNKNOWN
-    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=True) is d.CommitmentState.BROKEN
-    assert d.evaluate_commitment(overdue=True, evidence_admissible=True, covered=True) is d.CommitmentState.FULFILLED
+    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=False, harvest_failed=False) is d.CommitmentState.UNKNOWN
+    assert d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=True, harvest_failed=False) is d.CommitmentState.BROKEN
+    assert d.evaluate_commitment(overdue=True, evidence_admissible=True, covered=True, harvest_failed=False) is d.CommitmentState.FULFILLED
+
+
+def test_a_failed_harvest_is_error_not_unknown():
+    """AD-35 — the two silences are distinguishable, and one of them never clears.
+
+    A sleeping laptop made no attempts: `UNKNOWN`, and waiting is right. A dead
+    token made attempts that failed: `ERROR`, and waiting is wrong, because
+    nothing about it will change until a human refreshes the credential. Before
+    2026-08-27 both were `UNKNOWN`, so a permanently dead connector read forever
+    as patience.
+    """
+    d = mod("pm_ai.domain")
+    gap = dict(overdue=True, evidence_admissible=False, covered=False)
+    assert d.evaluate_commitment(**gap, harvest_failed=False) is d.CommitmentState.UNKNOWN
+    assert d.evaluate_commitment(**gap, harvest_failed=True) is d.CommitmentState.ERROR
+
+    # A window that WAS harvested yields a real verdict, and a connector that
+    # broke afterwards does not retract it. ERROR competes with UNKNOWN only.
+    assert d.evaluate_commitment(
+        overdue=True, evidence_admissible=False, covered=True, harvest_failed=True
+    ) is d.CommitmentState.BROKEN
+
+    # Neither epistemic member may be terminal: both clear when the world or the
+    # machine changes, and a terminal state is one nothing revisits.
+    assert not d.CommitmentState.ERROR.is_terminal
+    assert not d.CommitmentState.UNKNOWN.is_terminal
+    assert not d.CommitmentState.ERROR.is_verdict
+    assert not d.CommitmentState.UNKNOWN.is_verdict
+
+
+def test_the_signature_cannot_be_called_without_answering_the_harvest_question():
+    """AD-9's discipline, applied here: a guard must not be silently unarmed.
+
+    A default of `False` would be the *safe* verdict and would quietly restore
+    the indefinite waiting `ERROR` exists to end, which is the worst kind of
+    default: correct-looking and self-defeating.
+    """
+    d = mod("pm_ai.domain")
+    with pytest.raises(TypeError):
+        d.evaluate_commitment(overdue=True, evidence_admissible=False, covered=False)
 
 
 def test_ad38_disclosure_records_cannot_reach_a_committed_scope():

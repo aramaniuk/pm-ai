@@ -200,20 +200,24 @@ def test_pm_ai_does_not_verify_its_own_write(daemon):
         overdue=True,
         evidence_admissible=Provenance.PM_AI.admissible_as_evidence,
         covered=True,
+        harvest_failed=False,
     )
     assert self_authored is CommitmentState.BROKEN, (
         "AD-36: pm-ai's own comment was counted as fulfilment evidence."
     )
 
     externally_authored = evaluate_commitment(
-        overdue=True, evidence_admissible=Provenance.EXTERNAL.admissible_as_evidence, covered=True
+        overdue=True,
+        evidence_admissible=Provenance.EXTERNAL.admissible_as_evidence,
+        covered=True,
+        harvest_failed=False,
     )
     assert externally_authored is CommitmentState.FULFILLED
 
 
 def test_coverage_gap_does_not_fire_an_irreversible_nudge(daemon):
     """AD-35 — a sleeping laptop is missing data, not a broken promise."""
-    assert evaluate_commitment(overdue=True, evidence_admissible=False, covered=False) is CommitmentState.UNKNOWN
+    assert evaluate_commitment(overdue=True, evidence_admissible=False, covered=False, harvest_failed=False) is CommitmentState.UNKNOWN
 
 
 def test_disclosure_never_lands_in_the_committed_scope(daemon):

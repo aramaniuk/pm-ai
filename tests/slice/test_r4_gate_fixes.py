@@ -103,6 +103,7 @@ def test_our_own_write_harvested_back_is_not_evidence(daemon):
         overdue=True,
         evidence_admissible=attributed[0].authored_by.admissible_as_evidence,
         covered=True,
+        harvest_failed=False,
     )
     assert verdict is CommitmentState.BROKEN, "self-authored activity must never prove fulfilment"
 
@@ -111,7 +112,7 @@ def test_a_genuine_external_write_still_counts(daemon):
     """The guard must not swallow real evidence — otherwise nothing ever FULFILS."""
     attributed = attribute_all((_commit_event("9f2a1c"),), daemon.storage.executed_mutations())
     assert attributed[0].authored_by is Provenance.EXTERNAL
-    assert evaluate_commitment(overdue=True, evidence_admissible=True, covered=True) is (
+    assert evaluate_commitment(overdue=True, evidence_admissible=True, covered=True, harvest_failed=False) is (
         CommitmentState.FULFILLED
     )
 
