@@ -76,7 +76,7 @@ the case already made in `derivation-services.md` for running `1h` after story 1
 |---|---|---|
 | `2a-two-clock-bases` | which clock governs which reasoning; an implausible provider timestamp refused | — |
 | `2b-flag-implausible-provider-timestamps` | that refusal reaches the persist path as a flag | 2a, 2d |
-| `2c-closed-entry-type-enumeration` | AD-27's second closed enumeration: what the ledger may record | — |
+| `2c-closed-entry-type-enumeration` | two ledger vocabularies named for their subjects: `ObservedEventType` (renamed) and `SelfActionType` | — |
 | `2d-one-entry-renderer` | one function producing every ledger line | 2c |
 | `2e-retire-the-free-string-append` | `append_event_log` takes a typed entry; every caller migrates | 2d |
 | `2f-segment-parser-and-deterministic-fold` | segments read back; fold by `(occurred_at, entry_id)` | 2d |

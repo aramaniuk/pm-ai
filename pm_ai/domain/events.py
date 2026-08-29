@@ -47,6 +47,12 @@ class ObservedEventType(Enum):
     DOCUMENT_UPDATED = "document_updated"
     MESSAGE_POSTED = "message_posted"
     CALENDAR_EVENT_HELD = "calendar_event_held"
+    # The PM decided; pm-ai only observed it, through a transcript. It belongs
+    # here rather than with pm-ai's own actions because its subject is a person,
+    # and AD-33 already rules that a transcript's referent is its meeting — so
+    # `meeting:<id>`, already in AD-34's scopeless set, is a referent it can
+    # carry. CAP-27 tags these `[TYPE: DECISION]` in the owning scope's log.
+    DECISION = "decision"
 
 
 class Provenance(Enum):
@@ -107,6 +113,14 @@ class MessagePayload:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionPayload:
+    """What was decided. Who decided it is the envelope's `actor`."""
+
+    statement: str
+    rationale: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PipelinePayload:
     pipeline_id: str
     status: str
@@ -130,6 +144,7 @@ PAYLOAD_FOR: dict[ObservedEventType, type] = {
     ObservedEventType.DOCUMENT_UPDATED: DocumentPayload,
     ObservedEventType.MESSAGE_POSTED: MessagePayload,
     ObservedEventType.CALENDAR_EVENT_HELD: MeetingHeldPayload,
+    ObservedEventType.DECISION: DecisionPayload,
 }
 
 
