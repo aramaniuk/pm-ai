@@ -44,6 +44,17 @@ def parse_segment(text: str, *, source: str = "<segment>") -> tuple[EventEntry, 
     An unterminated final line is dropped: it is a write in progress, not a
     record. Everything before it is whole, because each record was appended
     newline-terminated.
+
+    **File order is arrival order, and it is the only exact one.** Storage is the
+    single writer (AD-5) and every append adds one line at the end, so the
+    sequence here is the sequence the records arrived in — at any rate, with no
+    ties, including records sharing a timestamp. Neither `ingested_at` nor the
+    entry id can do that: the first is stamped once per *batch*, so every event
+    in one harvest carries an identical value, and the second is random.
+
+    So a caller wanting a chronology reads this and stops. `fold` deliberately
+    reorders, into the total order AD-35 fixes for deriving state across a
+    rebuild; it is not a chronology and the two are not interchangeable.
     """
     entries = []
     for number, line in enumerate(text.split("\n")[:-1], start=1):

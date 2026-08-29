@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from pm_ai.app.wiring import build
+from pm_ai.core import ledger
 from pm_ai.domain.scope_model import FOREIGN_ROOTS
 from pm_ai.domain import (
     ARTIFACT_TIER,
@@ -136,8 +137,8 @@ def test_the_event_log_is_appended_to_never_rewritten(daemon):
     assert len(segments) == 1, "one open segment per month, appended to"
     body = _mask(segments[0].read_text())
     assert body == (
-        "- [evt_ID] security actor=test detail=first\n"
-        "- [evt_ID] security actor=test detail=second\n"
+        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 detail=first\n"
+        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 detail=second\n"
     )
 
 
@@ -176,7 +177,7 @@ def test_every_scope_writes_into_its_own_resolved_tree(daemon, tmp_path):
     assert len(set(resolved.values())) == len(ALL_SCOPES), "two scopes share one ledger"
     for scope, log in resolved.items():
         assert _mask((log / f"{NOW:%Y-%m}.md").read_text()) == (
-            f"- [evt_ID] security actor=test detail={scope}\n"
+            f"- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 detail={scope}\n"
         )
 
     # Each in the tree its scope owns, spelled from the resolver's own names so
@@ -462,8 +463,8 @@ def test_the_persisted_line_keeps_the_grammar_it_had_before_the_renderer(daemon)
     masked = [re.sub(r"evt_[0-9a-f]+", "evt_MASKED", line) for line in lines]
     for line in masked:
         assert re.fullmatch(
-            r"- \[evt_MASKED\] \w+ actor=\S+ src=\S+ "
-            r"occurred_at=(\S+) ingested_at=\S+ authored_by=\w+",
+            r"- \[evt_MASKED\] \w+ actor=\S+ ingested_at=\S+ src=\S+ "
+            r"occurred_at=\S+ authored_by=\w+",
             line,
         ), f"the ledger grammar moved: {line!r}"
 
@@ -486,7 +487,11 @@ def test_the_writer_mints_the_entry_id(daemon):
     daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
 
     line = _segment(daemon.storage, daemon.scope).read_text().rstrip("\n")
-    assert re.fullmatch(r"- \[evt_[0-9a-f]+\] security actor=test detail=first", line)
+    assert re.fullmatch(
+        r"- \[evt_[0-9a-f]+\] security actor=test "
+        + re.escape(f"ingested_at={NOW.isoformat()} detail=first"),
+        line,
+    )
 
 
 def test_an_entry_arriving_with_an_id_is_refused(daemon):
@@ -562,3 +567,61 @@ def test_a_mixed_batch_persists_everything_and_counts_what_it_flagged(daemon):
 
     assert result.persisted == len(mixed)
     assert result.flagged == 1
+
+
+# ── Every entry carries when it arrived (CAP-10) ────────────────────────────
+
+
+def test_a_self_action_entry_carries_the_ingestion_time(daemon):
+    """CAP-10 requires an ISO-8601 timestamp on *every* entry.
+
+    The harvest path built one by hand; entries arriving through
+    `append_event_log` carried an id, a category and an actor, and no time at all.
+    """
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+
+    line = _segment(daemon.storage, daemon.scope).read_text().rstrip("\n")
+    assert f"ingested_at={NOW.isoformat()}" in line
+
+
+def test_the_ingestion_time_comes_from_the_injected_clock(daemon, tmp_path):
+    """Not `datetime.now()`: the writer has exactly one clock and this is it."""
+    d = build(tmp_path, "beta", now=lambda: ELSEWHEN)
+    d.storage.append_event_log(_test_entry("entry"), scope=d.scope)
+
+    body = (d.storage.paths.resolve(d.scope, EVENT_LOG) / f"{ELSEWHEN:%Y-%m}.md").read_text()
+    assert f"ingested_at={ELSEWHEN.isoformat()}" in body
+
+
+def test_the_ingestion_time_sits_in_the_same_place_on_every_path(daemon):
+    """One grammar: a reader finds the field without knowing which path wrote it."""
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+    daemon.storage.persist_events(_events(daemon), scope=daemon.scope)
+
+    for line in _segment(daemon.storage, daemon.scope).read_text().splitlines():
+        after_actor = line.split(" actor=", 1)[1]
+        assert after_actor.split(" ", 1)[1].startswith("ingested_at="), line
+
+
+# ── File order is arrival order ─────────────────────────────────────────────
+
+
+def test_file_order_is_arrival_order(daemon):
+    """The one thing that orders events exactly, with no ties.
+
+    Appends are serialized (AD-5) and each adds one line at the end, so the
+    sequence in the file *is* the sequence they arrived in — at any rate, and
+    including entries that share a timestamp. `fold` deliberately reorders; this
+    is what a caller reads when it wants a chronology instead.
+    """
+    for marker in ("first", "second", "third", "fourth"):
+        daemon.storage.append_event_log(_test_entry(marker), scope=daemon.scope)
+
+    text = _segment(daemon.storage, daemon.scope).read_text()
+    parsed = ledger.parse_segment(text)
+    assert [dict(e.fields)["detail"] for e in parsed] == [
+        "first",
+        "second",
+        "third",
+        "fourth",
+    ]

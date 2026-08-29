@@ -998,7 +998,18 @@ class StorageService:
                 f"(AD-34) — build the entry without one."
             )
         at = self._at()
-        named = replace(entry, entry_id=_ulid())
+        named = replace(
+            entry,
+            entry_id=_ulid(),
+            # CAP-10 wants a timestamp on *every* entry, and until this was added
+            # the clock read below named the segment file and nothing else — so an
+            # entry arriving here carried an id, a category and an actor, and no
+            # time. `ingested_at` rather than `occurred_at`: the writer knows when
+            # the record reached it and nothing about when the thing happened
+            # (AD-35). It leads the fields on both write paths so a reader finds
+            # it without knowing which one produced the line.
+            fields=(("ingested_at", at.isoformat()),) + entry.fields,
+        )
         self._append(self._segment(scope, EVENT_LOG, at), render_entry(named) + "\n")
 
     # ── Raw captures: outside the tier model, inside a committed scope ───────
@@ -1144,6 +1155,7 @@ class StorageService:
                         category=stamped.type,
                         actor=stamped.actor.actor_id,
                         fields=(
+                            ("ingested_at", at.isoformat()),
                             ("src", str(stamped.source_ref)),
                             (
                                 "occurred_at",
@@ -1151,7 +1163,6 @@ class StorageService:
                                 if stamped.occurred_at
                                 else "unknown",
                             ),
-                            ("ingested_at", at.isoformat()),
                             ("authored_by", stamped.authored_by.value),
                         )
                         + suspect,
