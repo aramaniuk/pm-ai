@@ -18,6 +18,7 @@ review_loop_iteration: 0
 
 **Always:**
 - Reading is the inverse of 2i's renderer, asserted by a round-trip test rather than by two hand-written formats agreeing.
+- **One clock here, unlike the event log.** A `DisclosureRecord` carries a single `at` — when the frontier call happened, which is also when it was recorded, because pm-ai made the call. So a period query needs no `occurred_at`/`ingested_at` choice and the parameters need no clock in their names. Stated because the event log's reader does need that choice, and the difference is not obvious.
 - The same tolerance the event log has: an unterminated trailing line is a boundary, not corruption. The daemon may be appending while a briefing reads.
 - Totals are computed from the ledger on every call, never cached and never stored. A stored total is a second structure that can disagree with the records it summarises — and AD-17's whole point is that the figure is *evidence*, not a counter.
 - The threshold **warns only**. This story returns numbers and, at most, a breached flag. No degradation, no model switch, no refusal — AD-17 forbids all three.

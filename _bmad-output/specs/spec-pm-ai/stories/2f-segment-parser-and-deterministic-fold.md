@@ -17,6 +17,7 @@ review_loop_iteration: 0
 ## Boundaries & Constraints
 
 **Always:**
+- **File order is arrival order, and parse preserves it.** Storage is the single writer (AD-5) and each append adds one line at the end, so position in the segment is the sequence records arrived in — exact, with no ties. `fold` is a separate, opt-in reordering; the two answer different questions and a caller must be able to get either.
 - **A trailing fragment is a boundary, not corruption.** A reader landing mid-append sees complete records plus an unterminated tail; the tail is dropped and the read succeeds. Raising here would make every concurrent read a failure.
 - Fold order is `(occurred_at, entry_id)` and nothing else. Reversing the input must not change the result — that is the pre-written test's assertion.
 - Parse is the inverse of 2d's `render_entry` for every entry the renderer can produce. A round-trip test asserts it rather than review.
@@ -30,7 +31,7 @@ review_loop_iteration: 0
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Whole segment | n terminated records | n entries, in file order | N/A |
+| Whole segment | n terminated records | n entries, in file order — which is arrival order | N/A |
 | Mid-append read | n records plus an unterminated tail | n entries; the tail is dropped silently | N/A |
 | Malformed complete record | a terminated line that is not an entry | refused, naming the segment and line number | `MalformedEntry` |
 | Unknown category | a value outside either vocabulary | refused — both are closed | `UnknownCategory` |
