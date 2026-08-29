@@ -14,6 +14,7 @@ synchronisation point.
 
 from __future__ import annotations
 
+import re
 import errno
 import os
 import stat
@@ -22,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain import CAPTURE_STAGING, DataScope, ScopeKind
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.storage import service as service_module
@@ -64,6 +66,13 @@ def _staging(storage: StorageService, scope: DataScope) -> Path:
 
 
 # ── Captures: the name appears only when the content is complete ─────────────
+
+
+def _entry(marker: str):
+    """A minimal typed entry, standing in for the old free-string call (2e)."""
+    return EventEntry(
+        category=SelfActionType.SECURITY, actor="test", fields=(("detail", marker),)
+    )
 
 
 def test_a_capture_written_normally_leaves_no_staged_file(tmp_path):
@@ -343,9 +352,13 @@ def test_appends_are_still_appends(tmp_path):
     not do is change the shape of the write.
     """
     storage = _writer(tmp_path)
-    storage.append_event_log("- [a] first", scope=PERSONAL)
-    storage.append_event_log("- [b] second", scope=PERSONAL)
+    storage.append_event_log(_entry("first"), scope=PERSONAL)
+    storage.append_event_log(_entry("second"), scope=PERSONAL)
 
     segment = storage.paths.resolve(PERSONAL, "event_log/") / f"{NOW:%Y-%m}.md"
-    assert segment.read_text(encoding="utf-8") == "- [a] first\n- [b] second\n"
+    body = re.sub(r"evt_[0-9a-f]+", "evt_ID", segment.read_text(encoding="utf-8"))
+    assert body == (
+        "- [evt_ID] security actor=test detail=first\n"
+        "- [evt_ID] security actor=test detail=second\n"
+    )
     assert not list(segment.parent.glob("*.part")), "an append was staged; it must not be"

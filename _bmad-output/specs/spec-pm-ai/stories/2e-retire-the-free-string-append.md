@@ -2,7 +2,7 @@
 title: 'Retire the free-string append'
 type: 'refactor'
 created: '2026-08-29'
-status: 'draft'
+status: 'in-review'
 review_loop_iteration: 0
 ---
 
@@ -17,6 +17,7 @@ review_loop_iteration: 0
 ## Boundaries & Constraints
 
 **Always:**
+- **Storage mints the entry id, never the caller** (AD-34: the surrogate is assigned by the storage service at persist time). `EventEntry.entry_id` is therefore optional at construction and stamped on the way in, exactly as `ingested_at` already is; an entry arriving with an id is refused rather than silently overwritten.
 - The port declaration (`ports/__init__.py:291`) changes with the implementation. A Protocol that still says `str` is the divergence 1k's type-checking gate exists to catch, and it would catch this one.
 - Both production callers gain the fields the free string omitted: `wiring.py:179` records the debug-flag notice with the daemon as actor, `registry.py:108` records the skill invocation AD-1 requires with the invoked skill as actor.
 - Every one of the 14 test call sites moves to the typed form. A test helper minting a plain entry is fine; leaving a string overload for tests is not — it is the same door.
@@ -55,9 +56,13 @@ review_loop_iteration: 0
 **Acceptance Criteria:**
 - Given the type checker runs, then no caller passes a `str` and the port matches the implementation.
 - Given `registry.py` invokes a skill, when the entry is read, then it carries the skill's category and actor — AD-1's requirement becomes checkable rather than assumed.
+- Given the four tests that assert segment bytes exactly (`test_storage_resolution.py:115`, `test_cipher.py:498`, `test_atomic_writes.py:350`, `test_capture_guard.py:436`), then each still asserts exact bytes with only the minted id masked — an unchanged pass count reached by loosening them would hide the drift this story could cause.
 - Given the full suite, then the count of passing tests is unchanged: this story alters construction, not behaviour.
 
 ## Spec Change Log
+
+- **2026-08-29, acceptance tightened before implementation.** The review of the set found "the count of passing tests is unchanged" satisfiable by weakening the four tests that assert segment bytes exactly — the entry id is now minted per call, so the obvious way to keep them green is to stop asserting content. Named those four and required them to keep asserting exact bytes with only the id masked. KEEP: the masking approach, not a looser matcher; these four are the only tests that would notice a grammar drift reaching disk.
+- **`entry_id` moves to storage.** 2d gave `EventEntry` a required id because its only caller was already inside the writer. With external callers arriving, AD-34 decides it: the surrogate is assigned at persist time, so the field becomes optional and storage stamps it, mirroring `ingested_at`.
 
 ## Design Notes
 

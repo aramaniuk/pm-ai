@@ -239,3 +239,19 @@ def test_a_line_beyond_the_bound_is_refused():
     with pytest.raises(ee.MalformedEntry) as caught:
         ee.render_entry(entry)
     assert str(ee.MAX_ENTRY_LENGTH) in str(caught.value)
+
+
+# ── 2e: the id is storage's to mint (AD-34) ──────────────────────────────────
+
+
+def test_an_entry_without_an_id_cannot_be_rendered():
+    """The break: a caller building a whole line and bypassing the mint."""
+    with pytest.raises(ee.MalformedEntry) as caught:
+        ee.render_entry(ee.EventEntry(category=ee.SelfActionType.SECURITY, actor="pm-ai"))
+    assert "storage" in str(caught.value).lower()
+
+
+def test_an_entry_is_constructible_without_an_id():
+    """Callers outside storage build entries; they do not name them."""
+    entry = ee.EventEntry(category=ee.SelfActionType.SECURITY, actor="pm-ai")
+    assert entry.entry_id is None

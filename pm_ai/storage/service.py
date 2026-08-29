@@ -978,9 +978,27 @@ class StorageService:
             target = target / name
         return self._read(target)
 
-    def append_event_log(self, entry: str, *, scope: DataScope) -> None:
+    def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None:
+        """Append one typed record to `scope`'s open segment, naming it here.
+
+        Took a free string until story 2e, which is how four grammars reached one
+        ledger and why CAP-10's guarantee — an id, a timestamp, an actor and a
+        category on every entry — held only on the harvest path.
+
+        The id is minted here rather than accepted, per AD-34: the surrogate
+        belongs to the writer, and a caller that could supply one could also
+        reuse one. Refused rather than overwritten, because silently discarding
+        a caller's id would leave them believing the ledger holds it.
+        """
+        if entry.entry_id is not None:
+            raise ValueError(
+                f"entry already carries id {entry.entry_id!r}. The `evt_` "
+                f"surrogate is minted by the storage service at persist time "
+                f"(AD-34) — build the entry without one."
+            )
         at = self._at()
-        self._append(self._segment(scope, EVENT_LOG, at), entry.rstrip("\n") + "\n")
+        named = replace(entry, entry_id=_ulid())
+        self._append(self._segment(scope, EVENT_LOG, at), render_entry(named) + "\n")
 
     # ── Raw captures: outside the tier model, inside a committed scope ───────
     # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on

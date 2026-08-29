@@ -27,6 +27,7 @@ protect the path the verdict is about.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ from pathlib import Path
 
 import pytest
 
+from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain import (
     CAPTURES,
     EVENT_LOG,
@@ -246,6 +248,13 @@ def _assert_nothing_written(
 # ── Rows 1 and 4: git excludes the directory, however the rule is spelled ─────
 
 
+def _entry(marker: str):
+    """A minimal typed entry, standing in for the old free-string call (2e)."""
+    return EventEntry(
+        category=SelfActionType.SECURITY, actor="test", fields=(("detail", marker),)
+    )
+
+
 def test_a_capture_is_written_when_the_rule_is_present(tmp_path):
     """Row 1 — the ordinary case, and the one that proves the guard is not a wall."""
     fixture = _fixture(tmp_path, gitignore=f"node_modules/\n{RULE}\n")
@@ -430,10 +439,11 @@ def test_a_non_capture_artifact_in_the_same_scope_is_unaffected(tmp_path):
     vcs = FakeVcs(verdict=TrackingVerdict(ignored=False))  # would refuse if asked
     fixture = _fixture(tmp_path, gitignore="node_modules/\n", vcs=vcs)
 
-    fixture.storage.append_event_log("- [test] entry", scope=PROJECT)
+    fixture.storage.append_event_log(_entry("entry"), scope=PROJECT)
 
     segment = fixture.paths.resolve(PROJECT, EVENT_LOG) / f"{NOW:%Y-%m}.md"
-    assert segment.read_text(encoding="utf-8") == "- [test] entry\n"
+    body = re.sub(r"evt_[0-9a-f]+", "evt_ID", segment.read_text(encoding="utf-8"))
+    assert body == "- [evt_ID] security actor=test detail=entry\n"
     assert vcs.asked == [], "git was consulted about an artifact that has no rule"
 
 

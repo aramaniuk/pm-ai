@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
@@ -288,7 +289,7 @@ class StoragePort(Protocol):
     def load_cursor(self, instance: str) -> Cursor: ...
     def save_cursor(self, instance: str, cursor: Cursor, coverage: object) -> None: ...
     def was_executed(self, idempotency_key: str) -> bool: ...
-    def append_event_log(self, entry: str, *, scope: DataScope) -> None: ...
+    def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None: ...
     # AD-20 is two-phase, and this port declared only the one-shot form until
     # 2026-08-22. The key is *claimed* before the outbound call and *settled*
     # after, because recording only on success leaves a crash window in which

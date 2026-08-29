@@ -35,6 +35,7 @@ from pm_ai.domain import (
     TargetRef,
     Tier,
 )
+from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain.harvest import Cursor
 from pm_ai.platform.vcs import GitVcs
 from pm_ai.platform.paths import (
@@ -92,6 +93,27 @@ def _events(daemon):
     return daemon.connectors["gitlab:alpha"].harvest(Cursor()).events
 
 
+def _mask(text: str) -> str:
+    """Blank the minted surrogate so the rest of the grammar stays exact.
+
+    The id is per-call by design (AD-34), and dropping the content assertion
+    rather than masking it would retire the only check that notices a format
+    drift reaching disk.
+    """
+    return re.sub(r"evt_[0-9a-f]+", "evt_ID", text)
+
+
+def _test_entry(marker: str):
+    """A minimal typed entry, standing in for the old free-string call.
+
+    Uses a real category rather than inventing a `test` one: a tag existing only
+    in fixtures is an entry no parser would ever be asked to read.
+    """
+    return EventEntry(
+        category=SelfActionType.SECURITY, actor="test", fields=(("detail", marker),)
+    )
+
+
 def _segment(storage, scope, at=NOW):
     return storage.paths.resolve(scope, EVENT_LOG) / f"{at:%Y-%m}.md"
 
@@ -107,12 +129,16 @@ def test_the_event_log_is_appended_to_never_rewritten(daemon):
     was enough to make both event-log writes invisible to it. Reading the file
     back is what actually proves the mode.
     """
-    daemon.storage.append_event_log("- [test] first", scope=daemon.scope)
-    daemon.storage.append_event_log("- [test] second", scope=daemon.scope)
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+    daemon.storage.append_event_log(_test_entry("second"), scope=daemon.scope)
 
     segments = list(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md"))
     assert len(segments) == 1, "one open segment per month, appended to"
-    assert segments[0].read_text() == "- [test] first\n- [test] second\n"
+    body = _mask(segments[0].read_text())
+    assert body == (
+        "- [evt_ID] security actor=test detail=first\n"
+        "- [evt_ID] security actor=test detail=second\n"
+    )
 
 
 def test_persisted_batches_accumulate_in_one_segment(daemon):
@@ -144,12 +170,14 @@ def test_every_scope_writes_into_its_own_resolved_tree(daemon, tmp_path):
     Markdown beside its own operational store.
     """
     for scope in ALL_SCOPES:
-        daemon.storage.append_event_log(f"- [test] {scope}", scope=scope)
+        daemon.storage.append_event_log(_test_entry(str(scope)), scope=scope)
 
     resolved = {scope: daemon.storage.paths.resolve(scope, EVENT_LOG) for scope in ALL_SCOPES}
     assert len(set(resolved.values())) == len(ALL_SCOPES), "two scopes share one ledger"
     for scope, log in resolved.items():
-        assert (log / f"{NOW:%Y-%m}.md").read_text() == f"- [test] {scope}\n"
+        assert _mask((log / f"{NOW:%Y-%m}.md").read_text()) == (
+            f"- [evt_ID] security actor=test detail={scope}\n"
+        )
 
     # Each in the tree its scope owns, spelled from the resolver's own names so
     # this test cannot drift from the layout it is checking.
@@ -180,7 +208,7 @@ def test_a_traversing_person_id_is_refused_at_the_write(daemon):
     """
     escaping = DataScope(ScopeKind.PEOPLE, person_id="../../../tmp/evil")
     with pytest.raises(ScopeResolutionError):
-        daemon.storage.append_event_log("- [test] leak", scope=escaping)
+        daemon.storage.append_event_log(_test_entry("leak"), scope=escaping)
 
 
 # ── AD-3: Tier 2 is not in anyone's Markdown tree ────────────────────────────
@@ -272,7 +300,7 @@ def test_a_store_created_before_the_settle_column_still_settles(tmp_path):
 def test_the_segment_filename_comes_from_the_injected_clock(tmp_path):
     """The one observable of the clock in `append_event_log`, pinned off-month."""
     d = build(tmp_path, "alpha", now=lambda: ELSEWHEN)
-    d.storage.append_event_log("- [test] entry", scope=d.scope)
+    d.storage.append_event_log(_test_entry("entry"), scope=d.scope)
 
     segments = list(d.storage.paths.resolve(d.scope, EVENT_LOG).glob("*.md"))
     assert [s.name for s in segments] == [f"{ELSEWHEN:%Y-%m}.md"] == ["2019-03.md"]
@@ -317,7 +345,7 @@ def test_a_clock_that_is_not_utc_is_refused(tmp_path, clock, why):
         ScopePaths.rooted(tmp_path), now=clock, vcs=GitVcs(), crypto=TEST_CIPHER
     )
     with pytest.raises(NonUtcClock):
-        storage.append_event_log(f"- [test] {why}", scope=PERSONAL)
+        storage.append_event_log(_test_entry(why), scope=PERSONAL)
 
 
 # ── The batch is one unit ────────────────────────────────────────────────────
@@ -384,7 +412,7 @@ def test_production_paths_reach_the_daemon(tmp_path):
     assert paths.project_parent is None, "production may not invent a repository"
 
     d = build(None, "alpha", paths=paths, now=lambda: NOW)
-    d.storage.append_event_log("- [test] entry", scope=d.scope)
+    d.storage.append_event_log(_test_entry("entry"), scope=d.scope)
 
     log = d.storage.paths.resolve(d.scope, EVENT_LOG)
     assert log.is_relative_to(repository / PROJECT_DIRNAME)
@@ -448,3 +476,21 @@ def test_an_absent_provider_timestamp_still_renders_unknown(daemon):
     body = _segment(daemon.storage, daemon.scope).read_text()
     assert "occurred_at=unknown" in body
     assert "occurred_at=None" not in body
+
+
+# ── Story 2e: the writer accepts a typed entry and names it ──────────────────
+
+
+def test_the_writer_mints_the_entry_id(daemon):
+    """AD-34 — the surrogate is assigned by storage at persist, never by a caller."""
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+
+    line = _segment(daemon.storage, daemon.scope).read_text().rstrip("\n")
+    assert re.fullmatch(r"- \[evt_[0-9a-f]+\] security actor=test detail=first", line)
+
+
+def test_an_entry_arriving_with_an_id_is_refused(daemon):
+    """Overwriting it silently would make AD-34 a convention rather than a rule."""
+    entry = replace(_test_entry("first"), entry_id="evt_minted_by_the_caller")
+    with pytest.raises(ValueError):
+        daemon.storage.append_event_log(entry, scope=daemon.scope)

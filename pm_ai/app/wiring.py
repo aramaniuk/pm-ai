@@ -17,6 +17,7 @@ from pathlib import Path
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
+from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import MASTER_KEY_NAME, CryptoPort, KeychainPort, VcsPort
 from pm_ai.platform.environment import encryption_disabled as encryption_off
@@ -177,7 +178,13 @@ def _announce_disabled_encryption(storage: StorageService) -> None:
         file=sys.stderr,
     )
     storage.append_event_log(
-        "- [security] encryption disabled by debug flag; the encrypted set is "
-        "being written in plaintext",
+        EventEntry(
+            category=SelfActionType.SECURITY,
+            actor=DAEMON_ACTOR,
+            fields=(
+                ("protection", "encryption-at-rest"),
+                ("disabled_by", "environment variable"),
+            ),
+        ),
         scope=DataScope(ScopeKind.APPLICATION),
     )

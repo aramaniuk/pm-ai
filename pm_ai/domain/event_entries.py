@@ -39,6 +39,7 @@ from pm_ai.domain.events import PAYLOAD_FOR, ObservedEventType
 from pm_ai.domain.invariants import InconsistentModel
 
 __all__ = [
+    "DAEMON_ACTOR",
     "GRAMMAR_VERSION",
     "MAX_ENTRY_LENGTH",
     "EventEntry",
@@ -130,6 +131,14 @@ LedgerCategory = ObservedEventType | SelfActionType
 """What a segment line may be tagged with: either subject, never a third thing."""
 
 
+DAEMON_ACTOR = "pm-ai"
+"""The actor on a record pm-ai wrote about itself.
+
+One spelling, because the actor field is what a retrospective groups by: `pm-ai`
+in one entry and `pm_ai` in another are two actors to every reader that counts
+them. `storage-contract.md`'s COMPACTION example fixes this form.
+"""
+
 MAX_ENTRY_LENGTH = 4096
 """How long one rendered record may be.
 
@@ -195,14 +204,19 @@ class EventEntry:
     growing a field per subject.
 
     Rendering is pure, so the id and every timestamp arrive already decided: the
-    minting lives in storage (`service.py:215`) and the clock is the one the
-    single writer injects.
+    clock is the one the single writer injects, and `entry_id` is stamped by
+    storage on the way in.
+
+    `entry_id` is optional at construction and required at render, which is
+    AD-34 expressed in the type: the `evt_` surrogate is assigned by the storage
+    service at persist time, so a caller outside it builds an entry and does not
+    name it. `NormalizedEvent.ingested_at` is nullable for the same reason.
     """
 
-    entry_id: str
     category: LedgerCategory
     actor: str
     fields: tuple[tuple[str, str], ...] = ()
+    entry_id: str | None = None
 
 
 def _render_value(value: str, *, where: str) -> str:
@@ -225,6 +239,12 @@ def render_entry(entry: EventEntry) -> str:
     Returns the record without its terminating newline: the writer appends that,
     and it is the newline that makes the record a record.
     """
+    if entry.entry_id is None:
+        raise MalformedEntry(
+            "this entry has no id. The `evt_` surrogate is minted by the storage "
+            "service at persist time (AD-34), so an entry is rendered after it "
+            "has been through the writer, never before."
+        )
     if not entry.entry_id or any(c in entry.entry_id for c in " []\n\r"):
         raise MalformedEntry(
             f"entry_id {entry.entry_id!r} is not a bare token. It is rendered "
