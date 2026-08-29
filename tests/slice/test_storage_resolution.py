@@ -25,6 +25,7 @@ import pytest
 
 from pm_ai.app.wiring import build
 from pm_ai.core import ledger
+from pm_ai.core.event_log import EventLog
 from pm_ai.domain.scope_model import FOREIGN_ROOTS
 from pm_ai.domain import (
     ARTIFACT_TIER,
@@ -723,3 +724,29 @@ def test_a_stray_file_in_the_log_directory_is_not_a_segment(tmp_path):
 
     d.storage.append_event_log(_test_entry("first"), scope=d.scope)
     assert f"first" in (log / f"{NOW:%Y-%m}.md").read_text()
+
+
+# ── Story 2h: the accessor against the real writer, not only the fake ───────
+
+
+def test_the_accessor_reads_back_what_the_real_writer_wrote(daemon):
+    """The fake `StoragePort` in `tests/core/test_event_log.py` is only worth
+    having if it matches this. Written through the real service, read through
+    the accessor, in arrival order."""
+    log = EventLog(daemon.storage)
+    for marker in ("first", "second", "third"):
+        log.append(_test_entry(marker), scope=daemon.scope)
+
+    entries = log.read(scope=daemon.scope)
+    assert [dict(e.fields)["detail"] for e in entries] == ["first", "second", "third"]
+    assert log.open_segment(scope=daemon.scope) == f"{NOW:%Y-%m}.md"
+
+
+def test_the_accessor_creates_nothing_when_asked_about_an_unwritten_scope(daemon):
+    """Asking which segments exist must not bring the directory into being."""
+    log = EventLog(daemon.storage)
+    unwritten = DataScope(ScopeKind.PERSONAL)
+
+    assert log.read(scope=unwritten) == ()
+    assert log.open_segment(scope=unwritten) is None
+    assert not daemon.storage.paths.resolve(unwritten, EVENT_LOG).exists()

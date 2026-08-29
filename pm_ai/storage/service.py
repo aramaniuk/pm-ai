@@ -1064,6 +1064,30 @@ class StorageService:
         )
         self._append(self._segment(scope, EVENT_LOG, at), render_entry(named) + "\n")
 
+    def event_log_segments(self, *, scope: DataScope) -> tuple[str, ...]:
+        """Every dated segment in `scope`'s event log, oldest first.
+
+        Resolved *without* `create`: asking which segments exist must not bring
+        the directory into being. A scope that has never been written to answers
+        "none", and an empty tuple is that answer — not a new empty directory for
+        the next reader to find and believe in.
+        """
+        directory = self._paths.resolve(scope, EVENT_LOG)
+        if not directory.is_dir():
+            return ()
+        return tuple(sorted(_segment_names(directory)))
+
+    def read_event_log_segment(self, *, scope: DataScope, name: str) -> str:
+        """One segment's text, by the name `event_log_segments` returned.
+
+        Goes through `read_artifact`, so the name is validated as the single path
+        component it becomes — a caller cannot read its way out of the directory
+        with a name this writer never minted.
+        """
+        return self.read_artifact(scope=scope, artifact=EVENT_LOG, name=name).decode(
+            "utf-8"
+        )
+
     # ── Raw captures: outside the tier model, inside a committed scope ───────
     # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on
     # one (AD-33), which is why `RETENTION_MANAGED` holds them instead of

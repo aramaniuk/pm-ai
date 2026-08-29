@@ -2,7 +2,7 @@
 title: 'EventLog accessor'
 type: 'feature'
 created: '2026-08-29'
-status: 'draft'
+status: 'in-review'
 review_loop_iteration: 0
 ---
 
@@ -18,11 +18,12 @@ review_loop_iteration: 0
 
 **Always:**
 - All I/O goes through `StorageService` (AD-5, the single writer). The accessor holds no path and opens no file; it is a vocabulary, not a second writer.
-- Reads span segments and return entries in the fold order 2f fixed, so two callers asking the same question get the same answer.
+- Reads span segments and return **arrival order** — segments in name order, lines in file order — which 2f documents as the only exact chronology. `ledger.fold` is one call away for a caller deriving state, and a default that silently reordered would surprise one asking what happened.
+- **A range filters on `ingested_at`, and the parameters say so.** Segment filenames derive from the write clock, so skipping a segment outside the range is sound for that clock and wrong for the other: an event that occurred in July and was ingested in August lives in the August segment. AD-35 forbids mixing them, and an unnamed `since` would.
 - Per scope. A scope is an argument, never a construction-time default — the debug-flag entry goes to the application scope while a skill entry goes to the skill's own, and a bound scope would make one of those a mistake nobody sees.
 - Additive: `StorageService`'s methods stay public and 2e's callers keep working. This story adds the accessor and moves nothing.
 
-**Ask First:** Whether `CommitmentLog` and `MeetingRecords` — rule 3's other two accessors — land here as empty siblings or wait for the stories that own their resources (15 and 4). Building all three now risks two interfaces designed without a caller.
+**Ask First:** None. `CommitmentLog` and `MeetingRecords` wait for the stories that own their resources (15 and 4) — an interface designed without a caller is designed against a guess.
 
 **Never:** No job runner, no `inputs()`/`outputs()`, no task manager — that is story 10a. No caller migration beyond what the accessor's own tests need. No caching.
 
@@ -32,7 +33,7 @@ review_loop_iteration: 0
 |----------|--------------|---------------------------|----------------|
 | Append | an `EventEntry` and a scope | delegated to the writer; lands in the open segment | N/A |
 | Read all | a scope with several segments | every entry, in fold order, across segments | N/A |
-| Read a range | a bounded period | only entries within it; segments outside are not opened | N/A |
+| Read a range | bounded by `ingested_at` | only entries within it; segments outside are not opened | N/A |
 | Empty log | a scope with no `event_log/` yet | empty result, no directory created | N/A |
 | Sealed-segment append | an `at` outside the open segment | 2g's refusal propagates unchanged | `SealedSegment` |
 | Truncated tail | a segment mid-append | 2f's rule applies: complete records only | N/A |
@@ -59,6 +60,10 @@ review_loop_iteration: 0
 - Given `lint-imports`, then `pm_ai.core` does not import `pm_ai.storage` concretely.
 
 ## Spec Change Log
+
+- **2026-08-29, reads return arrival order, not fold order.** The spec said fold order "so two callers asking the same question get the same answer" — but arrival order is equally deterministic (segments sort by name, lines by position) and is the exact chronology, with no ties, that 2f documented and 2g's single-writer rule guarantees. Fold is the total order for *deriving state across a rebuild*, not for reading a log; making it the default would silently reorder for every caller that just wanted to know what happened.
+- **The range names its clock.** `ingested_since` / `ingested_until`, not `since` / `until`. The matrix promised that segments outside a range are not opened, and that optimisation is only correct on the write clock, because that is what the filenames derive from — filtering `occurred_at` by segment name would drop a July event ingested in August. AD-35 makes mixing the two clocks the defect; an unnamed parameter is how it happens.
+- **The port gains two read methods.** `StoragePort` declared only writes, so the accessor had nothing to depend on. `event_log_segments` and `read_event_log_segment` keep the accessor pathless while letting it decide which segments to open.
 
 ## Verification
 
