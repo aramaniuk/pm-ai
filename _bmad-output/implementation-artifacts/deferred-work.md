@@ -18,6 +18,79 @@ the queue begins after `1i`.
 | `1h-derived-tier-rebuild` | the derived tier is provably disposable | 1a, 1b |
 | `1i-operational-schema-versioning` | the unrebuildable store can be upgraded safely | 1b |
 
+## Story 2 decomposition
+
+`stories.yaml` story 2 ("Event log and disclosure ledger") is eleven specs under
+`_bmad-output/specs/spec-pm-ai/stories/`, in this order. Sized to the 1600-token
+spec ceiling: the largest is 1262, the set totals 12,051.
+
+| Spec | Delivers | Depends on |
+|---|---|---|
+| `2a-two-clock-bases` | AD-35's two bases and the implausible-timestamp refusal | — |
+| `2b-flag-implausible-provider-timestamps` | the flag reaches the ledger instead of the exception reaching the batch | 2a |
+| `2c-closed-entry-type-enumeration` | AD-27's second closed enumeration, which never existed | — |
+| `2d-one-entry-renderer` | one definition of a ledger line, replacing four grammars | 2c |
+| `2e-retire-the-free-string-append` | `append_event_log` takes a typed entry; 14 call sites move | 2d |
+| `2f-segment-parser-and-deterministic-fold` | segments become readable; fold by `(occurred_at, entry_id)` | 2d |
+| `2g-open-and-sealed-segments` | exactly one open segment; sealed ones refuse writes | — |
+| `2h-event-log-accessor` | derivation-services rule 3's `EventLog` | 2f, 2g |
+| `2i-disclosure-ledger-append` | the disclosure ledger gains a writer | — |
+| `2j-disclosure-ledger-reads` | AD-17's monthly total and AD-31's period query | 2i |
+| `2k-retrospective-aggregation` | CAP-10's weekly counts by category | 2h |
+
+Decisions taken at the sizing gate (2026-08-29):
+
+- **The entry format is Markdown.** `SPEC.md` CAP-10 said "appends a JSON line"
+  against `storage-contract.md`'s example, the Tier-1 "plaintext Markdown" row,
+  the `%Y-%m.md` segment name and the shipped `_append_batch`. Corrected in
+  `SPEC.md` rather than in the four sources that agreed.
+- **Embeddings moved to story 10a**, with CAP-27's semantic-query clause. Story 2
+  therefore creates no Tier-3 artifact, which strengthens `derivation-services.md`'s
+  case for running `1h` after story 19 rather than next.
+- **Spec ceiling honoured at 1600 tokens**, unlike story 1 where every spec
+  exceeded it (measured: 1710-3895 body tokens, median 2821). The cost is spec
+  count: eleven thin specs rather than six fat ones.
+
+Two defects the sizing pass found, each now owned by the spec that fixes it:
+
+- `disclosure.md` is Tier-1 truth and **absent from `_APPEND_ONLY_KEYS`**
+  (`storage_tiers.py:159`), so `write_artifact` would replace the audit ledger
+  whole. Verified: `is_append_only(APPLICATION, "disclosure.md")` returns `False`.
+  Fixed by `2i`.
+- `_ulid()` (`service.py:215`) returns `"evt_" + secrets.token_hex(10)` — random,
+  **not** time-sortable, though `ARCHITECTURE-SPINE.md:649` calls these ids
+  "sortable by creation time". The fold stays deterministic, but entries sharing
+  an `occurred_at` order arbitrarily. Raised as an Ask First in `2f`.
+
+## Story 2 decomposition
+
+`stories.yaml` story 2 ("Event log and disclosure ledger") is implemented as
+eleven specs, in this order. Embeddings and semantic query — `vector_index/`,
+originally assigned here by `derivation-services.md` — were **deferred to story
+10a** by decision on 2026-08-29: the artifact needs the task manager and the job
+runner that 10a supplies, and story 2 would otherwise define a job nothing can
+trigger. Story 2 therefore creates no Tier-3 artifact at all, which strengthens
+the case already made in `derivation-services.md` for running `1h` after story 19.
+
+| Spec | Delivers | Depends on |
+|---|---|---|
+| `2a-two-clock-bases` | which clock governs which reasoning; an implausible provider timestamp refused | — |
+| `2b-flag-implausible-provider-timestamps` | that refusal reaches the persist path as a flag | 2a, 2d |
+| `2c-closed-entry-type-enumeration` | AD-27's second closed enumeration: what the ledger may record | — |
+| `2d-one-entry-renderer` | one function producing every ledger line | 2c |
+| `2e-retire-the-free-string-append` | `append_event_log` takes a typed entry; every caller migrates | 2d |
+| `2f-segment-parser-and-deterministic-fold` | segments read back; fold by `(occurred_at, entry_id)` | 2d |
+| `2g-open-and-sealed-segments` | exactly one open segment; sealed months refuse writes | 2e |
+| `2h-event-log-accessor` | derivation-services rule 3, over `event_log/` | 2f, 2g |
+| `2i-disclosure-ledger-append` | the application-scoped ledger gains a writer | 2d |
+| `2j-disclosure-ledger-reads` | AD-17's monthly total and AD-31's period query gain a source | 2i |
+| `2k-retrospective-aggregation` | CAP-10's counts by category, as a weekly trend | 2h |
+
+**2b depends on 2d, not on 2a alone.** Recorded here because the review of
+2026-08-29 found the original ordering had 2b writing a flag into a line format
+that 2d then replaces — the work would have been done twice and the two golden
+tests would have disagreed.
+
 ## Deferred to later stories
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`

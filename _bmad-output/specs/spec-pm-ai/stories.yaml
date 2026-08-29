@@ -194,22 +194,22 @@
   spec_checkpoint: true
   done_checkpoint: true
   description: >-
-    Implement the segmented, append-only per-scope event log with typed entries,
-    the separate application-scoped disclosure ledger for frontier-call
-    provenance and cost, and the embedding job that makes CAP-27's semantic
-    query possible. Delivers CAP-10 and CAP-27.
+    Implement the segmented, append-only per-scope event log with typed entries
+    and the separate application-scoped disclosure ledger for frontier-call
+    provenance and cost. Delivers CAP-10 and CAP-27's first and third clauses.
+    Decomposed into eleven specs 2a-2k; see implementation-artifacts/deferred-work.md.
   invoke_dev_with: >-
-    OWNS THE EMBEDDINGS. CAP-27's second clause - semantic query across past
-    decisions within 5 seconds - is the first capability that cannot work without
-    vector_index/, and until 2026-08-27 no story claimed to build it. See
-    derivation-services.md: the embedding job takes event_log/, meetings/ and
-    coaching history as declared inputs and produces vector_index/, and it must be
-    reconstructible from Tier-1 Markdown alone, because story 1h will later drop
-    the whole derived tier and require a rebuild to reproduce it byte for byte.
-    Nothing that cannot be rebuilt that way belongs in Tier 3.
-    Each embedding record stores the MD5 of the source file it was computed from,
-    beside the record, so one edited meeting re-embeds one file (see
-    derivation-services.md).
+    NARROWED 2026-08-29, by decision: the embedding job and CAP-27's semantic-query
+    clause moved to story 10a, which supplies the task manager that would trigger
+    the job. Story 2 ships the log and the ledger only, and therefore creates no
+    Tier-3 artifact at all.
+    The entry format is Markdown, not JSON. SPEC.md's CAP-10 said "JSON line"
+    against three sources and the shipped code; it was corrected on 2026-08-29.
+    Segments are .md, entries are one Markdown list item per record, and a record
+    without its terminating newline is not a record (storage-contract.md).
+    AD-27 closes TWO enumerations and only the NormalizedEvent one exists. The
+    event_log/ entry vocabulary is the gap 2c fills - four grammars reach one
+    ledger today and nothing can parse a segment.
 - id: "3"
   title: MCP execution firewall and skill registry
   spec_checkpoint: true
@@ -342,6 +342,15 @@
     suite already expects pm_ai.core.scheduler (test_domain_invariants.py:148);
     and app/pipelines.py holds run_harvest and run_transcript_ingestion as
     functions nothing calls - jobs without a job runner.
+    ALSO OWNS THE EMBEDDINGS, moved here from story 2 on 2026-08-29. CAP-27's
+    semantic query needs vector_index/, and the embedding job needs the runner
+    this story builds - it cannot be triggered by a story that ships before the
+    task manager exists. The job takes event_log/, meetings/ and coaching history
+    as declared inputs and produces vector_index/, and it must be reconstructible
+    from Tier-1 Markdown alone, because story 1h will later drop the whole derived
+    tier and require a rebuild to reproduce it byte for byte. Each embedding record
+    stores the MD5 of the source file it was computed from, beside the record, so
+    one edited meeting re-embeds one file (see derivation-services.md).
     A job declares inputs() and outputs() and does ONE thing. The dependency graph
     is DERIVED from those declarations, never configured: one job's outputs
     intersecting another's inputs is the edge. A job must never enqueue its

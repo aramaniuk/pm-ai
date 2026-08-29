@@ -134,7 +134,7 @@ Without these, three jobs parse the same Markdown three ways and the fourth read
 
 | artifact | owner | why |
 | --- | --- | --- |
-| embeddings (`vector_index/`) | **story 2** | CAP-27's semantic query is the first capability that cannot work without them, and story 2 delivers CAP-27. Its description covers only the ledger today and needs widening. |
+| embeddings (`vector_index/`) | **story 10a** (moved from 2, 2026-08-29) | CAP-27's semantic query is the first capability that cannot work without them. Placed on story 2 until 2026-08-29, then moved: the job needs the task manager to trigger it, and story 2 shipping before 10a would have defined a job nothing could run. Story 2 keeps CAP-27's ledger clauses. |
 | commitment index (`commitment_index.db`) | **story 15** | CAP-34 says "an indexed row"; the story that persists commitments writes it. |
 | search index (`event_index.db`) | **story 18** | CAP-23 and CAP-24 both need it and story 18 owns both. |
 | the rebuild guarantee | **story 1h, moved** | Nothing to rebuild until the three above exist. |
