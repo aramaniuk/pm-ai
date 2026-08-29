@@ -40,6 +40,10 @@ from pm_ai.domain.invariants import InconsistentModel
 
 __all__ = [
     "GRAMMAR_VERSION",
+    "MAX_ENTRY_LENGTH",
+    "EventEntry",
+    "MalformedEntry",
+    "render_entry",
     "CompactionPayload",
     "InconsistentVocabulary",
     "LedgerCategory",
@@ -126,6 +130,22 @@ LedgerCategory = ObservedEventType | SelfActionType
 """What a segment line may be tagged with: either subject, never a third thing."""
 
 
+MAX_ENTRY_LENGTH = 4096
+"""How long one rendered record may be.
+
+A segment is plaintext Markdown the PM is meant to read, grep and diff by hand
+(`storage-contract.md`), and one entry carrying a megabyte of payload defeats
+every one of those. The bound turns that into a refusal at the writer, where it
+names the entry, instead of a file nobody can open.
+"""
+
+_NEEDS_QUOTING = {" ", "=", '"', "\\"}
+
+
+class MalformedEntry(ValueError):
+    """A record that cannot be rendered without corrupting the ledger."""
+
+
 class UnknownCategory(ValueError):
     """A wire value naming no member of either vocabulary."""
 
@@ -162,6 +182,75 @@ def category(value: str) -> LedgerCategory:
         f"member is a deliberate change in `domain` reviewed for overlap "
         f"(AD-27). Known: {', '.join(known)}."
     )
+
+
+@dataclass(frozen=True, slots=True)
+class EventEntry:
+    """One ledger record, before it is a line.
+
+    `actor` and `category` are structural because every entry has them — CAP-10
+    requires an entry id, a timestamp, an actor and a category on every one.
+    Everything else is ordered `key=value` pairs, which is what lets one shape
+    carry both a harvested event and a compaction without the record type
+    growing a field per subject.
+
+    Rendering is pure, so the id and every timestamp arrive already decided: the
+    minting lives in storage (`service.py:215`) and the clock is the one the
+    single writer injects.
+    """
+
+    entry_id: str
+    category: LedgerCategory
+    actor: str
+    fields: tuple[tuple[str, str], ...] = ()
+
+
+def _render_value(value: str, *, where: str) -> str:
+    """Bare when it can be, quoted when it must be, never able to forge a record."""
+    if "\n" in value or "\r" in value:
+        raise MalformedEntry(
+            f"{where} contains a line break. A record is one line, and the append "
+            f"rule reads an unterminated line as a fragment — so this would forge "
+            f"a record boundary that no reader could detect as corruption."
+        )
+    if any(ch in value for ch in _NEEDS_QUOTING):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def render_entry(entry: EventEntry) -> str:
+    """The one function that produces a ledger line.
+
+    Returns the record without its terminating newline: the writer appends that,
+    and it is the newline that makes the record a record.
+    """
+    if not entry.entry_id or any(c in entry.entry_id for c in " []\n\r"):
+        raise MalformedEntry(
+            f"entry_id {entry.entry_id!r} is not a bare token. It is rendered "
+            f"inside brackets, where a space or a bracket ends the field early."
+        )
+    parts = [
+        f"- [{entry.entry_id}]",
+        entry.category.value,
+        f"actor={_render_value(entry.actor, where='actor')}",
+    ]
+    for key, value in entry.fields:
+        if not key or any(ch in key for ch in ' ="\n\r\\'):
+            raise MalformedEntry(
+                f"field name {key!r} is not a bare token. A key carrying a "
+                f"separator shifts every field after it when the line is parsed."
+            )
+        parts.append(f"{key}={_render_value(value, where=f'field {key!r}')}")
+
+    line = " ".join(parts)
+    if len(line) > MAX_ENTRY_LENGTH:
+        raise MalformedEntry(
+            f"the rendered record is {len(line)} characters, beyond the "
+            f"{MAX_ENTRY_LENGTH} bound. A segment is meant to be read and grepped "
+            f"by hand; summarise the payload or cite what holds it."
+        )
+    return line
 
 
 def _assert_vocabularies_agree() -> None:

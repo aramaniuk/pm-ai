@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from pm_ai.domain.disclosure import assert_writable
+from pm_ai.domain.event_entries import EventEntry, render_entry
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.harvest import Cursor, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
@@ -1100,11 +1101,28 @@ class StorageService:
             self._db.execute("INSERT INTO seen (natural_key) VALUES (?)", (key,))
             stamped = replace(ev, ingested_at=at)  # AD-35 — local clock, assigned here
             assert_writable(stamped, scope=scope)  # AD-38
+            # The format lives in `render_entry` (story 2d), not here. A writer
+            # that formats its own line is a second grammar in the ledger, which
+            # is what left four of them reaching one file.
             lines.append(
-                f"- [{_ulid()}] {stamped.type.value} "
-                f"actor={stamped.actor.actor_id} src={stamped.source_ref} "
-                f"occurred_at={stamped.occurred_at.isoformat() if stamped.occurred_at else 'unknown'} "
-                f"ingested_at={at.isoformat()} authored_by={stamped.authored_by.value}"
+                render_entry(
+                    EventEntry(
+                        entry_id=_ulid(),
+                        category=stamped.type,
+                        actor=stamped.actor.actor_id,
+                        fields=(
+                            ("src", str(stamped.source_ref)),
+                            (
+                                "occurred_at",
+                                stamped.occurred_at.isoformat()
+                                if stamped.occurred_at
+                                else "unknown",
+                            ),
+                            ("ingested_at", at.isoformat()),
+                            ("authored_by", stamped.authored_by.value),
+                        ),
+                    )
+                )
             )
             persisted += 1
         if lines:

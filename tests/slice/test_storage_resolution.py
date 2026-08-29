@@ -17,7 +17,8 @@ exercise the parts of that which a green suite could otherwise hide:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -415,3 +416,35 @@ def test_an_unregistered_project_is_refused_at_build_time(tmp_path):
     paths = ScopePaths.production(home=tmp_path / "home", projects={"alpha": tmp_path / "a"})
     with pytest.raises(UnknownProject):
         build(None, "beta", paths=paths, now=lambda: NOW)
+
+
+# ── Story 2d: one renderer owns the line the ledger already holds ────────────
+
+
+def test_the_persisted_line_keeps_the_grammar_it_had_before_the_renderer(daemon):
+    """Captured from `_append_batch` before 2d moved the format out of it.
+
+    The break this catches is the expensive one: a format drift orphans every
+    segment already on disk, and nothing fails at the moment it happens. Only
+    the minted id is masked — everything else is asserted byte for byte.
+    """
+    daemon.storage.persist_events(_events(daemon), scope=daemon.scope)
+    lines = _segment(daemon.storage, daemon.scope).read_text().splitlines()
+
+    masked = [re.sub(r"evt_[0-9a-f]+", "evt_MASKED", line) for line in lines]
+    for line in masked:
+        assert re.fullmatch(
+            r"- \[evt_MASKED\] \w+ actor=\S+ src=\S+ "
+            r"occurred_at=(\S+) ingested_at=\S+ authored_by=\w+",
+            line,
+        ), f"the ledger grammar moved: {line!r}"
+
+
+def test_an_absent_provider_timestamp_still_renders_unknown(daemon):
+    """`occurred_at` is nullable, and `unknown` is what the ledger has always said."""
+    events = tuple(replace(event, occurred_at=None) for event in _events(daemon))
+    daemon.storage.persist_events(events, scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert "occurred_at=unknown" in body
+    assert "occurred_at=None" not in body

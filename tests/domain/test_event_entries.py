@@ -126,3 +126,116 @@ def test_the_payload_coverage_guard_refuses_an_unregistered_member(monkeypatch):
     )
     with pytest.raises(ee.InconsistentVocabulary):
         ee._assert_vocabularies_agree()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2d — one renderer
+#
+# The golden line below was captured from `_append_batch` before this story
+# touched it, with the minted id substituted. It is a literal on purpose: an
+# expectation built by the renderer would agree with any format it produced.
+# ═══════════════════════════════════════════════════════════════════════════
+
+GOLDEN = (
+    "- [evt_0000000000000000000f] commit_pushed actor=u_42 "
+    "src=gitlab:alpha:commit:9f2a1c occurred_at=2026-08-19T08:00:00+00:00 "
+    "ingested_at=2026-08-19T09:00:00+00:00 authored_by=unknown"
+)
+
+
+def _harvest_entry():
+    return ee.EventEntry(
+        entry_id="evt_0000000000000000000f",
+        category=ObservedEventType.COMMIT_PUSHED,
+        actor="u_42",
+        fields=(
+            ("src", "gitlab:alpha:commit:9f2a1c"),
+            ("occurred_at", "2026-08-19T08:00:00+00:00"),
+            ("ingested_at", "2026-08-19T09:00:00+00:00"),
+            ("authored_by", "unknown"),
+        ),
+    )
+
+
+def test_a_harvested_entry_renders_the_line_the_ledger_already_holds():
+    """The break: a format drift that silently orphans every segment on disk."""
+    assert ee.render_entry(_harvest_entry()) == GOLDEN
+
+
+def test_rendering_is_deterministic():
+    """No clock read, no id minting — the entry carries everything."""
+    assert ee.render_entry(_harvest_entry()) == ee.render_entry(_harvest_entry())
+
+
+def test_the_rendered_line_carries_no_newline():
+    """The writer terminates the record; the renderer must not pre-empt it."""
+    assert "\n" not in ee.render_entry(_harvest_entry())
+
+
+# ── A record boundary cannot be forged ───────────────────────────────────────
+
+
+def test_a_value_containing_a_newline_is_refused():
+    entry = ee.EventEntry(
+        entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm-ai",
+        fields=(("detail", "first\nsecond"),),
+    )
+    with pytest.raises(ee.MalformedEntry):
+        ee.render_entry(entry)
+
+
+def test_an_actor_containing_a_newline_is_refused():
+    entry = ee.EventEntry(
+        entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm\nai", fields=()
+    )
+    with pytest.raises(ee.MalformedEntry):
+        ee.render_entry(entry)
+
+
+def test_a_key_containing_a_separator_is_refused():
+    """A key is a bare token; a space or `=` in one shifts every field after it."""
+    for bad in ("two words", "has=equals"):
+        entry = ee.EventEntry(
+            entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm-ai",
+            fields=((bad, "v"),),
+        )
+        with pytest.raises(ee.MalformedEntry):
+            ee.render_entry(entry)
+
+
+# ── Values that need quoting get it, and only those ──────────────────────────
+
+
+def test_a_value_containing_a_space_is_quoted():
+    entry = ee.EventEntry(
+        entry_id="evt_1", category=ObservedEventType.DECISION, actor="u_42",
+        fields=(("statement", "ship the thing"),),
+    )
+    assert 'statement="ship the thing"' in ee.render_entry(entry)
+
+
+def test_a_value_containing_a_quote_or_backslash_is_escaped():
+    entry = ee.EventEntry(
+        entry_id="evt_1", category=ObservedEventType.DECISION, actor="u_42",
+        fields=(("statement", 'say "hi" a\\b'),),
+    )
+    assert r'statement="say \"hi\" a\\b"' in ee.render_entry(entry)
+
+
+def test_a_value_needing_no_quoting_stays_bare():
+    """Byte-compatibility rests on this: today's values must not gain quotes."""
+    assert 'actor=u_42 ' in ee.render_entry(_harvest_entry())
+    assert '"' not in ee.render_entry(_harvest_entry())
+
+
+# ── A line stays readable ────────────────────────────────────────────────────
+
+
+def test_a_line_beyond_the_bound_is_refused():
+    entry = ee.EventEntry(
+        entry_id="evt_1", category=ObservedEventType.DECISION, actor="u_42",
+        fields=(("statement", "x" * (ee.MAX_ENTRY_LENGTH + 1)),),
+    )
+    with pytest.raises(ee.MalformedEntry) as caught:
+        ee.render_entry(entry)
+    assert str(ee.MAX_ENTRY_LENGTH) in str(caught.value)
