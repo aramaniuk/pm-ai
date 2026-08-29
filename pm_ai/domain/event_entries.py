@@ -54,6 +54,7 @@ __all__ = [
     "SkillInvokedPayload",
     "UnknownCategory",
     "category",
+    "render_value",
 ]
 
 
@@ -219,7 +220,7 @@ class EventEntry:
     entry_id: str | None = None
 
 
-def _render_value(value: str, *, where: str) -> str:
+def render_value(value: str, *, where: str) -> str:
     """Bare when it can be, quoted when it must be, never able to forge a record."""
     if "\n" in value or "\r" in value:
         raise MalformedEntry(
@@ -253,7 +254,7 @@ def render_entry(entry: EventEntry) -> str:
     parts = [
         f"- [{entry.entry_id}]",
         entry.category.value,
-        f"actor={_render_value(entry.actor, where='actor')}",
+        f"actor={render_value(entry.actor, where='actor')}",
     ]
     for key, value in entry.fields:
         if not key or any(ch in key for ch in ' ="\n\r\\'):
@@ -261,7 +262,7 @@ def render_entry(entry: EventEntry) -> str:
                 f"field name {key!r} is not a bare token. A key carrying a "
                 f"separator shifts every field after it when the line is parsed."
             )
-        parts.append(f"{key}={_render_value(value, where=f'field {key!r}')}")
+        parts.append(f"{key}={render_value(value, where=f'field {key!r}')}")
 
     line = " ".join(parts)
     if len(line) > MAX_ENTRY_LENGTH:

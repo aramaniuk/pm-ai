@@ -2,7 +2,7 @@
 title: 'Disclosure ledger append'
 type: 'feature'
 created: '2026-08-29'
-status: 'draft'
+status: 'in-review'
 review_loop_iteration: 0
 ---
 
@@ -20,9 +20,12 @@ review_loop_iteration: 0
 - **`disclosure.md` joins `_APPEND_ONLY_KEYS`** (`storage_tiers.py:159`, today `{event_log/, commitments_log.md}`). Verified absent: `is_append_only(APPLICATION, "disclosure.md")` returns `False`, so `write_artifact` would replace the audit ledger whole and destroy every prior entry — the exact loss `AppendOnlyArtifact` exists to refuse.
 - The application scope is the only destination, enforced by the existing guard rather than by the caller choosing correctly. `assert_writable` already raises `CommittedScopeLeak` for any other scope; this story must not route around it.
 - One line per call, newline-terminated, obeying the same append rule as an event entry — a record without its terminating newline is not a record.
+- **Same value encoding as an event entry, no shared vocabulary.** The line is `key=value` pairs quoted by the same rule, so 2j's parser reuses the tokenizer — but the disclosure record gets no `LedgerCategory` member. Adding one would let a disclosure be spelled as an `EventEntry` and appended to a git-committed project log, and `assert_writable` runs only in `_append_batch` (`service.py:1209`), never in `append_event_log` — so nothing would refuse it. That is the leak AD-38 exists to prevent, reintroduced through the vocabulary.
+- **No entry id and no category token.** Every line in this file is a frontier call, so there is nothing to tag; and the spine's id prefixes (`cmt_`, `prp_`, `evt_`, `job_`, `skl_`, `goal_`) have no member for one, which is a change this story does not need to make. The file is the vocabulary.
+- **Contributing scopes render in sorted order.** A frozenset iterates arbitrarily, and an audit line that differs between two runs over identical data is not an audit line.
 - Every field of `DisclosureRecord` is rendered: `task_class`, `model`, both token counts, the cost estimate, the contributing scopes and the destination. A cost total that cannot be recomputed from the ledger is not an audit trail.
 
-**Ask First:** Whether the disclosure line reuses 2c/2d's `EventEntry` grammar or gets its own. Sharing means one parser; separating acknowledges that a disclosure record has no actor and no `occurred_at` and would render two fields empty forever.
+**Ask First:** None outstanding. The grammar question is answered below: same value encoding, separate vocabulary, no shared category enum.
 
 **Never:** No monthly total, no audit query — that is 2j. No frontier caller: nothing in the tree makes a frontier call yet, so this story provides the write path and its tests, not a producer. No encryption; the ledger is plaintext Markdown by the same rule as every other Tier-1 file.
 
@@ -60,6 +63,9 @@ review_loop_iteration: 0
 - Given several appends, when the file is read, then every prior line is intact.
 
 ## Spec Change Log
+
+- **2026-08-29, grammar question resolved: shared encoding, separate vocabulary.** Sharing 2c's `LedgerCategory` would have created a spelling for a disclosure that `append_event_log` accepts into any scope — and the leak guard runs only on the batch path, so a project-scope write would land unrefused. The line therefore reuses the value encoding (so one tokenizer serves both files) and takes no category and no id: every line in `disclosure.md` is a frontier call, and the file is the vocabulary.
+- **Sorted scopes added to the Always list.** `contributing_scopes` is a frozenset; rendering it unsorted makes the same call produce different bytes on different runs.
 
 ## Verification
 

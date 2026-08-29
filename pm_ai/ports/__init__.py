@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from pm_ai.domain.disclosure import DisclosureRecord
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
@@ -294,6 +295,7 @@ class StoragePort(Protocol):
     # over `event_log/` had nothing to depend on and would have had to reach the
     # concrete service — or a path. Two methods rather than one because a
     # bounded read decides which segments to open and must see their names.
+    def append_disclosure(self, record: DisclosureRecord, *, scope: DataScope | None = None) -> None: ...
     def event_log_segments(self, *, scope: DataScope) -> tuple[str, ...]: ...
     def read_event_log_segment(self, *, scope: DataScope, name: str) -> str: ...
     # AD-20 is two-phase, and this port declared only the one-shot form until

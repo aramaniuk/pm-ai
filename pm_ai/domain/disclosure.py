@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from pm_ai.domain.event_entries import render_value
 from pm_ai.domain.identity import DataScope, ScopeKind
 
 # AD-38: one file, outside every repository. Both AD-31's "what has left this
@@ -25,6 +26,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 # them answerable — spread across N per-scope logs, neither query has a source.
 DISCLOSURE_LEDGER_SCOPE = DataScope(ScopeKind.APPLICATION)
 DISCLOSURE_LEDGER_PATH = "~/.pm-ai/disclosure.md"
+DISCLOSURE_LEDGER_ARTIFACT = "disclosure.md"
 
 
 class CommittedScopeLeak(ValueError):
@@ -130,3 +132,43 @@ def assert_citation_legal(*, cited: DataScope, into: DataScope) -> None:
             f"{cited}. The citation would publish, by reference, exactly what the "
             f"scope boundary exists to keep out (AD-38)."
         )
+
+
+def render_disclosure(record: DisclosureRecord) -> str:
+    """One frontier call as one Markdown line, for `~/.pm-ai/disclosure.md`.
+
+    **No entry id and no category token.** Every line in this file is a frontier
+    call, so there is nothing to tag — the file is the vocabulary. Giving the
+    record a `LedgerCategory` member instead would have created a spelling that
+    `append_event_log` accepts into *any* scope, and the leak guard runs only on
+    the batch path (`service.py:1209`) — so a disclosure naming personal material
+    could be written into a git-committed project log with nothing refusing it.
+    That is the leak AD-38 exists to prevent, reintroduced through the vocabulary.
+
+    The value encoding is shared with the event log's, so one tokenizer reads
+    both files. Sharing the encoding is not sharing the vocabulary.
+
+    Every field is rendered, including a zero cost and an absent destination.
+    AD-17's monthly total has to be recomputable from these lines alone; a field
+    omitted because it was empty is a field a reader cannot distinguish from one
+    that was never written.
+    """
+    scopes = ",".join(sorted(str(scope) for scope in record.contributing_scopes))
+    destination = "none" if record.destination is None else str(record.destination)
+    fields = (
+        ("at", record.at.isoformat()),
+        ("task_class", record.task_class),
+        ("model", record.model),
+        ("input_tokens", str(record.input_tokens)),
+        ("output_tokens", str(record.output_tokens)),
+        # `repr` of a float round-trips exactly in Python; a fixed number of
+        # decimal places would silently round a sub-cent call to zero, and a
+        # month of those sums to a figure the ledger cannot justify.
+        ("cost_usd", repr(record.estimated_cost_usd)),
+        ("scopes", scopes),
+        ("destination", destination),
+    )
+    parts = [
+        f"{key}={render_value(value, where=f'field {key!r}')}" for key, value in fields
+    ]
+    return "- " + " ".join(parts)

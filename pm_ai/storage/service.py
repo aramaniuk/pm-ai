@@ -37,7 +37,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from pm_ai.domain import clocks
-from pm_ai.domain.disclosure import assert_writable
+from pm_ai.domain.disclosure import (
+    DISCLOSURE_LEDGER_ARTIFACT,
+    DisclosureRecord,
+    assert_writable,
+    render_disclosure,
+)
 from pm_ai.domain.event_entries import EventEntry, render_entry
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.harvest import Cursor, PersistResult
@@ -1063,6 +1068,30 @@ class StorageService:
             fields=(("ingested_at", at.isoformat()),) + entry.fields,
         )
         self._append(self._segment(scope, EVENT_LOG, at), render_entry(named) + "\n")
+
+    def append_disclosure(
+        self, record: DisclosureRecord, *, scope: DataScope | None = None
+    ) -> None:
+        """Append one frontier call to the application-scoped ledger (AD-17, AD-38).
+
+        `scope` exists so the refusal is reachable, not so a caller can choose:
+        the record's only home is the application scope, and omitting it takes
+        that. `assert_writable` is what enforces it — a `DisclosureRecord` routed
+        anywhere else raises `CommittedScopeLeak`, because the project scope is
+        git-committed and a record naming personal material would be pushed to
+        the employer's repository. The mechanism built to prove nothing leaked
+        would have been the leak.
+
+        Both refusals run before the directory is resolved with `create`, so a
+        refused write leaves neither a file nor a directory behind.
+        """
+        destination = record.home if scope is None else scope
+        assert_writable(record, scope=destination)  # AD-38
+        self._assert_git_excludes(destination, DISCLOSURE_LEDGER_ARTIFACT)
+        target = self._paths.resolve(
+            destination, DISCLOSURE_LEDGER_ARTIFACT, create=True
+        )
+        self._append(target, render_disclosure(record) + "\n")
 
     def event_log_segments(self, *, scope: DataScope) -> tuple[str, ...]:
         """Every dated segment in `scope`'s event log, oldest first.

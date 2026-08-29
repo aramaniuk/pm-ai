@@ -25,6 +25,7 @@ import pytest
 
 from pm_ai.app.wiring import build
 from pm_ai.core import ledger
+from pm_ai.domain.disclosure import CommittedScopeLeak, DisclosureRecord
 from pm_ai.core.event_log import EventLog
 from pm_ai.domain.scope_model import FOREIGN_ROOTS
 from pm_ai.domain import (
@@ -53,6 +54,7 @@ from pm_ai.platform.paths import (
     artifacts_in,
 )
 from pm_ai.storage.service import (
+    AppendOnlyArtifact,
     NonUtcClock,
     SealedSegment,
     OperationalStoreUnavailable,
@@ -750,3 +752,66 @@ def test_the_accessor_creates_nothing_when_asked_about_an_unwritten_scope(daemon
     assert log.read(scope=unwritten) == ()
     assert log.open_segment(scope=unwritten) is None
     assert not daemon.storage.paths.resolve(unwritten, EVENT_LOG).exists()
+
+
+# ── Story 2i: the disclosure ledger gains a writer ──────────────────────────
+
+
+def _disclosure(**kw):
+    base = dict(
+        at=NOW,
+        task_class="summarize",
+        model="claude-opus-5",
+        contributing_scopes=frozenset({DataScope(ScopeKind.PERSONAL)}),
+        input_tokens=1200,
+        output_tokens=340,
+        estimated_cost_usd=0.0186,
+    )
+    return DisclosureRecord(**{**base, **kw})
+
+
+def test_a_disclosure_lands_in_the_application_ledger(daemon):
+    daemon.storage.append_disclosure(_disclosure())
+
+    ledger = daemon.storage.paths.resolve(APPLICATION, "disclosure.md")
+    assert "model=claude-opus-5" in ledger.read_text()
+
+
+def test_appending_a_disclosure_never_replaces_the_file(daemon):
+    """The hole this story closed: `write_artifact` would keep one record and
+    destroy every one before it."""
+    for model in ("claude-opus-5", "claude-haiku-4-5", "claude-sonnet-5"):
+        daemon.storage.append_disclosure(_disclosure(model=model))
+
+    body = daemon.storage.paths.resolve(APPLICATION, "disclosure.md").read_text()
+    assert body.count("\n") == 3
+    for model in ("claude-opus-5", "claude-haiku-4-5", "claude-sonnet-5"):
+        assert f"model={model}" in body
+
+
+def test_the_ledger_refuses_a_whole_file_write(daemon):
+    with pytest.raises(AppendOnlyArtifact):
+        daemon.storage.write_artifact(
+            b"replaced", scope=APPLICATION, artifact="disclosure.md"
+        )
+
+
+def test_a_disclosure_routed_to_a_committed_scope_is_refused(daemon):
+    """AD-38 — the mechanism built to prove nothing leaked must not be the leak."""
+    with pytest.raises(CommittedScopeLeak):
+        daemon.storage.append_disclosure(_disclosure(), scope=PROJECT)
+
+
+def test_a_refused_disclosure_leaves_nothing_behind(daemon):
+    with pytest.raises(CommittedScopeLeak):
+        daemon.storage.append_disclosure(_disclosure(), scope=PROJECT)
+
+    assert not daemon.storage.paths.resolve(APPLICATION, "disclosure.md").exists()
+
+
+def test_the_layout_refuses_a_disclosure_path_outside_the_application_scope(daemon):
+    """A second guard, below AD-38's: the scope model will not name a path for
+    this artifact anywhere else, so a caller cannot route around the leak check
+    by resolving its own path first."""
+    with pytest.raises(ScopeResolutionError):
+        daemon.storage.paths.resolve(PROJECT, "disclosure.md")

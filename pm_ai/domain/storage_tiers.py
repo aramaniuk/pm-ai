@@ -156,7 +156,11 @@ def requires_git_exclusion(scope_kind: ScopeKind, artifact: str) -> bool:
 # whole-file replacement, and replacing a ledger destroys every entry but the
 # last write's — so the single writer refuses these by name. Node keys, not
 # spellings: `is_append_only` canonicalises the same way the git guard does.
-_APPEND_ONLY_KEYS = frozenset({EVENT_LOG, "commitments_log.md"})
+# `disclosure.md` joined on 2026-08-29 (story 2i). It was declared Tier-1 truth
+# and left out of this set, so `write_artifact` would have replaced the audit
+# ledger whole — keeping one record and destroying every one before it, which
+# is exactly the loss `AppendOnlyArtifact` exists to refuse.
+_APPEND_ONLY_KEYS = frozenset({EVENT_LOG, "commitments_log.md", "disclosure.md"})
 
 
 def is_append_only(scope_kind: ScopeKind, artifact: str) -> bool:
