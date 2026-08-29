@@ -39,6 +39,7 @@ from pathlib import Path
 from pm_ai.domain import clocks
 from pm_ai.domain.disclosure import (
     DISCLOSURE_LEDGER_ARTIFACT,
+    DISCLOSURE_LEDGER_SCOPE,
     DisclosureRecord,
     assert_writable,
     render_disclosure,
@@ -1092,6 +1093,18 @@ class StorageService:
             destination, DISCLOSURE_LEDGER_ARTIFACT, create=True
         )
         self._append(target, render_disclosure(record) + "\n")
+
+    def read_disclosure(self) -> str:
+        """The application ledger's text, or empty if nothing has left the machine.
+
+        Absent is not an error: a machine that has made no frontier call has an
+        honest answer, and creating the file to report it would make "nothing yet"
+        indistinguishable from "the ledger was deleted".
+        """
+        target = self._paths.resolve(DISCLOSURE_LEDGER_SCOPE, DISCLOSURE_LEDGER_ARTIFACT)
+        if not target.exists():
+            return ""
+        return self._read(target).decode("utf-8")
 
     def event_log_segments(self, *, scope: DataScope) -> tuple[str, ...]:
         """Every dated segment in `scope`'s event log, oldest first.

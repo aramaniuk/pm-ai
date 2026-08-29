@@ -25,6 +25,7 @@ import pytest
 
 from pm_ai.app.wiring import build
 from pm_ai.core import ledger
+from pm_ai.core.disclosure_ledger import DisclosureLedger
 from pm_ai.domain.disclosure import CommittedScopeLeak, DisclosureRecord
 from pm_ai.core.event_log import EventLog
 from pm_ai.domain.scope_model import FOREIGN_ROOTS
@@ -815,3 +816,21 @@ def test_the_layout_refuses_a_disclosure_path_outside_the_application_scope(daem
     by resolving its own path first."""
     with pytest.raises(ScopeResolutionError):
         daemon.storage.paths.resolve(PROJECT, "disclosure.md")
+
+
+# ── Story 2j: written through the real service, read through the ledger ─────
+
+
+def test_the_disclosure_ledger_totals_what_the_real_writer_wrote(daemon):
+    """The fake in `tests/core/` is only worth having if it matches this."""
+    for cost in (1.5, 2.25, 4.0):
+        daemon.storage.append_disclosure(_disclosure(estimated_cost_usd=cost))
+
+    total = DisclosureLedger(daemon.storage).monthly_total(NOW.year, NOW.month)
+    assert total.records == 3
+    assert total.cost_usd == 7.75
+
+
+def test_an_unwritten_disclosure_ledger_reads_empty_and_creates_nothing(daemon):
+    assert daemon.storage.read_disclosure() == ""
+    assert not daemon.storage.paths.resolve(APPLICATION, "disclosure.md").exists()

@@ -2,7 +2,7 @@
 title: 'Disclosure ledger reads'
 type: 'feature'
 created: '2026-08-29'
-status: 'draft'
+status: 'in-review'
 review_loop_iteration: 0
 ---
 
@@ -23,7 +23,7 @@ review_loop_iteration: 0
 - Totals are computed from the ledger on every call, never cached and never stored. A stored total is a second structure that can disagree with the records it summarises — and AD-17's whole point is that the figure is *evidence*, not a counter.
 - The threshold **warns only**. This story returns numbers and, at most, a breached flag. No degradation, no model switch, no refusal — AD-17 forbids all three.
 
-**Ask First:** Where the monthly threshold lives. AD-17 names "$20 as a monitored target"; `config.toml` is the daemon's settings file, but no story has claimed this key. Hard-coding it here would put a budget figure in the domain.
+**Ask First:** None. The threshold is **passed in, not looked up**: `monthly_total` takes an optional target and reports whether the total exceeded it. No budget figure enters the domain, no story has to own a config key before this one can ship, and the surfaces that do have a configured target (stories 4 and 9) supply it.
 
 **Never:** No briefing, no CLI, no rendering for a human — stories 4 and 9 own those surfaces. No enforcement of any kind. No write path.
 
@@ -36,7 +36,8 @@ review_loop_iteration: 0
 | Mid-append read | an unterminated trailing line | every complete record counted; the tail ignored | N/A |
 | Malformed complete record | a terminated line that will not parse | refused, naming the line | `MalformedDisclosure` |
 | Period query | a start and end instant | records within it, in ledger order | N/A |
-| Threshold breach | total above the configured target | totals returned with a breached flag; nothing is blocked | N/A |
+| Threshold breach | a target passed in, total above it | totals returned with a breached flag; nothing is blocked | N/A |
+| No target given | no target passed | totals returned, breach unreported rather than assumed false | N/A |
 
 </frozen-after-approval>
 
@@ -59,6 +60,9 @@ review_loop_iteration: 0
 - Given a ledger truncated mid-append, when totalled, then the figure covers every complete record and no exception is raised.
 
 ## Spec Change Log
+
+- **2026-08-29, threshold resolved by passing it in.** The review of the set found this matrix row unimplementable: it required a configured target while the Ask First said no story owned the key, so one of six rows could neither ship nor be tested. Taking the target as an argument removes the dependency entirely — the domain gains no budget figure, and a caller with a configured value supplies it. With no target the result reports the breach as unknown rather than as false, because "nothing was compared" and "nothing was exceeded" are different facts and AD-17's figure is evidence.
+- **The tokenizer moves to `domain/event_entries.py` beside `render_value`.** 2j parses the encoding 2i writes, and duplicating the scanner would be the failure rule 3 names — the same Markdown parsed two ways. Encoder and decoder now sit together and both core parsers import them.
 
 ## Design Notes
 

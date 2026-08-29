@@ -29,6 +29,15 @@ DISCLOSURE_LEDGER_PATH = "~/.pm-ai/disclosure.md"
 DISCLOSURE_LEDGER_ARTIFACT = "disclosure.md"
 
 
+class MalformedDisclosure(ValueError):
+    """A complete line in the ledger that is not a disclosure record.
+
+    Distinct from an unterminated tail, which is a write in progress and is
+    dropped: a terminated line that will not parse is corruption in an audit
+    trail, and an audit trail that quietly skips what it cannot read is not one.
+    """
+
+
 class CommittedScopeLeak(ValueError):
     """A record naming personal material was routed to a git-committed scope."""
 

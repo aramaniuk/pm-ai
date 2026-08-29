@@ -110,3 +110,25 @@ def test_the_application_scope_is_the_only_home():
     assert_writable(_record(), scope=DISCLOSURE_LEDGER_SCOPE)
     with pytest.raises(CommittedScopeLeak):
         assert_writable(_record(), scope=PROJECT)
+
+
+# ── The scope round trip the ledger depends on ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        DataScope(ScopeKind.APPLICATION),
+        DataScope(ScopeKind.PERSONAL),
+        DataScope(ScopeKind.PROJECT, project_id="alpha"),
+        DataScope(ScopeKind.PEOPLE, person_id="u_42"),
+    ],
+    ids=["application", "personal", "project", "people"],
+)
+def test_a_scope_survives_a_round_trip_through_text(scope):
+    assert DataScope.parse(str(scope)) == scope
+
+
+def test_an_unknown_scope_kind_is_refused():
+    with pytest.raises(ValueError):
+        DataScope.parse("employer:acme")

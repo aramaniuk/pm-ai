@@ -30,6 +30,7 @@ from pm_ai.domain.event_entries import (
     MalformedEntry,
     SelfActionType,
     category,
+    scan_fields,
 )
 from pm_ai.domain.events import ObservedEventType
 
@@ -80,7 +81,7 @@ def parse_line(line: str) -> EventEntry:
     rest = line[closing + 1 :]
     if not rest.startswith(" "):
         raise MalformedEntry(f"{line!r} has no category after its entry id.")
-    fields = _scan(rest[1:], line=line)
+    fields = scan_fields(rest[1:], line=line)
     if not fields:
         raise MalformedEntry(f"{line!r} carries no category.")
 
@@ -98,54 +99,6 @@ def parse_line(line: str) -> EventEntry:
         # vocabulary — deliberately not caught here: a closed enumeration that
         # silently accepts an unknown member is not closed.
     )
-
-
-def _scan(text: str, *, line: str) -> list[tuple[str, str]]:
-    """Split `key=value` pairs, honouring the quoting `render_entry` applies.
-
-    The bare category token arrives as a pair with an empty key, which is why the
-    caller reads `fields[0]` positionally.
-    """
-    out: list[tuple[str, str]] = []
-    index = 0
-    while index < len(text):
-        if text[index] == " ":
-            index += 1
-            continue
-        start = index
-        while index < len(text) and text[index] not in " =":
-            index += 1
-        token = text[start:index]
-        if index >= len(text) or text[index] == " ":
-            out.append(("", token))
-            continue
-        index += 1  # past the '='
-        value, index = _read_value(text, index, line=line)
-        out.append((token, value))
-    return out
-
-
-def _read_value(text: str, index: int, *, line: str) -> tuple[str, int]:
-    if index < len(text) and text[index] == '"':
-        index += 1
-        chars: list[str] = []
-        while index < len(text):
-            char = text[index]
-            if char == "\\":
-                if index + 1 >= len(text):
-                    raise MalformedEntry(f"{line!r} ends inside an escape sequence.")
-                chars.append(text[index + 1])
-                index += 2
-                continue
-            if char == '"':
-                return "".join(chars), index + 1
-            chars.append(char)
-            index += 1
-        raise MalformedEntry(f"{line!r} has an unclosed quoted value.")
-    start = index
-    while index < len(text) and text[index] != " ":
-        index += 1
-    return text[start:index], index
 
 
 def fold(entries) -> tuple[EventEntry, ...]:
