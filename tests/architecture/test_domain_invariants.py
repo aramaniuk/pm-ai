@@ -103,7 +103,7 @@ def test_ad27_connectors_only_emit_core_declared_event_types():
     taxonomy = mod("pm_ai.domain.events")
     registry = mod("pm_ai.connectors.registry")
 
-    allowed = set(taxonomy.NormalizedEventType)
+    allowed = set(taxonomy.ObservedEventType)
     for connector in registry.all_connectors():
         declared = set(connector.emits())
         unknown = declared - allowed
@@ -605,7 +605,7 @@ def test_event_payloads_are_typed_per_event_type():
     with pytest.raises(d.PayloadMismatch):
         d.NormalizedEvent(
             scope=d.DataScope(d.ScopeKind.PROJECT, "alpha"),
-            type=d.NormalizedEventType.WORK_ITEM_CLOSED,
+            type=d.ObservedEventType.WORK_ITEM_CLOSED,
             source_ref=d.SourceRef.parse("gitlab:alpha:issue:102"),
             actor=d.UNRESOLVED,
             occurred_at=None,

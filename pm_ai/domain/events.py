@@ -17,8 +17,20 @@ from enum import Enum
 from pm_ai.domain.identity import Actor, DataScope, SourceRef
 
 
-class NormalizedEventType(Enum):
-    """The closed vocabulary every connector maps into (AD-27).
+class ObservedEventType(Enum):
+    """The closed vocabulary for things that happened in the world (AD-27).
+
+    **Subject: something outside pm-ai, with pm-ai as the witness.** That is the
+    membership rule, and it is what the name states. A member qualifies only if
+    it has a durable external referent expressible in AD-34's grammar, can carry
+    a provider `occurred_at`, and is dedup-able by natural key. Such a record may
+    be evidence, subject to AD-36's authorship rule.
+
+    Named `NormalizedEventType` until 2026-08-29, which described how a value got
+    here — a connector normalised into it — rather than what it is about. The
+    sibling vocabulary `SelfActionType` holds what pm-ai did, where pm-ai is the
+    only witness; the two are disjoint, and the question that separates them is
+    *did this happen, or did pm-ai do it?*
 
     A connector may not mint a member. Adding one is a deliberate change here,
     reviewed against the existing members for overlap — which is the only way
@@ -107,17 +119,17 @@ class MeetingHeldPayload:
     duration_minutes: int
 
 
-PAYLOAD_FOR: dict[NormalizedEventType, type] = {
-    NormalizedEventType.COMMIT_PUSHED: CommitPayload,
-    NormalizedEventType.REVIEW_SUBMITTED: ReviewPayload,
-    NormalizedEventType.MERGE_COMPLETED: ReviewPayload,
-    NormalizedEventType.WORK_ITEM_CREATED: WorkItemPayload,
-    NormalizedEventType.WORK_ITEM_UPDATED: WorkItemPayload,
-    NormalizedEventType.WORK_ITEM_CLOSED: WorkItemPayload,
-    NormalizedEventType.PIPELINE_FINISHED: PipelinePayload,
-    NormalizedEventType.DOCUMENT_UPDATED: DocumentPayload,
-    NormalizedEventType.MESSAGE_POSTED: MessagePayload,
-    NormalizedEventType.CALENDAR_EVENT_HELD: MeetingHeldPayload,
+PAYLOAD_FOR: dict[ObservedEventType, type] = {
+    ObservedEventType.COMMIT_PUSHED: CommitPayload,
+    ObservedEventType.REVIEW_SUBMITTED: ReviewPayload,
+    ObservedEventType.MERGE_COMPLETED: ReviewPayload,
+    ObservedEventType.WORK_ITEM_CREATED: WorkItemPayload,
+    ObservedEventType.WORK_ITEM_UPDATED: WorkItemPayload,
+    ObservedEventType.WORK_ITEM_CLOSED: WorkItemPayload,
+    ObservedEventType.PIPELINE_FINISHED: PipelinePayload,
+    ObservedEventType.DOCUMENT_UPDATED: DocumentPayload,
+    ObservedEventType.MESSAGE_POSTED: MessagePayload,
+    ObservedEventType.CALENDAR_EVENT_HELD: MeetingHeldPayload,
 }
 
 
@@ -135,7 +147,7 @@ class NormalizedEvent:
     """
 
     scope: DataScope
-    type: NormalizedEventType
+    type: ObservedEventType
     source_ref: SourceRef
     actor: Actor
     occurred_at: datetime | None  # provider clock — may be absent or skewed

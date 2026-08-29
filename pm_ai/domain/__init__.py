@@ -18,7 +18,7 @@ from pm_ai.domain.disclosure import (
 )
 from pm_ai.domain.events import (
     NormalizedEvent,
-    NormalizedEventType,
+    ObservedEventType,
     PAYLOAD_FOR,
     PayloadMismatch,
     Provenance,
@@ -92,7 +92,7 @@ __all__ = [
     "Actor", "CommittedScopeLeak", "DISCLOSURE_LEDGER_PATH",
     "DISCLOSURE_LEDGER_SCOPE", "DisclosureRecord", "assert_writable", "CommitmentState", "CoverageWindow", "DEFAULT_PROPOSAL_TTL",
     "DataScope", "MalformedReference", "NonDurableReferent", "NormalizedEvent",
-    "NormalizedEventType", "PAYLOAD_FOR", "PM_AI", "PM_AI_ACTOR",
+    "ObservedEventType", "PAYLOAD_FOR", "PM_AI", "PM_AI_ACTOR",
     "PayloadMismatch", "ProposalState", "Provenance", "ScopeKind",
     "PM_AI_MINTED", "SkillPermission", "SourceRef", "TargetRef", "UNRESOLVED",
     "UNRESOLVED_ACTOR", "UnknownVerb", "VERB_REGISTRY", "Verb",

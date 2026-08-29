@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pm_ai.domain.events import NormalizedEvent, NormalizedEventType
+from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.vcs import TrackingVerdict
@@ -23,7 +23,7 @@ class ConnectorPort(Protocol):
     name: str
     system: str
 
-    def emits(self) -> frozenset[NormalizedEventType]:
+    def emits(self) -> frozenset[ObservedEventType]:
         """The subset of the core taxonomy this connector produces (AD-27)."""
 
     def harvest(self, since: Cursor) -> HarvestResult:
