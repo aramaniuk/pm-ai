@@ -28,6 +28,7 @@ from pm_ai.core import ledger
 from pm_ai.core.disclosure_ledger import DisclosureLedger
 from pm_ai.domain.disclosure import CommittedScopeLeak, DisclosureRecord
 from pm_ai.core.event_log import EventLog
+from pm_ai.core.retrospective import weekly
 from pm_ai.domain.scope_model import FOREIGN_ROOTS
 from pm_ai.domain import (
     ARTIFACT_TIER,
@@ -834,3 +835,16 @@ def test_the_disclosure_ledger_totals_what_the_real_writer_wrote(daemon):
 def test_an_unwritten_disclosure_ledger_reads_empty_and_creates_nothing(daemon):
     assert daemon.storage.read_disclosure() == ""
     assert not daemon.storage.paths.resolve(APPLICATION, "disclosure.md").exists()
+
+
+# ── Story 2k: the trend, over what the real writer wrote ────────────────────
+
+
+def test_the_retrospective_counts_what_the_real_writer_wrote(daemon):
+    log = EventLog(daemon.storage)
+    for marker in ("one", "two"):
+        log.append(_test_entry(marker), scope=daemon.scope)
+
+    result = weekly(log, scope=daemon.scope)
+    assert result.unplaceable == 0, "a pm-ai action is placed by its own clock"
+    assert sum(w["security"] for w in result.weeks) == 2
