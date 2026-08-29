@@ -91,6 +91,12 @@ the case already made in `derivation-services.md` for running `1h` after story 1
 that 2d then replaces — the work would have been done twice and the two golden
 tests would have disagreed.
 
+## Open, raised by story 2f
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2f-segment-parser-and-deterministic-fold.md`
+  summary: `_ulid()` (`pm_ai/storage/service.py:215`) returns `"evt_" + secrets.token_hex(10)` — random, not time-sortable — while `ARCHITECTURE-SPINE.md:649` says these ids are "sortable by creation time". Either the minting gains a time prefix or the spine drops the claim.
+  evidence: AD-35's fold is `(occurred_at, entry_id)`, and it is deterministic either way because the id is stable once written — so nothing is broken today and 2f shipped without deciding. What is wrong is the spine: entries sharing an `occurred_at` order arbitrarily rather than by arrival, and the next component to read the spine's claim and rely on it will be wrong. Note that a time-sortable id would need the injected clock inside minting, which introduces a third clock into a codebase where AD-35 already assigns arrival-order reasoning to `ingested_at`.
+
 ## Deferred to later stories
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`
