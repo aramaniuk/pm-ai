@@ -35,6 +35,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from pm_ai.domain import clocks
 from pm_ai.domain.disclosure import assert_writable
 from pm_ai.domain.event_entries import EventEntry, render_entry
 from pm_ai.domain.events import NormalizedEvent
@@ -1107,7 +1108,7 @@ class StorageService:
     def _append_batch(
         self, events: tuple[NormalizedEvent, ...], at: datetime, *, scope: DataScope
     ) -> PersistResult:
-        persisted = duplicates = 0
+        persisted = duplicates = flagged = 0
         lines: list[str] = []
         for ev in events:
             key = json.dumps(ev.natural_key)  # AD-34 — includes scope
@@ -1119,6 +1120,20 @@ class StorageService:
             self._db.execute("INSERT INTO seen (natural_key) VALUES (?)", (key,))
             stamped = replace(ev, ingested_at=at)  # AD-35 — local clock, assigned here
             assert_writable(stamped, scope=scope)  # AD-38
+
+            # AD-35 — an implausible provider clock is *flagged*, never
+            # backfilled from `ingested_at`: a substituted timestamp is
+            # well-formed, plausible and wrong, and nothing downstream can tell
+            # it from a real one. The refusal is caught rather than propagated
+            # because this batch is all-or-nothing, and one skewed provider must
+            # not discard every other event harvested with it.
+            suspect: tuple[tuple[str, str], ...]
+            try:
+                clocks.validate_occurred_at(stamped.occurred_at, now=at)
+                suspect = ()
+            except clocks.ImplausibleTimestamp:
+                suspect = (("occurred_at_flag", "implausible"),)
+                flagged += 1
             # The format lives in `render_entry` (story 2d), not here. A writer
             # that formats its own line is a second grammar in the ledger, which
             # is what left four of them reaching one file.
@@ -1138,14 +1153,17 @@ class StorageService:
                             ),
                             ("ingested_at", at.isoformat()),
                             ("authored_by", stamped.authored_by.value),
-                        ),
+                        )
+                        + suspect,
                     )
                 )
             )
             persisted += 1
         if lines:
             self._append(self._segment(scope, EVENT_LOG, at), "\n".join(lines) + "\n")
-        return PersistResult(persisted=persisted, duplicates=duplicates, at=at)
+        return PersistResult(
+            persisted=persisted, duplicates=duplicates, at=at, flagged=flagged
+        )
 
     # ── Tier 2: operational, never rebuilt (AD-3) ────────────────────────────
 

@@ -2,7 +2,7 @@
 title: 'Flag implausible provider timestamps'
 type: 'feature'
 created: '2026-08-29'
-status: 'draft'
+status: 'in-review'
 review_loop_iteration: 0
 ---
 
@@ -33,7 +33,7 @@ review_loop_iteration: 0
 | Future-dated | `occurred_at` 48h after the batch clock | entry persisted, carrying the flag | N/A |
 | Absent | `occurred_at is None` | `unknown`, as today; not flagged — absence is a distinct state | N/A |
 | Non-UTC provider value | tz-naive or offset datetime | entry persisted, carrying the flag | N/A |
-| Mixed batch | one flagged among several | every event persisted; `PersistResult.persisted` counts all | N/A |
+| Mixed batch | one flagged among several | every event persisted; `persisted` counts all and `flagged` counts the suspect | N/A |
 
 </frozen-after-approval>
 
@@ -57,6 +57,11 @@ review_loop_iteration: 0
 - Given every existing storage test, when the suite runs, then none change behaviour: a plausible timestamp renders exactly as before.
 
 ## Spec Change Log
+
+- **2026-08-29, resequenced behind 2d before implementation.** The original plan had this depend on 2a alone, which would have meant editing the very f-string 2d deletes — the work done twice and two golden tests disagreeing. Landing it after the renderer made the flag an ordinary field on `EventEntry` instead of a format edit, so this story touches no grammar at all.
+- **`PersistResult` gains `flagged`,** from a review finding that nothing reported how many events in a batch carried a suspect clock. Without it a connector whose clock is wrong flags every event it emits and no caller can see that it happened: the entries are in the ledger and nobody is looking. One counter on the report object the batch already returns, defaulted so no existing construction moves.
+- **The flag is one token, `occurred_at_flag=implausible`, not a reason code.** A machine-readable reason would have to come from `pm_ai.domain.clocks`, and 2a's surface is frozen by this story's Never. Diagnosis is served by the timestamp itself, which sits beside the flag verbatim.
+- **The Ask First stays open, with the stated default taken.** Whether a flagged event is admissible as evidence is story 15's question: AD-36 governs authorship, not plausibility. Here the flag is recorded and nothing consumes it. KEEP: the catch around `validate_occurred_at` — propagating it would discard an entire harvest because one provider clock is wrong.
 
 ## Design Notes
 

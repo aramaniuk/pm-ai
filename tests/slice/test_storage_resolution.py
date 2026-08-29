@@ -494,3 +494,71 @@ def test_an_entry_arriving_with_an_id_is_refused(daemon):
     entry = replace(_test_entry("first"), entry_id="evt_minted_by_the_caller")
     with pytest.raises(ValueError):
         daemon.storage.append_event_log(entry, scope=daemon.scope)
+
+
+# ── Story 2b: a provider clock that cannot be believed, flagged not dropped ──
+
+
+def _skewed(daemon, **kw):
+    """The connector's real events, with one field overridden on all of them."""
+    return tuple(replace(event, **kw) for event in _events(daemon))
+
+
+def test_a_future_dated_provider_timestamp_is_flagged_and_still_persisted(daemon):
+    """AD-35 — flagged. `persist_events` is all-or-nothing, so raising here would
+    drop a whole harvest because one provider clock is wrong."""
+    events = _skewed(daemon, occurred_at=NOW + timedelta(hours=48))
+    result = daemon.storage.persist_events(events, scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert result.persisted == len(events)
+    assert body.count("occurred_at_flag=implausible") == len(events)
+
+
+def test_a_flagged_timestamp_is_never_backfilled_from_the_local_clock(daemon):
+    """The substitution AD-35 forbids: the suspect value stays, verbatim, beside
+    the flag. A replaced one is indistinguishable from a real one afterwards."""
+    skewed = NOW + timedelta(hours=48)
+    daemon.storage.persist_events(_skewed(daemon, occurred_at=skewed), scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert f"occurred_at={skewed.isoformat()}" in body
+    assert f"occurred_at={NOW.isoformat()}" not in body
+
+
+def test_a_plausible_timestamp_carries_no_flag(daemon):
+    daemon.storage.persist_events(
+        _skewed(daemon, occurred_at=NOW - timedelta(hours=2)), scope=daemon.scope
+    )
+    assert "occurred_at_flag" not in _segment(daemon.storage, daemon.scope).read_text()
+
+
+def test_an_absent_timestamp_is_not_flagged(daemon):
+    """Absence is a distinct state: `unknown` is a known answer, not a suspect one."""
+    daemon.storage.persist_events(_skewed(daemon, occurred_at=None), scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert "occurred_at=unknown" in body
+    assert "occurred_at_flag" not in body
+
+
+def test_a_naive_provider_timestamp_is_flagged(daemon):
+    """Not comparable to the batch clock, so its plausibility is unknowable."""
+    daemon.storage.persist_events(
+        _skewed(daemon, occurred_at=datetime(2026, 8, 19, 8, 0)), scope=daemon.scope
+    )
+    assert "occurred_at_flag=implausible" in _segment(
+        daemon.storage, daemon.scope
+    ).read_text()
+
+
+def test_a_mixed_batch_persists_everything_and_counts_what_it_flagged(daemon):
+    """The break: a connector with a broken clock flags every event it emits and
+    nothing anywhere reports that it happened."""
+    events = _events(daemon)
+    mixed = (replace(events[0], occurred_at=NOW + timedelta(hours=48)),) + events[1:]
+
+    result = daemon.storage.persist_events(mixed, scope=daemon.scope)
+
+    assert result.persisted == len(mixed)
+    assert result.flagged == 1
