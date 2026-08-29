@@ -53,6 +53,7 @@ from pm_ai.platform.paths import (
 )
 from pm_ai.storage.service import (
     NonUtcClock,
+    SealedSegment,
     OperationalStoreUnavailable,
     StorageService,
 )
@@ -625,3 +626,100 @@ def test_file_order_is_arrival_order(daemon):
         "third",
         "fourth",
     ]
+
+
+# ── Story 2g: exactly one segment is open, and the rest are immutable ────────
+
+
+class _Rewindable:
+    """A clock the test moves, so a month boundary is crossable in both directions."""
+
+    def __init__(self, at):
+        self.at = at
+
+    def __call__(self):
+        return self.at
+
+
+def test_a_month_boundary_seals_the_old_segment_with_no_ceremony(tmp_path):
+    clock = _Rewindable(datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("august"), scope=d.scope)
+
+    clock.at = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG)
+    assert sorted(p.name for p in log.glob("*.md")) == ["2026-08.md", "2026-09.md"]
+    assert "august" in (log / "2026-08.md").read_text()
+    assert "september" in (log / "2026-09.md").read_text()
+
+
+def test_a_write_into_a_sealed_segment_is_refused_not_redirected(tmp_path):
+    """Redirecting would silently re-date the entry; `occurred_at` carries when
+    it happened, and the filename does not."""
+    clock = _Rewindable(datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+
+    clock.at = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
+    with pytest.raises(SealedSegment) as caught:
+        d.storage.append_event_log(_test_entry("late august"), scope=d.scope)
+
+    message = str(caught.value)
+    assert "2026-08.md" in message and "2026-09.md" in message
+
+
+def test_a_refused_write_leaves_the_sealed_segment_untouched(tmp_path):
+    clock = _Rewindable(datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG)
+
+    clock.at = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
+    with pytest.raises(SealedSegment):
+        d.storage.append_event_log(_test_entry("late august"), scope=d.scope)
+
+    assert not (log / "2026-08.md").exists(), "a refused write created a segment"
+    assert "september" in (log / "2026-09.md").read_text()
+
+
+def test_the_batch_path_is_guarded_too(tmp_path):
+    """A guard on one append path is not a guard."""
+    clock = _Rewindable(datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+
+    d.connectors["gitlab:alpha"]._fake_api = [
+        {
+            "sha": "9f2a1c",
+            "message": "Fix auth refactor",
+            "author_email": "alex@example.com",
+            "committed_at": clock.at - timedelta(hours=2),
+        }
+    ]
+    events = _events(d)
+    assert events, "the fixture harvested nothing, so the guard was never reached"
+
+    clock.at = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
+    with pytest.raises(SealedSegment):
+        d.storage.persist_events(events, scope=d.scope)
+
+
+def test_the_first_append_opens_a_segment(tmp_path):
+    d = build(tmp_path, "alpha", now=lambda: NOW)
+    d.storage.append_event_log(_test_entry("first"), scope=d.scope)
+
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG)
+    assert [p.name for p in log.glob("*.md")] == [f"{NOW:%Y-%m}.md"]
+
+
+def test_a_stray_file_in_the_log_directory_is_not_a_segment(tmp_path):
+    """`- [test]` notes, editor leftovers and `.DS_Store` must not seal anything."""
+    d = build(tmp_path, "alpha", now=lambda: NOW)
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG, create=True)
+    (log / "notes.md").write_text("not a segment\n")
+    (log / "9999-99.md.bak").write_text("nor this\n")
+
+    d.storage.append_event_log(_test_entry("first"), scope=d.scope)
+    assert f"first" in (log / f"{NOW:%Y-%m}.md").read_text()

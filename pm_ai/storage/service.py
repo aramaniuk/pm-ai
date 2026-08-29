@@ -28,6 +28,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Callable
@@ -214,6 +215,19 @@ def _fsync_dir(directory: Path) -> None:
         os.close(descriptor)
 
 
+_SEGMENT_NAME = re.compile(r"^\d{4}-\d{2}\.md$")
+
+
+def _segment_names(directory: Path) -> list[str]:
+    """Every dated segment in `directory`, and nothing else.
+
+    Matched against the naming rule rather than globbed as `*.md`: an editor
+    leftover, a hand-written note or a `.bak` in the log directory must not be
+    able to seal a month, and a `*.md` glob cannot tell them apart.
+    """
+    return [p.name for p in directory.iterdir() if _SEGMENT_NAME.match(p.name)]
+
+
 def _ulid() -> str:
     """Surrogate id, minted here and nowhere else (AD-34)."""
     import secrets
@@ -336,6 +350,22 @@ class AppendToSealedArtifact(RuntimeError):
 
     Not a caller error to be worked around: it means a declaration and a write
     shape disagree, and the resolution is to change one of them.
+    """
+
+
+class SealedSegment(RuntimeError):
+    """A write targeted a segment that is no longer the open one.
+
+    `storage-contract.md` makes the event log "a directory of dated segments,
+    exactly one open and appended to, earlier segments sealed and immutable",
+    and that immutability is what lets compaction replace a whole sealed segment
+    rather than rewrite entries in place. A late append into a summarised month
+    would be deleted by the next compaction with nothing recording that it
+    existed.
+
+    Refused rather than redirected into the open segment: redirecting silently
+    re-dates the record, and the filename is not what carries when the thing
+    happened — `occurred_at` is.
     """
 
 
@@ -728,8 +758,30 @@ class StorageService:
         The directory comes from the resolver, so a scope's event log lands in
         that scope's own tree rather than in a sibling directory named by
         flattening the scope to a string.
+
+        **Which segment is open is derived, never stored.** A stored flag is a
+        second structure describing one fact, and the way it fails here is the
+        one state compaction cannot survive: a sealed segment the writer believes
+        is open. The filenames already carry the answer — the newest is open and
+        every earlier one is sealed — so the directory listing *is* the record.
+
+        Refuses a target older than the newest segment present. Nothing reaches
+        that today, because both append paths pass the current instant; it is the
+        clock moving backwards across a month boundary that gets here, and then
+        the refusal is the point.
         """
-        return self._writable_dir(scope, artifact) / f"{at:%Y-%m}.md"
+        directory = self._writable_dir(scope, artifact)
+        target = directory / f"{at:%Y-%m}.md"
+        newest = max(_segment_names(directory), default=None)
+        if newest is not None and target.name < newest:
+            raise SealedSegment(
+                f"{target.name} is sealed: {newest} is the open segment of "
+                f"{scope}'s {artifact}. An entry appended to a sealed month is "
+                f"deleted by the next compaction with nothing recording that it "
+                f"existed. It is not re-dated into the open segment — the "
+                f"filename does not carry when the thing happened."
+            )
+        return target
 
     # ── Every file operation asks the model first (AD-5, AD-6) ──────────────
     #

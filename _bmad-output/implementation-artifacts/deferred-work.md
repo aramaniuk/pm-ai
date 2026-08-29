@@ -98,6 +98,12 @@ tests would have disagreed.
   evidence: AD-35's fold is `(occurred_at, entry_id)`, and it is deterministic either way because the id is stable once written — so nothing is broken today. The concrete risk is the `id > cursor` pagination the claim invites (incremental indexing in story 18, oldest-first selection in story 19, paged reads in 2h): with random ids that query silently returns the wrong set rather than failing.
   narrowed 2026-08-29: two arguments first made against a time-sortable id do not hold. It would **not** introduce a third clock — `append_event_log` reads `at` on the line before it mints, so a prefix would re-encode `ingested_at` rather than read a new clock. Its real cost is that `_ulid()` has three call sites and one, the `.part` staging name at `service.py:857`, has no clock in scope. What is also now settled: a time-sortable id would not have delivered arrival order anyway — 48-bit millisecond resolution buckets a fast batch and orders within it by the random tail. Arrival order is file order, and that is now documented on `parse_segment` and tested. So this question is narrowed to one thing only: does anything want `id > cursor` pagination? If not, drop the claim from the spine.
 
+## Surfaced by story 2g, deferred
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2g-open-and-sealed-segments.md`
+  summary: A clock that moves backwards across a month boundary makes every append refuse with `SealedSegment` until wall-clock catches up — for `pm_ai/skills/registry.py`, that lands *after* the skill already executed, so the mutation happened and AD-1's one-entry-per-invocation record is lost rather than merely delayed.
+  evidence: The refusal is correct — the alternative is writing into a month compaction may already have summarised and deleted — but its blast radius is not bounded anywhere. An NTP correction of a few seconds across midnight on the 1st is the realistic trigger. Wants either a bounded tolerance for writes just past a boundary, or a quarantine that holds refused entries until the open segment accepts them. Not story 2g's to decide: compaction (story 19) is what makes a sealed segment genuinely unwritable, and until it exists the refusal protects nothing that is happening yet.
+
 ## Deferred to later stories
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`
