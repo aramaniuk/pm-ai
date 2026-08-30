@@ -19,16 +19,19 @@ choice, which is why these parameters carry no clock in their names and
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from pm_ai.domain.disclosure import DisclosureRecord, MalformedDisclosure
 from pm_ai.domain.event_entries import scan_fields
 from pm_ai.domain.identity import DataScope
+from pm_ai.ports import StoragePort
 
 __all__ = ["DisclosureLedger", "MonthlyTotal", "parse_ledger", "parse_disclosure_line"]
 
-_NONE = "none"
+from pm_ai.domain.disclosure import NO_DESTINATION as _NONE
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,8 @@ class MonthlyTotal:
     caller that forgot to pass its target read the result as reassurance.
     """
 
+    year: int
+    month: int
     records: int
     input_tokens: int
     output_tokens: int
@@ -100,6 +105,11 @@ def parse_disclosure_line(line: str) -> DisclosureRecord:
         raise MalformedDisclosure(f"{line!r}: {refusal}") from refusal
 
 
+def _utc(at: datetime) -> datetime:
+    """The same instant, expressed in UTC, so calendar fields mean one thing."""
+    return at.astimezone(timezone.utc)
+
+
 def _assert_comparable(bound: datetime | None, *, name: str) -> None:
     """A naive bound raises `TypeError` mid-scan; refused here instead.
 
@@ -118,7 +128,7 @@ def _assert_comparable(bound: datetime | None, *, name: str) -> None:
 class DisclosureLedger:
     """The two aggregates AD-17 and AD-31 name, over the one file that holds them."""
 
-    def __init__(self, storage) -> None:
+    def __init__(self, storage: StoragePort) -> None:
         self._storage = storage
 
     def records(
@@ -152,13 +162,24 @@ class DisclosureLedger:
         story owns that key yet, and hard-coding a budget figure would put one in
         the domain. A caller that has a configured target supplies it.
         """
+        if not 1 <= month <= 12:
+            raise ValueError(f"{month} is not a month. A total needs one to name.")
         found = [
             record
             for record in parse_ledger(self._storage.read_disclosure())
-            if record.at.year == year and record.at.month == month
+            # Converted before the month is read: `record.at.month` on an
+            # offset-carrying value is its *wall-clock* month, which straddles
+            # the boundary the caller asked about.
+            if _utc(record.at).year == year and _utc(record.at).month == month
         ]
-        cost = sum(record.estimated_cost_usd for record in found)
+        # `math.fsum` rather than `sum`: correctly rounded, and free. No drifting
+        # case was reproducible with realistic sub-cent costs, so this is not a
+        # fix for an observed defect — it is the exact option taken because AD-17
+        # calls this figure evidence.
+        cost = math.fsum(record.estimated_cost_usd for record in found)
         return MonthlyTotal(
+            year=year,
+            month=month,
             records=len(found),
             input_tokens=sum(record.input_tokens for record in found),
             output_tokens=sum(record.output_tokens for record in found),

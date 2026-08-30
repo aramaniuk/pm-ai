@@ -145,11 +145,14 @@ def test_a_flagged_non_utc_timestamp_still_folds_deterministically():
     assert ledger.fold(entries) == ledger.fold(list(reversed(entries)))
 
 
-def test_sample_entries_is_foldable():
-    """The pre-written architecture test calls this by name."""
-    assert ledger.fold(ledger.sample_entries()) == ledger.fold(
-        list(reversed(ledger.sample_entries()))
-    )
+def test_the_architecture_fixture_is_foldable():
+    """The pre-written architecture test folds this set; keep it foldable here too."""
+    import sys
+
+    sys.path.insert(0, "tests/architecture")
+    from ledger_fixtures import sample_entries
+
+    assert ledger.fold(sample_entries()) == ledger.fold(list(reversed(sample_entries())))
 
 
 # ── Review findings, 2026-08-30 ─────────────────────────────────────────────
@@ -175,3 +178,38 @@ def test_the_malformed_refusal_names_the_line_number_itself():
     with pytest.raises(MalformedEntry) as caught:
         ledger.parse_segment(ONE + "this is not an entry\n", source="2026-08.md")
     assert "line 2" in str(caught.value)
+
+
+def test_a_repeated_field_name_is_refused():
+    """`dict(fields)` resolves a duplicate to the last, so a second `occurred_at`
+    silently overrides the first — the same shadowing the writer now refuses."""
+    with pytest.raises(MalformedEntry):
+        ledger.parse_line("- [evt_1] security actor=x detail=a detail=b")
+
+
+def test_a_category_token_carrying_an_equals_sign_is_refused():
+    """It would be scanned as a field, and the *next* token read as the category."""
+    with pytest.raises((MalformedEntry, UnknownCategory)):
+        ledger.parse_line("- [evt_1] k=v actor=x")
+
+
+def test_a_value_ending_inside_an_escape_is_refused():
+    with pytest.raises(MalformedEntry):
+        ledger.parse_line('- [evt_1] security actor=x detail="a\\\\')
+
+
+def test_an_unclosed_quoted_value_is_refused():
+    with pytest.raises(MalformedEntry):
+        ledger.parse_line('- [evt_1] security actor=x detail="unterminated')
+
+
+def test_a_line_at_exactly_the_length_bound_is_accepted():
+    """The bound is `>`, so the boundary itself must pass."""
+    from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, EventEntry, render_entry
+
+    head = render_entry(EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY,
+                                   actor="x", fields=(("d", ""),)))
+    pad = MAX_ENTRY_LENGTH - len(head)
+    entry = EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY,
+                       actor="x", fields=(("d", "y" * pad),))
+    assert len(render_entry(entry)) == MAX_ENTRY_LENGTH

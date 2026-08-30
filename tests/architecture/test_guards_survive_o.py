@@ -92,6 +92,14 @@ CASES = {
         # that would leave a parser unable to say which subject a line had.
         "m.SELF_ACTION_VALUES = {'commit_pushed'}",
     ),
+    "a_self_action_registered_as_an_event_payload": (
+        "pm_ai.domain.event_entries",
+        "_assert_vocabularies_agree",
+        # The third branch: a pm-ai action constructible as a harvested event,
+        # which `persist_events` would then dedup away.
+        "m.PAYLOAD_FOR = dict(m.PAYLOAD_FOR);"
+        " m.PAYLOAD_FOR[m.SelfActionType.COMPACTION] = m.CompactionPayload",
+    ),
     "a_self_action_with_no_payload": (
         "pm_ai.domain.event_entries",
         "_assert_vocabularies_agree",

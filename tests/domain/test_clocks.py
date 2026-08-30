@@ -102,11 +102,7 @@ def test_a_non_utc_offset_timestamp_is_refused():
         clocks.validate_occurred_at(at, now=NOW)
 
 
-def test_a_naive_reference_instant_is_refused_naming_the_operand():
-    """The reference is as capable of being wrong as the subject."""
-    with pytest.raises(clocks.ImplausibleTimestamp) as caught:
-        clocks.validate_occurred_at(NOW, now=datetime(2026, 8, 29, 12, 0))
-    assert "now" in str(caught.value)
+
 
 
 # ── The offset spelling ──────────────────────────────────────────────────────
@@ -146,3 +142,30 @@ def test_the_tolerance_is_a_named_constant_not_a_literal():
     assert isinstance(clocks.FUTURE_SKEW_TOLERANCE, timedelta)
     assert clocks.FUTURE_SKEW_TOLERANCE > timedelta(seconds=60)
     assert clocks.FUTURE_SKEW_TOLERANCE < timedelta(hours=1)
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_the_offset_spelling_refuses_a_non_finite_offset():
+    """`nan` compares False against the tolerance, so it passed as plausible."""
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(clocks.ImplausibleTimestamp):
+            clocks.validate_occurred_at(future_by_hours=bad)
+
+
+def test_the_offset_spelling_accepts_a_past_offset_and_says_why():
+    """It cannot apply `EARLIEST_PLAUSIBLE`: with no reference instant there is no
+    date to compare against. The docstring claimed "two spellings, one rule",
+    which was true only of the skew half."""
+    assert clocks.validate_occurred_at(future_by_hours=-1_000_000) is None
+
+
+def test_a_naive_reference_instant_is_a_caller_error_not_bad_data():
+    """The docstring says a bad reference is "a caller error rather than an
+    implausible timestamp — the data is not what is wrong". It raised
+    `ImplausibleTimestamp` anyway, which blamed the provider for our own bug."""
+    with pytest.raises(ValueError) as caught:
+        clocks.validate_occurred_at(NOW, now=datetime(2026, 8, 29, 12, 0))
+    assert not isinstance(caught.value, clocks.ImplausibleTimestamp)
+    assert "now" in str(caught.value)

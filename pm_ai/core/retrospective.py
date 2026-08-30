@@ -18,17 +18,20 @@ what keeps that gap visible instead of looking like an absent feature.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pm_ai.core.event_log import EventLog
-from pm_ai.domain.event_entries import EventEntry, SelfActionType
+from pm_ai.domain.event_entries import (
+    OCCURRED_AT_FLAG,
+    UNKNOWN_VALUE,
+    EventEntry,
+    SelfActionType,
+)
 from pm_ai.domain.events import ObservedEventType
 from pm_ai.domain.identity import DataScope
 
 __all__ = ["Retrospective", "WeekBucket", "weekly"]
 
-_UNKNOWN = "unknown"
-_FLAG = "occurred_at_flag"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +43,10 @@ class WeekBucket:
     counts: tuple[tuple[str, int], ...]
 
     def __getitem__(self, category: str) -> int:
-        return dict(self.counts)[category]
+        for name, count in self.counts:
+            if name == category:
+                return count
+        raise KeyError(category)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +70,13 @@ class Retrospective:
     """
 
 
-def weekly(log: EventLog, *, scope: DataScope) -> Retrospective:
+def weekly(
+    log: EventLog,
+    *,
+    scope: DataScope,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> Retrospective:
     """Group a scope's ledger into ISO weeks and count each category.
 
     The read is unbounded even though the result is bucketed. 2h's range is on
@@ -74,7 +86,17 @@ def weekly(log: EventLog, *, scope: DataScope) -> Retrospective:
 
     Weeks are ISO-8601 in UTC, from `isocalendar()`, so a boundary instant belongs
     to the week it opens. Hand-rolling that would be a second definition of a week,
-    able to disagree with every other tool the PM reads the same dates in.
+    able to disagree with every other tool the PM reads the same dates in. Every
+    timestamp is converted to UTC before its week is read — `isocalendar()` on an
+    offset-carrying value answers for its own wall clock, so two records at the
+    same instant could land in different weeks.
+
+    `since`/`until` bound the *trend*, not the read. Without them the span runs
+    from the first entry to the last, so a quiet week at either edge is simply
+    absent — which is the failure the zero-count rule exists to prevent, moved to
+    the ends. They also bound the output: a ledger spanning years otherwise
+    yields a bucket per week with no way to ask for fewer. The bounds are on the
+    same clock as the buckets, so they carry no clock in their names.
     """
     placed: dict[tuple[int, int], dict[str, int]] = {}
     unplaceable = undated_actions = 0
@@ -87,12 +109,17 @@ def weekly(log: EventLog, *, scope: DataScope) -> Retrospective:
             else:
                 unplaceable += 1
             continue
+        at = at.astimezone(timezone.utc)
+        if (since is not None and at < since) or (until is not None and at > until):
+            continue
         key = (at.isocalendar().year, at.isocalendar().week)
         bucket = placed.setdefault(key, {})
         bucket[entry.category.value] = bucket.get(entry.category.value, 0) + 1
 
     return Retrospective(
-        weeks=_fill(placed), unplaceable=unplaceable, undated_actions=undated_actions
+        weeks=_fill(placed, since, until),
+        unplaceable=unplaceable,
+        undated_actions=undated_actions,
     )
 
 
@@ -113,10 +140,10 @@ def _placement(entry: EventEntry) -> datetime | None:
     fields = dict(entry.fields)
     if isinstance(entry.category, SelfActionType):
         return _parse(fields.get("ingested_at"))
-    if fields.get(_FLAG):
+    if fields.get(OCCURRED_AT_FLAG):
         return None
     raw = fields.get("occurred_at")
-    return None if raw is None or raw == _UNKNOWN else _parse(raw)
+    return None if raw is None or raw == UNKNOWN_VALUE else _parse(raw)
 
 
 def _parse(raw: str | None) -> datetime | None:
@@ -128,22 +155,28 @@ def _parse(raw: str | None) -> datetime | None:
         return None
 
 
-def _fill(placed: dict[tuple[int, int], dict[str, int]]) -> tuple[WeekBucket, ...]:
+def _fill(
+    placed: dict[tuple[int, int], dict[str, int]],
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[WeekBucket, ...]:
     """Every week between the first and the last, including the quiet ones.
 
     A gap week is present with zeros because a quiet week is a finding — omitting
     it turns "nothing happened" into "we did not look", and those read the same
     on a trend line.
     """
-    if not placed:
+    if not placed and (since is None or until is None):
         return ()
     categories = sorted(
         [member.value for member in ObservedEventType]
         + [member.value for member in SelfActionType]
     )
     ordered = sorted(placed)
+    first = _week_of(since) if since is not None else ordered[0]
+    last = _week_of(until) if until is not None else ordered[-1]
     weeks = []
-    for key in _span(ordered[0], ordered[-1]):
+    for key in _span(first, last):
         counts = placed.get(key, {})
         weeks.append(
             WeekBucket(
@@ -153,6 +186,11 @@ def _fill(placed: dict[tuple[int, int], dict[str, int]]) -> tuple[WeekBucket, ..
             )
         )
     return tuple(weeks)
+
+
+def _week_of(at: datetime) -> tuple[int, int]:
+    utc = at.astimezone(timezone.utc)
+    return (utc.isocalendar().year, utc.isocalendar().week)
 
 
 def _span(first: tuple[int, int], last: tuple[int, int]) -> list[tuple[int, int]]:

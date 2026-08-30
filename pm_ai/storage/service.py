@@ -44,7 +44,13 @@ from pm_ai.domain.disclosure import (
     assert_writable,
     render_disclosure,
 )
-from pm_ai.domain.event_entries import EventEntry, render_entry
+from pm_ai.domain.event_entries import (
+    IMPLAUSIBLE,
+    OCCURRED_AT_FLAG,
+    UNKNOWN_VALUE,
+    EventEntry,
+    render_entry,
+)
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.harvest import Cursor, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
@@ -234,7 +240,7 @@ def _segment_names(directory: Path) -> list[str]:
     return [p.name for p in directory.iterdir() if _SEGMENT_NAME.match(p.name)]
 
 
-_WRITER_OWNED_FIELDS = frozenset({"ingested_at", "occurred_at_flag"})
+_WRITER_OWNED_FIELDS = frozenset({"ingested_at", OCCURRED_AT_FLAG})
 """Fields the single writer sets, which no caller may supply.
 
 Both are stamped onto the entry on the way in, and `dict(entry.fields)` resolves
@@ -1105,7 +1111,9 @@ class StorageService:
         """
         destination = record.home if scope is None else scope
         assert_writable(record, scope=destination)  # AD-38
-        self._assert_git_excludes(destination, DISCLOSURE_LEDGER_ARTIFACT)
+        # No git check: `assert_writable` above refuses every scope but the
+        # application one, and that scope is outside every working tree. A guard
+        # whose refusal has no reachable path reads as protection and is not.
         target = self._paths.resolve(
             destination, DISCLOSURE_LEDGER_ARTIFACT, create=True
         )
@@ -1278,7 +1286,7 @@ class StorageService:
                 clocks.validate_occurred_at(stamped.occurred_at, now=at)
                 suspect = ()
             except clocks.ImplausibleTimestamp:
-                suspect = (("occurred_at_flag", "implausible"),)
+                suspect = ((OCCURRED_AT_FLAG, IMPLAUSIBLE),)
                 flagged += 1
             # The format lives in `render_entry` (story 2d), not here. A writer
             # that formats its own line is a second grammar in the ledger, which
@@ -1296,7 +1304,7 @@ class StorageService:
                                 "occurred_at",
                                 stamped.occurred_at.isoformat()
                                 if stamped.occurred_at
-                                else "unknown",
+                                else UNKNOWN_VALUE,
                             ),
                             ("authored_by", stamped.authored_by.value),
                         )

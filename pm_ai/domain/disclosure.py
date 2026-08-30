@@ -15,6 +15,8 @@ Imports nothing from `pm_ai` except sibling domain modules (AD-30).
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -28,6 +30,8 @@ DISCLOSURE_LEDGER_SCOPE = DataScope(ScopeKind.APPLICATION)
 DISCLOSURE_LEDGER_PATH = "~/.pm-ai/disclosure.md"
 DISCLOSURE_LEDGER_ARTIFACT = "disclosure.md"
 _SCOPE_SEPARATOR = ","
+NO_DESTINATION = "none"
+"""What an absent destination renders as — spelled once, read by the parser."""
 
 
 class MalformedDisclosure(ValueError):
@@ -163,6 +167,25 @@ def render_disclosure(record: DisclosureRecord) -> str:
     omitted because it was empty is a field a reader cannot distinguish from one
     that was never written.
     """
+    if not math.isfinite(record.estimated_cost_usd):
+        raise MalformedDisclosure(
+            f"cost {record.estimated_cost_usd!r} is not a finite number. A month "
+            f"containing it totals to nan, and `nan > target` is False — an "
+            f"unbudgeted month would read as compliant."
+        )
+    negative = {
+        name: value
+        for name, value in (
+            ("input_tokens", record.input_tokens),
+            ("output_tokens", record.output_tokens),
+        )
+        if value < 0
+    }
+    if negative:
+        raise MalformedDisclosure(
+            f"{negative} is negative. A usage total is a sum, so a negative "
+            f"count silently offsets real calls rather than adding to them."
+        )
     named = sorted(str(scope) for scope in record.contributing_scopes)
     # A scope id carrying the separator would write cleanly and then break every
     # later read of the whole file — `parse_disclosure_line` splits on it, and
@@ -178,7 +201,7 @@ def render_disclosure(record: DisclosureRecord) -> str:
             f"fail on it."
         )
     scopes = _SCOPE_SEPARATOR.join(named)
-    destination = "none" if record.destination is None else str(record.destination)
+    destination = NO_DESTINATION if record.destination is None else str(record.destination)
     fields = (
         ("at", record.at.isoformat()),
         ("task_class", record.task_class),

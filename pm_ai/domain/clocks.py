@@ -28,6 +28,7 @@ boundary that matters.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 
 __all__ = [
@@ -94,7 +95,11 @@ def validate_occurred_at(
       caller records the absence. It never returns `now`.
     - `validate_occurred_at(future_by_hours=...)` — the offset stated directly.
       There is no timestamp to hand back, so it returns `None`; this spelling is
-      a check, not a filter.
+      a check, not a filter. It judges the **skew half of the rule only**: with
+      no reference instant there is no date to compare against, so
+      `EARLIEST_PLAUSIBLE` cannot apply and a past offset is accepted. Said
+      plainly because this docstring claimed "two spellings, one rule" until the
+      2026-08-30 review, which was true of the tolerance and of nothing else.
 
     Exactly one spelling per call. Supplying both, neither, or `at` without a
     reference instant is a caller error rather than an implausible timestamp —
@@ -110,6 +115,12 @@ def validate_occurred_at(
                 "future_by_hours, never both — two spellings of the offset can "
                 "disagree, and then the rule depends on which one is read."
             )
+        if not math.isfinite(future_by_hours):
+            raise ImplausibleTimestamp(
+                f"future_by_hours={future_by_hours!r} is not a finite number. "
+                f"Every comparison against it is False, so it would pass as "
+                f"plausible without ever having been judged."
+            )
         _assert_within_tolerance(timedelta(hours=future_by_hours), subject=None)
         return None
 
@@ -120,7 +131,15 @@ def validate_occurred_at(
             "own, so it cannot supply one."
         )
 
-    _assert_comparable(now, operand="now")
+    # A bad reference instant is *our* bug, not the provider's, so it is a plain
+    # caller error rather than `ImplausibleTimestamp` — which this function's own
+    # docstring said, while the code raised the data-blaming one anyway.
+    if now.tzinfo is None or now.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"now={now!r} is not aware UTC. The reference instant is supplied by "
+            f"the caller, so this is a caller error and not a statement about the "
+            f"timestamp being judged."
+        )
     if at is None:
         # AD-35's load-bearing rule. An absent provider timestamp stays absent —
         # returning `now` here would be the backfill the whole module forbids.

@@ -41,8 +41,10 @@ class EventLog:
     def open_segment(self, *, scope: DataScope) -> str | None:
         """The segment appends land in, or `None` if the log is empty.
 
-        Derived from the filenames, exactly as the writer derives it (story 2g).
-        Asking the writer rather than recomputing keeps one answer in one place.
+        The writer sorts and filters; this takes the last. Deliberately not a
+        second `max()` over the names — story 2g's whole point is that "which
+        segment is open" has one definition, and two computations of it are the
+        divergence the sealed-segment guard exists to prevent.
         """
         segments = self._storage.event_log_segments(scope=scope)
         return segments[-1] if segments else None

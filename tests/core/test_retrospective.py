@@ -19,6 +19,7 @@ from pm_ai.domain.events import ObservedEventType
 from pm_ai.domain.identity import DataScope, ScopeKind
 
 SCOPE = DataScope(ScopeKind.PERSONAL)
+OTHER = DataScope(ScopeKind.APPLICATION)
 INGESTED = "2026-08-19T09:00:00+00:00"
 
 
@@ -32,14 +33,22 @@ def _entry(category, *, occurred_at=None, ingested_at=INGESTED, flagged=False, e
 
 
 class FakeStorage:
-    def __init__(self, entries):
-        self.text = "".join(render_entry(e) + "\n" for e in entries)
+    """Keyed by scope, so a scope-mixing bug in `EventLog` is visible here.
+
+    It returned the same text for every scope and every segment name until the
+    2026-08-30 review, which made this whole file blind to one.
+    """
+
+    def __init__(self, entries, scope=SCOPE):
+        self.by_scope = {scope: "".join(render_entry(e) + "\n" for e in entries)}
 
     def event_log_segments(self, *, scope):
-        return ("2026-08.md",) if self.text else ()
+        return ("2026-08.md",) if self.by_scope.get(scope) else ()
 
     def read_event_log_segment(self, *, scope, name):
-        return self.text
+        if name != "2026-08.md":
+            raise AssertionError(f"asked for a segment that does not exist: {name}")
+        return self.by_scope[scope]
 
 
 def _log(*entries):
@@ -161,3 +170,43 @@ def test_a_pm_ai_action_with_no_usable_clock_is_not_filed_as_unplaceable():
     result = weekly(log, scope=SCOPE)
     assert result.unplaceable == 0
     assert result.undated_actions == 1
+
+
+def test_a_non_utc_timestamp_is_bucketed_by_its_utc_instant():
+    """The docstring promises ISO weeks in UTC; `isocalendar()` on an unconverted
+    offset datetime buckets by its own wall clock instead."""
+    log = _log(
+        _entry(ObservedEventType.DECISION, occurred_at="2026-08-17T02:00:00+09:00", eid="evt_1"),
+    )
+    result = weekly(log, scope=SCOPE)
+    # 2026-08-17T02:00+09:00 is 2026-08-16T17:00Z — the *previous* ISO week.
+    assert (result.weeks[0].iso_year, result.weeks[0].iso_week) == (2026, 33)
+
+
+def test_a_period_bounds_the_trend_and_shows_quiet_weeks_at_its_edges():
+    """Without a period, `_fill` spans first-entry to last-entry, so a quiet week
+    at either edge is absent — 'nothing happened' and 'we did not look' again."""
+    log = _log(_entry(ObservedEventType.DECISION, occurred_at="2026-08-17T10:00:00+00:00"))
+    result = weekly(
+        log,
+        scope=SCOPE,
+        since=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        until=datetime(2026, 8, 30, tzinfo=timezone.utc),
+    )
+    assert len(result.weeks) == 4
+    assert [w["decision"] for w in result.weeks] == [0, 0, 1, 0]
+
+
+def test_the_same_ledger_aggregates_identically_from_reversed_input():
+    """The old test called `weekly` twice on one fake — it could not fail."""
+    entries = [
+        _entry(ObservedEventType.DECISION, occurred_at="2026-08-21T10:00:00+00:00", eid="evt_2"),
+        _entry(ObservedEventType.DECISION, occurred_at="2026-08-17T10:00:00+00:00", eid="evt_1"),
+    ]
+    assert weekly(_log(*entries), scope=SCOPE) == weekly(_log(*reversed(entries)), scope=SCOPE)
+
+
+def test_another_scopes_ledger_is_not_counted():
+    """The fake is keyed by scope, so this fails if `EventLog` ignores it."""
+    log = _log(_entry(ObservedEventType.DECISION, occurred_at="2026-08-17T10:00:00+00:00"))
+    assert weekly(log, scope=OTHER).weeks == ()

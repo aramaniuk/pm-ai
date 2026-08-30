@@ -5,7 +5,7 @@ Spec: `_bmad-output/specs/spec-pm-ai/stories/2j-disclosure-ledger-reads.md`.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -150,11 +150,18 @@ def test_a_ledger_truncated_mid_append_still_totals():
 
 
 def test_a_period_query_returns_records_in_ledger_order():
+    """Ledger order, not sorted order: the file is the record of what happened.
+    Written deliberately out of timestamp order so a sort would fail this."""
+    late = _record(datetime(2026, 8, 20, tzinfo=timezone.utc), cost=2.0)
+    early = _record(datetime(2026, 8, 10, tzinfo=timezone.utc), cost=1.0)
+    got = _ledger(late, early).records(since=datetime(2026, 8, 1, tzinfo=timezone.utc))
+    assert got == (late, early)
+
+
+def test_a_period_query_excludes_records_before_it():
     early = _record(datetime(2026, 8, 10, tzinfo=timezone.utc), cost=1.0)
     late = _record(datetime(2026, 8, 20, tzinfo=timezone.utc), cost=2.0)
-    log = _ledger(early, late)
-
-    got = log.records(since=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    got = _ledger(early, late).records(since=datetime(2026, 8, 15, tzinfo=timezone.utc))
     assert got == (late,)
 
 
@@ -188,3 +195,58 @@ def test_an_upper_bound_excludes_a_later_record():
     late = _record(datetime(2026, 8, 20, tzinfo=timezone.utc), cost=2.0)
     got = _ledger(early, late).records(until=datetime(2026, 8, 15, tzinfo=timezone.utc))
     assert got == (early,)
+
+
+def test_a_non_utc_record_totals_into_its_utc_month():
+    """`record.at.month` on an unconverted offset datetime is the wall-clock
+    month, which straddles the boundary the total is asked about."""
+    log = _ledger(_record(datetime(2026, 9, 1, 2, 0, tzinfo=timezone(timedelta(hours=9))), cost=5.0))
+    # 2026-09-01T02:00+09:00 is 2026-08-31T17:00Z — August, not September.
+    assert log.monthly_total(2026, 8).cost_usd == 5.0
+    assert log.monthly_total(2026, 9).cost_usd == 0.0
+
+
+def test_the_total_names_the_month_it_describes():
+    total = _ledger(_record(datetime(2026, 8, 1, tzinfo=timezone.utc))).monthly_total(2026, 8)
+    assert (total.year, total.month) == (2026, 8)
+
+
+def test_an_empty_total_is_a_float_not_an_int():
+    assert isinstance(DisclosureLedger(FakeStorage("")).monthly_total(2026, 8).cost_usd, float)
+
+
+def test_a_month_outside_the_calendar_is_refused():
+    with pytest.raises(ValueError):
+        DisclosureLedger(FakeStorage("")).monthly_total(2026, 13)
+
+
+
+def test_a_line_missing_a_required_field_is_refused():
+    with pytest.raises(MalformedDisclosure) as caught:
+        parse_ledger("- at=2026-08-01T00:00:00+00:00 task_class=t\n")
+    assert "model" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [("at", "not-a-date"), ("cost_usd", "free"), ("input_tokens", "many"),
+     ("scopes", "employer:acme")],
+)
+def test_an_unparseable_field_is_refused(field, bad):
+    good = render_disclosure(_record(datetime(2026, 8, 1, tzinfo=timezone.utc)))
+    import re
+    broken = re.sub(rf"{field}=\S+", f"{field}={bad}", good)
+    with pytest.raises(MalformedDisclosure):
+        parse_ledger(broken + "\n")
+
+
+def test_a_negative_token_count_is_refused_at_write():
+    """It would offset a month's usage against real calls."""
+    with pytest.raises(MalformedDisclosure):
+        render_disclosure(_record(datetime(2026, 8, 1, tzinfo=timezone.utc), input_tokens=-5))
+
+
+def test_a_non_finite_cost_is_refused_at_write():
+    """`nan > target` is False, so an unbudgeted month would read as compliant."""
+    with pytest.raises(MalformedDisclosure):
+        render_disclosure(_record(datetime(2026, 8, 1, tzinfo=timezone.utc), cost=float("nan")))

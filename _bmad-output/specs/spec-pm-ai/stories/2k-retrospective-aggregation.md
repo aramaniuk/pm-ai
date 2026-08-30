@@ -66,6 +66,8 @@ review_loop_iteration: 0
 
 ## Spec Change Log
 
+- **2026-08-30, code review: `weekly` gains `since`/`until`, and a second counter.** Without a period the trend spanned first-entry to last-entry, so a quiet week at either *edge* was absent — the failure the zero-count rule exists to prevent, displaced to the ends — and a ledger spanning years produced a bucket per week with no way to ask for fewer. Both bounds are on the same clock as the buckets, so they carry no clock in their names. Separately, a `SelfActionType` record whose own clock is missing was being filed under `unplaceable`, contradicting that field's documented meaning; those are now `undated_actions`, because data we were given badly and a record we wrote without stamping are different failures. And every timestamp is converted to UTC before its week is read — `isocalendar()` on an offset-carrying value answers for its own wall clock, so two records at the same instant could land in different weeks.
+
 - **2026-08-29, the week rule is ISO-8601 in UTC.** The matrix said "the rule is stated" without stating it, leaving ISO-versus-Sunday and local-versus-UTC to whoever implemented. `isocalendar()` already answers it, and a hand-rolled week is a second definition that disagrees with every other tool the same dates are read in.
 - **The partial-delivery question is recorded rather than asked.** Three of CAP-10's four categories have no producer, so the shape ships complete and the counts fill in as stories 15 and the proposal lifecycle land. The zero-count rule is what keeps that visible.
 

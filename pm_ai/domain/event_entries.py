@@ -40,6 +40,9 @@ from pm_ai.domain.invariants import InconsistentModel
 
 __all__ = [
     "DAEMON_ACTOR",
+    "IMPLAUSIBLE",
+    "OCCURRED_AT_FLAG",
+    "UNKNOWN_VALUE",
     "MAX_ENTRY_LENGTH",
     "EventEntry",
     "MalformedEntry",
@@ -134,6 +137,21 @@ SELF_ACTION_VALUES = {member.value for member in SelfActionType}
 LedgerCategory = ObservedEventType | SelfActionType
 """What a segment line may be tagged with: either subject, never a third thing."""
 
+
+UNKNOWN_VALUE = "unknown"
+"""What a field with no value renders as, across every producer and reader.
+
+Spelled once because the round trip depends on writer and reader agreeing: it was
+a literal in `service._append_batch`, `_UNKNOWN` in `core/ledger` and `_UNKNOWN`
+again in `core/retrospective`, three copies that had to match and nothing making
+them.
+"""
+
+OCCURRED_AT_FLAG = "occurred_at_flag"
+"""The field name story 2b stamps when a provider clock cannot be believed."""
+
+IMPLAUSIBLE = "implausible"
+"""Its only value today, and the one every reader tests for."""
 
 DAEMON_ACTOR = "pm-ai"
 """The actor on a record pm-ai wrote about itself.

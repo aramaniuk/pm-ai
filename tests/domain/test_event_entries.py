@@ -247,3 +247,16 @@ def test_an_entry_is_constructible_without_an_id():
     """Callers outside storage build entries; they do not name them."""
     entry = ee.EventEntry(category=ee.SelfActionType.SECURITY, actor="pm-ai")
     assert entry.entry_id is None
+
+
+def test_the_leak_guard_refuses_a_self_action_registered_as_an_event_payload(monkeypatch):
+    """The third branch of `_assert_vocabularies_agree`, previously untested.
+
+    A pm-ai action registered in `PAYLOAD_FOR` becomes constructible as a
+    `NormalizedEvent`, and `persist_events` would then deduplicate the second
+    occurrence away — losing audit records by design.
+    """
+    monkeypatch.setitem(PAYLOAD_FOR, ee.SelfActionType.COMPACTION, ee.CompactionPayload)
+    with pytest.raises(ee.InconsistentVocabulary) as caught:
+        ee._assert_vocabularies_agree()
+    assert "COMPACTION" in str(caught.value)

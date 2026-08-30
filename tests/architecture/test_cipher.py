@@ -21,14 +21,13 @@ reads as coverage in a green run.
 
 from __future__ import annotations
 
-import re
 import os
 import stat
 from datetime import datetime, timezone
 
 import pytest
 
-from pm_ai.domain.event_entries import EventEntry, SelfActionType
+from ledger_fixtures import entry as _entry, mask_ids
 from pm_ai.app.wiring import build
 from pm_ai.storage.service import AppendToSealedArtifact
 from pm_ai.domain.storage_tiers import EVENT_LOG
@@ -66,13 +65,6 @@ def _seal(daemon, payload=None, *, name=None):
     )
 
 PAYLOAD = b'{"jira": "token-\xff\x00-not-utf8"}'
-
-
-def _entry(marker: str):
-    """A minimal typed entry, standing in for the old free-string call (2e)."""
-    return EventEntry(
-        category=SelfActionType.SECURITY, actor="test", fields=(("detail", marker),)
-    )
 
 
 @pytest.fixture

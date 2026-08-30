@@ -506,7 +506,10 @@ def test_ad35_ledger_folding_is_deterministic():
     Otherwise `pm-ai reindex` changes commitment states while AD-3's test passes.
     """
     ledger = mod("pm_ai.core.ledger")
-    entries = ledger.sample_entries()
+    # The fixture moved out of the production module in the story-2 code review.
+    from ledger_fixtures import sample_entries
+
+    entries = sample_entries()
     assert ledger.fold(entries) == ledger.fold(list(reversed(entries))), (
         "AD-35: folding depends on input order, so a rebuild can produce different "
         "commitment states than the live system."

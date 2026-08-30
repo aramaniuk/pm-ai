@@ -61,6 +61,8 @@ review_loop_iteration: 0
 
 ## Spec Change Log
 
+- **2026-08-30, code review.** `monthly_total` read `record.at.month` without converting, so an offset-carrying timestamp was filed by its wall-clock month and straddled the boundary asked about; it now converts to UTC first. The result names the year and month it describes, refuses a month outside the calendar, and returns a float on an empty ledger rather than `sum([])`'s int. The sum moved to `math.fsum` — no drifting case was reproducible with realistic sub-cent costs, so that is the exact option taken because AD-17 calls the figure evidence, not a fix for an observed defect.
+
 - **2026-08-29, threshold resolved by passing it in.** The review of the set found this matrix row unimplementable: it required a configured target while the Ask First said no story owned the key, so one of six rows could neither ship nor be tested. Taking the target as an argument removes the dependency entirely — the domain gains no budget figure, and a caller with a configured value supplies it. With no target the result reports the breach as unknown rather than as false, because "nothing was compared" and "nothing was exceeded" are different facts and AD-17's figure is evidence.
 - **The tokenizer moves to `domain/event_entries.py` beside `render_value`.** 2j parses the encoding 2i writes, and duplicating the scanner would be the failure rule 3 names — the same Markdown parsed two ways. Encoder and decoder now sit together and both core parsers import them.
 

@@ -29,15 +29,15 @@ from pm_ai.domain.event_entries import (
     LedgerCategory,
     MalformedEntry,
     SelfActionType,
+    UNKNOWN_VALUE,
     UnknownCategory,
     category,
     scan_fields,
 )
 from pm_ai.domain.events import ObservedEventType
 
-__all__ = ["fold", "parse_line", "parse_segment", "sample_entries"]
+__all__ = ["fold", "parse_line", "parse_segment"]
 
-_UNKNOWN = "unknown"
 
 
 def parse_segment(text: str, *, source: str = "<segment>") -> tuple[EventEntry, ...]:
@@ -105,11 +105,23 @@ def parse_line(line: str) -> EventEntry:
         raise MalformedEntry(
             f"{line!r} has no `actor=`. CAP-10 requires an actor on every entry."
         )
+    rest_fields = tuple(fields[2:])
+    names = [key for key, _ in rest_fields]
+    if len(set(names)) != len(names):
+        # `dict(entry.fields)` resolves a duplicate to the *last* occurrence, so a
+        # repeated key silently overrides the first — the same shadowing the
+        # writer refuses on the way in, arriving instead through a hand-edited
+        # or corrupted line.
+        duplicated = sorted({name for name in names if names.count(name) > 1})
+        raise MalformedEntry(
+            f"{line!r} repeats {duplicated}. A later value would silently win "
+            f"over the earlier one for every reader."
+        )
     return EventEntry(
         entry_id=entry_id,
         category=category(raw_category),
         actor=fields[1][1],
-        fields=tuple(fields[2:]),
+        fields=rest_fields,
         # `category()` raises `UnknownCategory` for a value in neither
         # vocabulary — deliberately not caught here: a closed enumeration that
         # silently accepts an unknown member is not closed.
@@ -135,8 +147,8 @@ def fold(entries) -> tuple[EventEntry, ...]:
 
 
 def _order(entry: EventEntry) -> tuple[int, object, str]:
-    raw = dict(entry.fields).get("occurred_at", _UNKNOWN)
-    if raw == _UNKNOWN:
+    raw = dict(entry.fields).get("occurred_at", UNKNOWN_VALUE)
+    if raw == UNKNOWN_VALUE:
         return (2, "", entry.entry_id or "")
     try:
         parsed = datetime.fromisoformat(raw)
@@ -147,26 +159,3 @@ def _order(entry: EventEntry) -> tuple[int, object, str]:
     return (0, parsed.timestamp(), entry.entry_id or "")
 
 
-def sample_entries() -> list[EventEntry]:
-    """A canonical set for `test_ad35_ledger_folding_is_deterministic`.
-
-    Test-facing, and named by that pre-written test rather than chosen here. It
-    covers the three ranks `_order` distinguishes, so a fold that stops being
-    total fails on it rather than on whichever segment happens to hold a flagged
-    timestamp first.
-    """
-    return [
-        _sample("evt_c", "2026-08-19T10:00:00+00:00", SelfActionType.COMPACTION),
-        _sample("evt_a", "2026-08-19T08:00:00+00:00", ObservedEventType.DECISION),
-        _sample("evt_d", _UNKNOWN, SelfActionType.SECURITY),
-        _sample("evt_b", "2026-08-19T09:00:00", ObservedEventType.COMMIT_PUSHED),
-    ]
-
-
-def _sample(entry_id: str, occurred_at: str, kind: LedgerCategory) -> EventEntry:
-    return EventEntry(
-        entry_id=entry_id,
-        category=kind,
-        actor="pm-ai",
-        fields=(("occurred_at", occurred_at),),
-    )
