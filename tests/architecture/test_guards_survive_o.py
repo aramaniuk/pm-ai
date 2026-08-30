@@ -97,13 +97,14 @@ CASES = {
         "_assert_vocabularies_agree",
         # The third branch: a pm-ai action constructible as a harvested event,
         # which `persist_events` would then dedup away.
-        "m.PAYLOAD_FOR = dict(m.PAYLOAD_FOR);"
-        " m.PAYLOAD_FOR[m.SelfActionType.COMPACTION] = m.CompactionPayload",
+        "import pm_ai.domain.events as ev;"
+        " m.PAYLOAD_FOR = dict(m.PAYLOAD_FOR);"
+        " m.PAYLOAD_FOR[m.SelfActionType.COMPACTION] = ev.CommitPayload",
     ),
     "a_self_action_with_no_payload": (
         "pm_ai.domain.event_entries",
         "_assert_vocabularies_agree",
-        "m.SELF_ACTION_PAYLOAD_FOR = {}",
+        "m.SELF_ACTION_FIELDS = {}",
     ),
     "two_lifecycles_sharing_a_member_name": (
         "pm_ai.domain.lifecycle",

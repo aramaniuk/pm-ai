@@ -85,6 +85,7 @@ the case already made in `derivation-services.md` for running `1h` after story 1
 | `2i-disclosure-ledger-append` | the application-scoped ledger gains a writer | 2d |
 | `2j-disclosure-ledger-reads` | AD-17's monthly total and AD-31's period query gain a source | 2i |
 | `2k-retrospective-aggregation` | CAP-10's counts by category, as a weekly trend | 2h |
+| `2l-payloads-reach-tier-one` | a payload's content reaches the ledger, so a Tier-3 index can be rebuilt from Tier 1 | 2d, 2f |
 
 **2b depends on 2d, not on 2a alone.** Recorded here because the review of
 2026-08-29 found the original ordering had 2b writing a flag into a line format

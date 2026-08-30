@@ -46,7 +46,7 @@ def test_decision_is_an_observed_event_because_the_pm_decided_it():
 
 def test_every_self_action_has_a_registered_payload():
     for member in ee.SelfActionType:
-        assert member in ee.SELF_ACTION_PAYLOAD_FOR
+        assert member in ee.SELF_ACTION_FIELDS
 
 
 def test_every_observed_event_has_a_registered_payload():
@@ -54,25 +54,17 @@ def test_every_observed_event_has_a_registered_payload():
         assert member in PAYLOAD_FOR
 
 
-def test_a_compaction_payload_carries_what_it_deleted_and_what_replaced_it():
+def test_compaction_declares_the_checksums_it_must_record():
     """storage-contract.md: checksums, because a filename is reused and content is not."""
-    payload = ee.CompactionPayload(
-        source="event_log/2026-06",
-        replaced=(("2026-06.md", "d41d8cd9"),),
-        summary=("2026-06-milestone.md", "9b2c77e0"),
+    assert ee.SELF_ACTION_FIELDS[ee.SelfActionType.COMPACTION] == (
+        "source", "replaced", "summary",
     )
-    assert payload.replaced == (("2026-06.md", "d41d8cd9"),)
-    assert payload.summary == ("2026-06-milestone.md", "9b2c77e0")
 
 
-def test_a_skill_invocation_payload_carries_its_idempotency_key():
-    payload = ee.SkillInvokedPayload(
-        skill="gitlab.comment",
-        target="gitlab:alpha:issue:PAY-102",
-        external_id="note_88",
-        idempotency_key="idem_abc",
-    )
-    assert payload.idempotency_key == "idem_abc"
+def test_a_skill_invocation_declares_its_idempotency_key_and_not_the_actor():
+    declared = ee.SELF_ACTION_FIELDS[ee.SelfActionType.SKILL_INVOKED]
+    assert "idempotency_key" in declared
+    assert "skill" not in declared, "the skill name is the actor, not a field"
 
 
 # ── Resolving a category off the wire ────────────────────────────────────────
@@ -113,9 +105,7 @@ def test_the_disjointness_guard_refuses_an_overlapping_value(monkeypatch):
 
 
 def test_the_payload_coverage_guard_refuses_an_unregistered_member(monkeypatch):
-    monkeypatch.setattr(
-        ee, "SELF_ACTION_PAYLOAD_FOR", {ee.SelfActionType.COMPACTION: ee.CompactionPayload}
-    )
+    monkeypatch.setattr(ee, "SELF_ACTION_FIELDS", {})
     with pytest.raises(ee.InconsistentVocabulary):
         ee._assert_vocabularies_agree()
 
@@ -127,6 +117,9 @@ def test_the_payload_coverage_guard_refuses_an_unregistered_member(monkeypatch):
 # touched it, with the minted id substituted. It is a literal on purpose: an
 # expectation built by the renderer would agree with any format it produced.
 # ═══════════════════════════════════════════════════════════════════════════
+
+SECURITY_FIELDS = (("protection", "encryption-at-rest"), ("disabled_by", "env-var"))
+"""What `SelfActionType.SECURITY` declares. Fixtures write real fields now."""
 
 GOLDEN = (
     "- [evt_0000000000000000000f] commit_pushed actor=u_42 "
@@ -167,21 +160,24 @@ def test_the_rendered_line_carries_no_newline():
 # ── A record boundary cannot be forged ───────────────────────────────────────
 
 
-def test_a_value_containing_a_newline_is_refused():
+def test_a_value_containing_a_newline_is_escaped_not_refused():
+    """Changed by 2l: the line carries real commit messages now. It still holds no
+    literal newline, so the append rule is untouched."""
     entry = ee.EventEntry(
         entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm-ai",
-        fields=(("detail", "first\nsecond"),),
+        fields=SECURITY_FIELDS + (("detail", "first\nsecond"),),
     )
-    with pytest.raises(ee.MalformedEntry):
-        ee.render_entry(entry)
+    line = ee.render_entry(entry)
+    assert "\n" not in line
+    assert r"first\nsecond" in line
 
 
-def test_an_actor_containing_a_newline_is_refused():
+def test_an_actor_containing_a_newline_is_escaped_too():
     entry = ee.EventEntry(
-        entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm\nai", fields=()
+        entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm\nai",
+        fields=SECURITY_FIELDS,
     )
-    with pytest.raises(ee.MalformedEntry):
-        ee.render_entry(entry)
+    assert "\n" not in ee.render_entry(entry)
 
 
 def test_a_key_containing_a_separator_is_refused():
@@ -189,7 +185,7 @@ def test_a_key_containing_a_separator_is_refused():
     for bad in ("two words", "has=equals"):
         entry = ee.EventEntry(
             entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm-ai",
-            fields=((bad, "v"),),
+            fields=SECURITY_FIELDS + ((bad, "v"),),
         )
         with pytest.raises(ee.MalformedEntry):
             ee.render_entry(entry)
@@ -239,13 +235,19 @@ def test_a_line_beyond_the_bound_is_refused():
 def test_an_entry_without_an_id_cannot_be_rendered():
     """The break: a caller building a whole line and bypassing the mint."""
     with pytest.raises(ee.MalformedEntry) as caught:
-        ee.render_entry(ee.EventEntry(category=ee.SelfActionType.SECURITY, actor="pm-ai"))
+        ee.render_entry(
+            ee.EventEntry(
+                category=ee.SelfActionType.SECURITY, actor="pm-ai", fields=SECURITY_FIELDS
+            )
+        )
     assert "storage" in str(caught.value).lower()
 
 
 def test_an_entry_is_constructible_without_an_id():
     """Callers outside storage build entries; they do not name them."""
-    entry = ee.EventEntry(category=ee.SelfActionType.SECURITY, actor="pm-ai")
+    entry = ee.EventEntry(
+        category=ee.SelfActionType.SECURITY, actor="pm-ai", fields=SECURITY_FIELDS
+    )
     assert entry.entry_id is None
 
 
@@ -256,7 +258,9 @@ def test_the_leak_guard_refuses_a_self_action_registered_as_an_event_payload(mon
     `NormalizedEvent`, and `persist_events` would then deduplicate the second
     occurrence away — losing audit records by design.
     """
-    monkeypatch.setitem(PAYLOAD_FOR, ee.SelfActionType.COMPACTION, ee.CompactionPayload)
+    from pm_ai.domain.events import CommitPayload
+
+    monkeypatch.setitem(PAYLOAD_FOR, ee.SelfActionType.COMPACTION, CommitPayload)
     with pytest.raises(ee.InconsistentVocabulary) as caught:
         ee._assert_vocabularies_agree()
     assert "COMPACTION" in str(caught.value)

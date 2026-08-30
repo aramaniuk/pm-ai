@@ -117,7 +117,9 @@ def _test_entry(marker: str):
     in fixtures is an entry no parser would ever be asked to read.
     """
     return EventEntry(
-        category=SelfActionType.SECURITY, actor="test", fields=(("detail", marker),)
+        category=SelfActionType.SECURITY,
+        actor="test",
+        fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("detail", marker)),
     )
 
 
@@ -143,8 +145,8 @@ def test_the_event_log_is_appended_to_never_rewritten(daemon):
     assert len(segments) == 1, "one open segment per month, appended to"
     body = _mask(segments[0].read_text())
     assert body == (
-        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 detail=first\n"
-        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 detail=second\n"
+        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=first\n"
+        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=second\n"
     )
 
 
@@ -183,7 +185,9 @@ def test_every_scope_writes_into_its_own_resolved_tree(daemon, tmp_path):
     assert len(set(resolved.values())) == len(ALL_SCOPES), "two scopes share one ledger"
     for scope, log in resolved.items():
         assert _mask((log / f"{NOW:%Y-%m}.md").read_text()) == (
-            f"- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 detail={scope}\n"
+            f"- [evt_ID] security actor=test "
+            f"ingested_at=2026-08-19T09:00:00+00:00 "
+            f"protection=encryption-at-rest disabled_by=env-var detail={scope}\n"
         )
 
     # Each in the tree its scope owns, spelled from the resolver's own names so
@@ -470,7 +474,10 @@ def test_the_persisted_line_keeps_the_grammar_it_had_before_the_renderer(daemon)
     for line in masked:
         assert re.fullmatch(
             r"- \[evt_MASKED\] \w+ actor=\S+ ingested_at=\S+ src=\S+ "
-            r"occurred_at=\S+ authored_by=\w+",
+            r"occurred_at=\S+ authored_by=\w+"
+            # the payload rides after the envelope (story 2l); a value carrying
+            # a space is quoted, so `\S+` alone would stop at the first one
+            r'(?: p\.\w+=(?:"[^"]*"|\S+))+',
             line,
         ), f"the ledger grammar moved: {line!r}"
 
@@ -495,7 +502,10 @@ def test_the_writer_mints_the_entry_id(daemon):
     line = _segment(daemon.storage, daemon.scope).read_text().rstrip("\n")
     assert re.fullmatch(
         r"- \[evt_[0-9a-f]+\] security actor=test "
-        + re.escape(f"ingested_at={NOW.isoformat()} detail=first"),
+        + re.escape(
+            f"ingested_at={NOW.isoformat()} protection=encryption-at-rest "
+            f"disabled_by=env-var detail=first"
+        ),
         line,
     )
 
@@ -860,7 +870,7 @@ def test_an_entry_carrying_the_writers_own_field_is_refused(daemon):
     entry = EventEntry(
         category=SelfActionType.SECURITY,
         actor="test",
-        fields=(("ingested_at", "1999-01-01T00:00:00+00:00"),),
+        fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("ingested_at", "1999-01-01T00:00:00+00:00")),
     )
     with pytest.raises(ValueError) as caught:
         daemon.storage.append_event_log(entry, scope=daemon.scope)
@@ -871,7 +881,7 @@ def test_an_entry_carrying_the_writers_flag_field_is_refused(daemon):
     entry = EventEntry(
         category=SelfActionType.SECURITY,
         actor="test",
-        fields=(("occurred_at_flag", "implausible"),),
+        fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("occurred_at_flag", "implausible")),
     )
     with pytest.raises(ValueError):
         daemon.storage.append_event_log(entry, scope=daemon.scope)

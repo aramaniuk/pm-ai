@@ -154,4 +154,4 @@ def test_a_disclosure_line_has_a_length_bound():
     from pm_ai.domain.disclosure import MalformedDisclosure
 
     with pytest.raises(MalformedDisclosure):
-        render_disclosure(_record(task_class="x" * 5000))
+        render_disclosure(_record(task_class="x" * 20000))

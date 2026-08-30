@@ -25,6 +25,8 @@ INGESTED = "2026-08-19T09:00:00+00:00"
 
 def _entry(category, *, occurred_at=None, ingested_at=INGESTED, flagged=False, eid="evt_1"):
     fields = (("ingested_at", ingested_at),)
+    if isinstance(category, SelfActionType):
+        fields += (("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("source", "event_log/2026-06"), ("replaced", "2026-06.md:d41d"), ("summary", "s.md:9b2c"), ("target", "t"), ("external_id", "e"), ("idempotency_key", "k"))
     if occurred_at is not None:
         fields += (("occurred_at", occurred_at),)
     if flagged:

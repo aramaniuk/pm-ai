@@ -30,7 +30,7 @@ def _sample(entry_id: str, occurred_at: str, kind: LedgerCategory) -> EventEntry
         entry_id=entry_id,
         category=kind,
         actor="pm-ai",
-        fields=(("occurred_at", occurred_at),),
+        fields=(("occurred_at", occurred_at), ("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("source", "event_log/2026-06"), ("replaced", "2026-06.md:d41d"), ("summary", "s.md:9b2c")),
     )
 
 
@@ -42,7 +42,9 @@ def entry(marker: str) -> EventEntry:
     pasted copies across the suite until the 2026-08-30 review.
     """
     return EventEntry(
-        category=SelfActionType.SECURITY, actor="test", fields=(("detail", marker),)
+        category=SelfActionType.SECURITY,
+        actor="test",
+        fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("detail", marker)),
     )
 
 

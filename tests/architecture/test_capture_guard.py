@@ -436,7 +436,7 @@ def test_a_non_capture_artifact_in_the_same_scope_is_unaffected(tmp_path):
     segment = fixture.paths.resolve(PROJECT, EVENT_LOG) / f"{NOW:%Y-%m}.md"
     body = mask_ids(segment.read_text(encoding="utf-8"))
     assert body == (
-        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} detail=entry\n"
+        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=entry\n"
     )
     assert vcs.asked == [], "git was consulted about an artifact that has no rule"
 

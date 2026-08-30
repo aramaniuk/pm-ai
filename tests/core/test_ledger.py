@@ -17,8 +17,8 @@ from pm_ai.domain.event_entries import (
 )
 from pm_ai.domain.events import ObservedEventType
 
-ONE = "- [evt_a1] security actor=test detail=first\n"
-TWO = "- [evt_b2] security actor=test detail=second\n"
+ONE = '- [evt_a1] security actor=test protection=encryption-at-rest disabled_by=env-var detail=first\n'
+TWO = '- [evt_b2] security actor=test protection=encryption-at-rest disabled_by=env-var detail=second\n'
 
 
 # ── The append rule: a record without its newline is not a record ────────────
@@ -31,7 +31,7 @@ def test_a_whole_segment_parses_in_file_order():
 
 def test_an_unterminated_tail_is_a_boundary_not_corruption():
     """A reader landing mid-append must succeed, or every concurrent read fails."""
-    entries = ledger.parse_segment(ONE + "- [evt_c3] security actor=test det")
+    entries = ledger.parse_segment(ONE + "- [evt_c3] security actor=test prot")
     assert [e.entry_id for e in entries] == ["evt_a1"]
 
 
@@ -71,7 +71,8 @@ def test_a_category_outside_both_vocabularies_is_refused():
 @pytest.mark.parametrize(
     "entry",
     [
-        EventEntry(entry_id="evt_1", category=SelfActionType.COMPACTION, actor="pm-ai"),
+        EventEntry(entry_id="evt_1", category=SelfActionType.COMPACTION, actor="pm-ai",
+                   fields=(("source", "event_log/2026-06"), ("replaced", "2026-06.md:d41d"), ("summary", "s.md:9b2c"),)),
         EventEntry(
             entry_id="evt_2",
             category=ObservedEventType.COMMIT_PUSHED,
@@ -99,7 +100,7 @@ def _at(entry_id: str, occurred_at: str):
         entry_id=entry_id,
         category=SelfActionType.COMPACTION,
         actor="pm-ai",
-        fields=(("occurred_at", occurred_at),),
+        fields=(("occurred_at", occurred_at), ("source", "event_log/2026-06"), ("replaced", "2026-06.md:d41d"), ("summary", "s.md:9b2c")),
     )
 
 
@@ -184,7 +185,7 @@ def test_a_repeated_field_name_is_refused():
     """`dict(fields)` resolves a duplicate to the last, so a second `occurred_at`
     silently overrides the first — the same shadowing the writer now refuses."""
     with pytest.raises(MalformedEntry):
-        ledger.parse_line("- [evt_1] security actor=x detail=a detail=b")
+        ledger.parse_line('- [evt_1] security actor=x protection=encryption-at-rest disabled_by=env-var detail=a detail=b')
 
 
 def test_a_category_token_carrying_an_equals_sign_is_refused():
@@ -195,21 +196,22 @@ def test_a_category_token_carrying_an_equals_sign_is_refused():
 
 def test_a_value_ending_inside_an_escape_is_refused():
     with pytest.raises(MalformedEntry):
-        ledger.parse_line('- [evt_1] security actor=x detail="a\\\\')
+        ledger.parse_line('- [evt_1] security actor=x protection=encryption-at-rest disabled_by=env-var detail="a\\\\')
 
 
 def test_an_unclosed_quoted_value_is_refused():
     with pytest.raises(MalformedEntry):
-        ledger.parse_line('- [evt_1] security actor=x detail="unterminated')
+        ledger.parse_line('- [evt_1] security actor=x protection=encryption-at-rest disabled_by=env-var detail="unterminated')
 
 
 def test_a_line_at_exactly_the_length_bound_is_accepted():
     """The bound is `>`, so the boundary itself must pass."""
     from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, EventEntry, render_entry
 
+    base = (("protection", "p"), ("disabled_by", "d"))
     head = render_entry(EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY,
-                                   actor="x", fields=(("d", ""),)))
+                                   actor="x", fields=base + (("d2", ""),)))
     pad = MAX_ENTRY_LENGTH - len(head)
     entry = EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY,
-                       actor="x", fields=(("d", "y" * pad),))
+                       actor="x", fields=base + (("d2", "y" * pad),))
     assert len(render_entry(entry)) == MAX_ENTRY_LENGTH

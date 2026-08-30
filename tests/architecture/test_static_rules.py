@@ -431,3 +431,43 @@ def test_ad5_encrypted_io_belongs_to_the_single_writer_alone():
         "cipher takes bytes and returns bytes; the service decides what to do "
         "with a path.",
     )
+
+
+def test_every_event_entry_in_the_package_satisfies_its_category_schema():
+    """Runtime checks only cover producers a test actually runs.
+
+    `wiring.py`'s path runs in one cipher test and a future producer might run in
+    none, so the declared fields are checked against the *source* as well: this
+    is what would have caught `registry.py` writing `key=` while its category
+    declared `idempotency_key` (story 2l).
+    """
+    from pm_ai.domain.event_entries import SELF_ACTION_FIELDS, WRITER_OWNED_FIELDS
+
+    checked = 0
+    for source in source_files():
+        path = source.path
+        for node in ast.walk(source.tree):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "EventEntry"):
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            category = kw.get("category")
+            # Only literal `SelfActionType.X` producers. `parse_line` passes a
+            # computed category, which has no schema to check at read time.
+            if not isinstance(category, ast.Attribute):
+                continue
+            if getattr(category.value, "id", "") != "SelfActionType":
+                continue
+            if "fields" not in kw or not isinstance(kw["fields"], ast.Tuple):
+                continue
+            member = getattr(category, "attr", "")
+            declared = next(
+                names for m, names in SELF_ACTION_FIELDS.items() if m.name == member
+            )
+            written = {e.elts[0].value for e in kw["fields"].elts} | WRITER_OWNED_FIELDS
+            missing = [name for name in declared if name not in written]
+            assert not missing, (
+                f"{path.name} writes a {member} entry missing {missing}; the "
+                f"category declares {list(declared)}."
+            )
+            checked += 1
+    assert checked, "the scan matched no producers — it would pass on an empty package"

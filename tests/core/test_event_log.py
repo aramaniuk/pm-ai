@@ -29,7 +29,7 @@ def _line(entry_id: str, ingested_at: str, marker: str) -> str:
             entry_id=entry_id,
             category=SelfActionType.SECURITY,
             actor="test",
-            fields=(("ingested_at", ingested_at), ("detail", marker)),
+            fields=(("ingested_at", ingested_at), ("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("detail", marker)),
         )
     )
 
@@ -63,7 +63,8 @@ def _log(segments=None):
 
 def test_appending_delegates_to_the_single_writer():
     log, storage = _log()
-    entry = EventEntry(category=SelfActionType.SECURITY, actor="pm-ai")
+    entry = EventEntry(category=SelfActionType.SECURITY, actor="pm-ai",
+                       fields=(("protection", "p"), ("disabled_by", "d")))
 
     log.append(entry, scope=SCOPE)
 
@@ -74,7 +75,8 @@ def test_the_scope_is_an_argument_not_a_construction_time_default():
     """The debug-flag entry goes to the application scope and a skill entry does
     not; a bound scope makes one of those a mistake nobody sees."""
     log, storage = _log()
-    entry = EventEntry(category=SelfActionType.SECURITY, actor="pm-ai")
+    entry = EventEntry(category=SelfActionType.SECURITY, actor="pm-ai",
+                       fields=(("protection", "p"), ("disabled_by", "d")))
 
     log.append(entry, scope=SCOPE)
     log.append(entry, scope=OTHER)
@@ -183,7 +185,8 @@ def test_an_entry_without_an_ingestion_time_is_excluded_from_a_range():
     """Not silently included: a range asks a question it cannot answer for that
     entry, and guessing either way is worse than leaving it out."""
     line = render_entry(
-        EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY, actor="test")
+        EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY, actor="test",
+                   fields=(("protection", "p"), ("disabled_by", "d")))
     )
     log, _ = _log({SCOPE: {"2026-08.md": line + "\n"}})
 

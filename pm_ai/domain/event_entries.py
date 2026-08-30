@@ -47,13 +47,11 @@ __all__ = [
     "EventEntry",
     "MalformedEntry",
     "render_entry",
-    "CompactionPayload",
     "InconsistentVocabulary",
     "LedgerCategory",
-    "SELF_ACTION_PAYLOAD_FOR",
-    "SecurityPayload",
+    "SELF_ACTION_FIELDS",
+    "WRITER_OWNED_FIELDS",
     "SelfActionType",
-    "SkillInvokedPayload",
     "UnknownCategory",
     "category",
     "render_value",
@@ -94,43 +92,28 @@ class SelfActionType(Enum):
     SKILL_INVOKED = "skill_invoked"
 
 
-@dataclass(frozen=True, slots=True)
-class CompactionPayload:
-    """The only job that destroys Tier 1, and what it destroyed.
-
-    Checksums rather than filenames alone, per `storage-contract.md`: a filename
-    says *a file called this was deleted*, a checksum says *this exact content
-    was deleted*, and filenames are reused across months while content is not.
-    """
-
-    source: str
-    replaced: tuple[tuple[str, str], ...]
-    summary: tuple[str, str]
-
-
-@dataclass(frozen=True, slots=True)
-class SecurityPayload:
-    """A protection the operator turned off, and the mechanism that did it."""
-
-    protection: str
-    disabled_by: str
-
-
-@dataclass(frozen=True, slots=True)
-class SkillInvokedPayload:
-    """AD-1's one entry per invocation, in the owning scope."""
-
-    skill: str
-    target: str
-    external_id: str
-    idempotency_key: str
-
-
-SELF_ACTION_PAYLOAD_FOR: dict[SelfActionType, type] = {
-    SelfActionType.COMPACTION: CompactionPayload,
-    SelfActionType.SECURITY: SecurityPayload,
-    SelfActionType.SKILL_INVOKED: SkillInvokedPayload,
+SELF_ACTION_FIELDS: dict[SelfActionType, tuple[str, ...]] = {
+    # `source`, and each replaced segment with the MD5 it had when deleted, plus
+    # the summary that replaced it (`storage-contract.md`).
+    SelfActionType.COMPACTION: ("source", "replaced", "summary"),
+    # Which protection the operator turned off, and the mechanism that did it.
+    SelfActionType.SECURITY: ("protection", "disabled_by"),
+    # AD-1's one entry per invocation. The skill's name is the *actor*, so it is
+    # not repeated here — a schema declares fields, and the actor is not one.
+    SelfActionType.SKILL_INVOKED: ("target", "external_id", "idempotency_key"),
 }
+"""What each pm-ai action must record, by field name.
+
+**Required, not exhaustive.** A producer may add a field without changing this;
+one that drops a required field is refused. Equality would make the schema a cage
+— the rigidity a second declaration always brings — while a floor still catches
+the regression worth catching.
+
+Names rather than dataclasses. The three classes that stood here were never
+constructed anywhere in `pm_ai/`, and one of them could not have been true: it
+declared `replaced: tuple[tuple[str, str], ...]` when a ledger line holds only
+strings. A registry describing a line's fields should say field names.
+"""
 
 SELF_ACTION_VALUES = {member.value for member in SelfActionType}
 
@@ -153,6 +136,14 @@ OCCURRED_AT_FLAG = "occurred_at_flag"
 IMPLAUSIBLE = "implausible"
 """Its only value today, and the one every reader tests for."""
 
+WRITER_OWNED_FIELDS = frozenset({"ingested_at", "occurred_at_flag"})
+"""Fields the single writer stamps, which no caller may supply.
+
+Lives here rather than in `pm_ai.storage` because the entry's own construction
+check has to exclude them: the writer re-builds the entry with these prepended,
+which re-runs `__post_init__`.
+"""
+
 DAEMON_ACTOR = "pm-ai"
 """The actor on a record pm-ai wrote about itself.
 
@@ -161,16 +152,36 @@ in one entry and `pm_ai` in another are two actors to every reader that counts
 them. `storage-contract.md`'s COMPACTION example fixes this form.
 """
 
-MAX_ENTRY_LENGTH = 4096
+MAX_ENTRY_LENGTH = 16384
 """How long one rendered record may be.
 
 A segment is plaintext Markdown the PM is meant to read, grep and diff by hand
 (`storage-contract.md`), and one entry carrying a megabyte of payload defeats
 every one of those. The bound turns that into a refusal at the writer, where it
 names the entry, instead of a file nobody can open.
+
+Raised from 4096 on 2026-08-30, when payload content began reaching the line. A
+realistic commit line with its message inline is 94 characters, so this is
+headroom for a long body or an excerpt rather than a licence for large content.
+Raised rather than clipped: a truncated payload in Tier 1 is the same rebuild gap
+in smaller form, and hand-readability of the rare long line is worth less than
+Tier 1 being complete.
 """
 
-_NEEDS_QUOTING = {" ", "=", '"', "\\"}
+ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r"}
+"""How a value survives being one field of one line.
+
+A literal newline never appears in a rendered line, so the append rule is
+untouched — a fragment stays detectable and a record still ends where it did.
+Before this table the parser treated a backslash as "the next character,
+literally", so `\n` decoded to the letter `n` and a real commit message could not
+be carried. Render and parse must move together or the asymmetry is a silent
+corruption.
+"""
+
+UNESCAPES = {"\\\\": "\\", '\\"': '"', "\\n": "\n", "\\r": "\r"}
+
+_NEEDS_QUOTING = {" ", "=", '"', "\\", "\n", "\r"}
 
 
 class MalformedEntry(ValueError):
@@ -240,17 +251,31 @@ class EventEntry:
     fields: tuple[tuple[str, str], ...] = ()
     entry_id: str | None = None
 
+    def __post_init__(self) -> None:
+        """A pm-ai action must carry the fields its category declares.
+
+        Mirrors `NormalizedEvent.__post_init__`, which is where the working half
+        of this idea already lives — caught at construction, before anything is
+        written. Observed events are deliberately not checked: their payload is a
+        separate object and the line's fields are envelope metadata, disjoint by
+        construction (story 2l).
+        """
+        if not isinstance(self.category, SelfActionType):
+            return
+        present = {key for key, _ in self.fields} | WRITER_OWNED_FIELDS
+        missing = [name for name in SELF_ACTION_FIELDS[self.category] if name not in present]
+        if missing:
+            raise MalformedEntry(
+                f"{self.category.value} must record {missing}; it declares "
+                f"{list(SELF_ACTION_FIELDS[self.category])} and this entry carries "
+                f"{sorted(key for key, _ in self.fields)}."
+            )
+
 
 def render_value(value: str, *, where: str) -> str:
     """Bare when it can be, quoted when it must be, never able to forge a record."""
-    if "\n" in value or "\r" in value:
-        raise MalformedEntry(
-            f"{where} contains a line break. A record is one line, and the append "
-            f"rule reads an unterminated line as a fragment — so this would forge "
-            f"a record boundary that no reader could detect as corruption."
-        )
     if any(ch in value for ch in _NEEDS_QUOTING):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        escaped = "".join(ESCAPES.get(ch, ch) for ch in value)
         return f'"{escaped}"'
     return value
 
@@ -309,10 +334,10 @@ def _assert_vocabularies_agree() -> None:
             f"which subject a segment line had."
         )
 
-    untyped = [m.name for m in SelfActionType if m not in SELF_ACTION_PAYLOAD_FOR]
+    untyped = [m.name for m in SelfActionType if m not in SELF_ACTION_FIELDS]
     if untyped:
         raise InconsistentVocabulary(
-            f"{untyped} have no payload registered. An entry without a shape is "
+            f"{untyped} declare no fields. An entry without a shape is "
             f"the free text this vocabulary replaced."
         )
 
@@ -362,7 +387,10 @@ def _read_value(text: str, index: int, *, line: str) -> tuple[str, int]:
             if char == "\\":
                 if index + 1 >= len(text):
                     raise MalformedEntry(f"{line!r} ends inside an escape sequence.")
-                chars.append(text[index + 1])
+                pair = text[index : index + 2]
+                # The table, not "the next character literally" — that decoded
+                # `\n` to the letter `n` and lost every newline a payload carried.
+                chars.append(UNESCAPES.get(pair, text[index + 1]))
                 index += 2
                 continue
             if char == '"':

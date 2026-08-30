@@ -113,7 +113,10 @@ class SkillRegistry:
                     fields=(
                         ("target", target.lock_key),
                         ("external_id", external_id),
-                        ("key", idempotency_key),
+                        # `idempotency_key`, not `key`: this name lands in a
+                        # line a human reads during an audit, and it is what the
+                        # category declares (story 2l).
+                        ("idempotency_key", idempotency_key),
                     ),
                 ),
                 scope=self._scope,
