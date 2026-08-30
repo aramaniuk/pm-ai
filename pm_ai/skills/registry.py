@@ -14,6 +14,7 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass
 
+from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import lookup_verb
 from pm_ai.ports import SkillPort, StoragePort
@@ -106,8 +107,18 @@ class SkillRegistry:
             external_id = skill.execute(target, payload)
             self._storage.settle_execution(idempotency_key, external_id)  # AD-36
             self._storage.append_event_log(  # AD-1
-                f"- [skill] {qualified_name} target={target.lock_key} "
-                f"external_id={external_id} key={idempotency_key}",
+                EventEntry(
+                    category=SelfActionType.SKILL_INVOKED,
+                    actor=qualified_name,
+                    fields=(
+                        ("target", target.lock_key),
+                        ("external_id", external_id),
+                        # `idempotency_key`, not `key`: this name lands in a
+                        # line a human reads during an audit, and it is what the
+                        # category declares (story 2l).
+                        ("idempotency_key", idempotency_key),
+                    ),
+                ),
                 scope=self._scope,
             )
         return Invocation(external_id=external_id, replayed=False)

@@ -103,7 +103,7 @@ def test_ad27_connectors_only_emit_core_declared_event_types():
     taxonomy = mod("pm_ai.domain.events")
     registry = mod("pm_ai.connectors.registry")
 
-    allowed = set(taxonomy.NormalizedEventType)
+    allowed = set(taxonomy.ObservedEventType)
     for connector in registry.all_connectors():
         declared = set(connector.emits())
         unknown = declared - allowed
@@ -506,7 +506,10 @@ def test_ad35_ledger_folding_is_deterministic():
     Otherwise `pm-ai reindex` changes commitment states while AD-3's test passes.
     """
     ledger = mod("pm_ai.core.ledger")
-    entries = ledger.sample_entries()
+    # The fixture moved out of the production module in the story-2 code review.
+    from ledger_fixtures import sample_entries
+
+    entries = sample_entries()
     assert ledger.fold(entries) == ledger.fold(list(reversed(entries))), (
         "AD-35: folding depends on input order, so a rebuild can produce different "
         "commitment states than the live system."
@@ -605,7 +608,7 @@ def test_event_payloads_are_typed_per_event_type():
     with pytest.raises(d.PayloadMismatch):
         d.NormalizedEvent(
             scope=d.DataScope(d.ScopeKind.PROJECT, "alpha"),
-            type=d.NormalizedEventType.WORK_ITEM_CLOSED,
+            type=d.ObservedEventType.WORK_ITEM_CLOSED,
             source_ref=d.SourceRef.parse("gitlab:alpha:issue:102"),
             actor=d.UNRESOLVED,
             occurred_at=None,

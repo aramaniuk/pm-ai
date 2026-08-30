@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from pm_ai.domain.events import CommitPayload, NormalizedEvent, NormalizedEventType, Provenance
+from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType, Provenance
 from pm_ai.domain.harvest import Cursor, HarvestResult
 from pm_ai.domain.identity import DataScope, SourceRef, resolve_actor
 from pm_ai.domain.lifecycle import CoverageWindow
@@ -28,9 +28,9 @@ class GitLabConnectorAdapter:
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     _fake_api: list[dict] = field(default_factory=list)
 
-    def emits(self) -> frozenset[NormalizedEventType]:
+    def emits(self) -> frozenset[ObservedEventType]:
         """Only from the core taxonomy — a connector may not mint a type (AD-27)."""
-        return frozenset({NormalizedEventType.COMMIT_PUSHED})
+        return frozenset({ObservedEventType.COMMIT_PUSHED})
 
     def harvest(self, since: Cursor) -> HarvestResult:
         started = self.now()
@@ -40,7 +40,7 @@ class GitLabConnectorAdapter:
         events = tuple(
             NormalizedEvent(
                 scope=self.scope,
-                type=NormalizedEventType.COMMIT_PUSHED,
+                type=ObservedEventType.COMMIT_PUSHED,
                 # AD-34 grammar — not a URL, so it joins across connectors
                 source_ref=SourceRef.parse(f"gitlab:{self.project}:commit:{r['sha']}"),
                 # AD-34 — a native handle resolves to an Actor or to UNRESOLVED,

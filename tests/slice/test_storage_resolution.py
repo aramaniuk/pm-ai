@@ -17,12 +17,18 @@ exercise the parts of that which a green suite could otherwise hide:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from pm_ai.app.wiring import build
+from pm_ai.core import ledger
+from pm_ai.core.disclosure_ledger import DisclosureLedger
+from pm_ai.domain.disclosure import CommittedScopeLeak, DisclosureRecord
+from pm_ai.core.event_log import EventLog
+from pm_ai.core.retrospective import weekly
 from pm_ai.domain.scope_model import FOREIGN_ROOTS
 from pm_ai.domain import (
     ARTIFACT_TIER,
@@ -34,6 +40,7 @@ from pm_ai.domain import (
     TargetRef,
     Tier,
 )
+from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain.harvest import Cursor
 from pm_ai.platform.vcs import GitVcs
 from pm_ai.platform.paths import (
@@ -49,7 +56,9 @@ from pm_ai.platform.paths import (
     artifacts_in,
 )
 from pm_ai.storage.service import (
+    AppendOnlyArtifact,
     NonUtcClock,
+    SealedSegment,
     OperationalStoreUnavailable,
     StorageService,
 )
@@ -91,6 +100,29 @@ def _events(daemon):
     return daemon.connectors["gitlab:alpha"].harvest(Cursor()).events
 
 
+def _mask(text: str) -> str:
+    """Blank the minted surrogate so the rest of the grammar stays exact.
+
+    The id is per-call by design (AD-34), and dropping the content assertion
+    rather than masking it would retire the only check that notices a format
+    drift reaching disk.
+    """
+    return re.sub(r"evt_[0-9a-f]+", "evt_ID", text)
+
+
+def _test_entry(marker: str):
+    """A minimal typed entry, standing in for the old free-string call.
+
+    Uses a real category rather than inventing a `test` one: a tag existing only
+    in fixtures is an entry no parser would ever be asked to read.
+    """
+    return EventEntry(
+        category=SelfActionType.SECURITY,
+        actor="test",
+        fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("detail", marker)),
+    )
+
+
 def _segment(storage, scope, at=NOW):
     return storage.paths.resolve(scope, EVENT_LOG) / f"{at:%Y-%m}.md"
 
@@ -106,12 +138,16 @@ def test_the_event_log_is_appended_to_never_rewritten(daemon):
     was enough to make both event-log writes invisible to it. Reading the file
     back is what actually proves the mode.
     """
-    daemon.storage.append_event_log("- [test] first", scope=daemon.scope)
-    daemon.storage.append_event_log("- [test] second", scope=daemon.scope)
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+    daemon.storage.append_event_log(_test_entry("second"), scope=daemon.scope)
 
     segments = list(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md"))
     assert len(segments) == 1, "one open segment per month, appended to"
-    assert segments[0].read_text() == "- [test] first\n- [test] second\n"
+    body = _mask(segments[0].read_text())
+    assert body == (
+        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=first\n"
+        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=second\n"
+    )
 
 
 def test_persisted_batches_accumulate_in_one_segment(daemon):
@@ -143,12 +179,16 @@ def test_every_scope_writes_into_its_own_resolved_tree(daemon, tmp_path):
     Markdown beside its own operational store.
     """
     for scope in ALL_SCOPES:
-        daemon.storage.append_event_log(f"- [test] {scope}", scope=scope)
+        daemon.storage.append_event_log(_test_entry(str(scope)), scope=scope)
 
     resolved = {scope: daemon.storage.paths.resolve(scope, EVENT_LOG) for scope in ALL_SCOPES}
     assert len(set(resolved.values())) == len(ALL_SCOPES), "two scopes share one ledger"
     for scope, log in resolved.items():
-        assert (log / f"{NOW:%Y-%m}.md").read_text() == f"- [test] {scope}\n"
+        assert _mask((log / f"{NOW:%Y-%m}.md").read_text()) == (
+            f"- [evt_ID] security actor=test "
+            f"ingested_at=2026-08-19T09:00:00+00:00 "
+            f"protection=encryption-at-rest disabled_by=env-var detail={scope}\n"
+        )
 
     # Each in the tree its scope owns, spelled from the resolver's own names so
     # this test cannot drift from the layout it is checking.
@@ -179,7 +219,7 @@ def test_a_traversing_person_id_is_refused_at_the_write(daemon):
     """
     escaping = DataScope(ScopeKind.PEOPLE, person_id="../../../tmp/evil")
     with pytest.raises(ScopeResolutionError):
-        daemon.storage.append_event_log("- [test] leak", scope=escaping)
+        daemon.storage.append_event_log(_test_entry("leak"), scope=escaping)
 
 
 # ── AD-3: Tier 2 is not in anyone's Markdown tree ────────────────────────────
@@ -271,7 +311,7 @@ def test_a_store_created_before_the_settle_column_still_settles(tmp_path):
 def test_the_segment_filename_comes_from_the_injected_clock(tmp_path):
     """The one observable of the clock in `append_event_log`, pinned off-month."""
     d = build(tmp_path, "alpha", now=lambda: ELSEWHEN)
-    d.storage.append_event_log("- [test] entry", scope=d.scope)
+    d.storage.append_event_log(_test_entry("entry"), scope=d.scope)
 
     segments = list(d.storage.paths.resolve(d.scope, EVENT_LOG).glob("*.md"))
     assert [s.name for s in segments] == [f"{ELSEWHEN:%Y-%m}.md"] == ["2019-03.md"]
@@ -316,7 +356,7 @@ def test_a_clock_that_is_not_utc_is_refused(tmp_path, clock, why):
         ScopePaths.rooted(tmp_path), now=clock, vcs=GitVcs(), crypto=TEST_CIPHER
     )
     with pytest.raises(NonUtcClock):
-        storage.append_event_log(f"- [test] {why}", scope=PERSONAL)
+        storage.append_event_log(_test_entry(why), scope=PERSONAL)
 
 
 # ── The batch is one unit ────────────────────────────────────────────────────
@@ -383,7 +423,7 @@ def test_production_paths_reach_the_daemon(tmp_path):
     assert paths.project_parent is None, "production may not invent a repository"
 
     d = build(None, "alpha", paths=paths, now=lambda: NOW)
-    d.storage.append_event_log("- [test] entry", scope=d.scope)
+    d.storage.append_event_log(_test_entry("entry"), scope=d.scope)
 
     log = d.storage.paths.resolve(d.scope, EVENT_LOG)
     assert log.is_relative_to(repository / PROJECT_DIRNAME)
@@ -415,3 +455,433 @@ def test_an_unregistered_project_is_refused_at_build_time(tmp_path):
     paths = ScopePaths.production(home=tmp_path / "home", projects={"alpha": tmp_path / "a"})
     with pytest.raises(UnknownProject):
         build(None, "beta", paths=paths, now=lambda: NOW)
+
+
+# ── Story 2d: one renderer owns the line the ledger already holds ────────────
+
+
+def test_the_persisted_line_keeps_the_grammar_it_had_before_the_renderer(daemon):
+    """Captured from `_append_batch` before 2d moved the format out of it.
+
+    The break this catches is the expensive one: a format drift orphans every
+    segment already on disk, and nothing fails at the moment it happens. Only
+    the minted id is masked — everything else is asserted byte for byte.
+    """
+    daemon.storage.persist_events(_events(daemon), scope=daemon.scope)
+    lines = _segment(daemon.storage, daemon.scope).read_text().splitlines()
+
+    masked = [re.sub(r"evt_[0-9a-f]+", "evt_MASKED", line) for line in lines]
+    for line in masked:
+        assert re.fullmatch(
+            r"- \[evt_MASKED\] \w+ actor=\S+ ingested_at=\S+ src=\S+ "
+            r"occurred_at=\S+ authored_by=\w+"
+            # the payload rides after the envelope (story 2l); a value carrying
+            # a space is quoted, so `\S+` alone would stop at the first one
+            r'(?: p\.\w+=(?:"[^"]*"|\S+))+',
+            line,
+        ), f"the ledger grammar moved: {line!r}"
+
+
+def test_an_absent_provider_timestamp_still_renders_unknown(daemon):
+    """`occurred_at` is nullable, and `unknown` is what the ledger has always said."""
+    events = tuple(replace(event, occurred_at=None) for event in _events(daemon))
+    daemon.storage.persist_events(events, scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert "occurred_at=unknown" in body
+    assert "occurred_at=None" not in body
+
+
+# ── Story 2e: the writer accepts a typed entry and names it ──────────────────
+
+
+def test_the_writer_mints_the_entry_id(daemon):
+    """AD-34 — the surrogate is assigned by storage at persist, never by a caller."""
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+
+    line = _segment(daemon.storage, daemon.scope).read_text().rstrip("\n")
+    assert re.fullmatch(
+        r"- \[evt_[0-9a-f]+\] security actor=test "
+        + re.escape(
+            f"ingested_at={NOW.isoformat()} protection=encryption-at-rest "
+            f"disabled_by=env-var detail=first"
+        ),
+        line,
+    )
+
+
+def test_an_entry_arriving_with_an_id_is_refused(daemon):
+    """Overwriting it silently would make AD-34 a convention rather than a rule."""
+    entry = replace(_test_entry("first"), entry_id="evt_minted_by_the_caller")
+    with pytest.raises(ValueError):
+        daemon.storage.append_event_log(entry, scope=daemon.scope)
+
+
+# ── Story 2b: a provider clock that cannot be believed, flagged not dropped ──
+
+
+def _skewed(daemon, **kw):
+    """The connector's real events, with one field overridden on all of them."""
+    return tuple(replace(event, **kw) for event in _events(daemon))
+
+
+def test_a_future_dated_provider_timestamp_is_flagged_and_still_persisted(daemon):
+    """AD-35 — flagged. `persist_events` is all-or-nothing, so raising here would
+    drop a whole harvest because one provider clock is wrong."""
+    events = _skewed(daemon, occurred_at=NOW + timedelta(hours=48))
+    result = daemon.storage.persist_events(events, scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert result.persisted == len(events)
+    assert body.count("occurred_at_flag=implausible") == len(events)
+
+
+def test_a_flagged_timestamp_is_never_backfilled_from_the_local_clock(daemon):
+    """The substitution AD-35 forbids: the suspect value stays, verbatim, beside
+    the flag. A replaced one is indistinguishable from a real one afterwards."""
+    skewed = NOW + timedelta(hours=48)
+    daemon.storage.persist_events(_skewed(daemon, occurred_at=skewed), scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert f"occurred_at={skewed.isoformat()}" in body
+    assert f"occurred_at={NOW.isoformat()}" not in body
+
+
+def test_a_plausible_timestamp_carries_no_flag(daemon):
+    daemon.storage.persist_events(
+        _skewed(daemon, occurred_at=NOW - timedelta(hours=2)), scope=daemon.scope
+    )
+    assert "occurred_at_flag" not in _segment(daemon.storage, daemon.scope).read_text()
+
+
+def test_an_absent_timestamp_is_not_flagged(daemon):
+    """Absence is a distinct state: `unknown` is a known answer, not a suspect one."""
+    daemon.storage.persist_events(_skewed(daemon, occurred_at=None), scope=daemon.scope)
+
+    body = _segment(daemon.storage, daemon.scope).read_text()
+    assert "occurred_at=unknown" in body
+    assert "occurred_at_flag" not in body
+
+
+def test_a_naive_provider_timestamp_is_flagged(daemon):
+    """Not comparable to the batch clock, so its plausibility is unknowable."""
+    daemon.storage.persist_events(
+        _skewed(daemon, occurred_at=datetime(2026, 8, 19, 8, 0)), scope=daemon.scope
+    )
+    assert "occurred_at_flag=implausible" in _segment(
+        daemon.storage, daemon.scope
+    ).read_text()
+
+
+def test_a_mixed_batch_persists_everything_and_counts_what_it_flagged(daemon):
+    """The break: a connector with a broken clock flags every event it emits and
+    nothing anywhere reports that it happened."""
+    events = _events(daemon)
+    mixed = (replace(events[0], occurred_at=NOW + timedelta(hours=48)),) + events[1:]
+
+    result = daemon.storage.persist_events(mixed, scope=daemon.scope)
+
+    assert result.persisted == len(mixed)
+    assert result.flagged == 1
+
+
+# ── Every entry carries when it arrived (CAP-10) ────────────────────────────
+
+
+def test_a_self_action_entry_carries_the_ingestion_time(daemon):
+    """CAP-10 requires an ISO-8601 timestamp on *every* entry.
+
+    The harvest path built one by hand; entries arriving through
+    `append_event_log` carried an id, a category and an actor, and no time at all.
+    """
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+
+    line = _segment(daemon.storage, daemon.scope).read_text().rstrip("\n")
+    assert f"ingested_at={NOW.isoformat()}" in line
+
+
+def test_the_ingestion_time_comes_from_the_injected_clock(daemon, tmp_path):
+    """Not `datetime.now()`: the writer has exactly one clock and this is it."""
+    d = build(tmp_path, "beta", now=lambda: ELSEWHEN)
+    d.storage.append_event_log(_test_entry("entry"), scope=d.scope)
+
+    body = (d.storage.paths.resolve(d.scope, EVENT_LOG) / f"{ELSEWHEN:%Y-%m}.md").read_text()
+    assert f"ingested_at={ELSEWHEN.isoformat()}" in body
+
+
+def test_the_ingestion_time_sits_in_the_same_place_on_every_path(daemon):
+    """One grammar: a reader finds the field without knowing which path wrote it."""
+    daemon.storage.append_event_log(_test_entry("first"), scope=daemon.scope)
+    daemon.storage.persist_events(_events(daemon), scope=daemon.scope)
+
+    for line in _segment(daemon.storage, daemon.scope).read_text().splitlines():
+        after_actor = line.split(" actor=", 1)[1]
+        assert after_actor.split(" ", 1)[1].startswith("ingested_at="), line
+
+
+# ── File order is arrival order ─────────────────────────────────────────────
+
+
+def test_file_order_is_arrival_order(daemon):
+    """The one thing that orders events exactly, with no ties.
+
+    Appends are serialized (AD-5) and each adds one line at the end, so the
+    sequence in the file *is* the sequence they arrived in — at any rate, and
+    including entries that share a timestamp. `fold` deliberately reorders; this
+    is what a caller reads when it wants a chronology instead.
+    """
+    for marker in ("first", "second", "third", "fourth"):
+        daemon.storage.append_event_log(_test_entry(marker), scope=daemon.scope)
+
+    text = _segment(daemon.storage, daemon.scope).read_text()
+    parsed = ledger.parse_segment(text)
+    assert [dict(e.fields)["detail"] for e in parsed] == [
+        "first",
+        "second",
+        "third",
+        "fourth",
+    ]
+
+
+# ── Story 2g: exactly one segment is open, and the rest are immutable ────────
+
+
+class _Rewindable:
+    """A clock the test moves, so a month boundary is crossable in both directions."""
+
+    def __init__(self, at):
+        self.at = at
+
+    def __call__(self):
+        return self.at
+
+
+def test_a_month_boundary_seals_the_old_segment_with_no_ceremony(tmp_path):
+    clock = _Rewindable(datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("august"), scope=d.scope)
+
+    clock.at = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG)
+    assert sorted(p.name for p in log.glob("*.md")) == ["2026-08.md", "2026-09.md"]
+    assert "august" in (log / "2026-08.md").read_text()
+    assert "september" in (log / "2026-09.md").read_text()
+
+
+def test_a_write_into_a_sealed_segment_is_refused_not_redirected(tmp_path):
+    """Redirecting would silently re-date the entry; `occurred_at` carries when
+    it happened, and the filename does not."""
+    clock = _Rewindable(datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+
+    clock.at = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
+    with pytest.raises(SealedSegment) as caught:
+        d.storage.append_event_log(_test_entry("late august"), scope=d.scope)
+
+    message = str(caught.value)
+    assert "2026-08.md" in message and "2026-09.md" in message
+
+
+def test_a_refused_write_leaves_the_sealed_segment_untouched(tmp_path):
+    clock = _Rewindable(datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG)
+
+    clock.at = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
+    with pytest.raises(SealedSegment):
+        d.storage.append_event_log(_test_entry("late august"), scope=d.scope)
+
+    assert not (log / "2026-08.md").exists(), "a refused write created a segment"
+    assert "september" in (log / "2026-09.md").read_text()
+
+
+def test_the_batch_path_is_guarded_too(tmp_path):
+    """A guard on one append path is not a guard."""
+    clock = _Rewindable(datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc))
+    d = build(tmp_path, "alpha", now=clock)
+    d.storage.append_event_log(_test_entry("september"), scope=d.scope)
+
+    d.connectors["gitlab:alpha"]._fake_api = [
+        {
+            "sha": "9f2a1c",
+            "message": "Fix auth refactor",
+            "author_email": "alex@example.com",
+            "committed_at": clock.at - timedelta(hours=2),
+        }
+    ]
+    events = _events(d)
+    assert events, "the fixture harvested nothing, so the guard was never reached"
+
+    clock.at = datetime(2026, 8, 31, 23, 0, tzinfo=timezone.utc)
+    with pytest.raises(SealedSegment):
+        d.storage.persist_events(events, scope=d.scope)
+
+
+def test_the_first_append_opens_a_segment(tmp_path):
+    d = build(tmp_path, "alpha", now=lambda: NOW)
+    d.storage.append_event_log(_test_entry("first"), scope=d.scope)
+
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG)
+    assert [p.name for p in log.glob("*.md")] == [f"{NOW:%Y-%m}.md"]
+
+
+def test_a_stray_file_in_the_log_directory_is_not_a_segment(tmp_path):
+    """`- [test]` notes, editor leftovers and `.DS_Store` must not seal anything."""
+    d = build(tmp_path, "alpha", now=lambda: NOW)
+    log = d.storage.paths.resolve(d.scope, EVENT_LOG, create=True)
+    (log / "notes.md").write_text("not a segment\n")
+    (log / "9999-99.md.bak").write_text("nor this\n")
+
+    d.storage.append_event_log(_test_entry("first"), scope=d.scope)
+    assert "first" in (log / f"{NOW:%Y-%m}.md").read_text()
+
+
+# ── Story 2h: the accessor against the real writer, not only the fake ───────
+
+
+def test_the_accessor_reads_back_what_the_real_writer_wrote(daemon):
+    """The fake `StoragePort` in `tests/core/test_event_log.py` is only worth
+    having if it matches this. Written through the real service, read through
+    the accessor, in arrival order."""
+    log = EventLog(daemon.storage)
+    for marker in ("first", "second", "third"):
+        log.append(_test_entry(marker), scope=daemon.scope)
+
+    entries = log.read(scope=daemon.scope)
+    assert [dict(e.fields)["detail"] for e in entries] == ["first", "second", "third"]
+    assert log.open_segment(scope=daemon.scope) == f"{NOW:%Y-%m}.md"
+
+
+def test_the_accessor_creates_nothing_when_asked_about_an_unwritten_scope(daemon):
+    """Asking which segments exist must not bring the directory into being."""
+    log = EventLog(daemon.storage)
+    unwritten = DataScope(ScopeKind.PERSONAL)
+
+    assert log.read(scope=unwritten) == ()
+    assert log.open_segment(scope=unwritten) is None
+    assert not daemon.storage.paths.resolve(unwritten, EVENT_LOG).exists()
+
+
+# ── Story 2i: the disclosure ledger gains a writer ──────────────────────────
+
+
+def _disclosure(**kw):
+    base = dict(
+        at=NOW,
+        task_class="summarize",
+        model="claude-opus-5",
+        contributing_scopes=frozenset({DataScope(ScopeKind.PERSONAL)}),
+        input_tokens=1200,
+        output_tokens=340,
+        estimated_cost_usd=0.0186,
+    )
+    return DisclosureRecord(**{**base, **kw})
+
+
+def test_a_disclosure_lands_in_the_application_ledger(daemon):
+    daemon.storage.append_disclosure(_disclosure())
+
+    ledger = daemon.storage.paths.resolve(APPLICATION, "disclosure.md")
+    assert "model=claude-opus-5" in ledger.read_text()
+
+
+def test_appending_a_disclosure_never_replaces_the_file(daemon):
+    """The hole this story closed: `write_artifact` would keep one record and
+    destroy every one before it."""
+    for model in ("claude-opus-5", "claude-haiku-4-5", "claude-sonnet-5"):
+        daemon.storage.append_disclosure(_disclosure(model=model))
+
+    body = daemon.storage.paths.resolve(APPLICATION, "disclosure.md").read_text()
+    assert body.count("\n") == 3
+    for model in ("claude-opus-5", "claude-haiku-4-5", "claude-sonnet-5"):
+        assert f"model={model}" in body
+
+
+def test_the_ledger_refuses_a_whole_file_write(daemon):
+    with pytest.raises(AppendOnlyArtifact):
+        daemon.storage.write_artifact(
+            b"replaced", scope=APPLICATION, artifact="disclosure.md"
+        )
+
+
+def test_a_disclosure_routed_to_a_committed_scope_is_refused(daemon):
+    """AD-38 — the mechanism built to prove nothing leaked must not be the leak."""
+    with pytest.raises(CommittedScopeLeak):
+        daemon.storage.append_disclosure(_disclosure(), scope=PROJECT)
+
+
+def test_a_refused_disclosure_leaves_nothing_behind(daemon):
+    with pytest.raises(CommittedScopeLeak):
+        daemon.storage.append_disclosure(_disclosure(), scope=PROJECT)
+
+    assert not daemon.storage.paths.resolve(APPLICATION, "disclosure.md").exists()
+
+
+def test_the_layout_refuses_a_disclosure_path_outside_the_application_scope(daemon):
+    """A second guard, below AD-38's: the scope model will not name a path for
+    this artifact anywhere else, so a caller cannot route around the leak check
+    by resolving its own path first."""
+    with pytest.raises(ScopeResolutionError):
+        daemon.storage.paths.resolve(PROJECT, "disclosure.md")
+
+
+# ── Story 2j: written through the real service, read through the ledger ─────
+
+
+def test_the_disclosure_ledger_totals_what_the_real_writer_wrote(daemon):
+    """The fake in `tests/core/` is only worth having if it matches this."""
+    for cost in (1.5, 2.25, 4.0):
+        daemon.storage.append_disclosure(_disclosure(estimated_cost_usd=cost))
+
+    total = DisclosureLedger(daemon.storage).monthly_total(NOW.year, NOW.month)
+    assert total.records == 3
+    assert total.cost_usd == 7.75
+
+
+def test_an_unwritten_disclosure_ledger_reads_empty_and_creates_nothing(daemon):
+    assert daemon.storage.read_disclosure() == ""
+    assert not daemon.storage.paths.resolve(APPLICATION, "disclosure.md").exists()
+
+
+# ── Story 2k: the trend, over what the real writer wrote ────────────────────
+
+
+def test_the_retrospective_counts_what_the_real_writer_wrote(daemon):
+    log = EventLog(daemon.storage)
+    for marker in ("one", "two"):
+        log.append(_test_entry(marker), scope=daemon.scope)
+
+    result = weekly(log, scope=daemon.scope)
+    assert result.unplaceable == 0, "a pm-ai action is placed by its own clock"
+    assert sum(w["security"] for w in result.weeks) == 2
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_an_entry_carrying_the_writers_own_field_is_refused(daemon):
+    """AD-35 makes `ingested_at` storage's to assign. The writer prepends its
+    stamp, so a caller's duplicate wins under `dict(fields)` — the substitution
+    the whole clock rule forbids, reachable through the public port."""
+    entry = EventEntry(
+        category=SelfActionType.SECURITY,
+        actor="test",
+        fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("ingested_at", "1999-01-01T00:00:00+00:00")),
+    )
+    with pytest.raises(ValueError) as caught:
+        daemon.storage.append_event_log(entry, scope=daemon.scope)
+    assert "ingested_at" in str(caught.value)
+
+
+def test_an_entry_carrying_the_writers_flag_field_is_refused(daemon):
+    entry = EventEntry(
+        category=SelfActionType.SECURITY,
+        actor="test",
+        fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("occurred_at_flag", "implausible")),
+    )
+    with pytest.raises(ValueError):
+        daemon.storage.append_event_log(entry, scope=daemon.scope)

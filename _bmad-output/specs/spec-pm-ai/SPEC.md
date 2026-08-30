@@ -64,7 +64,7 @@ An engineering PM's judgement is spent on retrieval: reconstructing what a team 
 
 - **CAP-10** (FR-10)
   - **intent:** Keep an immutable, queryable record of every decision, operational event, and telemetry diff, and aggregate it for retrospective.
-  - **success:** Every state mutation appends a JSON line carrying ISO-8601 timestamp, actor ID, and action category; `pm-ai retrospective --weekly` renders counts by category (decisions logged, proposals staged vs approved, commitments fulfilled vs broken) as a weekly trend.
+  - **success:** Every state mutation appends a Markdown ledger line to the owning scope's `event_log/` segment, carrying a minted entry id, ISO-8601 timestamp, actor ID, and action category; `pm-ai retrospective --weekly` renders counts by category (decisions logged, proposals staged vs approved, commitments fulfilled vs broken) as a weekly trend.
 
 - **CAP-11** (FR-11)
   - **intent:** Tie each day's micro-decisions back to the goals the PM actually set, so drift becomes visible rather than inferred.

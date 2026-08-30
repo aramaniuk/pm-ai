@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from ledger_fixtures import entry as _entry, mask_ids
 from pm_ai.domain import (
     CAPTURES,
     EVENT_LOG,
@@ -430,10 +431,13 @@ def test_a_non_capture_artifact_in_the_same_scope_is_unaffected(tmp_path):
     vcs = FakeVcs(verdict=TrackingVerdict(ignored=False))  # would refuse if asked
     fixture = _fixture(tmp_path, gitignore="node_modules/\n", vcs=vcs)
 
-    fixture.storage.append_event_log("- [test] entry", scope=PROJECT)
+    fixture.storage.append_event_log(_entry("entry"), scope=PROJECT)
 
     segment = fixture.paths.resolve(PROJECT, EVENT_LOG) / f"{NOW:%Y-%m}.md"
-    assert segment.read_text(encoding="utf-8") == "- [test] entry\n"
+    body = mask_ids(segment.read_text(encoding="utf-8"))
+    assert body == (
+        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=entry\n"
+    )
     assert vcs.asked == [], "git was consulted about an artifact that has no rule"
 
 

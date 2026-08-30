@@ -18,6 +18,99 @@ the queue begins after `1i`.
 | `1h-derived-tier-rebuild` | the derived tier is provably disposable | 1a, 1b |
 | `1i-operational-schema-versioning` | the unrebuildable store can be upgraded safely | 1b |
 
+## Story 2 decomposition
+
+`stories.yaml` story 2 ("Event log and disclosure ledger") is eleven specs under
+`_bmad-output/specs/spec-pm-ai/stories/`, in this order. Sized to the 1600-token
+spec ceiling: the largest is 1262, the set totals 12,051.
+
+| Spec | Delivers | Depends on |
+|---|---|---|
+| `2a-two-clock-bases` | AD-35's two bases and the implausible-timestamp refusal | — |
+| `2b-flag-implausible-provider-timestamps` | the flag reaches the ledger instead of the exception reaching the batch | 2a |
+| `2c-closed-entry-type-enumeration` | AD-27's second closed enumeration, which never existed | — |
+| `2d-one-entry-renderer` | one definition of a ledger line, replacing four grammars | 2c |
+| `2e-retire-the-free-string-append` | `append_event_log` takes a typed entry; 14 call sites move | 2d |
+| `2f-segment-parser-and-deterministic-fold` | segments become readable; fold by `(occurred_at, entry_id)` | 2d |
+| `2g-open-and-sealed-segments` | exactly one open segment; sealed ones refuse writes | — |
+| `2h-event-log-accessor` | derivation-services rule 3's `EventLog` | 2f, 2g |
+| `2i-disclosure-ledger-append` | the disclosure ledger gains a writer | — |
+| `2j-disclosure-ledger-reads` | AD-17's monthly total and AD-31's period query | 2i |
+| `2k-retrospective-aggregation` | CAP-10's weekly counts by category | 2h |
+
+Decisions taken at the sizing gate (2026-08-29):
+
+- **The entry format is Markdown.** `SPEC.md` CAP-10 said "appends a JSON line"
+  against `storage-contract.md`'s example, the Tier-1 "plaintext Markdown" row,
+  the `%Y-%m.md` segment name and the shipped `_append_batch`. Corrected in
+  `SPEC.md` rather than in the four sources that agreed.
+- **Embeddings moved to story 10a**, with CAP-27's semantic-query clause. Story 2
+  therefore creates no Tier-3 artifact, which strengthens `derivation-services.md`'s
+  case for running `1h` after story 19 rather than next.
+- **Spec ceiling honoured at 1600 tokens**, unlike story 1 where every spec
+  exceeded it (measured: 1710-3895 body tokens, median 2821). The cost is spec
+  count: eleven thin specs rather than six fat ones.
+
+Two defects the sizing pass found, each now owned by the spec that fixes it:
+
+- `disclosure.md` is Tier-1 truth and **absent from `_APPEND_ONLY_KEYS`**
+  (`storage_tiers.py:159`), so `write_artifact` would replace the audit ledger
+  whole. Verified: `is_append_only(APPLICATION, "disclosure.md")` returns `False`.
+  Fixed by `2i`.
+- `_ulid()` (`service.py:215`) returns `"evt_" + secrets.token_hex(10)` — random,
+  **not** time-sortable, though `ARCHITECTURE-SPINE.md:649` calls these ids
+  "sortable by creation time". The fold stays deterministic, but entries sharing
+  an `occurred_at` order arbitrarily. Raised as an Ask First in `2f`.
+
+## Story 2 decomposition
+
+`stories.yaml` story 2 ("Event log and disclosure ledger") is implemented as
+eleven specs, in this order. Embeddings and semantic query — `vector_index/`,
+originally assigned here by `derivation-services.md` — were **deferred to story
+10a** by decision on 2026-08-29: the artifact needs the task manager and the job
+runner that 10a supplies, and story 2 would otherwise define a job nothing can
+trigger. Story 2 therefore creates no Tier-3 artifact at all, which strengthens
+the case already made in `derivation-services.md` for running `1h` after story 19.
+
+| Spec | Delivers | Depends on |
+|---|---|---|
+| `2a-two-clock-bases` | which clock governs which reasoning; an implausible provider timestamp refused | — |
+| `2b-flag-implausible-provider-timestamps` | that refusal reaches the persist path as a flag | 2a, 2d |
+| `2c-closed-entry-type-enumeration` | two ledger vocabularies named for their subjects: `ObservedEventType` (renamed) and `SelfActionType` | — |
+| `2d-one-entry-renderer` | one function producing every ledger line | 2c |
+| `2e-retire-the-free-string-append` | `append_event_log` takes a typed entry; every caller migrates | 2d |
+| `2f-segment-parser-and-deterministic-fold` | segments read back; fold by `(occurred_at, entry_id)` | 2d |
+| `2g-open-and-sealed-segments` | exactly one open segment; sealed months refuse writes | 2e |
+| `2h-event-log-accessor` | derivation-services rule 3, over `event_log/` | 2f, 2g |
+| `2i-disclosure-ledger-append` | the application-scoped ledger gains a writer | 2d |
+| `2j-disclosure-ledger-reads` | AD-17's monthly total and AD-31's period query gain a source | 2i |
+| `2k-retrospective-aggregation` | CAP-10's counts by category, as a weekly trend | 2h |
+| `2l-payloads-reach-tier-one` | a payload's content reaches the ledger, so a Tier-3 index can be rebuilt from Tier 1 | 2d, 2f |
+
+**2b depends on 2d, not on 2a alone.** Recorded here because the review of
+2026-08-29 found the original ordering had 2b writing a flag into a line format
+that 2d then replaces — the work would have been done twice and the two golden
+tests would have disagreed.
+
+## Open, raised by story 2f
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2f-segment-parser-and-deterministic-fold.md`
+  summary: `_ulid()` (`pm_ai/storage/service.py:215`) returns `"evt_" + secrets.token_hex(10)` — random, not time-sortable — while `ARCHITECTURE-SPINE.md:649` says these ids are "sortable by creation time". Either the minting gains a time prefix or the spine drops the claim.
+  evidence: AD-35's fold is `(occurred_at, entry_id)`, and it is deterministic either way because the id is stable once written — so nothing is broken today. The concrete risk is the `id > cursor` pagination the claim invites (incremental indexing in story 18, oldest-first selection in story 19, paged reads in 2h): with random ids that query silently returns the wrong set rather than failing.
+  narrowed 2026-08-29: two arguments first made against a time-sortable id do not hold. It would **not** introduce a third clock — `append_event_log` reads `at` on the line before it mints, so a prefix would re-encode `ingested_at` rather than read a new clock. Its real cost is that `_ulid()` has three call sites and one, the `.part` staging name at `service.py:857`, has no clock in scope. What is also now settled: a time-sortable id would not have delivered arrival order anyway — 48-bit millisecond resolution buckets a fast batch and orders within it by the random tail. Arrival order is file order, and that is now documented on `parse_segment` and tested. So this question is narrowed to one thing only: does anything want `id > cursor` pagination? If not, drop the claim from the spine.
+
+## Surfaced by story 2g, deferred
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2g-open-and-sealed-segments.md`
+  summary: A clock that moves backwards across a month boundary makes every append refuse with `SealedSegment` until wall-clock catches up — for `pm_ai/skills/registry.py`, that lands *after* the skill already executed, so the mutation happened and AD-1's one-entry-per-invocation record is lost rather than merely delayed.
+  evidence: The refusal is correct — the alternative is writing into a month compaction may already have summarised and deleted — but its blast radius is not bounded anywhere. An NTP correction of a few seconds across midnight on the 1st is the realistic trigger. Wants either a bounded tolerance for writes just past a boundary, or a quarantine that holds refused entries until the open segment accepts them. Not story 2g's to decide: compaction (story 19) is what makes a sealed segment genuinely unwritable, and until it exists the refusal protects nothing that is happening yet.
+
+## Surfaced by the story-2 code review (2026-08-30)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2c-closed-entry-type-enumeration.md`
+  summary: AD-27 requires both closed vocabularies to be "versioned so parsers can read historical entries", and nothing implements it. A `GRAMMAR_VERSION` constant was removed by this review because it was written nowhere and read nowhere.
+  evidence: Three review layers found it independently. The design choice is unmade: a version field on every line (honest, but a permanent per-record cost on a file meant to be grepped by hand), a per-segment header line (cheap, but the append rule says every line is a record), or a dated table mapping grammar changes to date ranges (free, but only correct if every change is dated and recorded). It becomes real the first time the entry grammar changes after something has written segments — which has not happened, since nothing is deployed.
+
 ## Deferred to later stories
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`

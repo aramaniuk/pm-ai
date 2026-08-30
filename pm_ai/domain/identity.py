@@ -89,6 +89,34 @@ class DataScope:
         subject = self.project_id or self.person_id
         return f"{self.kind.value}:{subject}" if subject else self.kind.value
 
+    @classmethod
+    def parse(cls, raw: str) -> DataScope:
+        """The inverse of `__str__`, so a scope survives a round trip through text.
+
+        Added with story 2j: the disclosure ledger records which scopes fed a
+        frontier call, and reading that back needs the inverse. Living here rather
+        than in the parser makes the round trip a property of the type — the two
+        halves cannot drift apart in separate modules, which is the failure the
+        `SourceRef` grammar was given one home to avoid.
+
+        The subject lands in whichever field its kind declares, and `__post_init__`
+        refuses the combinations that are not allowed — so a malformed scope is a
+        construction error here rather than a silently wrong scope downstream.
+        """
+        head, _, subject = raw.partition(":")
+        try:
+            kind = ScopeKind(head)
+        except ValueError as unknown:
+            raise ValueError(
+                f"{raw!r} does not name a scope kind. The set is closed: "
+                f"{sorted(k.value for k in ScopeKind)}."
+            ) from unknown
+        if not subject:
+            return cls(kind)
+        if kind is ScopeKind.PROJECT:
+            return cls(kind, project_id=subject)
+        return cls(kind, person_id=subject)
+
 
 class SkillPermission(Enum):
     """What an MCP skill is authorized to do (AD-18).

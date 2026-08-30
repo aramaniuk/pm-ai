@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from ledger_fixtures import entry as _entry, mask_ids
 from pm_ai.domain import CAPTURE_STAGING, DataScope, ScopeKind
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.storage import service as service_module
@@ -343,9 +344,13 @@ def test_appends_are_still_appends(tmp_path):
     not do is change the shape of the write.
     """
     storage = _writer(tmp_path)
-    storage.append_event_log("- [a] first", scope=PERSONAL)
-    storage.append_event_log("- [b] second", scope=PERSONAL)
+    storage.append_event_log(_entry("first"), scope=PERSONAL)
+    storage.append_event_log(_entry("second"), scope=PERSONAL)
 
     segment = storage.paths.resolve(PERSONAL, "event_log/") / f"{NOW:%Y-%m}.md"
-    assert segment.read_text(encoding="utf-8") == "- [a] first\n- [b] second\n"
+    body = mask_ids(segment.read_text(encoding="utf-8"))
+    assert body == (
+        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=first\n"
+        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=second\n"
+    )
     assert not list(segment.parent.glob("*.part")), "an append was staged; it must not be"

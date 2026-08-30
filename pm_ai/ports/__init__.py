@@ -10,7 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pm_ai.domain.events import NormalizedEvent, NormalizedEventType
+from pm_ai.domain.disclosure import DisclosureRecord
+from pm_ai.domain.event_entries import EventEntry
+from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.vcs import TrackingVerdict
@@ -23,7 +25,7 @@ class ConnectorPort(Protocol):
     name: str
     system: str
 
-    def emits(self) -> frozenset[NormalizedEventType]:
+    def emits(self) -> frozenset[ObservedEventType]:
         """The subset of the core taxonomy this connector produces (AD-27)."""
 
     def harvest(self, since: Cursor) -> HarvestResult:
@@ -288,7 +290,15 @@ class StoragePort(Protocol):
     def load_cursor(self, instance: str) -> Cursor: ...
     def save_cursor(self, instance: str, cursor: Cursor, coverage: object) -> None: ...
     def was_executed(self, idempotency_key: str) -> bool: ...
-    def append_event_log(self, entry: str, *, scope: DataScope) -> None: ...
+    def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None: ...
+    # Reads, added with story 2h. The port declared only writes, so an accessor
+    # over `event_log/` had nothing to depend on and would have had to reach the
+    # concrete service — or a path. Two methods rather than one because a
+    # bounded read decides which segments to open and must see their names.
+    def append_disclosure(self, record: DisclosureRecord, *, scope: DataScope | None = None) -> None: ...
+    def read_disclosure(self) -> str: ...
+    def event_log_segments(self, *, scope: DataScope) -> tuple[str, ...]: ...
+    def read_event_log_segment(self, *, scope: DataScope, name: str) -> str: ...
     # AD-20 is two-phase, and this port declared only the one-shot form until
     # 2026-08-22. The key is *claimed* before the outbound call and *settled*
     # after, because recording only on success leaves a crash window in which

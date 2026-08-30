@@ -25,9 +25,11 @@ reached at all — and `pm_ai.platform.vcs` runs the commands.
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Callable
@@ -35,7 +37,21 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from pm_ai.domain.disclosure import assert_writable
+from pm_ai.domain import clocks
+from pm_ai.domain.disclosure import (
+    DISCLOSURE_LEDGER_ARTIFACT,
+    DISCLOSURE_LEDGER_SCOPE,
+    DisclosureRecord,
+    assert_writable,
+    render_disclosure,
+)
+from pm_ai.domain.event_entries import (
+    IMPLAUSIBLE,
+    OCCURRED_AT_FLAG,
+    UNKNOWN_VALUE,
+    EventEntry,
+    render_entry,
+)
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.harvest import Cursor, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
@@ -212,6 +228,53 @@ def _fsync_dir(directory: Path) -> None:
         os.close(descriptor)
 
 
+_SEGMENT_NAME = re.compile(r"^\d{4}-\d{2}\.md$")
+
+
+def _segment_names(directory: Path) -> list[str]:
+    """Every dated segment in `directory`, and nothing else.
+
+    Matched against the naming rule rather than globbed as `*.md`: an editor
+    leftover, a hand-written note or a `.bak` in the log directory must not be
+    able to seal a month, and a `*.md` glob cannot tell them apart.
+    """
+    return [p.name for p in directory.iterdir() if _SEGMENT_NAME.match(p.name)]
+
+
+_WRITER_OWNED_FIELDS = frozenset({"ingested_at", OCCURRED_AT_FLAG})
+"""Fields the single writer sets, which no caller may supply.
+
+Both are stamped onto the entry on the way in, and `dict(entry.fields)` resolves
+a duplicate key to the *last* occurrence — so a caller passing either one would
+override the writer rather than be overridden by it.
+"""
+
+
+def _payload_fields(payload: object) -> tuple[tuple[str, str], ...]:
+    """The payload's own declared fields, for the line (story 2l).
+
+    Derived from the dataclass rather than declared a second time, so a field
+    added to a payload reaches Tier 1 with nothing to update and nothing to
+    forget. Until this existed a commit's `message` and `branch` were never
+    written anywhere, and `event_index.db` — Tier 3, rebuilt from Tier 1 alone —
+    could not have been rebuilt over content that was never recorded.
+
+    Prefixed `p.` so a payload field can never shadow an envelope one. The twenty
+    payload names and the six envelope names are disjoint today; the prefix is
+    what stops that being luck.
+
+    `None` is omitted rather than rendered empty, because absent and empty are
+    different facts — the same rule `occurred_at` follows.
+    """
+    if not dataclasses.is_dataclass(payload):
+        return ()
+    return tuple(
+        (f"p.{field.name}", str(getattr(payload, field.name)))
+        for field in dataclasses.fields(payload)
+        if getattr(payload, field.name) is not None
+    )
+
+
 def _ulid() -> str:
     """Surrogate id, minted here and nowhere else (AD-34)."""
     import secrets
@@ -334,6 +397,22 @@ class AppendToSealedArtifact(RuntimeError):
 
     Not a caller error to be worked around: it means a declaration and a write
     shape disagree, and the resolution is to change one of them.
+    """
+
+
+class SealedSegment(RuntimeError):
+    """A write targeted a segment that is no longer the open one.
+
+    `storage-contract.md` makes the event log "a directory of dated segments,
+    exactly one open and appended to, earlier segments sealed and immutable",
+    and that immutability is what lets compaction replace a whole sealed segment
+    rather than rewrite entries in place. A late append into a summarised month
+    would be deleted by the next compaction with nothing recording that it
+    existed.
+
+    Refused rather than redirected into the open segment: redirecting silently
+    re-dates the record, and the filename is not what carries when the thing
+    happened — `occurred_at` is.
     """
 
 
@@ -726,8 +805,30 @@ class StorageService:
         The directory comes from the resolver, so a scope's event log lands in
         that scope's own tree rather than in a sibling directory named by
         flattening the scope to a string.
+
+        **Which segment is open is derived, never stored.** A stored flag is a
+        second structure describing one fact, and the way it fails here is the
+        one state compaction cannot survive: a sealed segment the writer believes
+        is open. The filenames already carry the answer — the newest is open and
+        every earlier one is sealed — so the directory listing *is* the record.
+
+        Refuses a target older than the newest segment present. Nothing reaches
+        that today, because both append paths pass the current instant; it is the
+        clock moving backwards across a month boundary that gets here, and then
+        the refusal is the point.
         """
-        return self._writable_dir(scope, artifact) / f"{at:%Y-%m}.md"
+        directory = self._writable_dir(scope, artifact)
+        target = directory / f"{at:%Y-%m}.md"
+        newest = max(_segment_names(directory), default=None)
+        if newest is not None and target.name < newest:
+            raise SealedSegment(
+                f"{target.name} is sealed: {newest} is the open segment of "
+                f"{scope}'s {artifact}. An entry appended to a sealed month is "
+                f"deleted by the next compaction with nothing recording that it "
+                f"existed. It is not re-dated into the open segment — the "
+                f"filename does not carry when the thing happened."
+            )
+        return target
 
     # ── Every file operation asks the model first (AD-5, AD-6) ──────────────
     #
@@ -977,9 +1078,108 @@ class StorageService:
             target = target / name
         return self._read(target)
 
-    def append_event_log(self, entry: str, *, scope: DataScope) -> None:
+    def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None:
+        """Append one typed record to `scope`'s open segment, naming it here.
+
+        Took a free string until story 2e, which is how four grammars reached one
+        ledger and why CAP-10's guarantee — an id, a timestamp, an actor and a
+        category on every entry — held only on the harvest path.
+
+        The id is minted here rather than accepted, per AD-34: the surrogate
+        belongs to the writer, and a caller that could supply one could also
+        reuse one. Refused rather than overwritten, because silently discarding
+        a caller's id would leave them believing the ledger holds it.
+        """
+        supplied = {key for key, _ in entry.fields} & _WRITER_OWNED_FIELDS
+        if supplied:
+            raise ValueError(
+                f"entry already carries {sorted(supplied)}, which the writer "
+                f"stamps itself. A duplicate key wins under `dict(fields)`, so a "
+                f"caller's value would silently replace the local clock — the "
+                f"substitution AD-35 forbids."
+            )
+        if entry.entry_id is not None:
+            raise ValueError(
+                f"entry already carries id {entry.entry_id!r}. The `evt_` "
+                f"surrogate is minted by the storage service at persist time "
+                f"(AD-34) — build the entry without one."
+            )
         at = self._at()
-        self._append(self._segment(scope, EVENT_LOG, at), entry.rstrip("\n") + "\n")
+        named = replace(
+            entry,
+            entry_id=_ulid(),
+            # CAP-10 wants a timestamp on *every* entry, and until this was added
+            # the clock read below named the segment file and nothing else — so an
+            # entry arriving here carried an id, a category and an actor, and no
+            # time. `ingested_at` rather than `occurred_at`: the writer knows when
+            # the record reached it and nothing about when the thing happened
+            # (AD-35). It leads the fields on both write paths so a reader finds
+            # it without knowing which one produced the line.
+            fields=(("ingested_at", at.isoformat()),) + entry.fields,
+        )
+        self._append(self._segment(scope, EVENT_LOG, at), render_entry(named) + "\n")
+
+    def append_disclosure(
+        self, record: DisclosureRecord, *, scope: DataScope | None = None
+    ) -> None:
+        """Append one frontier call to the application-scoped ledger (AD-17, AD-38).
+
+        `scope` exists so the refusal is reachable, not so a caller can choose:
+        the record's only home is the application scope, and omitting it takes
+        that. `assert_writable` is what enforces it — a `DisclosureRecord` routed
+        anywhere else raises `CommittedScopeLeak`, because the project scope is
+        git-committed and a record naming personal material would be pushed to
+        the employer's repository. The mechanism built to prove nothing leaked
+        would have been the leak.
+
+        Both refusals run before the directory is resolved with `create`, so a
+        refused write leaves neither a file nor a directory behind.
+        """
+        destination = record.home if scope is None else scope
+        assert_writable(record, scope=destination)  # AD-38
+        # No git check: `assert_writable` above refuses every scope but the
+        # application one, and that scope is outside every working tree. A guard
+        # whose refusal has no reachable path reads as protection and is not.
+        target = self._paths.resolve(
+            destination, DISCLOSURE_LEDGER_ARTIFACT, create=True
+        )
+        self._append(target, render_disclosure(record) + "\n")
+
+    def read_disclosure(self) -> str:
+        """The application ledger's text, or empty if nothing has left the machine.
+
+        Absent is not an error: a machine that has made no frontier call has an
+        honest answer, and creating the file to report it would make "nothing yet"
+        indistinguishable from "the ledger was deleted".
+        """
+        target = self._paths.resolve(DISCLOSURE_LEDGER_SCOPE, DISCLOSURE_LEDGER_ARTIFACT)
+        if not target.exists():
+            return ""
+        return self._read(target).decode("utf-8")
+
+    def event_log_segments(self, *, scope: DataScope) -> tuple[str, ...]:
+        """Every dated segment in `scope`'s event log, oldest first.
+
+        Resolved *without* `create`: asking which segments exist must not bring
+        the directory into being. A scope that has never been written to answers
+        "none", and an empty tuple is that answer — not a new empty directory for
+        the next reader to find and believe in.
+        """
+        directory = self._paths.resolve(scope, EVENT_LOG)
+        if not directory.is_dir():
+            return ()
+        return tuple(sorted(_segment_names(directory)))
+
+    def read_event_log_segment(self, *, scope: DataScope, name: str) -> str:
+        """One segment's text, by the name `event_log_segments` returned.
+
+        Goes through `read_artifact`, so the name is validated as the single path
+        component it becomes — a caller cannot read its way out of the directory
+        with a name this writer never minted.
+        """
+        return self.read_artifact(scope=scope, artifact=EVENT_LOG, name=name).decode(
+            "utf-8"
+        )
 
     # ── Raw captures: outside the tier model, inside a committed scope ───────
     # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on
@@ -1088,7 +1288,7 @@ class StorageService:
     def _append_batch(
         self, events: tuple[NormalizedEvent, ...], at: datetime, *, scope: DataScope
     ) -> PersistResult:
-        persisted = duplicates = 0
+        persisted = duplicates = flagged = 0
         lines: list[str] = []
         for ev in events:
             key = json.dumps(ev.natural_key)  # AD-34 — includes scope
@@ -1100,16 +1300,51 @@ class StorageService:
             self._db.execute("INSERT INTO seen (natural_key) VALUES (?)", (key,))
             stamped = replace(ev, ingested_at=at)  # AD-35 — local clock, assigned here
             assert_writable(stamped, scope=scope)  # AD-38
+
+            # AD-35 — an implausible provider clock is *flagged*, never
+            # backfilled from `ingested_at`: a substituted timestamp is
+            # well-formed, plausible and wrong, and nothing downstream can tell
+            # it from a real one. The refusal is caught rather than propagated
+            # because this batch is all-or-nothing, and one skewed provider must
+            # not discard every other event harvested with it.
+            suspect: tuple[tuple[str, str], ...]
+            try:
+                clocks.validate_occurred_at(stamped.occurred_at, now=at)
+                suspect = ()
+            except clocks.ImplausibleTimestamp:
+                suspect = ((OCCURRED_AT_FLAG, IMPLAUSIBLE),)
+                flagged += 1
+            # The format lives in `render_entry` (story 2d), not here. A writer
+            # that formats its own line is a second grammar in the ledger, which
+            # is what left four of them reaching one file.
             lines.append(
-                f"- [{_ulid()}] {stamped.type.value} "
-                f"actor={stamped.actor.actor_id} src={stamped.source_ref} "
-                f"occurred_at={stamped.occurred_at.isoformat() if stamped.occurred_at else 'unknown'} "
-                f"ingested_at={at.isoformat()} authored_by={stamped.authored_by.value}"
+                render_entry(
+                    EventEntry(
+                        entry_id=_ulid(),
+                        category=stamped.type,
+                        actor=stamped.actor.actor_id,
+                        fields=(
+                            ("ingested_at", at.isoformat()),
+                            ("src", str(stamped.source_ref)),
+                            (
+                                "occurred_at",
+                                stamped.occurred_at.isoformat()
+                                if stamped.occurred_at
+                                else UNKNOWN_VALUE,
+                            ),
+                            ("authored_by", stamped.authored_by.value),
+                        )
+                        + suspect
+                        + _payload_fields(stamped.payload),
+                    )
+                )
             )
             persisted += 1
         if lines:
             self._append(self._segment(scope, EVENT_LOG, at), "\n".join(lines) + "\n")
-        return PersistResult(persisted=persisted, duplicates=duplicates, at=at)
+        return PersistResult(
+            persisted=persisted, duplicates=duplicates, at=at, flagged=flagged
+        )
 
     # ── Tier 2: operational, never rebuilt (AD-3) ────────────────────────────
 

@@ -84,6 +84,28 @@ CASES = {
         "_assert_code_keys_are_declared",
         "m.GITIGNORED = {k: frozenset({'invented_by_a_rule/'}) for k in m.GITIGNORED}",
     ),
+    "a_value_in_both_ledger_vocabularies": (
+        "pm_ai.domain.event_entries",
+        "_assert_vocabularies_agree",
+        # Story 2c's disjointness rule: one occurrence, one member. Doctored by
+        # claiming a connector's value as a pm-ai action, which is the collision
+        # that would leave a parser unable to say which subject a line had.
+        "m.SELF_ACTION_VALUES = {'commit_pushed'}",
+    ),
+    "a_self_action_registered_as_an_event_payload": (
+        "pm_ai.domain.event_entries",
+        "_assert_vocabularies_agree",
+        # The third branch: a pm-ai action constructible as a harvested event,
+        # which `persist_events` would then dedup away.
+        "import pm_ai.domain.events as ev;"
+        " m.PAYLOAD_FOR = dict(m.PAYLOAD_FOR);"
+        " m.PAYLOAD_FOR[m.SelfActionType.COMPACTION] = ev.CommitPayload",
+    ),
+    "a_self_action_with_no_payload": (
+        "pm_ai.domain.event_entries",
+        "_assert_vocabularies_agree",
+        "m.SELF_ACTION_FIELDS = {}",
+    ),
     "two_lifecycles_sharing_a_member_name": (
         "pm_ai.domain.lifecycle",
         "_assert_lifecycles_are_distinct",

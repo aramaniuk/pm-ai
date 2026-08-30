@@ -15,9 +15,12 @@ Imports nothing from `pm_ai` except sibling domain modules (AD-30).
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from datetime import datetime
 
+from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, render_value
 from pm_ai.domain.identity import DataScope, ScopeKind
 
 # AD-38: one file, outside every repository. Both AD-31's "what has left this
@@ -25,6 +28,19 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 # them answerable — spread across N per-scope logs, neither query has a source.
 DISCLOSURE_LEDGER_SCOPE = DataScope(ScopeKind.APPLICATION)
 DISCLOSURE_LEDGER_PATH = "~/.pm-ai/disclosure.md"
+DISCLOSURE_LEDGER_ARTIFACT = "disclosure.md"
+_SCOPE_SEPARATOR = ","
+NO_DESTINATION = "none"
+"""What an absent destination renders as — spelled once, read by the parser."""
+
+
+class MalformedDisclosure(ValueError):
+    """A complete line in the ledger that is not a disclosure record.
+
+    Distinct from an unterminated tail, which is a write in progress and is
+    dropped: a terminated line that will not parse is corruption in an audit
+    trail, and an audit trail that quietly skips what it cannot read is not one.
+    """
 
 
 class CommittedScopeLeak(ValueError):
@@ -130,3 +146,83 @@ def assert_citation_legal(*, cited: DataScope, into: DataScope) -> None:
             f"{cited}. The citation would publish, by reference, exactly what the "
             f"scope boundary exists to keep out (AD-38)."
         )
+
+
+def render_disclosure(record: DisclosureRecord) -> str:
+    """One frontier call as one Markdown line, for `~/.pm-ai/disclosure.md`.
+
+    **No entry id and no category token.** Every line in this file is a frontier
+    call, so there is nothing to tag — the file is the vocabulary. Giving the
+    record a `LedgerCategory` member instead would have created a spelling that
+    `append_event_log` accepts into *any* scope, and the leak guard runs only on
+    the batch path (`service.py:1209`) — so a disclosure naming personal material
+    could be written into a git-committed project log with nothing refusing it.
+    That is the leak AD-38 exists to prevent, reintroduced through the vocabulary.
+
+    The value encoding is shared with the event log's, so one tokenizer reads
+    both files. Sharing the encoding is not sharing the vocabulary.
+
+    Every field is rendered, including a zero cost and an absent destination.
+    AD-17's monthly total has to be recomputable from these lines alone; a field
+    omitted because it was empty is a field a reader cannot distinguish from one
+    that was never written.
+    """
+    if not math.isfinite(record.estimated_cost_usd):
+        raise MalformedDisclosure(
+            f"cost {record.estimated_cost_usd!r} is not a finite number. A month "
+            f"containing it totals to nan, and `nan > target` is False — an "
+            f"unbudgeted month would read as compliant."
+        )
+    negative = {
+        name: value
+        for name, value in (
+            ("input_tokens", record.input_tokens),
+            ("output_tokens", record.output_tokens),
+        )
+        if value < 0
+    }
+    if negative:
+        raise MalformedDisclosure(
+            f"{negative} is negative. A usage total is a sum, so a negative "
+            f"count silently offsets real calls rather than adding to them."
+        )
+    named = sorted(str(scope) for scope in record.contributing_scopes)
+    # A scope id carrying the separator would write cleanly and then break every
+    # later read of the whole file — `parse_disclosure_line` splits on it, and
+    # the second half names no scope kind. In an append-only audit ledger that is
+    # unrepairable short of hand-editing, so the writer refuses a line it could
+    # not read back.
+    poisoned = [name for name in named if _SCOPE_SEPARATOR in name]
+    if poisoned:
+        raise MalformedDisclosure(
+            f"scope {poisoned} contains {_SCOPE_SEPARATOR!r}, which separates "
+            f"scopes in this field. The line would parse back as different "
+            f"scopes than it recorded, and every later read of the ledger would "
+            f"fail on it."
+        )
+    scopes = _SCOPE_SEPARATOR.join(named)
+    destination = NO_DESTINATION if record.destination is None else str(record.destination)
+    fields = (
+        ("at", record.at.isoformat()),
+        ("task_class", record.task_class),
+        ("model", record.model),
+        ("input_tokens", str(record.input_tokens)),
+        ("output_tokens", str(record.output_tokens)),
+        # `repr` of a float round-trips exactly in Python; a fixed number of
+        # decimal places would silently round a sub-cent call to zero, and a
+        # month of those sums to a figure the ledger cannot justify.
+        ("cost_usd", repr(record.estimated_cost_usd)),
+        ("scopes", scopes),
+        ("destination", destination),
+    )
+    parts = [
+        f"{key}={render_value(value, where=f'field {key!r}')}" for key, value in fields
+    ]
+    line = "- " + " ".join(parts)
+    if len(line) > MAX_ENTRY_LENGTH:
+        raise MalformedDisclosure(
+            f"the rendered record is {len(line)} characters, beyond the "
+            f"{MAX_ENTRY_LENGTH} bound. `disclosure.md` is read and grepped by "
+            f"hand on the same terms as a segment."
+        )
+    return line

@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from ledger_fixtures import entry as _entry, mask_ids
 from pm_ai.app.wiring import build
 from pm_ai.storage.service import AppendToSealedArtifact
 from pm_ai.domain.storage_tiers import EVENT_LOG
@@ -383,8 +384,8 @@ def test_the_debug_flag_writes_an_event_log_entry(tmp_path):
     daemon = _daemon(tmp_path, disabled=True)
 
     body = _event_log_text(daemon)
-    assert "encryption disabled" in body
-    assert "[security]" in body, "the entry must be findable by category"
+    assert "protection=encryption-at-rest" in body
+    assert " security actor=" in body, "the entry must be findable by category"
 
 
 def test_encryption_on_announces_nothing_at_all(tmp_path, capsys):
@@ -491,8 +492,8 @@ def test_appending_to_a_plaintext_ledger_still_works(tmp_path):
     """
     daemon = _daemon(tmp_path, disabled=False)
 
-    daemon.storage.append_event_log("- [test] a line", scope=daemon.scope)
-    daemon.storage.append_event_log("- [test] another", scope=daemon.scope)
+    daemon.storage.append_event_log(_entry("a line"), scope=daemon.scope)
+    daemon.storage.append_event_log(_entry("another"), scope=daemon.scope)
 
     body = _event_log_text(daemon, scope=daemon.scope)
-    assert body.count("[test]") == 2, "appending replaced rather than appended"
+    assert body.count("actor=test") == 2, "appending replaced rather than appended"

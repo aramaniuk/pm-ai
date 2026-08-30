@@ -25,7 +25,7 @@ from pm_ai.domain.events import (
     CommitPayload,
     MessagePayload,
     NormalizedEvent,
-    NormalizedEventType,
+    ObservedEventType,
     Provenance,
 )
 from pm_ai.domain.harvest import Cursor
@@ -46,7 +46,7 @@ def daemon(tmp_path):
 def _commit_event(sha: str, scope: DataScope = PROJECT) -> NormalizedEvent:
     return NormalizedEvent(
         scope=scope,
-        type=NormalizedEventType.COMMIT_PUSHED,
+        type=ObservedEventType.COMMIT_PUSHED,
         source_ref=SourceRef.parse(f"gitlab:alpha:commit:{sha}"),
         actor=resolve_actor(system="gitlab", handle="alex@example.com"),
         occurred_at=NOW,
@@ -87,7 +87,7 @@ def test_our_own_write_harvested_back_is_not_evidence(daemon):
     harvested = (
         NormalizedEvent(
             scope=PROJECT,
-            type=NormalizedEventType.MESSAGE_POSTED,
+            type=ObservedEventType.MESSAGE_POSTED,
             source_ref=SourceRef.parse(f"gitlab:alpha:note:{invocation.external_id}"),
             actor=resolve_actor(system="gitlab", handle="alex@example.com"),
             occurred_at=NOW,
@@ -121,7 +121,7 @@ def test_bot_identity_attributes_independently(daemon):
     """AD-36 mechanism 3 — two mechanisms, because one of them will have gaps."""
     event = NormalizedEvent(
         scope=PROJECT,
-        type=NormalizedEventType.COMMIT_PUSHED,
+        type=ObservedEventType.COMMIT_PUSHED,
         source_ref=SourceRef.parse("gitlab:alpha:commit:deadbe"),
         actor=PM_AI,
         occurred_at=NOW,

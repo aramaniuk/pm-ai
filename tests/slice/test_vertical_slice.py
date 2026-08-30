@@ -170,7 +170,7 @@ def test_mutation_writes_one_event_log_entry(daemon):
         idempotency_key="idem_log",
     )
     body = next(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md")).read_text()
-    assert body.count("[skill] gitlab.post_comment") == 1
+    assert body.count("skill_invoked actor=gitlab.post_comment") == 1
 
 
 def test_sub_resource_target_is_rejected_so_the_lock_is_real(daemon):

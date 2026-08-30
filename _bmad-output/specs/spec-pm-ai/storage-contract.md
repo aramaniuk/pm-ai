@@ -112,9 +112,10 @@ Added 2026-08-27. Compaction is the only job that destroys Tier 1; everything el
 **Every compaction is recorded in the open segment of the same scope's event log**, in the ordinary entry format, naming each replaced segment with the MD5 it had when deleted, and the summary that replaced it:
 
 ```
-- [01J9Q4T…] COMPACTION actor=pm-ai src=event_log/2026-06
-  replaced=2026-06.md:d41d8cd9… summary=2026-06-milestone.md:9b2c77e0…
+- [01J9Q4T…] COMPACTION actor=pm-ai src=event_log/2026-06 replaced=2026-06.md:d41d8cd9… summary=2026-06-milestone.md:9b2c77e0…
 ```
+
+**One record is one line.** Corrected 2026-08-29: this example was written wrapped across two lines, and story 2d found that the wrapping contradicts the append rule above. A reader landing between the two lines sees a *complete*, newline-terminated line that is not a complete record — so "a record without its terminating newline is not a record" would stop telling a fragment from a whole, which is the entire crash-safety property of an append-only segment. A compaction replacing several segments would also wrap arbitrarily, so the shape could never have been load-bearing. `render_entry` refuses an embedded newline for this reason, and long values are quoted rather than broken.
 
 The **open** segment specifically, because compaction deletes only *sealed* segments — a record written into a sealed one is deletable by the next compaction. Each scope records into its own event log, since each holds one.
 

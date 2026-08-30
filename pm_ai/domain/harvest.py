@@ -47,3 +47,11 @@ class PersistResult:
     persisted: int
     duplicates: int
     at: datetime
+    flagged: int = 0
+    """How many of the persisted events carried a provider clock we cannot believe.
+
+    Reported rather than raised, because AD-35 says an implausible `occurred_at`
+    is flagged and the batch is all-or-nothing. Without a count, a connector whose
+    clock is wrong flags every event it emits and nothing anywhere says so — the
+    entries are in the ledger and no one is looking at them.
+    """
