@@ -20,7 +20,7 @@ choice, which is why these parameters carry no clock in their names and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pm_ai.domain.disclosure import DisclosureRecord, MalformedDisclosure
 from pm_ai.domain.event_entries import scan_fields
@@ -100,6 +100,21 @@ def parse_disclosure_line(line: str) -> DisclosureRecord:
         raise MalformedDisclosure(f"{line!r}: {refusal}") from refusal
 
 
+def _assert_comparable(bound: datetime | None, *, name: str) -> None:
+    """A naive bound raises `TypeError` mid-scan; refused here instead.
+
+    An audit query that crashes answers nothing, and "what left this machine" is
+    the question least well served by an exception from inside a loop.
+    """
+    if bound is None:
+        return
+    if bound.tzinfo is None or bound.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{name}={bound!r} is not aware UTC. Every `at` in the ledger is, so "
+            f"this bound cannot be compared against them."
+        )
+
+
 class DisclosureLedger:
     """The two aggregates AD-17 and AD-31 name, over the one file that holds them."""
 
@@ -115,6 +130,9 @@ class DisclosureLedger:
         means the whole of the 15th, and an exclusive bound silently drops the
         record written at the instant asked about.
         """
+        _assert_comparable(since, name="since")
+        _assert_comparable(until, name="until")
+
         found = parse_ledger(self._storage.read_disclosure())
         if since is None and until is None:
             return found

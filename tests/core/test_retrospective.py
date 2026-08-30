@@ -149,3 +149,15 @@ def test_an_empty_log_is_an_empty_trend_not_an_error():
     result = weekly(_log(), scope=SCOPE)
     assert result.weeks == ()
     assert result.unplaceable == 0
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_a_pm_ai_action_with_no_usable_clock_is_not_filed_as_unplaceable():
+    """`unplaceable` documents itself as counting observed events only. A
+    self-action with an unreadable `ingested_at` was inflating it."""
+    log = _log(_entry(SelfActionType.SECURITY, ingested_at="not-a-date"))
+    result = weekly(log, scope=SCOPE)
+    assert result.unplaceable == 0
+    assert result.undated_actions == 1

@@ -99,14 +99,6 @@ def test_the_refusal_names_the_value_and_the_closed_set():
     assert "compaction" in message
 
 
-# ── Versioned, so a historical segment stays readable ────────────────────────
-
-
-def test_the_grammar_version_is_recorded():
-    assert isinstance(ee.GRAMMAR_VERSION, int)
-    assert ee.GRAMMAR_VERSION >= 1
-
-
 # ── The guards fire, and are not bare asserts ────────────────────────────────
 
 

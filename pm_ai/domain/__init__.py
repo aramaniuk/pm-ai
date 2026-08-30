@@ -17,7 +17,6 @@ from pm_ai.domain.disclosure import (
     assert_writable,
 )
 from pm_ai.domain.event_entries import (
-    GRAMMAR_VERSION,
     CompactionPayload,
     InconsistentVocabulary,
     LedgerCategory,
@@ -126,7 +125,6 @@ __all__ = [
     "GITIGNORED",
     "GITIGNORE_FILENAME",
     "GIT_SUBCOMMANDS",
-    "GRAMMAR_VERSION",
     "InconsistentVocabulary",
     "LedgerCategory",
     "MalformedLayout",

@@ -104,6 +104,12 @@ tests would have disagreed.
   summary: A clock that moves backwards across a month boundary makes every append refuse with `SealedSegment` until wall-clock catches up — for `pm_ai/skills/registry.py`, that lands *after* the skill already executed, so the mutation happened and AD-1's one-entry-per-invocation record is lost rather than merely delayed.
   evidence: The refusal is correct — the alternative is writing into a month compaction may already have summarised and deleted — but its blast radius is not bounded anywhere. An NTP correction of a few seconds across midnight on the 1st is the realistic trigger. Wants either a bounded tolerance for writes just past a boundary, or a quarantine that holds refused entries until the open segment accepts them. Not story 2g's to decide: compaction (story 19) is what makes a sealed segment genuinely unwritable, and until it exists the refusal protects nothing that is happening yet.
 
+## Surfaced by the story-2 code review (2026-08-30)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2c-closed-entry-type-enumeration.md`
+  summary: AD-27 requires both closed vocabularies to be "versioned so parsers can read historical entries", and nothing implements it. A `GRAMMAR_VERSION` constant was removed by this review because it was written nowhere and read nowhere.
+  evidence: Three review layers found it independently. The design choice is unmade: a version field on every line (honest, but a permanent per-record cost on a file meant to be grepped by hand), a per-segment header line (cheap, but the append rule says every line is a record), or a dated table mapping grammar changes to date ranges (free, but only correct if every change is dated and recorded). It becomes real the first time the entry grammar changes after something has written segments — which has not happened, since nothing is deployed.
+
 ## Deferred to later stories
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`

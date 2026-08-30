@@ -727,7 +727,7 @@ def test_a_stray_file_in_the_log_directory_is_not_a_segment(tmp_path):
     (log / "9999-99.md.bak").write_text("nor this\n")
 
     d.storage.append_event_log(_test_entry("first"), scope=d.scope)
-    assert f"first" in (log / f"{NOW:%Y-%m}.md").read_text()
+    assert "first" in (log / f"{NOW:%Y-%m}.md").read_text()
 
 
 # ── Story 2h: the accessor against the real writer, not only the fake ───────
@@ -848,3 +848,30 @@ def test_the_retrospective_counts_what_the_real_writer_wrote(daemon):
     result = weekly(log, scope=daemon.scope)
     assert result.unplaceable == 0, "a pm-ai action is placed by its own clock"
     assert sum(w["security"] for w in result.weeks) == 2
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_an_entry_carrying_the_writers_own_field_is_refused(daemon):
+    """AD-35 makes `ingested_at` storage's to assign. The writer prepends its
+    stamp, so a caller's duplicate wins under `dict(fields)` — the substitution
+    the whole clock rule forbids, reachable through the public port."""
+    entry = EventEntry(
+        category=SelfActionType.SECURITY,
+        actor="test",
+        fields=(("ingested_at", "1999-01-01T00:00:00+00:00"),),
+    )
+    with pytest.raises(ValueError) as caught:
+        daemon.storage.append_event_log(entry, scope=daemon.scope)
+    assert "ingested_at" in str(caught.value)
+
+
+def test_an_entry_carrying_the_writers_flag_field_is_refused(daemon):
+    entry = EventEntry(
+        category=SelfActionType.SECURITY,
+        actor="test",
+        fields=(("occurred_at_flag", "implausible"),),
+    )
+    with pytest.raises(ValueError):
+        daemon.storage.append_event_log(entry, scope=daemon.scope)

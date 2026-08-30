@@ -29,6 +29,7 @@ from pm_ai.domain.event_entries import (
     LedgerCategory,
     MalformedEntry,
     SelfActionType,
+    UnknownCategory,
     category,
     scan_fields,
 )
@@ -63,6 +64,12 @@ def parse_segment(text: str, *, source: str = "<segment>") -> tuple[EventEntry, 
             entries.append(parse_line(line))
         except MalformedEntry as refusal:
             raise MalformedEntry(f"{source} line {number}: {refusal}") from refusal
+        except UnknownCategory as refusal:
+            # Caught alongside `MalformedEntry` because a category retired from
+            # the vocabulary is the corruption most likely to appear in an *old*
+            # segment — and until this, it was the one refusal that could not
+            # tell an operator which file or line it came from.
+            raise UnknownCategory(f"{source} line {number}: {refusal}") from refusal
     return tuple(entries)
 
 
@@ -77,6 +84,14 @@ def parse_line(line: str) -> EventEntry:
     if closing == -1:
         raise MalformedEntry(f"{line!r} has no closing bracket on its entry id.")
     entry_id = line[3:closing]
+    if not entry_id:
+        # `render_entry` refuses to write this, so accepting it here would let
+        # the parser admit a record the writer cannot produce — and empty ids
+        # collide with one another in `fold`'s tiebreaker.
+        raise MalformedEntry(
+            f"{line!r} has an empty entry id. The writer mints one on every "
+            f"record (AD-34), so a line without one was not written by it."
+        )
 
     rest = line[closing + 1 :]
     if not rest.startswith(" "):

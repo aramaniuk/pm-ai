@@ -234,6 +234,15 @@ def _segment_names(directory: Path) -> list[str]:
     return [p.name for p in directory.iterdir() if _SEGMENT_NAME.match(p.name)]
 
 
+_WRITER_OWNED_FIELDS = frozenset({"ingested_at", "occurred_at_flag"})
+"""Fields the single writer sets, which no caller may supply.
+
+Both are stamped onto the entry on the way in, and `dict(entry.fields)` resolves
+a duplicate key to the *last* occurrence — so a caller passing either one would
+override the writer rather than be overridden by it.
+"""
+
+
 def _ulid() -> str:
     """Surrogate id, minted here and nowhere else (AD-34)."""
     import secrets
@@ -1049,6 +1058,14 @@ class StorageService:
         reuse one. Refused rather than overwritten, because silently discarding
         a caller's id would leave them believing the ledger holds it.
         """
+        supplied = {key for key, _ in entry.fields} & _WRITER_OWNED_FIELDS
+        if supplied:
+            raise ValueError(
+                f"entry already carries {sorted(supplied)}, which the writer "
+                f"stamps itself. A duplicate key wins under `dict(fields)`, so a "
+                f"caller's value would silently replace the local clock — the "
+                f"substitution AD-35 forbids."
+            )
         if entry.entry_id is not None:
             raise ValueError(
                 f"entry already carries id {entry.entry_id!r}. The `evt_` "

@@ -20,7 +20,7 @@ sees.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pm_ai.core import ledger
 from pm_ai.domain.event_entries import EventEntry
@@ -75,6 +75,9 @@ class EventLog:
         excluded from a bounded one: the range asks a question that entry cannot
         answer, and guessing either way is worse than leaving it out.
         """
+        _assert_comparable(ingested_since, name="ingested_since")
+        _assert_comparable(ingested_until, name="ingested_until")
+
         entries: list[EventEntry] = []
         for name in self._storage.event_log_segments(scope=scope):
             if not _segment_overlaps(name, ingested_since, ingested_until):
@@ -88,6 +91,22 @@ class EventLog:
             entry
             for entry in entries
             if _within(entry, ingested_since, ingested_until)
+        )
+
+
+def _assert_comparable(bound: datetime | None, *, name: str) -> None:
+    """A naive bound is a caller error, refused here rather than mid-scan.
+
+    Comparing it against a stored aware `ingested_at` raises `TypeError` from
+    inside the loop, which surfaces as the read *failing* rather than answering —
+    and `_within` catches only `ValueError`, so nothing absorbed it.
+    """
+    if bound is None:
+        return
+    if bound.tzinfo is None or bound.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{name}={bound!r} is not aware UTC. Every `ingested_at` in the "
+            f"ledger is, so this bound cannot be compared against them."
         )
 
 

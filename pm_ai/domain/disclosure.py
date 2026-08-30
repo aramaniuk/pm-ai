@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from pm_ai.domain.event_entries import render_value
+from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, render_value
 from pm_ai.domain.identity import DataScope, ScopeKind
 
 # AD-38: one file, outside every repository. Both AD-31's "what has left this
@@ -27,6 +27,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 DISCLOSURE_LEDGER_SCOPE = DataScope(ScopeKind.APPLICATION)
 DISCLOSURE_LEDGER_PATH = "~/.pm-ai/disclosure.md"
 DISCLOSURE_LEDGER_ARTIFACT = "disclosure.md"
+_SCOPE_SEPARATOR = ","
 
 
 class MalformedDisclosure(ValueError):
@@ -162,7 +163,21 @@ def render_disclosure(record: DisclosureRecord) -> str:
     omitted because it was empty is a field a reader cannot distinguish from one
     that was never written.
     """
-    scopes = ",".join(sorted(str(scope) for scope in record.contributing_scopes))
+    named = sorted(str(scope) for scope in record.contributing_scopes)
+    # A scope id carrying the separator would write cleanly and then break every
+    # later read of the whole file — `parse_disclosure_line` splits on it, and
+    # the second half names no scope kind. In an append-only audit ledger that is
+    # unrepairable short of hand-editing, so the writer refuses a line it could
+    # not read back.
+    poisoned = [name for name in named if _SCOPE_SEPARATOR in name]
+    if poisoned:
+        raise MalformedDisclosure(
+            f"scope {poisoned} contains {_SCOPE_SEPARATOR!r}, which separates "
+            f"scopes in this field. The line would parse back as different "
+            f"scopes than it recorded, and every later read of the ledger would "
+            f"fail on it."
+        )
+    scopes = _SCOPE_SEPARATOR.join(named)
     destination = "none" if record.destination is None else str(record.destination)
     fields = (
         ("at", record.at.isoformat()),
@@ -180,4 +195,11 @@ def render_disclosure(record: DisclosureRecord) -> str:
     parts = [
         f"{key}={render_value(value, where=f'field {key!r}')}" for key, value in fields
     ]
-    return "- " + " ".join(parts)
+    line = "- " + " ".join(parts)
+    if len(line) > MAX_ENTRY_LENGTH:
+        raise MalformedDisclosure(
+            f"the rendered record is {len(line)} characters, beyond the "
+            f"{MAX_ENTRY_LENGTH} bound. `disclosure.md` is read and grepped by "
+            f"hand on the same terms as a segment."
+        )
+    return line

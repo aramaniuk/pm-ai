@@ -202,3 +202,37 @@ def test_the_open_segment_is_the_newest_present():
 def test_an_empty_log_has_no_open_segment():
     log, _ = _log()
     assert log.open_segment(scope=SCOPE) is None
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_a_naive_bound_is_refused_rather_than_crashing_mid_scan():
+    """`_within` caught only ValueError, so a naive bound raised TypeError out of
+    the middle of the read — the audit query failing instead of answering."""
+    log, _ = _log({SCOPE: {"2026-08.md": _line("evt_1", "2026-08-15T00:00:00+00:00", "x") + "\n"}})
+    with pytest.raises(ValueError) as caught:
+        log.read(scope=SCOPE, ingested_since=datetime(2026, 8, 1))
+    assert "ingested_since" in str(caught.value)
+
+
+def test_a_naive_upper_bound_is_refused_too():
+    log, _ = _log({SCOPE: {"2026-08.md": _line("evt_1", "2026-08-15T00:00:00+00:00", "x") + "\n"}})
+    with pytest.raises(ValueError):
+        log.read(scope=SCOPE, ingested_until=datetime(2026, 8, 31))
+
+
+def test_an_upper_bound_excludes_a_later_entry_and_its_segment():
+    """Deleting both `until` comparisons left the suite green: no test drove the
+    upper bound on its own."""
+    log, storage = _log(
+        {
+            SCOPE: {
+                "2026-07.md": _line("evt_1", "2026-07-15T00:00:00+00:00", "july") + "\n",
+                "2026-08.md": _line("evt_2", "2026-08-15T00:00:00+00:00", "august") + "\n",
+            }
+        }
+    )
+    read = log.read(scope=SCOPE, ingested_until=datetime(2026, 7, 31, tzinfo=timezone.utc))
+    assert [dict(e.fields)["detail"] for e in read] == ["july"]
+    assert storage.opened == ["2026-07.md"]

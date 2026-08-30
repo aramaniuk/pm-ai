@@ -132,3 +132,26 @@ def test_a_scope_survives_a_round_trip_through_text(scope):
 def test_an_unknown_scope_kind_is_refused():
     with pytest.raises(ValueError):
         DataScope.parse("employer:acme")
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_a_scope_containing_the_separator_is_refused_at_write():
+    """A comma in a project id would write fine and poison the ledger forever:
+    every later read fails, and an append-only file cannot be repaired."""
+    from pm_ai.domain.disclosure import MalformedDisclosure
+
+    record = _record(
+        contributing_scopes=frozenset({DataScope(ScopeKind.PROJECT, project_id="a,b")})
+    )
+    with pytest.raises(MalformedDisclosure) as caught:
+        render_disclosure(record)
+    assert "a,b" in str(caught.value)
+
+
+def test_a_disclosure_line_has_a_length_bound():
+    from pm_ai.domain.disclosure import MalformedDisclosure
+
+    with pytest.raises(MalformedDisclosure):
+        render_disclosure(_record(task_class="x" * 5000))

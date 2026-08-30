@@ -22,7 +22,7 @@ review_loop_iteration: 0
 - **`SelfActionType` — pm-ai, acting.** Subject: pm-ai itself, its only witness. A member qualifies only if it has no external referent, is never evidence, and is never deduplicated — each occurrence is a distinct fact about the machine and all must survive.
 - The membership test is one question: **did this happen, or did pm-ai do it?** A candidate that seems to be both is two records — what `authored_by` exists to distinguish.
 - Each enumeration owns its payload registry, so an operational entry is typed rather than free text.
-- Versioned, so a segment written under an earlier vocabulary stays readable — AD-27's stated reason for asking.
+- AD-27 also asks that both vocabularies be versioned. **Not delivered by this story** — see the Change Log; a constant that nothing writes or reads is not versioning, and choosing where the version lives is a design decision.
 - Pure domain, sibling imports only (AD-30).
 
 **Ask First:** Adding a member to either enumeration. AD-27 requires each addition to be reviewed for overlap; the roles make that review answerable, but the answer is a human's.
@@ -37,7 +37,6 @@ review_loop_iteration: 0
 | Unregistered category | `"security_note"` | refused, message listing the closed set | `UnknownCategory` |
 | A value in both enumerations | any overlap between the two value sets | refused at import — one occurrence, one member | `AssertionError` |
 | Member lacks a payload | absent from its enum's registry | refused at import | `AssertionError` |
-| Historical grammar | an entry stamped with an earlier version | recognised as readable; the version is retrievable | N/A |
 
 </frozen-after-approval>
 
@@ -61,9 +60,10 @@ review_loop_iteration: 0
 - Given both enumerations, when their values are intersected, then the result is empty — no occurrence can be spelled two ways.
 - Given `SelfActionType`, when each member is checked against the connector taxonomy test at `test_domain_invariants.py:106`, then none is declarable by a connector — the role is enforced, not documented.
 - Given `lint-imports` runs, then this module imports nothing outside `pm_ai.domain`.
-- Given a member is added later, then the grammar version records the change.
 
 ## Spec Change Log
+
+- **2026-08-30, code review: the versioning row was fiction and is withdrawn.** `GRAMMAR_VERSION = 1` shipped as a module constant that nothing wrote into a line and nothing consulted while parsing, so a segment written under one grammar was byte-indistinguishable from one written under any other. Its only test asserted the constant was an integer — it could not fail for the reason AD-27 asks for the field, and three review layers found it independently. Removed rather than back-filled: stamping a version on every line forever is a real cost, and the choice between that, a per-segment header, and a dated grammar table is a design decision no story has taken. AD-27's versioning clause is now openly unmet and recorded in deferred-work, which is better than a constant that reads as satisfying it.
 
 - **Rejected alternative, recorded in full.** Not because one list could drift from another — because `ObservedEventType` is the type tag of `NormalizedEvent`, whose envelope requires a `SourceRef` and derives `natural_key` from it (`events.py:158`). A `COMPACTION` has no external referent, and `persist_events` skips any row whose natural key it has seen, so the second compaction in a scope would vanish from the audit trail. One enum remains possible with two record classes; it costs three runtime exclusion lists to do what one type boundary does for free (see the change log).
 

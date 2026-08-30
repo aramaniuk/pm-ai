@@ -47,6 +47,14 @@ class WeekBucket:
 class Retrospective:
     weeks: tuple[WeekBucket, ...]
     unplaceable: int
+    undated_actions: int = 0
+    """pm-ai actions whose own clock is missing or unreadable.
+
+    Counted apart from `unplaceable` rather than folded into it, because the two
+    are different failures: an observed event with no provider clock is data we
+    were given badly, and this is a record *we* wrote without stamping. Merging
+    them would make the first figure grow for a reason it does not describe.
+    """
     """Observed events whose provider clock is absent or unbelievable.
 
     Reported rather than dropped: a retrospective that quietly omits records is
@@ -69,18 +77,23 @@ def weekly(log: EventLog, *, scope: DataScope) -> Retrospective:
     able to disagree with every other tool the PM reads the same dates in.
     """
     placed: dict[tuple[int, int], dict[str, int]] = {}
-    unplaceable = 0
+    unplaceable = undated_actions = 0
 
     for entry in log.read(scope=scope):
         at = _placement(entry)
         if at is None:
-            unplaceable += 1
+            if isinstance(entry.category, SelfActionType):
+                undated_actions += 1
+            else:
+                unplaceable += 1
             continue
         key = (at.isocalendar().year, at.isocalendar().week)
         bucket = placed.setdefault(key, {})
         bucket[entry.category.value] = bucket.get(entry.category.value, 0) + 1
 
-    return Retrospective(weeks=_fill(placed), unplaceable=unplaceable)
+    return Retrospective(
+        weeks=_fill(placed), unplaceable=unplaceable, undated_actions=undated_actions
+    )
 
 
 def _placement(entry: EventEntry) -> datetime | None:

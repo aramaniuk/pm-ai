@@ -56,7 +56,8 @@ def test_a_malformed_complete_record_is_refused_with_its_line_number():
         ledger.parse_segment(ONE + "this is not an entry\n", source="2026-08.md")
     message = str(caught.value)
     assert "2026-08.md" in message
-    assert "2" in message
+    # Not `"2" in message` — that passed via the `2026` in the filename.
+    assert "line 2" in message
 
 
 def test_a_category_outside_both_vocabularies_is_refused():
@@ -149,3 +150,28 @@ def test_sample_entries_is_foldable():
     assert ledger.fold(ledger.sample_entries()) == ledger.fold(
         list(reversed(ledger.sample_entries()))
     )
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_an_empty_entry_id_is_refused_by_the_parser():
+    """Parse must not accept what render refuses: empty ids collide in `fold`."""
+    with pytest.raises(MalformedEntry):
+        ledger.parse_line("- [] security actor=x")
+
+
+def test_an_unknown_category_refusal_names_the_segment_and_the_line():
+    """`UnknownCategory` is the corruption most likely in an old segment, and it
+    was the one refusal that could not say where it came from."""
+    with pytest.raises((UnknownCategory, MalformedEntry)) as caught:
+        ledger.parse_segment(ONE + "- [evt_2] not_a_category actor=x\n", source="2026-08.md")
+    message = str(caught.value)
+    assert "2026-08.md" in message and "line 2" in message
+
+
+def test_the_malformed_refusal_names_the_line_number_itself():
+    """The old assertion checked `"2" in message`, which passes via `2026`."""
+    with pytest.raises(MalformedEntry) as caught:
+        ledger.parse_segment(ONE + "this is not an entry\n", source="2026-08.md")
+    assert "line 2" in str(caught.value)

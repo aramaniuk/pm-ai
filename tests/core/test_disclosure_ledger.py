@@ -90,7 +90,8 @@ def test_a_malformed_complete_record_is_refused_with_its_line():
     with pytest.raises(MalformedDisclosure) as caught:
         parse_ledger(_text(_record(datetime(2026, 8, 1, tzinfo=timezone.utc)))
                      + "not a disclosure\n")
-    assert "2" in str(caught.value)
+    # Not `"2" in ...` — that passed via the `2026` in the record's timestamp.
+    assert "line 2" in str(caught.value)
 
 
 # ── AD-17: the monthly total, recomputed every time ─────────────────────────
@@ -169,3 +170,21 @@ def test_an_unbounded_query_returns_everything():
         _record(datetime(2026, 8, 20, tzinfo=timezone.utc)),
     )
     assert len(log.records()) == 2
+
+
+# ── Review findings, 2026-08-30 ─────────────────────────────────────────────
+
+
+def test_a_naive_bound_is_refused_rather_than_crashing_mid_scan():
+    log = _ledger(_record(datetime(2026, 8, 15, tzinfo=timezone.utc)))
+    with pytest.raises(ValueError) as caught:
+        log.records(since=datetime(2026, 8, 1))
+    assert "since" in str(caught.value)
+
+
+def test_an_upper_bound_excludes_a_later_record():
+    """The `until` half was never driven alone; deleting it kept the suite green."""
+    early = _record(datetime(2026, 8, 10, tzinfo=timezone.utc), cost=1.0)
+    late = _record(datetime(2026, 8, 20, tzinfo=timezone.utc), cost=2.0)
+    got = _ledger(early, late).records(until=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    assert got == (early,)

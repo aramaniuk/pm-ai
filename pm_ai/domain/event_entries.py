@@ -40,7 +40,6 @@ from pm_ai.domain.invariants import InconsistentModel
 
 __all__ = [
     "DAEMON_ACTOR",
-    "GRAMMAR_VERSION",
     "MAX_ENTRY_LENGTH",
     "EventEntry",
     "MalformedEntry",
@@ -59,13 +58,16 @@ __all__ = [
 ]
 
 
-GRAMMAR_VERSION = 1
-"""The entry grammar a segment was written under.
-
-AD-27 asks for it so a parser can read historical entries: a member added or a
-rendering changed moves this, and a reader can tell which rules applied to a line
-written months ago rather than guessing from its shape.
-"""
+# AD-27 also asks that both vocabularies be "versioned so parsers can read
+# historical entries". A `GRAMMAR_VERSION = 1` constant stood here until
+# 2026-08-30 and was removed by code review: nothing wrote it into a line and
+# nothing read it while parsing, so a segment written under one grammar was
+# byte-indistinguishable from one written under any other, and the only test
+# asserted the constant was an integer — it could not fail for the reason the
+# requirement exists. Removed rather than back-filled, because putting a version
+# on every line forever is a real cost and the choice between that, a segment
+# header, and a dated grammar table is a design decision no story has taken. See
+# deferred-work.md.
 
 
 class SelfActionType(Enum):
