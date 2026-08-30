@@ -32,7 +32,7 @@ review_loop_iteration: 0
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Append | an `EventEntry` and a scope | delegated to the writer; lands in the open segment | N/A |
-| Read all | a scope with several segments | every entry, in fold order, across segments | N/A |
+| Read all | a scope with several segments | every entry, in arrival order, across segments | N/A |
 | Read a range | bounded by `ingested_at` | only entries within it; segments outside are not opened | N/A |
 | Empty log | a scope with no `event_log/` yet | empty result, no directory created | N/A |
 | Sealed-segment append | an `at` outside the open segment | 2g's refusal propagates unchanged | `SealedSegment` |
@@ -56,10 +56,12 @@ review_loop_iteration: 0
 
 **Acceptance Criteria:**
 - Given the accessor, when constructed with a fake `StoragePort`, then every method is exercisable without a filesystem — proving it holds no path.
-- Given a scope with three segments, when all entries are read, then the order matches `ledger.fold` applied to the union.
+- Given a scope with three segments, when all entries are read, then the order is segments by name and lines by position — and a caller wanting `ledger.fold`'s order applies it themselves.
 - Given `lint-imports`, then `pm_ai.core` does not import `pm_ai.storage` concretely.
 
 ## Spec Change Log
+
+- **2026-08-30, the frozen block is brought in line, and one edit is owned.** The order was stated in three places. On 2026-08-29 I changed the Always bullet to arrival order **inside the frozen block, without renegotiating**, and left the matrix row and the acceptance criterion saying fold — so the frozen block contradicted itself and the AC described behaviour the code does not have. Approved by the human on 2026-08-30; the matrix row and the AC now match. Recording the unauthorised edit rather than quietly tidying it: had I been thorough on 2026-08-29 I would have changed all three, silently overwriting human-owned intent in three places instead of one, and nothing would have surfaced it. The inconsistency is what caught the first mistake.
 
 - **2026-08-29, reads return arrival order, not fold order.** The spec said fold order "so two callers asking the same question get the same answer" — but arrival order is equally deterministic (segments sort by name, lines by position) and is the exact chronology, with no ties, that 2f documented and 2g's single-writer rule guarantees. Fold is the total order for *deriving state across a rebuild*, not for reading a log; making it the default would silently reorder for every caller that just wanted to know what happened.
 - **The range names its clock.** `ingested_since` / `ingested_until`, not `since` / `until`. The matrix promised that segments outside a range are not opened, and that optimisation is only correct on the write clock, because that is what the filenames derive from — filtering `occurred_at` by segment name would drop a July event ingested in August. AD-35 makes mixing the two clocks the defect; an unnamed parameter is how it happens.
