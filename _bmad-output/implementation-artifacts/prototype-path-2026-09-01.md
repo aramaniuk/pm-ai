@@ -83,6 +83,214 @@ Sources:
 `https://learn.microsoft.com/en-us/graph/api/onlinemeeting-list-transcripts?view=graph-rest-1.0`,
 `https://learn.microsoft.com/en-us/graph/api/channel-list-messages?view=graph-rest-1.0`
 
+## Structure — existing, changed, new
+
+Three views of the same path. The first is the module map against the enforced
+layer stack; the second is what happens when the dashboard is generated; the
+third is the order the wave-1 slices can actually be built in.
+
+Legend throughout: **unfilled** is in place and untouched, **amber** is existing
+code this path modifies, **green** is new.
+
+### Module map
+
+Layer boundaries are the ones `.importlinter` enforces, not a drawing
+convention. Dependencies point inward only; the sibling row may not import
+across itself.
+
+The enforced order, from `.importlinter`, is a stack and not a graph:
+
+```
+pm_ai.app                                                    outermost
+pm_ai.surfaces
+pm_ai.connectors : skills : storage : models : platform       siblings
+pm_ai.core
+pm_ai.ports
+pm_ai.domain                                                 innermost
+```
+
+Mermaid lays `surfaces` beside the sibling row below rather than above it; the
+stack above is the authority on the order.
+
+```mermaid
+flowchart TB
+    subgraph L_app["pm_ai.app — composition root, may import every layer"]
+        direction LR
+        wiring["wiring.build → Daemon<br/>registers Graph, retires meetings dict"]
+        pipes["pipelines.run_harvest"]
+        dashpipe["pipelines.run_dashboard"]
+    end
+
+    subgraph L_surf["pm_ai.surfaces — reach adapters only through core"]
+        direction LR
+        scli["cli — entry point, subcommands"]
+        sapi["api — daemon, loopback FastAPI<br/>wave 2"]
+        srepl["cli — REPL, CAP-18 parity<br/>wave 2"]
+        stg["telegram — untouched"]
+    end
+
+    subgraph L_adapt["connectors : skills : storage : models : platform — siblings, no cross-imports"]
+        direction LR
+        agraph["connectors.graph<br/>auth · calendar · messages · transcripts"]
+        acreg["connectors.registry<br/>health probe"]
+        agit["connectors.gitlab<br/>CoverageWindow fix"]
+        astore["storage.service<br/>storage.crypto"]
+        aplat["platform<br/>paths · keychain · vcs · doctor"]
+        askill["skills<br/>registry · gitlab"]
+        amod["models.local · models.frontier<br/>deferred, stays empty"]
+    end
+
+    subgraph L_core["pm_ai.core — I/O-free"]
+        direction LR
+        csan["sanitize · normalize<br/>8c fixes the boundary"]
+        cnew["rendering · goal_register<br/>meeting_records · config"]
+        csched["scheduler — wave 2"]
+        cexist["event_log · retrospective<br/>disclosure_ledger · extraction · ledger"]
+    end
+
+    subgraph L_ports["pm_ai.ports — imports only pm_ai.domain"]
+        direction LR
+        gport["GraphAuthPort"]
+        cport["ConnectorPort · StoragePort · KeychainPort<br/>CryptoPort · ScopePathPort · SkillPort"]
+    end
+
+    subgraph L_dom["pm_ai.domain — imports nothing from pm_ai"]
+        direction LR
+        dev["events<br/>MessagePayload gains mentions"]
+        dharv["harvest<br/>HarvestResult gains ran-and-learned-nothing"]
+        dstable["meetings · goals · scope_model<br/>identity · lifecycle · event_entries"]
+    end
+
+    dashpipe --> scli
+    dashpipe -.->|composition root only| agraph
+    scli --> cnew
+    agraph --> csan
+    astore --> cport
+    cnew --> cport
+    csan --> dev
+    cport --> dstable
+
+    classDef new fill:#0f5132,stroke:#0a3622,color:#ffffff
+    classDef chg fill:#664d03,stroke:#413003,color:#ffffff
+    classDef defer fill:#495057,stroke:#343a40,color:#ffffff
+    class scli,sapi,srepl,agraph,acreg,cnew,csched,gport,dashpipe new
+    class agit,wiring,pipes,dev,dharv,csan chg
+    class amod,stg defer
+```
+
+Two things the map makes visible that the prose does not:
+
+- **The new code concentrates in three places** — `connectors.graph`, four new
+  `core` modules, and the CLI surface. Everything below `core` is nearly
+  untouched: two field additions in `domain`, one new port. A foundation that
+  needs two new fields to carry a whole new provider is a foundation that was
+  built right.
+- **`models` stays empty.** Decision 2's cut is structural, not a matter of
+  degree — no arrow enters that box anywhere in the path.
+
+### Dashboard generation flow
+
+What `pm-ai dashboard` does, and where each of the four sections gets its
+content. `core.scheduler` replaces the CLI as the trigger in wave 2; nothing
+else in this flow changes.
+
+```mermaid
+flowchart LR
+    subgraph ext["Microsoft Graph — read-only, class H egress"]
+        gapi_cal["/me/calendarView"]
+        gapi_msg["channel + chat messages"]
+        gapi_tr["/onlineMeetings/../transcripts"]
+    end
+
+    trigger["pm-ai dashboard"]
+    tick["daemon 07:00 tick"]
+
+    conn["connectors.graph — one ConnectorPort"]
+    san["core.sanitize — AD-12, non-destructive"]
+    attr["core.normalize — AD-36 provenance"]
+    sv["storage.service — the single writer"]
+
+    elog[("event_log/ segments")]
+    meet[("meetings/ Tier-1 records")]
+    goals[("strategic_goals.md — hand-authored")]
+
+    rend["core.rendering — pure function"]
+    out[("memory/daily_dashboard.md")]
+
+    gapi_cal --> conn
+    gapi_msg --> conn
+    gapi_tr --> conn
+    conn --> san --> attr --> sv
+    sv --> elog
+    sv --> meet
+
+    trigger --> rend
+    tick -.->|wave 2| rend
+    meet -->|Time-Critical| rend
+    elog -->|Proactive Enablement| rend
+    goals -->|3-Tier Milestones| rend
+    rend --> out
+
+    classDef new fill:#0f5132,stroke:#0a3622,color:#ffffff
+    classDef chg fill:#664d03,stroke:#413003,color:#ffffff
+    classDef store fill:#084298,stroke:#052c65,color:#ffffff
+    class conn,rend,trigger,tick,goals new
+    class san,attr chg
+    class elog,meet,out store
+```
+
+`san` and `attr` are amber because slice `8c` fixes the discarded-return-value
+fault before any Graph text passes through them.
+
+### Wave 1 build order
+
+Edges are hard dependencies, not preferences. Anything unconnected is
+independent and can move.
+
+```mermaid
+flowchart LR
+    s4a["4a config"]
+    s4b["4b key enrol"]
+    s4c["4c CLI"]
+    s8a["8a registry + HarvestResult"]
+    s8b["8b credentials"]
+    s8c["8c sanitize fix"]
+    s11a["11a meeting records"]
+    s33a["33a Graph auth"]
+    s33b["33b Graph calendar"]
+    s22a["22a goal register"]
+    s23a["23a renderer"]
+    s23b["23b dashboard wiring"]
+    done(["real daily_dashboard.md"])
+
+    s0(["slice 0 — spike, throwaway"]) --> s33a
+
+    s4a --> s4c
+    s4b --> s8b
+    s4c --> s23b
+    s8a --> s33a
+    s8b --> s33a
+    s33a --> s33b
+    s11a --> s33b
+    s33b --> s23b
+    s22a --> s23a
+    s23a --> s23b
+    s23b --> done
+
+    classDef ind fill:#0f5132,stroke:#0a3622,color:#ffffff
+    classDef goal fill:#084298,stroke:#052c65,color:#ffffff
+    class s8c ind
+    class done,s0 goal
+```
+
+`8c` has no edges: it is a standalone correctness fix, needed before `33c` in
+wave 2 rather than by anything in wave 1. It sits in wave 1 because `8a` is
+already in the harvest plumbing and the defect is live on the GitLab path today.
+
+The critical path is `4b → 8b → 33a → 33b → 23b`, five slices. `22a` and `23a`
+can proceed in parallel with the whole Graph chain, since the renderer takes a
+goal register and a clock and does not care where meetings came from.
+
 ## Connector design
 
 ### Nothing in the domain has to change
@@ -101,8 +309,30 @@ needs a `mentions` field.
 ### Auth
 
 `GraphAuthPort` in `pm_ai/ports/`; MSAL device-code adapter in
-`pm_ai/platform/graph_auth.py`, because AD-26 puts the OS and network boundary
-in `platform`.
+`pm_ai/connectors/graph/auth.py`.
+
+**Not in `pm_ai/platform`**, which an earlier draft of this document proposed on
+the grounds that AD-26 puts the OS boundary there. That was wrong. The
+`http-confined-to-adapters` contract forbids `httpx`, `requests` and `aiohttp`
+in `pm_ai.platform`, and states the intent plainly: "Only inbound connectors and
+outbound skills may speak HTTP at all." Device-code flow talks to the Microsoft
+token endpoint, so it is HTTP and belongs in `connectors`.
+
+The distinction the two layers draw here is worth stating, because it is easy to
+collapse: token **custody** is `platform` — the macOS Keychain behind
+`KeychainPort`, built by story 1d. Token **acquisition** is `connectors` — an
+HTTP conversation with a provider. `connectors/graph/auth.py` obtains, and
+stores through the ports it is given.
+
+Note that import-linter would not have caught the mistake: MSAL reaches
+`requests` transitively, and the contract lists direct imports. A violation that
+passes the gate is worse than one that fails it, which is the reason this is
+recorded rather than silently fixed. Whether the contract should name `msal`
+directly is left as a question for `33a`.
+
+`msal` is a new runtime dependency and must be pinned in `pyproject.toml`
+alongside the existing stack, per the pinning discipline the `anthropic` entry
+documents.
 
 `pm-ai connector add --type graph` prints the device code and URL; the PM signs
 in in a browser. Scopes: `Calendars.Read`, `Chat.Read`,
