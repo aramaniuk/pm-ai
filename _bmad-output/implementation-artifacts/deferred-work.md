@@ -95,7 +95,7 @@ tests would have disagreed.
 
 ## Wave 1 decomposition
 
-The thirteen specs of the prototype path's first wave, under
+The fourteen specs of the prototype path's first wave, under
 `_bmad-output/specs/spec-pm-ai/stories/`, in build order. Unlike stories 1 and
 2 these do not decompose one story: they select slices of stories 4, 8, 11, 22,
 23 and the new 33. Full rationale in `prototype-path-2026-09-01.md`.
@@ -103,8 +103,9 @@ The thirteen specs of the prototype path's first wave, under
 **Revised 2026-09-02 after a three-lens review** (`review-wave-1-2026-09-02.md`,
 140 findings). Every spec is at `review_loop_iteration: 1` and carries a change
 log recording what the review changed. The wave grew from twelve slices to
-thirteen: `4d`, the project registry, which no story owned and without which
-`pm-ai` could not have run once on a clean machine.
+fourteen: `4d`, the project registry, which no story owned and without which
+`pm-ai` could not have run once on a clean machine; and the original `33b` split
+into a fetch half and a mapping half at the sizing gate below.
 
 | Spec | Delivers | Depends on |
 |---|---|---|
@@ -117,7 +118,8 @@ thirteen: `4d`, the project registry, which no story owned and without which
 | `8c-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | — |
 | `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
 | `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8a, 8b |
-| `33b-graph-calendar-resource` | `calendarView` to Meeting records and ended-meeting events | 11a, 33a |
+| `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 33a |
+| `33c-graph-calendar-mapping` | rows to Meeting records and ended-meeting events; `ConnectorPort` conformance | 11a, 33b |
 | `22a-goal-register` | the register `domain/goals.py` has never had | — |
 | `23a-dashboard-renderer` | `core.rendering`, four sections, honest gaps | 22a, 11a |
 | `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 33b |
@@ -127,12 +129,65 @@ no-minted-ids checks (`8a`, both importing `pm_ai.connectors.registry`), and
 AD-25's personal-store wall (`23a`, importing `pm_ai.core.rendering`). Baseline
 to measure against is 638 passed, 27 skipped at `7316178`.
 
+## Wave 1 sizing — measured, and the ceiling revised
+
+Measured 2026-09-02 with `tiktoken` `cl100k_base`, on spec body excluding
+frontmatter and the Spec Change Log — the like-for-like basis, since story 2's
+gate ran at creation before its own change logs existed.
+
+| Set | Specs | Total | Median | Max |
+|---|---|---|---|---|
+| Story 2, shipped | 12 | 15,184 | 1,239 | 1,544 (`2c`) |
+| Wave 1, revised | 14 | 27,243 | 1,952 | 2,377 (`23a`) |
+
+**Every wave-1 spec exceeds the 1600-token ceiling story 2 set**, except `33b`
+after its split. The smallest of the fourteen (1,698) exceeds story 2's largest
+(1,544).
+
+Where the weight sits, mean tokens per section:
+
+| Section | Story 2 | Wave 1 |
+|---|---|---|
+| Frozen intent block | 783 | 1,206 |
+| Code Map | 123 | 168 |
+| Tasks & Acceptance | 208 | 404 |
+| Design Notes | 85 | 148 |
+| Verification | 51 | 74 |
+
+The overrun is concentrated in the frozen block and in Tasks & Acceptance — the
+I/O matrix rows and the positive acceptance assertions the review demanded. It is
+not in the explanatory prose, which barely moved. So trimming cannot fix it.
+
+**Ruling: the ceiling is 2,400 for wave 1, and the 1600 figure is recorded as
+calibrated on a different shape of work.** Story 2's slices were narrow domain
+changes — one enumeration, one renderer, one parser — carrying four to eight
+matrix rows each. Wave 1's are integration slices: a connector, a CLI surface, a
+credential lifecycle, each spanning three layers and carrying twelve to
+seventeen matrix rows because the review found that many real unhandled paths.
+
+The decisive evidence is `33c`: written from scratch on 2026-09-02 *with the
+ceiling in mind*, split off a spec specifically to reduce size, and it still
+measures 1,969. A ceiling that a deliberately-scoped fresh slice cannot meet is
+measuring the wrong thing.
+
+What the ceiling still buys, and is kept for: `33b` was 2,497 before the split
+and genuinely held two failure classes — talking to Graph correctly, and mapping
+what came back. The gate caught that, which is the point of having one.
+
+**One candidate remains and is left to a human.** `8a` (2,275) holds two
+arguably separate concerns: a `pm_ai.domain.harvest` type change (the three
+outcomes, honest coverage) and a `pm_ai.connectors` registry with health probes.
+Splitting it is defensible; it is not obviously right, because the coverage fix
+and the registry land in the same review of the same defect. `23a` (2,377) and
+`8c` (2,193) were examined and are single concerns spanning layers — splitting
+either would divide a fix down the middle.
+
 Decisions taken at the sizing gate (2026-09-02):
 
 - **Slice 0 is a throwaway spike**, not a spec. Device-code sign-in against the
   real tenant and one call each to the three resources. Its only output is an
   answer: whether the tenant permits transcripts at all. A `403
-  GraphAccessToTranscriptsDisabled` deletes `33d` and `11b` from the plan and
+  GraphAccessToTranscriptsDisabled` deletes `33e` and `11b` from the plan and
   has no workaround.
 - **Story 3 stays deferred on the correct grounds.** An earlier draft justified
   it with "sanitization already binds at the boundary", which is false — hence
@@ -157,7 +212,7 @@ Known debt this wave takes on, recorded so it is not discovered later:
 - **CAP-9 is knowingly unmet in two clauses** — Leadership Notes and the 07:00
   deadline. Both recorded in story 23's queue entry and in `23a`/`23b`.
 - **AD-27's versioning clause remains unmet** from story 2, unchanged by this
-  wave. `8c` and `33c` both touch the Tier-1 entry format and both defer the
+  wave. `8c` and `33d` both touch the Tier-1 entry format and both defer the
   question to story 1i.
 
 ## Open, raised by story 2f

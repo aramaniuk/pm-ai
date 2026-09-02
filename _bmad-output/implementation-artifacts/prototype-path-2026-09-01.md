@@ -283,7 +283,7 @@ flowchart LR
     class done,s0 goal
 ```
 
-`8c` has no edges: it is a standalone correctness fix, needed before `33c` in
+`8c` has no edges: it is a standalone correctness fix, needed before `33d` in
 wave 2 rather than by anything in wave 1. It sits in wave 1 because `8a` is
 already in the harvest plumbing and the defect is live on the GitLab path today.
 
@@ -419,7 +419,7 @@ hardcoded name, and persist both halves of the `Sanitized` pair per AD-29 so a
 later consumer has `for_model` without re-deriving it. The exact on-disk shape
 ties into open question 3, since story 2l put payload content into Tier 1.
 
-Placed in wave 1 rather than beside `33c`: it is a live defect on the existing
+Placed in wave 1 rather than beside `33d`: it is a live defect on the existing
 GitLab path too, and `8a` is already in the harvest plumbing.
 
 ### Transcripts
@@ -509,7 +509,7 @@ Markdown in `SPEC.md` rather than in the four sources that agreed.
    Leadership Notes will not fill, because filling it needs synthesis and
    decision 2 removed the model from the path. **And Proactive Enablement will
    not fill in wave 1**, because it reads `MESSAGE_POSTED` and `33b`'s `emits()`
-   is exactly `{CALENDAR_EVENT_HELD}` — messages arrive with `33c` in wave 2.
+   is exactly `{CALENDAR_EVENT_HELD}` — messages arrive with `33d` in wave 2.
    Corrected 2026-09-02 by the spec review; this document originally claimed one
    gap. The renderer states each reason instead of padding.
 3. **Time-Critical lists only meetings that have not ended.** This document said
@@ -539,10 +539,10 @@ Device-code sign-in against the real tenant; one call each to `calendarView`,
 channel messages, and transcripts. Reports what comes back. No code kept.
 
 Answers three unknowns: whether the tenant permits transcripts at all, which
-scopes consent cleanly, and what the real payload shapes are. Slice 33d's scope
+scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (13 slices)
+### Wave 1 — a real dashboard from a real calendar (14 slices)
 
 | Slice | Delivers |
 |---|---|
@@ -554,7 +554,8 @@ depends on the first answer.
 | `8c` | Sanitization actually binds at the harvest boundary. See below. |
 | `11a` | Meeting records reach Tier 1 through `meetings/`; retires the in-memory dict. |
 | `33a` | `GraphAuthPort` and MSAL device-code adapter, refresh, stale-credential health reporting. |
-| `33b` | Graph calendar resource → Meeting records, and `CALENDAR_EVENT_HELD` for ended meetings. |
+| `33b` | Graph calendar fetch — paging, throttling, `{dateTime, timeZone}` → aware UTC, honest coverage. |
+| `33c` | Calendar rows → Meeting records and `CALENDAR_EVENT_HELD`; `ConnectorPort` conformance. |
 | `22a` | Goal register parsed from `strategic_goals.md`; hand-edit tolerant, unparseable lines surfaced not dropped. |
 | `23a` | `core/rendering.py` — four sections, honest gaps, golden-file tests. |
 | `23b` | `pm-ai dashboard` wiring in `app/`: meetings + event_log + goals → render → `write_artifact`. |
@@ -565,7 +566,7 @@ legitimate point to stop and reassess.**
 
 Ordering constraints inside the wave: `4a` and `4b` precede everything (nothing
 runs without config and a key); `8a` precedes `33a` so Graph inherits a fixed
-`HarvestResult` rather than a fabricated one; `8c` precedes `33c`, where the
+`HarvestResult` rather than a fabricated one; `8c` precedes `33d`, where the
 first genuinely untrusted third-party text arrives; `11a` precedes `33b` because
 calendar harvest writes Meeting records; `22a` precedes `23a` because the
 renderer takes a goal register.
@@ -574,8 +575,8 @@ renderer takes a goal register.
 
 | Slice | Delivers |
 |---|---|
-| `33c` | Chat and channel messages — client-side cursor, HTML→text, `MessagePayload.mentions`. |
-| `33d` | Transcript resource — `joinUrl` → `onlineMeetings` → `/content`; 403 degradation. Replaces `_fake_api`. |
+| `33d` | Chat and channel messages — client-side cursor, HTML→text, `MessagePayload.mentions`. |
+| `33e` | Transcript resource — `joinUrl` → `onlineMeetings` → `/content`; 403 degradation. Replaces `_fake_api`. |
 | `23c` | Proactive Enablement fills from real message events. |
 | `4d` | Daemon and loopback-only FastAPI binding. |
 | `4e` | REPL at CAP-18 parity, under 1.0s startup. |
@@ -605,21 +606,21 @@ renderer takes a goal register.
 ## Cost, stated plainly
 
 Stories 1 and 2 were 25 slices and built the storage, crypto, and log
-foundation. This path is 20 slices plus a spike — the same order of magnitude
+foundation. This path is 21 slices plus a spike — the same order of magnitude
 again. "Shortest" means shortest *given the four decisions above*, not small.
 
-The shortest path to something working is wave 1 alone: 13 slices.
+The shortest path to something working is wave 1 alone: 14 slices.
 
 ## Open questions
 
 1. **Does the tenant permit Graph transcript access?** Slice 0 answers it. A
-   `403 GraphAccessToTranscriptsDisabled` removes slice 33d and `11b` from the
+   `403 GraphAccessToTranscriptsDisabled` removes slice 33e and `11b` from the
    plan entirely and there is no workaround.
 2. **Is "3-Tier" horizon or domain?** Decided as horizon above. A one-line
    change now; a re-render later.
 3. **Does a payload gaining a field need an operational schema version bump?**
    Story 1i built the versioning; whether a Tier-1 Markdown entry format change
-   is in its remit needs checking against `1i` before `33c` is specced. This
+   is in its remit needs checking against `1i` before `33d` is specced. This
    covers both `MessagePayload.mentions` and slice `8c`'s persisted `for_model`.
 4. **How should a payload declare which of its fields is sanitizable text?**
    Decided in `8c` at review: keyed by payload **class**, not event type, since

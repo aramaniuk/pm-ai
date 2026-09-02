@@ -49,7 +49,7 @@ review_loop_iteration: 1
 | No goals | empty register | 3-Tier states no goals declared and names the file to author | N/A |
 | No message entries | empty log | Proactive Enablement states no signals in the window | N/A |
 | Leadership Notes | any input | states that synthesis is not enabled in this build | N/A |
-| Proactive Enablement in wave 1 | no `MESSAGE_POSTED` entries exist yet | states no message signals until `33c` supplies them — the **second** knowingly empty section | N/A |
+| Proactive Enablement in wave 1 | no `MESSAGE_POSTED` entries exist yet | states no message signals until `33d` supplies them — the **second** knowingly empty section | N/A |
 | One horizon empty | no medium-horizon goals | that tier stated as empty; the other two render | N/A |
 | Meeting already ended today | start earlier today, now past its end | not listed as time-critical | N/A |
 | Project-scope datasources | `project="alpha"` | no path containing the personal scope | asserted by the pre-written test |
@@ -88,7 +88,7 @@ review_loop_iteration: 1
   **The project-scope dashboard was incoherent.** Goals are personal-only and AD-25 forbids a project render reaching them, so a project 3-Tier section is structurally always empty — and its empty string, "No strategic goals declared", is a claim about the world that is false whenever the personal file has goals, breaking this spec's own "nothing is invented" rule. The alternative implementation reads the personal file and breaches AD-25 in the very slice whose test claims to prove the wall. The section now states the boundary instead.
   **The AD-25 criterion could not catch the leak it exists for.** The pre-written test filters for two substrings, neither of which appears in `strategic_goals.md`; and because it asserts over a list comprehension, an empty list passes, so "the skip count falls by one" was satisfied by a stub. Replaced with a positive assertion against `PERSONAL_SUBJECT_ARTIFACTS` and the project tree.
   **"No meetings on your calendar today" was false by mid-afternoon.** Ended meetings are excluded from Time-Critical, so a day whose meetings had all finished rendered the no-meetings string. Now two distinct computed statements. The ended-meeting filter is also an unrecorded deviation from `prototype-path-2026-09-01.md`, which says "`meetings/` where `start` falls today"; recorded now.
-  **Wave 1 has two permanently empty sections, not one.** Proactive Enablement reads `MESSAGE_POSTED`, which arrives with `33c` in wave 2 — `33b`'s `emits()` is exactly `{CALENDAR_EVENT_HELD}`. Both this spec and the design doc claimed one honest gap. Recorded as the second, and the full-day golden fixture is labelled forward-looking since wave 1 cannot produce that state.
+  **Wave 1 has two permanently empty sections, not one.** Proactive Enablement reads `MESSAGE_POSTED`, which arrives with `33d` in wave 2 — `33b`'s `emits()` is exactly `{CALENDAR_EVENT_HELD}`. Both this spec and the design doc claimed one honest gap. Recorded as the second, and the full-day golden fixture is labelled forward-looking since wave 1 cannot produce that state.
   **Ask First was "Nothing" and should not have been.** The display timezone owning "today" has no owner in any story, and leaving it implicit meant whichever of this slice and `11a` was written first decided which meetings a 07:00 dashboard shows.
 ## Design Notes
 

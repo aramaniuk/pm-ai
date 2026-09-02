@@ -27,7 +27,7 @@ review_loop_iteration: 1
 
 **Ask First:** Nothing. The `msal` contract question, deferred in the first draft, is decided above.
 
-**Never:** No calendar, message or transcript fetching — `33b`, `33c`, `33d`. No app-only or client-credentials path: a second auth mode with nothing exercising it is untested code. No token in `connectors/graph.json`.
+**Never:** No calendar, message or transcript fetching — `33b`, `33d`, `33e`. No app-only or client-credentials path: a second auth mode with nothing exercising it is untested code. No token in `connectors/graph.json`.
 
 ## I/O & Edge-Case Matrix
 
@@ -60,7 +60,7 @@ review_loop_iteration: 1
 - `.importlinter:49-60` -- the contract that decides this module's home
 - `pm_ai/core/connector_enrolment.py` -- `8b`, which seals the token
 - `pm_ai/platform/keychain.py` -- custody, the half that stays in `platform`
-- `pm_ai/connectors/transcripts/graph.py:14` -- the `_fake_api` that `33d` replaces using this auth
+- `pm_ai/connectors/transcripts/graph.py:14` -- the `_fake_api` that `33e` replaces using this auth
 
 ## Tasks & Acceptance
 

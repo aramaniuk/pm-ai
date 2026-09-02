@@ -16,6 +16,12 @@ Raw verification-gap JSON, with per-finding `evidence` fields citing what was
 actually read:
 `~/.claude/projects/-Users-andreiramaniuk-3alab-pm-ai/4b602ead-4703-4db1-adc9-e93b0769b3d7/tool-results/toolu_01Fh2KEG4tCC98fPirGpn1na.json`
 
+> **Numbering note, added after this review ran.** Acting on it split the
+> original `33b` into `33b` (calendar fetch) and `33c` (calendar mapping), and
+> renumbered wave 2's messages and transcripts slices to `33d` and `33e`. Where
+> this report says `33c` it means what is now `33d`, and `33d` means `33e`. The
+> report is left otherwise as written, as the record of what was found.
+
 ## Verdict
 
 **The set is not ready to implement.** Five specs cannot be built as written —

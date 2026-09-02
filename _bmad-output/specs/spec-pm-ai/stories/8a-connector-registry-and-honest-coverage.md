@@ -88,7 +88,7 @@ review_loop_iteration: 1
 
 Making coverage optional is the load-bearing change, and it is a type-level one: as long as `HarvestResult` requires a `CoverageWindow`, a connector that learned nothing must invent one to satisfy the constructor, which is precisely how the GitLab defect arose. The comment there — "reported in the return type so it cannot be forgotten" — was right about the mechanism and wrong about the failure: a mandatory field cannot be forgotten, but it can be fabricated, and a fabricated window is worse than a missing one because it reads as evidence.
 
-`33c` will make this sharper still. The Graph channel-messages endpoint supports only `$top` and `$expand`, so there is no server-side filter to describe the window with — coverage there is knowable only from the pages actually walked.
+`33d` will make this sharper still. The Graph channel-messages endpoint supports only `$top` and `$expand`, so there is no server-side filter to describe the window with — coverage there is knowable only from the pages actually walked.
 
 ## Verification
 

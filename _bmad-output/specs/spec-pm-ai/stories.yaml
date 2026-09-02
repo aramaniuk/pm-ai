@@ -465,7 +465,7 @@
     and dies with the process, and storage/service.py does not mention meetings
     at all. 11a adds derivation-services.md rule 3's MeetingRecords accessor and
     retires the dict. Binding transcripts to meetings is 11b, in wave 2, and
-    needs 33d.
+    needs 33e.
 - id: "12"
   title: Spoken anchor resolution and fuzzy recovery
   spec_checkpoint: true
@@ -656,7 +656,7 @@
     wave 2.
     THREE deviations, not two - corrected by the spec review 2026-09-02. Wave 1
     leaves TWO sections permanently stating a reason, not one: Proactive
-    Enablement reads MESSAGE_POSTED, which 33c supplies in wave 2, and 33b's
+    Enablement reads MESSAGE_POSTED, which 33d supplies in wave 2, and 33b's
     emits() is exactly {CALENDAR_EVENT_HELD}. The third is the ended-meeting
     filter, an unrecorded divergence from the design doc's "meetings/ where
     start falls today".
@@ -762,9 +762,16 @@
     device-code auth. The Phase-1 instance of CAP-35, which enumerated the
     framework and left its instances unlisted.
   invoke_dev_with: >-
-    ADDED 2026-09-02, because no story owned a Teams connector. Four specs:
-    33a device-code auth (wave 1), 33b the calendar resource (wave 1), 33c chat
-    and channel messages (wave 2), 33d transcripts (wave 2).
+    ADDED 2026-09-02, because no story owned a Teams connector. Five specs:
+    33a device-code auth, 33b the calendar fetch and 33c its mapping to records
+    and events (all wave 1), then 33d chat and channel messages and 33e
+    transcripts (wave 2).
+    33b SPLIT at the sizing gate 2026-09-02: at 2497 tokens it held two failure
+    classes, talking to Graph correctly and mapping what came back, and the
+    review had found defects in both. 33b now owns paging, throttling and the
+    {dateTime, timeZone} conversion that would otherwise refuse every event in
+    the tenant; 33c owns the past/future split, provenance and ConnectorPort
+    conformance.
     Verified against the Graph reference 2026-09-01, not assumed. Delegated
     OnlineMeetingTranscript.Read.All and ChannelMessage.Read.All both suffice,
     with no protected-API approval and no application access policy. TWO
