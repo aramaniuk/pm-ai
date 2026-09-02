@@ -548,7 +548,8 @@ depends on the first answer.
 |---|---|
 | `4a` | Config loading — `tomllib`, `config.toml`. Explicitly not the encryption toggle. |
 | `4b` | `pm-ai key enrol` through KeychainPort; the daemon never mints. Retargets 1g's "key absent" remediation. |
-| `4c` | CLI entry point and subcommand dispatch. `[project.scripts] pm-ai`. No REPL yet. |
+| `4c` | CLI entry point, subcommand dispatch, and the exit-code table. No REPL yet. |
+| `4d` | Project registry and `pm-ai project add`. **Added by the spec review** — `build()` resolves the project scope eagerly, so without it nothing runs on a clean machine. |
 | `8a` | `HarvestResult`'s three outcomes and the `CoverageWindow` fix in `gitlab.py`. |
 | `8d` | Connector registry and the 10s CAP-35 health probes. |
 | `8b` | Credential lifecycle — `pm-ai connector add`, encrypted-write-first, 600. |
@@ -581,8 +582,8 @@ renderer takes a goal register.
 | `33d` | Chat and channel messages — client-side cursor, HTML→text, `MessagePayload.mentions`. |
 | `33e` | Transcript resource — `joinUrl` → `onlineMeetings` → `/content`; 403 degradation. Replaces `_fake_api`. |
 | `23c` | Proactive Enablement fills from real message events. |
-| `4d` | Daemon and loopback-only FastAPI binding. |
-| `4e` | REPL at CAP-18 parity, under 1.0s startup. |
+| `4e` | Daemon and loopback-only FastAPI binding. |
+| `4f` | REPL at CAP-18 parity, under 1.0s startup. |
 | `9a` | Scheduled harvest — 240min ±15, exponential backoff, the missing `try/except` story 9 names, and the 07:00 render tick. |
 | `11b` | Real transcript path wired into the existing extraction pipeline. |
 
