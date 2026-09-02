@@ -54,7 +54,8 @@ review_loop_iteration: 1
 - `pm_ai/app/entry.py` -- new; `main()`, the console script target
 - `pm_ai/surfaces/cli/dispatch.py` -- new; argument mapping only
 - `pyproject.toml` -- add the `[project.scripts]` table that does not exist
-- `pm_ai/app/wiring.py:47` -- `build()`, called by `entry.main()` and by nothing else today
+- `pm_ai/app/wiring.py:62` -- `build()`, called by `entry.main()` and by nothing else today; it already takes `keychain: KeychainPort | None = None` (`:69`)
+- `pm_ai/app/wiring.py:37-47` -- `Daemon`, which gains the keychain field; `config` at `:47` carries a default and so fixes the insertion point
 - `.importlinter:134-139` -- AD-7, the contract that fails if the CLI reaches a scheduler
 - `.importlinter:148-156` -- AD-30, surfaces reach adapters only through core
 - `pm_ai/platform/doctor.py` -- the diagnostics this story makes reachable
@@ -63,6 +64,7 @@ review_loop_iteration: 1
 
 **Execution:**
 - [ ] `pm_ai/app/entry.py` -- add `main(argv=None)` building the daemon and delegating -- construction in the one layer permitted to do it
+- [ ] `pm_ai/app/wiring.py` -- add `keychain: KeychainPort` to `Daemon`, hoisting the adapter `build()` constructs at `wiring.py:140` (`keychain or MacOSKeychainAdapter()`, currently inline as a call argument) to a local so it can reach both `_choose_crypto` and `Daemon` -- without it this slice has no legal route to `4b`'s `enrol`: `pm_ai.surfaces` may not reach `keyring`, indirectly included, under `.importlinter:115-129`. Insert it **before** `config` (`wiring.py:47`), which carries a default -- a non-default field after a defaulted one raises `TypeError` at class creation, so appending it would break every `Daemon` construction in the suite
 - [ ] `pm_ai/surfaces/cli/dispatch.py` -- add the subcommand table and exit-code mapping -- no adapter construction, no business logic
 - [ ] `pyproject.toml` -- declare `[project.scripts]`
 - [ ] `tests/surfaces/test_cli_dispatch.py` -- one test per matrix row, `main()` called with an explicit argv, asserting the **exact** exit integer per row
@@ -76,6 +78,9 @@ review_loop_iteration: 1
 - Given `main()` is called with an unparseable `config.toml` in place and the argument `doctor`, then probes still run and the config failure is one reported result among them.
 
 ## Spec Change Log
+
+- **2026-09-02, inherited `4b`'s daemon field, and two citations story 4a shifted.** The keychain field moved here from `4b`, whose frozen `Never: No daemon changes` forbade the task the wave-1 review had added to it; resolved by the human at the story-4a review gate. This slice is where the need is real — it is the one calling `enrol` from a surface that may not reach `keyring` — and it already owns composition through `entry.main()`.
+  Two line citations drifted when 4a added the `config` field to `Daemon` and a parameter to `build()`: the Code Map's `wiring.py:47` was `build()` and is now the `config` field, with `build()` at `:62`. The contract citation inherited from `4b`'s task read `.importlinter:115-131` and is `115-129` — the range ends at `launchd`. That field also set a trap for this task, now stated in it: `config` carries a default and is last, so a non-default `keychain` appended after it raises `TypeError` at class creation rather than failing a test.
 
 - **2026-09-02, multi-lens review.** Three gaps, one of them a hard blocker.
   **`pm-ai` could not have run once on a clean machine.** `build()` eagerly resolves the project scope (`wiring.py:104`, whose comment explains the eagerness) and an unregistered project raises `UnknownProject` (`paths.py:553`) — so every subcommand, `doctor` included, would have died before dispatch, defeating this slice's own Always about `doctor` surviving a broken environment. The registry had no owner in any story; it is now `4d`, and this slice depends on it. A criterion and a matrix row cover `doctor` on an unregistered machine regardless.

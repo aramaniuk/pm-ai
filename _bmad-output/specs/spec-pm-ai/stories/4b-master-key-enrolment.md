@@ -56,7 +56,6 @@ review_loop_iteration: 1
 
 **Execution:**
 - [ ] `pm_ai/ports/__init__.py` -- move `AES_KEY_BYTES` here beside `MASTER_KEY_NAME` -- `core` cannot import `pm_ai.storage.crypto`, and a duplicated literal is the failure `:202-206` records
-- [ ] `pm_ai/app/wiring.py` -- add `keychain: KeychainPort` to `Daemon`, passing the adapter `build()` already constructs at `wiring.py:115` -- without it `4c` has no legal route: `surfaces` may not reach `keyring`, indirectly included, under `.importlinter:115-131`
 - [ ] `pm_ai/core/enrolment.py` -- add `enrol(keychain, *, key_name=MASTER_KEY_NAME)`, `KeyAlreadyEnrolled`, and the read-back equality check -- minting in exactly one place
 - [ ] `pm_ai/platform/doctor.py` -- point the `ABSENT` remediation at `pm-ai key enrol` by name -- 1g deliberately left this text pending a command to name
 - [ ] `tests/core/test_enrolment.py` -- one test per matrix row, against a fake `KeychainPort`
@@ -68,6 +67,8 @@ review_loop_iteration: 1
 - Given a fake whose read-back returns different material than was stored, then enrolment refuses rather than reporting success.
 
 ## Spec Change Log
+
+- **2026-09-02, the daemon field moved to `4c`.** The multi-lens review's fix for A3 ("`enrol` has no legal route to a keychain") was added here as a task adding `keychain: KeychainPort` to `Daemon` — which this spec's own frozen `Never: No daemon changes` forbids. Caught at the story-4a review gate and resolved by the human in favour of moving the task rather than amending the frozen clause, which now stands untouched and true. The reasoning: `enrol(keychain, *, key_name)` is a `core` service tested against a fake `KeychainPort` and never needs `Daemon` at all, while `4c` is the slice that calls it from the surface and already owns `pm_ai/app/entry.py`. The route is still mandatory and still recorded, in `4c`'s task list, with the layering reason unchanged.
 
 - **2026-09-02, multi-lens review.** Three findings changed the slice's contents.
   **Two of three acceptance criteria could not be evaluated at this slice's own checkpoint** — both named the CLI, which `4c` builds afterwards. Restated at service level, with the surface criteria moved to `4c`.
