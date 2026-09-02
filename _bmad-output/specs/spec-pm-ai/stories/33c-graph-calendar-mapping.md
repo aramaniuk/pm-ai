@@ -14,7 +14,7 @@ review_loop_iteration: 0
 
 Split from the original `33b` on 2026-09-02 at the sizing gate.
 
-**Approach:** `GraphConnector` satisfying `ConnectorPort`, mapping rows to `Meeting` records and `CALENDAR_EVENT_HELD` events, registered through `8a`.
+**Approach:** `GraphConnector` satisfying `ConnectorPort`, mapping rows to `Meeting` records and `CALENDAR_EVENT_HELD` events, registered through `8d`.
 
 ## Boundaries & Constraints
 
@@ -64,12 +64,12 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 - `pm_ai/core/meeting_records.py` -- `11a`'s accessor and its safe-name encoding
 - `pm_ai/domain/meetings.py:48-50` -- `man_hour_cost`, which the all-day convention feeds
 - `pm_ai/app/wiring.py:40` -- `connectors: dict[str, GitLabConnectorAdapter]`, an annotation mypy rejects once a Graph connector is registered
-- `tests/architecture/test_domain_invariants.py:94,483,793-826` -- the two tests `8a` unskipped, and the port-conformance test that covers no connector
+- `tests/architecture/test_domain_invariants.py:94,483,793-826` -- the two tests `8d` unskipped, and the port-conformance test that covers no connector
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/__init__.py` -- add `GraphConnector` satisfying `ConnectorPort`, registered through `8a`
+- [ ] `pm_ai/connectors/graph/__init__.py` -- add `GraphConnector` satisfying `ConnectorPort`, registered through `8d`
 - [ ] `pm_ai/app/wiring.py` -- widen `Daemon.connectors` to `dict[str, ConnectorPort]` -- mypy, gated inside pytest since story 1k, rejects the current annotation
 - [ ] `tests/connectors/test_graph_calendar_mapping.py` -- the matrix against `33b`'s row fixtures
 
@@ -77,7 +77,7 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 - Given a window containing one ended and one upcoming row, then exactly one `CALENDAR_EVENT_HELD` is persisted and two `meetings/` records exist — the past/future split, asserted rather than described.
 - Given every emitted event, then `authored_by` is `Provenance.UNKNOWN` — asserted, because AD-36's rule lives only in a comment and the AD-34 test inspects only the absent `id`.
 - Given `GraphConnector`, then `isinstance(GraphConnector(...), ConnectorPort)` holds — the port-conformance test covers three adapters and no connector, and its docstring says annotations are documentation until something checks them.
-- Given the AD-27 and AD-34 tests with `GraphConnector` registered, then both pass and `all_connectors()` returns two connectors — `8a`'s non-empty assertion now has a second member.
+- Given the AD-27 and AD-34 tests with `GraphConnector` registered, then both pass and `all_connectors()` returns two connectors — `8d`'s non-empty assertion now has a second member.
 - Given a `meetings/` write that refuses, then no event is persisted.
 - Given an all-day row, then its recorded duration equals the stated convention — the original row said only "handled explicitly, never as zero-cost", which the wrong 24-hour answer satisfied.
 

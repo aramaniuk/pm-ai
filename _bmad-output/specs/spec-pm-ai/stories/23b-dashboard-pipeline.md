@@ -10,7 +10,7 @@ review_loop_iteration: 1
 
 ## Intent
 
-**Problem:** After `23a` the renderer is a pure function nothing calls, `11a` holds meetings, `22a` parses goals and `33b` fills both from Graph. Nothing joins them, and `daily_dashboard.md` is still never written. This is the last slice of wave 1 and the one that makes the prototype real.
+**Problem:** After `23a` and `23d` the renderer is a pure function nothing calls, `11a` holds meetings, `22a` parses goals and `33b` fills both from Graph. Nothing joins them, and `daily_dashboard.md` is still never written. This is the last slice of wave 1 and the one that makes the prototype real.
 
 **Approach:** Add `run_dashboard` to `pm_ai/app/pipelines.py` — read meetings, log entries and goals, render, write through `StorageService.write_artifact` — and expose it as `pm-ai dashboard`.
 
@@ -53,7 +53,7 @@ review_loop_iteration: 1
 
 - `pm_ai/app/pipelines.py` -- add `run_dashboard(daemon, *, scope, now)`; `run_harvest` at `:20` is the shape to follow
 - `pm_ai/surfaces/cli/dispatch.py` -- add the `dashboard` subcommand to `4c`'s table
-- `pm_ai/core/rendering.py` -- `23a`'s renderer and datasource declaration
+- `pm_ai/core/rendering.py` -- `23a`'s section renderers and `23d`'s datasource declaration
 - `pm_ai/core/meeting_records.py`, `pm_ai/core/goal_register.py`, `pm_ai/core/event_log.py:52` -- the three inputs
 - `pm_ai/storage/service.py:1022,1039` -- `write_artifact` and the ledger refusal that correctly does not apply here
 - `pm_ai/domain/scope_model.py:540` -- the declaration that resolves the path
@@ -71,7 +71,7 @@ review_loop_iteration: 1
 - Given a goals file with a duplicate id and a dashboard already on disk, when the pipeline runs, then it refuses **and** the existing file is unchanged byte for byte — a failed render must not destroy yesterday's dashboard.
 - Given a clean root with nothing harvested, then the file is still written and every section states its reason.
 - Given no master key is enrolled, then the write succeeds — this artifact is unencrypted and must not depend on the enclave.
-- Given `--scope project:alpha` against a root whose personal tree holds goals and meetings, when the pipeline runs, then no path beneath the personal root is read — asserted by instrumenting the reader, because `23a`'s AD-25 test checks only what the renderer *declares*, never what `run_dashboard` actually opens.
+- Given `--scope project:alpha` against a root whose personal tree holds goals and meetings, when the pipeline runs, then no path beneath the personal root is read — asserted by instrumenting the reader, because `23d`'s AD-25 test checks only what the renderer *declares*, never what `run_dashboard` actually opens.
 
 ## Spec Change Log
 

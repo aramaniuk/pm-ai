@@ -95,17 +95,18 @@ tests would have disagreed.
 
 ## Wave 1 decomposition
 
-The fourteen specs of the prototype path's first wave, under
+The seventeen specs of the prototype path's first wave, under
 `_bmad-output/specs/spec-pm-ai/stories/`, in build order. Unlike stories 1 and
 2 these do not decompose one story: they select slices of stories 4, 8, 11, 22,
 23 and the new 33. Full rationale in `prototype-path-2026-09-01.md`.
 
 **Revised 2026-09-02 after a three-lens review** (`review-wave-1-2026-09-02.md`,
 140 findings). Every spec is at `review_loop_iteration: 1` and carries a change
-log recording what the review changed. The wave grew from twelve slices to
-fourteen: `4d`, the project registry, which no story owned and without which
-`pm-ai` could not have run once on a clean machine; and the original `33b` split
-into a fetch half and a mapping half at the sizing gate below.
+log recording what the review changed. The wave grew from twelve slices to seventeen. `4d`, the project registry, was
+missing entirely and without it `pm-ai` could not have run once on a clean
+machine. The other four are sizing-gate splits: `33b` into fetch and mapping,
+`8a` into harvest outcomes and registry, `8c` into declarations and boundary,
+and `23a` into sections and scope wall.
 
 | Spec | Delivers | Depends on |
 |---|---|---|
@@ -113,16 +114,19 @@ into a fetch half and a mapping half at the sizing gate below.
 | `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
 | `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b, 4d |
 | `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a |
-| `8a-connector-registry-and-honest-coverage` | the registry two pre-written tests import, and coverage derived from what was fetched | — |
+| `8a-honest-harvest-outcomes` | `HarvestResult`'s three outcomes, and coverage derived from what was fetched | — |
+| `8d-connector-registry` | the registry two pre-written tests import, and the CAP-35 health probes | — |
 | `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 8a |
-| `8c-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | — |
+| `8c-payloads-declare-untrusted-text` | each payload class declares its untrusted fields, guarded at import | — |
+| `8e-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | 8c |
 | `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
-| `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8a, 8b |
+| `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8b, 8d |
 | `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 33a |
 | `33c-graph-calendar-mapping` | rows to Meeting records and ended-meeting events; `ConnectorPort` conformance | 11a, 33b |
 | `22a-goal-register` | the register `domain/goals.py` has never had | — |
-| `23a-dashboard-renderer` | `core.rendering`, four sections, honest gaps | 22a, 11a |
-| `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 33b |
+| `23a-dashboard-sections` | `core.rendering`'s four sections, honest gaps | 22a, 11a |
+| `23d-project-render-scope-wall` | `project_scope_datasources` and AD-25's one-directional wall | 23a, 4d |
+| `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 23d, 33c |
 
 Four skipped tests stop skipping across the wave: the AD-27 taxonomy and AD-34
 no-minted-ids checks (`8a`, both importing `pm_ai.connectors.registry`), and
@@ -174,13 +178,56 @@ What the ceiling still buys, and is kept for: `33b` was 2,497 before the split
 and genuinely held two failure classes — talking to Graph correctly, and mapping
 what came back. The gate caught that, which is the point of having one.
 
-**One candidate remains and is left to a human.** `8a` (2,275) holds two
-arguably separate concerns: a `pm_ai.domain.harvest` type change (the three
-outcomes, honest coverage) and a `pm_ai.connectors` registry with health probes.
-Splitting it is defensible; it is not obviously right, because the coverage fix
-and the registry land in the same review of the same defect. `23a` (2,377) and
-`8c` (2,193) were examined and are single concerns spanning layers — splitting
-either would divide a fix down the middle.
+**All three remaining candidates were split by decision on 2026-09-02**, after
+the ruling above was recorded. `8a` separated a `domain.harvest` type change from
+a `connectors` registry. `8c` separated the domain declarations from the `app`
+and `storage` boundary that acts on them. `23a` separated the four section
+renderers from `project_scope_datasources`, the AD-25 wall — a seam that turned
+out to divide two distinct failure classes, text that misleads a reader and a
+privacy leak into a git-committed repository, which is a better argument for the
+split than sizing alone.
+
+### After the splits — measured 2026-09-02
+
+Same basis: `tiktoken` `cl100k_base`, body excluding frontmatter and change log.
+Rows in build order.
+
+| Slice | Spec | Tokens | Before |
+|---|---|---:|---:|
+| `4a` | config-loading | 1,698 | 1,698 |
+| `4b` | master-key-enrolment | 1,733 | 1,733 |
+| `4c` | cli-entry-point | 1,998 | 1,998 |
+| `4d` | project-registry | 1,760 | 1,760 |
+| `8a` | honest-harvest-outcomes | 1,511 | 2,275 |
+| `8d` | connector-registry | 1,553 | *new* |
+| `8b` | credential-lifecycle | 2,037 | 2,037 |
+| `8c` | payloads-declare-untrusted-text | 1,494 | 2,193 |
+| `8e` | sanitization-binds-at-the-boundary | 1,605 | *new* |
+| `11a` | meeting-records-reach-tier-one | 1,952 | 1,952 |
+| `33a` | graph-device-code-auth | 2,014 | 2,014 |
+| `33b` | graph-calendar-fetch | 1,558 | 1,558 |
+| `33c` | graph-calendar-mapping | 1,969 | 1,969 |
+| `22a` | goal-register | 1,865 | 1,865 |
+| `23a` | dashboard-sections | 1,695 | 2,377 |
+| `23d` | project-render-scope-wall | 1,652 | *new* |
+| `23b` | dashboard-pipeline | 1,827 | 1,814 |
+
+| | Specs | Total | Median | Max | Over 2,400 | Over 1,600 |
+|---|---:|---:|---:|---:|---:|---:|
+| Story 2, shipped | 12 | 15,184 | 1,239 | 1,544 | 0 | 0 |
+| Wave 1, before splits | 14 | 27,243 | 1,952 | 2,377 | 0 | 13 |
+| Wave 1, after splits | 17 | 29,921 | 1,733 | 2,037 | 0 | 13 |
+
+`8b` (2,037) is now the largest and sits comfortably inside the ceiling.
+
+**Two things the table shows that are worth keeping in view.** Total grew by
+2,678 tokens across three splits — about 890 each, which is the duplicated frame
+every split pays for: a second Intent, Boundaries, Code Map and Verification
+block. And **thirteen of seventeen are still over the original 1,600**, which the
+splits did not change and were never going to: the median moved 1,952 to 1,733
+while the count over 1,600 stayed at thirteen. That is the same conclusion the
+ruling above reached, now with the splits done as evidence rather than as an
+argument.
 
 Decisions taken at the sizing gate (2026-09-02):
 

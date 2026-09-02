@@ -315,9 +315,11 @@
     to now unconditionally, tied to nothing that proves a fetch happened, so a
     provider declining with an empty 200 claims full coverage it never had.
     HarvestResult has no way to say "I ran and learned nothing" - give it one.
-    SPLIT 2026-09-02 into three specs, all in wave 1. 8a takes the registry, the
-    health probes and both defects named above; 8b takes the credential
-    lifecycle and the write ordering below; 8c is a bugfix this story's own
+    SPLIT 2026-09-02 into five specs, all in wave 1. 8a takes HarvestResult's
+    three outcomes and both coverage defects named above; 8d takes the registry
+    and the CAP-35 health probes; 8b takes the credential lifecycle and the
+    write ordering below; 8c declares each payload class's untrusted text fields
+    behind an import-time guard, and 8e is the bugfix this story's own
     verification uncovered - app/pipelines.py:26-28 does NOT sanitize. It
     discards sanitize()'s return value and reads a `message` field only
     CommitPayload has, so every MessagePayload body passes untouched beneath a
@@ -651,9 +653,15 @@
     Pre-render the multi-tier strategic focus briefing and enforce the declared
     occasions on which the system may interrupt. Delivers CAP-9 and CAP-13.
   invoke_dev_with: >-
-    NARROWED 2026-09-02. Wave 1 takes 23a the renderer and 23b the pipeline and
-    pm-ai dashboard; 23c fills Proactive Enablement from real message events in
-    wave 2.
+    NARROWED 2026-09-02. Wave 1 takes 23a the four sections, 23d the AD-25
+    project-render scope wall, and 23b the pipeline and pm-ai dashboard; 23c
+    fills Proactive Enablement from real message events in wave 2.
+    23a SPLIT at the sizing gate 2026-09-02. The seam separates two failure
+    classes rather than merely halving a token count: text that misleads a
+    reader, and a privacy leak into a git-committed repository. daily_dashboard.md
+    is declared in the project tree too and is NOT gitignored, while goals are
+    personal-only, so the obvious way to fill a project 3-Tier section writes
+    personal career goals into an employer repo.
     THREE deviations, not two - corrected by the spec review 2026-09-02. Wave 1
     leaves TWO sections permanently stating a reason, not one: Proactive
     Enablement reads MESSAGE_POSTED, which 33d supplies in wave 2, and 33b's

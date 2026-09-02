@@ -542,22 +542,25 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (14 slices)
+### Wave 1 — a real dashboard from a real calendar (17 slices)
 
 | Slice | Delivers |
 |---|---|
 | `4a` | Config loading — `tomllib`, `config.toml`. Explicitly not the encryption toggle. |
 | `4b` | `pm-ai key enrol` through KeychainPort; the daemon never mints. Retargets 1g's "key absent" remediation. |
 | `4c` | CLI entry point and subcommand dispatch. `[project.scripts] pm-ai`. No REPL yet. |
-| `8a` | Connector registry, 10s health probe, `HarvestResult` "ran and learned nothing", and the `CoverageWindow` fix in `gitlab.py`. |
+| `8a` | `HarvestResult`'s three outcomes and the `CoverageWindow` fix in `gitlab.py`. |
+| `8d` | Connector registry and the 10s CAP-35 health probes. |
 | `8b` | Credential lifecycle — `pm-ai connector add`, encrypted-write-first, 600. |
-| `8c` | Sanitization actually binds at the harvest boundary. See below. |
+| `8c` | Each payload class declares its untrusted text fields, guarded at import. |
+| `8e` | Sanitization actually binds at the harvest boundary. See below. |
 | `11a` | Meeting records reach Tier 1 through `meetings/`; retires the in-memory dict. |
 | `33a` | `GraphAuthPort` and MSAL device-code adapter, refresh, stale-credential health reporting. |
 | `33b` | Graph calendar fetch — paging, throttling, `{dateTime, timeZone}` → aware UTC, honest coverage. |
 | `33c` | Calendar rows → Meeting records and `CALENDAR_EVENT_HELD`; `ConnectorPort` conformance. |
 | `22a` | Goal register parsed from `strategic_goals.md`; hand-edit tolerant, unparseable lines surfaced not dropped. |
-| `23a` | `core/rendering.py` — four sections, honest gaps, golden-file tests. |
+| `23a` | `core/rendering.py` — the four sections, honest gaps, golden-file tests. |
+| `23d` | `project_scope_datasources` and AD-25's one-directional privacy wall. |
 | `23b` | `pm-ai dashboard` wiring in `app/`: meetings + event_log + goals → render → `write_artifact`. |
 
 Wave 1 ends with a real `~/.manager-ai/memory/daily_dashboard.md` built from the
@@ -606,10 +609,10 @@ renderer takes a goal register.
 ## Cost, stated plainly
 
 Stories 1 and 2 were 25 slices and built the storage, crypto, and log
-foundation. This path is 21 slices plus a spike — the same order of magnitude
+foundation. This path is 24 slices plus a spike — the same order of magnitude
 again. "Shortest" means shortest *given the four decisions above*, not small.
 
-The shortest path to something working is wave 1 alone: 14 slices.
+The shortest path to something working is wave 1 alone: 17 slices.
 
 ## Open questions
 

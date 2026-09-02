@@ -10,7 +10,7 @@ review_loop_iteration: 1
 
 ## Intent
 
-**Problem:** CAP-35 requires enrolling a connector without touching code: prompt for a credential, probe it live, store the secret encrypted and the configuration at 600. Nothing does this. A connector's token has nowhere to live, so `33a` has nowhere to put a Graph refresh token, and `8a`'s registry has nothing to register from.
+**Problem:** CAP-35 requires enrolling a connector without touching code: prompt for a credential, probe it live, store the secret encrypted and the configuration at 600. Nothing does this. A connector's token has nowhere to live, so `33a` has nowhere to put a Graph refresh token, and `8d`'s registry has nothing to register from.
 
 **Approach:** Add the enrolment service: write the credential to the encrypted `private/config.json` **first**, then the connector's configuration to the unencrypted `connectors/` collection. `4c` exposes it as `pm-ai connector add`.
 
@@ -21,7 +21,7 @@ review_loop_iteration: 1
 - **Every write goes through `write_artifact`.** The declaration decides whether an artifact is sealed, never the caller (`config.json` is `encrypted=True` at `scope_model.py:484`; `connectors/` is `encrypted=False, gitignored=True` at `:451`).
 - **`private/config.json` is read-modify-written, never replaced.** It is one sealed file holding every connector's credential, and `write_artifact` replaces whole — so a plain write while enrolling a second connector destroys the first's token.
 - **`connectors/<name>.json` needs a mode mechanism, not an assertion.** `_replace` passes `mode=ENCRYPTED_FILE_MODE if sealed else None` (`service.py:880,903`), and this artifact is declared unencrypted, so today it lands at the umask — typically 0644. A declared restricted mode is added to storage; the caller still decides nothing.
-- **Registration is construction-time**, per `8a`. `pm-ai connector add` does not register into a live registry, and its success message says the connector becomes active at the next start.
+- **Registration is construction-time**, per `8d`. `pm-ai connector add` does not register into a live registry, and its success message says the connector becomes active at the next start.
 - **A live probe runs before anything is stored**, within CAP-35's 10-second bound, so a bad credential is refused while the human is present rather than discovered by a silent harvest at 03:00.
 - **The credential never appears in output.** Not echoed at the prompt, not logged, not in a traceback, not in the stored connector configuration.
 - **Refusal exit codes come from `4c`'s table** — `3` for a refusal — and this slice may not add to it.
@@ -56,7 +56,7 @@ review_loop_iteration: 1
 - `pm_ai/core/connector_enrolment.py` -- new, the whole of this story
 - `pm_ai/domain/scope_model.py:451,484` -- the two declarations whose different sealing makes the write order matter
 - `pm_ai/storage/service.py:1022` -- `write_artifact`, and its `name` parameter for members of a `Collection`
-- `pm_ai/connectors/registry.py` -- `8a`'s registry, what a successful enrolment registers into
+- `pm_ai/connectors/registry.py` -- `8d`'s registry, what a successful enrolment registers into
 - `pm_ai/ports/__init__.py:163` -- `KeyNotFound`, the lazy-key refusal this ordering is built around
 - `stories.yaml` story 8 -- the write-ordering rule, stated there first
 
@@ -83,8 +83,8 @@ review_loop_iteration: 1
   **Enrolling a second connector would have destroyed the first's credential.** `private/config.json` is one sealed file and `write_artifact` replaces whole; the slice specified a write with no matrix row for an existing occupant. Now read-modify-write, asserted on decrypted contents.
   **`StoragePort` declares neither `write_artifact` nor `read_artifact`** (`ports/__init__.py:286-314`). This slice's `core` service, plus `11a`, `22a` and `23b`, all assumed they were there. Declaring them is now a task here, as the earliest slice that needs them — the same move story 2h made for the event-log methods. Without it the implementer's only routes were importing `pm_ai.storage` from `core` or typing the dependency `Any`, the defect story 1k removed.
   **The 600 assertion had no mechanism.** `_replace` passes a mode only when the artifact is sealed (`service.py:880,903`) and `connectors/` is declared unencrypted, so the file would have landed at the umask while the criterion asserted 600 — met only by a `chmod` in the enrolment code, which this slice's own Always forbids.
-  **"No plaintext credential on disk under any circumstance" was false** and withdrawn. With `PM_AI_DISABLE_ENCRYPTION` set, `build()` installs `PlaintextCrypto` (`wiring.py:114-115,153-155`), so the clause's own mandated mechanism produces what it forbids. Restated as something the mechanism can keep. An absolute known to be false teaches the reader these clauses are aspirational, which is the `8c` defect in miniature.
-  **Contradiction with `8a` resolved** in `8a`'s favour: registration is construction-time and the success message says so.
+  **"No plaintext credential on disk under any circumstance" was false** and withdrawn. With `PM_AI_DISABLE_ENCRYPTION` set, `build()` installs `PlaintextCrypto` (`wiring.py:114-115,153-155`), so the clause's own mandated mechanism produces what it forbids. Restated as something the mechanism can keep. An absolute known to be false teaches the reader these clauses are aspirational, which is the `8e` defect in miniature.
+  **Contradiction with the registry slice resolved** in its favour (that rule now lives in `8d`, split from `8a` on 2026-09-02): registration is construction-time and the success message says so.
   The edge-case lens added the non-TTY case, where `getpass` falls back to an echoing prompt and the credential lands in shell history; the orphan-blind duplicate check; and a path-unsafe instance name refused only *after* the probe and seal, guaranteeing the orphan the slice tries to avoid.
 ## Design Notes
 
