@@ -95,21 +95,23 @@ tests would have disagreed.
 
 ## Wave 1 decomposition
 
-The twelve specs of the prototype path's first wave, under
+The thirteen specs of the prototype path's first wave, under
 `_bmad-output/specs/spec-pm-ai/stories/`, in build order. Unlike stories 1 and
 2 these do not decompose one story: they select slices of stories 4, 8, 11, 22,
 23 and the new 33. Full rationale in `prototype-path-2026-09-01.md`.
 
-Sized against the shipped story-2 set for comparability: frozen-intent blocks
-total 40,155 characters across the twelve, against story 2's 40,471 across its
-twelve, and the largest here (`23a`, 3,810) is smaller than story 2's largest
-(`2k`, 4,574).
+**Revised 2026-09-02 after a three-lens review** (`review-wave-1-2026-09-02.md`,
+140 findings). Every spec is at `review_loop_iteration: 1` and carries a change
+log recording what the review changed. The wave grew from twelve slices to
+thirteen: `4d`, the project registry, which no story owned and without which
+`pm-ai` could not have run once on a clean machine.
 
 | Spec | Delivers | Depends on |
 |---|---|---|
 | `4a-config-loading` | a reader for the declared `config.toml`, and the refusal keeping the encryption toggle out | — |
 | `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
-| `4c-cli-entry-point` | `[project.scripts] pm-ai` and subcommand dispatch; 1g's diagnostics become reachable | 4a, 4b |
+| `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b, 4d |
+| `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a |
 | `8a-connector-registry-and-honest-coverage` | the registry two pre-written tests import, and coverage derived from what was fetched | — |
 | `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 8a |
 | `8c-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | — |
@@ -139,7 +141,13 @@ Decisions taken at the sizing gate (2026-09-02):
   prerequisite the moment either changes.
 - **The critical path is five slices**: `4b → 8b → 33a → 33b → 23b`. `22a` and
   `23a` run parallel to the whole Graph chain, and `8c` has no dependants in
-  wave 1 at all.
+  wave 1 at all. `4c → 8b` was missing from the first draft's graph and is now
+  an edge; `4d` precedes `4c`.
+- **`EXPECTED_SKIPS` is lowered inside the slice that unskips a test** — `8a` by
+  two, `23a` by one. `tests/conftest.py:88-104` fails the run when skips fall
+  *below* the baseline and demands it be turned in the same commit, so the first
+  draft's "skip count falls, no new failures" was self-contradictory in all
+  twelve specs.
 
 Known debt this wave takes on, recorded so it is not discovered later:
 

@@ -248,10 +248,20 @@
     Split before building unless there is a reason not to; the two setup concerns
     arrived by having nowhere else to go, which is how a story becomes too large
     to review.
-    SPLIT 2026-09-02, by decision, into five specs. Wave 1 takes 4a config
-    loading, 4b master-key enrolment and 4c the CLI entry point and subcommand
-    dispatch; wave 2 takes 4d the daemon and loopback API and 4e the REPL at
-    CAP-18 parity. The split is the one this note asked for. Note that the
+    SPLIT 2026-09-02, by decision, into six specs. Wave 1 takes 4a config
+    loading, 4b master-key enrolment, 4c the CLI entry point and subcommand
+    dispatch, and 4d the project registry; wave 2 takes 4e the daemon and
+    loopback API and 4f the REPL at CAP-18 parity.
+    4d WAS ADDED BY THE SPEC REVIEW (2026-09-02), which found that pm-ai could
+    not have run once on a clean machine: build() eagerly resolves the project
+    scope (wiring.py:104) and an unregistered project raises UnknownProject
+    (paths.py:553), so every subcommand died before dispatch - including doctor.
+    projects.toml is declared (scope_model.py:440), paths.py already resolves it
+    and its refusal message already names `pm-ai project add`; only the command
+    and the file were missing. AD-11 governs it: a project is registered, never
+    discovered.
+    Exit codes are declared ONCE, in 4c, and 8b and 23b reuse that table. Three
+    slices previously said "non-zero" and named no integers. The split is the one this note asked for. Note that the
     console script cannot live in pm_ai.surfaces: surfaces sits BELOW app in the
     enforced layer stack, so importing wiring.build would invert it - 4c puts
     main() in pm_ai/app/entry.py and leaves dispatch in surfaces.
@@ -643,7 +653,17 @@
   invoke_dev_with: >-
     NARROWED 2026-09-02. Wave 1 takes 23a the renderer and 23b the pipeline and
     pm-ai dashboard; 23c fills Proactive Enablement from real message events in
-    wave 2. CAP-13's notification discipline is untouched - there is nothing to
+    wave 2.
+    THREE deviations, not two - corrected by the spec review 2026-09-02. Wave 1
+    leaves TWO sections permanently stating a reason, not one: Proactive
+    Enablement reads MESSAGE_POSTED, which 33c supplies in wave 2, and 33b's
+    emits() is exactly {CALENDAR_EVENT_HELD}. The third is the ended-meeting
+    filter, an unrecorded divergence from the design doc's "meetings/ where
+    start falls today".
+    A PROJECT-SCOPE dashboard's 3-Tier section states the AD-25 wall rather than
+    "no strategic goals declared": goals are personal-scope only, so the latter
+    is a claim about the world that is false whenever the personal file has
+    goals. CAP-13's notification discipline is untouched - there is nothing to
     interrupt with before story 5.
     TWO DELIBERATE DEVIATIONS from CAP-9, recorded rather than quietly
     satisfied. Leadership Notes stays empty-with-stated-reason, because filling

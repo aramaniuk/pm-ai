@@ -505,9 +505,17 @@ Both are deliberate, and both are recorded here rather than quietly satisfied,
 following the precedent story 2 set when it corrected CAP-10's "JSON line" to
 Markdown in `SPEC.md` rather than in the four sources that agreed.
 
-1. **CAP-9's "no empty section" is not met.** Leadership Notes will not fill in
-   the prototype, because filling it needs synthesis and decision 2 removed the
-   model from the path. The renderer states the reason instead of padding.
+1. **CAP-9's "no empty section" is not met, in two sections rather than one.**
+   Leadership Notes will not fill, because filling it needs synthesis and
+   decision 2 removed the model from the path. **And Proactive Enablement will
+   not fill in wave 1**, because it reads `MESSAGE_POSTED` and `33b`'s `emits()`
+   is exactly `{CALENDAR_EVENT_HELD}` — messages arrive with `33c` in wave 2.
+   Corrected 2026-09-02 by the spec review; this document originally claimed one
+   gap. The renderer states each reason instead of padding.
+3. **Time-Critical lists only meetings that have not ended.** This document said
+   "`meetings/` where `start` falls today"; `23a` filters ended meetings out, so
+   an afternoon run says "all N of today's meetings have ended" rather than
+   listing them. Recorded 2026-09-02.
 2. **CAP-9's 07:00 deadline is not met in wave 1.** Wave 1 renders on
    `pm-ai dashboard` and has no scheduler. The deadline clause arrives in wave 2
    with slice 9a's scheduled tick.
@@ -534,7 +542,7 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33d's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (12 slices)
+### Wave 1 — a real dashboard from a real calendar (13 slices)
 
 | Slice | Delivers |
 |---|---|
@@ -597,10 +605,10 @@ renderer takes a goal register.
 ## Cost, stated plainly
 
 Stories 1 and 2 were 25 slices and built the storage, crypto, and log
-foundation. This path is 19 slices plus a spike — the same order of magnitude
+foundation. This path is 20 slices plus a spike — the same order of magnitude
 again. "Shortest" means shortest *given the four decisions above*, not small.
 
-The shortest path to something working is wave 1 alone: 12 slices.
+The shortest path to something working is wave 1 alone: 13 slices.
 
 ## Open questions
 
@@ -614,6 +622,14 @@ The shortest path to something working is wave 1 alone: 12 slices.
    is in its remit needs checking against `1i` before `33c` is specced. This
    covers both `MessagePayload.mentions` and slice `8c`'s persisted `for_model`.
 4. **How should a payload declare which of its fields is sanitizable text?**
-   Slice `8c` needs an answer that is not a hardcoded field name. A `Protocol`, a
-   classvar on each payload, or a mapping beside `PAYLOAD_FOR` are all plausible;
-   the choice belongs in `8c`'s spec, not here.
+   Decided in `8c` at review: keyed by payload **class**, not event type, since
+   `ReviewPayload` serves two types; validated against the dataclass at import;
+   refused by a typed error, never an `assert`, which
+   `test_guards_survive_o.py:174-181` forbids anywhere in `pm_ai/`.
+5. **What display timezone owns "today"?** Raised by the review and still open.
+   `Meeting.start` is aware UTC, so a 23:30-local meeting is tomorrow in UTC and
+   the answer decides which meetings a 07:00 dashboard shows. `11a`'s
+   `for_day(day, *, tz)` takes it and `23a` must agree.
+6. **Does persisting `for_model` bump the operational schema version?** Story 1i
+   owns versioning. Now marked blocking in `8c` rather than deferrable, because
+   its task list already commits to persisting.

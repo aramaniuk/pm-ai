@@ -3,7 +3,7 @@ title: 'CLI entry point and subcommand dispatch'
 type: 'feature'
 created: '2026-09-02'
 status: 'in-review'
-review_loop_iteration: 0
+review_loop_iteration: 1
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -14,13 +14,17 @@ review_loop_iteration: 0
 
 **Approach:** Console script at `pm_ai/app/entry.py` — the composition root builds, then hands the built `Daemon` and the argument vector to `pm_ai/surfaces/cli/dispatch.py`, which maps subcommands onto core services. Three subcommands land here: `doctor`, `key enrol`, and `config show`.
 
+**Depends on `4d`.** `build()` eagerly resolves the project scope (`wiring.py:104`), and an unregistered project raises `UnknownProject` (`paths.py:553`), so until a project registry exists every subcommand dies before dispatch. `doctor` is the exception this slice must handle regardless — see the Always below.
+
 ## Boundaries & Constraints
 
 **Always:**
 - **The composition root constructs; the CLI dispatches.** `[project.scripts] pm-ai = "pm_ai.app.entry:main"`. `surfaces` sits *below* `app` in the enforced layer stack, so `surfaces.cli` may not import `pm_ai.app` at all — which is the decisive reason the entry point cannot live in `surfaces`. The CLI receives what it needs and constructs no adapter.
 - **The CLI holds no scheduler** (AD-7, enforced by the `cli-owns-no-scheduling` contract at `.importlinter:134-139`). Every subcommand runs once and exits. The 07:00 tick is the daemon's, in `9a`.
 - **A bare `pm-ai` exits non-zero with usage.** CAP-18 makes bare invocation open a REPL, and that is `4e`; until then a bare call that silently succeeded would read as a working install.
-- **Refusal and crash have different exit codes.** An operator scripting against this needs to tell "you asked for something disallowed" from "pm-ai broke".
+- **The exit-code table is declared here and nowhere else.** Three slices map outcomes to codes (`8b`, `23b` reuse this); leaving each to choose makes `pm-ai doctor || alert` and `pm-ai dashboard || retry` behave differently. `0` success · `1` unexpected exception · `2` usage or unknown subcommand · `3` refusal (a stated, deliberate no) · `4` `doctor` reports an unhealthy machine. `8b` and `23b` reuse these values and may not add to the table.
+- **`doctor` runs even when composition fails.** It is the command for a broken machine, so a broken machine must not make it unreachable — an unregistered project, an unwritable root or an unparseable `config.toml` each become one reported probe result rather than a traceback.
+- **All four `Health` states map explicitly.** `ABSENT` is not healthy (`doctor.py:64-72` says so: setup incomplete, encrypted writes will be refused), so it must not exit `0`.
 
 **Ask First:** Any argument-parsing dependency. `argparse` is in the standard library and this surface is small; a dependency here would need a reason.
 
@@ -30,11 +34,17 @@ review_loop_iteration: 0
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Bare invocation | `pm-ai` | usage printed, non-zero exit | N/A |
-| Diagnostics | `pm-ai doctor` | 1g's probes run and print | non-zero if any probe fails |
-| Enrolment | `pm-ai key enrol` | `4b`'s service invoked | refusal exit code, message from the service |
-| Config shown | `pm-ai config show` | the loaded `Config`, defaults marked as such | refusal exit code on `ConfigRefused` |
-| Unknown subcommand | `pm-ai frobnicate` | usage printed, non-zero exit | N/A |
+| Bare invocation | `pm-ai` | usage printed, exit `2` | N/A |
+| Subcommand group, no leaf | `pm-ai key`, `pm-ai config` | group usage printed, exit `2` | N/A |
+| Help requested | `pm-ai --help` | usage printed, exit `0`; `SystemExit` caught so `main()` returns a code | N/A |
+| Composition fails | no registered project, or an unwritable root | `doctor` still reaches every probe not needing the failed component | reported as probe results |
+| Unexpected exception | a bug anywhere below | exit `1`, distinct from `2` and `3` | traceback to stderr |
+| Probe reports `ABSENT` | key not enrolled | exit `4` — setup is incomplete, which is not success | N/A |
+| Diagnostics | `pm-ai doctor` | 1g's probes run and print | exit `4` if any probe is not healthy |
+| Enrolment | `pm-ai key enrol` | `4b`'s service invoked with `Daemon.keychain` | exit `3`, message from the service |
+| Enrolment prompt | any invocation | nothing about the key is echoed or printed | N/A |
+| Config shown | `pm-ai config show` | the loaded `Config`, defaults marked as such | exit `3` on `ConfigRefused` |
+| Unknown subcommand | `pm-ai frobnicate` | usage printed, exit `2` | N/A |
 | Malformed config present | `pm-ai doctor` with unparseable `config.toml` | diagnostics still run — a broken config must not hide a broken machine | reported as a probe result |
 
 </frozen-after-approval>
@@ -55,13 +65,22 @@ review_loop_iteration: 0
 - [ ] `pm_ai/app/entry.py` -- add `main(argv=None)` building the daemon and delegating -- construction in the one layer permitted to do it
 - [ ] `pm_ai/surfaces/cli/dispatch.py` -- add the subcommand table and exit-code mapping -- no adapter construction, no business logic
 - [ ] `pyproject.toml` -- declare `[project.scripts]`
-- [ ] `tests/surfaces/test_cli_dispatch.py` -- one test per matrix row, `main()` called with an explicit argv
+- [ ] `tests/surfaces/test_cli_dispatch.py` -- one test per matrix row, `main()` called with an explicit argv, asserting the **exact** exit integer per row
 
 **Acceptance Criteria:**
 - Given `uv run pm-ai doctor`, then story 1g's probes execute and print — the diagnostics become reachable for the first time since they were built.
+- Given a dispatcher that returns `1` for every non-success outcome, then the suite fails — each matrix row asserts its exact code, so a single collapsed value cannot pass.
+- Given a machine with no registered project, then `pm-ai doctor` still prints a probe report rather than raising `UnknownProject`.
+- Given `pm-ai key enrol` succeeds, when stdout and stderr are captured and searched, then the key material appears in neither — the surface half of `4b`'s guarantee, which `4b` cannot assert because it has no surface.
 - Given `lint-imports` runs, then `cli-owns-no-scheduling` and both AD-30 contracts hold, and `pm_ai.surfaces` imports no module from `pm_ai.app`.
 - Given `main()` is called with an unparseable `config.toml` in place and the argument `doctor`, then probes still run and the config failure is one reported result among them.
 
+## Spec Change Log
+
+- **2026-09-02, multi-lens review.** Three gaps, one of them a hard blocker.
+  **`pm-ai` could not have run once on a clean machine.** `build()` eagerly resolves the project scope (`wiring.py:104`, whose comment explains the eagerness) and an unregistered project raises `UnknownProject` (`paths.py:553`) — so every subcommand, `doctor` included, would have died before dispatch, defeating this slice's own Always about `doctor` surviving a broken environment. The registry had no owner in any story; it is now `4d`, and this slice depends on it. A criterion and a matrix row cover `doctor` on an unregistered machine regardless.
+  **Exit codes were named nowhere.** This slice, `8b` and `23b` all said "non-zero" or "refusal exit code" and no integers, so each subcommand would have chosen its own convention and the stated distinction between "disallowed" and "pm-ai broke" would have been unobservable to the operator it exists for. The table is now declared here, the other two slices reuse it, and every matrix row asserts its exact value.
+  The edge-case lens added the four paths a real operator hits first: a subcommand group with no leaf, `--help` raising `SystemExit` out of `main` (which would have broken the explicit-argv design), composition failing before dispatch, and `ABSENT` exiting `0` — the last being the summary an operator trusts while the morning briefing cannot decrypt anything.
 ## Design Notes
 
 `main(argv=None)` takes its arguments rather than reading `sys.argv` inside, so every row of the matrix is a unit test and none needs a subprocess.

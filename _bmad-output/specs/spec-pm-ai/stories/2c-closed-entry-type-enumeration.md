@@ -35,8 +35,8 @@ review_loop_iteration: 0
 |----------|--------------|---------------------------|----------------|
 | Known operational category | `"compaction"` | resolves to the `COMPACTION` member | N/A |
 | Unregistered category | `"security_note"` | refused, message listing the closed set | `UnknownCategory` |
-| A value in both enumerations | any overlap between the two value sets | refused at import — one occurrence, one member | `AssertionError` |
-| Member lacks a payload | absent from its enum's registry | refused at import | `AssertionError` |
+| A value in both enumerations | any overlap between the two value sets | refused at import — one occurrence, one member | `InconsistentVocabulary` |
+| Member lacks a payload | absent from its enum's registry | refused at import | `InconsistentVocabulary` |
 
 </frozen-after-approval>
 
@@ -62,6 +62,15 @@ review_loop_iteration: 0
 - Given `lint-imports` runs, then this module imports nothing outside `pm_ai.domain`.
 
 ## Spec Change Log
+
+- **2026-09-02, corrected while reviewing wave 1.** Both import-time rows named
+  `AssertionError`, a guard shape story 1l retired: `test_guards_survive_o.py:174-181`
+  AST-sweeps `pm_ai/` and fails on any `ast.Assert`, because `python -O` strips
+  them. The shipped code raises `InconsistentVocabulary(InconsistentModel)`
+  (`event_entries.py:195`) and always did, so this was stale documentation of
+  correct code — but it was copied verbatim into wave 1's `8c` for the one guard
+  standing between a new payload type and an unsanitized field, which is how a
+  stale matrix row becomes a real defect two stories later.
 
 - **2026-08-30, code review: the versioning row was fiction and is withdrawn.** `GRAMMAR_VERSION = 1` shipped as a module constant that nothing wrote into a line and nothing consulted while parsing, so a segment written under one grammar was byte-indistinguishable from one written under any other. Its only test asserted the constant was an integer — it could not fail for the reason AD-27 asks for the field, and three review layers found it independently. Removed rather than back-filled: stamping a version on every line forever is a real cost, and the choice between that, a per-segment header, and a dated grammar table is a design decision no story has taken. AD-27's versioning clause is now openly unmet and recorded in deferred-work, which is better than a constant that reads as satisfying it.
 
