@@ -18,6 +18,7 @@ the queue begins after `1i`.
 | `1h-derived-tier-rebuild` | the derived tier is provably disposable | 1a, 1b |
 | `1i-operational-schema-versioning` | the unrebuildable store can be upgraded safely | 1b |
 
+
 ## Story 2 decomposition
 
 `stories.yaml` story 2 ("Event log and disclosure ledger") is eleven specs under
@@ -91,6 +92,65 @@ the case already made in `derivation-services.md` for running `1h` after story 1
 2026-08-29 found the original ordering had 2b writing a flag into a line format
 that 2d then replaces — the work would have been done twice and the two golden
 tests would have disagreed.
+
+## Wave 1 decomposition
+
+The twelve specs of the prototype path's first wave, under
+`_bmad-output/specs/spec-pm-ai/stories/`, in build order. Unlike stories 1 and
+2 these do not decompose one story: they select slices of stories 4, 8, 11, 22,
+23 and the new 33. Full rationale in `prototype-path-2026-09-01.md`.
+
+Sized against the shipped story-2 set for comparability: frozen-intent blocks
+total 40,155 characters across the twelve, against story 2's 40,471 across its
+twelve, and the largest here (`23a`, 3,810) is smaller than story 2's largest
+(`2k`, 4,574).
+
+| Spec | Delivers | Depends on |
+|---|---|---|
+| `4a-config-loading` | a reader for the declared `config.toml`, and the refusal keeping the encryption toggle out | — |
+| `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
+| `4c-cli-entry-point` | `[project.scripts] pm-ai` and subcommand dispatch; 1g's diagnostics become reachable | 4a, 4b |
+| `8a-connector-registry-and-honest-coverage` | the registry two pre-written tests import, and coverage derived from what was fetched | — |
+| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 8a |
+| `8c-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | — |
+| `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
+| `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8a, 8b |
+| `33b-graph-calendar-resource` | `calendarView` to Meeting records and ended-meeting events | 11a, 33a |
+| `22a-goal-register` | the register `domain/goals.py` has never had | — |
+| `23a-dashboard-renderer` | `core.rendering`, four sections, honest gaps | 22a, 11a |
+| `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 33b |
+
+Four skipped tests stop skipping across the wave: the AD-27 taxonomy and AD-34
+no-minted-ids checks (`8a`, both importing `pm_ai.connectors.registry`), and
+AD-25's personal-store wall (`23a`, importing `pm_ai.core.rendering`). Baseline
+to measure against is 638 passed, 27 skipped at `7316178`.
+
+Decisions taken at the sizing gate (2026-09-02):
+
+- **Slice 0 is a throwaway spike**, not a spec. Device-code sign-in against the
+  real tenant and one call each to the three resources. Its only output is an
+  answer: whether the tenant permits transcripts at all. A `403
+  GraphAccessToTranscriptsDisabled` deletes `33d` and `11b` from the plan and
+  has no workaround.
+- **Story 3 stays deferred on the correct grounds.** An earlier draft justified
+  it with "sanitization already binds at the boundary", which is false — hence
+  `8c`. The real ground is that the prototype mutates nothing external and puts
+  no model in the path, so nothing harvested reaches a prompt. It becomes a hard
+  prerequisite the moment either changes.
+- **The critical path is five slices**: `4b → 8b → 33a → 33b → 23b`. `22a` and
+  `23a` run parallel to the whole Graph chain, and `8c` has no dependants in
+  wave 1 at all.
+
+Known debt this wave takes on, recorded so it is not discovered later:
+
+- **`9a`'s scheduler will be an in-memory timer**, which story 10a explicitly
+  forbids ("every job is a queue row per AD-20, never an in-memory timer"). It
+  is in wave 2, and its spec must label it temporary.
+- **CAP-9 is knowingly unmet in two clauses** — Leadership Notes and the 07:00
+  deadline. Both recorded in story 23's queue entry and in `23a`/`23b`.
+- **AD-27's versioning clause remains unmet** from story 2, unchanged by this
+  wave. `8c` and `33c` both touch the Tier-1 entry format and both defer the
+  question to story 1i.
 
 ## Open, raised by story 2f
 
