@@ -248,6 +248,23 @@
     Split before building unless there is a reason not to; the two setup concerns
     arrived by having nowhere else to go, which is how a story becomes too large
     to review.
+    SPLIT 2026-09-02, by decision, into six specs. Wave 1 takes 4a config
+    loading, 4b master-key enrolment, 4c the CLI entry point and subcommand
+    dispatch, and 4d the project registry; wave 2 takes 4e the daemon and
+    loopback API and 4f the REPL at CAP-18 parity.
+    4d WAS ADDED BY THE SPEC REVIEW (2026-09-02), which found that pm-ai could
+    not have run once on a clean machine: build() eagerly resolves the project
+    scope (wiring.py:104) and an unregistered project raises UnknownProject
+    (paths.py:553), so every subcommand died before dispatch - including doctor.
+    projects.toml is declared (scope_model.py:440), paths.py already resolves it
+    and its refusal message already names `pm-ai project add`; only the command
+    and the file were missing. AD-11 governs it: a project is registered, never
+    discovered.
+    Exit codes are declared ONCE, in 4c, and 8b and 23b reuse that table. Three
+    slices previously said "non-zero" and named no integers. The split is the one this note asked for. Note that the
+    console script cannot live in pm_ai.surfaces: surfaces sits BELOW app in the
+    enforced layer stack, so importing wiring.build would invert it - 4c puts
+    main() in pm_ai/app/entry.py and leaves dispatch in surfaces.
 - id: "5"
   title: Telegram bridge and cryptographic pairing
   spec_checkpoint: true
@@ -298,6 +315,17 @@
     to now unconditionally, tied to nothing that proves a fetch happened, so a
     provider declining with an empty 200 claims full coverage it never had.
     HarvestResult has no way to say "I ran and learned nothing" - give it one.
+    SPLIT 2026-09-02 into five specs, all in wave 1. 8a takes HarvestResult's
+    three outcomes and both coverage defects named above; 8d takes the registry
+    and the CAP-35 health probes; 8b takes the credential lifecycle and the
+    write ordering below; 8c declares each payload class's untrusted text fields
+    behind an import-time guard, and 8e is the bugfix this story's own
+    verification uncovered - app/pipelines.py:26-28 does NOT sanitize. It
+    discards sanitize()'s return value and reads a `message` field only
+    CommitPayload has, so every MessagePayload body passes untouched beneath a
+    comment asserting AD-12 holds. Inert only because no model is in the
+    prototype path. Hot registration into a running radar stays deferred: there
+    is no running daemon before 4d.
     Write ordering matters here more than anywhere. Enrolling a connector writes
     a token to the encrypted config.json and configuration to the unencrypted
     connectors/, and the key is fetched lazily, so the encrypted write is the one
@@ -432,6 +460,14 @@
     Introduce the Meeting entity as citation root, the provider transcript path
     and the manual fallback, with cost metrics in the summary header. Delivers
     CAP-3 and CAP-8.
+  invoke_dev_with: >-
+    SPLIT 2026-09-02. Wave 1 takes 11a only - Meeting records reach Tier 1.
+    Daemon.meetings is a plain dict (wiring.py:42) that run_transcript_ingestion
+    writes into, so every citation minted today resolves against process memory
+    and dies with the process, and storage/service.py does not mention meetings
+    at all. 11a adds derivation-services.md rule 3's MeetingRecords accessor and
+    retires the dict. Binding transcripts to meetings is 11b, in wave 2, and
+    needs 33e.
 - id: "12"
   title: Spoken anchor resolution and fuzzy recovery
   spec_checkpoint: true
@@ -602,6 +638,13 @@
   description: >-
     Model goals on the Domain and Horizon axes and tag every recommendation
     with a resolvable goal citation that drives rank. Delivers CAP-11.
+  invoke_dev_with: >-
+    NARROWED 2026-09-02. Wave 1 takes 22a only - the parser that builds the
+    register from strategic_goals.md. domain/goals.py already holds Goal, the
+    two closed enums and the whole alignment machinery, every piece of which
+    takes a register dict that nothing constructs, so UNALIGNED is currently the
+    only reachable answer. Ranking and the recommendation surfaces stay with
+    story 22 proper.
 - id: "23"
   title: Daily briefing and notification discipline
   spec_checkpoint: true
@@ -609,6 +652,35 @@
   description: >-
     Pre-render the multi-tier strategic focus briefing and enforce the declared
     occasions on which the system may interrupt. Delivers CAP-9 and CAP-13.
+  invoke_dev_with: >-
+    NARROWED 2026-09-02. Wave 1 takes 23a the four sections, 23d the AD-25
+    project-render scope wall, and 23b the pipeline and pm-ai dashboard; 23c
+    fills Proactive Enablement from real message events in wave 2.
+    23a SPLIT at the sizing gate 2026-09-02. The seam separates two failure
+    classes rather than merely halving a token count: text that misleads a
+    reader, and a privacy leak into a git-committed repository. daily_dashboard.md
+    is declared in the project tree too and is NOT gitignored, while goals are
+    personal-only, so the obvious way to fill a project 3-Tier section writes
+    personal career goals into an employer repo.
+    THREE deviations, not two - corrected by the spec review 2026-09-02. Wave 1
+    leaves TWO sections permanently stating a reason, not one: Proactive
+    Enablement reads MESSAGE_POSTED, which 33d supplies in wave 2, and 33b's
+    emits() is exactly {CALENDAR_EVENT_HELD}. The third is the ended-meeting
+    filter, an unrecorded divergence from the design doc's "meetings/ where
+    start falls today".
+    A PROJECT-SCOPE dashboard's 3-Tier section states the AD-25 wall rather than
+    "no strategic goals declared": goals are personal-scope only, so the latter
+    is a claim about the world that is false whenever the personal file has
+    goals. CAP-13's notification discipline is untouched - there is nothing to
+    interrupt with before story 5.
+    TWO DELIBERATE DEVIATIONS from CAP-9, recorded rather than quietly
+    satisfied. Leadership Notes stays empty-with-stated-reason, because filling
+    it needs synthesis and the prototype path puts no model in the path; and the
+    07:00 deadline is NOT met until 9a supplies the scheduled tick. The renderer
+    never fabricates: an empty section names a file or a window, never a state
+    of the world. 3-Tier is read as GoalHorizon, not GoalDomain - both are
+    three-valued and CAP-9 says only "3-Tier"; the section is about when
+    milestones land.
 - id: "24"
   title: Socratic 1:1 protocol and meta-coaching scorecard
   spec_checkpoint: true
@@ -688,3 +760,46 @@
     and bounded forgetting remains story 19's recorded compaction. Refuse the
     adaptation when the share of surfaced material the PM has not previously
     engaged with declines as engagement rises.
+- id: "33"
+  title: Microsoft Graph connector - calendar, chat, transcripts
+  spec_checkpoint: true
+  done_checkpoint: true
+  description: >-
+    One read-only pull connector over Microsoft Graph covering calendar,
+    chat and channel messages, and meeting transcripts, on delegated
+    device-code auth. The Phase-1 instance of CAP-35, which enumerated the
+    framework and left its instances unlisted.
+  invoke_dev_with: >-
+    ADDED 2026-09-02, because no story owned a Teams connector. Five specs:
+    33a device-code auth, 33b the calendar fetch and 33c its mapping to records
+    and events (all wave 1), then 33d chat and channel messages and 33e
+    transcripts (wave 2).
+    33b SPLIT at the sizing gate 2026-09-02: at 2497 tokens it held two failure
+    classes, talking to Graph correctly and mapping what came back, and the
+    review had found defects in both. 33b now owns paging, throttling and the
+    {dateTime, timeZone} conversion that would otherwise refuse every event in
+    the tenant; 33c owns the past/future split, provenance and ConnectorPort
+    conformance.
+    Verified against the Graph reference 2026-09-01, not assumed. Delegated
+    OnlineMeetingTranscript.Read.All and ChannelMessage.Read.All both suffice,
+    with no protected-API approval and no application access policy. TWO
+    caveats that shape the design: a tenant administrator can disable Graph
+    transcript access outright, returning 403 with inner code
+    GraphAccessToTranscriptsDisabled and no request-side workaround, which is
+    what the throwaway spike in slice 0 exists to find out; and the
+    channel-messages endpoint supports only $top and $expand - no $filter, no
+    $orderby - so incremental harvest cannot use a server-side cursor and must
+    page and cut client-side. That makes story 8's fabricated CoverageWindow a
+    blocker rather than a nit.
+    Calendar is not a third independent resource: transcripts are reachable
+    only for meetings tied to a calendar event, so calendar is the lookup path
+    to them via joinWebUrl.
+    The MSAL adapter goes in pm_ai/connectors/graph/auth.py, NOT pm_ai/platform.
+    The http-confined-to-adapters contract forbids HTTP clients in platform and
+    states the intent as "only inbound connectors and outbound skills may speak
+    HTTP at all"; device-code flow talks to the token endpoint. Token custody is
+    platform (KeychainPort, story 1d); token acquisition is connectors.
+    import-linter would NOT have caught the misplacement - msal reaches requests
+    transitively and the contract lists direct imports - so whether the contract
+    should name msal is an open question for 33a.
+    msal is a new runtime dependency and needs a pin.

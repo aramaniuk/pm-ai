@@ -18,6 +18,7 @@ the queue begins after `1i`.
 | `1h-derived-tier-rebuild` | the derived tier is provably disposable | 1a, 1b |
 | `1i-operational-schema-versioning` | the unrebuildable store can be upgraded safely | 1b |
 
+
 ## Story 2 decomposition
 
 `stories.yaml` story 2 ("Event log and disclosure ledger") is eleven specs under
@@ -91,6 +92,181 @@ the case already made in `derivation-services.md` for running `1h` after story 1
 2026-08-29 found the original ordering had 2b writing a flag into a line format
 that 2d then replaces — the work would have been done twice and the two golden
 tests would have disagreed.
+
+## Wave 1 decomposition
+
+The seventeen specs of the prototype path's first wave, under
+`_bmad-output/specs/spec-pm-ai/stories/`, in build order. Unlike stories 1 and
+2 these do not decompose one story: they select slices of stories 4, 8, 11, 22,
+23 and the new 33. Full rationale in `prototype-path-2026-09-01.md`.
+
+**Revised 2026-09-02 after a three-lens review** (`review-wave-1-2026-09-02.md`,
+140 findings). Every spec is at `review_loop_iteration: 1` and carries a change
+log recording what the review changed. The wave grew from twelve slices to seventeen. `4d`, the project registry, was
+missing entirely and without it `pm-ai` could not have run once on a clean
+machine. The other four are sizing-gate splits: `33b` into fetch and mapping,
+`8a` into harvest outcomes and registry, `8c` into declarations and boundary,
+and `23a` into sections and scope wall.
+
+| Spec | Delivers | Depends on |
+|---|---|---|
+| `4a-config-loading` | a reader for the declared `config.toml`, and the refusal keeping the encryption toggle out | — |
+| `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
+| `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b |
+| `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a, 4c |
+| `8a-honest-harvest-outcomes` | `HarvestResult`'s three outcomes, and coverage derived from what was fetched | — |
+| `8d-connector-registry` | the registry two pre-written tests import, and the CAP-35 health probes | — |
+| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d |
+| `8c-payloads-declare-untrusted-text` | each payload class declares its untrusted fields, guarded at import | — |
+| `8e-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | 8c |
+| `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
+| `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8b, 8d |
+| `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 8a, 33a |
+| `33c-graph-calendar-mapping` | rows to Meeting records and ended-meeting events; `ConnectorPort` conformance | 11a, 33b |
+| `22a-goal-register` | the register `domain/goals.py` has never had | — |
+| `23a-dashboard-sections` | `core.rendering`'s four sections, honest gaps | 22a, 11a |
+| `23d-project-render-scope-wall` | `project_scope_datasources` and AD-25's one-directional wall | 23a, 4d |
+| `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 23d, 33c |
+
+Four skipped tests stop skipping across the wave: the AD-27 taxonomy and AD-34
+no-minted-ids checks (`8a`, both importing `pm_ai.connectors.registry`), and
+AD-25's personal-store wall (`23a`, importing `pm_ai.core.rendering`). Baseline
+to measure against is 638 passed, 27 skipped at `7316178`.
+
+## Wave 1 sizing — measured, and the ceiling revised
+
+Measured 2026-09-02 with `tiktoken` `cl100k_base`, on spec body excluding
+frontmatter and the Spec Change Log — the like-for-like basis, since story 2's
+gate ran at creation before its own change logs existed.
+
+| Set | Specs | Total | Median | Max |
+|---|---|---|---|---|
+| Story 2, shipped | 12 | 15,184 | 1,239 | 1,544 (`2c`) |
+| Wave 1, revised | 14 | 27,243 | 1,952 | 2,377 (`23a`) |
+
+**Every wave-1 spec exceeds the 1600-token ceiling story 2 set**, except `33b`
+after its split. The smallest of the fourteen (1,698) exceeds story 2's largest
+(1,544).
+
+Where the weight sits, mean tokens per section:
+
+| Section | Story 2 | Wave 1 |
+|---|---|---|
+| Frozen intent block | 783 | 1,206 |
+| Code Map | 123 | 168 |
+| Tasks & Acceptance | 208 | 404 |
+| Design Notes | 85 | 148 |
+| Verification | 51 | 74 |
+
+The overrun is concentrated in the frozen block and in Tasks & Acceptance — the
+I/O matrix rows and the positive acceptance assertions the review demanded. It is
+not in the explanatory prose, which barely moved. So trimming cannot fix it.
+
+**Ruling: the ceiling is 2,400 for wave 1, and the 1600 figure is recorded as
+calibrated on a different shape of work.** Story 2's slices were narrow domain
+changes — one enumeration, one renderer, one parser — carrying four to eight
+matrix rows each. Wave 1's are integration slices: a connector, a CLI surface, a
+credential lifecycle, each spanning three layers and carrying twelve to
+seventeen matrix rows because the review found that many real unhandled paths.
+
+The decisive evidence is `33c`: written from scratch on 2026-09-02 *with the
+ceiling in mind*, split off a spec specifically to reduce size, and it still
+measures 1,969. A ceiling that a deliberately-scoped fresh slice cannot meet is
+measuring the wrong thing.
+
+What the ceiling still buys, and is kept for: `33b` was 2,497 before the split
+and genuinely held two failure classes — talking to Graph correctly, and mapping
+what came back. The gate caught that, which is the point of having one.
+
+**All three remaining candidates were split by decision on 2026-09-02**, after
+the ruling above was recorded. `8a` separated a `domain.harvest` type change from
+a `connectors` registry. `8c` separated the domain declarations from the `app`
+and `storage` boundary that acts on them. `23a` separated the four section
+renderers from `project_scope_datasources`, the AD-25 wall — a seam that turned
+out to divide two distinct failure classes, text that misleads a reader and a
+privacy leak into a git-committed repository, which is a better argument for the
+split than sizing alone.
+
+### After the splits — measured 2026-09-02
+
+Same basis: `tiktoken` `cl100k_base`, body excluding frontmatter and change log.
+Rows in build order.
+
+| Slice | Spec | Tokens | Before |
+|---|---|---:|---:|
+| `4a` | config-loading | 1,698 | 1,698 |
+| `4b` | master-key-enrolment | 1,733 | 1,733 |
+| `4c` | cli-entry-point | 1,998 | 1,998 |
+| `4d` | project-registry | 1,760 | 1,760 |
+| `8a` | honest-harvest-outcomes | 1,511 | 2,275 |
+| `8d` | connector-registry | 1,553 | *new* |
+| `8b` | credential-lifecycle | 2,037 | 2,037 |
+| `8c` | payloads-declare-untrusted-text | 1,494 | 2,193 |
+| `8e` | sanitization-binds-at-the-boundary | 1,605 | *new* |
+| `11a` | meeting-records-reach-tier-one | 1,952 | 1,952 |
+| `33a` | graph-device-code-auth | 2,014 | 2,014 |
+| `33b` | graph-calendar-fetch | 1,558 | 1,558 |
+| `33c` | graph-calendar-mapping | 1,969 | 1,969 |
+| `22a` | goal-register | 1,865 | 1,865 |
+| `23a` | dashboard-sections | 1,695 | 2,377 |
+| `23d` | project-render-scope-wall | 1,652 | *new* |
+| `23b` | dashboard-pipeline | 1,827 | 1,814 |
+
+| | Specs | Total | Median | Max | Over 2,400 | Over 1,600 |
+|---|---:|---:|---:|---:|---:|---:|
+| Story 2, shipped | 12 | 15,184 | 1,239 | 1,544 | 0 | 0 |
+| Wave 1, before splits | 14 | 27,243 | 1,952 | 2,377 | 0 | 13 |
+| Wave 1, after splits | 17 | 29,921 | 1,733 | 2,037 | 0 | 13 |
+
+`8b` (2,037) is now the largest and sits comfortably inside the ceiling.
+
+**Two things the table shows that are worth keeping in view.** Total grew by
+2,678 tokens across three splits — about 890 each, which is the duplicated frame
+every split pays for: a second Intent, Boundaries, Code Map and Verification
+block. And **thirteen of seventeen are still over the original 1,600**, which the
+splits did not change and were never going to: the median moved 1,952 to 1,733
+while the count over 1,600 stayed at thirteen. That is the same conclusion the
+ruling above reached, now with the splits done as evidence rather than as an
+argument.
+
+Decisions taken at the sizing gate (2026-09-02):
+
+- **Slice 0 is a throwaway spike**, not a spec. Device-code sign-in against the
+  real tenant and one call each to the three resources. Its only output is an
+  answer: whether the tenant permits transcripts at all. A `403
+  GraphAccessToTranscriptsDisabled` deletes `33e` and `11b` from the plan and
+  has no workaround.
+- **Story 3 stays deferred on the correct grounds.** An earlier draft justified
+  it with "sanitization already binds at the boundary", which is false — hence
+  `8c`. The real ground is that the prototype mutates nothing external and puts
+  no model in the path, so nothing harvested reaches a prompt. It becomes a hard
+  prerequisite the moment either changes.
+- **The critical path is seven slices**: `4a → 4c → 8b → 33a → 33b → 33c → 23b`,
+  re-derived 2026-09-02 after the splits. It runs through the CLI rather than the
+  key, because `8b` adds `connector add` to the dispatch table `4c` creates.
+  Seven slices have no dependencies and can start immediately — `4a`, `4b`, `8a`,
+  `8c`, `8d`, `11a`, `22a` — and `8c → 8e` is an island with no dependants in
+  this wave.
+- **`4c` precedes `4d`.** An earlier draft had the reverse, which was circular:
+  `4d` adds `project add` to the dispatch table `4c` creates. It resolves in this
+  direction only because `4c` requires `doctor` to work on a machine with no
+  registered project.
+- **`EXPECTED_SKIPS` is lowered inside the slice that unskips a test** — `8a` by
+  two, `23a` by one. `tests/conftest.py:88-104` fails the run when skips fall
+  *below* the baseline and demands it be turned in the same commit, so the first
+  draft's "skip count falls, no new failures" was self-contradictory in all
+  twelve specs.
+
+Known debt this wave takes on, recorded so it is not discovered later:
+
+- **`9a`'s scheduler will be an in-memory timer**, which story 10a explicitly
+  forbids ("every job is a queue row per AD-20, never an in-memory timer"). It
+  is in wave 2, and its spec must label it temporary.
+- **CAP-9 is knowingly unmet in two clauses** — Leadership Notes and the 07:00
+  deadline. Both recorded in story 23's queue entry and in `23a`/`23b`.
+- **AD-27's versioning clause remains unmet** from story 2, unchanged by this
+  wave. `8c` and `33d` both touch the Tier-1 entry format and both defer the
+  question to story 1i.
 
 ## Open, raised by story 2f
 
