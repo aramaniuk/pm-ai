@@ -2,8 +2,9 @@
 title: 'Config loading'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 1
+baseline_commit: '2120c5de1c09a42e560600bd5e957fab45b3e550'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -57,6 +58,9 @@ review_loop_iteration: 1
 ## Code Map
 
 - `pm_ai/core/config.py` -- new, the whole of this story
+- `pm_ai/core/extraction.py:44` -- `speaker_is_pm` gained a `bool(pm_handle)` guard, because retiring the `wiring.py` literal made "no PM configured" a reachable state
+- `tests/slice/test_transcript_slice.py:45` -- the AD-32 daemon fixture now states its `pm_handle`; a new test pins the unset case
+- `tests/architecture/test_static_rules.py` -- home of the three repository-wide sweeps this story added (the loader opens nothing, one module imports `tomllib`, no developer address survives in the package)
 - `pm_ai/domain/scope_model.py:432` -- the declaration that finally gets a reader
 - `pm_ai/platform/environment.py:1-22` -- the module docstring states why the toggle may not live in `config.toml`; this story enforces it
 - `pm_ai/storage/service.py:1065` -- `read_artifact`, what `4c` will call to get the bytes
@@ -64,9 +68,9 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/config.py` -- add `Config` (the three keys with defaults), `load_config(raw: bytes | None) -> Config`, `ConfigRefused`, and the encryption-key family as a named constant -- one place states what the file may say
-- [ ] `pm_ai/app/wiring.py` -- take `pm_handle` from the loaded `Config`, retiring the `wiring.py:44` literal -- the hardcoded address is why this key is in wave 1
-- [ ] `tests/core/test_config.py` -- one test per matrix row
+- [x] `pm_ai/core/config.py` -- add `Config` (the three keys with defaults), `load_config(raw: bytes | None) -> Config`, `ConfigRefused`, and the encryption-key family as a named constant -- one place states what the file may say
+- [x] `pm_ai/app/wiring.py` -- take `pm_handle` from the loaded `Config`, retiring the `wiring.py:44` literal -- the hardcoded address is why this key is in wave 1
+- [x] `tests/core/test_config.py` -- one test per matrix row
 
 **Acceptance Criteria:**
 - Given a `config.toml` carrying an encryption key, when loaded, then `ConfigRefused` names `PM_AI_DISABLE_ENCRYPTION` — a reader learns where the setting lives rather than only that this is the wrong place.
@@ -80,6 +84,8 @@ review_loop_iteration: 1
 - **2026-09-02, multi-lens review.** The closed key vocabulary had **no members**: every key was deferred to Ask First, so the loader would have refused every possible `config.toml` — a declared, hand-editable, non-gitignored file that accepts nothing. Three keys are now named, chosen because wave 1 demonstrably needs them: `pm_handle` was hardcoded at `wiring.py:44`, `blended_hourly_rate` is what CAP-3's Man-Hour Cost needs and 11a's own Ask First raised, and `verbose_logging` is the one key `environment.py` sanctions. Retiring the `wiring.py:44` literal became a task here rather than staying nobody's.
   The edge-case lens added five unhandled paths, of which two are substantive: an encryption key that is *also* an unknown key had two matching refusal rows and no precedence, and `isinstance(True, int)` means a TOML `true` would pass a float check and price every meeting at one unit per attendee-hour.
   The verification lens found the central Always — "never opens a file" — invisible to all three declared commands. It is now stated as structural (the signature takes bytes) with the reason no gate covers it, rather than as a promise.
+- **2026-09-02, during implementation: retiring the literal made "no PM configured" reachable, and AD-32 had to be told.** No matrix row or criterion covers this, and it is the story's most consequential effect. `wiring.py` defaulted `pm_handle` to one developer's address, so `extract()`'s `speaker_is_pm=(u.speaker_handle == pm_handle)` was always comparing against *something*. With the literal gone, `Config().pm_handle` is `""` — and nothing validates the handles a transcript arrives with, so an authenticated transcript can carry an empty one. A bare equality would then have made an unattributed utterance the PM on any machine with no `config.toml`: an unconfigured install granting spoken-command execution authority, the one direction AD-32 may not fail in. Two changes close it, and both belong to this story because this story opened it — `extract()` now requires a non-empty `pm_handle` before any comparison, and `Config.__post_init__` refuses a whitespace-only handle so the `bool` test is sufficient rather than merely usual. The wave-1 defaults are therefore *unset states* rather than values: `pm_handle = ""` matches nobody and `blended_hourly_rate = 0.0` reports a zero cost rather than a plausible wrong one, while a `config.toml` that writes either explicitly is refused, so absent and abandoned cannot be confused.
+
 ## Design Notes
 
 The encryption refusal is a whole named clause rather than an unknown-key case because the two failures teach different things. An unknown key is a typo; an encryption key is someone deliberately trying to do the thing the architecture forbids, and they need to be told where to go instead. Collapsing it into "unknown key" would answer a real question with a shrug.
@@ -92,3 +98,54 @@ Refusing unknown keys at all is the less obvious choice — TOML readers usually
 - `uv run pytest tests/core/test_config.py -q` -- expected: all matrix rows pass
 - `uv run lint-imports` -- expected: contracts kept
 - `uv run pytest -q` -- expected: no new failures
+
+## Suggested Review Order
+
+**What the file may say**
+
+- The whole vocabulary and its refusals in one place — start here for the design.
+  [`config.py:98`](../../../../pm_ai/core/config.py#L98)
+- Refusal order is fixed and documented: decode, parse, encryption, vocabulary, types, values.
+  [`config.py:168`](../../../../pm_ai/core/config.py#L168)
+- The encryption family, matched per path segment case-folded — the architecture's one-way door.
+  [`config.py:282`](../../../../pm_ai/core/config.py#L282)
+- Closed vocabulary: a typo is refused, never ignored.
+  [`config.py:304`](../../../../pm_ai/core/config.py#L304)
+
+**Invariants the class holds, not only the loader**
+
+- Unset states stay constructible; whitespace handles and unusable rates cannot be built.
+  [`config.py:123`](../../../../pm_ai/core/config.py#L123)
+- Accepted set derived from the dataclass, so a field cannot be admitted unread.
+  [`config.py:165`](../../../../pm_ai/core/config.py#L165)
+
+**Refuse or return, for pathological input too**
+
+- Depth bound, so a 1000-part key refuses instead of exhausting the stack.
+  [`config.py:253`](../../../../pm_ai/core/config.py#L253)
+- Decode reports the offset in the file, BOM included — not in the stripped text.
+  [`config.py:207`](../../../../pm_ai/core/config.py#L207)
+- A 400-digit integer refuses by name rather than raising `OverflowError`.
+  [`config.py:337`](../../../../pm_ai/core/config.py#L337)
+
+**Who the daemon thinks the PM is**
+
+- One developer's address was the compiled-in default; `Config` is now its only home.
+  [`wiring.py:50`](../../../../pm_ai/app/wiring.py#L50)
+- Config arrives already parsed — `core` opens nothing, the single reader reads.
+  [`wiring.py:62`](../../../../pm_ai/app/wiring.py#L62)
+- The consequence: unset matches nobody, so an unconfigured install grants no authority (AD-32).
+  [`extraction.py:53`](../../../../pm_ai/core/extraction.py#L53)
+
+**Gates**
+
+- The story's central Always, as an import allowlist rather than a reviewer's denylist.
+  [`test_static_rules.py:537`](../../../../tests/architecture/test_static_rules.py#L537)
+- One `tomllib` importer, matched on import nodes; and the retired address stays retired.
+  [`test_static_rules.py:563`](../../../../tests/architecture/test_static_rules.py#L563)
+- Every accepted key round-trips, which is what fails when a fourth arrives unread.
+  [`test_config.py:370`](../../../../tests/core/test_config.py#L370)
+- One row per matrix scenario, both halves of every type message asserted.
+  [`test_config.py:165`](../../../../tests/core/test_config.py#L165)
+- AD-32 restated as a test: an unconfigured handle matches no speaker.
+  [`test_transcript_slice.py:128`](../../../../tests/slice/test_transcript_slice.py#L128)

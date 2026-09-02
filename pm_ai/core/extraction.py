@@ -41,7 +41,16 @@ def extract(transcript: Transcript, meeting: Meeting, *, pm_handle: str, provide
                 kind="explicit_command",
                 disposition=classify(
                     source_authenticated=transcript.source.speaker_identity_is_authenticated,
-                    speaker_is_pm=(u.speaker_handle == pm_handle),
+                    # `bool(pm_handle)` first, deliberately. An unconfigured
+                    # `pm_handle` is `""` (`core.config`) and nothing validates
+                    # the handles a transcript arrives with, so a GRAPH
+                    # transcript can carry an empty one. A bare equality would
+                    # then make an *unattributed* utterance the PM on a machine
+                    # nobody has configured yet — an unconfigured install
+                    # granting execution authority, the one direction AD-32 must
+                    # never fail in. `Config` refuses a whitespace handle, which
+                    # is why `bool` suffices here and no `.strip()` follows it.
+                    speaker_is_pm=bool(pm_handle) and u.speaker_handle == pm_handle,
                     provider=provider,
                     verb=verb,
                 ),

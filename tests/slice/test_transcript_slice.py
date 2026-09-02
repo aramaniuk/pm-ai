@@ -13,6 +13,7 @@ import pytest
 
 from pm_ai.app.pipelines import run_transcript_ingestion
 from pm_ai.app.wiring import build
+from pm_ai.core.config import Config
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meetings import Meeting
@@ -43,7 +44,15 @@ MEETING = Meeting(
 
 
 def _daemon(tmp_path):
-    return build(tmp_path, "alpha", now=lambda: NOW)
+    """Built with an explicit `pm_handle`, because there is no longer a default.
+
+    `wiring.py` carried one developer's address as a literal until story 4a gave
+    `config.toml` a reader; `Config()` now leaves the handle unset, and an unset
+    handle deliberately matches no speaker. Every AD-32 test below therefore has
+    to state who the PM is — which is the honest arrangement: the authorization
+    rule was silently passing on a value nobody configured.
+    """
+    return build(tmp_path, "alpha", now=lambda: NOW, config=Config(pm_handle=PM))
 
 
 def _transcript(source: TranscriptSource, lines: list[tuple[str, str]]) -> Transcript:
@@ -111,6 +120,29 @@ def test_manual_source_stages_even_for_the_pm_and_a_reversible_verb(tmp_path):
     d = _daemon(tmp_path)
     t = _transcript(TranscriptSource.MANUAL,
                     [(PM, "pm-ai, post_comment gitlab:alpha:issue:102 ship it")])
+    out = run_transcript_ingestion(d, t, MEETING)
+    assert not out["executed"] and len(out["staged"]) == 1
+    assert d.skills._skills["gitlab.post_comment"].posted == []
+
+
+def test_an_unconfigured_pm_handle_matches_nobody(tmp_path):
+    """AD-32 — story 4a made "unset" reachable, so it must fail closed.
+
+    `Config().pm_handle` is `""`, and nothing validates the handles a transcript
+    arrives with: the source vouches for speaker *identity*, not for the string
+    being non-empty, so a GRAPH transcript can carry `""`. A bare equality in
+    `extract()` would then make an unattributed utterance the PM on a machine
+    nobody has configured yet — an unconfigured install granting execution
+    authority, which is the one direction this rule may not fail in.
+
+    GRAPH rather than MANUAL on purpose: `classify` stages every unauthenticated
+    source before it ever looks at the speaker, so the manual adapter could not
+    exercise this if it tried.
+    """
+    d = build(tmp_path, "alpha", now=lambda: NOW)
+    assert d.pm_handle == ""
+    t = _transcript(TranscriptSource.GRAPH,
+                    [("", "pm-ai, post_comment gitlab:alpha:issue:102 ship it")])
     out = run_transcript_ingestion(d, t, MEETING)
     assert not out["executed"] and len(out["staged"]) == 1
     assert d.skills._skills["gitlab.post_comment"].posted == []

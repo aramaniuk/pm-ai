@@ -348,3 +348,13 @@ Known debt this wave takes on, recorded so it is not discovered later:
 - source_spec: `_bmad-output/specs/spec-pm-ai/SPEC.md` (constraint: "Everything else … is 600-permissioned and unencrypted")
   summary: Implement 600 permissions for the whole plaintext set — every file `_publish` writes plaintext, `operational.db` at creation, captures, and team-member records — as a follow-up story; today only the two encrypted files and their enclave directories are tightened (0600/0700).
   evidence: `storage-contract.md` makes 600 the load-bearing substitute for the encryption dropped on 2026-08-23, and nothing implements it for the plaintext set (story-1 code review, 2026-08-28). Deferred by decision at the review gate: the change concentrates in the single writer but touches every write path and deserves its own matrix (umask interaction, git-committed project files, sqlite sidecar files) rather than riding a review patch.
+
+## Deferred at the story-4a review gate (2026-09-02)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4a-config-loading.md`
+  summary: `blended_hourly_rate` has no upper bound, so a finite but enormous rate (`1e308`) makes `Meeting.man_hour_cost` return `inf` — the silent propagation `nan` and `inf` were refused to prevent.
+  evidence: Reproduced: `load_config(b'blended_hourly_rate = 1e308')` returns `1e+308` and is admissible. The loader refuses `nan`, `inf`, zero and negatives as unusable, so this is the one remaining value class that type-checks, passes the admissibility rules, and still poisons every cost CAP-3 computes. Deferred rather than patched because the ceiling is a policy call — any threshold picked during a review patch would be invented, and CAP-3's own currency assumptions are not yet written down.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4a-config-loading.md`
+  summary: `config.toml` is hand-edited (AD-3) with a closed key vocabulary, but no sample file or documentation states the three key names, their types, or their admissible ranges.
+  evidence: The vocabulary exists only inside `pm_ai/core/config.py` and this story file, and the loader refuses every unknown key — so a user discovers what the file may say by triggering refusals one at a time. Deferred because the natural home is the operator-facing surface story 4c stands up, not a loader that no caller reaches yet.
