@@ -249,47 +249,78 @@ independent and can move.
 
 ```mermaid
 flowchart LR
+    s0(["slice 0 — spike, throwaway"])
     s4a["4a config"]
     s4b["4b key enrol"]
-    s4c["4c CLI"]
-    s8a["8a registry + HarvestResult"]
+    s4c["4c CLI + exit codes"]
+    s4d["4d project registry"]
+    s8a["8a harvest outcomes"]
+    s8d["8d connector registry"]
     s8b["8b credentials"]
-    s8c["8c sanitize fix"]
+    s8c["8c payload declarations"]
+    s8e["8e sanitize at boundary"]
     s11a["11a meeting records"]
-    s33a["33a Graph auth"]
-    s33b["33b Graph calendar"]
     s22a["22a goal register"]
-    s23a["23a renderer"]
-    s23b["23b dashboard wiring"]
+    s33a["33a Graph auth"]
+    s33b["33b Graph fetch"]
+    s33c["33c Graph mapping"]
+    s23a["23a dashboard sections"]
+    s23d["23d scope wall"]
+    s23b["23b dashboard pipeline"]
     done(["real daily_dashboard.md"])
 
-    s0(["slice 0 — spike, throwaway"]) --> s33a
-
+    s0 --> s33a
     s4a --> s4c
+    s4b --> s4c
+    s4a --> s4d
+    s4c --> s4d
     s4b --> s8b
-    s4c --> s23b
-    s8a --> s33a
+    s4c --> s8b
+    s8d --> s8b
     s8b --> s33a
+    s8d --> s33a
+    s8a --> s33b
     s33a --> s33b
-    s11a --> s33b
-    s33b --> s23b
+    s11a --> s33c
+    s33b --> s33c
+    s8c --> s8e
     s22a --> s23a
+    s11a --> s23a
+    s23a --> s23d
+    s4d --> s23d
+    s4c --> s23b
     s23a --> s23b
+    s23d --> s23b
+    s33c --> s23b
     s23b --> done
 
-    classDef ind fill:#0f5132,stroke:#0a3622,color:#ffffff
+    classDef crit fill:#664d03,stroke:#413003,color:#ffffff
+    classDef island fill:#0f5132,stroke:#0a3622,color:#ffffff
     classDef goal fill:#084298,stroke:#052c65,color:#ffffff
-    class s8c ind
+    class s4a,s4c,s8b,s33a,s33b,s33c,s23b crit
+    class s8c,s8e island
     class done,s0 goal
 ```
 
-`8c` has no edges: it is a standalone correctness fix, needed before `33d` in
-wave 2 rather than by anything in wave 1. It sits in wave 1 because `8a` is
-already in the harvest plumbing and the defect is live on the GitLab path today.
+Amber is the critical path, **seven slices**:
+`4a → 4c → 8b → 33a → 33b → 33c → 23b`. It runs through the CLI rather than the
+key, because `8b` adds `connector add` to the dispatch table `4c` creates — an
+edge the first draft of this graph missed entirely.
 
-The critical path is `4b → 8b → 33a → 33b → 23b`, five slices. `22a` and `23a`
-can proceed in parallel with the whole Graph chain, since the renderer takes a
-goal register and a clock and does not care where meetings came from.
+Green is an island: `8c → 8e` has no dependants in wave 1. The sanitization fix
+is needed before `33d` in wave 2, where the first genuinely untrusted
+third-party text arrives. It sits in wave 1 because the defect is live on the
+GitLab path today.
+
+Seven slices have no dependencies at all and can start immediately: `4a`, `4b`,
+`8a`, `8c`, `8d`, `11a`, `22a`. `22a` and `11a` in particular run parallel to the
+entire Graph chain, since the renderer takes a goal register and a clock and does
+not care where meetings came from.
+
+**`4c` precedes `4d`, not the other way round.** `4d` adds `project add` to the
+dispatch table `4c` creates, so the reverse would be circular — and it is
+survivable only because `4c` requires `doctor` to work on a machine with no
+registered project.
 
 ## Connector design
 
@@ -568,12 +599,16 @@ Wave 1 ends with a real `~/.manager-ai/memory/daily_dashboard.md` built from the
 PM's actual calendar and actual goals. **This is the working prototype, and a
 legitimate point to stop and reassess.**
 
-Ordering constraints inside the wave: `4a` and `4b` precede everything (nothing
-runs without config and a key); `8a` precedes `33a` so Graph inherits a fixed
-`HarvestResult` rather than a fabricated one; `8c` precedes `33d`, where the
-first genuinely untrusted third-party text arrives; `11a` precedes `33b` because
-calendar harvest writes Meeting records; `22a` precedes `23a` because the
-renderer takes a goal register.
+Ordering constraints inside the wave, as the build-order graph below derives
+them: `4a` and `4b` precede everything, because nothing runs without config and a
+key; `4c` precedes `4d` and `8b`, both of which add subcommands to the dispatch
+table it creates; `8d` precedes `8b` and `33a`, which register into it; `8a`
+precedes `33b` so Graph inherits a `HarvestResult` that can report an honest
+outcome; `11a` precedes `33c` because the mapping writes Meeting records, and
+precedes `23a` because Time-Critical reads them; `22a` precedes `23a` because the
+renderer takes a goal register; `23a` precedes `23d`, which adds the scope wall
+to the same module; and `8c` precedes `8e`, the one pair with no dependants in
+this wave.
 
 ### Wave 2 — the full surface (7 slices)
 

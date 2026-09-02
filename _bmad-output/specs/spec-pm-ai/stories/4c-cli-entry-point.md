@@ -14,7 +14,7 @@ review_loop_iteration: 1
 
 **Approach:** Console script at `pm_ai/app/entry.py` — the composition root builds, then hands the built `Daemon` and the argument vector to `pm_ai/surfaces/cli/dispatch.py`, which maps subcommands onto core services. Three subcommands land here: `doctor`, `key enrol`, and `config show`.
 
-**Depends on `4d`.** `build()` eagerly resolves the project scope (`wiring.py:104`), and an unregistered project raises `UnknownProject` (`paths.py:553`), so until a project registry exists every subcommand dies before dispatch. `doctor` is the exception this slice must handle regardless — see the Always below.
+**`4d` follows this slice, and does not precede it.** `build()` eagerly resolves the project scope (`wiring.py:104`) and an unregistered project raises `UnknownProject` (`paths.py:553`), so until `4d` exists only `doctor` is usable on a clean machine — which is exactly why the Always below requires `doctor` to survive a failed composition. Ordering it the other way would be circular: `4d` adds `project add` to the dispatch table **this** slice creates.
 
 ## Boundaries & Constraints
 

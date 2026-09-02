@@ -16,6 +16,8 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 
 **Approach:** `pm-ai project add <id> <repository-path>` writes `projects.toml`; `build()` reads it and hands the mapping to `ScopePaths.real()`.
 
+**Follows `4c`**, which creates the dispatch table and the exit-code table this command uses. Before this slice lands, `4c` leaves only `doctor` usable on a clean machine; after it, every subcommand is.
+
 ## Boundaries & Constraints
 
 **Always:**

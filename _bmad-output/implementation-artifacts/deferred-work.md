@@ -112,16 +112,16 @@ and `23a` into sections and scope wall.
 |---|---|---|
 | `4a-config-loading` | a reader for the declared `config.toml`, and the refusal keeping the encryption toggle out | — |
 | `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
-| `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b, 4d |
-| `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a |
+| `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b |
+| `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a, 4c |
 | `8a-honest-harvest-outcomes` | `HarvestResult`'s three outcomes, and coverage derived from what was fetched | — |
 | `8d-connector-registry` | the registry two pre-written tests import, and the CAP-35 health probes | — |
-| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 8a |
+| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d |
 | `8c-payloads-declare-untrusted-text` | each payload class declares its untrusted fields, guarded at import | — |
 | `8e-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | 8c |
 | `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
 | `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8b, 8d |
-| `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 33a |
+| `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 8a, 33a |
 | `33c-graph-calendar-mapping` | rows to Meeting records and ended-meeting events; `ConnectorPort` conformance | 11a, 33b |
 | `22a-goal-register` | the register `domain/goals.py` has never had | — |
 | `23a-dashboard-sections` | `core.rendering`'s four sections, honest gaps | 22a, 11a |
@@ -241,10 +241,16 @@ Decisions taken at the sizing gate (2026-09-02):
   `8c`. The real ground is that the prototype mutates nothing external and puts
   no model in the path, so nothing harvested reaches a prompt. It becomes a hard
   prerequisite the moment either changes.
-- **The critical path is five slices**: `4b → 8b → 33a → 33b → 23b`. `22a` and
-  `23a` run parallel to the whole Graph chain, and `8c` has no dependants in
-  wave 1 at all. `4c → 8b` was missing from the first draft's graph and is now
-  an edge; `4d` precedes `4c`.
+- **The critical path is seven slices**: `4a → 4c → 8b → 33a → 33b → 33c → 23b`,
+  re-derived 2026-09-02 after the splits. It runs through the CLI rather than the
+  key, because `8b` adds `connector add` to the dispatch table `4c` creates.
+  Seven slices have no dependencies and can start immediately — `4a`, `4b`, `8a`,
+  `8c`, `8d`, `11a`, `22a` — and `8c → 8e` is an island with no dependants in
+  this wave.
+- **`4c` precedes `4d`.** An earlier draft had the reverse, which was circular:
+  `4d` adds `project add` to the dispatch table `4c` creates. It resolves in this
+  direction only because `4c` requires `doctor` to work on a machine with no
+  registered project.
 - **`EXPECTED_SKIPS` is lowered inside the slice that unskips a test** — `8a` by
   two, `23a` by one. `tests/conftest.py:88-104` fails the run when skips fall
   *below* the baseline and demands it be turned in the same commit, so the first
