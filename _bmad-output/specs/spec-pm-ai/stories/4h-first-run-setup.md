@@ -21,6 +21,8 @@ context: []
 - **Encryption is never offered as a choice.** Setup enrols the master key and never asks whether to encrypt. No persistent setting may disable encryption; `PM_AI_DISABLE_ENCRYPTION` — an environment variable, which dies with the process — is the only channel, and `4a` refuses any encryption-shaped key in `config.toml` by name.
 - **Every step is re-runnable, and refuses rather than overwrites.** An enrolled key, a registered project and an existing `config.toml` are ordinary states on a second run, not failures. Nothing here may replace a key: a new one makes every previously sealed artifact unreadable.
 - **The sequence is ordered by dependency, and says why.** Key before any encrypted write, project before path resolution, config last because it is the only step whose absence is survivable.
+- **The TTY check is step zero.** It runs before enrolment, not beside the prompts: a key minted into the keychain before a non-interactive refusal is a write, and "writes nothing" asserted on files alone would not see it.
+- **`pm_handle` is mandatory.** Setup re-prompts until it has an admissible one, or refuses; there is no path that completes with the handle unset. An unconfigured handle matches no speaker (`4a`), so a machine that finished setup without one would harvest, render, and silently execute nothing that was spoken.
 - **Setup asserts its own result.** It ends by running `1g`'s probes and reporting them, exiting per `4c`'s table. "The command succeeded" and "the machine is ready" are different claims, and only the second matters to the operator.
 - **Nothing is reimplemented.** `4b`'s `enrol`, `4d`'s registry and `4g`'s `render_config` are called. This slice owns the order, the prompts, and the write.
 
@@ -37,11 +39,15 @@ context: []
 | Key already enrolled | keychain holds a key | `4b`'s `KeyAlreadyEnrolled` reads as a completed step, not a failure | N/A |
 | Keychain unreachable | no backend, or the OS refuses | setup stops at that step and names it; nothing later runs | exit `3` |
 | Malformed `config.toml` present | hand-edited, unparseable | refused by name and left untouched; setup does not overwrite it | `ConfigRefused`, exit `3` |
-| Operator declines a value | empty answer for `pm_handle` | the key is omitted rather than written blank, which `4a` would refuse | N/A |
-| Non-interactive invocation | no TTY | refuses rather than prompting into a pipe | exit `2` |
+| Operator gives no handle | empty answer for `pm_handle` | re-prompted; `pm_handle` is mandatory, so setup does not complete without one | refused after a bounded number of attempts, exit `3` |
+| Operator gives an inadmissible answer | a negative rate, `true` as a rate, a whitespace handle | named and re-prompted — `Config.__post_init__` refuses these, and its `ConfigRefused` must not escape as a traceback after the key and project are already done | re-prompt, then exit `3` |
+| Non-interactive invocation | no TTY | refuses **before enrolment**, so nothing is written anywhere, keychain included | exit `3` |
+| Second run, a different project path for the same id | operator answers differently | `4d` refuses the move rather than relocating a tree; the refusal names it | `DuplicateProject`, exit `3` |
+| Second run, a new project id | operator registers a second project | files **do** change: the registry gains an entry, additively | exit `0` |
+| Second run, config already valid | `config.toml` parses and is complete | reads as a completed step, as `KeyAlreadyEnrolled` does — not a refusal | exit `0` |
 | Write refused mid-sequence | root unwritable | steps already completed stay done; the refusal names where it stopped | propagated, exit `3` |
 | Environment fault after a full run | `sqlite-vec` unavailable | every configuration step completes; the probe is reported | exit `4` |
-| Interrupted part-way | operator aborts at the prompt | what was done stays done; re-running continues from there | exit `2` |
+| Interrupted part-way | operator aborts at the prompt | what was done stays done; re-running continues from there | exit `3` |
 
 </frozen-after-approval>
 
@@ -59,19 +65,28 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add `setup`: enrol, register, prompt, write, report -- one ordered sequence, each step idempotent and each refusal naming its step
+- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add `setup`: **check TTY**, enrol, register, prompt, write, report -- one ordered sequence, each step idempotent and each refusal naming its step; the TTY check precedes enrolment so a refusal leaves the keychain untouched
 - [ ] `pm_ai/app/entry.py` -- route `render_config`'s bytes to `write_artifact`, and read the existing file first so a malformed one is refused before anything is written
 - [ ] `pm_ai/platform/doctor.py` -- retarget the keychain `ABSENT` remediation at `pm-ai setup`, which `1g` left pending a command to name
 - [ ] `tests/slice/test_first_run.py` -- a clean temporary root driven to all-probes-green with scripted answers, plus the matrix
 
 **Acceptance Criteria:**
-- Given a clean temporary root, when `setup` runs with scripted answers, then `doctor` reports keychain, registry and config healthy — asserted on the probe report rather than on setup's exit code, because the two can disagree.
-- Given `setup` run twice, then no file's bytes differ after the second run and it exits `0` — asserted on file contents, since "already done" is easy to report and easy to get wrong.
+- Given a clean temporary root, when `setup` runs with scripted answers, then the **keychain, registry and config probes** report healthy — those three by name, not `report.healthy`, because `packages_installed()` is FAILING by design in this repo (`test_doctor.py:305-317` records why) and an all-green verdict is unreachable without standing the distributions in.
+- Given `setup` run twice with the same answers, then no file's bytes differ after the second run and it exits `0` — asserted on file contents, since "already done" is easy to report and easy to get wrong.
 - Given a keychain that already holds a key, then no write reaches the keychain — asserted on the fake, because replacing a key destroys every sealed artifact.
 - Given a malformed `config.toml`, then it is byte-identical after the failed run.
-- Given `pm-ai setup` with stdin not a TTY, then it refuses with exit `2` and writes nothing.
+- Given `pm-ai setup` with stdin not a TTY, then it refuses with exit `3`, and **no key reaches the keychain** — asserted on the fake as well as on the filesystem, because the TTY check runs before enrolment.
+- Given an operator who answers `pm_handle` with an empty string, then setup does not complete: the run ends non-zero and `config.toml` carries no `pm_handle` key.
 
 ## Spec Change Log
+
+- **2026-09-03, frozen intent amended under the human's unlock, after the second multi-lens review.** Six changes, all from decisions taken while triaging that review.
+  **`pm_handle` is mandatory at first boot** (decision D-7), so the "operator declines a value" row is withdrawn — there is no completing path with the handle unset. That also dissolves the review's B3: `4g`'s `WARNING` for an unset handle can no longer mean "exit `4` forever", because a machine that finished setup always has one.
+  **A non-TTY refusal exits `3`, not `2`** (D-9). `4c` defines `2` as usage and `3` as a stated refusal, and `8b` already used `3` for the same condition — so `pm-ai setup || alert` and `pm-ai connector add || alert` no longer diverge on one machine fault, which is what `4c`'s table exists to prevent.
+  **The TTY check moves to step zero** (B16). As written it sat beside the prompts, so a key could be minted into the keychain before the refusal, while "writes nothing" was asserted on files only. The criterion now asserts the fake keychain too.
+  **Two answer-shaped failures gained rows** (B24): an inadmissible answer, whose `ConfigRefused` from `Config.__post_init__` would otherwise escape as a traceback after the key and project were already done; and a changed answer on a second run, where a new project id legitimately *does* change files while a moved path for an existing id is refused by `4d`.
+  **The all-probes-green criterion was unreachable** (C13). `packages_installed()` is FAILING by design in this repo and `run_all` constructs a real keychain adapter when passed none, so a correct implementation exited `4`. The criterion now names the three probes setup actually configures.
+  KEEP: asserting on the probe report rather than on setup's own exit code. The two can disagree, and that is the whole reason the closing report exists.
 
 - **2026-09-03, split at the sizing gate.** Drafted together with the config serializer and probe as one slice measuring 1981 body tokens, over wave 1's 1600 ceiling. `4g` holds the serializer and the probe — independently shippable, and able to land while `4b` and `4d` are still in flight. This half holds the sequence, which cannot start until all three exist.
 
