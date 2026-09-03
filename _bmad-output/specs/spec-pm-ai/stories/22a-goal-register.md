@@ -10,7 +10,7 @@ review_loop_iteration: 1
 
 ## Intent
 
-**Problem:** `domain/goals.py` defines `Goal`, `GoalDomain`, `GoalHorizon`, and the alignment machinery — `resolve`, `alignment_tag`, `rank_key` — all of which take a `register: dict[str, Goal]`. Nothing builds that register. `strategic_goals.md` is declared Tier-1 exactly once, in the personal tree (`scope_model.py:544`), and is a member of `PERSONAL_SUBJECT_ARTIFACTS` (`:1052`) precisely so that **no committed scope may hold it** (`:1044-1047`) and is described as "hand-editable by design (AD-3)", but no parser exists, so every consumer of the alignment machinery has an empty register and CAP-11's `UNALIGNED` is the only reachable answer.
+**Problem:** `domain/goals.py` defines `Goal`, `GoalDomain`, `GoalHorizon`, and the alignment machinery — `resolve`, `alignment_tag`, `rank_key` — all of which take a `register: dict[str, Goal]`. Nothing builds that register. `strategic_goals.md` is declared Tier-1 exactly once, in the personal tree (`scope_model.py:544`), and is a member of `PERSONAL_SUBJECT_ARTIFACTS` (`:1052`) precisely so that **no committed scope may hold it** (`:1044-1047`) and is described as "hand-editable by design (AD-3)", but no parser exists, so every consumer of the alignment machinery has an empty register. And the consequence is worse than a degraded tag: `UNALIGNED` is returned only when a recommendation cites nothing (`goals.py:64,87-88`), so a recommendation that *does* cite a goal makes `resolve` **raise `UnresolvedGoal`** (`:90-95`). With no register, `alignment_tag` cannot be called on real data at all.
 
 **Approach:** Add the parser that turns the hand-authored Markdown into a register, tolerating human editing and surfacing what it cannot read. `23a`'s 3-Tier Strategic Milestones section is the first consumer.
 
@@ -24,9 +24,19 @@ review_loop_iteration: 1
 - **The scope comes from the caller, never from the file.** `parse_goals(raw, *, scope)`. `Goal.scope` is required deliberately (`goals.py:49`), and it is the personal scope because that is the only tree this file is declared in. A parser defaulting it would be a parser taking a caller's decision — the same rule `11a` states for `Meeting.scope`, and the AD-38 hole the required field closed.
 - **A goal-shaped block that fails the grammar is refused, not read as prose.** Otherwise "an unreadable goal is surfaced, never dropped" is satisfied by an implementation that ignores everything non-matching, which is the natural one to write.
 
-**Ask First:** The file's exact Markdown grammar. It is the surface a human types into every week, and a grammar chosen for parser convenience over writing comfort will simply not be maintained. A worked example in the file's own header, so the format documents itself, is the shape worth considering.
+**Ask First:** Nothing. The grammar was decided on 2026-09-03: **domain from the section heading, `[id]` and `(horizon)` as the only structured tokens, the title as free text.**
 
-**Never:** No write path — this file is authored by hand and pm-ai does not edit it. No goal invention: an absent file yields an empty register and that is a state the renderer states, not one the parser papers over. No changes to `domain/goals.py`.
+```
+## Project
+
+- [g_payments_latency] (medium) Cut payment latency below 200ms
+```
+
+Rejected: the `key=value` grammar `11a` uses for meeting records. Four lines per goal is fine for a machine-written record and wrong for a file a human revises, and D-8 made `domain` the grouping axis, which maps onto headings for free. A worked example in the file's own header makes it self-documenting.
+
+**Always, added:** **an id's charset is stated here, not inferred from `SourceRef`.** `SourceRef.parse(f"goal:{id}")` checks only that there are two colon-separated parts and the second is non-empty (`identity.py:26-31`), so `goal:my id` parses happily — a citation with a space in it, unparseable by anything that splits on whitespace. The parser refuses against an explicit charset, and keeps the `SourceRef.parse` check as a second gate.
+
+**Never:** No writer and no command — `22b`.  No write path — this file is authored by hand and pm-ai does not edit it. No goal invention: an absent file yields an empty register and that is a state the renderer states, not one the parser papers over. No changes to `domain/goals.py`.
 
 ## I/O & Edge-Case Matrix
 
@@ -68,12 +78,19 @@ review_loop_iteration: 1
 **Acceptance Criteria:**
 - Given a file with two goals sharing an id, when parsed, then it is refused and the message names the id — a register that silently kept one would make `resolve` return an arbitrary goal.
 - Given a well-formed file, when the register is passed to `alignment_tag` with a recommendation citing one of its goals, then the tag names that goal's domain — the machinery works end to end for the first time.
-- Given `lint-imports` runs, then `pm_ai.core.goal_register` imports no I/O client.
+- Given the signature `parse_goals(raw: bytes | None, *, scope)`, then there is no path to a file — stated structurally rather than as a `lint-imports` criterion, which cannot fail: `core-is-io-free` already forbids every client it would name, and the way a parser actually does I/O is a bare `open()`, which imports nothing.
 - Given every goal in a well-formed file, then each `Goal.scope` equals the scope the caller passed — asserted, because a parser that defaults it re-opens AD-38 and nothing else would notice.
 - Given a file containing prose and one goal-shaped block with a broken horizon line, then it is refused — the case that separates "surfaced, never dropped" from "ignore what does not match".
 - Given a file of well-formed prose with no goals, then the register is present-and-empty rather than absent, so `23a` says "no goals declared" rather than telling the PM to author a file they already wrote.
 
 ## Spec Change Log
+
+- **2026-09-03, amended against the second multi-lens review, and the grammar decided.**
+  **The Intent was wrong about current behaviour** (B8). It said an empty register makes `UNALIGNED` the only reachable answer; in fact `resolve` **raises `UnresolvedGoal`** for any recommendation that cites a goal (`goals.py:90-95`), and `UNALIGNED` is returned only when nothing is cited. So today's behaviour is an exception, not a degraded tag — a stronger reason for this slice, and one that matters because `23a` and `23b` were specified against the "quietly degrades" reading.
+  **The grammar is Markdown-native** (decision Q15): domain from the heading, `[id]` and `(horizon)` as the only structured tokens, title as free text. The `key=value` grammar `11a` uses was rejected here — four lines per goal is right for a machine-written record and wrong for the file a human revises, and this file's failure mode is not a parse error but the PM stopping updating it.
+  **The id charset is stated rather than inferred** (B23). The matrix leaned on `SourceRef.parse` to reject an unsafe id, but that check only counts colon-separated parts, so `goal:my id` passes — a citation with a space, unparseable by anything splitting on whitespace.
+  **A criterion that could not fail is replaced** (C14). `lint-imports` already forbids every client the old criterion would have caught, and a bare `open()` imports nothing; the `bytes` signature is the real guarantee, so it is stated as one.
+  **The writer moved to `22b`.** Goals are not normally typed by hand — they are set in a 1:1, or through the CLI or a Telegram voice command — so this slice was a reader for a hand-editable artifact, exactly as `4a` was. The 4a → 4g precedent applies.
 
 - **2026-09-02, multi-lens review.** Two defects, one of them the most consequential in the wave.
   **The Intent inverted the meaning of `scope_model.py:1052`.** It said `strategic_goals.md` is declared "in the personal and committed trees". That line is a member of `PERSONAL_SUBJECT_ARTIFACTS`, whose checked property is stated at `:1044-1047` as *no committed scope holds it*; the file is declared once, personal-only. An implementer following the original sentence would have looked for or created a project-scope copy — writing the PM's personal career goals into a git-committed employer repository. Corrected, and the reason the line exists is now stated rather than cited.

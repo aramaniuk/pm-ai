@@ -130,6 +130,7 @@ and `23a` into sections and scope wall.
 | `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 8a, 33a |
 | `33c-graph-calendar-mapping` | rows to Meeting records and ended-meeting events; `ConnectorPort` conformance | 11a, 33b |
 | `22a-goal-register` | the register `domain/goals.py` has never had | — |
+| `22b-goal-writer` | `render_goals`, `pm-ai goal set`, and the `goal_set` entry | 22a, 4c |
 | `23a-dashboard-sections` | `core.rendering`'s four sections, honest gaps | 22a, 11a |
 | `23d-project-render-scope-wall` | `project_scope_datasources` and AD-25's one-directional wall | 23a, 4d |
 | `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 23d, 33c |
@@ -383,3 +384,16 @@ Known debt this wave takes on, recorded so it is not discovered later:
   **Closed 2026-09-03 by slice `8f`**, which declares both methods and a collection listing on the port.
   evidence: Verified at the story-4a review gate: the port declares nine methods (`ports/__init__.py:286-314`) and neither of those two, while `StorageService.write_artifact` sits at `service.py:1022` and `read_artifact` at `:1065`. The review filed this as A1, "blocks implementation". It does not: `Daemon.storage` is typed as the concrete `StorageService` (`wiring.py:38`), so `4c` reading `config.toml` and every other wave-1 caller reach both methods legally, and no wave-1 slice depends on the port for artifact access. It remains a real inconsistency of the kind story 2h fixed when it added the event-log methods to the port for this same reason. Recorded because downgrading it from blocker is exactly how it would otherwise be lost — it appears in no story, and the two methods are the whole of AD-3's tiering contract as far as any future port consumer can see.
 
+
+## Queued by decision, 2026-09-03 — meeting amendments
+
+Decided in full while triaging the wave-1 review, then queued rather than
+specified: the machinery corrects a transcript-derived **summary**, and a summary
+needs a model, which the prototype path's decision 2 removes from waves 1 and 2.
+`11a` reserves the `## Summary` region and preserves `## Notes`; nothing else
+here is buildable until story 7 puts a model in the path and `11b` wires the real
+transcript.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11a-meeting-records-reach-tier-one.md`
+  summary: A meeting record's `## Summary` is derived from the transcript **and** an append-only amendment log, and each amendment appends a `meeting_amended` entry to the event log.
+  evidence: The PM amends through the CLI or Telegram — text or voice — not by hand-editing, so pm-ai owns every write and there is no concurrent editor to merge against; amendments are records carrying instant, actor and surface, appended and never regenerated, while the summary is re-derived from both so a correction reads correctly rather than sitting below the thing it corrects. CAP-10 requires the event-log entry, and it **cannot** be an `ObservedEventType`: those require a `SourceRef` and `persist_events` dedups on the key derived from it, so a second amendment to one meeting would share the first's key and be silently dropped — the failure `2c` documented when it rejected putting `COMPACTION` there. So `SelfActionType` gains `meeting_amended` and `2c`'s payload registry gains a typed payload for it, under `2c`'s standing guards: disjoint value sets, and no member declarable by a connector. Voice amendments additionally need Whisper (story 7); text amendments do not.

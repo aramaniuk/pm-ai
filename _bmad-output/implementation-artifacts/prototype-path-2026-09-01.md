@@ -268,6 +268,7 @@ flowchart LR
     s8e["8e model boundary"]
     s11a["11a meeting records"]
     s22a["22a goal register"]
+    s22b["22b goal writer"]
     s33a["33a Graph auth"]
     s33b["33b Graph fetch"]
     s33c["33c Graph mapping"]
@@ -302,6 +303,8 @@ flowchart LR
     s33a --> s33b
     s11a --> s33c
     s33b --> s33c
+    s22a --> s22b
+    s4c --> s22b
     s22a --> s23a
     s11a --> s23a
     s23a --> s23d
@@ -321,8 +324,8 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 23 slices, **33 dependency edges** in the table and the
-same 33 in the diagram, no edge in one and absent from the other, acyclic. The
+cross-checked both ways: 24 slices, **35 dependency edges** in the table and the
+same 35 in the diagram, no edge in one and absent from the other, acyclic. The
 count has moved four times on 2026-09-03 as the wave's specs were amended
 against the second review and split at the sizing gate; it is re-derived from the
 table each time rather than adjusted by hand.
@@ -610,7 +613,7 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (23 slices)
+### Wave 1 — a real dashboard from a real calendar (24 slices)
 
 | Slice | Delivers |
 |---|---|
@@ -634,6 +637,7 @@ depends on the first answer.
 | `33b` | Graph calendar fetch — paging, throttling, `{dateTime, timeZone}` → aware UTC, honest coverage. |
 | `33c` | Calendar rows → Meeting records and `CALENDAR_EVENT_HELD`; `ConnectorPort` conformance. |
 | `22a` | Goal register parsed from `strategic_goals.md`; hand-edit tolerant, unparseable lines surfaced not dropped. |
+| `22b` | `render_goals`, `pm-ai goal set`, and the `goal_set` event-log entry. |
 | `23a` | `core/rendering.py` — the four sections, honest gaps, golden-file tests. |
 | `23d` | `project_scope_datasources` and AD-25's one-directional privacy wall. |
 | `23b` | `pm-ai dashboard` wiring in `app/`: meetings + event_log + goals → render → `write_artifact`. |
