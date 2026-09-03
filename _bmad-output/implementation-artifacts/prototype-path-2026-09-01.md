@@ -255,6 +255,8 @@ flowchart LR
     s4b["4b key enrol"]
     s4c["4c CLI + exit codes"]
     s4d["4d project registry"]
+    s4g["4g config writer + probe"]
+    s4h["4h pm-ai setup"]
     s8a["8a harvest outcomes"]
     s8d["8d connector registry"]
     s8b["8b credentials"]
@@ -275,6 +277,11 @@ flowchart LR
     s4b --> s4c
     s4a --> s4d
     s4c --> s4d
+    s4a --> s4g
+    s4g --> s4h
+    s4b --> s4h
+    s4c --> s4h
+    s4d --> s4h
     s4b --> s8b
     s4c --> s8b
     s8d --> s8b
@@ -303,9 +310,10 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 17 slices, **21 dependency edges** in the table and the
-same 21 in the diagram, no edge in one and absent from the other, acyclic. The
-count was 22 until 8e's 2026-09-02 renegotiation removed its edge from `8c`.
+cross-checked both ways: 19 slices, **26 dependency edges** in the table and the
+same 26 in the diagram, no edge in one and absent from the other, acyclic. It was
+22 until 8e's 2026-09-02 renegotiation removed its edge from `8c`, and 21 until
+`4g` and `4h` entered the wave on 2026-09-03.
 
 Amber is the critical path, **seven slices**:
 `4a → 4c → 8b → 33a → 33b → 33c → 23b`. It runs through the CLI rather than the
@@ -331,6 +339,12 @@ where meetings came from.
 dispatch table `4c` creates, so the reverse would be circular — and it is
 survivable only because `4c` requires `doctor` to work on a machine with no
 registered project.
+
+**`4h` has three prerequisites and no dependants.** It sequences `4b`'s
+enrolment, `4d`'s registration and `4g`'s writer, so it cannot start until all
+three exist — and because nothing depends on it, it never delays the critical
+path. `4g` needs only `4a`, so it can land while `4b` and `4d` are still in
+flight; that asymmetry is why the pair was split at the sizing gate.
 
 ## Connector design
 
@@ -583,7 +597,7 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (17 slices)
+### Wave 1 — a real dashboard from a real calendar (19 slices)
 
 | Slice | Delivers |
 |---|---|
@@ -591,6 +605,8 @@ depends on the first answer.
 | `4b` | `pm-ai key enrol` through KeychainPort; the daemon never mints. Retargets 1g's "key absent" remediation. |
 | `4c` | CLI entry point, subcommand dispatch, and the exit-code table. No REPL yet. |
 | `4d` | Project registry and `pm-ai project add`. **Added by the spec review** — `build()` resolves the project scope eagerly, so without it nothing runs on a clean machine. |
+| `4g` | A writer for `config.toml`, and the sixth `doctor` probe that reports its state. |
+| `4h` | `pm-ai setup` — enrol, register, prompt, write, then report `doctor`. First boot to green. |
 | `8a` | `HarvestResult`'s three outcomes and the `CoverageWindow` fix in `gitlab.py`. |
 | `8d` | Connector registry and the 10s CAP-35 health probes. |
 | `8b` | Credential lifecycle — `pm-ai connector add`, encrypted-write-first, 600. |

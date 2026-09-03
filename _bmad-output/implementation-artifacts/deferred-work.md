@@ -102,7 +102,7 @@ The seventeen specs of the prototype path's first wave, under
 
 **Revised 2026-09-02 after a three-lens review** (`review-wave-1-2026-09-02.md`,
 140 findings). Every spec is at `review_loop_iteration: 1` and carries a change
-log recording what the review changed. The wave grew from twelve slices to seventeen. `4d`, the project registry, was
+log recording what the review changed. The wave grew from twelve slices to seventeen, and to nineteen on 2026-09-03 when first-run setup was requested: `config.toml` had a reader and no writer, so nothing could configure a machine and `doctor` could not report whether it was configured. Split at the sizing gate into `4g` (writer and probe) and `4h` (the sequence). `4d`, the project registry, was
 missing entirely and without it `pm-ai` could not have run once on a clean
 machine. The other four are sizing-gate splits: `33b` into fetch and mapping,
 `8a` into harvest outcomes and registry, `8c` into declarations and boundary,
@@ -114,6 +114,8 @@ and `23a` into sections and scope wall.
 | `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
 | `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b |
 | `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a, 4c |
+| `4g-config-gains-a-writer` | a writer for `config.toml` and the probe that reports its state | 4a |
+| `4h-first-run-setup` | `pm-ai setup` — the ordered first-boot sequence, asserted by a probe report | 4b, 4c, 4d, 4g |
 | `8a-honest-harvest-outcomes` | `HarvestResult`'s three outcomes, and coverage derived from what was fetched | — |
 | `8d-connector-registry` | the registry two pre-written tests import, and the CAP-35 health probes | — |
 | `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d |
