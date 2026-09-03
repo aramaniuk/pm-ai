@@ -256,6 +256,7 @@ flowchart LR
     s4c["4c CLI + exit codes + doctor"]
     s4j["4j service subcommands"]
     s4d["4d project registry"]
+    s4k["4k project add"]
     s4g["4g config writer"]
     s4i["4i config probe"]
     s4h["4h pm-ai setup"]
@@ -280,14 +281,15 @@ flowchart LR
     s4c --> s4j
     s8d --> s4j
     s4a --> s4d
-    s4c --> s4d
     s4a --> s4g
     s4g --> s4h
     s4a --> s4i
     s4i --> s4h
     s4b --> s4h
     s4c --> s4h
-    s4d --> s4h
+    s4d --> s4k
+    s4c --> s4k
+    s4k --> s4h
     s4b --> s8b
     s4c --> s8b
     s8d --> s8b
@@ -316,8 +318,8 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 21 slices, **30 dependency edges** in the table and the
-same 30 in the diagram, no edge in one and absent from the other, acyclic. The
+cross-checked both ways: 22 slices, **31 dependency edges** in the table and the
+same 31 in the diagram, no edge in one and absent from the other, acyclic. The
 count has moved four times on 2026-09-03 as the wave's specs were amended
 against the second review and split at the sizing gate; it is re-derived from the
 table each time rather than adjusted by hand.
@@ -342,10 +344,11 @@ was removed. `22a` and `11a` in particular run parallel to the entire Graph
 chain, since the renderer takes a goal register and a clock and does not care
 where meetings came from.
 
-**`4c` precedes `4d`, not the other way round.** `4d` adds `project add` to the
-dispatch table `4c` creates, so the reverse would be circular — and it is
-survivable only because `4c` requires `doctor` to work on a machine with no
-registered project.
+**`4c` precedes `4k`, not `4d`.** The circularity the review found was real
+while one slice held both the registry and its command: `4d` added `project add`
+to the dispatch table `4c` creates. Splitting them on 2026-09-03 dissolved it —
+`4d` is the registry, its reader and its probe, and needs only `4a`; `4k` is the
+command and needs `4c`. So `4d` is startable immediately and `4k` waits.
 
 **`4h` has four prerequisites and no dependants.** It sequences `4b`'s
 enrolment, `4d`'s registration, `4g`'s writer and `4i`'s probe, so it cannot
@@ -604,7 +607,7 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (21 slices)
+### Wave 1 — a real dashboard from a real calendar (22 slices)
 
 | Slice | Delivers |
 |---|---|
@@ -612,7 +615,8 @@ depends on the first answer.
 | `4b` | `pm-ai key enrol` through KeychainPort; the daemon never mints. Retargets 1g's "key absent" remediation. |
 | `4c` | CLI entry point, the dispatch and exit-code tables, and `doctor`. No REPL yet. |
 | `4j` | The three service leaves: `key enrol`, `config show`, `connector check`. |
-| `4d` | Project registry and `pm-ai project add`. **Added by the spec review** — `build()` resolves the project scope eagerly, so without it nothing runs on a clean machine. |
+| `4d` | `projects.toml` parsed, rendered, read by `build()`, reported by `doctor`. **Added by the spec review.** |
+| `4k` | `pm-ai project add <path> [alias]` — creates the tree, generates `.gitignore`, adopts an existing one. |
 | `4g` | A writer for `config.toml` — `render_config` beside `load_config`. |
 | `4i` | The sixth `doctor` probe: what state `config.toml` is actually in. |
 | `4h` | `pm-ai setup` — enrol, register, prompt, write, then report `doctor`. First boot to green. |
@@ -636,8 +640,8 @@ legitimate point to stop and reassess.**
 
 Ordering constraints inside the wave, as the build-order graph below derives
 them: `4a` and `4b` precede everything, because nothing runs without config and a
-key; `4c` precedes `4d` and `8b`, both of which add subcommands to the dispatch
-table it creates; `8d` precedes `8b` and `33a`, which register into it; `8a`
+key; `4c` precedes `4j`, `4k` and `8b`, all of which add subcommands to the
+dispatch table it creates; `8d` precedes `8b` and `33a`, which register into it; `8a`
 precedes `33b` so Graph inherits a `HarvestResult` that can report an honest
 outcome; `11a` precedes `33c` because the mapping writes Meeting records, and
 precedes `23a` because Time-Critical reads them; `22a` precedes `23a` because the
