@@ -118,7 +118,7 @@ and `23a` into sections and scope wall.
 | `8d-connector-registry` | the registry two pre-written tests import, and the CAP-35 health probes | — |
 | `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d |
 | `8c-payloads-declare-untrusted-text` | each payload class declares its untrusted fields, guarded at import | — |
-| `8e-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | 8c |
+| `8e-sanitization-binds-at-the-boundary` | AD-12 holding where it can be enforced: `ModelPort` accepts only `Sanitized` | — |
 | `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
 | `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8b, 8d |
 | `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 8a, 33a |

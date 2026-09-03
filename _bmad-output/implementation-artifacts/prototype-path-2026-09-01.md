@@ -142,7 +142,7 @@ flowchart TB
 
     subgraph L_core["pm_ai.core — I/O-free"]
         direction LR
-        csan["sanitize · normalize<br/>8c fixes the boundary"]
+        csan["sanitize · normalize<br/>8e retires the no-op"]
         cnew["rendering · goal_register<br/>meeting_records · config"]
         csched["scheduler — wave 2"]
         cexist["event_log · retrospective<br/>disclosure_ledger · extraction · ledger"]
@@ -239,8 +239,9 @@ flowchart LR
     class elog,meet,out store
 ```
 
-`san` and `attr` are amber because slice `8c` fixes the discarded-return-value
-fault before any Graph text passes through them.
+`san` and `attr` are amber because slice `8e` retires the discarded-return-value
+no-op here and moves the guard to the model boundary, before any Graph text
+passes through them.
 
 ### Wave 1 build order
 
@@ -258,7 +259,7 @@ flowchart LR
     s8d["8d connector registry"]
     s8b["8b credentials"]
     s8c["8c payload declarations"]
-    s8e["8e sanitize at boundary"]
+    s8e["8e model boundary"]
     s11a["11a meeting records"]
     s22a["22a goal register"]
     s33a["33a Graph auth"]
@@ -283,7 +284,6 @@ flowchart LR
     s33a --> s33b
     s11a --> s33c
     s33b --> s33c
-    s8c --> s8e
     s22a --> s23a
     s11a --> s23a
     s23a --> s23d
@@ -302,20 +302,30 @@ flowchart LR
     class done,s0 goal
 ```
 
+Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
+cross-checked both ways: 17 slices, **21 dependency edges** in the table and the
+same 21 in the diagram, no edge in one and absent from the other, acyclic. The
+count was 22 until 8e's 2026-09-02 renegotiation removed its edge from `8c`.
+
 Amber is the critical path, **seven slices**:
 `4a → 4c → 8b → 33a → 33b → 33c → 23b`. It runs through the CLI rather than the
 key, because `8b` adds `connector add` to the dispatch table `4c` creates — an
 edge the first draft of this graph missed entirely.
 
-Green is an island: `8c → 8e` has no dependants in wave 1. The sanitization fix
-is needed before `33d` in wave 2, where the first genuinely untrusted
-third-party text arrives. It sits in wave 1 because the defect is live on the
-GitLab path today.
+Green is two islands, not a chain: `8c` and `8e` have no dependants in wave 1
+and, since 8e's 2026-09-02 renegotiation, no dependency on each other. 8e
+declares the chokepoint — `ModelPort` accepting only `Sanitized` — and reads no
+declaration; a caller gathering text for a prompt reads 8c's. Both are needed
+before `33d` in wave 2, where the first genuinely untrusted third-party text
+arrives, and before story 7 puts a model behind the port. They sit in wave 1
+because the defect is live on the GitLab path today and cheapest to close while
+nothing can yet bypass the port.
 
-Seven slices have no dependencies at all and can start immediately: `4a`, `4b`,
-`8a`, `8c`, `8d`, `11a`, `22a`. `22a` and `11a` in particular run parallel to the
-entire Graph chain, since the renderer takes a goal register and a clock and does
-not care where meetings came from.
+Eight slices have no dependencies at all and can start immediately: `4a`, `4b`,
+`8a`, `8c`, `8d`, `8e`, `11a`, `22a` — `8e` joined them when its edge from `8c`
+was removed. `22a` and `11a` in particular run parallel to the entire Graph
+chain, since the renderer takes a goal register and a clock and does not care
+where meetings came from.
 
 **`4c` precedes `4d`, not the other way round.** `4d` adds `project add` to the
 dispatch table `4c` creates, so the reverse would be circular — and it is
@@ -413,7 +423,7 @@ The transcript 403 makes this load-bearing rather than tidy: a tenant with
 transcripts disabled must record *looked-and-refused*, or story 16's three
 verdicts later read it as *nothing happened*.
 
-### Sanitization does not currently happen (slice 8c)
+### Sanitization does not currently happen (slice 8e)
 
 Found 2026-09-01 while verifying this document's own claims, and it is a silent
 fault rather than a gap.
@@ -585,7 +595,7 @@ depends on the first answer.
 | `8d` | Connector registry and the 10s CAP-35 health probes. |
 | `8b` | Credential lifecycle — `pm-ai connector add`, encrypted-write-first, 600. |
 | `8c` | Each payload class declares its untrusted text fields, guarded at import. |
-| `8e` | Sanitization actually binds at the harvest boundary. See below. |
+| `8e` | Sanitization binds where it can be enforced: `ModelPort` accepts only `Sanitized`. See below. |
 | `11a` | Meeting records reach Tier 1 through `meetings/`; retires the in-memory dict. |
 | `33a` | `GraphAuthPort` and MSAL device-code adapter, refresh, stale-credential health reporting. |
 | `33b` | Graph calendar fetch — paging, throttling, `{dateTime, timeZone}` → aware UTC, honest coverage. |
@@ -607,8 +617,8 @@ precedes `33b` so Graph inherits a `HarvestResult` that can report an honest
 outcome; `11a` precedes `33c` because the mapping writes Meeting records, and
 precedes `23a` because Time-Critical reads them; `22a` precedes `23a` because the
 renderer takes a goal register; `23a` precedes `23d`, which adds the scope wall
-to the same module; and `8c` precedes `8e`, the one pair with no dependants in
-this wave.
+to the same module; and `8c` and `8e` are two independent slices with no
+dependants in this wave and, after 8e's renegotiation, no edge between them.
 
 ### Wave 2 — the full surface (7 slices)
 
@@ -630,8 +640,8 @@ this wave.
   either changes; nothing in wave 1 or 2 does.
 
   The rationale is *not* that sanitization already works. It does not — see
-  slice `8c`. An earlier draft of this document claimed the harvest boundary
-  sanitizes; that claim was wrong and the correction is why `8c` exists.
+  slice `8e`. An earlier draft of this document claimed the harvest boundary
+  sanitizes; that claim was wrong and the correction is why `8e` exists.
 - **Story 7 — Whisper and Ollama.** Decision 2 removed every model from the
   path. Transcript extraction does not need one: `core/extraction.py` is regex,
   not model-backed.
@@ -658,9 +668,16 @@ The shortest path to something working is wave 1 alone: 17 slices.
 2. **Is "3-Tier" horizon or domain?** Decided as horizon above. A one-line
    change now; a re-render later.
 3. **Does a payload gaining a field need an operational schema version bump?**
-   Story 1i built the versioning; whether a Tier-1 Markdown entry format change
-   is in its remit needs checking against `1i` before `33d` is specced. This
-   covers both `MessagePayload.mentions` and slice `8c`'s persisted `for_model`.
+   **Answered 2026-09-02: no, and story 1i is the wrong owner.** `SCHEMA_VERSION`
+   (`service.py:133`) describes `operational.db`'s table shape, and a field added
+   to a Tier-1 Markdown line changes no column — the only thing the harvest write
+   path puts in SQLite is a `seen` dedup key. The version that would govern an
+   entry line is AD-27's entry grammar, which does not exist: 2c withdrew
+   `GRAMMAR_VERSION` after finding it written nowhere and read nowhere. `8e` no
+   longer persists `for_model` at all (see question 6), so what remains live is
+   `MessagePayload.mentions` in `33d` — the first slice that genuinely widens the
+   entry grammar, and the point at which AD-27's unmade design decision must be
+   taken rather than deferred.
 4. **How should a payload declare which of its fields is sanitizable text?**
    Decided in `8c` at review: keyed by payload **class**, not event type, since
    `ReviewPayload` serves two types; validated against the dataclass at import;
@@ -670,6 +687,12 @@ The shortest path to something working is wave 1 alone: 17 slices.
    `Meeting.start` is aware UTC, so a 23:30-local meeting is tomorrow in UTC and
    the answer decides which meetings a 07:00 dashboard shows. `11a`'s
    `for_day(day, *, tz)` takes it and `23a` must agree.
-6. **Does persisting `for_model` bump the operational schema version?** Story 1i
-   owns versioning. Now marked blocking in `8c` rather than deferrable, because
-   its task list already commits to persisting.
+6. **Does persisting `for_model` bump the operational schema version?**
+   **Closed 2026-09-02 by removing the premise.** The question was a category
+   error (see question 3), and examining it retired the design that raised it:
+   AD-12 already requires the guard at the consumer through a `ModelPort`
+   accepting only `Sanitized`, no such port existed anywhere in `pm_ai/`, nothing
+   in the package referenced `Sanitized` except the module defining it, and
+   AD-31's audit record is scope provenance in the disclosure ledger rather than
+   the sanitized text. `8e` now declares the port and derives the copy at the
+   point of use, persisting nothing and leaving the entry grammar untouched.
