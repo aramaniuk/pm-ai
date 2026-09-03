@@ -80,6 +80,8 @@ context: []
 
 ## Spec Change Log
 
+- **2026-09-03, kept over the ceiling by decision.** 2047 body tokens against wave 1's 1600. Not split: an ordered first-run sequence over three other slices' commands is one goal, and its bulk is the matrix — separating the prompts from the writes would be artificial. The human accepted the overage on the grounds that the review's central complaint about this set was specs that *understated* their failure paths. `4g` was split instead, leaving `4i` for the probe.
+
 - **2026-09-03, frozen intent amended under the human's unlock, after the second multi-lens review.** Six changes, all from decisions taken while triaging that review.
   **`pm_handle` is mandatory at first boot** (decision D-7), so the "operator declines a value" row is withdrawn — there is no completing path with the handle unset. That also dissolves the review's B3: `4g`'s `WARNING` for an unset handle can no longer mean "exit `4` forever", because a machine that finished setup always has one.
   **A non-TTY refusal exits `3`, not `2`** (D-9). `4c` defines `2` as usage and `3` as a stated refusal, and `8b` already used `3` for the same condition — so `pm-ai setup || alert` and `pm-ai connector add || alert` no longer diverge on one machine fault, which is what `4c`'s table exists to prevent.
