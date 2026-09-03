@@ -128,3 +128,41 @@ to Verification), C16 (`4c`'s config row moves to `4g` or gains the edge), C17
 3. I apply the AMEND list in build order: `4b`, `4c`, `4d`, then `8a`/`8d`/`8b`,
    then `8c`/`8e`, then `11a`/`22a`, then `23a`/`23d`/`23b`, then `33a`/`33b`/`33c`.
 4. Re-run the lens pass on what changed, not on the set.
+
+## Answers — 2026-09-03 walkthrough
+
+**D-7. `pm_handle` is mandatory at first boot.** Not declinable. `4h` loses its
+"operator declines a value" row; B3's WARNING/exit-4 problem disappears.
+
+**D-1. `project add` takes a path, not an id.**
+
+- `pm-ai project add <path> [alias]`. Path may be relative or absolute, and is
+  **resolved to absolute** before it reaches `projects.toml`.
+- The directory need not exist; it is created, and the project scope structure
+  is generated inside it. This answers `4d`'s `Ask First`: registration creates
+  the tree.
+- **git is optional.** No code change needed: `working_tree() -> None` is already
+  treated as an answer, not a refusal (`service.py:714-717`) — only an
+  *unanswerable* question refuses. `4d`'s `Always` requiring a git repository is
+  stricter than the code and than the intent, and is relaxed.
+- An existing directory already carrying pm-ai structure is **onboarded with its
+  artefacts**, not re-initialised. A project tree is Tier 1 only — nine
+  `Tier.TRUTH` declarations, no Operational and no Derived — so "drop Tier 2,
+  regenerate Tier 3" is a no-op at project scope; both live in the application
+  and personal scopes, per machine.
+- Already-onboarded path: report that it exists, change nothing.
+- **The project id comes from the path**, normalised from the basename, and is
+  **immutable** once assigned. On collision the suffix is **derived from the
+  path**, not a counter — `alpha`, `alpha-7f3c` — so two machines onboarding the
+  same directories in either order agree. A counter would make ids
+  registration-order dependent, and project Tier-1 artefacts are
+  `gitignored=False`, so a shared `.project-ai/` would carry `SourceRef`s that
+  resolve on one machine and not the other.
+- **The alias is a mutable label and never a reference.** Renaming changes the
+  alias only; every reference points at the id.
+- `Daemon.scope` during `project add` is the project being registered.
+
+Still open from D-1, both about a directory onboarded with existing segments:
+the per-machine Tier-2 `seen` set and connector cursors are not reconciled
+against them, so a first harvest may re-append duplicates; and Tier-3
+regeneration is `1h`'s declared job, which has never been implemented.
