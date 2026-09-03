@@ -10,7 +10,7 @@ review_loop_iteration: 0
 
 ## Intent
 
-**Problem:** `pm_ai.connectors.registry` is imported by two pre-written architecture tests — `test_ad27_connectors_only_emit_core_declared_event_types` (`test_domain_invariants.py:94`) and `test_ad34_connectors_do_not_mint_event_ids` (`:483`) — and does not exist, so both have skipped since they were written. Nothing enumerates the connectors a daemon holds: `build()` puts them in a `Daemon.connectors` dict (`wiring.py:121-135`) that no architecture check can reach. And CAP-35's live health probe, which must answer within 10 seconds, has nowhere to live.
+**Problem:** `pm_ai.connectors.registry` is imported by two pre-written architecture tests — `test_ad27_connectors_only_emit_core_declared_event_types` (`test_domain_invariants.py:94`) and `test_ad34_connectors_do_not_mint_event_ids` (`:483`) — and does not exist, so both have skipped since they were written. Nothing enumerates the connectors a daemon holds: `build()` puts them in a `Daemon.connectors` dict (`wiring.py:150-154`) that no architecture check can reach. And CAP-35's live health probe, which must answer within 10 seconds, has nowhere to live.
 
 Split from the original `8a` on 2026-09-02 at the sizing gate.
 
@@ -49,7 +49,7 @@ Split from the original `8a` on 2026-09-02 at the sizing gate.
 - `pm_ai/connectors/registry.py` -- new; `all_connectors()`, `sample_events()`, `DuplicateConnector`, the probes
 - `tests/architecture/test_domain_invariants.py:94,483` -- the two pre-written tests that stop skipping, and the exact accessors they call
 - `tests/architecture/test_domain_invariants.py:793-826` -- the port-conformance test, which covers three adapters and no connector
-- `pm_ai/app/wiring.py:121-135` -- where connectors are built today, unreachable from any check
+- `pm_ai/app/wiring.py:150-154` -- where connectors are built today, unreachable from any check
 - `pm_ai/platform/doctor.py:22-24,64-72,96-100` -- the report-never-raise rule, the four `Health` states, and `Probe`
 - `tests/conftest.py:42,88-104` -- `EXPECTED_SKIPS` and the ratchet that fails when skips fall below it
 
@@ -67,6 +67,8 @@ Split from the original `8a` on 2026-09-02 at the sizing gate.
 - Given an adapter whose probe raises, then the registry reports `FAILING` for it and healthy for its sibling — one broken connector hiding another is the failure the report-never-raise rule exists for.
 
 ## Spec Change Log
+
+- **2026-09-02, `wiring.py` citations re-pointed after story 4a.** 4a added one import to `wiring.py`, shifting every line below it, and a parameter plus a docstring paragraph to `build()`, shifting the rest further. The numbers below named other code. **Line numbers only — no wording, no intent, no task, and no acceptance criterion changed.**
 
 - **2026-09-02, split at the sizing gate.** Separated from the original `8a` (2,275 tokens), which held this registry alongside the `HarvestResult` type change now in `8a`.
 - **Inherited from the 2026-09-02 multi-lens review**, which found all three of the original acceptance criteria vacuous, named a test that does not exist (`test_ad27_connectors_share_one_event_taxonomy`) with two wrong line numbers, and found `EXPECTED_SKIPS` unowned — making the original "skip count falls by two, no new failures" self-contradictory.

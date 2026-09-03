@@ -14,7 +14,7 @@ review_loop_iteration: 1
 
 **Approach:** Console script at `pm_ai/app/entry.py` — the composition root builds, then hands the built `Daemon` and the argument vector to `pm_ai/surfaces/cli/dispatch.py`, which maps subcommands onto core services. Three subcommands land here: `doctor`, `key enrol`, and `config show`.
 
-**`4d` follows this slice, and does not precede it.** `build()` eagerly resolves the project scope (`wiring.py:104`) and an unregistered project raises `UnknownProject` (`paths.py:553`), so until `4d` exists only `doctor` is usable on a clean machine — which is exactly why the Always below requires `doctor` to survive a failed composition. Ordering it the other way would be circular: `4d` adds `project add` to the dispatch table **this** slice creates.
+**`4d` follows this slice, and does not precede it.** `build()` eagerly resolves the project scope (`wiring.py:129`) and an unregistered project raises `UnknownProject` (`paths.py:553`), so until `4d` exists only `doctor` is usable on a clean machine — which is exactly why the Always below requires `doctor` to survive a failed composition. Ordering it the other way would be circular: `4d` adds `project add` to the dispatch table **this** slice creates.
 
 ## Boundaries & Constraints
 
@@ -79,11 +79,13 @@ review_loop_iteration: 1
 
 ## Spec Change Log
 
+- **2026-09-02, `wiring.py` citations re-pointed after story 4a.** 4a added one import to `wiring.py`, shifting every line below it, and a parameter plus a docstring paragraph to `build()`, shifting the rest further. The numbers below named other code. **Line numbers only — no wording, no intent, no task, and no acceptance criterion changed.**
+
 - **2026-09-02, inherited `4b`'s daemon field, and two citations story 4a shifted.** The keychain field moved here from `4b`, whose frozen `Never: No daemon changes` forbade the task the wave-1 review had added to it; resolved by the human at the story-4a review gate. This slice is where the need is real — it is the one calling `enrol` from a surface that may not reach `keyring` — and it already owns composition through `entry.main()`.
   Two line citations drifted when 4a added the `config` field to `Daemon` and a parameter to `build()`: the Code Map's `wiring.py:47` was `build()` and is now the `config` field, with `build()` at `:62`. The contract citation inherited from `4b`'s task read `.importlinter:115-131` and is `115-129` — the range ends at `launchd`. That field also set a trap for this task, now stated in it: `config` carries a default and is last, so a non-default `keychain` appended after it raises `TypeError` at class creation rather than failing a test.
 
 - **2026-09-02, multi-lens review.** Three gaps, one of them a hard blocker.
-  **`pm-ai` could not have run once on a clean machine.** `build()` eagerly resolves the project scope (`wiring.py:104`, whose comment explains the eagerness) and an unregistered project raises `UnknownProject` (`paths.py:553`) — so every subcommand, `doctor` included, would have died before dispatch, defeating this slice's own Always about `doctor` surviving a broken environment. The registry had no owner in any story; it is now `4d`, and this slice depends on it. A criterion and a matrix row cover `doctor` on an unregistered machine regardless.
+  **`pm-ai` could not have run once on a clean machine.** `build()` eagerly resolves the project scope (`wiring.py:129`, whose comment explains the eagerness) and an unregistered project raises `UnknownProject` (`paths.py:553`) — so every subcommand, `doctor` included, would have died before dispatch, defeating this slice's own Always about `doctor` surviving a broken environment. The registry had no owner in any story; it is now `4d`, and this slice depends on it. A criterion and a matrix row cover `doctor` on an unregistered machine regardless.
   **Exit codes were named nowhere.** This slice, `8b` and `23b` all said "non-zero" or "refusal exit code" and no integers, so each subcommand would have chosen its own convention and the stated distinction between "disallowed" and "pm-ai broke" would have been unobservable to the operator it exists for. The table is now declared here, the other two slices reuse it, and every matrix row asserts its exact value.
   The edge-case lens added the four paths a real operator hits first: a subcommand group with no leaf, `--help` raising `SystemExit` out of `main` (which would have broken the explicit-argv design), composition failing before dispatch, and `ABSENT` exiting `0` — the last being the summary an operator trusts while the morning briefing cannot decrypt anything.
 ## Design Notes

@@ -10,7 +10,7 @@ review_loop_iteration: 0
 
 ## Intent
 
-**Problem:** `projects.toml` is declared as an application-scope Tier-1 file (`scope_model.py:440`) and is read and written by nothing. `ScopePaths.real()` takes a `projects` mapping documented as coming "from the registry the CLI writes (`projects.toml`)" (`paths.py:467`), `projects_registry()` resolves its path (`paths.py:640`), and `repository()` refuses an unknown project with a message naming `pm-ai project add` (`paths.py:553`) — a command that does not exist. `build()` resolves the project scope eagerly (`wiring.py:104`), so on a real machine every subcommand fails before dispatch.
+**Problem:** `projects.toml` is declared as an application-scope Tier-1 file (`scope_model.py:440`) and is read and written by nothing. `ScopePaths.real()` takes a `projects` mapping documented as coming "from the registry the CLI writes (`projects.toml`)" (`paths.py:467`), `projects_registry()` resolves its path (`paths.py:640`), and `repository()` refuses an unknown project with a message naming `pm-ai project add` (`paths.py:553`) — a command that does not exist. `build()` resolves the project scope eagerly (`wiring.py:129`), so on a real machine every subcommand fails before dispatch.
 
 Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-11 governs it and `paths.py` was written against it; only the command and the file were missing.
 
@@ -57,7 +57,7 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 - `pm_ai/platform/paths.py:463-479` -- `real()` and its `projects` mapping; `_absolute_map` expects absolute paths
 - `pm_ai/platform/paths.py:545-558` -- `repository()` and the `UnknownProject` message naming this command
 - `pm_ai/platform/paths.py:640` -- `projects_registry()`, already resolving the path
-- `pm_ai/app/wiring.py:99-104` -- the eager `scope_root` call that makes this a wave-1 blocker
+- `pm_ai/app/wiring.py:125-129` -- the eager `scope_root` call that makes this a wave-1 blocker
 - `pm_ai/platform/doctor.py:64-72` -- the four-state `Health` shape a registry probe follows
 
 ## Tasks & Acceptance
@@ -74,6 +74,10 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 - Given a registered project, when the daemon is built for it, then `scope_root` resolves without raising — the condition every other wave-1 slice depends on and none currently establishes.
 - Given a path that is a directory but not a git repository, then registration refuses; story 1c's guard asks git whether a capture directory is tracked, and it cannot answer for a non-repository.
 - Given a hand-edited malformed `projects.toml`, then it is refused by name and not overwritten — a registry that resets itself loses every project silently.
+
+## Spec Change Log
+
+- **2026-09-02, `wiring.py` citations re-pointed after story 4a.** 4a added one import to `wiring.py`, shifting every line below it, and a parameter plus a docstring paragraph to `build()`, shifting the rest further. The numbers below named other code. **Line numbers only — no wording, no intent, no task, and no acceptance criterion changed.**
 
 ## Design Notes
 

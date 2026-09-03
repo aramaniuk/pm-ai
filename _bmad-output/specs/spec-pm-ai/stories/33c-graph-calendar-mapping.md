@@ -63,7 +63,7 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 - `pm_ai/connectors/gitlab.py:40-60` -- the reference mapping: AD-34 source refs, `resolve_actor`, `Provenance.UNKNOWN`, no minted id
 - `pm_ai/core/meeting_records.py` -- `11a`'s accessor and its safe-name encoding
 - `pm_ai/domain/meetings.py:48-50` -- `man_hour_cost`, which the all-day convention feeds
-- `pm_ai/app/wiring.py:40` -- `connectors: dict[str, GitLabConnectorAdapter]`, an annotation mypy rejects once a Graph connector is registered
+- `pm_ai/app/wiring.py:41` -- `connectors: dict[str, GitLabConnectorAdapter]`, an annotation mypy rejects once a Graph connector is registered
 - `tests/architecture/test_domain_invariants.py:94,483,793-826` -- the two tests `8d` unskipped, and the port-conformance test that covers no connector
 
 ## Tasks & Acceptance
@@ -80,6 +80,10 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 - Given the AD-27 and AD-34 tests with `GraphConnector` registered, then both pass and `all_connectors()` returns two connectors — `8d`'s non-empty assertion now has a second member.
 - Given a `meetings/` write that refuses, then no event is persisted.
 - Given an all-day row, then its recorded duration equals the stated convention — the original row said only "handled explicitly, never as zero-cost", which the wrong 24-hour answer satisfied.
+
+## Spec Change Log
+
+- **2026-09-02, `wiring.py` citations re-pointed after story 4a.** 4a added one import to `wiring.py`, shifting every line below it, and a parameter plus a docstring paragraph to `build()`, shifting the rest further. The numbers below named other code. **Line numbers only — no wording, no intent, no task, and no acceptance criterion changed.**
 
 ## Design Notes
 

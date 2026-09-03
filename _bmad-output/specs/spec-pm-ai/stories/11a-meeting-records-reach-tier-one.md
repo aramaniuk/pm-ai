@@ -10,7 +10,7 @@ review_loop_iteration: 1
 
 ## Intent
 
-**Problem:** `Meeting` is the citation root for everything said in a meeting (AD-33) and is declared Tier-1 in three scope trees (`scope_model.py:554,650,716`). It is never persisted. `Daemon.meetings` is a plain `dict[str, object]` (`wiring.py:42`) that `run_transcript_ingestion` writes into (`pipelines.py:51`), so every citation minted today resolves against process memory and dies with the process. Nothing in `storage/service.py` mentions meetings at all.
+**Problem:** `Meeting` is the citation root for everything said in a meeting (AD-33) and is declared Tier-1 in three scope trees (`scope_model.py:554,650,716`). It is never persisted. `Daemon.meetings` is a plain `dict[str, object]` (`wiring.py:43`) that `run_transcript_ingestion` writes into (`pipelines.py:51`), so every citation minted today resolves against process memory and dies with the process. Nothing in `storage/service.py` mentions meetings at all.
 
 **Approach:** Add the `MeetingRecords` accessor named by `derivation-services.md` rule 3, performing its I/O through `StorageService`, and retire the in-memory dict. `33b` becomes its first writer.
 
@@ -54,7 +54,7 @@ review_loop_iteration: 1
 
 - `pm_ai/core/meeting_records.py` -- new; the accessor, its parser and renderer
 - `pm_ai/domain/meetings.py:17-50` -- `Meeting`, `source_ref`, `transcript_home`, `man_hour_cost`; unchanged
-- `pm_ai/app/wiring.py:42` -- the `meetings` dict this story removes from `Daemon`
+- `pm_ai/app/wiring.py:43` -- the `meetings` dict this story removes from `Daemon`
 - `pm_ai/app/pipelines.py:50-51` -- the citation check and the dict write
 - `pm_ai/storage/service.py:1022,1065` -- `write_artifact` / `read_artifact` and the `name` parameter for `Collection` members
 - `pm_ai/domain/scope_model.py:554,650,716` -- the three `meetings/` declarations
@@ -76,6 +76,8 @@ review_loop_iteration: 1
 - Given `grep -n "meetings" pm_ai/app/wiring.py`, then no `dict` remains.
 
 ## Spec Change Log
+
+- **2026-09-02, `wiring.py` citations re-pointed after story 4a.** 4a added one import to `wiring.py`, shifting every line below it, and a parameter plus a docstring paragraph to `build()`, shifting the rest further. The numbers below named other code. **Line numbers only — no wording, no intent, no task, and no acceptance criterion changed.**
 
 - **2026-09-02, multi-lens review.** The persistence claim was untestable and the day boundary was unowned.
   **The central acceptance criterion could not be evaluated.** "Written and the process restarted" was to be verified by a `core` unit test against a `StoragePort`, where a restart is unrepresentable — so an accessor that cached in memory and never wrote a byte would have satisfied both it and the matrix's read-back row, leaving exactly the defect the slice exists to fix. A `tests/slice` case against a real temporary root is now the criterion.

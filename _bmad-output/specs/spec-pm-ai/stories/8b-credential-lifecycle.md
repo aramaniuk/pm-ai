@@ -28,7 +28,7 @@ review_loop_iteration: 1
 
 **Ask First:** `pm-ai connector disable`, and hot registration into a running radar. Both are CAP-35 clauses; disable needs a poller to halt and hot registration needs a daemon, neither of which exists before `4d`/`9a`.
 
-**Never:** No connector-specific auth logic — device-code flow is `33a`, and this story must work for a plain token too. **No credential written outside `write_artifact`, and no credential in the unencrypted `connectors/` artifact.** A run with `PM_AI_DISABLE_ENCRYPTION` set writes the sealed store in plaintext by the operator's explicit choice, announced at `wiring.py:174-179`; enrolment neither prevents nor re-checks that — see the Change Log for why the absolute form of this clause was withdrawn.
+**Never:** No connector-specific auth logic — device-code flow is `33a`, and this story must work for a plain token too. **No credential written outside `write_artifact`, and no credential in the unencrypted `connectors/` artifact.** A run with `PM_AI_DISABLE_ENCRYPTION` set writes the sealed store in plaintext by the operator's explicit choice, announced at `wiring.py:142-143,184`; enrolment neither prevents nor re-checks that — see the Change Log for why the absolute form of this clause was withdrawn.
 
 ## I/O & Edge-Case Matrix
 
@@ -79,11 +79,13 @@ review_loop_iteration: 1
 
 ## Spec Change Log
 
+- **2026-09-02, `wiring.py` citations re-pointed after story 4a.** 4a added one import to `wiring.py`, shifting every line below it, and a parameter plus a docstring paragraph to `build()`, shifting the rest further. The numbers below named other code. **Line numbers only — no wording, no intent, no task, and no acceptance criterion changed.**
+
 - **2026-09-02, multi-lens review.** One data-loss defect, one absolute that was false, and a missing interface.
   **Enrolling a second connector would have destroyed the first's credential.** `private/config.json` is one sealed file and `write_artifact` replaces whole; the slice specified a write with no matrix row for an existing occupant. Now read-modify-write, asserted on decrypted contents.
   **`StoragePort` declares neither `write_artifact` nor `read_artifact`** (`ports/__init__.py:286-314`). This slice's `core` service, plus `11a`, `22a` and `23b`, all assumed they were there. Declaring them is now a task here, as the earliest slice that needs them — the same move story 2h made for the event-log methods. Without it the implementer's only routes were importing `pm_ai.storage` from `core` or typing the dependency `Any`, the defect story 1k removed.
   **The 600 assertion had no mechanism.** `_replace` passes a mode only when the artifact is sealed (`service.py:880,903`) and `connectors/` is declared unencrypted, so the file would have landed at the umask while the criterion asserted 600 — met only by a `chmod` in the enrolment code, which this slice's own Always forbids.
-  **"No plaintext credential on disk under any circumstance" was false** and withdrawn. With `PM_AI_DISABLE_ENCRYPTION` set, `build()` installs `PlaintextCrypto` (`wiring.py:114-115,153-155`), so the clause's own mandated mechanism produces what it forbids. Restated as something the mechanism can keep. An absolute known to be false teaches the reader these clauses are aspirational, which is the `8e` defect in miniature.
+  **"No plaintext credential on disk under any circumstance" was false** and withdrawn. With `PM_AI_DISABLE_ENCRYPTION` set, `build()` installs `PlaintextCrypto` (`wiring.py:140,179-180`), so the clause's own mandated mechanism produces what it forbids. Restated as something the mechanism can keep. An absolute known to be false teaches the reader these clauses are aspirational, which is the `8e` defect in miniature.
   **Contradiction with the registry slice resolved** in its favour (that rule now lives in `8d`, split from `8a` on 2026-09-02): registration is construction-time and the success message says so.
   The edge-case lens added the non-TTY case, where `getpass` falls back to an echoing prompt and the credential lands in shell history; the orphan-blind duplicate check; and a path-unsafe instance name refused only *after* the probe and seal, guaranteeing the orphan the slice tries to avoid.
 ## Design Notes
