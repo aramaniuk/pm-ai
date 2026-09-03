@@ -262,6 +262,7 @@ flowchart LR
     s4h["4h pm-ai setup"]
     s8a["8a harvest outcomes"]
     s8d["8d connector registry"]
+    s8f["8f storage port capabilities"]
     s8b["8b credentials"]
     s8c["8c payload declarations"]
     s8e["8e model boundary"]
@@ -293,6 +294,8 @@ flowchart LR
     s4b --> s8b
     s4c --> s8b
     s8d --> s8b
+    s8f --> s8b
+    s8f --> s11a
     s8b --> s33a
     s8d --> s33a
     s8a --> s33b
@@ -318,8 +321,8 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 22 slices, **31 dependency edges** in the table and the
-same 31 in the diagram, no edge in one and absent from the other, acyclic. The
+cross-checked both ways: 23 slices, **33 dependency edges** in the table and the
+same 33 in the diagram, no edge in one and absent from the other, acyclic. The
 count has moved four times on 2026-09-03 as the wave's specs were amended
 against the second review and split at the sizing gate; it is re-derived from the
 table each time rather than adjusted by hand.
@@ -607,7 +610,7 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (22 slices)
+### Wave 1 — a real dashboard from a real calendar (23 slices)
 
 | Slice | Delivers |
 |---|---|
@@ -621,7 +624,8 @@ depends on the first answer.
 | `4i` | The sixth `doctor` probe: what state `config.toml` is actually in. |
 | `4h` | `pm-ai setup` — enrol, register, prompt, write, then report `doctor`. First boot to green. |
 | `8a` | `HarvestResult`'s three outcomes and the `CoverageWindow` fix in `gitlab.py`. |
-| `8d` | Connector registry and the 10s CAP-35 health probes. |
+| `8d` | Connector registry, the port's two new members, and per-connector health probes. |
+| `8f` | `StoragePort` declares artifact I/O and a collection listing; a declared file mode. |
 | `8b` | Credential lifecycle — `pm-ai connector add`, encrypted-write-first, 600. |
 | `8c` | Each payload class declares its untrusted text fields, guarded at import. |
 | `8e` | Sanitization binds where it can be enforced: `ModelPort` accepts only `Sanitized`. See below. |

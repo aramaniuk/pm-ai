@@ -121,10 +121,11 @@ and `23a` into sections and scope wall.
 | `4h-first-run-setup` | `pm-ai setup` — the ordered first-boot sequence, asserted by a probe report | 4b, 4c, 4g, 4i, 4k |
 | `8a-honest-harvest-outcomes` | `HarvestResult`'s three outcomes, and coverage derived from what was fetched | — |
 | `8d-connector-registry` | the registry two pre-written tests import, and the per-connector health probes | — |
-| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d |
+| `8f-storage-port-capabilities` | `StoragePort` declares artifact I/O and a collection listing; a declared file mode | — |
+| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d, 8f |
 | `8c-payloads-declare-untrusted-text` | each payload class declares its untrusted fields, guarded at import | — |
 | `8e-sanitization-binds-at-the-boundary` | AD-12 holding where it can be enforced: `ModelPort` accepts only `Sanitized` | — |
-| `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
+| `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b, 8f |
 | `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8b, 8d |
 | `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 8a, 33a |
 | `33c-graph-calendar-mapping` | rows to Meeting records and ended-meeting events; `ConnectorPort` conformance | 11a, 33b |
@@ -379,5 +380,6 @@ Known debt this wave takes on, recorded so it is not discovered later:
 
 - source_spec: `_bmad-output/implementation-artifacts/review-wave-1-2026-09-02.md` (finding A1)
   summary: `StoragePort` declares neither `read_artifact` nor `write_artifact` while `StorageService` implements both, so the Protocol under-declares its own implementation and nothing typed against the port can reach the single reader or the single writer.
+  **Closed 2026-09-03 by slice `8f`**, which declares both methods and a collection listing on the port.
   evidence: Verified at the story-4a review gate: the port declares nine methods (`ports/__init__.py:286-314`) and neither of those two, while `StorageService.write_artifact` sits at `service.py:1022` and `read_artifact` at `:1065`. The review filed this as A1, "blocks implementation". It does not: `Daemon.storage` is typed as the concrete `StorageService` (`wiring.py:38`), so `4c` reading `config.toml` and every other wave-1 caller reach both methods legally, and no wave-1 slice depends on the port for artifact access. It remains a real inconsistency of the kind story 2h fixed when it added the event-log methods to the port for this same reason. Recorded because downgrading it from blocker is exactly how it would otherwise be lost — it appears in no story, and the two methods are the whole of AD-3's tiering contract as far as any future port consumer can see.
 
