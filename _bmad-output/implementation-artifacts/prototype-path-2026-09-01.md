@@ -253,7 +253,8 @@ flowchart LR
     s0(["slice 0 — spike, throwaway"])
     s4a["4a config"]
     s4b["4b key enrol"]
-    s4c["4c CLI + exit codes"]
+    s4c["4c CLI + exit codes + doctor"]
+    s4j["4j service subcommands"]
     s4d["4d project registry"]
     s4g["4g config writer"]
     s4i["4i config probe"]
@@ -275,7 +276,9 @@ flowchart LR
 
     s0 --> s33a
     s4a --> s4c
-    s4b --> s4c
+    s4b --> s4j
+    s4c --> s4j
+    s8d --> s4j
     s4a --> s4d
     s4c --> s4d
     s4a --> s4g
@@ -313,11 +316,11 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 20 slices, **28 dependency edges** in the table and the
-same 28 in the diagram, no edge in one and absent from the other, acyclic. It was
-22 until 8e's 2026-09-02 renegotiation removed its edge from `8c`, 21 until `4g`
-and `4h` entered the wave on 2026-09-03, and 26 until `4g` split again that day
-and left `4i` for the probe.
+cross-checked both ways: 21 slices, **30 dependency edges** in the table and the
+same 30 in the diagram, no edge in one and absent from the other, acyclic. The
+count has moved four times on 2026-09-03 as the wave's specs were amended
+against the second review and split at the sizing gate; it is re-derived from the
+table each time rather than adjusted by hand.
 
 Amber is the critical path, **seven slices**:
 `4a → 4c → 8b → 33a → 33b → 33c → 23b`. It runs through the CLI rather than the
@@ -601,13 +604,14 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (20 slices)
+### Wave 1 — a real dashboard from a real calendar (21 slices)
 
 | Slice | Delivers |
 |---|---|
 | `4a` | Config loading — `tomllib`, `config.toml`. Explicitly not the encryption toggle. |
 | `4b` | `pm-ai key enrol` through KeychainPort; the daemon never mints. Retargets 1g's "key absent" remediation. |
-| `4c` | CLI entry point, subcommand dispatch, and the exit-code table. No REPL yet. |
+| `4c` | CLI entry point, the dispatch and exit-code tables, and `doctor`. No REPL yet. |
+| `4j` | The three service leaves: `key enrol`, `config show`, `connector check`. |
 | `4d` | Project registry and `pm-ai project add`. **Added by the spec review** — `build()` resolves the project scope eagerly, so without it nothing runs on a clean machine. |
 | `4g` | A writer for `config.toml` — `render_config` beside `load_config`. |
 | `4i` | The sixth `doctor` probe: what state `config.toml` is actually in. |

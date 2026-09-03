@@ -112,13 +112,14 @@ and `23a` into sections and scope wall.
 |---|---|---|
 | `4a-config-loading` | a reader for the declared `config.toml`, and the refusal keeping the encryption toggle out | — |
 | `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
-| `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b |
+| `4c-cli-entry-point` | `[project.scripts] pm-ai`, the dispatch and exit-code tables, and `doctor` | 4a |
+| `4j-cli-service-subcommands` | `key enrol`, `config show`, `connector check` — three leaves on `4c`'s table | 4b, 4c, 8d |
 | `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a, 4c |
 | `4g-config-gains-a-writer` | a writer for `config.toml` and the probe that reports its state | 4a |
 | `4i-config-doctor-probe` | the sixth `doctor` probe, reporting what state `config.toml` is in | 4a |
 | `4h-first-run-setup` | `pm-ai setup` — the ordered first-boot sequence, asserted by a probe report | 4b, 4c, 4d, 4g, 4i |
 | `8a-honest-harvest-outcomes` | `HarvestResult`'s three outcomes, and coverage derived from what was fetched | — |
-| `8d-connector-registry` | the registry two pre-written tests import, and the CAP-35 health probes | — |
+| `8d-connector-registry` | the registry two pre-written tests import, and the per-connector health probes | — |
 | `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d |
 | `8c-payloads-declare-untrusted-text` | each payload class declares its untrusted fields, guarded at import | — |
 | `8e-sanitization-binds-at-the-boundary` | AD-12 holding where it can be enforced: `ModelPort` accepts only `Sanitized` | — |
