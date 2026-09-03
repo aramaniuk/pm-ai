@@ -242,11 +242,46 @@ vocabulary and the same class of decision as `23b`'s `Ask First` about whether
 rendering logs. And the record now has machine-owned and human-owned regions,
 which settles the `11a`/`33c` overwrite contradiction the review found.
 
+## D-5 / Q9 / Q10 — two renderers, not one with a scope branch
+
+The personal and project dashboards are **separate functions** with their own
+sources, outputs and sections. They do not share a renderer and do not reason
+about each other's scope.
+
+**Why this is stronger than what was proposed.** Every option on the table kept
+one `render_dashboard(meetings, entries, goals, now, *, tz)` and made the caller
+choose what to pass — so the leak was one line (`goals = personal_register` in
+the project branch) and the defence was a datasource list plus a test that
+remembered to check it. With two functions, `render_project_dashboard` has **no
+goals parameter**, so passing personal goals is impossible rather than
+forbidden. Same move as D-6: make the invariant structural, not remembered.
+
+**Changes:**
+- **CAP-9's four-section rule binds only the personal file.** Its success
+  criterion names `~/.manager-ai/memory/daily_dashboard.md` — *"exactly the four
+  headed sections … and no empty section."* Nothing requires four sections of the
+  project dashboard, so it carries the sections its sources support: Time-Critical
+  from project meetings, Proactive Enablement from the project event log,
+  Commitments once something produces them. It has no 3-Tier and no Leadership
+  Notes section, so there is no boundary text to write — which is what Q9 was
+  asking about.
+- **`project_scope_datasources` is not built**, and D-5 dissolves with it: no
+  `core.rendering` function needs to resolve a project tree, because there is no
+  datasource list. Each renderer receives data its caller already read.
+- **The pre-written gate is retargeted, not deleted.**
+  `test_ad25_project_rendering_cannot_open_the_personal_store` calls a function
+  that will not exist. Its replacement asserts through `inspect.signature` that
+  `render_project_dashboard` accepts no goals parameter — a stronger check than
+  the substring scan it uses today, which its own comment records as having
+  nearly passed vacuously once, and which cannot drift the way a list can.
+- **`23d` is rewritten, not amended** — from "the scope wall as a datasource
+  list" to "the project renderer, with its own sections and sources". `23a`
+  narrows explicitly to the personal dashboard.
+- The review's A8 (`core.rendering` cannot resolve a tree it may not import) is
+  answered by removal.
+
 ## Still open
 
-- **D-5**: how `core.rendering` names a project tree it may not resolve — posed, not answered.
-- **Q9 / Q10**: whether a project render keeps the wall as a mechanism, and what its
-  3-Tier section says. Recommended `keep the render, drop the wall-as-mechanism`; unconfirmed.
 - **Q2's rename**: alias-only, or an id migration?
 - **`memory/`**: does the directory declaration follow its four children?
 - **`4g`/`4h` UNLOCK**: needed to apply D-7 and D-9 and five review findings.
