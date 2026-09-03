@@ -280,10 +280,94 @@ forbidden. Same move as D-6: make the invariant structural, not remembered.
 - The review's A8 (`core.rendering` cannot resolve a tree it may not import) is
   answered by removal.
 
+## Q2b — rename is alias-only
+
+The id, and therefore the scope directory name, never changes. Only the display
+alias does. **Rejected:** an id migration — `projects/<id>/.project-ai/` would
+move while every `SourceRef` already written into Tier-1 segments, meeting
+records and the disclosure ledger still names the old id; sealed segments are
+immutable (`2g`), so either they are rewritten or the registry must keep a
+history of former ids forever. Recorded as deferred work if the on-disk tree
+ever needs to match the label.
+
+## Q6b — project `memory/` follows its four children
+
+`memory/` is itself an addressable key, so its flag is a real declaration.
+With all four children gitignored, nothing beneath it is committed, and the
+generated `.gitignore` carries one rule rather than four. Cost, accepted: a
+future project artifact that genuinely should be shared cannot live under
+`memory/`. `GITIGNORED` is per scope kind, so the personal tree is untouched.
+
+## Q13 / Q14 — amendments are logged, renders are not
+
+The discriminator: **does the action change truth, or project it?**
+
+Amending a meeting mutates a Tier-1 record and is the only trace that a summary
+is not what the transcript said — so it appends an entry, under a new
+`SelfActionType` member **`meeting_amended`**. Rendering a dashboard does not:
+it is fully derivable from Tier 1 plus a clock, and CAP-10's retrospective counts
+are decisions, proposals and commitments, none of which a render is. That also
+answers `23b`'s `Ask First`.
+
+**Forced, not chosen:** neither can be an `ObservedEventType`. Those require a
+`SourceRef` and `persist_events` dedups on the natural key derived from it, so a
+second amendment to one meeting would share the first's key and be silently
+dropped — the failure `2c` documented when it rejected putting `COMPACTION`
+there. Adding a member means `2c`'s guards must still hold (disjoint value sets,
+no `SelfActionType` member declarable by a connector) and its payload registry
+needs a typed payload: which meeting, which amendment, which surface.
+
+## Q15 — `strategic_goals.md` uses a Markdown-native grammar, and needs a writer
+
+Goals are **not normally typed by hand**: they are set in 1:1 sessions with
+pm-ai, or through a CLI or Telegram voice command. Hand-editing is retained as a
+possibility, the same arrangement as `config.toml` and meeting records.
+
+Format: domain from the section heading, `[id]` and `(horizon)` as the only
+structured tokens, title as free text.
+
+```
+## Project
+
+- [g_payments_latency] (medium) Cut payment latency below 200ms
+```
+
+Rejected: the ledger's `key=value` grammar, which D-10a chose for meeting
+records. Four lines per goal is fine for a machine-written record and wrong for
+the one file a human revises, and D-8 just made `domain` the grouping axis, which
+maps onto headings for free.
+
+**Changes:** `22a` is a parser only — a declared hand-editable artifact with a
+reader and no writer, exactly as `4a` was. Following the 4a → 4g precedent, a
+sibling slice **`22b`** takes `render_goals`, the `pm-ai goal` command, and the
+`SelfActionType` member **`goal_set`** (one member: creating and revising are
+both setting, and goals appear in no CAP-10 retrospective aggregate). A round
+trip is required and is harder than `4g`'s, because the format carries prose the
+rewrite must preserve. The text channel needs no model; voice needs Whisper
+(story 7) and a 1:1 needs the Socratic protocol (Phase 3).
+
+## Q16 — an all-day event records 0 minutes
+
+An all-day calendar entry is a marker, not a meeting: a birthday, an OOO block,
+a sprint boundary. The record is still written, so it appears in Time-Critical
+Activities, and it contributes nothing to cost.
+
+**Why not the alternatives:** 1440 is the answer the spec itself calls wrong by
+an order of magnitude — five attendees at £100/h reports £12,000 for a birthday.
+480 is right for an offsite and wildly wrong for everything else, and nothing in
+the Graph payload distinguishes them. Omitting the record loses a genuine "team
+offsite" from the dashboard the PM reads that morning.
+
+**Changes:** makes `33c`'s criterion checkable — assert `man_hour_cost` is
+`0.0` for an all-day event at any attendee count, a value rather than the
+self-reference the review's C6 found. And `duration_minutes == 0` becomes common
+rather than theoretical, so `23a` must state which bound is inclusive when a
+meeting's end equals `now`.
+
 ## Still open
 
-- **Q2's rename**: alias-only, or an id migration?
-- **`memory/`**: does the directory declaration follow its four children?
-- **`4g`/`4h` UNLOCK**: needed to apply D-7 and D-9 and five review findings.
-- **`SelfActionType` member for an amendment**, and `23b`'s analogous rendering question.
-- **`22a`'s grammar**: follows D-10's format choice, needs confirming.
+Nothing. Every triage question is answered.
+
+Two items route to the architecture skill rather than a spec edit: **AD-3, AD-38
+and `scope-model.md`** still describe the project scope as the committed one,
+which Q6 changed.

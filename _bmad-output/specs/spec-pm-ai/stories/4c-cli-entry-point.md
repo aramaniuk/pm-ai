@@ -23,6 +23,7 @@ review_loop_iteration: 1
 - **The CLI holds no scheduler** (AD-7, enforced by the `cli-owns-no-scheduling` contract at `.importlinter:134-139`). Every subcommand runs once and exits. The 07:00 tick is the daemon's, in `9a`.
 - **A bare `pm-ai` exits non-zero with usage.** CAP-18 makes bare invocation open a REPL, and that is `4e`; until then a bare call that silently succeeded would read as a working install.
 - **The exit-code table is declared here and nowhere else.** Three slices map outcomes to codes (`8b`, `23b` reuse this); leaving each to choose makes `pm-ai doctor || alert` and `pm-ai dashboard || retry` behave differently. `0` success · `1` unexpected exception · `2` usage or unknown subcommand · `3` refusal (a stated, deliberate no) · `4` `doctor` reports an unhealthy machine. `8b` and `23b` reuse these values and may not add to the table.
+- **`dispatch` annotates a Protocol, never `Daemon`.** `pm_ai.surfaces` may not import `pm_ai.app`, so the built object cannot be named there and an unannotated parameter is implicitly `Any` — the defect story `1k` removed, in the most branch-heavy new module in the wave. A Protocol in `pm_ai/ports/` naming the members the CLI touches (`storage`, `keychain`, `config`, `scope`) is the shape the rest of the repo uses.
 - **`doctor` runs even when composition fails.** It is the command for a broken machine, so a broken machine must not make it unreachable — an unregistered project, an unwritable root or an unparseable `config.toml` each become one reported probe result rather than a traceback.
 - **All four `Health` states map explicitly.** `ABSENT` is not healthy (`doctor.py:64-72` says so: setup incomplete, encrypted writes will be refused), so it must not exit `0`.
 
@@ -44,7 +45,9 @@ review_loop_iteration: 1
 | Enrolment | `pm-ai key enrol` | `4b`'s service invoked with `Daemon.keychain` | exit `3`, message from the service |
 | Enrolment prompt | any invocation | nothing about the key is echoed or printed | N/A |
 | Config shown | `pm-ai config show` | the loaded `Config`, defaults marked as such | exit `3` on `ConfigRefused` |
+| Connector health | `pm-ai connector check` | `8d`'s per-connector probes run and print | exit `4` if any is unhealthy |
 | Unknown subcommand | `pm-ai frobnicate` | usage printed, exit `2` | N/A |
+| Config absent on a clean machine | no `config.toml` yet | `doctor` and `config show` both run; absence is a first-run state, not an error | `FileNotFoundError` translated here, never surfaced |
 | Malformed config present | `pm-ai doctor` with unparseable `config.toml` | diagnostics still run — a broken config must not hide a broken machine | reported as a probe result |
 
 </frozen-after-approval>
@@ -65,7 +68,9 @@ review_loop_iteration: 1
 **Execution:**
 - [ ] `pm_ai/app/entry.py` -- add `main(argv=None)` building the daemon and delegating -- construction in the one layer permitted to do it
 - [ ] `pm_ai/app/wiring.py` -- add `keychain: KeychainPort` to `Daemon`, hoisting the adapter `build()` constructs at `wiring.py:140` (`keychain or MacOSKeychainAdapter()`, currently inline as a call argument) to a local so it can reach both `_choose_crypto` and `Daemon` -- without it this slice has no legal route to `4b`'s `enrol`: `pm_ai.surfaces` may not reach `keyring`, indirectly included, under `.importlinter:115-129`. Insert it **before** `config` (`wiring.py:47`), which carries a default -- a non-default field after a defaulted one raises `TypeError` at class creation, so appending it would break every `Daemon` construction in the suite
+- [ ] `pm_ai/ports/__init__.py` -- declare the Protocol `dispatch` annotates, naming only the members the CLI touches -- `surfaces` may not name `Daemon`, and an implicit `Any` here is the one story `1k` retired
 - [ ] `pm_ai/surfaces/cli/dispatch.py` -- add the subcommand table and exit-code mapping -- no adapter construction, no business logic
+- [ ] `pm_ai/app/entry.py` -- translate `read_artifact`'s `FileNotFoundError` into the absent case before anything interprets it -- `read_artifact` ends in `path.read_bytes()` (`service.py:1079`) with no `bytes | None` form, and `4a`'s loader, `4i`'s probe and `4h`'s setup all need "absent" as a value rather than an exception
 - [ ] `pyproject.toml` -- declare `[project.scripts]`
 - [ ] `tests/surfaces/test_cli_dispatch.py` -- one test per matrix row, `main()` called with an explicit argv, asserting the **exact** exit integer per row
 
@@ -78,6 +83,12 @@ review_loop_iteration: 1
 - Given `main()` is called with an unparseable `config.toml` in place and the argument `doctor`, then probes still run and the config failure is one reported result among them.
 
 ## Spec Change Log
+
+- **2026-09-03, amended against the second multi-lens review.**
+  **`dispatch` could not name what it is handed** (C15). `surfaces` may not import `pm_ai.app`, so the daemon parameter was implicitly `Any` — story `1k`'s defect, in the wave's most branch-heavy new module — and this slice's Verification ran neither `uv run mypy` nor the full suite, the only two commands that would notice. A Protocol in `pm_ai/ports/` is now a task, and both commands are in the block.
+  **`read_artifact` has no absent case, and three slices need one** (B4). It ends in `path.read_bytes()` with no `bytes | None` form, so the first `doctor`, `config show` and `setup` on a clean machine each raise out of the command that exists to survive a broken machine. Translating it is a task here, in the first slice that reads the file, with a matrix row for the clean-machine case.
+  **The config-probe row belongs to `4i`** (C16). This slice's matrix asserted a probe result for an unparseable config while having no task touching `doctor.py` and no such probe existing. `4i` owns the probe, and this slice now depends on it — an edge the dependency table gains.
+  **`pm-ai connector check` joins the table deliberately** (D-3b). `8d`'s health probing became a separate command, and this slice's `Never` forbids other slices extending the exit-code table, so the entry is added here rather than improvised there.
 
 - **2026-09-02, `wiring.py` citations re-pointed after story 4a.** 4a added one import to `wiring.py`, shifting every line below it, and a parameter plus a docstring paragraph to `build()`, shifting the rest further. The numbers below named other code. **Line numbers only — no wording, no intent, no task, and no acceptance criterion changed.**
 
@@ -100,6 +111,8 @@ That a malformed config must not suppress diagnostics is worth stating because t
 
 **Commands:**
 - `uv run pytest tests/surfaces/test_cli_dispatch.py -q` -- expected: all matrix rows pass
+- `uv run mypy` -- expected: clean; this is the command that would notice an implicitly-`Any` daemon parameter
+- `uv run pytest -q` -- expected: no new failures
 - `uv run pm-ai doctor` -- expected: probe report printed; exit code reflects health
 - `uv run pm-ai` -- expected: usage, non-zero exit
 - `uv run lint-imports` -- expected: contracts kept
