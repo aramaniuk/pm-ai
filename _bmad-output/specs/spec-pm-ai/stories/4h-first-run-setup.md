@@ -2,7 +2,7 @@
 title: 'First-run setup'
 type: 'feature'
 created: '2026-09-03'
-status: 'draft'
+status: 'ready-for-dev'
 review_loop_iteration: 0
 context: []
 ---
