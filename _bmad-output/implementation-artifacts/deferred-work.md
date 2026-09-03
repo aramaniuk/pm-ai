@@ -265,8 +265,15 @@ Known debt this wave takes on, recorded so it is not discovered later:
 - **CAP-9 is knowingly unmet in two clauses** — Leadership Notes and the 07:00
   deadline. Both recorded in story 23's queue entry and in `23a`/`23b`.
 - **AD-27's versioning clause remains unmet** from story 2, unchanged by this
-  wave. `8c` and `33d` both touch the Tier-1 entry format and both defer the
-  question to story 1i.
+  wave. `33d` touches the Tier-1 entry format and cannot defer the question to
+  story 1i: 1i versions `operational.db`'s table shape, and a field added to a
+  markdown line changes no column. The unmade design decision is the entry-grammar
+  one recorded below, which has no owner. `8c` was named here in
+  error — the sizing-gate split left it declaring untrusted fields and writing
+  nothing — and `8e`, which did write the field, stopped: it now derives the
+  sanitized copy at the point of use and changes no entry format
+  (renegotiated 2026-09-02). So `33d` in wave 2 is where the decision becomes
+  unavoidable, on real data.
 
 ## Open, raised by story 2f
 
@@ -358,3 +365,9 @@ Known debt this wave takes on, recorded so it is not discovered later:
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4a-config-loading.md`
   summary: `config.toml` is hand-edited (AD-3) with a closed key vocabulary, but no sample file or documentation states the three key names, their types, or their admissible ranges.
   evidence: The vocabulary exists only inside `pm_ai/core/config.py` and this story file, and the loader refuses every unknown key — so a user discovers what the file may say by triggering refusals one at a time. Deferred because the natural home is the operator-facing surface story 4c stands up, not a loader that no caller reaches yet.
+
+## Deferred at the story-4a review gate (2026-09-02), second pass
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8e-sanitization-binds-at-the-boundary.md`
+  summary: Story `11b` wires the real transcript path and owes a confirmation that no path to a model bypasses `ModelPort` — an obligation `8e` hands it and nothing outside `8e` records. `11b` is a wave-2 slice with no spec yet.
+  evidence: `run_transcript_ingestion` (`pipelines.py:51,64`) reaches `extract()`, which calls `sanitize` itself and keeps the pair (`extraction.py:36,50-51,63-64`), but reaches `stage_proposal` rather than the harvest path. Under `8e`'s original persist design this was scoped out as uncovered; under the consumer-side design it is covered by the same chokepoint, so what remains for `11b` is narrower — confirming the transcript path reaches models only through the port, not building a second sanitization. `11a` also defers transcript binding to `11b`. Recorded because when `11b` is written the obligation is otherwise discoverable only by re-reading `8e`.
