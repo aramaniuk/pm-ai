@@ -2,7 +2,7 @@
 title: 'Flag implausible provider timestamps'
 type: 'feature'
 created: '2026-08-29'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 ---
 
