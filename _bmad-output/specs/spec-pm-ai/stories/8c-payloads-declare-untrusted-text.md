@@ -21,9 +21,10 @@ Split from the original `8c` on 2026-09-02 at the sizing gate: declaring untrust
 **Always:**
 - **A payload declares its own untrusted fields.** No field name anywhere in the pipeline: a pipeline that guessed is the defect being removed. A payload with no untrusted text declares none, and that is a statement rather than an omission.
 - **Declarations are keyed by payload class, not by event type.** `ReviewPayload` is bound to both `REVIEW_SUBMITTED` and `MERGE_COMPLETED` (`events.py:139-140`), so keying by type permits two declarations of one class that disagree.
-- **Refused at import by a typed error raised from an `if` — never an `assert`.** `tests/architecture/test_guards_survive_o.py:174-181` AST-sweeps `pm_ai/` and fails on any `ast.Assert`, because story 1l converted all ten import-time guards so `python -O` cannot strip them. This guard carries a subprocess `-O` case as 1l's others do.
+- **Refused at import by a typed error raised from an `if` — never an `assert`.** `tests/architecture/test_guards_survive_o.py:174-181` AST-sweeps `pm_ai/` and fails on any `ast.Assert`, because story 1l converted the import-time guards so `python -O` cannot strip them — `CASES` in that file holds eleven, which the Code Map states and an earlier draft of this clause miscounted as ten. This guard carries a subprocess `-O` case as 1l's others do.
 - **A declared name is validated against the dataclass** and must be typed `str` or `str | None`. A misspelled name would silently sanitize nothing, reinstating the exact `getattr` fallback this removes.
-- **Every class in `PAYLOAD_FOR` is covered or the import fails.** The completeness check is enumerated in a test, not left to review habit.
+- **Every `str` field of every class in `PAYLOAD_FOR` is either declared untrusted or recorded as trusted.** Not every *class* — every field. **All eight payload classes have at least one `str` field**, so "a class with no text at all" describes none of them: `PipelinePayload` carries `pipeline_id` and `status` (`events.py:127-130`), and `MessagePayload.channel`, `CommitPayload.sha`, `CommitPayload.branch`, `WorkItemPayload.work_item_id`, `WorkItemPayload.state`, `ReviewPayload.target_ref` and `ReviewPayload.verdict` are all provider-supplied. A class that declares an empty tuple while carrying provider text is the original bug with a registry on top, and the completeness check must be able to say so.
+- **The type check resolves annotations, it does not read them.** `events.py:11` has `from __future__ import annotations`, so `field.type` is the *string* `"str | None"`. Matching that text refuses `Optional[str]` and admits nothing reliably; `typing.get_type_hints` is what the rule needs.
 
 **Ask First:** Nothing. The versioning question the original `8c` carried belongs to `8e`, which is what persists.
 
@@ -40,7 +41,9 @@ Split from the original `8c` on 2026-09-02 at the sizing gate: declaring untrust
 | Declared field not text | an `int` or `datetime` field declared | refused — only `str` and `str \| None` can be sanitized | `MissingSanitizableDeclaration` |
 | One class, two event types | `ReviewPayload` under both its types | one declaration, keyed by class; divergence impossible | refused at import |
 | Class with text declaring none | `DocumentPayload.title`, `DecisionPayload.statement` | every `str` field either declared or explicitly recorded as trusted, with the reason | `MissingSanitizableDeclaration` |
-| Class with no text at all | `PipelinePayload` | declares none legitimately; import succeeds | N/A |
+| Class declaring no *untrusted* text | `PipelinePayload` | both `str` fields recorded as trusted, with the reason; import succeeds | `MissingSanitizableDeclaration` if either is unrecorded |
+| Provider text in a non-`str` field | `WorkItemPayload.assignee: Actor \| None`, `NormalizedEvent.actor` | recorded as a known limit: the `str`-only rule cannot require them, and this slice does not widen it | N/A |
+| Declared type spelled `Optional[str]` | a future payload using the older form | accepted — annotations are strings under `from __future__ import annotations`, so the check resolves them rather than matching text | `MissingSanitizableDeclaration` only for a genuinely non-text field |
 
 </frozen-after-approval>
 
@@ -62,10 +65,18 @@ Split from the original `8c` on 2026-09-02 at the sizing gate: declaring untrust
 **Acceptance Criteria:**
 - Given a payload class added to `PAYLOAD_FOR` without a declaration, when the module is imported, then it is refused — **including under `python -O`**, run as a subprocess the way story 1l's guards are.
 - Given `grep -rn "assert " pm_ai/domain/events.py`, then there is no match, and `test_guards_survive_o.py` still passes.
-- Given every class in `PAYLOAD_FOR`, then each has a declaration and every declared name is a real text field of that class — enumerated, so a class added later cannot slip through.
+- Given every class in `PAYLOAD_FOR`, then **every `str` field of it** appears in exactly one of the two records — declared untrusted, or recorded as trusted with a reason. Enumerated over fields rather than classes, because a class-level check passes for a class that declares an empty tuple while carrying provider text, which the Design Notes call the original bug with extra ceremony.
+- Given a declared field annotated `Optional[str]`, then it is accepted — asserted, because `from __future__ import annotations` makes every annotation a string and a text-matching check would refuse it.
+- Given `PipelinePayload`, then `pipeline_id` and `status` are both recorded as trusted with a stated reason — it is the class the matrix once called textless, and it has two provider-supplied `str` fields.
 - Given `MessagePayload`, then `excerpt` is declared — the field the old `getattr` guess never reached, and the one every Teams message body arrives in.
 
 ## Spec Change Log
+
+- **2026-09-03, amended against the second multi-lens review.**
+  **The exemplar of "a class with no text at all" has two `str` fields** (B7). `PipelinePayload` carries `pipeline_id` and `status`, so under this slice's own rule — every `str` field declared or recorded as trusted — it cannot legitimately declare nothing. In fact **no** payload class has zero `str` fields, so the row described none of them, and seven more provider-supplied fields appeared nowhere: `MessagePayload.channel`, `CommitPayload.sha` and `.branch`, `WorkItemPayload.work_item_id` and `.state`, `ReviewPayload.target_ref` and `.verdict`. The completeness rule now enumerates **fields**, not classes — a class-level check passes for a class declaring an empty tuple while carrying provider text, which the Design Notes already call the original bug with extra ceremony.
+  **The type check could not work as specified** (B22). `events.py:11` has `from __future__ import annotations`, so `field.type` is the string `"str | None"`: matching that text refuses `Optional[str]` and admits nothing reliably. It resolves annotations now, and a criterion pins the older spelling.
+  **Provider text also arrives in non-`str` fields** — `WorkItemPayload.assignee: Actor | None` and `NormalizedEvent.actor` carry display names the `str`-only rule can never require. Recorded as a known limit rather than silently widened, since widening detection is a different story from making detection run.
+  **The guard count contradicted itself:** this clause said ten and the Code Map says eleven. `CASES` in `test_guards_survive_o.py:39-117` holds eleven.
 
 - **2026-09-02, split at the sizing gate.** The original `8c` measured 2,193 tokens and spanned `domain`, `app` and `storage`. This half is the domain declaration and its guard; `8e` is the boundary that uses it. Recorded because the review had judged it a single concern spanning layers, and splitting it was a human's call.
 - **Inherited from the 2026-09-02 multi-lens review**, which found the specified `AssertionError` guard forbidden by `test_guards_survive_o.py` — a shape copied from 2c's stale matrix, for the one guard standing between a new payload type and an unsanitized field. It also added keying by class rather than event type, and validating the declared name against the dataclass.
