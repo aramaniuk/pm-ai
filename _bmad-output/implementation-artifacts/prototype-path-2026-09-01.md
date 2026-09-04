@@ -251,6 +251,7 @@ independent and can move.
 ```mermaid
 flowchart LR
     s0(["slice 0 — spike, throwaway"])
+    s1n["1n project artifacts machine-local"]
     s4a["4a config"]
     s4b["4b key enrol"]
     s4c["4c CLI + exit codes + doctor"]
@@ -290,6 +291,7 @@ flowchart LR
     s4b --> s4h
     s4c --> s4h
     s4d --> s4k
+    s1n --> s4k
     s4c --> s4k
     s4k --> s4h
     s4b --> s8b
@@ -323,8 +325,8 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 24 slices, **34 dependency edges** in the table and the
-same 34 in the diagram, no edge in one and absent from the other, acyclic. The
+cross-checked both ways: 25 slices, **35 dependency edges** in the table and the
+same 35 in the diagram, no edge in one and absent from the other, acyclic. The
 count has moved four times on 2026-09-03 as the wave's specs were amended
 against the second review and split at the sizing gate; it is re-derived from the
 table each time rather than adjusted by hand.
@@ -612,10 +614,11 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (24 slices)
+### Wave 1 — a real dashboard from a real calendar (25 slices)
 
 | Slice | Delivers |
 |---|---|
+| `1n` | Four project artifacts and `memory/` become gitignored — the wave's only code change. Must precede `4k`. |
 | `4a` | Config loading — `tomllib`, `config.toml`. Explicitly not the encryption toggle. |
 | `4b` | `pm-ai key enrol` through KeychainPort; the daemon never mints. Retargets 1g's "key absent" remediation. |
 | `4c` | CLI entry point, the dispatch and exit-code tables, and `doctor`. No REPL yet. |

@@ -110,12 +110,13 @@ and `23a` into sections and scope wall.
 
 | Spec | Delivers | Depends on |
 |---|---|---|
+| `1n-project-artifacts-go-machine-local` | four project artifacts and `memory/` become `gitignored`; the only code change in the wave's spec set | — |
 | `4a-config-loading` | a reader for the declared `config.toml`, and the refusal keeping the encryption toggle out | — |
 | `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
 | `4c-cli-entry-point` | `[project.scripts] pm-ai`, the dispatch and exit-code tables, and `doctor` | 4a |
 | `4j-cli-service-subcommands` | `key enrol`, `config show`, `connector check` — three leaves on `4c`'s table | 4b, 4c, 8d |
 | `4d-project-registry` | `projects.toml` parsed, rendered, read by `build()`, and reported by `doctor` | 4a |
-| `4k-project-onboarding` | `pm-ai project add <path> [alias]` — creates the tree, generates `.gitignore`, adopts an existing one | 4c, 4d |
+| `4k-project-onboarding` | `pm-ai project add <path> [alias]` — creates the tree, generates `.gitignore`, adopts an existing one | 1n, 4c, 4d |
 | `4g-config-gains-a-writer` | a writer for `config.toml` and the probe that reports its state | 4a |
 | `4i-config-doctor-probe` | the sixth `doctor` probe, reporting what state `config.toml` is in | 4a |
 | `4h-first-run-setup` | `pm-ai setup` — the ordered first-boot sequence, asserted by a probe report | 4b, 4c, 4g, 4i, 4k |
