@@ -474,3 +474,31 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
   summary: `_append` still writes event-log and meeting segments at the umask, so the declared restricted mode never reaches them.
   evidence: `event_log/` and `meetings/` are declared gitignored in the PEOPLE tree, but ledger appends go through `path.open("a")` rather than `_publish`, which is where `restricted_mode` is consulted. Outside 8f's matrix, and it matters the moment the people enclave's segment modes do.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
+  summary: Nothing enforces CAP-35's ten-second bound on the *credential* probe, so a hung provider would hang `pm-ai connector add` while holding the exclusive claim open.
+  evidence: `ProbeUnreachable` and `CredentialProbePort` both document a bound; no timeout exists in `connectors/probe.py` or `enrol_connector`, and `ProbeUnreachable` is raised only by test fakes. Unreachable today because every probe refuses before any I/O, and it becomes real the moment 33a wires a transport — which is also the slice that can bound it, since `core` may not own a thread and 8d's registry already holds the one bound this codebase has.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
+  summary: A half-enrolled connector cannot be recovered through any shipped command — both refusal messages point the operator at an AES-GCM encrypted file.
+  evidence: `DuplicateConnector` says "Remove the entry from the sealed store" and `OrphanedCredential` says "enrol again"; `private/config.json` is encrypted under a keychain-held master key and there is no `connector remove`, no `connector list`, and no way to hand-edit it. The design deliberately reports the orphan rather than rolling back, which is right — but the state it chooses is currently a dead end. A `pm-ai connector remove` belongs with the disable clause 8b's Ask First already defers.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
+  summary: A GitLab project containing a slash cannot be enrolled, and `gitlab:<group>/<project>` would silently build an adapter for the wrong path.
+  evidence: `_assert_nameable` forbids `/` because the instance becomes one path component of `connectors/`, while `wiring._enrolled_connectors` derives the project as `instance.split(":", 1)[1]`. Real GitLab projects are `group/project`. The coupling — the instance suffix *is* the project path — is undocumented, and 33a will hit the same question for Graph.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
+  summary: `_assert_nameable` is applied to `system` but every one of its refusals talks about the *instance* name.
+  evidence: `pm-ai connector add "git lab" alpha` produces a message about registry keys, cursors and `connectors/<instance>.json`, naming the wrong argument. The validation is right; only the sentence is.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
+  summary: A connector's credential is never read back from the sealed store, so a freshly enrolled connector reports ABSENT.
+  evidence: `grep stored_credentials pm_ai/` finds only enrolment's own duplicate check. `_enrolled_connectors` constructs adapters with no credential, so `pm-ai connector check` shows a just-enrolled connector as having none. Harmless while no transport exists; it is the wiring 33a needs.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
+  summary: `assert_writable` promises to ask "every question a write would ask" and asks exactly one.
+  evidence: The implementation is a single `_assert_git_excludes` call. It takes no `name`, so it never validates the member name `write_artifact` will, and it checks no directory writability — so an unwritable `connectors/` still orphans a credential on every attempt. Either narrow the docstring or widen the check.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
+  summary: `_append` still writes at the umask, so the declared restricted mode reaches two of the three writers.
+  evidence: `disclosure.md` is declared GITIGNORED in the application tree and goes through `append_disclosure` → `_append` → `path.open("a")`, never `_publish`, where `restricted_mode` is consulted. `write_artifact` and `write_capture` both honour the declaration; this one does not, which is the selective enforcement the mode rule was introduced to end.

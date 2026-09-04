@@ -34,6 +34,7 @@ from pm_ai.ports import (
     KeychainBackendMissing,
     KeychainUnavailable,
     KeyNotFound,
+    ProbeUnreachable,
 )
 from pm_ai.surfaces.cli import dispatch as cli
 from pm_ai.surfaces.cli.dispatch import (
@@ -656,3 +657,39 @@ def test_an_unprobeable_system_is_refused_rather_than_sealed(
     monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
     assert entry.main(["connector", "add", "nosuch", "nosuch:one"]) == EXIT_REFUSAL
     assert "no credential probe" in capsys.readouterr().err.lower()
+
+
+def test_a_keyless_machine_gets_a_refusal_not_a_traceback(
+    registered, monkeypatch, capsys
+):
+    """The most common first-run state, and it printed a stack trace.
+
+    Enrolment reads the sealed store for its duplicate check, which needs the
+    master key. `_run` re-raises everything it does not name, so `KeyNotFound`
+    reached the operator as a traceback and exit 1 — indistinguishable from a
+    bug — instead of the one instruction that fixes it.
+    """
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
+
+    def keyless(*args, **kwargs):
+        raise KeyNotFound("master")
+
+    monkeypatch.setattr(cli, "enrol_connector", keyless)
+    assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_REFUSAL
+    assert "pm-ai key enrol" in capsys.readouterr().err
+
+
+def test_a_silent_provider_is_not_reported_as_a_bad_credential(
+    registered, monkeypatch, capsys
+):
+    """Otherwise the operator reissues a token that was never the problem."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
+
+    def silent(*args, **kwargs):
+        raise ProbeUnreachable("gitlab did not answer within 10s")
+
+    monkeypatch.setattr(cli, "enrol_connector", silent)
+    assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_REFUSAL
+    assert "not the credential" in capsys.readouterr().err

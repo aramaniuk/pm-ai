@@ -178,7 +178,7 @@ def enrol_connector(
     credential: str,
     probe: CredentialProbePort,
 ) -> str:
-    """Probe `credential`, seal it, then configure `instance`. Returns the instance.
+    """Probe `credential`, seal it, then configure `instance`.
 
     The order, and what each step buys:
 
@@ -206,8 +206,10 @@ def enrol_connector(
     6. **The configuration is written.** No credential in it. If this fails, the
        sealed credential is reported as orphaned rather than left silent.
 
-    Returns the instance name. Never the credential, and never anything derived
-    from it.
+    Returns the provider's own sentence about what answered, redacted — for the
+    operator, who has just typed a secret and deserves to know what accepted it.
+    Never the credential: `_redacted` removes it, and every refusal path is
+    asserted against five spellings of it.
     """
     _assert_nameable(instance)
     _assert_nameable(system)
@@ -356,7 +358,21 @@ def _credentials_in(document: Mapping[str, object]) -> dict[str, dict[str, str]]
             f"{type(held).__name__} rather than an object keyed by instance "
             f"name. Enrolment will not replace it."
         )
-    return {str(k): dict(v) for k, v in held.items() if isinstance(v, dict)}
+    unrecognised = sorted(str(k) for k, v in held.items() if not isinstance(v, dict))
+    if unrecognised:
+        # Refused rather than filtered. Dropping these and writing the mapping
+        # back would delete them from the sealed store — the module preserves
+        # unrelated *top-level* keys with care and would have destroyed sibling
+        # credential entries it merely did not recognise. They are also
+        # invisible to both duplicate checks while filtered, so the instance
+        # would be silently overwritten rather than refused.
+        raise ValueError(
+            f"{CREDENTIAL_STORE} holds entries under {CREDENTIALS_KEY!r} that "
+            f"are not objects: {', '.join(unrecognised)}. Enrolment will not "
+            f"rewrite the store while it holds something it cannot interpret, "
+            f"because writing it back would drop them."
+        )
+    return {str(k): dict(v) for k, v in held.items()}
 
 
 def _encode(document: Mapping[str, object]) -> bytes:
@@ -373,6 +389,22 @@ def _redacted(answer: str, credential: str) -> str:
     on somebody else's string formatting into one this slice's own tests can
     assert against.
     """
-    if credential and credential in answer:
+    if not credential:
+        return answer
+    # Not just the whole string. A provider that echoed a *truncated* token —
+    # "gitlab accepted glpat-not-a…", which is how most APIs identify a
+    # credential back to you — passed a whole-string check and printed the
+    # first half of the secret. Any run of eight characters is enough to be
+    # worth not printing.
+    window = 8
+    candidates = {credential, credential.casefold()}
+    if len(credential) > window:
+        candidates |= {
+            credential[index : index + window]
+            for index in range(len(credential) - window + 1)
+        }
+        candidates |= {c.casefold() for c in list(candidates)}
+    folded = answer.casefold()
+    if any(candidate and candidate.casefold() in folded for candidate in candidates):
         return "the provider accepted the credential"
     return answer

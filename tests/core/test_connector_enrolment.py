@@ -425,11 +425,23 @@ def test_an_enrolled_connector_is_registered_by_a_fresh_composition(tmp_path):
         credential=SECRET, probe=accepts,
     )
 
-    build(tmp_path, "demo")
-    assert "gitlab:enrolled" in {c for c in _instances()}, (
+    daemon = build(tmp_path, "demo")
+    assert "gitlab:enrolled" in _instances(), (
         "an enrolled connector was absent from a freshly composed registry, so "
         "`active at the next start` never becomes true"
     )
+    # The registry is what `connector check` reads; `Daemon.connectors` is what
+    # `run_harvest` resolves against. Registering into one and not the other
+    # listed an instance that harvesting raised `KeyError` for — visible in the
+    # report, unreachable by the only code that fetches anything.
+    assert "gitlab:enrolled" in daemon.connectors, (
+        "the connector is in the registry but not the daemon, so `connector "
+        "check` lists it and `run_harvest` cannot resolve it"
+    )
+    assert set(_instances()) == set(daemon.connectors), (
+        "the registry and the daemon disagree about which connectors exist"
+    )
+    assert all_connectors()
 
 
 def _instances() -> tuple[str, ...]:
@@ -465,3 +477,26 @@ def test_a_malformed_entry_does_not_stop_the_daemon_composing(tmp_path):
         name="broken.json",
     )
     build(tmp_path, "demo")  # must not raise
+
+
+def test_an_unrecognised_sibling_entry_is_refused_not_silently_dropped(storage):
+    """Writing the mapping back would have deleted it.
+
+    The module preserves unrelated top-level keys deliberately, and would have
+    destroyed sibling *credential* entries it merely could not interpret — while
+    also hiding them from both duplicate checks, so the instance would be
+    overwritten rather than refused.
+    """
+    storage.write_artifact(
+        json.dumps({"connectors": {"gitlab:odd": "a bare string", "gitlab:ok": {}}}).encode(),
+        scope=APPLICATION,
+        artifact="config.json",
+    )
+    with pytest.raises(ValueError) as refused:
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:new",
+            credential=SECRET, probe=accepts,
+        )
+    assert "gitlab:odd" in str(refused.value)
+    raw = storage.read_artifact(scope=APPLICATION, artifact="config.json")
+    assert json.loads(raw.decode())["connectors"]["gitlab:odd"] == "a bare string"

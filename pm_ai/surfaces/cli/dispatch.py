@@ -50,11 +50,14 @@ from pm_ai.core.connector_enrolment import (
     enrol_connector,
 )
 from pm_ai.ports import (
+    ArtifactBusy,
     CredentialProbePort,
     DaemonPort,
     DuplicateConnector,
     KeychainUnavailable,
+    KeyNotFound,
     ProbeFailed,
+    ProbeUnreachable,
     UnknownConnectorSystem,
 )
 
@@ -386,8 +389,28 @@ def _connector_add(context: Context) -> int:
         raise Refusal(str(refused)) from refused
     except UnknownConnectorSystem as unknown:
         raise Refusal(str(unknown)) from unknown
+    except ProbeUnreachable as silent:
+        # Named before its base class, so "the provider never answered" does not
+        # read as "your token is wrong" — the operator would reissue a perfectly
+        # good credential.
+        raise Refusal(
+            f"{silent} This is the network or the provider, not the credential."
+        ) from silent
     except ProbeFailed as rejected:
         raise Refusal(str(rejected)) from rejected
+    except KeyNotFound as keyless:
+        # The most common first-run state, and it reached the operator as a
+        # traceback: enrolment reads the sealed store for its duplicate check,
+        # which needs the master key.
+        raise Refusal(
+            f"no master key is enrolled on this machine, so a credential cannot "
+            f"be sealed. Run `pm-ai key enrol` first, then enrol the connector. "
+            f"({keyless})"
+        ) from keyless
+    except KeychainUnavailable as unreachable:
+        raise Refusal(str(unreachable)) from unreachable
+    except ArtifactBusy as claimed:
+        raise Refusal(str(claimed)) from claimed
     except OrphanedCredential as orphaned:
         # Not a refusal that left nothing behind — the one case where something
         # *was* written. It exits 3 like any other stated no, and says what is
@@ -500,9 +523,13 @@ def usage(*, group: str | None = None) -> str:
     if not command.leaves:
         lines.append(f"  no `pm-ai {group}` subcommand is implemented yet.")
     else:
+        spelled = {
+            name: name + "".join(f" <{argument}>" for argument in leaf.takes)
+            for name, leaf in command.leaves.items()
+        }
+        width = max(len(text) for text in spelled.values())
         lines += [
-            f"  {name}{''.join(f' <{a}>' for a in leaf.takes):<{max(0, 10 - len(name))}}"
-            f"  {leaf.summary}"
+            f"  {spelled[name]:<{width}}  {leaf.summary}"
             for name, leaf in command.leaves.items()
         ]
     return "\n".join(lines)

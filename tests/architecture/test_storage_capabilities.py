@@ -28,6 +28,7 @@ from pm_ai.domain.storage_tiers import (
     restricted_mode,
 )
 from pm_ai.platform.paths import ScopePaths
+from pm_ai.ports import ArtifactBusy
 from pm_ai.storage.crypto import ENCLAVE_DIR_MODE, ENCRYPTED_FILE_MODE, AesGcmCrypto
 from pm_ai.storage.service import StorageService
 
@@ -269,3 +270,87 @@ def test_a_declared_plaintext_artifact_still_answers_to_the_umask(storage):
         os.umask(previous)
 
     assert _mode(written) == 0o644
+
+
+# ── The exclusive claim (story 8b's read-modify-write) ───────────────────────
+
+
+def _claim_for(storage, artifact: str) -> Path:
+    target = storage.paths.resolve(APPLICATION, artifact)
+    return target.parent / f".{target.name}.claim"
+
+
+def test_a_second_claim_on_one_artifact_is_refused(storage):
+    """The whole reason `exclusive` exists, and nothing asserted it.
+
+    Two enrolments racing both read `private/config.json`, both merge, and one
+    credential is lost. Dropping `O_EXCL` made the claim decorative and left the
+    entire suite green, because every other test claims sequentially.
+    """
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        with pytest.raises(ArtifactBusy) as held:
+            with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("a second claim was granted")
+    message = str(held.value)
+    assert "config.json" in message
+    assert ".claim" in message, "the claim path must be named, or a kill wedges the machine"
+
+
+def test_the_claim_is_released_on_the_way_out(storage):
+    claim = _claim_for(storage, "config.json")
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        assert claim.exists()
+    assert not claim.exists()
+
+
+def test_the_claim_is_released_even_when_the_body_raises(storage):
+    """A refused enrolment must not wedge every later one."""
+    claim = _claim_for(storage, "config.json")
+    with pytest.raises(RuntimeError):
+        with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+            raise RuntimeError("the body failed")
+    assert not claim.exists()
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        pass  # claimable again
+
+
+def test_two_different_artifacts_do_not_block_each_other(storage):
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        with storage.exclusive(scope=APPLICATION, artifact="projects.toml"):
+            pass
+
+
+def test_claiming_a_sealed_artifact_does_not_create_a_world_listable_enclave(storage):
+    """A claim must not open `private/` a moment before the write would seal it.
+
+    Stated as *create*, not *is*: `_mkdir_enclave` leaves an existing directory
+    alone on purpose — its mode is its owner's decision — and `ScopePaths.rooted`
+    has already made `private/` at the umask by the time any test runs. So the
+    enclave is removed first, and the claim is what brings it back.
+    """
+    enclave = _claim_for(storage, "config.json").parent
+    for leftover in enclave.iterdir():
+        leftover.unlink()
+    enclave.rmdir()
+    assert not enclave.exists()
+
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        assert _mode(enclave) == ENCLAVE_DIR_MODE, (
+            "the claim created `private/` at the umask, so it was world-listable "
+            "for the window between claiming a credential store and sealing it"
+        )
+
+
+# ── The declared mode reaches the other writer too ───────────────────────────
+
+
+def test_a_raw_capture_lands_at_the_declared_restricted_mode(storage):
+    """`transcripts/` is gitignored in every scope that holds it.
+
+    Honouring the declaration in `write_artifact` and not in `write_capture`
+    would be the selective enforcement this codebase keeps refusing — and
+    dropping the mode here left every verbatim recording group- and
+    world-readable with the suite still green.
+    """
+    written = storage.write_capture("hello world", scope=PERSONAL, name="a.txt")
+    assert _mode(written) == RESTRICTED_FILE_MODE
