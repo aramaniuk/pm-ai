@@ -308,7 +308,6 @@ flowchart LR
     s22a --> s23a
     s11a --> s23a
     s23a --> s23d
-    s4d --> s23d
     s4c --> s23b
     s23a --> s23b
     s23d --> s23b
@@ -324,8 +323,8 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 24 slices, **35 dependency edges** in the table and the
-same 35 in the diagram, no edge in one and absent from the other, acyclic. The
+cross-checked both ways: 24 slices, **34 dependency edges** in the table and the
+same 34 in the diagram, no edge in one and absent from the other, acyclic. The
 count has moved four times on 2026-09-03 as the wave's specs were amended
 against the second review and split at the sizing gate; it is re-derived from the
 table each time rather than adjusted by hand.
@@ -639,7 +638,7 @@ depends on the first answer.
 | `22a` | Goal register parsed from `strategic_goals.md`; hand-edit tolerant, unparseable lines surfaced not dropped. |
 | `22b` | `render_goals`, `pm-ai goal set`, and the `goal_set` event-log entry. |
 | `23a` | `core/rendering.py` — the four sections, honest gaps, golden-file tests. |
-| `23d` | `project_scope_datasources` and AD-25's one-directional privacy wall. |
+| `23d` | `render_project_dashboard` — a separate renderer whose signature *is* AD-25's wall. |
 | `23b` | `pm-ai dashboard` wiring in `app/`: meetings + event_log + goals → render → `write_artifact`. |
 
 Wave 1 ends with a real `~/.manager-ai/memory/daily_dashboard.md` built from the
@@ -653,8 +652,8 @@ dispatch table it creates; `8d` precedes `8b` and `33a`, which register into it;
 precedes `33b` so Graph inherits a `HarvestResult` that can report an honest
 outcome; `11a` precedes `33c` because the mapping writes Meeting records, and
 precedes `23a` because Time-Critical reads them; `22a` precedes `23a` because the
-renderer takes a goal register; `23a` precedes `23d`, which adds the scope wall
-to the same module; and `8c` and `8e` are two independent slices with no
+renderer takes a goal register; `23a` precedes `23d`, which adds the second renderer
+to the same module and reuses its section renderers; and `8c` and `8e` are two independent slices with no
 dependants in this wave and, after 8e's renegotiation, no edge between them.
 
 ### Wave 2 — the full surface (7 slices)

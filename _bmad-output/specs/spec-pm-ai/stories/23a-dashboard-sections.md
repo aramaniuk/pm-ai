@@ -22,13 +22,13 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 - **A pure function.** `render_dashboard(meetings, entries, goals, now, *, tz) -> str`. No I/O, no clock read, no storage — `core` is I/O-free and the injected clock is the rule 1b established. Every section is golden-file testable.
 - **Nothing is invented.** A section with no data states the computed reason. A claim the code did not compute may not appear in the output — "No meetings on your calendar today" names a query result; "All clear!" names a state of the world nothing measured.
 - **All four headings always render**, in CAP-9's order, so the file's shape is stable for a human skimming it at 07:00 and for anything that later parses it.
-- **3-Tier means `GoalHorizon`**, not `GoalDomain`. Both are three-valued and CAP-9 says only "3-Tier"; the section is about when milestones land, and `GoalHorizon` is documented as the planning-breakdown axis while `GoalDomain` is the `<Tier>` in `[Strategic Alignment: <Tier>]`.
+- **3-Tier means `GoalDomain`** — `Project`, `Team`, `Personal`. Settled by the source, against an earlier draft of this clause: `prd.md:63` names `strategic_goals.md` as "3-Tier Goals (Project, Team, Personal Career Goals)", and `prd.md:424` says the domain "is what a goal is *about*, and it is the `<Tier>` in the alignment tag, matching §2.1's '3-Tier Goals'". `alignment_tag`'s docstring (`goals.py:99-104`) was right all along; the word "Milestones" in the section title is what misled this spec.
 - **Every interpolated string is escaped** — goal titles and actor names are hand-authored or provider-supplied and reach the same Markdown as meeting titles.
 - **Ordering is total**: meetings by `(start, meeting_id)`, so a re-render is byte-identical.
 
-**Ask First:** The display timezone that owns the day boundary. `render_dashboard` takes `tz` and `11a`'s `for_day(day, *, tz)` must agree — a 23:30-local meeting is tomorrow in UTC, so this decides which meetings a 07:00 dashboard shows. It has no owner in any story.
+**Ask First:** Nothing. The display timezone was decided on 2026-09-03: it is `config.toml`'s fourth key, `display_timezone`, added by `4g`. `run_dashboard` reads it from the loaded `Config` and passes it to both `render_dashboard` and `for_day`, so the two cannot disagree.
 
-**Never:** No model call of any kind — the renderer is deterministic and the prototype path puts no model in the path. No file write (`23b`). No scheduling (`9a`). No scope-boundary logic (`23d`). No commitment data: nothing produces commitments yet, and a section implying otherwise would be invented evidence.
+**Never:** No project render — `render_project_dashboard` is `23d`'s, a separate function with its own sources and sections, so this one cannot be handed personal-scope data by mistake. No model call of any kind — the renderer is deterministic and the prototype path puts no model in the path. No file write (`23b`). No scheduling (`9a`). No scope-boundary logic (`23d`). No commitment data: nothing produces commitments yet, and a section implying otherwise would be invented evidence.
 
 ## I/O & Edge-Case Matrix
 
@@ -41,7 +41,8 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 | Meeting spanning midnight | started yesterday, ends today | listed | N/A |
 | No goals | empty register | 3-Tier states no goals declared and names the file to author | N/A |
 | Goals file present but empty | register present-and-empty | states no goals **declared**, not "author the file" — it exists | N/A |
-| One horizon empty | no medium-horizon goals | that tier stated as empty; the other two render | N/A |
+| One domain empty | no `Team` goals | that tier stated as empty; the other two render | N/A |
+| Timezone unset | `Config().display_timezone` | **refused** — a day boundary may not be assumed, and defaulting to UTC is the silent wrong answer the key exists to prevent | `ValueError` |
 | No message entries | empty log | Proactive Enablement states no signals in the window | N/A |
 | Proactive Enablement in wave 1 | `MESSAGE_POSTED` does not exist yet | states no message signals until `33d` supplies them — the **second** knowingly empty section | N/A |
 | Leadership Notes | any input | states that synthesis is not enabled in this build | N/A |
@@ -74,6 +75,13 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 - Given the rendered output, then every empty-section string names a file, a query or a window — never a state of the world.
 
 ## Spec Change Log
+
+- **2026-09-03, amended against the second multi-lens review and the day's decisions.**
+  **"3-Tier means `GoalHorizon`" was wrong** (B9/D-8), and it contradicted `alignment_tag`'s docstring, which cites the same spec section. The PRD settles it twice: the three tiers are `Project`, `Team`, `Personal` — the **domain**. Corrected, and a matrix row followed.
+  **The verification block could not pass** (C1). Creating `pm_ai/core/rendering.py` ends the skip on `test_ad25_project_rendering_cannot_open_the_personal_store`, whose subject was `23d`'s deliverable — verified by the review with a stub module: `AttributeError`, 1 failed, and the skip ratchet does not even fire because `conftest.py:78-80` returns early on failure. Under the two-renderer decision that gate now asserts `render_project_dashboard`'s **signature**, which is `23d`'s function, so the un-skip and its subject land together in `23d` rather than one slice ahead of the other.
+  **The display timezone got a source.** It was this slice's `Ask First` and had no owner in any story; it is now `config.toml`'s fourth key via `4g`, read once by `23b` and passed to both consumers.
+  **This slice is now explicitly the personal dashboard only.** The project render is a separate function in `23d`, which is what makes handing it personal-scope data impossible rather than merely forbidden.
+  **One review claim did not hold, and is recorded as not applying.** B8 said this slice and `23b` were specified against a "degrades quietly to `UNALIGNED`" model and would crash on an absent goals file. Neither mentions `resolve` or `alignment_tag`: the 3-Tier section lists goals rather than resolving recommendations, so `UnresolvedGoal` is unreachable here. `22a`'s Intent was wrong; the knock-on was not.
 
 - **2026-09-02, split at the sizing gate.** The original `23a` measured 2,377 tokens and carried both the section rendering and `project_scope_datasources`, the AD-25 scope wall. The wall is now `23d`. Recorded because the review had judged this a single concern spanning layers, and splitting it was a human's call; the seam chosen separates two different failure classes — text that misleads, and a privacy leak.
 - **Inherited from the 2026-09-02 multi-lens review**, which found "No meetings on your calendar today" false by mid-afternoon; that wave 1 leaves *two* sections permanently stating a reason rather than one, since Proactive Enablement reads `MESSAGE_POSTED` and `33d` supplies it in wave 2; and that Ask First was "Nothing" when the display timezone owning "today" had no owner in any story.

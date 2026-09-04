@@ -132,7 +132,7 @@ and `23a` into sections and scope wall.
 | `22a-goal-register` | the register `domain/goals.py` has never had | — |
 | `22b-goal-writer` | `render_goals`, `pm-ai goal set`, and the `goal_set` entry | 22a, 4c |
 | `23a-dashboard-sections` | `core.rendering`'s four sections, honest gaps | 22a, 11a |
-| `23d-project-render-scope-wall` | `project_scope_datasources` and AD-25's one-directional wall | 23a, 4d |
+| `23d-project-render-scope-wall` | `render_project_dashboard` — a separate function whose signature *is* AD-25's wall | 23a |
 | `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 23d, 33c |
 
 Four skipped tests stop skipping across the wave: the AD-27 taxonomy and AD-34
