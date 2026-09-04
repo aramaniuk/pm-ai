@@ -86,7 +86,28 @@ SCHEDULING_CALLS = {
     "threading.Thread",
     "threading.Timer",
     "sched.scheduler",
+    # Added by story 8d, with the one exemption below. A pool is the obvious way
+    # around a rule that names `threading.Thread` and nothing else, so listing it
+    # is what keeps the rule from being a speed bump — but it is also how the
+    # connector health bound is implemented, and that use is not cadence.
+    "concurrent.futures.ThreadPoolExecutor",
+    "futures.ThreadPoolExecutor",
+    "ThreadPoolExecutor",
+    "concurrent.futures.ProcessPoolExecutor",
+    "ProcessPoolExecutor",
 }
+
+# The single file AD-9's connector rule does not cover, and why.
+#
+# `pm_ai/connectors/registry.py` starts one thread per connector to bound
+# CAP-35's ten-second health probe. That is a *deadline*, not a schedule: it runs
+# once when invoked, owns no cadence, keeps no state between calls, and touches
+# no cursor. A blocking socket read cannot be cancelled from outside, so a bound
+# without a thread would be a bound the adapter is merely asked to honour.
+#
+# Named by relative path rather than by filename, so a future
+# `connectors/<something>/registry.py` does not inherit the exemption.
+SCHEDULING_EXEMPT = {"connectors/registry.py"}
 
 
 def _mode_of(node: ast.Call) -> str:
@@ -252,12 +273,21 @@ def test_ad9_connectors_own_no_scheduling():
         f"{f.location(node)}  {name}(...)"
         for f, node, name in calls(source_files("connectors"))
         if name in SCHEDULING_CALLS
+        and f.path.relative_to(PACKAGE_ROOT).as_posix() not in SCHEDULING_EXEMPT
     ]
     assert not violations, format_violations(
         violations,
         "AD-9: connectors expose harvest(since) and nothing else. The daemon's "
         "scheduler owns cadence, cursors, and backoff.",
     )
+    # The exemption has to name a file that exists, or it silently stops being an
+    # exemption and starts being a typo nobody notices.
+    for exempt in SCHEDULING_EXEMPT:
+        assert (PACKAGE_ROOT / exempt).is_file(), (
+            f"SCHEDULING_EXEMPT names {exempt}, which does not exist. An "
+            f"exemption for a moved or renamed file is a hole in AD-9 that reads "
+            f"as a considered decision."
+        )
 
 
 def test_ad11_no_filesystem_discovery_of_projects():

@@ -50,10 +50,15 @@ import re
 import shutil
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 
+# Re-exported, not redefined. `Health`, `Probe` and `Report` moved to
+# `pm_ai.domain.health` when `ConnectorPort` gained a health method: a port may
+# import only `pm_ai.domain`, so the types a port names cannot live here. Every
+# existing `from pm_ai.platform.doctor import Health, Probe, Report` still
+# resolves, and there is one `Health` in the process rather than two that agree
+# by convention.
+from pm_ai.domain.health import Health, Probe, Report
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR, TRUTHY, raw_toggle
 from pm_ai.platform.vcs import GitVcs
@@ -66,65 +71,6 @@ from pm_ai.ports import (
 )
 
 __all__ = ["Health", "Probe", "Report", "packages_installed", "run_all"]
-
-
-class Health(Enum):
-    """Four states, because three of them are not failures.
-
-    `ABSENT` is separate from `FAILING` because "reachable, nothing stored" is an
-    ordinary first-run state and "cannot reach it at all" is a broken machine.
-    Collapsing them would tell an operator to fix a keychain that is fine. It is
-    still not `is_healthy` — expected on a fresh install and a pass are different
-    claims: setup is incomplete, encrypted writes will be refused until the key
-    is enrolled, and a doctor that exits 0 over that would be the summary an
-    operator trusts while the morning briefing quietly cannot decrypt anything.
-
-    `WARNING` is separate from `OK` because encryption being off is not healthy
-    even though nothing is broken — and separate from `FAILING` because the
-    daemon is doing exactly what it was told to.
-    """
-
-    OK = "ok"
-    WARNING = "warning"
-    ABSENT = "absent"
-    FAILING = "failing"
-
-    @property
-    def is_healthy(self) -> bool:
-        return self is Health.OK
-
-
-@dataclass(frozen=True, slots=True)
-class Probe:
-    """One question asked and answered, with what to do about the answer."""
-
-    name: str
-    health: Health
-    detail: str
-    remediation: str = ""
-
-    def __str__(self) -> str:
-        line = f"[{self.health.value:>7}] {self.name}: {self.detail}"
-        return f"{line}\n          → {self.remediation}" if self.remediation else line
-
-
-@dataclass(frozen=True, slots=True)
-class Report:
-    probes: tuple[Probe, ...]
-
-    @property
-    def healthy(self) -> bool:
-        """False if anything is not `OK` — a warning is not a pass.
-
-        Encryption disabled is the case this exists for: the daemon works, and a
-        report that called it healthy would be the summary an operator trusts
-        while credentials sit in plaintext.
-        """
-        return all(p.health.is_healthy for p in self.probes)
-
-    def __str__(self) -> str:
-        verdict = "healthy" if self.healthy else "NOT healthy"
-        return "\n".join([*(str(p) for p in self.probes), "", f"pm-ai is {verdict}."])
 
 
 # ── Dependencies ─────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+from pm_ai.connectors.registry import ConnectorRegistry, install as install_connectors
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
@@ -154,15 +155,25 @@ def build(
         _announce_disabled_encryption(storage)
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
+    connectors: dict[str, GitLabConnectorAdapter] = {
+        f"gitlab:{project}": GitLabConnectorAdapter(project=project, scope=scope, now=clock)
+    }
+    # The daemon holds the instances; `pm_ai.connectors.registry` enumerates
+    # them. Two structures rather than one because the architecture gates and
+    # `pm-ai connector check` have to ask "for every connector, ..." from
+    # outside, and this dict is unreachable from anywhere but here. Registered
+    # under the same key, so a cursor, a coverage window and a probe row all
+    # name one instance. `install` replaces, so building a second daemon in one
+    # process describes that daemon rather than accumulating both.
+    enumerable = ConnectorRegistry()
+    for instance, connector in connectors.items():
+        enumerable.register(connector, instance=instance)
+    install_connectors(enumerable)
     return Daemon(
         storage=storage,
         crypto=crypto,
         skills=skills,
-        connectors={
-            f"gitlab:{project}": GitLabConnectorAdapter(
-                project=project, scope=scope, now=clock
-            )
-        },
+        connectors=connectors,
         # AD-23 — both adapters wired from day one, so the pipeline is exercisable
         # without a live tenant.
         transcripts={"graph": GraphTranscriptAdapter(), "manual": ManualTranscriptAdapter()},

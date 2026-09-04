@@ -14,6 +14,7 @@ from pm_ai.domain.disclosure import DisclosureRecord
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
+from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.vcs import TrackingVerdict
 
@@ -30,6 +31,45 @@ class ConnectorPort(Protocol):
 
     def harvest(self, since: Cursor) -> HarvestResult:
         """Auth, fetch, map-to-schema. Read-only — class H egress (AD-1)."""
+
+    def sample_events(self) -> tuple[NormalizedEvent, ...]:
+        """At least one event of the shape this connector produces, built offline.
+
+        Declared on the port rather than left to convention because the AD-34
+        gate calls `connector.sample_events()` on every registered connector: an
+        `isinstance` conformance check cannot observe a method nothing declares,
+        so the gate would have been reading an attribute no contract promised.
+
+        Contacts nothing. It exists so an architecture check can inspect a
+        connector's output without a credential, a network, or a fixture per
+        connector — which is what lets "no connector mints an event id" be a
+        property of the *set* of connectors rather than of the two somebody
+        remembered to write a test for.
+
+        Must return a non-empty tuple, and must build its events the same way
+        `harvest` does. A separate hand-written sample would drift from the real
+        mapping and the gate would then be checking a decoration.
+        """
+
+    def check_health(self) -> Probe:
+        """Whether this connector can currently reach its provider.
+
+        **Reports; never raises.** One broken connector must not hide three
+        others — the rule `pm_ai.platform.doctor` states and this shares the type
+        with.
+
+        Three answers matter and the enum keeps them apart. `ABSENT` is a
+        connector configured with no credential stored, which is an ordinary
+        first-run state rather than a broken machine. `FAILING` is a provider
+        that refused or would not answer. `OK` is a provider that answered.
+
+        Implemented per connector, never by `doctor`: what "reachable" means is
+        provider-specific, and `doctor` reports registry membership without
+        contacting anything. The ten-second bound is not enforced here — a
+        blocking call cannot cancel itself — but by
+        `pm_ai.connectors.registry.ConnectorRegistry.check_health`, which waits
+        for this and abandons it at the bound.
+        """
 
 
 @runtime_checkable
