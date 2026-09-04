@@ -345,11 +345,20 @@ arrives, and before story 7 puts a model behind the port. They sit in wave 1
 because the defect is live on the GitLab path today and cheapest to close while
 nothing can yet bypass the port.
 
-Eight slices have no dependencies at all and can start immediately: `4a`, `4b`,
-`8a`, `8c`, `8d`, `8e`, `11a`, `22a` — `8e` joined them when its edge from `8c`
-was removed. `22a` and `11a` in particular run parallel to the entire Graph
-chain, since the renderer takes a goal register and a clock and does not care
-where meetings came from.
+Nine slices have no dependencies at all: `1n`, `4a`, `4b`, `8a`, `8c`, `8d`,
+`8e`, `8f`, `22a`. `4a` is already implemented, so eight can start today. `8e`
+joined them when its edge from `8c` was removed; `8f` and `1n` were carved out of
+`8b` and the scope model on 2026-09-03. `22a` in particular runs parallel to the
+entire Graph chain, since the renderer takes a goal register and a clock and does
+not care where meetings came from — `11a` no longer joins it there, having gained
+a dependency on `8f`'s collection listing, which `for_day` needs.
+
+**`1n` is the one with an ordering constraint rather than a dependency.** It must
+land before `4k`: after it, a project directory that already committed
+`.project-ai/memory/` can only be fixed with `git rm --cached`, because AD-43's
+third row states that adding an ignore rule does not untrack what is already
+tracked. Nothing is deployed, so no such directory exists — which stays true only
+if the order holds.
 
 **`4c` precedes `4k`, not `4d`.** The circularity the review found was real
 while one slice held both the registry and its command: `4d` added `project add`
@@ -648,6 +657,12 @@ Wave 1 ends with a real `~/.manager-ai/memory/daily_dashboard.md` built from the
 PM's actual calendar and actual goals. **This is the working prototype, and a
 legitimate point to stop and reassess.**
 
+It also ends with `pm-ai` genuinely installable: `pm-ai setup` walks a clean
+machine to a configured one — key enrolled, project onboarded, `config.toml`
+written — and `pm-ai doctor` reports whether it worked. That was not in the
+original plan; it arrived on 2026-09-03 when the first-run experience was
+requested, and it is why the wave grew from seventeen slices to twenty-five.
+
 Ordering constraints inside the wave, as the build-order graph below derives
 them: `4a` and `4b` precede everything, because nothing runs without config and a
 key; `4c` precedes `4j`, `4k` and `8b`, all of which add subcommands to the
@@ -697,15 +712,21 @@ Stories 1 and 2 were 25 slices and built the storage, crypto, and log
 foundation. This path is 24 slices plus a spike — the same order of magnitude
 again. "Shortest" means shortest *given the four decisions above*, not small.
 
-The shortest path to something working is wave 1 alone: 17 slices.
+The shortest path to something working is wave 1 alone: 25 slices, one of them (`4a`) already implemented.
 
 ## Open questions
 
 1. **Does the tenant permit Graph transcript access?** Slice 0 answers it. A
    `403 GraphAccessToTranscriptsDisabled` removes slice 33e and `11b` from the
    plan entirely and there is no workaround.
-2. **Is "3-Tier" horizon or domain?** Decided as horizon above. A one-line
-   change now; a re-render later.
+2. **Is "3-Tier" horizon or domain?** **Domain**, and the earlier answer here —
+   "decided as horizon" — was wrong. Settled against the source on 2026-09-03:
+   `prd.md:63` names `strategic_goals.md` as "3-Tier Goals (Project, Team,
+   Personal Career Goals)", and `prd.md:424` says the domain "is what a goal is
+   *about*, and it is the `<Tier>` in the alignment tag, matching §2.1's '3-Tier
+   Goals'". `alignment_tag`'s docstring (`goals.py:99-104`) was right all along;
+   the word "Milestones" in CAP-9's section title is what misled both this entry
+   and `23a`. Corrected in `23a`.
 3. **Does a payload gaining a field need an operational schema version bump?**
    **Answered 2026-09-02: no, and story 1i is the wrong owner.** `SCHEMA_VERSION`
    (`service.py:133`) describes `operational.db`'s table shape, and a field added
@@ -722,10 +743,14 @@ The shortest path to something working is wave 1 alone: 17 slices.
    `ReviewPayload` serves two types; validated against the dataclass at import;
    refused by a typed error, never an `assert`, which
    `test_guards_survive_o.py:174-181` forbids anywhere in `pm_ai/`.
-5. **What display timezone owns "today"?** Raised by the review and still open.
-   `Meeting.start` is aware UTC, so a 23:30-local meeting is tomorrow in UTC and
-   the answer decides which meetings a 07:00 dashboard shows. `11a`'s
-   `for_day(day, *, tz)` takes it and `23a` must agree.
+5. **What display timezone owns "today"?** **Answered 2026-09-03: a fourth
+   `config.toml` key, `display_timezone`.** It had no owner in any story —
+   `render_dashboard` and `for_day` both took a `tz` and nothing supplied one,
+   `4a` had closed the vocabulary at three keys and `4h` forbids prompting for
+   anything `4a` does not accept. The key lands in `4g`, because a loader and a
+   renderer that disagree about a file format is the drift pair `4g` exists to
+   close; `23b` reads it once and passes it to both consumers, and an unset zone
+   is refused rather than defaulted to UTC.
 6. **Does persisting `for_model` bump the operational schema version?**
    **Closed 2026-09-02 by removing the premise.** The question was a category
    error (see question 3), and examining it retired the design that raised it:
