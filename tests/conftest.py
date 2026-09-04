@@ -39,7 +39,12 @@ import pytest
 # `sqlite_vec`) are imported inside the functions that use them precisely so a
 # missing extra cannot turn a test into a skip that reads as coverage. If this
 # number ever has to rise, the reason belongs in the commit message.
-EXPECTED_SKIPS = 27
+# Lowered by two in story 8d's commit, from 27: `pm_ai.connectors.registry` now
+# exists, so `test_ad27_connectors_only_emit_core_declared_event_types` and
+# `test_ad34_connectors_do_not_mint_event_ids` run instead of skipping. A delta
+# rather than an absolute on purpose — `23d` lowers it by one as well, and which
+# of the two lands first decides the number, not the work.
+EXPECTED_SKIPS = 25
 
 _VERDICT = pytest.StashKey[str]()
 

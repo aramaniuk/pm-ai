@@ -15,8 +15,10 @@ Two properties matter as much as the individual answers:
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +35,7 @@ from pm_ai.platform.doctor import (
 )
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR
 from pm_ai.ports import KeychainUnavailable, KeyNotFound
+from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_UNHEALTHY
 
 SECRET = b"\x00\x01\xfe a-real-looking-key"
 
@@ -40,9 +43,9 @@ SECRET = b"\x00\x01\xfe a-real-looking-key"
 class Keychain:
     """A whole `KeychainPort`, which fails however a row needs it to.
 
-    All three methods, not just the one the probe calls. Annotating
-    `keychain_reachable` with the port on 2026-08-25 immediately caught this as a
-    partial fake: it had satisfied the parameter only because the parameter was
+    Every method the port declares, not just the one the probe calls.
+    Annotating `keychain_reachable` with the port on 2026-08-25 immediately
+    caught this as a partial fake: it had satisfied the parameter only because the parameter was
     implicit `Any`. A fake that claims to be a port and is not means every row
     using it proves less than it appears to.
     """
@@ -51,6 +54,13 @@ class Keychain:
         self._secret, self._raises = secret, raises
 
     def store(self, name: str, secret: bytes) -> None:
+        self._secret = secret
+
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        from pm_ai.ports import KeyAlreadyEnrolled
+
+        if self._secret is not None:
+            raise KeyAlreadyEnrolled(f"{name!r} already holds a secret")
         self._secret = secret
 
     def fetch(self, name: str) -> bytes:
@@ -317,18 +327,31 @@ def test_a_fully_healthy_machine_reports_healthy(monkeypatch):
     assert "pm-ai is healthy." in str(report)
 
 
-def test_the_module_runs_as_a_subprocess_and_exits_by_verdict():
-    """There is no console entry point yet, so `python -m` is the whole surface.
+def test_the_console_script_runs_the_probes_and_exits_by_the_one_table():
+    """The console script is the whole surface; `python -m` was retired in 4c.
 
     Exit status matters more than the text: whatever runs this at install time
-    reads the code, not the prose.
+    reads the code, not the prose. Asserted against the table's own constants,
+    because this module deliberately no longer decides a code — it may not
+    import `surfaces`, and a second surface answering `1` for "unhealthy" would
+    collide with `1` meaning "pm-ai broke, read the traceback".
     """
+    # `which` first: console scripts do not always land beside the interpreter
+    # (--user installs, Windows `.exe`), and this test is about the exit code,
+    # not about where a packaging tool put the file. The declaration itself is
+    # pinned separately, through `importlib.metadata`, in test_cli_dispatch.
+    found = shutil.which("pm-ai") or (Path(sys.executable).parent / "pm-ai")
+    script = Path(found)
+    if not script.exists():
+        pytest.skip("the `pm-ai` console script is not installed in this layout")
     result = subprocess.run(
-        [sys.executable, "-m", "pm_ai.platform.doctor"],
+        [str(script), "doctor"],
         capture_output=True, text=True, check=False,
     )
     assert "sqlite extension support" in result.stdout
-    assert result.returncode in (0, 1), "the runner must exit by verdict, not crash"
+    assert result.returncode in (EXIT_OK, EXIT_UNHEALTHY), (
+        f"the script must exit by verdict, not crash: got {result.returncode}"
+    )
 
 
 # ── the environment is the only way in ───────────────────────────────────────

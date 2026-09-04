@@ -2,7 +2,8 @@
 title: 'The three service subcommands'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '3e042f2dde51a0ee17c60db107cfe4310ea9074c'
 review_loop_iteration: 0
 context: []
 ---
@@ -57,8 +58,8 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add `key enrol`, `config show` and `connector check` as leaves on `4c`'s table -- three mappings, no new exit code
-- [ ] `tests/surfaces/test_cli_subcommands.py` -- one test per matrix row, `main()` called with an explicit argv, asserting the exact exit integer
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- add `key enrol`, `config show` and `connector check` as leaves on `4c`'s table -- three mappings, no new exit code
+- [x] `tests/surfaces/test_cli_subcommands.py` -- one test per matrix row, `main()` called with an explicit argv, asserting the exact exit integer
 
 **Acceptance Criteria:**
 - Given `pm-ai key enrol` succeeds, when stdout and stderr are captured and searched, then the key material appears in neither — the surface half of `4b`'s guarantee, which `4b` cannot assert because it has no surface.

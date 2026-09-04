@@ -2,7 +2,8 @@
 title: 'Master-key enrolment'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'a778d5739311f760f5a9270f155cfb46bc451005'
 review_loop_iteration: 1
 ---
 
@@ -56,10 +57,10 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` -- define `AES_KEY_BYTES` here beside `MASTER_KEY_NAME`, and **re-export it from `pm_ai.storage.crypto`** keeping that module's `__all__` entry -- `core` cannot import `pm_ai.storage.crypto`, and a bare move breaks `tests/architecture/test_cipher.py:38-39`, which imports the name and uses it at six sites, at collection time
-- [ ] `pm_ai/ports/__init__.py`, `pm_ai/platform/keychain.py` -- add the conditional-on-absent store to `KeychainPort` and the macOS adapter -- the matrix's race row has no mechanism without it, and AD-14's port inventory gains an operation
-- [ ] `pm_ai/core/enrolment.py` -- add `enrol(keychain, *, key_name=MASTER_KEY_NAME)`, `KeyAlreadyEnrolled`, and the read-back equality check -- minting in exactly one place
-- [ ] `tests/core/test_enrolment.py` -- one test per matrix row, against a fake `KeychainPort`
+- [x] `pm_ai/ports/__init__.py` -- define `AES_KEY_BYTES` here beside `MASTER_KEY_NAME`, and **re-export it from `pm_ai.storage.crypto`** keeping that module's `__all__` entry -- `core` cannot import `pm_ai.storage.crypto`, and a bare move breaks `tests/architecture/test_cipher.py:38-39`, which imports the name and uses it at six sites, at collection time
+- [x] `pm_ai/ports/__init__.py`, `pm_ai/platform/keychain.py` -- add the conditional-on-absent store to `KeychainPort` and the macOS adapter -- the matrix's race row has no mechanism without it, and AD-14's port inventory gains an operation
+- [x] `pm_ai/core/enrolment.py` -- add `enrol(keychain, *, key_name=MASTER_KEY_NAME)`, `KeyAlreadyEnrolled`, and the read-back equality check -- minting in exactly one place
+- [x] `tests/core/test_enrolment.py` -- one test per matrix row, against a fake `KeychainPort`
 
 **Acceptance Criteria:**
 - Given a keychain already holding a key, when enrolment runs, then it refuses and no write reaches the keychain — asserted on the fake, not inferred from the message.

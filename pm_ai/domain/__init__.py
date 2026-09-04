@@ -42,6 +42,11 @@ from pm_ai.domain.events import (
     PayloadMismatch,
     Provenance,
 )
+from pm_ai.domain.health import (
+    Health,
+    Probe,
+    Report,
+)
 from pm_ai.domain.scope_model import (
     ARTIFACT_TIER,
     BACKUP_TARGETS,
@@ -136,6 +141,7 @@ __all__ = [
     "GITIGNORED",
     "GITIGNORE_FILENAME",
     "GIT_SUBCOMMANDS",
+    "Health",
     "ImplausibleTimestamp",
     "InconsistentVocabulary",
     "LedgerCategory",
@@ -154,10 +160,12 @@ __all__ = [
     "PM_AI_ACTOR",
     "PM_AI_MINTED",
     "PayloadMismatch",
+    "Probe",
     "ProposalState",
     "Provenance",
     "REBUILD_TARGETS",
     "RETENTION_MANAGED",
+    "Report",
     "SCOPE_TREES",
     "SELF_ACTION_FIELDS",
     "ScopeKind",

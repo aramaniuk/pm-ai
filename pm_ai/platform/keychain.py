@@ -40,13 +40,24 @@ import binascii
 from dataclasses import dataclass
 from typing import Any
 
-from pm_ai.ports import KeychainBackendMissing, KeychainUnavailable, KeyNotFound
+from pm_ai.ports import (
+    KeyAlreadyEnrolled,
+    KeychainBackendMissing,
+    KeychainUnavailable,
+    KeyNotFound,
+)
 
 __all__ = ["KEYCHAIN_SERVICE", "MacOSKeychainAdapter"]
 
 # One service name for every secret pm-ai owns, so uninstalling means deleting one
 # service's entries rather than hunting for names nobody wrote down.
 KEYCHAIN_SERVICE = "pm-ai"
+
+# `SecKeychainAddGenericPassword`'s answer when an item with the same (service,
+# account) already exists. Story 4b's whole reason for going around `keyring`
+# for one call: the framework decides absence and writes in the same step, so
+# two enrolments racing cannot both win.
+ERR_SEC_DUPLICATE_ITEM = -25299
 
 
 def _keyring() -> tuple[Any, type[BaseException]]:
@@ -68,6 +79,75 @@ def _keyring() -> tuple[Any, type[BaseException]]:
     return keyring, KeyringError
 
 
+def _add_generic_password(service: str, account: str, encoded: str) -> int:
+    """The `OSStatus` from `SecKeychainAddGenericPassword`, and nothing else.
+
+    `keyring` exposes get, set and delete, and `set` replaces — there is no
+    conditional write in its API, and a `get` followed by a `set` is the race
+    `KeychainPort.store_if_absent` exists to close. The Security framework has
+    the primitive: this add is refused with `errSecDuplicateItem` when the item
+    exists, decided inside the framework rather than by the caller.
+
+    Reached through `ctypes` rather than the `security(1)` tool, which takes the
+    password as an argv word — and argv is world-readable through `ps`, which is
+    key material leaving the keychain.
+
+    A separate function so the status-to-refusal mapping above can be exercised
+    without a real Keychain, which story 1d forbids the suite to touch. The
+    framework is loaded at call time for the same reason `keyring` is: a machine
+    that cannot load it must fail as a refusal at the moment it matters, not as
+    a traceback out of an import.
+    """
+    import ctypes
+    import ctypes.util
+
+    path = ctypes.util.find_library("Security")
+    if path is None:
+        raise KeychainUnavailable(
+            "the Security framework could not be located, so pm-ai cannot write "
+            "a key without first reading one — and read-then-write is what "
+            "loses a key to a second enrolment. This adapter is macOS-only "
+            "(AD-26); a port to another OS supplies its own conditional store."
+        )
+    try:
+        security = ctypes.CDLL(path)
+        add = security.SecKeychainAddGenericPassword
+    except (OSError, AttributeError) as unreachable:
+        raise KeychainUnavailable(
+            f"the Security framework is present and unusable ({unreachable}), so "
+            f"whether a key can be enrolled is unknown."
+        ) from unreachable
+    add.restype = ctypes.c_int32
+    add.argtypes = [
+        ctypes.c_void_p,  # keychain: NULL means the default keychain
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_void_p,  # out itemRef: NULL, nothing here wants the item back
+    ]
+    service_bytes = service.encode("utf-8")
+    account_bytes = account.encode("utf-8")
+    # The base64 this adapter writes, so `fetch` reads back what `store` would
+    # have written. Two spellings of the same secret in one keychain would be a
+    # key that decodes on one path and not the other.
+    payload = encoded.encode("ascii")
+    return int(
+        add(
+            None,
+            len(service_bytes),
+            service_bytes,
+            len(account_bytes),
+            account_bytes,
+            len(payload),
+            payload,
+            None,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MacOSKeychainAdapter:
     """Satisfies `pm_ai.ports.KeychainPort` against the OS keychain.
@@ -87,6 +167,29 @@ class MacOSKeychainAdapter:
                 f"secret was not written, and pm-ai will not hold it anywhere "
                 f"else."
             ) from unreachable
+
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        # The backend gate first, before anything is written. This call reaches
+        # the framework directly because `keyring` has no conditional write —
+        # but a key stored where `fetch` cannot read it is not enrolled, so the
+        # operation still requires the library the rest of this adapter speaks
+        # through. Without the gate, an install missing `keyring` would report a
+        # successful enrolment and then fail every read of the key it wrote.
+        _keyring()
+        encoded = base64.b64encode(secret).decode("ascii")
+        status = _add_generic_password(KEYCHAIN_SERVICE, name, encoded)
+        if status == ERR_SEC_DUPLICATE_ITEM:
+            raise KeyAlreadyEnrolled(
+                f"the {KEYCHAIN_SERVICE!r} keychain service already holds a "
+                f"secret named {name!r}. Nothing was written: replacing it "
+                f"would make every artifact sealed under the existing key "
+                f"permanently unreadable."
+            )
+        if status != 0:
+            raise KeychainUnavailable(
+                f"the keychain refused to add {name!r} (OSStatus {status}). No "
+                f"key was enrolled, and pm-ai will not hold one anywhere else."
+            )
 
     def fetch(self, name: str) -> bytes:
         keyring, KeyringError = _keyring()

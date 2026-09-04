@@ -91,7 +91,7 @@ def test_ad20_mutating_jobs_require_a_key(tmp_path):
         )
 
 
-def test_ad27_connectors_only_emit_core_declared_event_types():
+def test_ad27_connectors_only_emit_core_declared_event_types(tmp_path):
     """AD-27 — ADVERSARIAL. Two connectors describing the same change differently.
 
     If GitLab emits `mr_updated` and Jira emits `workitem.updated`, commitment
@@ -102,9 +102,22 @@ def test_ad27_connectors_only_emit_core_declared_event_types():
     # exist — and therefore skipped forever while reading as covered.
     taxonomy = mod("pm_ai.domain.events")
     registry = mod("pm_ai.connectors.registry")
+    # The registry is populated at composition, never at import: a connector
+    # needs a project and a scope that only `build()` knows. So a daemon is
+    # wired first, and what is checked below is the set this machine would
+    # actually harvest with.
+    _daemon(tmp_path)
 
     allowed = set(taxonomy.ObservedEventType)
-    for connector in registry.all_connectors():
+    connectors = registry.all_connectors()
+    assert connectors, (
+        "AD-27: nothing is registered, so the loop below asserts nothing and "
+        "this test passes over an empty set. That is the failure this test "
+        "already suffered once — it looked for a module that never existed and "
+        "skipped for its whole life while reading as covered. An empty registry "
+        "after composition means `build()` no longer registers what it builds."
+    )
+    for connector in connectors:
         declared = set(connector.emits())
         unknown = declared - allowed
         assert not unknown, (
@@ -480,11 +493,24 @@ def test_ad34_unresolvable_actors_never_become_raw_string_identities():
     )
 
 
-def test_ad34_connectors_do_not_mint_event_ids():
+def test_ad34_connectors_do_not_mint_event_ids(tmp_path):
     """AD-34 — storage mints the surrogate at persist; dedup uses the natural key."""
     registry = mod("pm_ai.connectors.registry")
-    for connector in registry.all_connectors():
-        for event in connector.sample_events():
+    _daemon(tmp_path)  # the registry is populated at composition, not at import
+    connectors = registry.all_connectors()
+    assert connectors, (
+        "AD-34: nothing is registered, so both loops below are empty and this "
+        "test passes without executing one assertion. A vacuous pass is worse "
+        "than a skip, which `-rs` at least shows."
+    )
+    for connector in connectors:
+        samples = connector.sample_events()
+        assert samples, (
+            f"AD-34: {connector.name} samples no events, so the assertion below "
+            f"never runs for it. `sample_events()` is declared on `ConnectorPort` "
+            f"precisely so this gate has something real to inspect."
+        )
+        for event in samples:
             assert getattr(event, "id", None) is None, (
                 f"AD-34: {connector.name} minted an event id. Re-harvest would then "
                 "double-count; dedup is on (source_system, source_ref)."
@@ -823,6 +849,31 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     assert isinstance(storage, ports.StoragePort), (
         "the single writer no longer satisfies the port core depends on"
     )
+
+    # Connectors, added by story 8d. Three adapters were covered here and no
+    # connector was — so `sample_events`, the one method the AD-34 gate actually
+    # invokes, was declared by nothing and checked by nothing. `isinstance`
+    # alone still cannot see it unless the port declares it, which is why
+    # declaring it was a task rather than a convention; and it cannot see that
+    # the method returns anything, which is why the non-empty assertion is here
+    # beside it.
+    connectors = mod("pm_ai.connectors.registry")
+    _daemon(tmp_path)
+    registered = connectors.all_connectors()
+    assert registered, "nothing registered — the assertions below would be vacuous"
+    for connector in registered:
+        assert isinstance(connector, ports.ConnectorPort), (
+            f"{connector} is registered as a connector and does not satisfy "
+            f"ConnectorPort — the protocol the AD-27 and AD-34 gates read it through"
+        )
+        assert connector.sample_events(), (
+            f"{connector.name} satisfies ConnectorPort and samples nothing, so "
+            f"the AD-34 gate proves nothing about it"
+        )
+        assert isinstance(connector.check_health(), mod("pm_ai.domain").Probe), (
+            f"{connector.name}'s health method must answer with a Probe — the "
+            f"same type the machine probes report with, so one screen can show both"
+        )
 
 
 # ── AD-36 vs AD-34: a scopeless reference is global, not foreign ─────────────

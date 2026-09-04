@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+from pm_ai.connectors.registry import ConnectorRegistry, install as install_connectors
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
@@ -42,6 +43,13 @@ class Daemon:
     transcripts: dict[str, object]
     meetings: dict[str, object]
     scope: DataScope
+    # Custody of the master key, held rather than reconstructed. `pm_ai.surfaces`
+    # may not import `keyring` (`.importlinter`'s `os-behind-platform`), so a CLI
+    # asked to enrol a key has no legal way to build an adapter — it has to be
+    # handed one, and this is the layer permitted to build it. Declared *before*
+    # `config` because that field carries a default: a non-default field after a
+    # defaulted one raises `TypeError` at class creation.
+    keychain: KeychainPort
     # Every setting `config.toml` carries, held once. Defaults when the caller
     # supplied none, which is a first run rather than an error.
     config: Config = field(default_factory=Config)
@@ -137,26 +145,41 @@ def build(
     # nobody else's; an explicit `True`/`False` overrides it, which is how tests
     # state their intent instead of mutating the environment.
     disabled = encryption_disabled if encryption_disabled is not None else encryption_off()
-    crypto = _choose_crypto(keychain or MacOSKeychainAdapter(), encryption_disabled=disabled)
+    # Hoisted out of the `_choose_crypto` argument it used to be, because the
+    # daemon now carries it: the cipher is not the only consumer, and building a
+    # second adapter for the CLI would put key custody in two places.
+    custody = keychain or MacOSKeychainAdapter()
+    crypto = _choose_crypto(custody, encryption_disabled=disabled)
     storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs(), crypto=crypto)
     if disabled:
         _announce_disabled_encryption(storage)
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
+    connectors: dict[str, GitLabConnectorAdapter] = {
+        f"gitlab:{project}": GitLabConnectorAdapter(project=project, scope=scope, now=clock)
+    }
+    # The daemon holds the instances; `pm_ai.connectors.registry` enumerates
+    # them. Two structures rather than one because the architecture gates and
+    # `pm-ai connector check` have to ask "for every connector, ..." from
+    # outside, and this dict is unreachable from anywhere but here. Registered
+    # under the same key, so a cursor, a coverage window and a probe row all
+    # name one instance. `install` replaces, so building a second daemon in one
+    # process describes that daemon rather than accumulating both.
+    enumerable = ConnectorRegistry()
+    for instance, connector in connectors.items():
+        enumerable.register(connector, instance=instance)
+    install_connectors(enumerable)
     return Daemon(
         storage=storage,
         crypto=crypto,
         skills=skills,
-        connectors={
-            f"gitlab:{project}": GitLabConnectorAdapter(
-                project=project, scope=scope, now=clock
-            )
-        },
+        connectors=connectors,
         # AD-23 — both adapters wired from day one, so the pipeline is exercisable
         # without a live tenant.
         transcripts={"graph": GraphTranscriptAdapter(), "manual": ManualTranscriptAdapter()},
         meetings={},
         scope=scope,
+        keychain=custody,
         config=config if config is not None else Config(),
     )
 

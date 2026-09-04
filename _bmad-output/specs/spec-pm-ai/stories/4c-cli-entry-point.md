@@ -2,8 +2,9 @@
 title: 'CLI entry point and subcommand dispatch'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 1
+baseline_commit: '57b27a44851eaa4b21a4ae5840843b5f336883fb'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -65,13 +66,13 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/app/entry.py` -- add `main(argv=None)` building the daemon and delegating -- construction in the one layer permitted to do it
-- [ ] `pm_ai/app/wiring.py` -- add `keychain: KeychainPort` to `Daemon`, **before** the defaulted `config` field (`wiring.py:47`), hoisting the adapter from the call argument at `wiring.py:140` -- `4j` and `4h` both need it and neither may construct it (`.importlinter:115-129`); appending after a defaulted field raises `TypeError` at class creation, breaking every `Daemon` construction in the suite
-- [ ] `pm_ai/ports/__init__.py` -- declare the Protocol `dispatch` annotates, naming only the members the CLI touches -- `surfaces` may not name `Daemon`, and an implicit `Any` here is the one story `1k` retired
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add the subcommand table, the exit-code mapping and `doctor` -- no adapter construction, no business logic; `4j` adds the remaining leaves
-- [ ] `pm_ai/app/entry.py` -- translate `read_artifact`'s `FileNotFoundError` into the absent case -- it ends in `path.read_bytes()` (`service.py:1079`) with no `bytes | None` form, and `4a`, `4i` and `4h` all need absence as a value rather than an exception
-- [ ] `pyproject.toml` -- declare `[project.scripts]`
-- [ ] `tests/surfaces/test_cli_dispatch.py` -- one test per matrix row, `main()` called with an explicit argv, asserting the **exact** exit integer per row
+- [x] `pm_ai/app/entry.py` -- add `main(argv=None)` building the daemon and delegating -- construction in the one layer permitted to do it
+- [x] `pm_ai/app/wiring.py` -- add `keychain: KeychainPort` to `Daemon`, **before** the defaulted `config` field (`wiring.py:47`), hoisting the adapter from the call argument at `wiring.py:140` -- `4j` and `4h` both need it and neither may construct it (`.importlinter:115-129`); appending after a defaulted field raises `TypeError` at class creation, breaking every `Daemon` construction in the suite
+- [x] `pm_ai/ports/__init__.py` -- declare the Protocol `dispatch` annotates, naming only the members the CLI touches -- `surfaces` may not name `Daemon`, and an implicit `Any` here is the one story `1k` retired
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- add the subcommand table, the exit-code mapping and `doctor` -- no adapter construction, no business logic; `4j` adds the remaining leaves
+- [x] `pm_ai/app/entry.py` -- translate `read_artifact`'s `FileNotFoundError` into the absent case -- it ends in `path.read_bytes()` (`service.py:1079`) with no `bytes | None` form, and `4a`, `4i` and `4h` all need absence as a value rather than an exception
+- [x] `pyproject.toml` -- declare `[project.scripts]`
+- [x] `tests/surfaces/test_cli_dispatch.py` -- one test per matrix row, `main()` called with an explicit argv, asserting the **exact** exit integer per row
 
 **Acceptance Criteria:**
 - Given `uv run pm-ai doctor`, then story 1g's probes execute and print — the diagnostics become reachable for the first time since they were built.
@@ -118,3 +119,44 @@ That a malformed config must not suppress diagnostics is worth stating because t
 - `uv run pm-ai doctor` -- expected: probe report printed; exit code reflects health
 - `uv run pm-ai` -- expected: usage, non-zero exit
 - `uv run lint-imports` -- expected: contracts kept
+
+## Suggested Review Order
+
+**The entry point and the layer split**
+
+- Start here: composition happens in `app`, then hands off — the reason the script cannot live in `surfaces`.
+  [`entry.py:58`](../../../../pm_ai/app/entry.py#L58)
+- The console script this slice exists to create; nothing was runnable before it.
+  [`pyproject.toml:17`](../../../../pyproject.toml#L17)
+- `surfaces` may not name `Daemon`, so the CLI annotates a Protocol instead of `Any`.
+  [`__init__.py:353`](../../../../pm_ai/ports/__init__.py#L353)
+
+**The exit-code table, declared once**
+
+- Five values `8b` and `23b` reuse and may not extend.
+  [`dispatch.py:59`](../../../../pm_ai/surfaces/cli/dispatch.py#L59)
+- The dispatch tree: bare, help, unknown, group-without-leaf, then the leaf.
+  [`dispatch.py:202`](../../../../pm_ai/surfaces/cli/dispatch.py#L202)
+- Only `Refusal` is caught here; every other exception belongs to the outer guard.
+  [`dispatch.py:249`](../../../../pm_ai/surfaces/cli/dispatch.py#L249)
+- Review finding: a string exit code is fatal, not a usage error.
+  [`entry.py:81`](../../../../pm_ai/app/entry.py#L81)
+
+**Surviving a broken machine**
+
+- Every composition failure becomes one probe, so `doctor` stays reachable.
+  [`entry.py:152`](../../../../pm_ai/app/entry.py#L152)
+- `read_artifact` has no `bytes | None` form; absence is a first run, not an error.
+  [`entry.py:98`](../../../../pm_ai/app/entry.py#L98)
+- Key custody hoisted into `Daemon` before the defaulted field, for `4j` and `4h`.
+  [`wiring.py:51`](../../../../pm_ai/app/wiring.py#L51)
+
+**Boundary exception — read closely**
+
+- AD-1 gains an ignored edge; the shell-execution guard still catches `app`.
+  [`.importlinter:215`](../../../../.importlinter#L215)
+
+**Supporting**
+
+- One test per matrix row, each asserting an exact exit integer.
+  [`test_cli_dispatch.py:1`](../../../../tests/surfaces/test_cli_dispatch.py#L1)

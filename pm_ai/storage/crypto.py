@@ -57,7 +57,7 @@ from pm_ai.domain.scope_model import (
     PERSONAL_DIRNAME,
     PROJECT_DIRNAME,
 )
-from pm_ai.ports import CryptoPort, DecryptionFailed, KeychainPort
+from pm_ai.ports import AES_KEY_BYTES, CryptoPort, DecryptionFailed, KeychainPort
 
 __all__ = [
     "AES_KEY_BYTES",
@@ -150,7 +150,13 @@ def is_encrypted(path: str) -> bool:
 # AES-256, as `storage-contract.md` specifies. GCM rather than CBC because it
 # authenticates: a wrong key, a truncated file or a tampered byte becomes a
 # raised error instead of plausible-looking garbage the caller cannot detect.
-AES_KEY_BYTES = 32
+#
+# `AES_KEY_BYTES` is *re-exported*, not defined: story 4b moved it to
+# `pm_ai.ports` beside `MASTER_KEY_NAME`, because `pm_ai.core.enrolment` mints a
+# key of that length and may not import this module. It stays in `__all__` and
+# importable from here — six call sites in `tests/architecture/test_cipher.py`
+# import it from this module, and it is the length *this* cipher refuses
+# anything else for. One object, so the minter and the refusal cannot drift.
 _NONCE_BYTES = 12
 
 # Directories holding encrypted artifacts. A `0600` file inside a world-readable

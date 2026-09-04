@@ -14,6 +14,7 @@ from pm_ai.domain.disclosure import DisclosureRecord
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
+from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.vcs import TrackingVerdict
 
@@ -30,6 +31,45 @@ class ConnectorPort(Protocol):
 
     def harvest(self, since: Cursor) -> HarvestResult:
         """Auth, fetch, map-to-schema. Read-only — class H egress (AD-1)."""
+
+    def sample_events(self) -> tuple[NormalizedEvent, ...]:
+        """At least one event of the shape this connector produces, built offline.
+
+        Declared on the port rather than left to convention because the AD-34
+        gate calls `connector.sample_events()` on every registered connector: an
+        `isinstance` conformance check cannot observe a method nothing declares,
+        so the gate would have been reading an attribute no contract promised.
+
+        Contacts nothing. It exists so an architecture check can inspect a
+        connector's output without a credential, a network, or a fixture per
+        connector — which is what lets "no connector mints an event id" be a
+        property of the *set* of connectors rather than of the two somebody
+        remembered to write a test for.
+
+        Must return a non-empty tuple, and must build its events the same way
+        `harvest` does. A separate hand-written sample would drift from the real
+        mapping and the gate would then be checking a decoration.
+        """
+
+    def check_health(self) -> Probe:
+        """Whether this connector can currently reach its provider.
+
+        **Reports; never raises.** One broken connector must not hide three
+        others — the rule `pm_ai.platform.doctor` states and this shares the type
+        with.
+
+        Three answers matter and the enum keeps them apart. `ABSENT` is a
+        connector configured with no credential stored, which is an ordinary
+        first-run state rather than a broken machine. `FAILING` is a provider
+        that refused or would not answer. `OK` is a provider that answered.
+
+        Implemented per connector, never by `doctor`: what "reachable" means is
+        provider-specific, and `doctor` reports registry membership without
+        contacting anything. The ten-second bound is not enforced here — a
+        blocking call cannot cancel itself — but by
+        `pm_ai.connectors.registry.ConnectorRegistry.check_health`, which waits
+        for this and abandons it at the bound.
+        """
 
 
 @runtime_checkable
@@ -198,6 +238,21 @@ class KeychainBackendMissing(KeychainUnavailable):
     """
 
 
+class KeyAlreadyEnrolled(Exception):
+    """A secret is already stored under that name, so nothing was written.
+
+    Neither a `LookupError` nor a `KeychainUnavailable`: the keychain answered,
+    and the answer was that something is there. Raised by
+    `KeychainPort.store_if_absent`, the only operation that can observe that
+    state and decline to change it in the same step.
+
+    Deliberately not a subclass of anything a caller already catches. Minting a
+    second key makes every artifact sealed under the first permanently
+    unreadable, so this refusal must never be swallowed by an `except` written
+    for a keychain that could not answer.
+    """
+
+
 # The name the master key is enrolled under. Spelled here because two callers
 # that may not import each other both need it: the composition root builds the
 # lazy cipher with it, and the doctor probes for it. Two independent literals
@@ -205,6 +260,17 @@ class KeychainBackendMissing(KeychainUnavailable):
 # other probing a key that no longer exists — ABSENT reported on a healthy
 # machine.
 MASTER_KEY_NAME = "master"
+
+# How many bytes that key is. Here rather than in `pm_ai.storage.crypto`, which
+# owned it until story 4b, for exactly the reason stated above the name: two
+# callers that may not import each other both need it. `pm_ai.core.enrolment`
+# mints a key of this length, and the layering contract forbids `pm_ai.core`
+# importing `pm_ai.storage` at all — so the alternative was a second literal
+# `32` in `core`, which is the shape that produced the ABSENT-on-a-healthy-
+# machine defect when it happened to the *name*. `pm_ai.storage.crypto`
+# re-exports it, so `crypto.AES_KEY_BYTES` and this are one object, and the
+# cipher's 32-byte refusal and the minter's 32-byte key cannot drift apart.
+AES_KEY_BYTES = 32
 
 
 @runtime_checkable
@@ -225,6 +291,27 @@ class KeychainPort(Protocol):
         """Store `secret` under `name`, replacing any previous value.
 
         Raises `KeychainUnavailable` if the keychain could not be reached.
+
+        Not what enrolment uses: replacing the master key destroys every
+        artifact sealed under the old one. See `store_if_absent`.
+        """
+
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        """Store `secret` under `name` **only if nothing is stored there**.
+
+        One operation, not a `fetch` followed by a `store`. Two enrolments that
+        both read an empty keychain would both then write, and the second would
+        replace the first's key — leaving every artifact sealed in between
+        permanently unreadable. The condition and the write have to be the same
+        step, or the refusal is advisory.
+
+        Raises `KeyAlreadyEnrolled` when something is already stored under
+        `name`, whatever that something is. An entry too short to be a key, or
+        one that is not key material at all, is still an entry: reading it as
+        absence is precisely how it gets minted over.
+
+        Raises `KeychainUnavailable` if the keychain could not be reached, and
+        `KeychainBackendMissing` if there is no keychain library to ask.
         """
 
     def fetch(self, name: str) -> bytes:
@@ -324,3 +411,55 @@ class SkillPort(Protocol):
 
     def execute(self, target: TargetRef, payload: dict) -> str:
         """Perform the mutation, return the external id it produced."""
+
+
+@runtime_checkable
+class ConfigPort(Protocol):
+    """The settings `config.toml` carries, named where `pm_ai.core` is unreachable.
+
+    `pm_ai.core.config.Config` is the only implementation and always will be —
+    this exists because `pm_ai.ports` may import nothing but `pm_ai.domain`
+    (`.importlinter`'s `ports-depend-only-on-domain`), so `DaemonPort` below has
+    no way to say `Config` and would otherwise say `Any`.
+
+    Read-only members, deliberately: `Config` is frozen, and a protocol
+    declaring settable attributes would claim a surface may write one.
+    """
+
+    @property
+    def blended_hourly_rate(self) -> float: ...
+
+    @property
+    def pm_handle(self) -> str: ...
+
+    @property
+    def verbose_logging(self) -> bool: ...
+
+
+@runtime_checkable
+class DaemonPort(Protocol):
+    """AD-30 — what a surface may see of the daemon the composition root built.
+
+    `pm_ai.app.wiring.Daemon` is the implementation, and no surface may name it:
+    `surfaces` sits *below* `app` in the enforced layer stack, so
+    `pm_ai.surfaces.cli.dispatch` cannot import it and an unannotated parameter
+    there would be implicitly `Any` — the defect story `1k` retired from
+    `SkillRegistry`, reintroduced in the most branch-heavy module of the wave.
+
+    Four members, and no more. The CLI reads settings, reaches the single writer,
+    enrols the master key, and knows which scope it is acting in; everything else
+    `Daemon` holds — the connectors, the skill registry, the cipher — is the
+    daemon's own business, and naming it here would make it the CLI's.
+    """
+
+    @property
+    def storage(self) -> StoragePort: ...
+
+    @property
+    def keychain(self) -> KeychainPort: ...
+
+    @property
+    def config(self) -> ConfigPort: ...
+
+    @property
+    def scope(self) -> DataScope: ...
