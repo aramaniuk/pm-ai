@@ -128,11 +128,13 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   - NFR-11 scopes to **Tier 3**. Tier 3 rebuilds to the fidelity Tier 1 *currently holds* — compaction (AD-5) is a deliberate, recorded reduction, so a rebuild after compaction reproduces the compacted view, not the pre-compaction detail.
   - **Restoring Tier 2 from a backup opens a re-execution window.** Mutations performed after the backup point are absent from the restored executed-key ledger, so a replayed job can act twice. Restore is a recovery event: the CLI must warn, and reconciliation against the external system is the operator's call, not something the idempotency key alone solves.
 
-### AD-4 — Three top-level scopes, and a fourth kind for other people's data `[revised 2026-08-19]`
+### AD-4 — Three top-level scopes, and a fourth kind for other people's data `[revised 2026-09-03]`
 
 - **Binds:** all storage paths, FR-16, FR-30, FR-31, NFR-07, AD-31
 - **Prevents:** project configuration contaminating the sovereign personal scope and breaking its portability across roles and companies — and, added after the scope model was found to have no legal home at all for a direct report's career record, that record landing in the one scope that travels to your next employer or the one scope your team can read
-- **Rule:** Three top-level scopes. `~/.pm-ai/` holds application-level state: daemon settings, project registry, per-project connector configuration, credentials. `~/.manager-ai/` holds sovereign personal material only — coaching, career, principles, goals, personal briefings — and contains **no** project-specific information or configuration. `<repo>/.project-ai/` holds committed per-project material, with one gitignored exception: `transcripts/`, the raw captures of its meetings (AD-23). Writing project config into `~/.manager-ai/` is prohibited.
+- **Rule:** Three top-level scopes. `~/.pm-ai/` holds application-level state: daemon settings, project registry, per-project connector configuration, credentials. `~/.manager-ai/` holds sovereign personal material only — coaching, career, principles, goals, personal briefings — and contains **no** project-specific information or configuration. `<repo>/.project-ai/` holds per-project material, of which `[revised 2026-09-03]` **only `rules/` and `skills/` are committed** — human-authored context and automation, the things a team shares. Everything under `memory/` is machine-local (Q6, AD-3), as are `transcripts/`, the raw captures of its meetings (AD-23). Writing project config into `~/.manager-ai/` is prohibited.
+
+  **A scope is an ownership boundary, not a sharing setting `[2026-09-03]`.** The three scopes were easy to read as "personal is private, project is shared", and Q6 broke that shorthand: most of the project scope is now machine-local. What the boundary decides is unchanged and was never about git — *whose* material this is, therefore which rules govern it, where it is written, and what it may reference (AD-38). Whether any given artifact travels is a separate answer, declared per node and derived into `GITIGNORED` (AD-44).
 
   Raw meeting transcripts previously sat in the application scope — documented as holding *no personal records*, which a recording of a meeting plainly is. Material now lands in the scope that owns its subject, the same rule AD-38 applies to log entries, and each scope holds its captures at the same relative path rather than in a directory of its own.
 
@@ -324,7 +326,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 ### AD-28 — Commitments belong to project scope; coaching commitments are a separate entity
 
 - **Binds:** FR-16, FR-34, AD-4, AD-25
-- **Prevents:** a 1:1 coaching undertaking being written into a git-committed project ledger, leaking personal material into a repository — and, symmetrically, a report's career goal being filed as either
+- **Prevents:** a 1:1 coaching undertaking being written into the project ledger, where it belongs to the wrong subject and — while the project scope was committed in full — was published to a repository `[motive restated 2026-09-03]` — and, symmetrically, a report's career goal being filed as either
 - **Rule:** Three distinct entities, three scopes, no shared storage and no shared code path:
 
   | Entity | What it is | Scope |
@@ -333,7 +335,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   | `CoachingCommitment` | the PM's own undertaking from a Socratic 1:1 (UJ-1) | personal |
   | `CareerGoal` | a direct report's goal agreed in a team 1:1 (UJ-4), HR-syncable on approval | people (AD-4) |
 
-  The project-scope ledger has no code path that accepts a personal or people entity. `CareerGoal` is not a `Commitment`: it is not verified against commit telemetry, and treating it as one would put a performance objective into a git-committed ledger.
+  The project-scope ledger has no code path that accepts a personal or people entity. `CareerGoal` is not a `Commitment`: it is not verified against commit telemetry, and treating it as one would file a performance objective in the project's ledger, where it belongs to neither the right subject nor the right sharing rules.
 
 ### AD-29 — Sanitization is non-destructive to the stored record
 
@@ -353,7 +355,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** each feature deciding independently what may enter a prompt — and a privacy charter whose central claim nothing can check
 - **Rule:** FR-16's adversary is **employer-controlled systems** — team channels, shared repositories, enterprise dashboards, HR platforms — not model APIs. Personal-scope material may therefore enter a frontier prompt, and the Socratic coaching flow routes to `claude-opus-5` as AD-15 specifies. Three obligations follow:
   1. **FR-16 must say so.** A charter that means something narrower than its words is worse than no charter, because it invites a reader to assume more protection than exists.
-  2. **Every frontier call records scope provenance** to the application-scoped disclosure ledger (AD-38) — never to `event_log/`, which exists per scope and one of whose scopes is git-committed. The record carries contributing scopes, task class, model, token counts, and destination. The CLI answers *"what has left this machine, and when"* from that one file. This converts the charter from an assurance into an audit.
+  2. **Every frontier call records scope provenance** to the application-scoped disclosure ledger (AD-38) — never to `event_log/`, which exists per scope, so "what has left this machine" would span N files — and whose project instance was committed in full when this was written. The record carries contributing scopes, task class, model, token counts, and destination. The CLI answers *"what has left this machine, and when"* from that one file. This converts the charter from an assurance into an audit.
   3. **The boundary is on the destination, not only the source.** Personal-scope material must never enter a prompt whose output is bound for a project-scope artifact or an external system. Burnout signals may shape your briefing; they may not reach a team-facing dashboard by way of a model that read both.
 
   **The HR platform is an adversary to `personal`, and a destination for `people` — because they are two different 1:1s.** The distinction is whose data it is, not which tool holds it:
@@ -380,7 +382,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   Any condition unmet ⇒ the command becomes a Proposal (AD-13). **Irreversible verbs always stage, regardless of source or speaker**: outbound email and DM (FR-26), MR/PR creation (FR-28), closures, deletions, and any external effect a later call cannot undo. The manual transcript adapter (AD-23) is **never** an auto-execute source — it is untrusted by construction — though it remains fully valid for extraction and staging. Every auto-execution emits a card carrying one-tap undo, plus its `event_log/` entry.
 
-### AD-33 — Cite the event, never the artifact that captured it `[NEW]`
+### AD-33 — Cite the event, never the artifact that captured it `[revised 2026-09-03]` `[NEW]`
 
 - **Binds:** every surfaced fact, FR-03, FR-25, FR-32, FR-33, FR-34, NFR-09, AD-29
 - **Prevents:** provenance pointing at a derived artifact that has its own lifecycle — so a transcript purge silently empties every citation that depended on it, and the drift auditor reports **clean** against sources that no longer exist
@@ -388,9 +390,9 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   **`Meeting` is a first-class Tier-1 record**: id, calendar event reference, title, start, duration, attendees, **scope**, derived-transcript pointer, processing status. It is also where FR-03's Man-Hour Cost inputs live, so FR-03, FR-32, and UJ-8 key off one entity rather than three ad-hoc lookups.
 
-  **A Meeting belongs to the scope that owns its subject, and `scope` is required rather than defaulted** — a team meeting to its project, a 1:1 with a direct report to `people` (AD-4), a purely personal session to `personal`. It decides two things no caller may guess: where the transcript is written, and whether a git-committed record may cite this meeting at all.
+  **A Meeting belongs to the scope that owns its subject, and `scope` is required rather than defaulted** — a team meeting to its project, a 1:1 with a direct report to `people` (AD-4), a purely personal session to `personal`. It decides two things no caller may guess: where the transcript is written, and whether a project-scope record may cite this meeting at all — `[revised 2026-09-03]` a **scope** question, not a git one, since AD-38's invariant tests the scope relation and holds for a project sitting in no repository.
 
-  This was wrong until 2026-08-20, and wrong in a way that made AD-38 false on the main path: `meetings/` was filed in the **personal** scope while commitments live in the git-committed project ledger, so **every commitment extracted from a meeting referenced personal-scope material by `source_ref`** — the exact phrasing AD-38 prohibits. Nothing detected it, because the write guard checks the scope a record *belongs to* and never the scope it *points at*. Both directions are now checked.
+  This was wrong until 2026-08-20, and wrong in a way that made AD-38 false on the main path: `meetings/` was filed in the **personal** scope while commitments live in the project ledger — then committed in full — so **every commitment extracted from a meeting referenced personal-scope material by `source_ref`** — the exact phrasing AD-38 prohibits. Nothing detected it, because the write guard checks the scope a record *belongs to* and never the scope it *points at*. Both directions are now checked.
 
   **Derived records are self-contained.** A ledger or decision entry carries everything needed to act on it and never depends on its source artifact still existing — which is what makes NFR-09's 30-day transcript purge a purely operational matter. Tracing walks *fact → meeting → transcript if present*; nothing may treat the third hop as a dependency.
 
