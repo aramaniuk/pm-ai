@@ -23,7 +23,13 @@ SAMPLE_ROW = {
     "sha": "0" * 40,
     "author_email": "sample@example.invalid",
     "message": "a sample commit, mapped by the same code path as a real one",
-    "committed_at": None,
+    # A real provider clock, not `None`. The sample is the one event the AD-27
+    # and AD-34 gates inspect, and with no `occurred_at` the AD-35 path — a
+    # provider timestamp, and its plausibility — was the one thing the fixture
+    # they read could not represent. Fixed and in the past, so it stays
+    # deterministic and stays plausible: after `EARLIEST_PLAUSIBLE`, and never
+    # inside the five-minute future skew tolerance.
+    "committed_at": datetime(2026, 1, 15, 9, 30, tzinfo=timezone.utc),
 }
 
 

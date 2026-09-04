@@ -398,3 +398,26 @@ def test_a_blank_credential_is_absent_not_configured(blank):
     """What a half-finished `8b` write leaves behind is not a setup that is done."""
     probe = gitlab("alpha", credential=blank).check_health()
     assert probe.health is Health.ABSENT
+
+
+def test_the_sample_event_carries_a_plausible_provider_clock():
+    """AD-35's path, represented in the fixture the architecture gates read.
+
+    `committed_at` was `None`, so the one event those gates inspect had no
+    `occurred_at` at all and the provider-clock rule was the single thing the
+    sample could not exercise. Fixed and in the past, so it is deterministic
+    and stays plausible as the real clock moves.
+    """
+    from datetime import datetime, timezone
+
+    from pm_ai.domain import clocks
+
+    (event,) = gitlab("alpha").sample_events()
+    assert event.occurred_at is not None
+    assert event.occurred_at.tzinfo is not None, "AD-35 reasons in aware UTC"
+    assert event.occurred_at > clocks.EARLIEST_PLAUSIBLE
+    # Judged by the rule itself, against a reference instant far in the future,
+    # so this cannot start failing merely because time passed.
+    clocks.validate_occurred_at(
+        at=event.occurred_at, now=datetime(2099, 1, 1, tzinfo=timezone.utc)
+    )

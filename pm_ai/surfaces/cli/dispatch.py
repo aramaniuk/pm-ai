@@ -419,6 +419,13 @@ def dispatch(
         return EXIT_USAGE
     name, *rest = argv
     if name in _HELP_FLAGS:
+        if rest:
+            # Every other path refuses trailing words; this one dropped them and
+            # exited 0, so `pm-ai --help enrol` looked like it had answered a
+            # question about `enrol` while printing the top-level usage.
+            print(f"pm-ai: `{name}` takes no arguments\n", file=sys.stderr)
+            print(usage(), file=sys.stderr)
+            return EXIT_USAGE
         print(usage())
         return EXIT_OK
     command = TABLE.get(name)
