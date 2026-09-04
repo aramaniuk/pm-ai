@@ -2,7 +2,8 @@
 title: 'Connector registry and health probes'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-progress'
+baseline_commit: '67e780b480d24effb73c837a50b52bfad4d93358'
 review_loop_iteration: 0
 ---
 
@@ -62,13 +63,13 @@ Split from the original `8a` on 2026-09-02 at the sizing gate.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/health.py` -- move `Probe`, `Health` and `Report` here from `pm_ai/platform/doctor.py`, which then imports them -- `pm_ai.ports` may import only `pm_ai.domain`, so a port that names a health type cannot leave it in `platform`
-- [ ] `pm_ai/ports/__init__.py` -- add `sample_events()` and the health method to `ConnectorPort`
-- [ ] `pm_ai/connectors/gitlab.py` -- implement both on the existing adapter -- `sample_events` is what the AD-34 gate calls and it exists nowhere
-- [ ] `pm_ai/connectors/registry.py` -- add the registry: `all_connectors()`, `sample_events()`, `DuplicateConnector`, and the per-connector probe invocation with its bound
-- [ ] `tests/architecture/test_domain_invariants.py` -- add `assert connectors` above the loops at `:98` and `:485` -- the shape `test_ad38_project_scope_is_the_only_committed_scope` (`:736`) already uses; without it both gates pass over an empty registry, which is the defect the AD-27 test's own comment at `:88-91` records happening once
-- [ ] `tests/conftest.py` -- lower `EXPECTED_SKIPS` **by two** in this slice's commit, from whatever the run then reports -- the absolute value is order-coupled with `23d`, which lowers it by one, and the ratchet fails in both directions (`conftest.py:81`)
-- [ ] `tests/connectors/test_registry.py` -- the matrix, including the empty-registry case
+- [x] `pm_ai/domain/health.py` -- move `Probe`, `Health` and `Report` here from `pm_ai/platform/doctor.py`, which then imports them -- `pm_ai.ports` may import only `pm_ai.domain`, so a port that names a health type cannot leave it in `platform`
+- [x] `pm_ai/ports/__init__.py` -- add `sample_events()` and the health method to `ConnectorPort`
+- [x] `pm_ai/connectors/gitlab.py` -- implement both on the existing adapter -- `sample_events` is what the AD-34 gate calls and it exists nowhere
+- [x] `pm_ai/connectors/registry.py` -- add the registry: `all_connectors()`, `sample_events()`, `DuplicateConnector`, and the per-connector probe invocation with its bound
+- [x] `tests/architecture/test_domain_invariants.py` -- add `assert connectors` above the loops at `:98` and `:485` -- the shape `test_ad38_project_scope_is_the_only_committed_scope` (`:736`) already uses; without it both gates pass over an empty registry, which is the defect the AD-27 test's own comment at `:88-91` records happening once
+- [x] `tests/conftest.py` -- lower `EXPECTED_SKIPS` **by two** in this slice's commit, from whatever the run then reports -- the absolute value is order-coupled with `23d`, which lowers it by one, and the ratchet fails in both directions (`conftest.py:81`)
+- [x] `tests/connectors/test_registry.py` -- the matrix, including the empty-registry case
 
 **Acceptance Criteria:**
 - Given the registry, then `all_connectors()` returns at least the GitLab instance and `sample_events()` returns at least one event for each — **asserted before** the AD-27 and AD-34 loops. Both pre-written tests assert only inside a `for` body, so an empty registry passes them without executing a single assertion, and "the skip count falls by two" would be satisfied by a stub module. A vacuous pass is worse than a skip, which `-rs` at least shows; the AD-27 test's own comment records this having happened here once already.
