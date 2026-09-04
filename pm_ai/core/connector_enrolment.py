@@ -65,6 +65,7 @@ from pm_ai.ports import (
 )
 
 __all__ = [
+    "_default_project",
     "CONNECTORS",
     "CREDENTIAL_STORE",
     "DuplicateConnector",
@@ -212,7 +213,7 @@ def enrol_connector(
     asserted against five spellings of it.
     """
     _assert_nameable(instance)
-    _assert_nameable(system)
+    _assert_nameable(system, label="system name")
 
     configured = connector_configurations(storage)
     if instance in configured:
@@ -260,7 +261,21 @@ def enrol_connector(
 
         try:
             storage.write_artifact(
-                _encode({"instance": instance, "system": system, "enabled": True}),
+                _encode(
+                    {
+                        "instance": instance,
+                        "system": system,
+                        "enabled": True,
+                        # Written explicitly rather than re-derived from the
+                        # instance suffix at composition. The instance name is a
+                        # path component and may not contain `/`, while a real
+                        # GitLab project is `group/project` — so deriving one
+                        # from the other silently built an adapter for the wrong
+                        # path. Recorded here, and editable in this file, which
+                        # is unencrypted and hand-editable for exactly this.
+                        "project": _default_project(instance),
+                    }
+                ),
                 scope=APPLICATION,
                 artifact=CONNECTORS,
                 name=f"{instance}.json",
@@ -285,8 +300,25 @@ def enrol_connector(
 # ── Everything below is pure, and none of it ever sees a path ────────────────
 
 
-def _assert_nameable(value: str) -> None:
+def _default_project(instance: str) -> str:
+    """The provider-side name an instance covers, before anyone edits it.
+
+    The suffix of `<system>:<what it covers>`, which is right for the common
+    case and wrong for a GitLab project inside a group. It is written into the
+    connector's configuration so the wrong answer can be corrected by editing
+    one plaintext line, rather than being recomputed from a name that cannot
+    express the right one.
+    """
+    return instance.split(":", 1)[1] if ":" in instance else instance
+
+
+def _assert_nameable(value: str, *, label: str = "instance name") -> None:
     """Refuse a name that cannot be one path component of `connectors/`.
+
+    `label` names which argument is being judged. The same rules apply to the
+    system and the instance, but the refusals used to talk about registry keys
+    and `connectors/<instance>.json` whichever one was wrong — so
+    `pm-ai connector add "git lab" alpha` complained about the instance name.
 
     The refusals mirror the single writer's own `_capture_name`, which validates
     the same string again at the moment it is interpolated. Duplicated on
@@ -297,14 +329,14 @@ def _assert_nameable(value: str) -> None:
     """
     if not value or value != value.strip():
         raise MalformedInstanceName(
-            f"{value!r} is empty or padded with whitespace. The instance name is "
+            f"the {label} {value!r} is empty or padded with whitespace. It is "
             f"a filename, a registry key and a cursor key, and two names "
             f"differing only in spacing are one name in every listing that "
             f"reports them."
         )
     if value.startswith("."):
         raise MalformedInstanceName(
-            f"{value!r} starts with a dot. `.` and `..` are directories, and a "
+            f"the {label} {value!r} starts with a dot. `.` and `..` are directories, and a "
             f"dotfile is hidden from the operator who has to find it — the "
             f"single writer omits dot-prefixed entries from a collection "
             f"listing, so this connector would be invisible to its own "
@@ -312,14 +344,14 @@ def _assert_nameable(value: str) -> None:
         )
     if len(value) > _INSTANCE_LIMIT:
         raise MalformedInstanceName(
-            f"{value!r} is {len(value)} characters; the limit is "
+            f"the {label} {value!r} is {len(value)} characters; the limit is "
             f"{_INSTANCE_LIMIT}. Past the filesystem's own limit the write fails "
             f"with a bare `OSError` naming neither the connector nor the limit."
         )
     illegal = sorted(set(value) - _INSTANCE_CHARACTERS)
     if illegal:
         raise MalformedInstanceName(
-            f"{value!r} contains {illegal}, which an instance name may not: it "
+            f"the {label} {value!r} contains {illegal}, which it may not: it "
             f"is interpolated into a path, so a separator would be written "
             f"outside the directory the git check answered for, and a control "
             f"character would split one filename across two lines in every "

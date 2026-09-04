@@ -18,9 +18,20 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from pm_ai.ports import ProbeFailed, UnknownConnectorSystem
+from pm_ai.connectors.registry import run_bounded
+from pm_ai.ports import (
+    ProbeFailed,
+    ProbeUnreachable,
+    UnknownConnectorSystem,
+)
 
-__all__ = ["PROBES", "probe_credential"]
+#: CAP-35's ten seconds, over the credential probe as well as the health one.
+#: Named separately from `HEALTH_PROBE_SECONDS` because they bound different
+#: things — one command a human is waiting on, one report over every connector —
+#: and a later decision to change one should not silently move the other.
+CREDENTIAL_PROBE_SECONDS = 10.0
+
+__all__ = ["CREDENTIAL_PROBE_SECONDS", "PROBES", "probe_credential"]
 
 
 def _gitlab(credential: str) -> str:
@@ -62,4 +73,21 @@ def probe_credential(system: str, credential: str) -> str:
             f"a credential for one. Enrolment refuses rather than sealing an "
             f"unchecked secret. Known systems: {known}."
         ) from None
-    return ask(credential)
+    try:
+        return run_bounded(
+            lambda: ask(credential),
+            timeout=CREDENTIAL_PROBE_SECONDS,
+            label=f"{system} credential probe",
+        )
+    except TimeoutError as silent:
+        # CAP-35's bound, enforced rather than merely documented.
+        # `ProbeUnreachable` is the distinct refusal an operator needs: a
+        # provider that never answered is not a credential that was rejected,
+        # and reissuing a good token is the wrong repair. Unbounded, this hung
+        # `pm-ai connector add` indefinitely while holding the sealed store's
+        # exclusive claim open — so one silent provider wedged every later
+        # enrolment too.
+        raise ProbeUnreachable(
+            f"{system} did not answer within {CREDENTIAL_PROBE_SECONDS:g}s, so "
+            f"the credential could not be checked and nothing was stored."
+        ) from silent

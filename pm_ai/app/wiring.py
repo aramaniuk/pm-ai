@@ -296,7 +296,17 @@ def _enrolled_connectors(
             # The only adapter that exists. An enrolled system pm-ai cannot
             # build is skipped rather than guessed at; 33a adds Graph.
             continue
-        project = instance.split(":", 1)[1] if ":" in instance else instance
+        # The connector's own declared project, not one re-derived from its
+        # name. The instance is a path component and may not contain `/`, while
+        # a real GitLab project is `group/project` — deriving one from the other
+        # built an adapter for the wrong path and said nothing. The fallback is
+        # for entries written before 8b recorded it.
+        declared = entry.get("project")
+        project = (
+            declared
+            if isinstance(declared, str) and declared
+            else (instance.split(":", 1)[1] if ":" in instance else instance)
+        )
         if not project:
             continue
         try:

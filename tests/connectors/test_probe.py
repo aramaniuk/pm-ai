@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from pm_ai.connectors.probe import PROBES, probe_credential
-from pm_ai.ports import ProbeFailed, UnknownConnectorSystem
+from pm_ai.ports import ProbeFailed, ProbeUnreachable, UnknownConnectorSystem
 
 
 def test_a_system_with_no_probe_is_refused_by_name():
@@ -69,3 +69,49 @@ def test_the_cli_is_wired_to_this_adapter_and_not_to_the_refusing_default():
     )
     assert entry.probe_credential is probe_credential
     assert entry.probe_credential is not dispatch._no_probe
+
+
+# ── CAP-35's bound, on the credential probe too ──────────────────────────────
+
+
+def test_a_hung_provider_is_abandoned_at_the_bound(monkeypatch):
+    """Unbounded, this hung `pm-ai connector add` forever.
+
+    Worse than a hang: `enrol_connector` probes *inside* the sealed store's
+    exclusive claim, so one silent provider wedged every later enrolment on the
+    machine until the process was killed.
+    """
+    import time
+
+    from pm_ai.connectors import probe as probe_module
+
+    monkeypatch.setattr(probe_module, "CREDENTIAL_PROBE_SECONDS", 0.3)
+    monkeypatch.setitem(probe_module.PROBES, "slow", lambda credential: time.sleep(30))
+
+    started = time.monotonic()
+    with pytest.raises(ProbeUnreachable) as silent:
+        probe_credential("slow", "a-token")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 3.0, f"the bound did not hold: {elapsed:.1f}s"
+    assert "did not answer" in str(silent.value)
+    assert "nothing was stored" in str(silent.value)
+
+
+def test_an_unreachable_provider_is_distinct_from_a_rejected_credential():
+    """`ProbeUnreachable` subclasses `ProbeFailed`, and must stay separable."""
+    assert issubclass(ProbeUnreachable, ProbeFailed)
+
+
+def test_a_probe_that_raises_is_relayed_not_turned_into_a_timeout(monkeypatch):
+    """The bound must not swallow the provider's own refusal."""
+    from pm_ai.connectors import probe as probe_module
+
+    def refusing(credential: str) -> str:
+        raise ProbeFailed("the provider rejected this token")
+
+    monkeypatch.setitem(probe_module.PROBES, "refuses", refusing)
+    with pytest.raises(ProbeFailed) as rejected:
+        probe_credential("refuses", "a-token")
+    assert "rejected this token" in str(rejected.value)
+    assert not isinstance(rejected.value, ProbeUnreachable)
