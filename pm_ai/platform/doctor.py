@@ -29,10 +29,18 @@ is wrong makes the operator guess at what to do, and guessing is how a machine
 gets a second key written over a store that could still have been opened.
 
 No repair actions, ever: probes are read-only and never create, migrate, or fix
-anything. And no `pm-ai doctor` subcommand here: this ships callables plus a
-`python -m pm_ai.platform.doctor` runner, and story 4c surfaced them from
-`pm_ai.surfaces.cli.dispatch` — which is also where the exit code a `doctor` run
-produces is decided, since `Report.healthy` is a verdict and not a code.
+anything. And no `pm-ai doctor` subcommand here: this ships callables and
+nothing else. Story 4c surfaced them from `pm_ai.surfaces.cli.dispatch`, which
+is also where the exit code a `doctor` run produces is decided, since
+`Report.healthy` is a verdict and not a code.
+
+This module had its own `python -m` runner until 4c, returning 0 or 1 by
+verdict. It was retired with the console script that superseded it: `1` is
+`pm-ai broke, read the traceback` in the one table that decides these, so a
+second surface answering `1` for `the machine is unhealthy` made the code an
+operator alerts on mean two different things. `platform` may not import
+`surfaces`, so this module cannot reuse those constants — which is the reason
+it no longer decides a code at all.
 """
 
 from __future__ import annotations
@@ -41,7 +49,6 @@ import importlib.metadata
 import re
 import shutil
 import sqlite3
-import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -394,13 +401,3 @@ def run_all(keychain: KeychainPort | None = None) -> Report:
             git_available(),
         )
     )
-
-
-def main() -> int:
-    report = run_all()
-    print(report)
-    return 0 if report.healthy else 1
-
-
-if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
-    sys.exit(main())

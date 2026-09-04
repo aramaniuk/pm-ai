@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +34,7 @@ from pm_ai.platform.doctor import (
 )
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR
 from pm_ai.ports import KeychainUnavailable, KeyNotFound
+from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_UNHEALTHY
 
 SECRET = b"\x00\x01\xfe a-real-looking-key"
 
@@ -317,18 +319,25 @@ def test_a_fully_healthy_machine_reports_healthy(monkeypatch):
     assert "pm-ai is healthy." in str(report)
 
 
-def test_the_module_runs_as_a_subprocess_and_exits_by_verdict():
-    """There is no console entry point yet, so `python -m` is the whole surface.
+def test_the_console_script_runs_the_probes_and_exits_by_the_one_table():
+    """The console script is the whole surface; `python -m` was retired in 4c.
 
     Exit status matters more than the text: whatever runs this at install time
-    reads the code, not the prose.
+    reads the code, not the prose. Asserted against the table's own constants,
+    because this module deliberately no longer decides a code — it may not
+    import `surfaces`, and a second surface answering `1` for "unhealthy" would
+    collide with `1` meaning "pm-ai broke, read the traceback".
     """
+    script = Path(sys.executable).parent / "pm-ai"
+    assert script.exists(), "the `pm-ai` console script is not installed"
     result = subprocess.run(
-        [sys.executable, "-m", "pm_ai.platform.doctor"],
+        [str(script), "doctor"],
         capture_output=True, text=True, check=False,
     )
     assert "sqlite extension support" in result.stdout
-    assert result.returncode in (0, 1), "the runner must exit by verdict, not crash"
+    assert result.returncode in (EXIT_OK, EXIT_UNHEALTHY), (
+        f"the script must exit by verdict, not crash: got {result.returncode}"
+    )
 
 
 # ── the environment is the only way in ───────────────────────────────────────

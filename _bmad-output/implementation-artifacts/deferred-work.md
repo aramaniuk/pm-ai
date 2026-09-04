@@ -438,3 +438,7 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
   summary: `dispatch` reads the module global `TABLE` while documenting that everything it needs arrives as an argument, forcing tests to monkeypatch the global.
   evidence: Both refusal tests do `monkeypatch.setattr(cli, "TABLE", {**cli.TABLE, ...})`. A defaulted `table=TABLE` parameter would make those tests local and let `4j` test its leaves without patching module state.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: Retiring `doctor.main()` left two specs citing it — `4i`'s Code Map names `pm_ai/platform/doctor.py:399 -- doctor.main(), a run_all call site`, and `1g`'s (done) verification commands run `python -m pm_ai.platform.doctor`.
+  evidence: `doctor.main()` and the `__main__` block were removed on 2026-09-04 so the exit-code table has one declaration. `4i` is unbuilt and its Code Map will mislead its implementer: the surviving `run_all` call site is now `pm_ai/app/entry.py`'s `_diagnose`. `1g` is done and its probes are unaffected — only the command that reaches them changed, to `pm-ai doctor`. Neither spec was edited here: amending another slice's Code Map belongs to that slice's own build.
