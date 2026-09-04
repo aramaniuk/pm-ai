@@ -601,3 +601,58 @@ def test_this_slice_asserts_only_the_codes_4c_declares():
         if isinstance(comparator, ast.Constant) and isinstance(comparator.value, int)
     ]
     assert not literals, f"a bare exit integer is asserted at lines {literals}"
+
+
+# ── Story 8b — `pm-ai connector add` ─────────────────────────────────────────
+
+
+def test_connector_add_declares_its_arity_and_refuses_the_wrong_count(capsys):
+    """4j refused every trailing word; 8b is the slice that needed some.
+
+    The arity is declared on the table, so the refusal and the usage line cannot
+    disagree — and a leaf taking arguments does not reopen the silent-drop hole
+    4j closed.
+    """
+    from pm_ai.surfaces.cli.dispatch import TABLE
+
+    assert TABLE["connector"].leaves["add"].takes == ("system", "instance")
+    assert entry.main(["connector", "add"]) == EXIT_USAGE
+    assert entry.main(["connector", "add", "gitlab"]) == EXIT_USAGE
+    assert "<system> <instance>" in capsys.readouterr().err
+
+
+def test_connector_add_refuses_when_stdin_is_not_a_terminal(
+    registered, monkeypatch, capsys
+):
+    """`getpass` falls back to an echoing read with no TTY, which is history."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_REFUSAL
+    assert "TTY" in capsys.readouterr().err
+
+
+def test_connector_add_never_echoes_the_credential(
+    registered, monkeypatch, capsys
+):
+    """The prompt is `getpass`, and nothing prints what it returned."""
+    secret = "glpat-typed-at-the-prompt-99"
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": secret)
+    monkeypatch.setattr(
+        cli, "enrol_connector", lambda *a, **k: "gitlab accepted the credential"
+    )
+
+    assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert "next start" in captured.out, "the activation promise 8d requires"
+
+
+def test_an_unprobeable_system_is_refused_rather_than_sealed(
+    registered, monkeypatch, capsys
+):
+    """The default probe refuses; a system pm-ai cannot ask about is not enrolled."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
+    assert entry.main(["connector", "add", "nosuch", "nosuch:one"]) == EXIT_REFUSAL
+    assert "no credential probe" in capsys.readouterr().err.lower()

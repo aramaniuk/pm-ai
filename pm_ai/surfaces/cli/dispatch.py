@@ -35,15 +35,28 @@ in `.importlinter`). The 07:00 tick belongs to the daemon.
 
 from __future__ import annotations
 
+import getpass
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import Protocol, runtime_checkable
 
 from pm_ai.core.config import Config
 from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
 from pm_ai.domain.health import Report
-from pm_ai.ports import DaemonPort, KeychainUnavailable
+from pm_ai.core.connector_enrolment import (
+    MalformedInstanceName,
+    OrphanedCredential,
+    enrol_connector,
+)
+from pm_ai.ports import (
+    CredentialProbePort,
+    DaemonPort,
+    DuplicateConnector,
+    KeychainUnavailable,
+    ProbeFailed,
+    UnknownConnectorSystem,
+)
 
 __all__ = [
     "EXIT_OK",
@@ -117,6 +130,16 @@ class HealthReport(Protocol):
     def __str__(self) -> str: ...
 
 
+
+def _no_probe(system: str, credential: str) -> str:
+    """The `Context` default: no probe was injected, so nothing may be enrolled."""
+    raise UnknownConnectorSystem(
+        f"no credential probe was supplied to the CLI, so {system!r} cannot be "
+        f"checked. This is a wiring fault rather than anything about the "
+        f"credential; enrolment refuses rather than sealing an unchecked secret."
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Context:
     """Everything a subcommand may reach, handed in by the composition root."""
@@ -145,6 +168,27 @@ class Context:
     is unreachable from here, whereas `pm_ai.domain` is the layer everything may
     name, and the leaf needs `probes` to tell an empty registry from a healthy
     one.
+    """
+
+    arguments: tuple[str, ...] = ()
+    """The words after the subcommand, in the order `Command.takes` named them.
+
+    Empty for every leaf that declares no arguments, which until story 8b was
+    all of them: `dispatch` dropped everything after the leaf name, so
+    `pm-ai connector add gitlab alpha` could not have been written. The arity is
+    declared on the table rather than parsed by each handler, so a leaf cannot
+    disagree with the usage line printed for it.
+    """
+
+    probe_credential: CredentialProbePort = _no_probe
+    """Asks a provider whether it accepts a credential (story 8b).
+
+    A value for the same reason `probe_connectors` is one: the adapter lives in
+    `pm_ai.connectors`, which this package may not import. Defaulted so every
+    existing `Context(...)` in the suite keeps working, and the default refuses
+    rather than passing — a probe that answered "fine" without asking would seal
+    an unchecked credential, which is the failure 8b's whole ordering exists to
+    prevent.
     """
 
     unavailable: str | None = None
@@ -194,6 +238,13 @@ class Command:
     summary: str
     run: Callable[[Context], int] | None = None
     leaves: Mapping[str, "Command"] = field(default_factory=dict)
+    takes: tuple[str, ...] = ()
+    """The positional arguments this command requires, named for its usage line.
+
+    Declared rather than inferred so the refusal and the usage text cannot
+    disagree, and so a leaf that takes none keeps refusing trailing words — the
+    behaviour 4j added, which silently dropping `rest` would have undone.
+    """
 
 
 def _doctor(context: Context) -> int:
@@ -289,6 +340,69 @@ def _config_show(context: Context) -> int:
     return EXIT_OK
 
 
+
+def _connector_add(context: Context) -> int:
+    """`pm-ai connector add <system> <instance>` — story 8b's surface.
+
+    The credential is prompted for, never taken as an argument: an argument is
+    in the process table while it runs and in shell history afterwards, which
+    are two places a token outlives the command that used it.
+
+    Nothing here decides anything. The order — probe, seal, configure — and
+    every refusal belong to `pm_ai.core.connector_enrolment`; this reads two
+    words and a secret, hands them over, and maps what comes back onto 4c's
+    table. The probe arrives as a value for the same reason `connector check`'s
+    does: `surfaces-through-core` forbids this package from importing
+    `pm_ai.connectors`.
+    """
+    daemon = context.require_daemon()
+    system, instance = context.arguments
+
+    if not sys.stdin.isatty():
+        # `getpass` falls back to reading an echoing stdin when there is no
+        # terminal, so a piped or cron-driven run would put the credential in
+        # shell history and in the terminal scrollback. Refusing is the only
+        # answer that keeps the promise the prompt makes.
+        raise Refusal(
+            "a credential can only be typed at a terminal. stdin is not a TTY "
+            "here — this is a pipe, a cron job or a CI step — and prompting "
+            "would echo the secret and leave it in history. Run "
+            "`pm-ai connector add` from an interactive shell."
+        )
+
+    credential = getpass.getpass(f"{system} credential for {instance}: ")
+    if not credential.strip():
+        raise Refusal("no credential was typed, so nothing was enrolled.")
+
+    try:
+        answer = enrol_connector(
+            daemon.storage,
+            system=system,
+            instance=instance,
+            credential=credential,
+            probe=context.probe_credential,
+        )
+    except (DuplicateConnector, MalformedInstanceName) as refused:
+        raise Refusal(str(refused)) from refused
+    except UnknownConnectorSystem as unknown:
+        raise Refusal(str(unknown)) from unknown
+    except ProbeFailed as rejected:
+        raise Refusal(str(rejected)) from rejected
+    except OrphanedCredential as orphaned:
+        # Not a refusal that left nothing behind — the one case where something
+        # *was* written. It exits 3 like any other stated no, and says what is
+        # on the machine, because a credential nothing refers to is only
+        # findable if this sentence is printed.
+        raise Refusal(str(orphaned)) from orphaned
+
+    print(answer)
+    print(
+        f"{instance} is enrolled. It becomes active at the next start — "
+        f"connectors are registered when the daemon is composed, so nothing is "
+        f"harvesting from it yet."
+    )
+    return EXIT_OK
+
 def _connector_check(context: Context) -> int:
     """CAP-35's live probe: every registered connector, bounded at ten seconds.
 
@@ -353,6 +467,11 @@ TABLE: Mapping[str, Command] = {
     "connector": Command(
         "the connectors this daemon harvests from",
         leaves={
+            "add": Command(
+                "enrol a connector: probe the credential, then seal it",
+                _connector_add,
+                takes=("system", "instance"),
+            ),
             "check": Command("probe every connector, within 10s in total", _connector_check),
         },
     ),
@@ -381,7 +500,11 @@ def usage(*, group: str | None = None) -> str:
     if not command.leaves:
         lines.append(f"  no `pm-ai {group}` subcommand is implemented yet.")
     else:
-        lines += [f"  {name:<10} {leaf.summary}" for name, leaf in command.leaves.items()]
+        lines += [
+            f"  {name}{''.join(f' <{a}>' for a in leaf.takes):<{max(0, 10 - len(name))}}"
+            f"  {leaf.summary}"
+            for name, leaf in command.leaves.items()
+        ]
     return "\n".join(lines)
 
 
@@ -391,6 +514,7 @@ def dispatch(
     daemon: DaemonPort | None,
     diagnose: Callable[[], HealthReport],
     probe_connectors: Callable[[], Report],
+    probe_credential: CredentialProbePort = _no_probe,
     unavailable: str | None = None,
 ) -> int:
     """Run what `argv` names, and return the exit code the table gives it.
@@ -409,6 +533,7 @@ def dispatch(
         daemon=daemon,
         diagnose=diagnose,
         probe_connectors=probe_connectors,
+        probe_credential=probe_credential,
         unavailable=unavailable,
     )
     if not argv:
@@ -453,16 +578,23 @@ def dispatch(
     if leaf is None or leaf.run is None:
         print(usage(group=name), file=sys.stderr)
         return EXIT_USAGE
-    if len(rest) > 1:
-        # The same refusal the no-leaf branch above makes, extended to leaves
-        # once `4j` gave the groups any. A leaf that ignored trailing words
-        # would run `pm-ai key enrol --dry-run` for real, and the flag an
-        # operator invented to be careful with would be the thing that was
-        # silently dropped.
-        print(f"pm-ai: `{name} {rest[0]}` takes no arguments\n", file=sys.stderr)
+    supplied = tuple(rest[1:])
+    if len(supplied) != len(leaf.takes):
+        # 4j refused every trailing word because no leaf took one. 8b's
+        # `connector add` does, so the refusal is now about *arity* — still a
+        # refusal, never a silent drop: the flag an operator invented to be
+        # careful with must not be the thing that vanishes.
+        expected = (
+            " ".join(f"<{argument}>" for argument in leaf.takes)
+            if leaf.takes
+            else "no arguments"
+        )
+        print(
+            f"pm-ai: `{name} {rest[0]}` takes {expected}\n", file=sys.stderr
+        )
         print(usage(group=name), file=sys.stderr)
         return EXIT_USAGE
-    return _run(leaf.run, context)
+    return _run(leaf.run, replace(context, arguments=supplied))
 
 
 def _run(handler: Callable[[Context], int], context: Context) -> int:

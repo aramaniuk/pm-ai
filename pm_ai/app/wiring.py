@@ -8,8 +8,9 @@ before it did.
 
 from __future__ import annotations
 
+import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,13 @@ from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.ports import MASTER_KEY_NAME, CryptoPort, KeychainPort, VcsPort
+from pm_ai.ports import (
+    MASTER_KEY_NAME,
+    CryptoPort,
+    DuplicateConnector,
+    KeychainPort,
+    VcsPort,
+)
 from pm_ai.platform.environment import encryption_disabled as encryption_off
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
@@ -168,6 +175,7 @@ def build(
     enumerable = ConnectorRegistry()
     for instance, connector in connectors.items():
         enumerable.register(connector, instance=instance)
+    _register_enrolled(enumerable, storage, scope=scope, clock=clock)
     install_connectors(enumerable)
     return Daemon(
         storage=storage,
@@ -237,3 +245,83 @@ def _announce_disabled_encryption(storage: StorageService) -> None:
         ),
         scope=DataScope(ScopeKind.APPLICATION),
     )
+
+
+def _register_enrolled(
+    registry: ConnectorRegistry,
+    storage: StorageService,
+    *,
+    scope: DataScope,
+    clock: Callable[[], datetime] | None,
+) -> None:
+    """Register what `pm-ai connector add` wrote, so enrolment survives a restart.
+
+    Story 8b's success message tells the operator the connector becomes active
+    at the next start. Nothing read `connectors/` until this function existed,
+    so that sentence was false: an enrolment wrote two files and no later run
+    ever looked at either. Registration stays construction-time per AD-9 and
+    story 8d — this is the start that "the next start" refers to.
+
+    Failures here are swallowed deliberately, and only these: an unreadable or
+    malformed entry must not stop a daemon composing, because `doctor` is the
+    command that diagnoses exactly that and it cannot run if `build()` raises.
+    A connector that fails to load is simply absent from the registry, which
+    `pm-ai connector check` reports as nothing where the operator expects a row.
+
+    Credentials are *not* read here. They live in the sealed store, and nothing
+    in this path needs one to construct an adapter — the harvest that needs it
+    fetches it when it runs.
+    """
+    for entry in _enrolled_configurations(storage, scope=scope):
+        instance = entry.get("instance")
+        system = entry.get("system")
+        if not isinstance(instance, str) or not isinstance(system, str):
+            continue
+        if entry.get("enabled") is False:
+            continue
+        if system != "gitlab":
+            # The only adapter that exists. An enrolled system pm-ai cannot
+            # build is skipped rather than guessed at; 33a adds Graph.
+            continue
+        project = instance.split(":", 1)[1] if ":" in instance else instance
+        try:
+            adapter = (
+                GitLabConnectorAdapter(project=project, scope=scope, now=clock)
+                if clock is not None
+                else GitLabConnectorAdapter(project=project, scope=scope)
+            )
+            registry.register(adapter, instance=instance)
+        except DuplicateConnector:
+            # Already built above from the daemon's own dict. The constructed
+            # one wins: it is the instance `Daemon.connectors` holds, and a
+            # registry row naming a different object than the daemon harvests
+            # through is worse than a missing row.
+            continue
+
+
+def _enrolled_configurations(
+    storage: StorageService, *, scope: DataScope
+) -> tuple[Mapping[str, object], ...]:
+    """Every readable `connectors/<name>.json`, as decoded mappings."""
+    application = DataScope(ScopeKind.APPLICATION)
+    try:
+        names = storage.list_collection(scope=application, artifact="connectors/")
+    except Exception:
+        return ()
+    entries: list[Mapping[str, object]] = []
+    for name in names:
+        try:
+            raw = storage.read_artifact(
+                scope=application, artifact="connectors/", name=name
+            )
+        except Exception:
+            continue
+        if raw is None:
+            continue
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(decoded, dict):
+            entries.append(decoded)
+    return tuple(entries)

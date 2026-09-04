@@ -42,6 +42,7 @@ from pm_ai.connectors.registry import check_health as probe_connectors
 from pm_ai.core.config import Config, ConfigRefused, load_config
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
+from pm_ai.connectors.probe import probe_credential
 from pm_ai.platform.doctor import Health, Probe, Report, run_all
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths, UnknownProject
@@ -78,6 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments,
             daemon=daemon,
             diagnose=lambda: _diagnose(keychain, failure),
+            probe_credential=probe_credential,
             # `pm-ai connector check`'s probes, run from the one layer permitted
             # to reach `pm_ai.connectors` — `surfaces-through-core` forbids the
             # CLI from importing the registry, exactly as `os-behind-platform`

@@ -25,6 +25,7 @@ reached at all — and `pm_ai.platform.vcs` runs the commands.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import errno
 import json
@@ -32,7 +33,7 @@ import os
 import re
 import sqlite3
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -73,7 +74,7 @@ from pm_ai.domain.storage_tiers import (
     restricted_mode,
 )
 from pm_ai.domain.vcs import VcsUnavailable
-from pm_ai.ports import CryptoPort, ScopePathPort, VcsPort
+from pm_ai.ports import ArtifactBusy, CryptoPort, ScopePathPort, VcsPort
 from pm_ai.storage.crypto import (
     ENCLAVE_DIR_MODE,
     ENCRYPTED_FILE_MODE,
@@ -1151,6 +1152,83 @@ class StorageService:
         return tuple(
             sorted(entry.name for entry in directory.iterdir() if not entry.name.startswith("."))
         )
+
+    def assert_writable(self, *, scope: DataScope, artifact: str) -> None:
+        """Ask now what a write to `artifact` would ask, and write nothing (story 8b).
+
+        The only question a write asks before touching anything is git's, and it
+        is asked of a *declared-gitignored* artifact only. For a caller that
+        writes one artifact this is redundant — `write_artifact` asks it anyway.
+        For a caller that writes two in a mandated order it is the difference
+        between a refusal and a half-finished enrolment: `connectors/` is
+        gitignored, so on a machine whose `$HOME` is a git repository without
+        the rule the refusal lands on the *second* write, with the credential
+        already sealed. Every attempt would orphan one.
+
+        Deliberately not `_writable_dir`, which resolves with `create=True`. A
+        question is not a reason to bring a directory into existence, and a
+        pre-flight that left one behind would be answering by writing.
+
+        The verdict is cached exactly as the write path caches it, because it is
+        the same call — so the pre-flight costs one `git` invocation and the
+        write that follows costs none.
+        """
+        self._assert_git_excludes(scope, artifact)
+
+    @contextlib.contextmanager
+    def exclusive(self, *, scope: DataScope, artifact: str) -> Iterator[None]:
+        """An exclusive claim on `artifact`, for a read-modify-write (story 8b).
+
+        `write_artifact` replaces a file whole and publishes by `os.replace`,
+        which overwrites deliberately and coordinates nothing. That is right for
+        a rotated credential and wrong for `private/config.json`, which is one
+        sealed file holding *every* connector's credential: two enrolments that
+        both read it, both add an entry and both write it back keep one entry
+        and lose the other. The read and the write have to be one step, and this
+        is what makes them one.
+
+        A claim file created with `O_CREAT|O_EXCL`, which is the same
+        kernel-enforced exclusivity `_create_exclusively` publishes captures
+        with — not an advisory lock and not a check followed by a create. Dot-
+        prefixed, so `list_collection` does not report it as a member and the
+        operator's own listings do not show it.
+
+        **Refuses rather than waits.** `ArtifactBusy` names the claim file, so a
+        claim orphaned by a kill can be removed by hand: `pm_ai.core` may not
+        learn where an artifact lives (story `1a`), so the writer that does know
+        composes the sentence. Waiting would be the wrong trade for a command a
+        human is standing at — and a wait on a dead holder's claim hangs instead
+        of saying so.
+
+        The claim is not the write's durability story and does not try to be. It
+        is removed however the body leaves; a process killed inside the body
+        leaves it behind, which is exactly the state the refusal explains.
+        """
+        target = self._paths.resolve(scope, artifact)
+        parent = target.parent
+        # The parent may not exist yet on a first run, and the claim has to live
+        # beside what it claims. Created by the same rule the artifact itself
+        # would be created under, so claiming a sealed artifact does not open a
+        # world-listable `private/` a moment before the enclave would have been.
+        if is_encrypted(str(target)):
+            _mkdir_enclave(parent)
+        else:
+            parent.mkdir(parents=True, exist_ok=True)
+        claim = parent / f".{target.name}.claim"
+        try:
+            descriptor = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as held:
+            raise ArtifactBusy(
+                f"{artifact} in {scope} is claimed by another pm-ai process, so "
+                f"this one refuses rather than overwriting what that one is "
+                f"about to write. If nothing else is running, the claim was "
+                f"orphaned by a kill and removing {claim} releases it."
+            ) from held
+        os.close(descriptor)
+        try:
+            yield
+        finally:
+            claim.unlink(missing_ok=True)
 
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None:
         """Append one typed record to `scope`'s open segment, naming it here.
