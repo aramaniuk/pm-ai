@@ -2,7 +2,8 @@
 title: 'The storage port declares what storage does'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'dd397ea6bcff8081b2372d32476a30b8e2f0d92e'
 review_loop_iteration: 0
 ---
 
@@ -58,11 +59,11 @@ Two mechanisms are missing beside it. Nothing lists a Tier-1 `Collection`, so `8
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` -- declare `write_artifact`, `read_artifact` in its absence-tolerant form, and the collection listing on `StoragePort`
-- [ ] `pm_ai/domain/storage_tiers.py` -- declare the restricted mode where the tier and exclusion answers already live, so it derives from the trees rather than a second table
-- [ ] `pm_ai/storage/service.py` -- honour the declared mode for the file alone, and give `read_artifact` the absence-tolerant form
-- [ ] `tests/architecture/test_domain_invariants.py:793-826` -- extend port conformance to assert the three new members
-- [ ] `tests/architecture/test_storage_capabilities.py` -- the matrix, with the parent-mode case asserted by `stat`
+- [x] `pm_ai/ports/__init__.py` -- declare `write_artifact`, `read_artifact` in its absence-tolerant form, and the collection listing on `StoragePort`
+- [x] `pm_ai/domain/storage_tiers.py` -- declare the restricted mode where the tier and exclusion answers already live, so it derives from the trees rather than a second table
+- [x] `pm_ai/storage/service.py` -- honour the declared mode for the file alone, and give `read_artifact` the absence-tolerant form
+- [x] `tests/architecture/test_domain_invariants.py:793-826` -- extend port conformance to assert the three new members
+- [x] `tests/architecture/test_storage_capabilities.py` -- the matrix, with the parent-mode case asserted by `stat`
 
 **Acceptance Criteria:**
 - Given `StorageService`, then `isinstance(service, StoragePort)` holds and the port names `write_artifact`, `read_artifact` and the listing — asserted in the conformance test, because a Protocol that omits a method its implementation has is invisible to `isinstance`.

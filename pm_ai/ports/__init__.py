@@ -7,6 +7,7 @@ say what it returns. Adapters implement these; core depends on them.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -70,6 +71,119 @@ class ConnectorPort(Protocol):
         `pm_ai.connectors.registry.ConnectorRegistry.check_health`, which waits
         for this and abandons it at the bound.
         """
+
+
+class DuplicateConnector(Exception):
+    """Two connectors under one instance name, so one of them would be lost.
+
+    Declared here rather than in `pm_ai.connectors.registry`, where story `8d`
+    first wrote it, because story `8b` raises the same refusal from
+    `pm_ai.core.connector_enrolment` — and `core` sits *below* `connectors` in
+    the enforced layer stack and may not import it. The alternatives were two
+    classes with one name in two packages that cannot see each other, so a
+    caller's `except` would catch one of them and let the other through, or a
+    second spelling of a refusal an operator has to recognise once. `ports` is
+    the layer both may reach, and the exception cluster below already lives
+    here for the same reason.
+
+    `pm_ai.connectors.registry` re-exports it, so `from
+    pm_ai.connectors.registry import DuplicateConnector` still names this class
+    and there is nothing to keep in step.
+
+    Refused rather than resolved by last-write-wins. The instance name is what a
+    cursor, a coverage window and a stored credential are all keyed by, so two
+    connectors sharing one would interleave their cursors — each re-harvesting
+    from where the other left off — and the symptom would be missing events,
+    weeks later, with nothing in the logs.
+
+    Not a `KeyError` or a `ValueError`: a caller catching either of those is
+    catching something else, and this is a refusal that should stop a daemon
+    starting rather than be absorbed by a broad `except`.
+    """
+
+
+class ProbeFailed(Exception):
+    """A credential was offered to its provider and the provider said no.
+
+    Raised by whatever performs the live check story `8b` runs *before* anything
+    is stored, so a bad token is refused while the human who typed it is still
+    present rather than discovered by a silent harvest at 03:00.
+
+    Declared here for `DuplicateConnector`'s reason, one layer along: the probe
+    is an adapter in `pm_ai.connectors` because `core-is-io-free` forbids every
+    HTTP client in `pm_ai.core`, and the core service that catches this may not
+    import that package. A parameter carries the probe in; this carries its
+    refusal back out.
+
+    Carries no credential material, ever — not in its message, not in its
+    `args`, not in the traceback of whatever it was raised from. A refusal that
+    quotes the token puts it in the operator's scrollback and in any bug report
+    that follows.
+    """
+
+
+class ProbeUnreachable(ProbeFailed):
+    """The provider never answered, so nothing is known about the credential.
+
+    A subclass, so `except ProbeFailed` keeps refusing both — the enrolment
+    declines either way, and it declines for the same reason: an unverified
+    credential must not be stored. What the subclass adds is the distinction
+    that changes the repair. A rejected token is fixed by issuing another one;
+    a provider that went silent past CAP-35's ten-second bound is fixed by
+    looking at the network, and telling an operator to re-issue a token that is
+    perfectly good sends them in a circle.
+
+    The same reading `KeychainUnavailable` takes against `KeyNotFound`, and the
+    same one `VcsUnavailable` takes: unknown is not a verdict.
+    """
+
+
+class UnknownConnectorSystem(LookupError):
+    """pm-ai has no probe for that provider, so it cannot verify a credential.
+
+    Not a `ProbeFailed`: nothing was asked and nothing refused. Storing a
+    credential nobody can check would be enrolling a connector that cannot
+    harvest, which is the state `8b` exists to keep off the disk.
+    """
+
+
+class ArtifactBusy(RuntimeError):
+    """Another process holds the exclusive claim on this artifact.
+
+    `private/config.json` is one sealed file holding every connector's
+    credential, and it is rewritten whole. Two enrolments that both read it and
+    both write it destroy one credential — the read-modify-write rule failing
+    one level down — so the read and the write are held under a claim, and a
+    second attempt refuses rather than waiting.
+
+    Refusing rather than blocking is deliberate: enrolment is a command a human
+    is waiting on, at a prompt, and a second one is a mistake rather than a
+    queue. The refusal names the claim file, so a claim orphaned by a kill can
+    be removed by hand — `pm_ai.core` may not learn where an artifact lives
+    (story `1a`), which is why the sentence is composed by the writer that does.
+    """
+
+
+@runtime_checkable
+class CredentialProbePort(Protocol):
+    """A live check that a credential is one the provider accepts (CAP-35).
+
+    A Protocol over a call rather than an object with a method, because the one
+    implementation is a function in `pm_ai.connectors` and the one consumer is
+    `pm_ai.core.connector_enrolment`, which receives it as a parameter. Naming
+    the shape here is what lets that parameter be typed at all: `core` may not
+    import the adapter, and an unannotated parameter is implicitly `Any` — the
+    defect story `1k` retired.
+
+    Returns a short sentence naming what answered, for the operator. It must
+    never contain the credential.
+
+    Raises `ProbeFailed` when the provider refused, `ProbeUnreachable` when it
+    did not answer within the bound, and `UnknownConnectorSystem` when pm-ai has
+    no probe for that provider at all.
+    """
+
+    def __call__(self, system: str, credential: str) -> str: ...
 
 
 @runtime_checkable
@@ -399,6 +513,87 @@ class StoragePort(Protocol):
     # The single-phase convenience over the two above. Kept because it has a
     # caller; not what the registry uses.
     def record_execution(self, idempotency_key: str, target: TargetRef, external_id: str) -> None: ...
+
+    # Artifacts, added with story 8f. This port declared nine methods and
+    # neither the single writer nor the single reader, while `StorageService`
+    # implemented both — so the Protocol under-declared its own implementation
+    # and anything typed against it could reach every ledger and no artifact,
+    # which is the whole of AD-3's tiering contract as far as a port consumer
+    # can see. The same absence story 2h closed for the event log; filed as A1
+    # by the wave-1 review and downgraded because `Daemon.storage` happens to be
+    # the concrete class.
+
+    def write_artifact(
+        self, payload: bytes, *, scope: DataScope, artifact: str, name: str | None = None
+    ) -> Path: ...
+
+    def read_artifact(
+        self, *, scope: DataScope, artifact: str, name: str | None = None
+    ) -> bytes | None:
+        """The artifact's bytes, or `None` when nothing has been written there.
+
+        `bytes | None` rather than `bytes`, because absence is the ordinary
+        state of every optional artifact on a clean machine and a first run is
+        not a failure. The implementation ended in `path.read_bytes()` until
+        story 8f, so each caller that needed "not there yet" wrote its own
+        translation of `FileNotFoundError` — and the one that forgets aborts on
+        a machine that is merely new.
+
+        Absence alone is a value. A directory in the way, a permission refusal,
+        an undecryptable file: those raise, because reporting them as "no file"
+        is how a machine that cannot read its own configuration looks freshly
+        installed.
+        """
+
+    def list_collection(self, *, scope: DataScope, artifact: str) -> tuple[str, ...]:
+        """The member names a declared `Collection` currently holds.
+
+        Names, not paths, and that is the load-bearing half. A caller reaching
+        this port may not learn where an artifact lives — the resolver is the
+        only thing that knows (story 1a) — and a listing of paths would be a way
+        to open one directly, which is AD-5's single writer routed around.
+
+        Empty when nothing has been written yet; asking must not create the
+        directory. Raises `pm_ai.domain.ScopeResolutionError` when `artifact` is
+        not a `Collection` at all: a `File` has no members, and a `Dir`'s are
+        declared in the scope trees rather than discovered on disk.
+        """
+
+    # Two more, added with story 8b. Both exist because that slice writes *two*
+    # artifacts in a mandated order and must leave nothing behind if either
+    # refuses — a guarantee neither of the methods above can give on its own.
+
+    def assert_writable(self, *, scope: DataScope, artifact: str) -> None:
+        """Ask now every question a write to `artifact` would ask, and write nothing.
+
+        The pre-flight. A declared-gitignored artifact's write is refused when
+        git cannot say whether the directory would be committed, and for an
+        enrolment that refusal lands on the *second* write, after the credential
+        is already sealed — so every attempt on a machine whose `$HOME` is a
+        repository without the rule would orphan a credential. Asking first is
+        what makes "nothing written" true rather than aspirational.
+
+        Answers by returning. Raises exactly what the corresponding write would
+        raise, and creates neither the file nor its directory.
+        """
+
+    def exclusive(self, *, scope: DataScope, artifact: str) -> AbstractContextManager[None]:
+        """Hold an exclusive claim on `artifact` for the body of a `with`.
+
+        For a read-modify-write over a whole file. `write_artifact` publishes by
+        `os.replace`, which overwrites deliberately and coordinates nothing, so
+        two processes that both read `private/config.json`, both add a
+        credential and both write it back leave one credential behind — the
+        exact loss the read-modify-write rule was written to prevent, one level
+        down.
+
+        Refuses rather than waits: `ArtifactBusy` when the claim is already
+        held. Enrolment is a command a human is standing at, so a second one
+        concurrently is a mistake and not a queue, and a blocking claim on a
+        machine where the holder was killed would hang instead of saying so.
+
+        The claim is released however the body leaves.
+        """
 
 
 @runtime_checkable

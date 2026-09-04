@@ -8,8 +8,9 @@ before it did.
 
 from __future__ import annotations
 
+import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,12 @@ from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.ports import MASTER_KEY_NAME, CryptoPort, KeychainPort, VcsPort
+from pm_ai.ports import (
+    MASTER_KEY_NAME,
+    CryptoPort,
+    KeychainPort,
+    VcsPort,
+)
 from pm_ai.platform.environment import encryption_disabled as encryption_off
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
@@ -165,6 +171,14 @@ def build(
     # under the same key, so a cursor, a coverage window and a probe row all
     # name one instance. `install` replaces, so building a second daemon in one
     # process describes that daemon rather than accumulating both.
+    # Enrolled connectors join the daemon's own dict *before* the registry is
+    # built from it. Registering them only into the registry left the two
+    # structures disagreeing — `pm-ai connector check` listed an instance that
+    # `run_harvest` raised `KeyError` for — which is the divergence the comment
+    # above says cannot happen and `test_composition_populates_the_registry`
+    # asserts cannot.
+    for instance, enrolled in _enrolled_connectors(storage, scope=scope, clock=clock):
+        connectors.setdefault(instance, enrolled)
     enumerable = ConnectorRegistry()
     for instance, connector in connectors.items():
         enumerable.register(connector, instance=instance)
@@ -237,3 +251,86 @@ def _announce_disabled_encryption(storage: StorageService) -> None:
         ),
         scope=DataScope(ScopeKind.APPLICATION),
     )
+
+
+def _enrolled_connectors(
+    storage: StorageService,
+    *,
+    scope: DataScope,
+    clock: Callable[[], datetime],
+) -> tuple[tuple[str, GitLabConnectorAdapter], ...]:
+    """What `pm-ai connector add` wrote, as adapters, so enrolment survives a restart.
+
+    Story 8b's success message tells the operator the connector becomes active
+    at the next start. Nothing read `connectors/` until this function existed,
+    so that sentence was false: an enrolment wrote two files and no later run
+    looked at either. Registration stays construction-time per AD-9 and story
+    8d — this is the start that "the next start" refers to.
+
+    Returned rather than registered, so the caller can put these in
+    `Daemon.connectors` *and* the registry. Registering them into the registry
+    alone made `pm-ai connector check` list an instance `run_harvest` could not
+    resolve.
+
+    Failures are swallowed deliberately, and only here: an unreadable or
+    malformed entry must not stop a daemon composing, because `doctor` is the
+    command that diagnoses exactly that and it cannot run if `build()` raises.
+    A connector that fails to load is simply absent, which `connector check`
+    reports as a missing row.
+
+    Credentials are *not* read. They live in the sealed store, and constructing
+    an adapter needs none — the harvest that needs one fetches it when it runs.
+    """
+    built: list[tuple[str, GitLabConnectorAdapter]] = []
+    for entry in _enrolled_configurations(storage):
+        instance = entry.get("instance")
+        system = entry.get("system")
+        if not isinstance(instance, str) or not isinstance(system, str) or not instance:
+            continue
+        # Anything but an explicit `true` is off. The file is plaintext and
+        # hand-editable on purpose, so `"false"`, `0` and `null` are all things
+        # an operator will actually write meaning "not this one".
+        if entry.get("enabled") is not True:
+            continue
+        if system != "gitlab":
+            # The only adapter that exists. An enrolled system pm-ai cannot
+            # build is skipped rather than guessed at; 33a adds Graph.
+            continue
+        project = instance.split(":", 1)[1] if ":" in instance else instance
+        if not project:
+            continue
+        try:
+            built.append(
+                (instance, GitLabConnectorAdapter(project=project, scope=scope, now=clock))
+            )
+        except Exception:
+            continue
+    return tuple(built)
+
+
+def _enrolled_configurations(
+    storage: StorageService,
+) -> tuple[Mapping[str, object], ...]:
+    """Every readable `connectors/<name>.json`, as decoded mappings."""
+    application = DataScope(ScopeKind.APPLICATION)
+    try:
+        names = storage.list_collection(scope=application, artifact="connectors/")
+    except Exception:
+        return ()
+    entries: list[Mapping[str, object]] = []
+    for name in names:
+        try:
+            raw = storage.read_artifact(
+                scope=application, artifact="connectors/", name=name
+            )
+        except Exception:
+            continue
+        if raw is None:
+            continue
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(decoded, dict):
+            entries.append(decoded)
+    return tuple(entries)

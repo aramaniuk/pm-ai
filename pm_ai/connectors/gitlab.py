@@ -135,8 +135,7 @@ class GitLabConnectorAdapter:
                 self.instance,
                 Health.ABSENT,
                 f"no usable credential is stored for {self.instance}",
-                "No credential can be enrolled on this build yet: `pm-ai "
-                "connector add gitlab` is story 8b and is not implemented. "
+                f"Enrol one with `pm-ai connector add gitlab {self.instance}`. "
                 "Harvests are skipped until then, which is a setup step "
                 "outstanding rather than a fault.",
             )
@@ -164,7 +163,7 @@ class GitLabConnectorAdapter:
                 f"{self.instance} has a credential, but its transport is still "
                 f"a stub — reachability has not been tested",
                 "Nothing to fix on this machine. The GitLab connector gains a "
-                "real HTTP transport in story 8b; until then this row reports "
+                "real HTTP transport in story 33a; until then this row reports "
                 "what is configured, not what answered.",
             )
         return Probe(self.instance, Health.OK, f"{answer}")

@@ -2,7 +2,8 @@
 title: 'Connector credential lifecycle'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '9eebc95edd16ed4a78fc501169e3e3558adeddc1'
 review_loop_iteration: 1
 ---
 
@@ -73,11 +74,11 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/connector_enrolment.py` -- add `enrol_connector(..., probe)`: probe, read-modify-seal, then configure -- the order is the story, and the probe is a parameter because `core` may not speak HTTP
-- [ ] `pm_ai/connectors/probe.py`, `pm_ai/app/entry.py` -- the probe adapter and its injection -- `8d`'s probes are legal in `connectors`; this one has the same constraint
-- [ ] `pm_ai/app/wiring.py` -- load `connectors/` at composition and register what it holds -- otherwise "active at the next start" is never true
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add `connector add`, prompting without echo
-- [ ] `tests/core/test_connector_enrolment.py` -- the matrix, with the refusal cases asserting **zero** writes
+- [x] `pm_ai/core/connector_enrolment.py` -- add `enrol_connector(..., probe)`: probe, read-modify-seal, then configure -- the order is the story, and the probe is a parameter because `core` may not speak HTTP
+- [x] `pm_ai/connectors/probe.py`, `pm_ai/app/entry.py` -- the probe adapter and its injection -- `8d`'s probes are legal in `connectors`; this one has the same constraint
+- [x] `pm_ai/app/wiring.py` -- load `connectors/` at composition and register what it holds -- otherwise "active at the next start" is never true
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- add `connector add`, prompting without echo
+- [x] `tests/core/test_connector_enrolment.py` -- the matrix, with the refusal cases asserting **zero** writes
 
 **Acceptance Criteria:**
 - Given the master key is absent, when enrolment runs against a provider that would have passed its probe, then no file exists in `connectors/` afterwards — asserted on the filesystem, which is the only assertion that proves the ordering rather than describing it.

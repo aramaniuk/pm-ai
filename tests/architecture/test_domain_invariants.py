@@ -829,6 +829,7 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     would start raising `TypeError` on a change that is not an error.
     """
     import datetime
+    import typing
 
     ports = mod("pm_ai.ports")
     paths = mod("pm_ai.platform.paths").ScopePaths.rooted(tmp_path)
@@ -849,6 +850,24 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     assert isinstance(storage, ports.StoragePort), (
         "the single writer no longer satisfies the port core depends on"
     )
+
+    # Artifacts, added by story 8f. `isinstance` above cannot see a method the
+    # Protocol does not declare, which is exactly how `StoragePort` named nine
+    # methods and neither `write_artifact` nor `read_artifact` while
+    # `StorageService` implemented both — a conforming port that under-declared
+    # its own implementation, and a green test beside it. So the membership is
+    # asserted directly: these three are the artifact half of AD-3's tiering
+    # contract as far as any consumer of this port can see.
+    declared = typing.get_protocol_members(ports.StoragePort)
+    for member in ("write_artifact", "read_artifact", "list_collection"):
+        assert member in declared, (
+            f"StoragePort does not declare {member}, so nothing typed against "
+            f"the port can reach it and `isinstance` cannot notice"
+        )
+        assert hasattr(storage, member), (
+            f"StoragePort declares {member} and the single writer does not "
+            f"implement it"
+        )
 
     # Connectors, added by story 8d. Three adapters were covered here and no
     # connector was — so `sample_events`, the one method the AD-34 gate actually

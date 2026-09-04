@@ -1,0 +1,502 @@
+"""Story 8b — the credential lifecycle, one test per matrix row.
+
+The write order is the entire point of this story, so the refusal rows assert
+the **absence of files** rather than the presence of an error message. An error
+message proves the code noticed; an empty `connectors/` proves it left nothing
+behind. Every row runs against a real temporary root, because "nothing was
+written" is a claim about a filesystem.
+"""
+
+from __future__ import annotations
+
+import json
+import stat
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from pm_ai.core.connector_enrolment import (
+    MalformedInstanceName,
+    OrphanedCredential,
+    connector_configurations,
+    enrol_connector,
+    stored_credentials,
+)
+from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.storage_tiers import RESTRICTED_FILE_MODE
+from pm_ai.platform.paths import ScopePaths
+from pm_ai.ports import DuplicateConnector, KeyNotFound, ProbeFailed, ProbeUnreachable
+from pm_ai.storage.crypto import AesGcmCrypto
+from pm_ai.storage.service import StorageService
+
+NOW = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
+APPLICATION = DataScope(ScopeKind.APPLICATION)
+KEY = b"K" * 32
+SECRET = "glpat-not-a-real-token-0123456789"
+
+
+class _NoRepository:
+    """Git: no working tree here. The capture guard is not what this is about."""
+
+    def working_tree(self, path):
+        return None
+
+    def repository_marker_above(self, path):
+        return None
+
+    def tracking(self, path, *, repository):  # pragma: no cover
+        raise AssertionError("tracking asked with no working tree")
+
+
+class _GitCannotAnswer:
+    """A `$HOME` that *is* a repository, with git unable to say what it excludes."""
+
+    def working_tree(self, path):
+        return Path("/pretend/repository")
+
+    def repository_marker_above(self, path):
+        return Path("/pretend/repository/.git")
+
+    def tracking(self, path, *, repository):
+        raise OSError("git is not installed on this machine")
+
+
+def _storage(root: Path, *, crypto=None, vcs=None) -> StorageService:
+    return StorageService(
+        ScopePaths.rooted(root),
+        now=lambda: NOW,
+        vcs=vcs or _NoRepository(),
+        crypto=crypto or AesGcmCrypto(KEY),
+    )
+
+
+@pytest.fixture
+def storage(tmp_path: Path) -> StorageService:
+    return _storage(tmp_path)
+
+
+def accepts(system: str, credential: str) -> str:
+    """A provider that answers. Never echoes what it was given."""
+    return f"{system} accepted the credential"
+
+
+def rejects(system: str, credential: str) -> str:
+    raise ProbeFailed(f"{system} refused the credential")
+
+
+def silent(system: str, credential: str) -> str:
+    raise ProbeUnreachable(f"{system} did not answer within 10s")
+
+
+def _connector_files(root: Path) -> list[Path]:
+    directory = root / ".pm-ai" / "connectors"
+    return sorted(p for p in directory.iterdir() if p.is_file()) if directory.exists() else []
+
+
+def _sealed_file(root: Path) -> Path:
+    return root / ".pm-ai" / "private" / "config.json"
+
+
+# ── Happy path ───────────────────────────────────────────────────────────────
+
+
+def test_a_valid_credential_is_probed_sealed_and_configured(storage, tmp_path):
+    answer = enrol_connector(
+        storage,
+        system="gitlab",
+        instance="gitlab:alpha",
+        credential=SECRET,
+        probe=accepts,
+    )
+    assert "accepted" in answer
+    assert stored_credentials(storage)["gitlab:alpha"]["credential"] == SECRET
+    assert connector_configurations(storage) == ("gitlab:alpha",)
+    assert [p.name for p in _connector_files(tmp_path)] == ["gitlab:alpha.json"]
+
+
+def test_the_configuration_holds_no_credential_and_lands_at_600(storage, tmp_path):
+    """The mode comes from 8f's declaration, so this asserts the declaration."""
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential=SECRET, probe=accepts
+    )
+    (written,) = _connector_files(tmp_path)
+    body = written.read_bytes()
+    assert SECRET.encode() not in body
+    assert b"credential" not in body
+    assert stat.S_IMODE(written.stat().st_mode) == RESTRICTED_FILE_MODE
+
+
+def test_the_application_root_mode_is_untouched(storage, tmp_path):
+    """A restricted file must not drag its parents into an enclave (8f's B13)."""
+    root = tmp_path / ".pm-ai"
+    root.mkdir(parents=True, exist_ok=True)
+    before = stat.S_IMODE(root.stat().st_mode)
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential=SECRET, probe=accepts
+    )
+    assert stat.S_IMODE(root.stat().st_mode) == before
+
+
+def test_the_first_enrolment_ever_succeeds_with_no_sealed_store(storage, tmp_path):
+    """`private/config.json` does not exist; absence reads as an empty mapping."""
+    assert not _sealed_file(tmp_path).exists()
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential=SECRET, probe=accepts
+    )
+    assert _sealed_file(tmp_path).exists()
+
+
+# ── Read-modify-write ────────────────────────────────────────────────────────
+
+
+def test_a_second_enrolment_keeps_the_first_credential(storage):
+    """`write_artifact` replaces whole, so the obvious implementation loses one."""
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential="first", probe=accepts
+    )
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:beta", credential="second", probe=accepts
+    )
+    held = stored_credentials(storage)
+    assert held["gitlab:alpha"]["credential"] == "first"
+    assert held["gitlab:beta"]["credential"] == "second"
+
+
+def test_a_second_enrolment_keeps_unrelated_keys_in_the_sealed_store(storage):
+    """The sealed file is not this story's private property."""
+    storage.write_artifact(
+        json.dumps({"unrelated": {"keep": True}}).encode(),
+        scope=APPLICATION,
+        artifact="config.json",
+    )
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential=SECRET, probe=accepts
+    )
+    raw = storage.read_artifact(scope=APPLICATION, artifact="config.json")
+    assert json.loads(raw.decode())["unrelated"] == {"keep": True}
+
+
+# ── Refusals that must write nothing ─────────────────────────────────────────
+
+
+def test_a_rejected_credential_writes_neither_half(storage, tmp_path):
+    with pytest.raises(ProbeFailed):
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=rejects,
+        )
+    assert _connector_files(tmp_path) == []
+    assert not _sealed_file(tmp_path).exists()
+
+
+def test_a_silent_provider_is_refused_distinctly_from_a_rejection(storage, tmp_path):
+    with pytest.raises(ProbeUnreachable):
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=silent,
+        )
+    assert _connector_files(tmp_path) == []
+    assert not _sealed_file(tmp_path).exists()
+
+
+@pytest.mark.parametrize("name", ["../graph", ".hidden", "a/b", "", "with space", "x" * 200])
+def test_a_path_unsafe_instance_name_is_refused_before_the_probe(tmp_path, name):
+    """Refused *before* the probe, so no orphan is possible."""
+    asked = []
+
+    def recording(system, credential):
+        asked.append(system)
+        return "answered"
+
+    storage = _storage(tmp_path)
+    with pytest.raises((MalformedInstanceName, ValueError)):
+        enrol_connector(
+            storage, system="gitlab", instance=name, credential=SECRET, probe=recording
+        )
+    assert asked == [], "the provider was asked before the name was judged"
+    assert _connector_files(tmp_path) == []
+
+
+def test_an_absent_master_key_leaves_connectors_empty(tmp_path):
+    """The acceptance criterion: asserted on the filesystem, not on a message.
+
+    This is what proves the ordering rather than describing it — the sealed
+    write is the one that can refuse, and it goes first.
+    """
+
+    class NoKey:
+        def encrypt(self, plaintext: bytes) -> bytes:
+            raise KeyNotFound("master")
+
+        def decrypt(self, blob: bytes) -> bytes:
+            raise KeyNotFound("master")
+
+    storage = _storage(tmp_path, crypto=NoKey())
+    with pytest.raises(KeyNotFound):
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=accepts,
+        )
+    assert _connector_files(tmp_path) == [], (
+        "a connector was configured while its credential could not be sealed — "
+        "which reads as a working connector harvesting nothing"
+    )
+
+
+def test_a_git_repository_home_with_no_git_is_refused_before_the_provider_is_asked(
+    tmp_path,
+):
+    """What the pre-flight actually buys, measured rather than assumed.
+
+    The spec's fear was an orphaned credential: `connectors/` is gitignored, so
+    its write refuses when git cannot answer, and that refusal would land after
+    the seal. In this tree it cannot — `private/` is declared gitignored too, so
+    the *sealed* write refuses on the same question and no orphan is reachable
+    with or without the pre-flight. Asserting "nothing was sealed" therefore
+    passes either way, which is a test that proves nothing; removing
+    `assert_writable` entirely left this file green until this row was rewritten.
+
+    What the pre-flight does buy is checkable: the question is asked before the
+    provider is, so a machine that cannot write does not spend a network round
+    trip — and a credential is never put on the wire for an enrolment that was
+    always going to refuse.
+    """
+    asked = []
+
+    def recording(system: str, credential: str) -> str:
+        asked.append(system)
+        return "answered"
+
+    storage = _storage(tmp_path, vcs=_GitCannotAnswer())
+    with pytest.raises(OSError) as refused:
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=recording,
+        )
+    assert not isinstance(refused.value, OrphanedCredential)
+    assert asked == [], (
+        "the credential was sent to the provider before pm-ai asked whether it "
+        "could write the result anywhere"
+    )
+    assert not _sealed_file(tmp_path).exists()
+
+
+# ── Duplicates, across both stores ───────────────────────────────────────────
+
+
+def test_a_configured_instance_is_refused_and_its_credential_untouched(storage):
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential="first", probe=accepts
+    )
+    with pytest.raises(DuplicateConnector):
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential="second", probe=accepts,
+        )
+    assert stored_credentials(storage)["gitlab:alpha"]["credential"] == "first"
+
+
+def test_an_orphaned_credential_is_seen_by_the_duplicate_check(storage, tmp_path):
+    """`connectors/` alone misses a half-finished enrolment."""
+    storage.write_artifact(
+        json.dumps({"connectors": {"gitlab:alpha": {"system": "gitlab", "credential": "x"}}}).encode(),
+        scope=APPLICATION,
+        artifact="config.json",
+    )
+    assert _connector_files(tmp_path) == []
+    with pytest.raises(DuplicateConnector) as refused:
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=accepts,
+        )
+    assert "half-finished" in str(refused.value)
+
+
+def test_the_unencrypted_half_is_checked_first_so_a_keyless_machine_says_so(tmp_path):
+    """The refusal must be about the key, not a spurious duplicate."""
+
+    class NoKey:
+        def encrypt(self, plaintext: bytes) -> bytes:
+            raise KeyNotFound("master")
+
+        def decrypt(self, blob: bytes) -> bytes:
+            raise KeyNotFound("master")
+
+    storage = _storage(tmp_path, crypto=NoKey())
+    with pytest.raises(KeyNotFound):
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=accepts,
+        )
+
+
+# ── The credential never appears ─────────────────────────────────────────────
+
+
+def test_no_refusal_message_or_traceback_carries_the_credential(storage):
+    """Every refusal path, searched for five spellings of the secret."""
+    spellings = [SECRET, repr(SECRET), SECRET.encode().hex(), SECRET[:8], SECRET[-8:]]
+
+    def check(raised: BaseException) -> None:
+        text = f"{raised!r} {raised}"
+        cause = raised.__cause__
+        while cause is not None:
+            text += f" {cause!r} {cause}"
+            cause = cause.__cause__
+        for spelling in spellings:
+            assert spelling not in text, f"{spelling!r} reached a refusal"
+
+    with pytest.raises(ProbeFailed) as rejected:
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=rejects,
+        )
+    check(rejected.value)
+
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential=SECRET, probe=accepts
+    )
+    with pytest.raises(DuplicateConnector) as duplicate:
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=accepts,
+        )
+    check(duplicate.value)
+
+
+def test_the_returned_sentence_never_carries_the_credential(storage):
+    """A provider that echoes what it was given must not be relayed verbatim."""
+
+    def echoing(system: str, credential: str) -> str:
+        return f"{system} accepted {credential}"
+
+    answer = enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha",
+        credential=SECRET, probe=echoing,
+    )
+    assert SECRET not in answer
+
+
+# ── The orphan, reported rather than rolled back ─────────────────────────────
+
+
+def test_a_failed_configuration_write_reports_the_orphan(tmp_path, monkeypatch):
+    """Reported, never silent — it is only findable if this is raised."""
+    storage = _storage(tmp_path)
+    real = storage.write_artifact
+    calls = []
+
+    def failing(payload, *, scope, artifact, name=None):
+        calls.append(artifact)
+        if artifact == "connectors/":
+            raise OSError("no space left on device")
+        return real(payload, scope=scope, artifact=artifact, name=name)
+
+    monkeypatch.setattr(storage, "write_artifact", failing)
+
+    with pytest.raises(OrphanedCredential) as orphaned:
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:alpha",
+            credential=SECRET, probe=accepts,
+        )
+    assert "gitlab:alpha" in str(orphaned.value)
+    assert "NOT enrolled" in str(orphaned.value)
+    assert SECRET not in str(orphaned.value)
+
+
+# ── "Active at the next start", made to mean something ───────────────────────
+
+
+def test_an_enrolled_connector_is_registered_by_a_fresh_composition(tmp_path):
+    """The only assertion that makes the success message true.
+
+    `pm-ai connector add` tells the operator the connector activates at the
+    next start. Nothing read `connectors/` until story 8b wired it into
+    `build()`, so that sentence described behaviour no code performed: two files
+    were written and no later run ever looked at either.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.connectors.registry import all_connectors
+
+    storage = _storage(tmp_path)
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:enrolled",
+        credential=SECRET, probe=accepts,
+    )
+
+    daemon = build(tmp_path, "demo")
+    assert "gitlab:enrolled" in _instances(), (
+        "an enrolled connector was absent from a freshly composed registry, so "
+        "`active at the next start` never becomes true"
+    )
+    # The registry is what `connector check` reads; `Daemon.connectors` is what
+    # `run_harvest` resolves against. Registering into one and not the other
+    # listed an instance that harvesting raised `KeyError` for — visible in the
+    # report, unreachable by the only code that fetches anything.
+    assert "gitlab:enrolled" in daemon.connectors, (
+        "the connector is in the registry but not the daemon, so `connector "
+        "check` lists it and `run_harvest` cannot resolve it"
+    )
+    assert set(_instances()) == set(daemon.connectors), (
+        "the registry and the daemon disagree about which connectors exist"
+    )
+    assert all_connectors()
+
+
+def _instances() -> tuple[str, ...]:
+    from pm_ai.connectors.registry import default_registry
+
+    return default_registry().instances()
+
+
+def test_a_disabled_entry_is_not_registered(tmp_path):
+    """`enabled: false` is the off switch the file format already declares."""
+    from pm_ai.app.wiring import build
+
+    storage = _storage(tmp_path)
+    storage.write_artifact(
+        json.dumps({"instance": "gitlab:off", "system": "gitlab", "enabled": False}).encode(),
+        scope=APPLICATION,
+        artifact="connectors/",
+        name="gitlab:off.json",
+    )
+    build(tmp_path, "demo")
+    assert "gitlab:off" not in _instances()
+
+
+def test_a_malformed_entry_does_not_stop_the_daemon_composing(tmp_path):
+    """`doctor` diagnoses a broken machine, and cannot if `build()` raises."""
+    from pm_ai.app.wiring import build
+
+    storage = _storage(tmp_path)
+    storage.write_artifact(
+        b"{ this is not json",
+        scope=APPLICATION,
+        artifact="connectors/",
+        name="broken.json",
+    )
+    build(tmp_path, "demo")  # must not raise
+
+
+def test_an_unrecognised_sibling_entry_is_refused_not_silently_dropped(storage):
+    """Writing the mapping back would have deleted it.
+
+    The module preserves unrelated top-level keys deliberately, and would have
+    destroyed sibling *credential* entries it merely could not interpret — while
+    also hiding them from both duplicate checks, so the instance would be
+    overwritten rather than refused.
+    """
+    storage.write_artifact(
+        json.dumps({"connectors": {"gitlab:odd": "a bare string", "gitlab:ok": {}}}).encode(),
+        scope=APPLICATION,
+        artifact="config.json",
+    )
+    with pytest.raises(ValueError) as refused:
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:new",
+            credential=SECRET, probe=accepts,
+        )
+    assert "gitlab:odd" in str(refused.value)
+    raw = storage.read_artifact(scope=APPLICATION, artifact="config.json")
+    assert json.loads(raw.decode())["connectors"]["gitlab:odd"] == "a bare string"

@@ -57,6 +57,7 @@ from pm_ai.domain.scope_model import (
     PERSONAL_DIRNAME,
     PROJECT_DIRNAME,
 )
+from pm_ai.domain.storage_tiers import RESTRICTED_FILE_MODE
 from pm_ai.ports import AES_KEY_BYTES, CryptoPort, DecryptionFailed, KeychainPort
 
 __all__ = [
@@ -164,7 +165,13 @@ _NONCE_BYTES = 12
 # with a named report happened on a given day, which is the fact the enclave
 # exists to hide.
 ENCLAVE_DIR_MODE = 0o700
-ENCRYPTED_FILE_MODE = 0o600
+
+# *Re-exported*, not defined, since story 8f: `pm_ai.domain.storage_tiers` names
+# the same 0600 as `RESTRICTED_FILE_MODE`, because an unencrypted artifact the
+# trees declare gitignored wants exactly this mode on its file and none of the
+# enclave above it. One object, so the cipher's mode and the declared mode
+# cannot drift into two answers about the same number.
+ENCRYPTED_FILE_MODE = RESTRICTED_FILE_MODE
 
 
 class KeyUnusable(ValueError):

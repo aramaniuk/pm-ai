@@ -59,7 +59,7 @@ from collections.abc import Iterable
 
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.health import Health, Probe, Report
-from pm_ai.ports import ConnectorPort
+from pm_ai.ports import ConnectorPort, DuplicateConnector
 
 __all__ = [
     "ConnectorRegistry",
@@ -77,19 +77,12 @@ __all__ = [
 HEALTH_PROBE_SECONDS = 10.0
 
 
-class DuplicateConnector(Exception):
-    """Two connectors registered under one instance name, so one would be lost.
-
-    Refused at registration rather than resolved by last-write-wins. The instance
-    name is what a cursor, a coverage window and a stored credential are all keyed
-    by, so two connectors sharing one would interleave their cursors — each
-    re-harvesting from where the other left off — and the symptom would be missing
-    events, weeks later, with nothing in the logs.
-
-    Not a `KeyError` or a `ValueError`: a caller catching either of those is
-    catching something else, and this is a composition-time refusal that should
-    stop a daemon starting rather than be absorbed by a broad `except`.
-    """
+# `DuplicateConnector` was declared here until story `8b`, and now lives in
+# `pm_ai.ports` — re-exported above so this module's name for it is unchanged.
+# The move was forced rather than tidy: `8b`'s enrolment raises the same refusal
+# from `pm_ai.core`, which sits below this package in the enforced layer stack
+# and may not import it. Two classes with one name, in two packages that cannot
+# see each other, is a refusal a caller catches half of.
 
 
 class ConnectorRegistry:

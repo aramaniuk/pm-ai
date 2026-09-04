@@ -278,7 +278,8 @@ def test_an_absent_config_is_a_first_run_not_an_error(registered, probes, capsys
 
 
 def test_read_optional_turns_absence_into_a_value(registered, tmp_path):
-    """`read_artifact` ends in `read_bytes()` and has no `bytes | None` form."""
+    """Absence is a value on this path — through the wrapper and, since `8f`,
+    through `read_artifact` itself, which is what the wrapper now delegates to."""
     daemon = entry._compose(_Keychain())[0]
     assert daemon is not None
     assert entry.read_optional(
