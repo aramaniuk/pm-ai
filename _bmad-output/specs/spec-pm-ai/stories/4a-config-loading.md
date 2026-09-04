@@ -31,7 +31,7 @@ baseline_commit: '2120c5de1c09a42e560600bd5e957fab45b3e550'
 | `pm_handle` | str | hardcoded `"andrei@example.com"` at `wiring.py:44`; `extract()` takes it |
 | `verbose_logging` | bool | the one setting `environment.py:16-17` explicitly sanctions for this file |
 
-**Ask First:** Any fourth key. Story 4's note says what `config.toml` comes to hold is otherwise undecided.
+**Ask First:** Any key beyond the four. The fourth, `display_timezone`, was added by the human on 2026-09-03 and lands in `4g` — see the change log. Story 4's note says what `config.toml` comes to hold is otherwise undecided, so the reservation stands for a fifth.
 
 **Never:** No `tomllib` import outside this module. No environment reads — that is `environment.py`, and two readers of one dangerous flag is the failure it exists to prevent. No write path: `config.toml` is hand-edited (AD-3).
 

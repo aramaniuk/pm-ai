@@ -2,7 +2,7 @@
 title: 'The storage port declares what storage does'
 type: 'feature'
 created: '2026-09-03'
-status: 'in-review'
+status: 'ready-for-dev'
 review_loop_iteration: 0
 ---
 

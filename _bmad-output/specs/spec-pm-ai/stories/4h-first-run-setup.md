@@ -26,7 +26,9 @@ context: []
 - **Setup asserts its own result.** It ends by running `1g`'s probes and reporting them, exiting per `4c`'s table. "The command succeeded" and "the machine is ready" are different claims, and only the second matters to the operator.
 - **Nothing is reimplemented.** `4b`'s `enrol`, `4d`'s registry and `4g`'s `render_config` are called. This slice owns the order, the prompts, and the write.
 
-**Ask First:** whether setup should also offer `connector add` (`8b`) once it exists. Excluded here: a connector needs a tenant and a browser sign-in, which is a different kind of step from three local ones.
+**Ask First:** Nothing.
+
+**Never, added:** setup does not offer `connector add`. A connector needs a tenant and a browser sign-in, which is a different kind of step from three local ones — the clause was self-answered where it stood.
 
 **Never:** No encryption toggle. No credential in `config.toml` — that is `8b`'s sealed store. No prompting for anything `4a` does not accept: the closed vocabulary is the whole question set. No daemon, no scheduler, no Telegram surface — Telegram reuses `4g`'s renderer when story 5 lands. No new subcommand beyond `setup`.
 

@@ -2,7 +2,7 @@
 title: 'CLI entry point and subcommand dispatch'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'ready-for-dev'
 review_loop_iteration: 1
 ---
 
@@ -27,7 +27,9 @@ review_loop_iteration: 1
 - **`doctor` runs even when composition fails.** It is the command for a broken machine, so a broken machine must not make it unreachable — an unregistered project, an unwritable root or an unparseable `config.toml` each become one reported probe result rather than a traceback.
 - **All four `Health` states map explicitly.** `ABSENT` is not healthy (`doctor.py:64-72` says so: setup incomplete, encrypted writes will be refused), so it must not exit `0`.
 
-**Ask First:** Any argument-parsing dependency. `argparse` is in the standard library and this surface is small; a dependency here would need a reason.
+**Ask First:** Nothing.
+
+**Never, added:** no argument-parsing dependency. `argparse` is in the standard library and this surface is small — the clause was self-answered where it stood, and an `Ask First` that answers itself teaches a reader that the next one may be ignored too.
 
 **Never:** No REPL (`4e`). No daemon and no loopback API (`4d`). No `dashboard` subcommand — that is `23b`, and it needs the renderer first. No business logic in `surfaces.cli`: it maps arguments to calls and formats results.
 

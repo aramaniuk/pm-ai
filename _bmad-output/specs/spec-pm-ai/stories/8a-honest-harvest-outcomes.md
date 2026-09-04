@@ -2,7 +2,7 @@
 title: 'Honest harvest outcomes and coverage'
 type: 'bugfix'
 created: '2026-09-02'
-status: 'in-review'
+status: 'ready-for-dev'
 review_loop_iteration: 1
 ---
 

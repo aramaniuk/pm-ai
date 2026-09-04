@@ -26,7 +26,9 @@ context: []
 - **The file says who writes it.** A generated header names the CLI as the primary channel and states plainly that a hand-edit is read but its comments are not preserved.
 - **Hand-editing stays supported.** AD-3's Tier-1 promise is that the file *can* be hand-edited, not that only a human may write it — the same promise `event_log/` keeps while the single writer appends to it.
 
-**Ask First:** whether a comment in a hand-edited file must survive a rewrite. It does not here: `tomllib` reads and cannot write, and round-tripping comments needs a third-party parser.
+**Ask First:** Nothing.
+
+**Never, added:** comments in a hand-edited file are not preserved across a rewrite. `tomllib` reads and cannot write, round-tripping comments needs a third-party parser this slice refuses, and the generated header says so — the clause was self-answered where it stood.
 
 **Never:** No encryption-shaped key may be emitted under any circumstance — `4a` refuses them on read, and a writer able to produce one would hand the loader a file it must reject. No new TOML dependency: three typed keys are emitted directly, and the closed vocabulary means there is nothing unknown to round-trip. No file I/O in this module. No probe — that is `4i`. No caller — `4h` wires it.
 

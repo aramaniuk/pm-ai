@@ -2,7 +2,7 @@
 title: 'Meeting records reach Tier 1'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'ready-for-dev'
 review_loop_iteration: 1
 ---
 
