@@ -10,11 +10,11 @@ Companion to `SPEC.md`. Four scopes, what each holds, and the rule deciding whic
 
 **Team-Member Scope (`~/.pm-ai/private/people/`)** — Gitignored, 600-permissioned records *about direct reports*: career dossiers, goals agreed in a team 1:1, per-employee monitored metrics. Stored under the application scope but governed by its own rules, because two requirements turn on telling it apart from the sovereign personal scope: **these records may sync to an external HR platform on explicit PM approval, and personal-scope records never may.** Deliberately **not** part of the sovereign scope and does not survive a company transition — a single directory, deleted on leaving the role.
 
-**Isolated Project Scopes (`<project-root>/.project-ai/`)** — Repository-specific, committed to version control: project rules, task automation scripts, team cultural conventions, local daily dashboards, meeting records, and the commitments ledger. Its one gitignored subdirectory, `transcripts/`, holds raw meeting captures.
+**Isolated Project Scopes (`<project-root>/.project-ai/`)** — Repository-specific. **Two artifacts are committed** (`[revised 2026-09-03]`): `rules/` — project rules, cultural conventions, engineering specs — and `skills/`, the task automation scripts. Everything under `memory/` is **machine-local**: the daily dashboard, the commitments ledger, meeting records and the event log, alongside `transcripts/`, which was already gitignored. A merge falsifies every mechanism that makes Tier 1 trustworthy — two machines appending to one monthly segment, a whole-file publish clobbering pulled lines, a per-machine dedup set re-appending a teammate's events, sealed segments rewritten, and arrival order lost — so the artifacts a pull would rewrite do not travel. See AD-3.
 
 ## The ownership rule
 
-**Scope is decided by subject, not by convenience.** A meeting record and its transcript live in the scope that owns the meeting: a team meeting in its project, a 1:1 with a direct report in the team-member scope, a purely personal session in the sovereign scope. A committed record may cite only a meeting in its own scope, so the capture is never more or less shareable than the event it records.
+**Scope is decided by subject, not by convenience.** A meeting record and its transcript live in the scope that owns the meeting: a team meeting in its project, a 1:1 with a direct report in the team-member scope, a purely personal session in the sovereign scope. A record may cite only a meeting in its own scope, so the capture is never more or less shareable than the event it records — a rule that outlives `[2026-09-03]` project records becoming machine-local, because AD-31's destination rule still governs what may enter an output bound for a project artifact, and `rules/` and `skills/` remain committed.
 
 Every scope that owns meetings holds its captures at the same relative path (`transcripts/`), the way each holds its own `event_log/`. That is three of the four:
 
@@ -139,20 +139,22 @@ The application scope holds none, because it owns no meetings. **All three are e
 ```
 <project-repository-alpha>/
 │
-├── .project-ai/                       # PROJECT-SPECIFIC CONTEXT (committed to git)
+├── .project-ai/                       # PROJECT-SPECIFIC CONTEXT
+│                                      # rules/ and skills/ committed; memory/ is NOT
 │   ├── rules/
 │   │   ├── persona.md                 # Project assistant persona definition
 │   │   ├── conventions.md             # Project team cultural rules
 │   │   └── engineering_specs.md       # Architecture & code guidelines
-│   ├── memory/
+│   ├── memory/                        # MACHINE-LOCAL (gitignored, one directory rule)
+│   │   │                              # A git pull would rewrite Tier 1 under the
+│   │   │                              # Tier-2 and Tier-3 state derived from it.
 │   │   ├── daily_dashboard.md         # Project daily team dashboard
 │   │   ├── commitments_log.md         # Spoken commitments & promise tracking ledger
 │   │   ├── meetings/                  # Meeting SUMMARIES - citation root for every
 │   │   │                              # extracted fact (man-hour cost, attendees, duration).
-│   │   │                              # Committed: a commitment in this scope may only
-│   │   │                              # cite a meeting in this scope.
+│   │   │                              # A record may only cite a meeting in its own scope.
 │   │   └── event_log/                 # Project-specific audit trail & decision log
-│   ├── skills/                        # PROJECT-SPECIFIC SKILLS
+│   ├── skills/                        # PROJECT-SPECIFIC SKILLS (committed)
 │   │   ├── parse_standup.py
 │   │   └── sync_gitlab_wi.py
 │   │
