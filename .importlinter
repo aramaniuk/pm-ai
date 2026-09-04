@@ -187,6 +187,14 @@ forbidden_modules =
 # importing it leaves the git adapter with no legal way to be built. `pm_ai.app`
 # calling subprocess *itself* is still caught, by
 # test_ad1_no_shell_execution_outside_platform, which scans app deliberately.
+#
+# The second ignored edge is the same exception for the same reason, added by
+# story 4c. `pm-ai doctor` runs the startup probes; the probes ask git whether
+# it can answer; and the console script has to live in `pm_ai.app`, because
+# `pm_ai.surfaces` may import neither the composition root nor `pm_ai.platform`
+# (this contract and `os-behind-platform` both forbid it, indirectly included).
+# Forbidding this edge too would leave the diagnostics with no legal caller —
+# which is exactly where they sat between story 1g and story 4c.
 [importlinter:contract:subprocess-confined]
 name = AD-1 — subprocess confined to pm_ai.models.local and pm_ai.platform
 type = forbidden
@@ -204,6 +212,7 @@ forbidden_modules =
     subprocess
 ignore_imports =
     pm_ai.app.wiring -> pm_ai.platform.vcs
+    pm_ai.app.entry -> pm_ai.platform.doctor
 
 
 # ── AD-30: ports declare protocols, they do not depend on implementations ──────

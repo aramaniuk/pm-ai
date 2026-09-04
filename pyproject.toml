@@ -10,6 +10,12 @@ requires-python = ">=3.13"
 # `[mcp]` extra pulls a second web stack that deserves its own resolution pass.
 dependencies = []
 
+# The one thing installing this package puts on an operator's PATH. `main()`
+# returns an exit code and the console-script wrapper passes it to `sys.exit`,
+# so the table in `pm_ai.surfaces.cli.dispatch` is what a shell actually sees.
+[project.scripts]
+pm-ai = "pm_ai.app.entry:main"
+
 [project.optional-dependencies]
 # The Stack table from ARCHITECTURE-SPINE.md, made executable.
 # Versions re-verified against their registries 2026-08-19.

@@ -324,3 +324,55 @@ class SkillPort(Protocol):
 
     def execute(self, target: TargetRef, payload: dict) -> str:
         """Perform the mutation, return the external id it produced."""
+
+
+@runtime_checkable
+class ConfigPort(Protocol):
+    """The settings `config.toml` carries, named where `pm_ai.core` is unreachable.
+
+    `pm_ai.core.config.Config` is the only implementation and always will be —
+    this exists because `pm_ai.ports` may import nothing but `pm_ai.domain`
+    (`.importlinter`'s `ports-depend-only-on-domain`), so `DaemonPort` below has
+    no way to say `Config` and would otherwise say `Any`.
+
+    Read-only members, deliberately: `Config` is frozen, and a protocol
+    declaring settable attributes would claim a surface may write one.
+    """
+
+    @property
+    def blended_hourly_rate(self) -> float: ...
+
+    @property
+    def pm_handle(self) -> str: ...
+
+    @property
+    def verbose_logging(self) -> bool: ...
+
+
+@runtime_checkable
+class DaemonPort(Protocol):
+    """AD-30 — what a surface may see of the daemon the composition root built.
+
+    `pm_ai.app.wiring.Daemon` is the implementation, and no surface may name it:
+    `surfaces` sits *below* `app` in the enforced layer stack, so
+    `pm_ai.surfaces.cli.dispatch` cannot import it and an unannotated parameter
+    there would be implicitly `Any` — the defect story `1k` retired from
+    `SkillRegistry`, reintroduced in the most branch-heavy module of the wave.
+
+    Four members, and no more. The CLI reads settings, reaches the single writer,
+    enrols the master key, and knows which scope it is acting in; everything else
+    `Daemon` holds — the connectors, the skill registry, the cipher — is the
+    daemon's own business, and naming it here would make it the CLI's.
+    """
+
+    @property
+    def storage(self) -> StoragePort: ...
+
+    @property
+    def keychain(self) -> KeychainPort: ...
+
+    @property
+    def config(self) -> ConfigPort: ...
+
+    @property
+    def scope(self) -> DataScope: ...

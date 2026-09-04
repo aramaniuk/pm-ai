@@ -398,3 +398,43 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/11a-meeting-records-reach-tier-one.md`
   summary: A meeting record's `## Summary` is derived from the transcript **and** an append-only amendment log, and each amendment appends a `meeting_amended` entry to the event log.
   evidence: The PM amends through the CLI or Telegram — text or voice — not by hand-editing, so pm-ai owns every write and there is no concurrent editor to merge against; amendments are records carrying instant, actor and surface, appended and never regenerated, while the summary is re-derived from both so a correction reads correctly rather than sitting below the thing it corrects. CAP-10 requires the event-log entry, and it **cannot** be an `ObservedEventType`: those require a `SourceRef` and `persist_events` dedups on the key derived from it, so a second amendment to one meeting would share the first's key and be silently dropped — the failure `2c` documented when it rejected putting `COMPACTION` there. So `SelfActionType` gains `meeting_amended` and `2c`'s payload registry gains a typed payload for it, under `2c`'s standing guards: disjoint value sets, and no member declarable by a connector. Voice amendments additionally need Whisper (story 7); text amendments do not.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: 4c's frozen matrix row 10 names `config show`, a leaf the 2026-09-03 sizing split moved to `4j`; the clause is `4j`'s to satisfy.
+  evidence: The row was written 2026-09-02, before the split recorded in the same spec's Change Log. 4c's Never clause and the split entry both assign the three service leaves to `4j`. The row's substantive half — config absence is a first-run state, not an error — is covered and passing by `test_an_absent_config_is_a_first_run_not_an_error` and `test_read_optional_turns_absence_into_a_value`. Human chose to accept rather than renegotiate the frozen block (2026-09-04).
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: `Command.run` is `Callable[[Context], int]` and `dispatch` drops every word after the leaf name, so no subcommand can receive an argument — `4j`, `4k` and `8b` all need one.
+  evidence: `dispatch.py` resolves `leaf = command.leaves.get(rest[0]) if rest else None` and never passes `rest[1:]` on. 4c is unaffected because `doctor` takes no arguments, but 4c's own probe remedy text tells the operator to run `pm-ai project add <path>`, and `8b` adds `pm-ai connector add`. The signature must gain arguments in `4j`, before the first leaf that needs them. Deliberately not patched during 4c review: a "leaf takes no arguments" guard would harden the wrong assumption.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: `python -m pm_ai.platform.doctor` returns 0/1 while `pm-ai doctor` returns 0/4, so exit 1 means both "unhealthy machine" and "pm-ai crashed".
+  evidence: Measured on 2026-09-04, same probe results: `uv run pm-ai doctor` → 4, `uv run python -m pm_ai.platform.doctor` → 1. 4c's frozen Always says the exit-code table is declared "here and nowhere else", and 4c edited `doctor.py`'s docstring to say dispatch decides the code, but `doctor.main()` still decides its own. `platform` may not import `surfaces`, so the runner cannot reuse the constants; the fix is to retire `doctor.main()` and its `__main__` block now that a console script supersedes them, which also touches `tests/architecture/test_doctor.py`'s `returncode in (0, 1)` assertion. Escalated to the human at 4c's review checkpoint rather than patched.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: `--help` is honoured only in argv position 0, so `pm-ai doctor --help` exits 2 with "takes no arguments" and there is no per-command help.
+  evidence: `dispatch` consults `_HELP_FLAGS` once, before the table lookup. 4c's matrix specifies only the bare `pm-ai --help` form, so this is unspecified rather than wrong — but it becomes user-visible as soon as `4j` adds leaves worth asking about.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: Two or more registered projects are reported as "the enrolled project cannot be resolved to a directory", with the remedy "Re-enrol the repository" — wrong for an operator whose projects both resolve fine.
+  evidence: `_select` raises `UnknownProject`, which `_compose` catches in its `ScopeResolutionError` arm. Unreachable today because `_registered_projects()` returns `{}` until `4d`; `4d` owns the choice policy and should give ambiguity its own probe and remedy.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: A malformed `config.toml` discards a daemon that composed successfully, so every non-`doctor` subcommand refuses — including the `config show` that would diagnose it.
+  evidence: `_compose`'s `ConfigRefused` arm returns `(None, probe)`, so `require_daemon()` refuses. `4j` owns `config show`; carrying the refusal as a probe while keeping the daemon would make the tool usable at the moment it is most needed.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: `_compose` mutates `daemon.config` after `build()` instead of using `build`'s own `config` parameter, which exists for exactly this decision.
+  evidence: `build()` declares `config: Config | None = None` and its docstring says the parameter is there so `4c` decides what an unparseable config does to a `doctor` run. Not trivially fixable: `_config()` reads through `daemon.storage`, which `build()` creates, so the seam needs either a pre-`build` read from `paths` or a frozen `Daemon`. Harmless today only because nothing inside `build` reads `config`.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: `_compose`'s `OSError` arm blames `~/.pm-ai` for any I/O failure raised anywhere inside `build()` or the config read.
+  evidence: Its own test proves it fires for a `StorageService.read_artifact` permission error; it would fire identically for an unreadable project repository, sending the operator to check the wrong directory's ownership. The fix is to name the operation that failed or narrow the `try`.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: `test_doctor_runs_the_real_probes_and_prints_them` runs the real `MacOSKeychainAdapter` against the developer's login keychain with no `HOME` redirect.
+  evidence: `keychain_reachable` calls `keychain.fetch(MASTER_KEY_NAME)`; `tests/architecture/test_cipher.py` notes this "is a user-visible prompt on some configurations". Latent here only because `keyring` is absent without the `runtime` extra, so the probe reports an incomplete install instead. Left unpatched because keeping the probes genuinely real while isolating custody is a design choice best made in `4b`, where the keychain work lives.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
+  summary: `dispatch` reads the module global `TABLE` while documenting that everything it needs arrives as an argument, forcing tests to monkeypatch the global.
+  evidence: Both refusal tests do `monkeypatch.setattr(cli, "TABLE", {**cli.TABLE, ...})`. A defaulted `table=TABLE` parameter would make those tests local and let `4j` test its leaves without patching module state.

@@ -29,9 +29,10 @@ is wrong makes the operator guess at what to do, and guessing is how a machine
 gets a second key written over a store that could still have been opened.
 
 No repair actions, ever: probes are read-only and never create, migrate, or fix
-anything. And no `pm-ai doctor` subcommand here — `pyproject.toml` declares no
-console entry point and the CLI is story 4. This ships callables plus a
-`python -m pm_ai.platform.doctor` runner, and story 4 surfaces them.
+anything. And no `pm-ai doctor` subcommand here: this ships callables plus a
+`python -m pm_ai.platform.doctor` runner, and story 4c surfaced them from
+`pm_ai.surfaces.cli.dispatch` — which is also where the exit code a `doctor` run
+produces is decided, since `Report.healthy` is a verdict and not a code.
 """
 
 from __future__ import annotations
