@@ -28,6 +28,7 @@ from pm_ai.connectors import registry as connectors
 from pm_ai.core.config import ACCEPTED_KEYS, Config, ConfigRefused, load_config
 from pm_ai.domain.health import Health, Probe
 from pm_ai.ports import (
+    AES_KEY_BYTES,
     MASTER_KEY_NAME,
     KeyAlreadyEnrolled,
     KeychainBackendMissing,
@@ -199,7 +200,7 @@ def test_enrolment_on_a_clean_keychain_succeeds(registered, keychain, capsys):
     """`4b`'s service, invoked with `Daemon.keychain` — the field `4c` added for it."""
     custody = keychain()
     assert entry.main(["key", "enrol"]) == EXIT_OK
-    assert custody.stored is not None and len(custody.stored) == 32
+    assert custody.stored is not None and len(custody.stored) == AES_KEY_BYTES
     printed = capsys.readouterr().out
     assert MASTER_KEY_NAME in printed
 
@@ -274,7 +275,9 @@ def test_the_three_failure_modes_stay_distinguished(registered, keychain, capsys
     assert len(set(messages.values())) == len(modes), messages
 
 
-def test_a_key_that_does_not_read_back_is_a_refusal(registered, keychain, capsys):
+def test_a_key_that_does_not_read_back_is_a_refusal(
+    registered, keychain, capsys, monkeypatch
+):
     """A write that reports success and stores nothing is the silent failure `4b` reads back for.
 
     The alternative is finding out months later, on a machine with nobody
@@ -286,13 +289,13 @@ def test_a_key_that_does_not_read_back_is_a_refusal(registered, keychain, capsys
             raise KeyNotFound(name)
 
     fake = Amnesiac()
-    import pm_ai.app.entry as module
+    # `monkeypatch`, not assignment plus `del`. Deleting the name outright left
+    # the module without an attribute it is defined with, and only the
+    # `registered` fixture's own undo put it back — so reordering these tests,
+    # or dropping that fixture, made every later `entry.main` raise NameError.
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: fake)
 
-    module.MacOSKeychainAdapter = lambda: fake  # type: ignore[assignment]
-    try:
-        assert entry.main(["key", "enrol"]) == EXIT_REFUSAL
-    finally:
-        del module.MacOSKeychainAdapter
+    assert entry.main(["key", "enrol"]) == EXIT_REFUSAL
     assert "do not treat this machine as set up" in capsys.readouterr().err
 
 

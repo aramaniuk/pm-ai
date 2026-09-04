@@ -525,3 +525,38 @@ def test_the_daemon_carries_the_very_keychain_it_was_built_with(tmp_path):
     assert isinstance(custody, KeychainPort), "the fake must satisfy the port"
     daemon = build(tmp_path, "demo", keychain=custody)
     assert daemon.keychain is custody
+
+
+def test_a_help_flag_with_trailing_words_is_a_usage_error(capsys):
+    """`pm-ai --help enrol` printed top-level usage and exited 0.
+
+    A reader could not tell that from a real answer about `enrol`, and every
+    other path in the table already refuses words it was not going to use.
+    """
+    assert entry.main(["--help", "enrol"]) == EXIT_USAGE
+    assert "takes no arguments" in capsys.readouterr().err
+
+
+def test_the_registry_reader_is_honestly_empty_until_4d():
+    """The real function, not the stub every other test installs.
+
+    `_registered_projects` is monkeypatched in all six of its other uses, so
+    nothing exercised the one thing that decides whether any subcommand but
+    `doctor` can run. AD-11 forbids discovering projects by scanning, so an
+    unread registry must be empty rather than guessed at — and when `4d` gives
+    it a reader, this test is what fails and names the contract it changed.
+    """
+    assert entry._registered_projects() == {}
+
+
+def test_a_real_machine_reaches_doctor_and_refuses_the_rest(capsys):
+    """End to end through the real reader, with nothing stubbed.
+
+    This is the state every operator is actually in today, and no test covered
+    it: composition fails, `doctor` still reports, and the other leaves refuse
+    rather than crashing.
+    """
+    assert entry.main(["doctor"]) == EXIT_UNHEALTHY
+    assert "project" in capsys.readouterr().out
+    assert entry.main(["config", "show"]) == EXIT_REFUSAL
+    assert entry.main(["key", "enrol"]) == EXIT_REFUSAL
