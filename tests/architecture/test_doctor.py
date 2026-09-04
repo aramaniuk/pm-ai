@@ -42,9 +42,9 @@ SECRET = b"\x00\x01\xfe a-real-looking-key"
 class Keychain:
     """A whole `KeychainPort`, which fails however a row needs it to.
 
-    All three methods, not just the one the probe calls. Annotating
-    `keychain_reachable` with the port on 2026-08-25 immediately caught this as a
-    partial fake: it had satisfied the parameter only because the parameter was
+    Every method the port declares, not just the one the probe calls.
+    Annotating `keychain_reachable` with the port on 2026-08-25 immediately
+    caught this as a partial fake: it had satisfied the parameter only because the parameter was
     implicit `Any`. A fake that claims to be a port and is not means every row
     using it proves less than it appears to.
     """
@@ -53,6 +53,13 @@ class Keychain:
         self._secret, self._raises = secret, raises
 
     def store(self, name: str, secret: bytes) -> None:
+        self._secret = secret
+
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        from pm_ai.ports import KeyAlreadyEnrolled
+
+        if self._secret is not None:
+            raise KeyAlreadyEnrolled(f"{name!r} already holds a secret")
         self._secret = secret
 
     def fetch(self, name: str) -> bytes:

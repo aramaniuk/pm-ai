@@ -27,8 +27,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from pm_ai.platform import keychain as keychain_module
 from pm_ai.platform.keychain import KEYCHAIN_SERVICE, MacOSKeychainAdapter
-from pm_ai.ports import KeychainPort, KeychainUnavailable, KeyNotFound
+from pm_ai.ports import (
+    KeyAlreadyEnrolled,
+    KeychainPort,
+    KeychainUnavailable,
+    KeyNotFound,
+)
 
 NAME = "master"
 SECRET = b"\x00\x01\xfe\xff not-ascii \x80"
@@ -44,6 +50,11 @@ class FakeKeychain:
     secrets: dict[str, bytes] = field(default_factory=dict)
 
     def store(self, name: str, secret: bytes) -> None:
+        self.secrets[name] = secret
+
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        if name in self.secrets:
+            raise KeyAlreadyEnrolled(f"{name!r} already holds a secret")
         self.secrets[name] = secret
 
     def fetch(self, name: str) -> bytes:
@@ -253,6 +264,100 @@ def test_the_secret_is_addressed_under_one_service_name(monkeypatch):
     MacOSKeychainAdapter().store(NAME, SECRET)
 
     assert seen == [(KEYCHAIN_SERVICE, NAME)]
+
+
+# ── The conditional store (story 4b) ─────────────────────────────────────────
+#
+# `store` replaces; `store_if_absent` refuses. The distinction is the whole
+# defence against a second enrolment overwriting the key every sealed artifact
+# was written under, so both halves are exercised: the port's contract through
+# the fake, and the adapter's OSStatus-to-refusal mapping through a substituted
+# framework call — the real one would be a Keychain write, which story 1d
+# forbids the suite outright.
+
+
+def test_a_conditional_store_refuses_rather_than_replacing():
+    keychain = FakeKeychain({NAME: SECRET})
+
+    with pytest.raises(KeyAlreadyEnrolled):
+        keychain.store_if_absent(NAME, b"a second key")
+
+    assert keychain.fetch(NAME) == SECRET, "the refusal still replaced the key"
+
+
+def test_a_conditional_store_into_an_empty_keychain_writes():
+    keychain = FakeKeychain()
+    keychain.store_if_absent(NAME, SECRET)
+    assert keychain.fetch(NAME) == SECRET
+
+
+def _substitute_add(monkeypatch, status, calls):
+    def add(service, account, encoded):
+        calls.append((service, account, encoded))
+        return status
+
+    monkeypatch.setattr(keychain_module, "_add_generic_password", add)
+
+
+def test_the_adapter_reads_a_duplicate_item_as_already_enrolled(monkeypatch):
+    """`errSecDuplicateItem` is the framework refusing, not the adapter guessing.
+
+    The status is what makes the operation conditional: the check and the write
+    happen inside Security, so two enrolments racing cannot both observe an
+    empty keychain and both write.
+    """
+    _install_fake_keyring(monkeypatch, behaviour=lambda module, error: None)
+    _substitute_add(monkeypatch, keychain_module.ERR_SEC_DUPLICATE_ITEM, [])
+
+    with pytest.raises(KeyAlreadyEnrolled) as refusal:
+        MacOSKeychainAdapter().store_if_absent(NAME, SECRET)
+
+    assert "unreadable" in str(refusal.value), "the refusal must name the consequence"
+
+
+def test_the_adapter_writes_the_same_base64_the_replacing_store_writes(monkeypatch):
+    """Or `fetch` reads back something it cannot decode, on the enrolment path only.
+
+    Two spellings of one secret in a keychain is a key that decodes on the path
+    nobody used and not on the path everybody does.
+    """
+    import base64
+
+    _install_fake_keyring(monkeypatch, behaviour=lambda module, error: None)
+    calls: list[tuple[str, str, str]] = []
+    _substitute_add(monkeypatch, 0, calls)
+
+    MacOSKeychainAdapter().store_if_absent(NAME, SECRET)
+
+    assert calls == [(KEYCHAIN_SERVICE, NAME, base64.b64encode(SECRET).decode("ascii"))]
+    assert SECRET.decode("latin-1") not in calls[0][2]
+
+
+def test_an_unrecognised_status_is_a_refusal_that_names_it(monkeypatch):
+    """Anything but success or duplicate means nothing is known and nothing was written."""
+    _install_fake_keyring(monkeypatch, behaviour=lambda module, error: None)
+    _substitute_add(monkeypatch, -25308, [])  # errSecInteractionNotAllowed
+
+    with pytest.raises(KeychainUnavailable, match="-25308"):
+        MacOSKeychainAdapter().store_if_absent(NAME, SECRET)
+
+
+def test_no_key_is_written_when_the_backend_that_would_read_it_is_missing(monkeypatch):
+    """A key `fetch` cannot read is not enrolled, however cleanly the write went.
+
+    Without the gate an install missing `keyring` reports a successful enrolment
+    and then fails every read of the key it just wrote — a machine that looks set
+    up and is not.
+    """
+    monkeypatch.setitem(sys.modules, "keyring", None)
+    calls: list[tuple[str, str, str]] = []
+    _substitute_add(monkeypatch, 0, calls)
+
+    with pytest.raises(KeychainUnavailable) as refusal:
+        MacOSKeychainAdapter().store_if_absent(NAME, SECRET)
+
+    assert "keyring" in str(refusal.value)
+    assert calls == [], "a key was written into a keychain nothing can read"
 
 
 @pytest.mark.parametrize(

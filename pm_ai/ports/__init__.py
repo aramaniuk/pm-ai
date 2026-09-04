@@ -198,6 +198,21 @@ class KeychainBackendMissing(KeychainUnavailable):
     """
 
 
+class KeyAlreadyEnrolled(Exception):
+    """A secret is already stored under that name, so nothing was written.
+
+    Neither a `LookupError` nor a `KeychainUnavailable`: the keychain answered,
+    and the answer was that something is there. Raised by
+    `KeychainPort.store_if_absent`, the only operation that can observe that
+    state and decline to change it in the same step.
+
+    Deliberately not a subclass of anything a caller already catches. Minting a
+    second key makes every artifact sealed under the first permanently
+    unreadable, so this refusal must never be swallowed by an `except` written
+    for a keychain that could not answer.
+    """
+
+
 # The name the master key is enrolled under. Spelled here because two callers
 # that may not import each other both need it: the composition root builds the
 # lazy cipher with it, and the doctor probes for it. Two independent literals
@@ -205,6 +220,17 @@ class KeychainBackendMissing(KeychainUnavailable):
 # other probing a key that no longer exists — ABSENT reported on a healthy
 # machine.
 MASTER_KEY_NAME = "master"
+
+# How many bytes that key is. Here rather than in `pm_ai.storage.crypto`, which
+# owned it until story 4b, for exactly the reason stated above the name: two
+# callers that may not import each other both need it. `pm_ai.core.enrolment`
+# mints a key of this length, and the layering contract forbids `pm_ai.core`
+# importing `pm_ai.storage` at all — so the alternative was a second literal
+# `32` in `core`, which is the shape that produced the ABSENT-on-a-healthy-
+# machine defect when it happened to the *name*. `pm_ai.storage.crypto`
+# re-exports it, so `crypto.AES_KEY_BYTES` and this are one object, and the
+# cipher's 32-byte refusal and the minter's 32-byte key cannot drift apart.
+AES_KEY_BYTES = 32
 
 
 @runtime_checkable
@@ -225,6 +251,27 @@ class KeychainPort(Protocol):
         """Store `secret` under `name`, replacing any previous value.
 
         Raises `KeychainUnavailable` if the keychain could not be reached.
+
+        Not what enrolment uses: replacing the master key destroys every
+        artifact sealed under the old one. See `store_if_absent`.
+        """
+
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        """Store `secret` under `name` **only if nothing is stored there**.
+
+        One operation, not a `fetch` followed by a `store`. Two enrolments that
+        both read an empty keychain would both then write, and the second would
+        replace the first's key — leaving every artifact sealed in between
+        permanently unreadable. The condition and the write have to be the same
+        step, or the refusal is advisory.
+
+        Raises `KeyAlreadyEnrolled` when something is already stored under
+        `name`, whatever that something is. An entry too short to be a key, or
+        one that is not key material at all, is still an entry: reading it as
+        absence is precisely how it gets minted over.
+
+        Raises `KeychainUnavailable` if the keychain could not be reached, and
+        `KeychainBackendMissing` if there is no keychain library to ask.
         """
 
     def fetch(self, name: str) -> bytes:
