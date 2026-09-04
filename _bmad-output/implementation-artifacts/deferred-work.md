@@ -466,3 +466,11 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4j-cli-service-subcommands.md`
   summary: Leaves now refuse trailing arguments, which sharpens the deferred argument-passing gap: `4k` and `8b` must give `Leaf` an arity declaration, not merely pass `rest` through.
   evidence: `dispatch` prints "`<group> <leaf>` takes no arguments" and exits 2 for any word after a leaf, and tests assert it. The refusal is right for 4j's three argument-less leaves — silently dropping an invented `--dry-run` is worse — but `project add <path>` and `connector add` now have a tested branch to change rather than an absent one.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
+  summary: `read_optional` in `pm_ai/app/entry.py` is dead weight now that `read_artifact` returns `bytes | None` — its `except FileNotFoundError` is unreachable through the real service.
+  evidence: 8f moved absence-as-a-value into the port, which is where `4c` said it belonged once something declared it. Retiring it touches one call site, one test in `tests/surfaces/test_cli_dispatch.py`, and a by-name reference in this file. Left in place because 8f's task list names five files and `app/entry.py` is not one; its docstring was corrected so it no longer claims to do the translation.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
+  summary: `_append` still writes event-log and meeting segments at the umask, so the declared restricted mode never reaches them.
+  evidence: `event_log/` and `meetings/` are declared gitignored in the PEOPLE tree, but ledger appends go through `path.open("a")` rather than `_publish`, which is where `restricted_mode` is consulted. Outside 8f's matrix, and it matters the moment the people enclave's segment modes do.

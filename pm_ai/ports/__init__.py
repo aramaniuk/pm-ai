@@ -400,6 +400,51 @@ class StoragePort(Protocol):
     # caller; not what the registry uses.
     def record_execution(self, idempotency_key: str, target: TargetRef, external_id: str) -> None: ...
 
+    # Artifacts, added with story 8f. This port declared nine methods and
+    # neither the single writer nor the single reader, while `StorageService`
+    # implemented both — so the Protocol under-declared its own implementation
+    # and anything typed against it could reach every ledger and no artifact,
+    # which is the whole of AD-3's tiering contract as far as a port consumer
+    # can see. The same absence story 2h closed for the event log; filed as A1
+    # by the wave-1 review and downgraded because `Daemon.storage` happens to be
+    # the concrete class.
+
+    def write_artifact(
+        self, payload: bytes, *, scope: DataScope, artifact: str, name: str | None = None
+    ) -> Path: ...
+
+    def read_artifact(
+        self, *, scope: DataScope, artifact: str, name: str | None = None
+    ) -> bytes | None:
+        """The artifact's bytes, or `None` when nothing has been written there.
+
+        `bytes | None` rather than `bytes`, because absence is the ordinary
+        state of every optional artifact on a clean machine and a first run is
+        not a failure. The implementation ended in `path.read_bytes()` until
+        story 8f, so each caller that needed "not there yet" wrote its own
+        translation of `FileNotFoundError` — and the one that forgets aborts on
+        a machine that is merely new.
+
+        Absence alone is a value. A directory in the way, a permission refusal,
+        an undecryptable file: those raise, because reporting them as "no file"
+        is how a machine that cannot read its own configuration looks freshly
+        installed.
+        """
+
+    def list_collection(self, *, scope: DataScope, artifact: str) -> tuple[str, ...]:
+        """The member names a declared `Collection` currently holds.
+
+        Names, not paths, and that is the load-bearing half. A caller reaching
+        this port may not learn where an artifact lives — the resolver is the
+        only thing that knows (story 1a) — and a listing of paths would be a way
+        to open one directly, which is AD-5's single writer routed around.
+
+        Empty when nothing has been written yet; asking must not create the
+        directory. Raises `pm_ai.domain.ScopeResolutionError` when `artifact` is
+        not a `Collection` at all: a `File` has no members, and a `Dir`'s are
+        declared in the scope trees rather than discovered on disk.
+        """
+
 
 @runtime_checkable
 class SkillPort(Protocol):

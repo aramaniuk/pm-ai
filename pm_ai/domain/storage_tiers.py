@@ -22,6 +22,10 @@ This module keeps what operates on that model rather than restating it:
   exclude, and a directory already in the index each make it disagree with git,
   the first two in the direction that publishes a transcript. See
   `pm_ai.domain.vcs`.
+- `restricted_mode` — the file mode a declared artifact lands at, derived from
+  the same `gitignored` declaration `requires_git_exclusion` reads.
+- `assert_is_collection` — whether an artifact has runtime members to list at
+  all, which is the question `StoragePort.list_collection` asks first.
 - `EVENT_LOG`, `OPERATIONAL_DB` and `CAPTURES` — the three artifact keys that
   appear in *code* rather than only in a tree, spelled once.
 
@@ -45,6 +49,7 @@ from pm_ai.domain.scope_model import (
     ENCRYPTED,
     GITIGNORED,
     KEYS,
+    Collection,
     REBUILD_TARGETS,
     RETENTION_MANAGED,
     OutsideTierModel,
@@ -63,9 +68,11 @@ __all__ = [
     "GITIGNORE_FILENAME",
     "ENCRYPTED",
     "GITIGNORED",
+    "NotACollection",
     "OPERATIONAL_DB",
     "OutsideTierModel",
     "REBUILD_TARGETS",
+    "RESTRICTED_FILE_MODE",
     "RETENTION_MANAGED",
     "ScopeResolutionError",
     "Tier",
@@ -73,10 +80,12 @@ __all__ = [
     "UnprotectedCaptureDir",
     "assert_capture_dir_ignored",
     "assert_capture_dir_untracked",
+    "assert_is_collection",
     "assert_reindex_safe",
     "gitignore_rule_for",
     "is_append_only",
     "requires_git_exclusion",
+    "restricted_mode",
 ]
 
 
@@ -168,6 +177,90 @@ def is_append_only(scope_kind: ScopeKind, artifact: str) -> bool:
     placement = ADDRESS[scope_kind].get(artifact)
     key = placement.node.key if placement is not None else artifact
     return key in _APPEND_ONLY_KEYS
+
+
+# ── What mode an artifact's file lands at ────────────────────────────────────
+
+RESTRICTED_FILE_MODE = 0o600
+"""Owner-only. The mode a declared-restricted artifact's file is created at.
+
+The same number `pm_ai.storage.crypto` spells as `ENCRYPTED_FILE_MODE`, and now
+the same object — that constant is an alias of this one. A cipher's file mode
+and a plaintext credential neighbourhood's file mode are one decision, and two
+literals are how one decision becomes two that can disagree.
+"""
+
+
+def restricted_mode(scope_kind: ScopeKind, artifact: str) -> int | None:
+    """The mode this artifact's file must be created at, or `None` for the umask.
+
+    Derived from the trees, beside the tier and exclusion answers, rather than
+    from a second table of restricted artifacts: the axis is `gitignored`. An
+    artifact declared "must never enter version control" (AD-23, AD-38, AD-43)
+    is one whose content is this machine's own business, and `connectors/` is
+    the case that forced the question. It is unencrypted by design — what it
+    needs is integrity, not confidentiality, and a cipher over executed modules
+    would have given neither — so `_replace` passed no mode for it and one file
+    per connector instance landed at the umask, typically 0644, next to the
+    credential store.
+
+    Reads `GITIGNORED` directly rather than calling `requires_git_exclusion`,
+    which reads the same set: that function answers "must the writer ask git
+    first", this one answers "who may read the file", and collapsing them would
+    make either one's rule impossible to change without changing the other's.
+
+    What this does NOT carry is the *enclave*. 0700 on every parent directory is
+    right for the encrypted set, where a listable directory publishes the names,
+    sizes and mtimes the enclave exists to hide, and wrong here: tightening
+    `~/.pm-ai` as a side effect of writing one connector file is a change nobody
+    asked for and nobody would notice. The caller applies the two separately.
+
+    `None` rather than `0o644`: the umask is the operator's answer for an
+    artifact that never asked for one, and naming a permissive mode here would
+    override it everywhere.
+    """
+    if _qualified(scope_kind, artifact) in GITIGNORED[scope_kind]:
+        return RESTRICTED_FILE_MODE
+    return None
+
+
+# ── Which artifacts have runtime members to enumerate ────────────────────────
+
+
+class NotACollection(ScopeResolutionError):
+    """A members listing was asked for over an artifact that has no members.
+
+    A `ScopeResolutionError` because that is the one refusal type a caller of
+    `StoragePort` may name: the concrete refusals live in `pm_ai.platform.paths`
+    and in `pm_ai.storage`, and callers of the port are forbidden to import
+    either.
+    """
+
+
+def assert_is_collection(scope_kind: ScopeKind, artifact: str) -> None:
+    """Refuse a members listing over anything but a `Collection`.
+
+    A `Collection` is the one node type whose members this module cannot
+    enumerate, which is precisely why enumerating them at runtime is a
+    capability at all. Over a `File` the question has no answer — a single file
+    is not a directory of members, and answering it from the filesystem would
+    mean listing whatever happens to sit beside it. Over a `Dir` the answer is
+    already declared here, and reading it off the disk instead would let a
+    caller discover structure the trees are the authority on.
+    """
+    placement = ADDRESS[scope_kind].get(artifact)
+    if placement is None:
+        raise NotACollection(
+            f"{artifact!r} names no node in the {scope_kind.value} tree, so it "
+            f"has no members to list."
+        )
+    if not isinstance(placement.node, Collection):
+        raise NotACollection(
+            f"{artifact!r} is a {type(placement.node).__name__} in the "
+            f"{scope_kind.value} tree, not a Collection. Only a directory whose "
+            f"members are created at runtime has a listing: a declared file is "
+            f"read whole, and a declared directory's members are in the tree."
+        )
 
 # Named here rather than in `pm_ai.platform`, because `pm_ai.storage` derives
 # the path from git's reported working-tree root and may not import that

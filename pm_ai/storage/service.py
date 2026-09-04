@@ -66,9 +66,11 @@ from pm_ai.domain.storage_tiers import (
     Tier,
     UnprotectedCaptureDir,
     assert_capture_dir_untracked,
+    assert_is_collection,
     gitignore_rule_for,
     is_append_only,
     requires_git_exclusion,
+    restricted_mode,
 )
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.ports import CryptoPort, ScopePathPort, VcsPort
@@ -859,7 +861,9 @@ class StorageService:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(text)
 
-    def _create_exclusively(self, path: Path, text: str, *, staging: Path) -> None:
+    def _create_exclusively(
+        self, path: Path, text: str, *, staging: Path, declared_mode: int | None
+    ) -> None:
         """Create an artifact that must not exist yet, sealing it if declared.
 
         Exclusive creation is the capture path's guarantee: two recordings must
@@ -870,6 +874,11 @@ class StorageService:
         complete *and* a name already taken is refused. `os.replace` would give
         the first property and destroy the second, silently splicing the two
         recordings this refusal exists to keep apart.
+
+        `declared_mode` is `restricted_mode`'s answer for what is being written,
+        computed by the caller that knows the scope and the artifact. It is used
+        only when the artifact is not sealed: a sealed one already gets the same
+        number *and* the enclave around it.
         """
         payload = text.encode("utf-8")
         sealed = is_encrypted(str(path))
@@ -877,11 +886,12 @@ class StorageService:
             path,
             self._crypto.encrypt(payload) if sealed else payload,
             staging=staging,
-            mode=ENCRYPTED_FILE_MODE if sealed else None,
+            mode=ENCRYPTED_FILE_MODE if sealed else declared_mode,
+            enclave=sealed,
             exclusive=True,
         )
 
-    def _replace(self, path: Path, payload: bytes) -> None:
+    def _replace(self, path: Path, payload: bytes, *, declared_mode: int | None) -> None:
         """Write an artifact whole, sealing it if declared. Credentials live here.
 
         Distinct from `_append` because a credential store *is* replaced — it has
@@ -894,13 +904,19 @@ class StorageService:
         the two left `config.json` empty — and an AES-GCM file cut part-way does
         not degrade, it fails its tag and becomes unreadable. Every connector
         credential, lost, with the daemon having done nothing wrong.
+
+        `declared_mode` carries the trees' answer for an artifact that is *not*
+        encrypted — `connectors/`, whose members used to land at the umask.
+        `enclave=sealed` is the whole of story 8f's separation: the mode reaches
+        the file either way, and only the encrypted set takes its parents with it.
         """
         sealed = is_encrypted(str(path))
         self._publish(
             path,
             self._crypto.encrypt(payload) if sealed else payload,
             staging=path.parent,
-            mode=ENCRYPTED_FILE_MODE if sealed else None,
+            mode=ENCRYPTED_FILE_MODE if sealed else declared_mode,
+            enclave=sealed,
             exclusive=False,
         )
 
@@ -916,6 +932,7 @@ class StorageService:
         *,
         staging: Path,
         mode: int | None,
+        enclave: bool,
         exclusive: bool,
     ) -> None:
         """Write `payload` where nobody can see it, then make it visible at once.
@@ -934,12 +951,20 @@ class StorageService:
         - otherwise — `os.replace`, which overwrites deliberately, because a
           rotated credential must land on top of the old one.
 
+        `mode` and `enclave` are two answers, not one. Until story 8f this
+        function inferred the second from the first — `enclave = mode is not
+        None` — so the only way to ask for a restricted *file* was to also chmod
+        every directory above it to 0700, `~/.pm-ai` included. That is right for
+        the encrypted set, where a listable directory publishes the names, sizes
+        and mtimes the enclave hides, and wrong for a declared-gitignored
+        plaintext artifact: one connector file would have tightened the
+        application root, which nobody asked for and nobody would notice.
+
         `fsync` before publishing and on the directory after: without the first,
         a crash can leave a visible, complete-looking name whose content never
         reached stable storage, which is the same problem one layer down.
         """
         parent = target.parent
-        enclave = mode is not None
         if enclave:
             # Every directory created along the way is 0700, not just the
             # immediate parent (story 1f): `mkdir(parents=True, mode=...)`
@@ -1027,7 +1052,9 @@ class StorageService:
         The entry point for the encrypted set — the credential store and the PM's
         voice notes — and the reason no caller decides whether to encrypt. Callers
         name *what* they are writing; the declaration in the scope trees decides
-        *how*.
+        *how*. Since story 8f that covers the file mode as well: an artifact the
+        trees declare gitignored lands at 0600 whether or not it is encrypted,
+        and no signature grew a `mode` argument to say so.
 
         `name` is for an artifact whose members are created at runtime: a
         `Collection` resolves to its directory, so the file inside it has to be
@@ -1059,13 +1086,27 @@ class StorageService:
         target = self._paths.resolve(scope, artifact)
         if name is not None:
             target = target / name
-        self._replace(target, payload)
+        self._replace(target, payload, declared_mode=restricted_mode(scope.kind, artifact))
         return target
 
     def read_artifact(
         self, *, scope: DataScope, artifact: str, name: str | None = None
-    ) -> bytes:
+    ) -> bytes | None:
         """Read a declared artifact, unsealing it if the model says it is sealed.
+
+        `None` means *nothing has been written there yet*, which is the ordinary
+        state of every optional artifact on a clean machine and not a failure.
+        This ended in `path.read_bytes()` until story 8f, so a first run raised
+        `FileNotFoundError` out of whatever asked, and every caller that needed
+        "not there yet" had to wrap the call in its own translation — `4c` wrote
+        one in `pm_ai.app.entry` for exactly this reason.
+
+        Only absence becomes a value. A directory in the way, a permission
+        refusal, an unreadable device — all `OSError`s that are *not* absence —
+        propagate, because reporting them as "no file" is how a machine that
+        cannot read its own configuration looks freshly installed. So does a
+        `DecryptionFailed` or a missing key: the file is there and unopenable,
+        which is a different sentence.
 
         `name` is validated as `write_artifact` validates it — this writer only
         ever mints single-component names, so a traversal here is a request to
@@ -1076,7 +1117,40 @@ class StorageService:
         target = self._paths.resolve(scope, artifact)
         if name is not None:
             target = target / name
-        return self._read(target)
+        try:
+            return self._read(target)
+        except FileNotFoundError:
+            return None
+
+    def list_collection(self, *, scope: DataScope, artifact: str) -> tuple[str, ...]:
+        """The names a declared `Collection` currently holds, sorted.
+
+        Names, never paths. A caller in `core` may not learn where an artifact
+        lives — story `1a` made the resolver the only thing that knows — and a
+        listing that handed out paths would be a way to route around it and open
+        a file directly, which is also AD-5's single writer gone.
+
+        Only a `Collection` has a listing, and `assert_is_collection` is what
+        refuses the rest: a `File` key is a caller error, and a `Dir`'s members
+        are declared in the trees rather than discovered on disk.
+
+        Resolved *without* `create`, for `event_log_segments`' reason: asking
+        what a collection holds must not bring its directory into being. A
+        collection nothing has been written to answers with an empty tuple, not
+        a new empty directory for the next reader to find and believe in.
+
+        Dot-prefixed entries are omitted. The only ones this writer produces are
+        the `.part` files `_publish` stages and unlinks, which are deliberately
+        invisible to the operator NFR-09's purge rule serves — reporting one as
+        a member would name a file that is about to stop existing.
+        """
+        directory = self._paths.resolve(scope, artifact)
+        assert_is_collection(scope.kind, artifact)
+        if not directory.is_dir():
+            return ()
+        return tuple(
+            sorted(entry.name for entry in directory.iterdir() if not entry.name.startswith("."))
+        )
 
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None:
         """Append one typed record to `scope`'s open segment, naming it here.
@@ -1176,10 +1250,21 @@ class StorageService:
         Goes through `read_artifact`, so the name is validated as the single path
         component it becomes — a caller cannot read its way out of the directory
         with a name this writer never minted.
+
+        Absence stays an exception here, alone among the readers. The name comes
+        from `event_log_segments`, which said the segment exists; returning `""`
+        for one that has since vanished would fold a deleted month into "that
+        month was empty", and a fold over an audit trail cannot tell those apart.
         """
-        return self.read_artifact(scope=scope, artifact=EVENT_LOG, name=name).decode(
-            "utf-8"
-        )
+        text = self.read_artifact(scope=scope, artifact=EVENT_LOG, name=name)
+        if text is None:
+            raise FileNotFoundError(
+                errno.ENOENT,
+                f"{name} is not a segment of {scope}'s event log; "
+                f"event_log_segments() is what names the ones that are",
+                name,
+            )
+        return text.decode("utf-8")
 
     # ── Raw captures: outside the tier model, inside a committed scope ───────
     # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on
@@ -1241,6 +1326,13 @@ class StorageService:
                 capture,
                 body,
                 staging=self._paths.resolve(scope, CAPTURE_STAGING, create=True),
+                # The same declaration `write_artifact` reads, asked here too so
+                # the trees' answer is honoured by both writers rather than by
+                # whichever one somebody remembered. `transcripts/` is declared
+                # gitignored in every scope that holds it, so a verbatim
+                # recording lands owner-only — with its directories untouched,
+                # since a capture is not encrypted and gets no enclave.
+                declared_mode=restricted_mode(scope.kind, CAPTURES),
             )
         except FileExistsError as taken:
             raise CaptureAlreadyExists(
