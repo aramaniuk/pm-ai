@@ -2,7 +2,7 @@
 title: 'Connector registry and health probes'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-progress'
+status: 'done'
 baseline_commit: '67e780b480d24effb73c837a50b52bfad4d93358'
 review_loop_iteration: 0
 ---
