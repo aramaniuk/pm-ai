@@ -426,6 +426,16 @@ def dispatch(
         print(f"pm-ai: unknown command {name!r}\n", file=sys.stderr)
         print(usage(), file=sys.stderr)
         return EXIT_USAGE
+    if command.run is not None and command.leaves:
+        # Measured: the `run` branch below wins and every leaf is unreachable,
+        # so `pm-ai demo sub` answers "takes no arguments" instead of running
+        # `sub`. Harmless while no command has both, and a silent trap the
+        # moment `4k` or `8b` hangs a leaf on a group that also acts alone.
+        raise ValueError(
+            f"the {name!r} command declares both a `run` and leaves "
+            f"({sorted(command.leaves)}). One or the other: a command with "
+            f"both shadows every leaf it has."
+        )
     if command.run is not None:
         if rest:
             print(f"pm-ai: `{name}` takes no arguments\n", file=sys.stderr)

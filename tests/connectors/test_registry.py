@@ -162,10 +162,38 @@ def test_one_kind_of_connector_may_be_registered_twice_under_two_instances():
     assert {c.name for c in reg.all_connectors()} == {"gitlab"}
 
 
-def test_instance_defaults_to_the_connector_name():
+def test_instance_defaults_to_what_the_connector_calls_itself():
+    """The adapter's own `instance`, and only then the system name.
+
+    The frozen matrix pins that a duplicate instance name is refused; it does
+    not pin what an omitted one defaults to. Defaulting to `name` made two
+    GitLab projects collide on `"gitlab"` through `install([...])` — 8b's
+    documented attach path — and abort composition.
+    """
     reg = ConnectorRegistry()
     reg.register(gitlab("alpha"))
-    assert reg.instances() == ("gitlab",)
+    assert reg.instances() == ("gitlab:alpha",)
+
+
+def test_two_projects_of_one_system_coexist_without_explicit_names():
+    reg = ConnectorRegistry()
+    reg.register(gitlab("alpha"))
+    reg.register(gitlab("beta"))
+    assert reg.instances() == ("gitlab:alpha", "gitlab:beta")
+
+
+def test_the_same_instance_twice_is_still_refused():
+    """The matrix row itself, which the new default must not weaken."""
+    reg = ConnectorRegistry()
+    reg.register(gitlab("alpha"))
+    with pytest.raises(DuplicateConnector):
+        reg.register(gitlab("alpha"))
+
+
+def test_a_connector_without_its_own_instance_falls_back_to_the_system_name():
+    reg = ConnectorRegistry()
+    reg.register(FakeConnector("fake"))
+    assert reg.instances() == ("fake",)
 
 
 # ── Samples ──────────────────────────────────────────────────────────────────
@@ -363,3 +391,10 @@ def test_composition_populates_the_registry(tmp_path):
         "the daemon holds the instances and the registry enumerates them — they "
         "must be the same objects, not two constructions of one connector"
     )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_credential_is_absent_not_configured(blank):
+    """What a half-finished `8b` write leaves behind is not a setup that is done."""
+    probe = gitlab("alpha", credential=blank).check_health()
+    assert probe.health is Health.ABSENT

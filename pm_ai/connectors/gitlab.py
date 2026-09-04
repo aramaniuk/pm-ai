@@ -121,14 +121,18 @@ class GitLabConnectorAdapter:
         itself, so `ConnectorRegistry.check_health` bounds the *wait* and
         abandons the attempt — see its docstring.
         """
-        if self.credential is None:
+        # `None`, empty and whitespace are one state: no usable credential.
+        # A blank string is what a half-finished enrolment leaves behind, and
+        # reporting it as configured would say setup is done when it is not.
+        if not (self.credential or "").strip():
             return Probe(
                 self.instance,
                 Health.ABSENT,
-                f"no credential is stored for {self.instance}",
-                "Enrol one with `pm-ai connector add gitlab`. Harvests are "
-                "skipped until then, which is a setup step outstanding rather "
-                "than a fault.",
+                f"no usable credential is stored for {self.instance}",
+                "No credential can be enrolled on this build yet: `pm-ai "
+                "connector add gitlab` is story 8b and is not implemented. "
+                "Harvests are skipped until then, which is a setup step "
+                "outstanding rather than a fault.",
             )
         try:
             answer = self.reach()

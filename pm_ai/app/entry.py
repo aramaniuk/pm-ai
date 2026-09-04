@@ -192,8 +192,10 @@ def _compose(keychain: KeychainPort) -> tuple[Daemon | None, Probe | None]:
             "project",
             Health.ABSENT,
             "no project is enrolled, so pm-ai has nothing to act on",
-            "Enrol a repository with `pm-ai project add <path>`. Projects enter "
-            "the system through that registry and never by being found on disk "
+            "No project can be enrolled on this build yet: `pm-ai project add "
+            "<path>` is story 4k and is not implemented, so this is the "
+            "expected state rather than something to repair. Projects enter the "
+            "system through that registry and never by being found on disk "
             "(AD-11), so an empty registry means no work has been offered yet.",
         )
     try:

@@ -121,6 +121,19 @@ def enrol(keychain: KeychainPort, *, key_name: str = MASTER_KEY_NAME) -> str:
 
     try:
         stored = keychain.fetch(key_name)
+    except KeychainUnavailable as unreachable:
+        # The sibling of the branch below. A keychain that accepted the write
+        # and then became unreadable leaves the same entry behind, so the same
+        # thing has to be said: propagating a bare "keychain locked" would let
+        # an operator retry into an already-enrolled refusal with no idea why.
+        raise KeychainUnavailable(
+            f"a key was stored under {key_name!r} and the keychain then became "
+            f"unreadable, so it could not be verified. The key is not enrolled; "
+            f"do not treat this machine as set up. This command does not remove "
+            f"the entry it wrote — if a repeat enrolment refuses as "
+            f"already-enrolled, delete the {key_name!r} entry in Keychain "
+            f"Access and enrol again. ({unreachable})"
+        ) from unreachable
     except KeyNotFound as vanished:
         # The write said it worked and the read says there is nothing there.
         # `KeyNotFound` would be a lie to propagate — this is not a keychain

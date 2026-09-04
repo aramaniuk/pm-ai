@@ -422,3 +422,26 @@ def test_the_key_length_is_one_constant_shared_by_the_minter_and_the_cipher():
         f"re-export the one in pm_ai.ports, which pm_ai.core.enrolment mints "
         f"against and may not import this module to read"
     )
+
+
+def test_a_keychain_that_locks_during_read_back_says_a_key_was_written():
+    """The sibling of the vanished-key row, which said it and this did not.
+
+    Both branches leave an entry behind that will refuse a later enrolment.
+    Propagating the adapter's bare message would send the operator to retry
+    into `KeyAlreadyEnrolled` with nothing connecting the two.
+    """
+    class Locking:
+        def store(self, name, secret): return None
+        def store_if_absent(self, name, secret): return None
+        def fetch(self, name): raise KeychainUnavailable("the keychain is locked")
+        def delete(self, name): return None
+
+    with pytest.raises(KeychainUnavailable) as refusal:
+        enrol(Locking())
+
+    message = str(refusal.value)
+    assert "a key was stored" in message
+    assert "not enrolled" in message
+    assert "Keychain Access" in message, "the recovery path must be named"
+    assert "the keychain is locked" in message, "the adapter's own reason survives"

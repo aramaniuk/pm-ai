@@ -108,11 +108,17 @@ class ConnectorRegistry:
         `instance` is separate from `name` because `name` is the *system*
         (`"gitlab"` on every GitLab adapter) while what must be unique is the
         instance — `gitlab:alpha` and `gitlab:beta` are two connectors of one
-        kind. Defaulting to `name` keeps the common single-instance case quiet.
+        kind. Omitted, it is taken from the connector's own `instance` when it
+        has one, and only then from `name`.
 
         Raises `DuplicateConnector` rather than replacing.
         """
-        key = instance if instance is not None else connector.name
+        # An adapter that already knows its own instance name is asked for it
+        # before falling back to the system name. Defaulting to `name` meant two
+        # GitLab projects registered through `install([...])` — 8b's documented
+        # attach path — collided on `"gitlab"` and aborted composition, while
+        # `build()` escaped it only because it passes `instance` explicitly.
+        key = instance or getattr(connector, "instance", None) or connector.name
         if key in self._connectors:
             raise DuplicateConnector(
                 f"a connector is already registered as {key!r}. Two connectors "
