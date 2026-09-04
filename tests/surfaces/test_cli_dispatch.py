@@ -93,18 +93,42 @@ def test_an_unknown_subcommand_exits_2(capsys):
     assert "usage: pm-ai" in printed
 
 
-@pytest.mark.parametrize("group", ["key", "config"])
-def test_a_group_with_no_leaf_prints_that_groups_usage_and_exits_2(group, capsys):
-    """The groups are in the table from the start; their leaves arrive with `4j`."""
+@pytest.mark.parametrize("group", ["key", "config", "connector"])
+def test_a_group_named_without_a_leaf_prints_its_leaves_and_exits_2(group, capsys):
+    """A group does nothing on its own; naming one is an incomplete command line.
+
+    Rewritten in `4j`, which gave all three groups their leaves. Until then this
+    asserted the "no subcommand is implemented yet" branch — the honest answer
+    while the leaves were declared and empty, and a claim that would have gone on
+    reading green after they landed had this test not moved with them. The
+    branch itself is still reachable and still tested, by
+    `test_a_group_with_genuinely_no_leaves_says_so` below.
+    """
     assert entry.main([group]) == EXIT_USAGE
     printed = capsys.readouterr().err
     assert f"usage: pm-ai {group}" in printed
-    assert "subcommand is implemented yet" in printed
+    assert "subcommand is implemented yet" not in printed
+    for leaf in cli.TABLE[group].leaves:
+        assert leaf in printed
 
 
-def test_an_unimplemented_leaf_is_a_usage_error_not_a_crash(capsys):
-    assert entry.main(["key", "enrol"]) == EXIT_USAGE
-    assert "usage: pm-ai key" in capsys.readouterr().err
+def test_a_group_with_genuinely_no_leaves_says_so(monkeypatch, capsys):
+    """"Not implemented yet" and "you typed the wrong leaf" are different mistakes.
+
+    No group in the table is empty any more, so the branch is exercised against
+    one planted here. Deleting the branch instead would remove the answer the
+    *next* group to be declared ahead of its leaf needs.
+    """
+    monkeypatch.setattr(cli, "TABLE", {**cli.TABLE, "later": Command("a group `4x` fills in")})
+    assert entry.main(["later"]) == EXIT_USAGE
+    assert "subcommand is implemented yet" in capsys.readouterr().err
+
+
+def test_an_unknown_leaf_is_a_usage_error_not_a_crash(capsys):
+    assert entry.main(["key", "frobnicate"]) == EXIT_USAGE
+    printed = capsys.readouterr().err
+    assert "usage: pm-ai key" in printed
+    assert "enrol" in printed
 
 
 def test_help_prints_usage_and_exits_0(capsys):
@@ -349,7 +373,9 @@ def test_no_invocation_echoes_anything_about_the_master_key(registered, monkeypa
     """
     secret = b"a-master-key-nobody-should-see"
     monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: _Keychain(secret))
-    for argv in ([], ["--help"], ["doctor"], ["key"], ["config"], ["frobnicate"]):
+    for argv in (
+        [], ["--help"], ["doctor"], ["key"], ["config"], ["connector"], ["frobnicate"]
+    ):
         entry.main(list(argv))
         captured = capsys.readouterr()
         for stream in (captured.out, captured.err):

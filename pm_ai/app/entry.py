@@ -38,6 +38,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from pm_ai.app.wiring import Daemon, build
+from pm_ai.connectors.registry import check_health as probe_connectors
 from pm_ai.core.config import Config, ConfigRefused, load_config
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
@@ -77,6 +78,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments,
             daemon=daemon,
             diagnose=lambda: _diagnose(keychain, failure),
+            # `pm-ai connector check`'s probes, run from the one layer permitted
+            # to reach `pm_ai.connectors` — `surfaces-through-core` forbids the
+            # CLI from importing the registry, exactly as `os-behind-platform`
+            # forbids it the doctor's probes. Passed unbound, so its own default
+            # timeout stays CAP-35's bound and this module holds no second copy
+            # of the number. Deliberately independent of `daemon`: the registry
+            # is populated by `build()` and empty before it, and an empty
+            # registry is a first-run state rather than a refusal.
+            probe_connectors=lambda: probe_connectors(),
+            # What stopped the daemon being built, so a refusal can name it.
+            # `config.toml` is the case that needs it: `4j`'s matrix requires
+            # `pm-ai config show` to report the loader's own message, and this
+            # probe's detail is the only place it survives.
+            unavailable=None if failure is None else failure.detail,
         )
     except SystemExit as requested:
         code = requested.code
