@@ -1,0 +1,373 @@
+# Decisions — first-run setup and project onboarding, 2026-09-03
+
+Taken with the human while triaging the 2026-09-03 wave-1 review. Each entry is
+the decision, then what it changes. Several change the architecture spine, which
+is skill-derived: they are recorded here and land in `ARCHITECTURE-SPINE.md` only
+through a re-run of the architecture skill.
+
+## D-7 — `pm_handle` is mandatory at first boot
+
+Not declinable. `4h` prompts until it has one, or refuses.
+
+**Changes:** `4h`'s "operator declines a value" matrix row is withdrawn — there
+is no such path. `4g`'s probe reports an unset handle as unhealthy without
+ambiguity, and the review's B3 (the `WARNING`-forever problem) and the declining
+half of B24 both disappear. `4h`'s exit-`0`-on-second-run criterion survives,
+because a configured machine always has a handle. Both specs are approved, so
+these amendments need the human's unlock.
+
+## Q1 — git is optional per project
+
+pm-ai must not require a project to be under git.
+
+**Changes:** already true in code. `service.py:714-717` treats `working_tree`
+returning `None` as an *answer* — no repository, nothing can carry the write into
+a commit, so it proceeds — and only an unanswerable question refuses. `4d`'s
+`Always` ("a registered path must be an existing directory containing a git
+repository") is stricter than both the code and the intent, and is relaxed.
+The residual requirement is that git be *installed* where a project is a
+repository, which is `1g`'s probe.
+
+## Q2 — `pm-ai project add <path> [alias]`, and rename after onboarding
+
+The argument is a filesystem path, not an id. An optional alias names the
+project. A project may be renamed after onboarding.
+
+**Changes:** the id becomes independent of the path, which removes the
+basename-collision problem entirely (`~/work/alpha` and `~/oss/alpha` differ by
+alias). **Rename is not a `4d` amendment.** The id is the scope directory name,
+so changing it moves `projects/<id>/.project-ai/` and staleness every `SourceRef`
+citing that scope — the same reason `4d`'s `Never` already excludes removal. If
+rename only changes a display alias and leaves the directory name fixed it is
+cheap; if it changes the id it is a migration. **Open: which.**
+
+## Q3 — normalise the path, or use the alias
+
+A directory name that `_directory_name` refuses (uppercase, leading dot,
+whitespace, separators — `paths.py:264`) does not block onboarding: normalise, or
+require an alias.
+
+## Q4 — paths are resolved to absolute at registration
+
+A relative path is meaningless to a daemon started from another working
+directory. `projects.toml` stores absolute paths.
+
+## Q5 — onboarding an existing directory keeps its Tier-1 artefacts
+
+**As originally stated the instruction was a no-op:** a project tree declares
+nine `Tier.TRUTH` artifacts and *zero* Operational or Derived ones. Tier 2
+(`operational.db`) and Tier 3 (the indexes) are application- and personal-scope,
+per machine, never inside a project. So there is no project Tier 2 to drop and no
+project Tier 3 to regenerate.
+
+The live question it exposed is Q6.
+
+## Q6 — the four machine-local project artifacts
+
+`event_log/`, `commitments_log.md`, `daily_dashboard.md` and `meetings/` become
+`gitignored=True` in the project tree. `rules/` and `skills/` stay shared.
+
+**Why.** They are committed today, so two machines on one repository write the
+same files and a `git pull` rewrites Tier 1 underneath the local Tier-2 and
+Tier-3 state that was derived from it. Concretely: both machines append to
+`2026-09.md`, so every pull conflicts or interleaves; `_append_batch` publishes
+the whole file through `os.replace` (`1m`), so a local append clobbers lines
+pulled in between; the `seen` dedup set is per-machine, so the next harvest
+re-appends what a teammate already logged; sealed segments are declared immutable
+(`2g`) and a pull rewrites them; and `2f`'s "file order is arrival order, and it
+is the only exact one" is false after a merge. `daily_dashboard.md` is replaced
+whole daily by each machine, and `commitments_log.md` is append-only with the same
+clobber window.
+
+`rules/` and `skills/` are human-authored, hand-edited, and nothing local is
+derived from them — which is what sharing is actually for.
+
+**Changes:**
+- `scope_model.py`: four declarations flip, project tree only.
+- The `GITIGNORED` set grows, and that set is exactly what
+  `_assert_git_excludes` guards (`service.py:697-717`). So in a project that *is*
+  a repository, every write to those four refuses until `.gitignore` carries the
+  rule. **`.gitignore` generation becomes mandatory**, which answers `4d`'s
+  `Ask First` by force rather than by choice.
+- `memory/` itself is declared `gitignored=False` while all four of its children
+  become `True`, so nothing committed remains under it. Whether the directory
+  declaration follows its children is a loose end.
+- AD-3, AD-38 and `scope-model.md` describe the project scope as the committed
+  one; they need re-deriving.
+
+**What this gives up, stated plainly:** a teammate's harvested events, meetings
+and commitments never reach this machine's ledger. CAP-10's retrospective counts
+and every project-level aggregation become per-machine. Cross-user visibility of
+project *events* is dropped deliberately; cross-user sharing of project *rules
+and skills* is kept.
+
+## Q7 — `seen` and the derivability question
+
+Moot under Q6. `seen` stays Tier 2, because no pull can now introduce Tier-1
+lines it has not seen. Worth recording that `seen` *is* derivable from Tier 1
+while AD-3 declares Tier 2 "not derivable from Tier 1" — a latent
+inconsistency, no longer load-bearing.
+
+## D-2 / D-3 — `ConnectorPort` gains `sample_events()` and a health method; `Probe`/`Health` move to domain
+
+**Changes:** `sample_events` is called by the AD-34 gate as `connector.sample_events()`
+and exists nowhere; `8d`'s Code Map wrongly places it in `registry.py`. Both members
+go on the port and on `GitLabConnectorAdapter`; the registry only enumerates.
+Because `pm_ai.ports` may import only `pm_ai.domain` (`.importlinter:208-226`),
+declaring a health method **forces** `Probe` and `Health` out of
+`pm_ai/platform/doctor.py` into `pm_ai/domain/`. `Report` follows them.
+`run_all`'s signature does not change.
+
+## D-3b — `doctor` reports registry membership only, and probing is a separate command
+
+Health probing is **connector-specific**, implemented by each connector, not by
+`doctor.py`. `doctor` keeps its five machine probes and lists registered
+connectors without contacting anything; `pm-ai connector check` does the live
+probing and owns CAP-35's 10-second bound and any concurrency. No last-known
+health is persisted — stale health on a diagnostic screen is worse than none,
+and persisting it would mean a new Tier-2 table and the first `SCHEMA_VERSION`
+bump.
+
+**Changes:** `8d` gains a CLI subcommand and therefore a dependency on `4c`,
+having had none — it was an independent starter and gates `8b` and `33a`, so the
+build order lengthens. `4c`'s exit-code table gains the subcommand deliberately,
+since `4c`'s `Never` forbids other slices extending it. A per-probe deadline
+cannot cancel a blocking adapter call: the bound is on waiting, and a hung probe
+is reported `FAILING` while its thread is abandoned. That must be stated or an
+implementer writes a bound the adapter can ignore.
+
+## D-4 — `HarvestResult` widens to carry records
+
+`33c` emits both `Meeting` records and `CALENDAR_EVENT_HELD` events.
+Deriving records from events is **impossible**: `MeetingHeldPayload` carries
+`meeting_id`, `attendee_count` and `duration_minutes` — a count, not the
+attendee list — and no `title`, `start` or `calendar_event_ref`. So the result
+widens, connectors produce domain records (as they already produce
+`NormalizedEvent`), and `app/pipelines.py` writes records through `11a`'s
+accessor before persisting events, satisfying `33c`'s ordering rule.
+
+## D-6 — `Sanitized` becomes unforgeable by `__post_init__`
+
+The invariant is that `for_model` is a **fixed point of the sanitizer** —
+`_INJECTION.sub(for_model) == for_model` — not that it equals
+`sanitize(raw).for_model`, which would reject `pipelines.py:70`'s legitimate
+`ex.for_model[:80]` truncation. Forging a *clean* `for_model` stays possible and
+is harmless: clean text is all a model was ever going to receive.
+
+**Changes:** answers `8e`'s open `Ask First` by force. `__post_init__` needs
+`_INJECTION`, `Sanitized` moves to `pm_ai.domain`, and
+`AD-30 — pm_ai.domain imports nothing from pm_ai` (`.importlinter:163-166`)
+means **`sanitize()` and the pattern move to domain with the type**.
+`pm_ai.core.sanitize` becomes a re-export or its callers re-point.
+Rejected: a factory-only constructor (Python cannot privatise a dataclass
+`__init__`, and `dataclasses.replace` bypasses a sentinel) and a `NewType`
+(erased at runtime, so it satisfies mypy and guarantees nothing).
+
+## D-8 — "3-Tier" is `GoalDomain`, and `23a` is wrong
+
+Settled by the source, not by preference. `prd.md:63` —
+`strategic_goals.md # 3-Tier Goals (Project, Team, Personal Career Goals)`.
+`prd.md:424` — "**Domain** — `Project` | `Team` | `Personal` (career growth).
+This is what a goal is *about*, and it is the `<Tier>` in the alignment tag,
+matching §2.1's '3-Tier Goals'."
+
+So `alignment_tag`'s docstring (`goals.py:99-104`) is correct and `23a`'s
+`Always` is the error — misled, presumably, by "Milestones" in the section
+title. `23a`'s clause is corrected and its section groups by domain.
+
+**Note:** all three domains live in the personal `strategic_goals.md`
+(`scope_model.py:541`), so a project render cannot show even Project-domain
+goals. The boundary statement is needed for a reason the scope model states
+outright: "there is no project-scope counterpart".
+
+## D-9 — a non-TTY refusal exits `3`
+
+`4c` defines `2` as usage and `3` as a stated, deliberate refusal. Refusing to
+prompt into a pipe is a refusal. `4h` is the spec that changes — two matrix rows
+and one criterion — and `8b` was already right. Needs UNLOCK.
+
+## D-10 — meeting scope, record format, and amendments
+
+**Scope (POC).** A harvested calendar row's `Meeting.scope` comes from
+**connector configuration mapping an Outlook category to a project**. The PM tags
+the meeting in Outlook; the mapping lives in `connectors/` — application scope,
+Tier 1, gitignored (`scope_model.py:451`) — so it is per-machine and uncommitted,
+and stays out of `config.toml`, whose vocabulary `4a` closed at three keys. An
+**unmapped meeting defaults to the personal scope**: it is the PM's own, it still
+appears in the personal dashboard, and nothing is silently dropped.
+
+**Record format.** Reuse the ledger's field grammar — `key=value` per line,
+rendered by `render_value` and parsed by `scan_fields` — with a free body. No new
+dependency, one grammar the repo already tests, and it extends to `22a`'s goals
+so there is one hand-edited grammar rather than three. It is the ledger's
+*fields* without its envelope (`- [id] category actor=`), which `11a` must say
+outright or the next reader assumes `parse_line` applies.
+
+Known wart: `attendees` is a list in a grammar with no lists, and `parse_line`
+refuses duplicate keys, so the list is one comma-separated value. Comma becomes
+reserved inside an attendee value, enforced nowhere — a display name like
+"Smith, Bob" would split silently. Mitigation: store handles only.
+
+**Man-Hour Cost is computed, never stored.** CAP-1 puts it in the *summary card*
+header — a rendered surface, not the Tier-1 record — and it derives from
+`blended_hourly_rate` in `config.toml`, so a stored value goes stale the moment
+the rate changes.
+
+**`tentative` is stored; `stale` is derived.** Tentative is provider data (Graph's
+response status). Stale means "absent from a window we actually harvested", which
+`8a`'s `CoverageWindow` already makes derivable.
+
+**The record holds a transcript-derived summary, and amendments are its source.**
+Per CAP-1 the transcript is fetched, sanitized and parsed, and "every ingested
+transcript binds to a meeting record". Extraction outputs already have homes:
+orders to `Proposal`, commitments to `commitments_log.md` (declared, no producer
+yet), decisions to `DECISION` in `ObservedEventType`, and the summary to the
+record.
+
+The PM amends through the CLI or Telegram — text or voice — not by hand-editing,
+so pm-ai owns every write and there is no concurrent editor to merge against.
+Amendments are **records with provenance** (when, actor, surface), append-only
+and never regenerated; `## Summary` is **derived from transcript + amendments**,
+so a corrected summary reads correctly and the amendment log is the audit trail.
+`## Notes` is preserved verbatim.
+
+**Wave placement, unchanged:** Graph transcripts are `33e`, the real transcript
+path is `11b`, both wave 2 — and a summary needs a model, which decision 2
+removed from waves 1 and 2, so summarisation is gated on story 7. Voice
+amendments need Whisper; text amendments do not.
+
+**Two consequences:** an amendment mutates a Tier-1 record, so CAP-10 requires an
+event-log entry — `SelfActionType` needs a member for it, which is `2c`'s closed
+vocabulary and the same class of decision as `23b`'s `Ask First` about whether
+rendering logs. And the record now has machine-owned and human-owned regions,
+which settles the `11a`/`33c` overwrite contradiction the review found.
+
+## D-5 / Q9 / Q10 — two renderers, not one with a scope branch
+
+The personal and project dashboards are **separate functions** with their own
+sources, outputs and sections. They do not share a renderer and do not reason
+about each other's scope.
+
+**Why this is stronger than what was proposed.** Every option on the table kept
+one `render_dashboard(meetings, entries, goals, now, *, tz)` and made the caller
+choose what to pass — so the leak was one line (`goals = personal_register` in
+the project branch) and the defence was a datasource list plus a test that
+remembered to check it. With two functions, `render_project_dashboard` has **no
+goals parameter**, so passing personal goals is impossible rather than
+forbidden. Same move as D-6: make the invariant structural, not remembered.
+
+**Changes:**
+- **CAP-9's four-section rule binds only the personal file.** Its success
+  criterion names `~/.manager-ai/memory/daily_dashboard.md` — *"exactly the four
+  headed sections … and no empty section."* Nothing requires four sections of the
+  project dashboard, so it carries the sections its sources support: Time-Critical
+  from project meetings, Proactive Enablement from the project event log,
+  Commitments once something produces them. It has no 3-Tier and no Leadership
+  Notes section, so there is no boundary text to write — which is what Q9 was
+  asking about.
+- **`project_scope_datasources` is not built**, and D-5 dissolves with it: no
+  `core.rendering` function needs to resolve a project tree, because there is no
+  datasource list. Each renderer receives data its caller already read.
+- **The pre-written gate is retargeted, not deleted.**
+  `test_ad25_project_rendering_cannot_open_the_personal_store` calls a function
+  that will not exist. Its replacement asserts through `inspect.signature` that
+  `render_project_dashboard` accepts no goals parameter — a stronger check than
+  the substring scan it uses today, which its own comment records as having
+  nearly passed vacuously once, and which cannot drift the way a list can.
+- **`23d` is rewritten, not amended** — from "the scope wall as a datasource
+  list" to "the project renderer, with its own sections and sources". `23a`
+  narrows explicitly to the personal dashboard.
+- The review's A8 (`core.rendering` cannot resolve a tree it may not import) is
+  answered by removal.
+
+## Q2b — rename is alias-only
+
+The id, and therefore the scope directory name, never changes. Only the display
+alias does. **Rejected:** an id migration — `projects/<id>/.project-ai/` would
+move while every `SourceRef` already written into Tier-1 segments, meeting
+records and the disclosure ledger still names the old id; sealed segments are
+immutable (`2g`), so either they are rewritten or the registry must keep a
+history of former ids forever. Recorded as deferred work if the on-disk tree
+ever needs to match the label.
+
+## Q6b — project `memory/` follows its four children
+
+`memory/` is itself an addressable key, so its flag is a real declaration.
+With all four children gitignored, nothing beneath it is committed, and the
+generated `.gitignore` carries one rule rather than four. Cost, accepted: a
+future project artifact that genuinely should be shared cannot live under
+`memory/`. `GITIGNORED` is per scope kind, so the personal tree is untouched.
+
+## Q13 / Q14 — amendments are logged, renders are not
+
+The discriminator: **does the action change truth, or project it?**
+
+Amending a meeting mutates a Tier-1 record and is the only trace that a summary
+is not what the transcript said — so it appends an entry, under a new
+`SelfActionType` member **`meeting_amended`**. Rendering a dashboard does not:
+it is fully derivable from Tier 1 plus a clock, and CAP-10's retrospective counts
+are decisions, proposals and commitments, none of which a render is. That also
+answers `23b`'s `Ask First`.
+
+**Forced, not chosen:** neither can be an `ObservedEventType`. Those require a
+`SourceRef` and `persist_events` dedups on the natural key derived from it, so a
+second amendment to one meeting would share the first's key and be silently
+dropped — the failure `2c` documented when it rejected putting `COMPACTION`
+there. Adding a member means `2c`'s guards must still hold (disjoint value sets,
+no `SelfActionType` member declarable by a connector) and its payload registry
+needs a typed payload: which meeting, which amendment, which surface.
+
+## Q15 — `strategic_goals.md` uses a Markdown-native grammar, and needs a writer
+
+Goals are **not normally typed by hand**: they are set in 1:1 sessions with
+pm-ai, or through a CLI or Telegram voice command. Hand-editing is retained as a
+possibility, the same arrangement as `config.toml` and meeting records.
+
+Format: domain from the section heading, `[id]` and `(horizon)` as the only
+structured tokens, title as free text.
+
+```
+## Project
+
+- [g_payments_latency] (medium) Cut payment latency below 200ms
+```
+
+Rejected: the ledger's `key=value` grammar, which D-10a chose for meeting
+records. Four lines per goal is fine for a machine-written record and wrong for
+the one file a human revises, and D-8 just made `domain` the grouping axis, which
+maps onto headings for free.
+
+**Changes:** `22a` is a parser only — a declared hand-editable artifact with a
+reader and no writer, exactly as `4a` was. Following the 4a → 4g precedent, a
+sibling slice **`22b`** takes `render_goals`, the `pm-ai goal` command, and the
+`SelfActionType` member **`goal_set`** (one member: creating and revising are
+both setting, and goals appear in no CAP-10 retrospective aggregate). A round
+trip is required and is harder than `4g`'s, because the format carries prose the
+rewrite must preserve. The text channel needs no model; voice needs Whisper
+(story 7) and a 1:1 needs the Socratic protocol (Phase 3).
+
+## Q16 — an all-day event records 0 minutes
+
+An all-day calendar entry is a marker, not a meeting: a birthday, an OOO block,
+a sprint boundary. The record is still written, so it appears in Time-Critical
+Activities, and it contributes nothing to cost.
+
+**Why not the alternatives:** 1440 is the answer the spec itself calls wrong by
+an order of magnitude — five attendees at £100/h reports £12,000 for a birthday.
+480 is right for an offsite and wildly wrong for everything else, and nothing in
+the Graph payload distinguishes them. Omitting the record loses a genuine "team
+offsite" from the dashboard the PM reads that morning.
+
+**Changes:** makes `33c`'s criterion checkable — assert `man_hour_cost` is
+`0.0` for an all-day event at any attendee count, a value rather than the
+self-reference the review's C6 found. And `duration_minutes == 0` becomes common
+rather than theoretical, so `23a` must state which bound is inclusive when a
+meeting's end equals `now`.
+
+## Still open
+
+Nothing. Every triage question is answered.
+
+Two items route to the architecture skill rather than a spec edit: **AD-3, AD-38
+and `scope-model.md`** still describe the project scope as the committed one,
+which Q6 changed.

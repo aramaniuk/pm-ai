@@ -102,7 +102,7 @@ The seventeen specs of the prototype path's first wave, under
 
 **Revised 2026-09-02 after a three-lens review** (`review-wave-1-2026-09-02.md`,
 140 findings). Every spec is at `review_loop_iteration: 1` and carries a change
-log recording what the review changed. The wave grew from twelve slices to seventeen. `4d`, the project registry, was
+log recording what the review changed. The wave grew from twelve slices to seventeen, and to nineteen on 2026-09-03 when first-run setup was requested: `config.toml` had a reader and no writer, so nothing could configure a machine and `doctor` could not report whether it was configured. Split at the sizing gate into `4g` (the writer) and `4h` (the sequence), and `4g` split again on 2026-09-03 once the second review's findings were applied, leaving `4i` for the probe. `4d`, the project registry, was
 missing entirely and without it `pm-ai` could not have run once on a clean
 machine. The other four are sizing-gate splits: `33b` into fetch and mapping,
 `8a` into harvest outcomes and registry, `8c` into declarations and boundary,
@@ -110,22 +110,30 @@ and `23a` into sections and scope wall.
 
 | Spec | Delivers | Depends on |
 |---|---|---|
+| `1n-project-artifacts-go-machine-local` | four project artifacts and `memory/` become `gitignored`; the only code change in the wave's spec set | — |
 | `4a-config-loading` | a reader for the declared `config.toml`, and the refusal keeping the encryption toggle out | — |
 | `4b-master-key-enrolment` | `pm-ai key enrol`; the daemon never mints | 1d, 1f |
-| `4c-cli-entry-point` | `[project.scripts] pm-ai`, subcommand dispatch, and the exit-code table | 4a, 4b |
-| `4d-project-registry` | `pm-ai project add` and `projects.toml`; without it nothing runs on a clean machine | 4a, 4c |
+| `4c-cli-entry-point` | `[project.scripts] pm-ai`, the dispatch and exit-code tables, and `doctor` | 4a |
+| `4j-cli-service-subcommands` | `key enrol`, `config show`, `connector check` — three leaves on `4c`'s table | 4b, 4c, 8d |
+| `4d-project-registry` | `projects.toml` parsed, rendered, read by `build()`, and reported by `doctor` | 4a |
+| `4k-project-onboarding` | `pm-ai project add <path> [alias]` — creates the tree, generates `.gitignore`, adopts an existing one | 1n, 4c, 4d |
+| `4g-config-gains-a-writer` | a writer for `config.toml` and the probe that reports its state | 4a |
+| `4i-config-doctor-probe` | the sixth `doctor` probe, reporting what state `config.toml` is in | 4a |
+| `4h-first-run-setup` | `pm-ai setup` — the ordered first-boot sequence, asserted by a probe report | 4b, 4c, 4g, 4i, 4k |
 | `8a-honest-harvest-outcomes` | `HarvestResult`'s three outcomes, and coverage derived from what was fetched | — |
-| `8d-connector-registry` | the registry two pre-written tests import, and the CAP-35 health probes | — |
-| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d |
+| `8d-connector-registry` | the registry two pre-written tests import, and the per-connector health probes | — |
+| `8f-storage-port-capabilities` | `StoragePort` declares artifact I/O and a collection listing; a declared file mode | — |
+| `8b-credential-lifecycle` | `pm-ai connector add`, sealed write first | 4b, 4c, 8d, 8f |
 | `8c-payloads-declare-untrusted-text` | each payload class declares its untrusted fields, guarded at import | — |
-| `8e-sanitization-binds-at-the-boundary` | AD-12 actually holding at the harvest boundary | 8c |
-| `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b |
+| `8e-sanitization-binds-at-the-boundary` | AD-12 holding where it can be enforced: `ModelPort` accepts only `Sanitized` | — |
+| `11a-meeting-records-reach-tier-one` | `MeetingRecords`; retires the in-memory dict | 1a, 1b, 8f |
 | `33a-graph-device-code-auth` | `GraphAuthPort` and the MSAL adapter | 8b, 8d |
 | `33b-graph-calendar-fetch` | `calendarView` paged, throttle-handled, converted to aware UTC, honest coverage | 8a, 33a |
 | `33c-graph-calendar-mapping` | rows to Meeting records and ended-meeting events; `ConnectorPort` conformance | 11a, 33b |
 | `22a-goal-register` | the register `domain/goals.py` has never had | — |
+| `22b-goal-writer` | `render_goals`, `pm-ai goal set`, and the `goal_set` entry | 22a, 4c |
 | `23a-dashboard-sections` | `core.rendering`'s four sections, honest gaps | 22a, 11a |
-| `23d-project-render-scope-wall` | `project_scope_datasources` and AD-25's one-directional wall | 23a, 4d |
+| `23d-project-render-scope-wall` | `render_project_dashboard` — a separate function whose signature *is* AD-25's wall | 23a |
 | `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 23d, 33c |
 
 Four skipped tests stop skipping across the wave: the AD-27 taxonomy and AD-34
@@ -265,8 +273,15 @@ Known debt this wave takes on, recorded so it is not discovered later:
 - **CAP-9 is knowingly unmet in two clauses** — Leadership Notes and the 07:00
   deadline. Both recorded in story 23's queue entry and in `23a`/`23b`.
 - **AD-27's versioning clause remains unmet** from story 2, unchanged by this
-  wave. `8c` and `33d` both touch the Tier-1 entry format and both defer the
-  question to story 1i.
+  wave. `33d` touches the Tier-1 entry format and cannot defer the question to
+  story 1i: 1i versions `operational.db`'s table shape, and a field added to a
+  markdown line changes no column. The unmade design decision is the entry-grammar
+  one recorded below, which has no owner. `8c` was named here in
+  error — the sizing-gate split left it declaring untrusted fields and writing
+  nothing — and `8e`, which did write the field, stopped: it now derives the
+  sanitized copy at the point of use and changes no entry format
+  (renegotiated 2026-09-02). So `33d` in wave 2 is where the decision becomes
+  unavoidable, on real data.
 
 ## Open, raised by story 2f
 
@@ -348,3 +363,38 @@ Known debt this wave takes on, recorded so it is not discovered later:
 - source_spec: `_bmad-output/specs/spec-pm-ai/SPEC.md` (constraint: "Everything else … is 600-permissioned and unencrypted")
   summary: Implement 600 permissions for the whole plaintext set — every file `_publish` writes plaintext, `operational.db` at creation, captures, and team-member records — as a follow-up story; today only the two encrypted files and their enclave directories are tightened (0600/0700).
   evidence: `storage-contract.md` makes 600 the load-bearing substitute for the encryption dropped on 2026-08-23, and nothing implements it for the plaintext set (story-1 code review, 2026-08-28). Deferred by decision at the review gate: the change concentrates in the single writer but touches every write path and deserves its own matrix (umask interaction, git-committed project files, sqlite sidecar files) rather than riding a review patch.
+
+## Deferred at the story-4a review gate (2026-09-02)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4a-config-loading.md`
+  summary: `blended_hourly_rate` has no upper bound, so a finite but enormous rate (`1e308`) makes `Meeting.man_hour_cost` return `inf` — the silent propagation `nan` and `inf` were refused to prevent.
+  evidence: Reproduced: `load_config(b'blended_hourly_rate = 1e308')` returns `1e+308` and is admissible. The loader refuses `nan`, `inf`, zero and negatives as unusable, so this is the one remaining value class that type-checks, passes the admissibility rules, and still poisons every cost CAP-3 computes. Deferred rather than patched because the ceiling is a policy call — any threshold picked during a review patch would be invented, and CAP-3's own currency assumptions are not yet written down.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4a-config-loading.md`
+  summary: `config.toml` is hand-edited (AD-3) with a closed key vocabulary, but no sample file or documentation states the three key names, their types, or their admissible ranges.
+  evidence: The vocabulary exists only inside `pm_ai/core/config.py` and this story file, and the loader refuses every unknown key — so a user discovers what the file may say by triggering refusals one at a time. Deferred because the natural home is the operator-facing surface story 4c stands up, not a loader that no caller reaches yet.
+
+## Deferred at the story-4a review gate (2026-09-02), second pass
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8e-sanitization-binds-at-the-boundary.md`
+  summary: Story `11b` wires the real transcript path and owes a confirmation that no path to a model bypasses `ModelPort` — an obligation `8e` hands it and nothing outside `8e` records. `11b` is a wave-2 slice with no spec yet.
+  evidence: `run_transcript_ingestion` (`pipelines.py:51,64`) reaches `extract()`, which calls `sanitize` itself and keeps the pair (`extraction.py:36,50-51,63-64`), but reaches `stage_proposal` rather than the harvest path. Under `8e`'s original persist design this was scoped out as uncovered; under the consumer-side design it is covered by the same chokepoint, so what remains for `11b` is narrower — confirming the transcript path reaches models only through the port, not building a second sanitization. `11a` also defers transcript binding to `11b`. Recorded because when `11b` is written the obligation is otherwise discoverable only by re-reading `8e`.
+
+- source_spec: `_bmad-output/implementation-artifacts/review-wave-1-2026-09-02.md` (finding A1)
+  summary: `StoragePort` declares neither `read_artifact` nor `write_artifact` while `StorageService` implements both, so the Protocol under-declares its own implementation and nothing typed against the port can reach the single reader or the single writer.
+  **Closed 2026-09-03 by slice `8f`**, which declares both methods and a collection listing on the port.
+  evidence: Verified at the story-4a review gate: the port declares nine methods (`ports/__init__.py:286-314`) and neither of those two, while `StorageService.write_artifact` sits at `service.py:1022` and `read_artifact` at `:1065`. The review filed this as A1, "blocks implementation". It does not: `Daemon.storage` is typed as the concrete `StorageService` (`wiring.py:38`), so `4c` reading `config.toml` and every other wave-1 caller reach both methods legally, and no wave-1 slice depends on the port for artifact access. It remains a real inconsistency of the kind story 2h fixed when it added the event-log methods to the port for this same reason. Recorded because downgrading it from blocker is exactly how it would otherwise be lost — it appears in no story, and the two methods are the whole of AD-3's tiering contract as far as any future port consumer can see.
+
+
+## Queued by decision, 2026-09-03 — meeting amendments
+
+Decided in full while triaging the wave-1 review, then queued rather than
+specified: the machinery corrects a transcript-derived **summary**, and a summary
+needs a model, which the prototype path's decision 2 removes from waves 1 and 2.
+`11a` reserves the `## Summary` region and preserves `## Notes`; nothing else
+here is buildable until story 7 puts a model in the path and `11b` wires the real
+transcript.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11a-meeting-records-reach-tier-one.md`
+  summary: A meeting record's `## Summary` is derived from the transcript **and** an append-only amendment log, and each amendment appends a `meeting_amended` entry to the event log.
+  evidence: The PM amends through the CLI or Telegram — text or voice — not by hand-editing, so pm-ai owns every write and there is no concurrent editor to merge against; amendments are records carrying instant, actor and surface, appended and never regenerated, while the summary is re-derived from both so a correction reads correctly rather than sitting below the thing it corrects. CAP-10 requires the event-log entry, and it **cannot** be an `ObservedEventType`: those require a `SourceRef` and `persist_events` dedups on the key derived from it, so a second amendment to one meeting would share the first's key and be silently dropped — the failure `2c` documented when it rejected putting `COMPACTION` there. So `SelfActionType` gains `meeting_amended` and `2c`'s payload registry gains a typed payload for it, under `2c`'s standing guards: disjoint value sets, and no member declarable by a connector. Voice amendments additionally need Whisper (story 7); text amendments do not.

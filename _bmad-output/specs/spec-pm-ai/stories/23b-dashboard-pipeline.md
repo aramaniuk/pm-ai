@@ -2,7 +2,7 @@
 title: 'Dashboard pipeline and pm-ai dashboard'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'ready-for-dev'
 review_loop_iteration: 1
 ---
 
@@ -19,13 +19,15 @@ review_loop_iteration: 1
 **Always:**
 - **The pipeline lives in `app`.** It must touch storage, core and the scope model at once, which no layer below may do (AD-30) — the same reason `run_harvest` lives there.
 - **The write goes through `write_artifact`**, which resolves the path from the declaration and decides sealing. `daily_dashboard.md` is a Tier-1 `File`, unencrypted, not gitignored (`scope_model.py:540`). Whole-file replacement is correct: this is a rendering, not a ledger, so the ledger refusal at `service.py:1039` does not apply and must not be worked around.
-- **The default scope is personal**, because CAP-9 names `~/.manager-ai/memory/daily_dashboard.md`. A project-scope render uses `project_scope_datasources` and cannot reach personal sources (AD-25).
+- **The default scope is personal**, because CAP-9 names `~/.manager-ai/memory/daily_dashboard.md`.
+- **Which renderer runs is a branch on scope, and each gets only its own sources.** `23a`'s `render_dashboard` for personal, `23d`'s `render_project_dashboard` for a project. They are separate functions and the project one has no goals parameter, so this slice cannot hand it personal-scope data even by mistake (AD-25). There is no datasource list to consult — `project_scope_datasources` is not built.
+- **The timezone is read once here and passed to every consumer.** `config.toml`'s `display_timezone` (`4g`) reaches both the renderer and `11a`'s `for_day`, so the day boundary the dashboard shows and the day boundary the meetings were selected by cannot disagree. An unset zone is refused rather than defaulted to UTC.
 - **The render is deterministic given its inputs**, so re-running produces the same file. Nothing about the output depends on how many times it has run.
 - **A missing input is a stated section, not a failure.** No goals file, no meetings and an empty log all produce a valid dashboard.
 - **Read and render fully before writing anything.** `write_artifact` replaces whole, so opening the target first and discovering a malformed input afterwards destroys yesterday's dashboard. This is why `23a` returns a string rather than writing as it goes.
 - **Exit codes come from `4c`'s table** — `3` for a refusal, `1` for an unexpected exception. This slice may not add to it.
 
-**Ask First:** Whether writing the dashboard should append a `SelfActionType` entry to the event log. Every state mutation appends one under CAP-10, and a rendering is arguably not a state mutation — but a daily artifact silently replaced with no record is also the kind of thing a retrospective wants. `2c` closed the vocabulary, so adding a member is the reviewed decision it describes.
+**Ask First:** Nothing. Whether a render appends an event-log entry was decided on 2026-09-03: **it does not.** The discriminator is whether an action changes truth or projects it. A dashboard is fully derivable from Tier 1 plus a clock, so a line per day per scope records nothing a reader could not reconstruct, and CAP-10's own retrospective counts are decisions, proposals and commitments — a render is none of them. `2c`'s vocabulary stays closed.
 
 **Never:** No scheduler and no daemon — `pm-ai dashboard` runs once and exits, and the CLI may hold no scheduler (AD-7). The 07:00 deadline in CAP-9 is knowingly unmet until `9a`. No harvest triggered from here: the dashboard renders what has been harvested, and conflating the two would make a read command perform network I/O.
 
@@ -35,10 +37,12 @@ review_loop_iteration: 1
 |----------|--------------|---------------------------|----------------|
 | Happy path | meetings, entries and goals present | file written at the declared path; exit zero | N/A |
 | First run ever | nothing harvested, no goals file | valid four-section file, every section stating its reason | N/A |
-| Re-run | run twice with unchanged inputs | file byte-identical | N/A |
+| Re-run | run twice with unchanged inputs | file byte-identical, **and the event log unchanged** — a render is not a state mutation | N/A |
 | Malformed goals file | duplicate goal id | refused, naming the id; **the previous dashboard is left intact** | `MalformedGoals` |
 | Malformed meeting record | a hand-edited record | refused, naming the file; previous dashboard intact | `MalformedMeeting` |
-| Project scope requested | `--scope project:alpha` | written to that project's tree; **no personal-scope artifact opened at all** | N/A |
+| Project scope requested | `--scope project:alpha` | `render_project_dashboard` runs; written to that project's tree; **no personal-scope artifact opened at all** | N/A |
+| Timezone unset | `Config().display_timezone` | refused before any read — the day boundary may not be assumed | exit `3` |
+| Timezone unknown to `zoneinfo` | a typo'd zone in `config.toml` | refused by `4a`'s loader before this slice runs | `ConfigRefused`, exit `3` |
 | Master key absent | no key enrolled | dashboard still written — it is unencrypted, and this must not require a key | N/A |
 | Path traversal in a name | a meeting id containing `../` | refused by `write_artifact`'s existing validation | propagated |
 | Malformed event-log segment | a hand-edited or corrupt segment | refused, naming the segment; previous dashboard intact | exit `3` |
@@ -74,6 +78,12 @@ review_loop_iteration: 1
 - Given `--scope project:alpha` against a root whose personal tree holds goals and meetings, when the pipeline runs, then no path beneath the personal root is read — asserted by instrumenting the reader, because `23d`'s AD-25 test checks only what the renderer *declares*, never what `run_dashboard` actually opens.
 
 ## Spec Change Log
+
+- **2026-09-03, amended against the second multi-lens review and the day's decisions.**
+  **The `Ask First` on logging a render is answered: it does not log** (Q14). The discriminator is whether an action changes truth or projects it — a dashboard is derivable from Tier 1 plus a clock, and CAP-10's retrospective counts are decisions, proposals and commitments. `2c`'s vocabulary stays closed, and a matrix row now asserts the event log is unchanged after a re-run.
+  **The project branch calls a different function.** `project_scope_datasources` is not built: the two dashboards are separate renderers, and the project one has no goals parameter, so this slice cannot pass it personal-scope data even by mistake. That is the wall, and it is structural rather than a list this slice must remember to consult.
+  **The timezone has a source and is read here.** `config.toml`'s `display_timezone` reaches both the renderer and `11a`'s `for_day` from one read, so the day the dashboard shows and the day its meetings were selected by cannot disagree. An unset zone is refused rather than defaulted to UTC — the silent wrong answer the key was added to prevent.
+  **One review claim did not hold.** B8 said this slice was specified against a "degrades quietly to `UNALIGNED`" model and would crash on an absent goals file. It would not: neither this slice nor `23a` calls `resolve` or `alignment_tag`, so `UnresolvedGoal` is unreachable. `22a`'s Intent was wrong about current behaviour; the knock-on onto the renderers was not.
 
 - **2026-09-02, multi-lens review.** The project-scope row had no criterion and the third input had no refusal path.
   **AD-25 was asserted only against the renderer's declaration**, never against what `run_dashboard` actually reads — so the pipeline could open the personal goals file for a project render and every declared check would pass. A criterion now instruments the reader.

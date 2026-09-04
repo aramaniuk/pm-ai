@@ -7,10 +7,18 @@ Everything in this file is checkable without running the daemon.
 from __future__ import annotations
 
 import ast
+import pathlib
 
 import pytest
 
-from conftest import calls, canonical_name, format_violations, source_files
+from conftest import (
+    PACKAGE_ROOT,
+    REPO_ROOT,
+    calls,
+    canonical_name,
+    format_violations,
+    source_files,
+)
 
 # Layers permitted to perform each restricted operation.
 WRITE_ALLOWED = {"storage"}
@@ -471,3 +479,158 @@ def test_every_event_entry_in_the_package_satisfies_its_category_schema():
             )
             checked += 1
     assert checked, "the scan matched no producers — it would pass on an empty package"
+
+
+# ── Story 4a: the config loader interprets bytes and opens nothing ───────────
+#
+# The story's central Always was invisible to every declared command: the
+# single-writer sweep above exempts read-mode opens, the import contracts list
+# only network and database clients, and the file-I/O rule is scoped to
+# `pm_ai.storage`. `load_config(raw: bytes | None)` is the real guarantee — there
+# is nothing to open — and these are what turn red if a path argument and a read
+# appear beside it.
+
+# An allowlist, not a denylist, and that is the whole point. A denylist of read
+# calls is only as good as the reviewer's memory: `codecs.open`,
+# `importlib.resources.files`, `pkgutil.get_data` and a bare `.read()` all
+# passed the first version of this check. You cannot read a file without either
+# the builtin `open` (caught below) or an import, so pinning the imports is what
+# closes the shape rather than the spelling. Adding a name here is a deliberate
+# act; the question to answer first is whether it can reach the filesystem.
+CONFIG_IMPORTS_ALLOWED = frozenset({"__future__", "collections", "dataclasses", "math", "tomllib"})
+
+# Belt to the allowlist's braces: the builtin needs no import, and a read verb on
+# an object obtained some other way should still be loud.
+READ_CALLS = frozenset({
+    "open",
+    "load",
+    "read",
+    "readline",
+    "readlines",
+    "readinto",
+    "read_text",
+    "read_bytes",
+    "get_data",
+    "files",
+    "as_file",
+    "iterdir",
+    "scandir",
+    "listdir",
+    "walk",
+    "glob",
+    "rglob",
+})
+
+
+def _import_heads(source) -> set[str]:
+    """Top-level module of every import in one file, relative imports included."""
+    heads: set[str] = set()
+    for node in ast.walk(source.tree):
+        if isinstance(node, ast.Import):
+            heads |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * node.level
+            heads.add(f"{prefix}{(node.module or '').split('.')[0]}")
+    return heads
+
+
+def test_story_4a_the_config_loader_reads_no_file():
+    """`pm_ai.core.config` parses bytes handed to it and reaches no filesystem."""
+    modules = [f for f in source_files("core") if f.path.name == "config.py"]
+    assert modules, (
+        f"{PACKAGE_ROOT / 'core' / 'config.py'} is missing — this rule would "
+        f"pass by scanning nothing"
+    )
+    (config,) = modules
+    violations = [
+        f"{config.location(node)}  {name}(...)"
+        for _f, node, name in calls([config])
+        if name.split(".")[-1] in READ_CALLS
+    ]
+    violations += [
+        f"{config.rel} imports {module}"
+        for module in sorted(_import_heads(config) - CONFIG_IMPORTS_ALLOWED)
+    ]
+    assert not violations, format_violations(
+        violations,
+        "Story 4a: pm_ai.core.config interprets bytes and opens nothing — `core` "
+        "is I/O-free and StorageService.read_artifact is the single reader. If an "
+        "import here is genuinely needed, add it to CONFIG_IMPORTS_ALLOWED after "
+        "establishing it cannot reach the filesystem.",
+    )
+
+
+def test_story_4a_tomllib_is_imported_by_exactly_one_module():
+    """One reader of `config.toml`, checked by import node rather than by text.
+
+    A substring search for `tomllib` verified "mentioned in exactly one module",
+    which is a different claim: any comment naming the parser broke it, and two
+    real importers would have compared as an unsorted list whose outcome
+    depended on filesystem order.
+    """
+    importers = {
+        f.rel
+        for f in source_files()
+        for node in ast.walk(f.tree)
+        if (
+            isinstance(node, ast.Import)
+            and any(alias.name.split(".")[0] == "tomllib" for alias in node.names)
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".")[0] == "tomllib"
+        )
+    }
+    assert importers == {"pm_ai/core/config.py"}, format_violations(
+        sorted(importers),
+        "Story 4a: config.toml has one reader. TOML parsed anywhere else is a "
+        "second interpretation of the same file, with its own idea of what the "
+        "accepted keys are.",
+    )
+
+
+# The address `wiring.py` carried as `Daemon.pm_handle`'s default until story 4a
+# gave `config.toml` a reader.
+RETIRED_PM_LITERAL = "andrei@example.com"
+
+# The maintainer's real address, which is not an example and must not become a
+# fixture. Story 4a's own first draft used it as one — in the tests of the story
+# whose job was to remove a personal address from the package, and invisible to
+# a sweep that looked only for the literal above.
+PERSONAL_DOMAIN = "itspartner.net"
+
+
+def test_story_4a_no_developer_address_is_compiled_into_the_package():
+    """The literal is gone, not shadowed by a config default that overrides it."""
+    holders = [
+        f.rel for f in source_files() if RETIRED_PM_LITERAL in f.path.read_text(encoding="utf-8")
+    ]
+    assert not holders, format_violations(
+        holders,
+        f"Story 4a: {RETIRED_PM_LITERAL} was one developer's address as a "
+        f"shipped default. It comes from config.toml now; a literal here is a "
+        f"machine configured by whoever wrote it.",
+    )
+
+
+def test_no_real_personal_address_is_used_as_a_fixture():
+    """A reserved example domain in code, always — tests included.
+
+    Swept over `tests/` as well as `pm_ai/`, because that is where the slip
+    happened. This file names the domain in order to look for it, so it is the
+    one file excluded — the same exemption `environment.py` gets from the sweep
+    that forbids naming the encryption variable.
+    """
+    roots = [PACKAGE_ROOT, REPO_ROOT / "tests"]
+    holders = []
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            if "__pycache__" in path.parts or path == pathlib.Path(__file__):
+                continue
+            if PERSONAL_DOMAIN in path.read_text(encoding="utf-8"):
+                holders.append(str(path.relative_to(REPO_ROOT)))
+    assert not holders, format_violations(
+        holders,
+        "Use a reserved example domain (example.com/.org/.net, RFC 2606). A real "
+        "address in a fixture is one somebody eventually mails.",
+    )

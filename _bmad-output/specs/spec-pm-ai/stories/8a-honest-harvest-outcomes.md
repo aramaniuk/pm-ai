@@ -2,7 +2,7 @@
 title: 'Honest harvest outcomes and coverage'
 type: 'bugfix'
 created: '2026-09-02'
-status: 'in-review'
+status: 'ready-for-dev'
 review_loop_iteration: 1
 ---
 
@@ -21,7 +21,9 @@ Split from the original `8a` on 2026-09-02 at the sizing gate: the domain type c
 **Always:**
 - **Coverage is evidence, not assumption.** `start` is the earliest point a fetch actually reached and `end` the moment it finished, both derived from returned pages. A fetch that returned nothing reports no coverage — never a window computed from the clock.
 - **Three outcomes, all of them values.** Harvested something, ran and learned nothing, ran and failed. A raised exception cannot carry the coverage a partial harvest earned, so a page-one-succeeded, page-two-failed fetch returns its events, its real coverage and its failure together.
-- **Coverage is expressed in `ingested_at`, not `occurred_at`.** `CoverageWindow`'s docstring (`lifecycle.py:158-164`) says so: it describes what the daemon did, not what happened in the world. Deriving `start` from a returned row's *provider* timestamp would replace fabrication with AD-35's mixed-clock defect.
+- **Coverage is expressed in `ingested_at`, and only in `ingested_at`.** `CoverageWindow`'s docstring (`lifecycle.py:158-164`) says so: it describes what the daemon did, not what happened in the world.
+- **"Derived from returned pages" means the connector's own clock, not a row's timestamp.** `start` is the connector's clock at the moment the first page came back and `end` at the moment fetching finished — so "derived from what was fetched" and "expressed in `ingested_at`" are the same statement rather than two. Rows carry no `ingested_at` of their own: storage assigns it at persist (`events.py:171`), so a `start` taken from a row would be a *provider* timestamp, which is AD-35's mixed-clock defect wearing this clause's words. **What the pages decide is whether there is any coverage at all, not what its bounds are.**
+- **A failure outcome is persisted, or it is not an outcome.** Both "ran and learned nothing" and "ran and failed" currently persist as the absence of a coverage window (`service.py:1363-1369`), so after the process exits they are one state. `evaluate_commitment` requires `harvest_failed` (`lifecycle.py:174-180`) and has no source for it, so a dead credential reads as patience. This slice gives the failure a durable home beside the cursor and coverage.
 - **`save_cursor` keys coverage on `coverage.connector_instance`** (`service.py:1357-1370`), not on its `instance` argument. The two must agree, or a window is stored under a key nothing reads back.
 
 **Ask First:** Nothing.
@@ -39,7 +41,10 @@ Split from the original `8a` on 2026-09-02 at the sizing gate: the domain type c
 | Partial page failure | page 1 ok, page 2 fails | events and page 1's real coverage returned **with** the failure; cursor advances to page 1's end only | failure outcome |
 | Throttled | 429 with `Retry-After` | pages already walked returned with their real coverage; retry hint surfaced | failure outcome, retryable |
 | Duplicate across pages | one row on pages 1 and 2 after re-pagination | deduped on the natural key; the span counted once | reported in `duplicates` |
-| Cursor with no coverage | ran-and-learned-nothing | cursor still advances; `save_cursor` accepts an absent window explicitly | N/A |
+| Cursor with no coverage | ran-and-learned-nothing | cursor still advances; `save_cursor` takes `CoverageWindow | None` **by signature**, not by duck-typing | N/A |
+| Same window harvested twice | a re-run over the same range | one window, not two — `save_cursor` inserts unconditionally today (`service.py:1366`) and nothing constrains uniqueness | N/A |
+| Failure read back after a restart | the process exited after a 5xx | the failure is still distinguishable from an empty harvest | N/A |
+| Persist raises after page one | coverage already earned | page one's cursor and coverage are saved, or both are discarded with the batch — stated, not left to ordering | failure outcome |
 
 </frozen-after-approval>
 
@@ -57,14 +62,27 @@ Split from the original `8a` on 2026-09-02 at the sizing gate: the domain type c
 - [ ] `pm_ai/domain/harvest.py` -- add the three-member `outcome`, a `failure` field, and make `coverage` optional rather than mandatory-and-therefore-invented
 - [ ] `pm_ai/connectors/gitlab.py` -- derive coverage from returned rows; delete the `timedelta(hours=4)` construction
 - [ ] `pm_ai/app/pipelines.py` -- do not save a coverage window that was not reported
-- [ ] `tests/connectors/test_coverage_honesty.py` -- the matrix, with the empty-200 and partial-page cases explicit
+- [ ] `pm_ai/ports/__init__.py`, `pm_ai/storage/service.py:1357-1370` -- retype `save_cursor`'s `coverage: object` to `CoverageWindow | None` on both the port and the service, replacing the three `getattr(coverage, ...)` reads with attribute access -- this is what makes "accepts an absent window **explicitly**" true rather than duck-typed, and what lets mypy catch a caller passing the wrong thing
+- [ ] `pm_ai/storage/service.py` -- give the failure outcome a durable home beside the cursor and coverage, and a read-back -- without it `harvest_failed` has no source and a dead credential reads as patience
+- [ ] `tests/slice/test_vertical_slice.py:96-103` -- update the coverage assertion in **this** slice's commit -- it asserts `start <= NOW - 30min <= end`, which holds only for the fabricated four-hour window this slice deletes
+- [ ] `tests/connectors/test_coverage_honesty.py` -- the matrix, with the empty-200, partial-page and re-run cases explicit
 
 **Acceptance Criteria:**
 - Given a fetch returning two pages, then exactly one window is read back through `coverage_windows(instance)`, its `start` equals the earliest point actually reached and its `end` the fetch-completion instant — a **positive** bound assertion. An absence assertion cannot stand alone: `save_cursor` keys on `coverage.connector_instance`, so a fabricated window under a different key already returns `[]`, and a `grep` for `timedelta(hours=4)` is satisfied by `timedelta(minutes=240)`.
 - Given a connector whose provider returns an empty `200`, then `coverage_windows(instance)` gains no entry — asserted against storage.
 - Given a page-one-succeeded, page-two-failed fetch, then the return value carries page one's events, page one's coverage **and** the failure — a shape an exception cannot express, which is why the outcome is a value.
+- Given a harvest that failed, when the value is written and the process restarted, then a reader can still tell it from a harvest that returned nothing — asserted across a fresh `StorageService`, because in one process the distinction survives in memory and proves nothing.
+- Given `uv run mypy`, then a caller passing something that is not a `CoverageWindow` to `save_cursor` is an error — the signature carries the rule, rather than three `getattr` calls tolerating anything.
+- Given `uv run pytest -q`, then the suite passes — including `tests/slice/test_vertical_slice.py`, whose coverage assertion this slice's own change invalidates and whose update is a task here rather than a surprise for the next slice.
 
 ## Spec Change Log
+
+- **2026-09-03, amended against the second multi-lens review.**
+  **The coverage clause named two clocks** (B18). It required `start` derived from returned rows *and* expressed in `ingested_at`, which storage assigns at persist — so a literal reading takes a provider timestamp and reinstates AD-35's mixed-clock defect. Restated: the bounds are the connector's own clock at first page and at completion, and what the pages decide is *whether* there is coverage, not what its bounds are.
+  **A failure outcome did not survive the process** (B19). Ran-and-learned-nothing and ran-and-failed both persist as an absent coverage window, so `evaluate_commitment`'s required `harvest_failed` has no source and a dead credential reads as patience. The failure now has a durable home and a read-back criterion asserted across a fresh service.
+  **`save_cursor` accepted an absent window by duck-typing, not by signature.** It is typed `coverage: object` on both the port and the service and read through three `getattr` calls, so the matrix's "explicitly" was aspirational and mypy could catch nothing. Retyping it is now a task.
+  **An existing assertion will fail** (C17). `tests/slice/test_vertical_slice.py:96-103` asserts `start <= NOW - 30min <= end`, true only of the fabricated four-hour window this slice deletes. Updating it is a task here, and a criterion says the full suite passes — this slice previously claimed "no new failures" while guaranteeing one.
+  **Two edge cases gained rows:** a re-run stores one window rather than two (`save_cursor` inserts unconditionally and nothing constrains uniqueness), and a persist that raises after page one either keeps that page's cursor and coverage or discards both with the batch — stated rather than left to call ordering.
 
 - **2026-09-02, split at the sizing gate.** The original `8a` measured 2,275 tokens and held a `pm_ai.domain.harvest` type change with its call-site fixes alongside a `pm_ai.connectors` registry with health probes. The registry is now `8d`. Recorded because the two were reviewed together as one defect and separating them was a human's call, not an obvious one.
 - **Inherited from the 2026-09-02 multi-lens review**, which found the failure outcome represented as "returns or raises" — unimplementable against this slice's own partial-page row, which requires both an error and page one's earned coverage. It also found the coverage acceptance criteria passing against a still-fabricating connector, and added the clock-basis rule, 429, duplicate rows across re-paginated pages, and a cursor advancing with no coverage.

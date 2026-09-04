@@ -2,7 +2,7 @@
 title: 'Master-key enrolment'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'ready-for-dev'
 review_loop_iteration: 1
 ---
 
@@ -19,9 +19,10 @@ review_loop_iteration: 1
 **Always:**
 - **The daemon never mints.** A new key makes every previously sealed artifact permanently unreadable, and that is not a decision a process start may take. Minting happens only here, only when a human invokes it.
 - **An existing key is never overwritten.** Enrolment against a populated keychain refuses and names the consequence. Replacing a key is a different act with data loss attached and belongs to whoever owns rotation.
+- **The store is conditional on absence, and `KeychainPort` has no such primitive yet.** `store` is specified as "replacing any previous value" (`ports/__init__.py:186-190`), so a read-then-write loses the race the matrix names: two enrolments both observe an empty keychain and the second overwrites the first's key, making every artifact sealed in between unreadable. This slice adds the conditional operation to the port and to the macOS adapter; without it the refusal is advisory.
 - **Key material never leaves the keychain.** Not returned to the caller, not logged, not echoed, not in a traceback, not in a test assertion message.
 - The three keychain failure modes `ports` already distinguishes — `KeyNotFound`, `KeychainUnavailable`, `KeychainBackendMissing` (`ports/__init__.py:163,174,184`) — stay distinguished. "Nothing stored" and "cannot reach it" lead to different actions.
-- **The key length is `AES_KEY_BYTES`, and this slice hoists that constant to `pm_ai/ports/`.** `EnvelopeCipher` refuses anything but 32 bytes (`crypto.py:153,192-194`), the constant lives in `pm_ai.storage.crypto`, and `pm_ai.core.enrolment` may not import it under the layering contract. Duplicating the literal is the shape that already failed once: `ports/__init__.py:202-206` records two independent literals for the key *name* causing ABSENT to be reported on a healthy machine.
+- **The key length is `AES_KEY_BYTES`, defined in `pm_ai/ports/` by this slice.** `EnvelopeCipher` refuses anything but 32 bytes (`crypto.py:153,192-194`) and `pm_ai.core.enrolment` may not import `pm_ai.storage.crypto`. Duplicating the literal is the shape that already failed once, for the key *name* (`ports/__init__.py:202-206`).
 - **One name, from one constant.** `enrol` stores under `MASTER_KEY_NAME`, the same constant `LazyKeyCrypto` fetches and `keychain_reachable` probes.
 
 **Ask First:** Key rotation, or re-enrolment that re-encrypts existing artifacts. Rotation means rewriting every sealed artifact and has no owner in any story.
@@ -55,19 +56,27 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` -- move `AES_KEY_BYTES` here beside `MASTER_KEY_NAME` -- `core` cannot import `pm_ai.storage.crypto`, and a duplicated literal is the failure `:202-206` records
-- [ ] `pm_ai/app/wiring.py` -- add `keychain: KeychainPort` to `Daemon`, passing the adapter `build()` already constructs at `wiring.py:115` -- without it `4c` has no legal route: `surfaces` may not reach `keyring`, indirectly included, under `.importlinter:115-131`
+- [ ] `pm_ai/ports/__init__.py` -- define `AES_KEY_BYTES` here beside `MASTER_KEY_NAME`, and **re-export it from `pm_ai.storage.crypto`** keeping that module's `__all__` entry -- `core` cannot import `pm_ai.storage.crypto`, and a bare move breaks `tests/architecture/test_cipher.py:38-39`, which imports the name and uses it at six sites, at collection time
+- [ ] `pm_ai/ports/__init__.py`, `pm_ai/platform/keychain.py` -- add the conditional-on-absent store to `KeychainPort` and the macOS adapter -- the matrix's race row has no mechanism without it, and AD-14's port inventory gains an operation
 - [ ] `pm_ai/core/enrolment.py` -- add `enrol(keychain, *, key_name=MASTER_KEY_NAME)`, `KeyAlreadyEnrolled`, and the read-back equality check -- minting in exactly one place
-- [ ] `pm_ai/platform/doctor.py` -- point the `ABSENT` remediation at `pm-ai key enrol` by name -- 1g deliberately left this text pending a command to name
 - [ ] `tests/core/test_enrolment.py` -- one test per matrix row, against a fake `KeychainPort`
 
 **Acceptance Criteria:**
 - Given a keychain already holding a key, when enrolment runs, then it refuses and no write reaches the keychain — asserted on the fake, not inferred from the message.
 - Given a successful enrolment, when `enrol`'s return value, every log record it emits and every traceback it raises are searched, then the key material appears in none. Stated at service level because `4c` does not exist yet; the no-echo-at-the-prompt and `pm-ai doctor` criteria belong to `4c`, which owns the surface.
 - Given `enrol` stores a key, then the name it stored under equals `MASTER_KEY_NAME` and the length equals `AES_KEY_BYTES` — asserted against the constants, because the tests run on a fake and nothing else would notice enrolment writing somewhere the cipher never looks.
+- Given both modules, then `pm_ai.storage.crypto.AES_KEY_BYTES is pm_ai.ports.AES_KEY_BYTES` — **identity, not equality**. A copy rather than a re-export leaves two literals that are both `32`, so every length assertion passes while the duplication this task exists to prevent ships invisibly; `ports/__init__.py:202-206` records that exact failure happening once already, for the key *name*.
+- Given two enrolments that both observe an empty keychain, then exactly one key is stored — asserted on the fake, because a read-then-write passes a single-threaded test and loses the race in production.
 - Given a fake whose read-back returns different material than was stored, then enrolment refuses rather than reporting success.
 
 ## Spec Change Log
+
+- **2026-09-03, amended against the second multi-lens review.**
+  **The race row had no mechanism** (B5). `KeychainPort.store` is specified as replacing any previous value, so the matrix's two-enrolments-racing row was unimplementable and its loser would overwrite the winner's key — making every artifact sealed in between unreadable. The port and the macOS adapter gain a conditional-on-absent operation, which touches AD-14's inventory.
+  **The `AES_KEY_BYTES` move breaks a test module at collection** (B6). `tests/architecture/test_cipher.py:38-39` imports the name and uses it at six sites. It is now defined in `ports` and re-exported from `pm_ai.storage.crypto`, and a criterion asserts **identity** rather than equality — a copy leaves two literals that are both `32`, so every value assertion passes while the duplication ships (C7).
+  **The remediation task moved to `4i`** (C8). Both this slice and `4h` claimed the keychain `ABSENT` text, and with `pm-ai setup` as the command that actually fixes it, the retarget belongs with the probe work. `test_doctor.py:123`'s bare `"Enrol"` substring passes whichever command the text names, or none, so `4i` carries the criterion too.
+
+- **2026-09-02, the daemon field moved to `4c`.** The multi-lens review's fix for A3 ("`enrol` has no legal route to a keychain") was added here as a task adding `keychain: KeychainPort` to `Daemon` — which this spec's own frozen `Never: No daemon changes` forbids. Caught at the story-4a review gate and resolved by the human in favour of moving the task rather than amending the frozen clause, which now stands untouched and true. The reasoning: `enrol(keychain, *, key_name)` is a `core` service tested against a fake `KeychainPort` and never needs `Daemon` at all, while `4c` is the slice that calls it from the surface and already owns `pm_ai/app/entry.py`. The route is still mandatory and still recorded, in `4c`'s task list, with the layering reason unchanged.
 
 - **2026-09-02, multi-lens review.** Three findings changed the slice's contents.
   **Two of three acceptance criteria could not be evaluated at this slice's own checkpoint** — both named the CLI, which `4c` builds afterwards. Restated at service level, with the surface criteria moved to `4c`.

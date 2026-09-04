@@ -142,7 +142,7 @@ flowchart TB
 
     subgraph L_core["pm_ai.core — I/O-free"]
         direction LR
-        csan["sanitize · normalize<br/>8c fixes the boundary"]
+        csan["sanitize · normalize<br/>8e retires the no-op"]
         cnew["rendering · goal_register<br/>meeting_records · config"]
         csched["scheduler — wave 2"]
         cexist["event_log · retrospective<br/>disclosure_ledger · extraction · ledger"]
@@ -239,8 +239,9 @@ flowchart LR
     class elog,meet,out store
 ```
 
-`san` and `attr` are amber because slice `8c` fixes the discarded-return-value
-fault before any Graph text passes through them.
+`san` and `attr` are amber because slice `8e` retires the discarded-return-value
+no-op here and moves the guard to the model boundary, before any Graph text
+passes through them.
 
 ### Wave 1 build order
 
@@ -250,17 +251,25 @@ independent and can move.
 ```mermaid
 flowchart LR
     s0(["slice 0 — spike, throwaway"])
+    s1n["1n project artifacts machine-local"]
     s4a["4a config"]
     s4b["4b key enrol"]
-    s4c["4c CLI + exit codes"]
+    s4c["4c CLI + exit codes + doctor"]
+    s4j["4j service subcommands"]
     s4d["4d project registry"]
+    s4k["4k project add"]
+    s4g["4g config writer"]
+    s4i["4i config probe"]
+    s4h["4h pm-ai setup"]
     s8a["8a harvest outcomes"]
     s8d["8d connector registry"]
+    s8f["8f storage port capabilities"]
     s8b["8b credentials"]
     s8c["8c payload declarations"]
-    s8e["8e sanitize at boundary"]
+    s8e["8e model boundary"]
     s11a["11a meeting records"]
     s22a["22a goal register"]
+    s22b["22b goal writer"]
     s33a["33a Graph auth"]
     s33b["33b Graph fetch"]
     s33c["33c Graph mapping"]
@@ -271,23 +280,36 @@ flowchart LR
 
     s0 --> s33a
     s4a --> s4c
-    s4b --> s4c
+    s4b --> s4j
+    s4c --> s4j
+    s8d --> s4j
     s4a --> s4d
-    s4c --> s4d
+    s4a --> s4g
+    s4g --> s4h
+    s4a --> s4i
+    s4i --> s4h
+    s4b --> s4h
+    s4c --> s4h
+    s4d --> s4k
+    s1n --> s4k
+    s4c --> s4k
+    s4k --> s4h
     s4b --> s8b
     s4c --> s8b
     s8d --> s8b
+    s8f --> s8b
+    s8f --> s11a
     s8b --> s33a
     s8d --> s33a
     s8a --> s33b
     s33a --> s33b
     s11a --> s33c
     s33b --> s33c
-    s8c --> s8e
+    s22a --> s22b
+    s4c --> s22b
     s22a --> s23a
     s11a --> s23a
     s23a --> s23d
-    s4d --> s23d
     s4c --> s23b
     s23a --> s23b
     s23d --> s23b
@@ -302,25 +324,53 @@ flowchart LR
     class done,s0 goal
 ```
 
+Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
+cross-checked both ways: 25 slices, **35 dependency edges** in the table and the
+same 35 in the diagram, no edge in one and absent from the other, acyclic. The
+count has moved four times on 2026-09-03 as the wave's specs were amended
+against the second review and split at the sizing gate; it is re-derived from the
+table each time rather than adjusted by hand.
+
 Amber is the critical path, **seven slices**:
 `4a → 4c → 8b → 33a → 33b → 33c → 23b`. It runs through the CLI rather than the
 key, because `8b` adds `connector add` to the dispatch table `4c` creates — an
 edge the first draft of this graph missed entirely.
 
-Green is an island: `8c → 8e` has no dependants in wave 1. The sanitization fix
-is needed before `33d` in wave 2, where the first genuinely untrusted
-third-party text arrives. It sits in wave 1 because the defect is live on the
-GitLab path today.
+Green is two islands, not a chain: `8c` and `8e` have no dependants in wave 1
+and, since 8e's 2026-09-02 renegotiation, no dependency on each other. 8e
+declares the chokepoint — `ModelPort` accepting only `Sanitized` — and reads no
+declaration; a caller gathering text for a prompt reads 8c's. Both are needed
+before `33d` in wave 2, where the first genuinely untrusted third-party text
+arrives, and before story 7 puts a model behind the port. They sit in wave 1
+because the defect is live on the GitLab path today and cheapest to close while
+nothing can yet bypass the port.
 
-Seven slices have no dependencies at all and can start immediately: `4a`, `4b`,
-`8a`, `8c`, `8d`, `11a`, `22a`. `22a` and `11a` in particular run parallel to the
+Nine slices have no dependencies at all: `1n`, `4a`, `4b`, `8a`, `8c`, `8d`,
+`8e`, `8f`, `22a`. `4a` is already implemented, so eight can start today. `8e`
+joined them when its edge from `8c` was removed; `8f` and `1n` were carved out of
+`8b` and the scope model on 2026-09-03. `22a` in particular runs parallel to the
 entire Graph chain, since the renderer takes a goal register and a clock and does
-not care where meetings came from.
+not care where meetings came from — `11a` no longer joins it there, having gained
+a dependency on `8f`'s collection listing, which `for_day` needs.
 
-**`4c` precedes `4d`, not the other way round.** `4d` adds `project add` to the
-dispatch table `4c` creates, so the reverse would be circular — and it is
-survivable only because `4c` requires `doctor` to work on a machine with no
-registered project.
+**`1n` is the one with an ordering constraint rather than a dependency.** It must
+land before `4k`: after it, a project directory that already committed
+`.project-ai/memory/` can only be fixed with `git rm --cached`, because AD-43's
+third row states that adding an ignore rule does not untrack what is already
+tracked. Nothing is deployed, so no such directory exists — which stays true only
+if the order holds.
+
+**`4c` precedes `4k`, not `4d`.** The circularity the review found was real
+while one slice held both the registry and its command: `4d` added `project add`
+to the dispatch table `4c` creates. Splitting them on 2026-09-03 dissolved it —
+`4d` is the registry, its reader and its probe, and needs only `4a`; `4k` is the
+command and needs `4c`. So `4d` is startable immediately and `4k` waits.
+
+**`4h` has four prerequisites and no dependants.** It sequences `4b`'s
+enrolment, `4d`'s registration, `4g`'s writer and `4i`'s probe, so it cannot
+start until all four exist — and because nothing depends on it, it never delays the critical
+path. `4g` and `4i` need only `4a`, so both can land while `4b` and `4d` are still
+in flight; that asymmetry is why the group was split at the sizing gate.
 
 ## Connector design
 
@@ -413,7 +463,7 @@ The transcript 403 makes this load-bearing rather than tidy: a tenant with
 transcripts disabled must record *looked-and-refused*, or story 16's three
 verdicts later read it as *nothing happened*.
 
-### Sanitization does not currently happen (slice 8c)
+### Sanitization does not currently happen (slice 8e)
 
 Found 2026-09-01 while verifying this document's own claims, and it is a silent
 fault rather than a gap.
@@ -573,42 +623,56 @@ Answers three unknowns: whether the tenant permits transcripts at all, which
 scopes consent cleanly, and what the real payload shapes are. Slice 33e's scope
 depends on the first answer.
 
-### Wave 1 — a real dashboard from a real calendar (17 slices)
+### Wave 1 — a real dashboard from a real calendar (25 slices)
 
 | Slice | Delivers |
 |---|---|
+| `1n` | Four project artifacts and `memory/` become gitignored — the wave's only code change. Must precede `4k`. |
 | `4a` | Config loading — `tomllib`, `config.toml`. Explicitly not the encryption toggle. |
 | `4b` | `pm-ai key enrol` through KeychainPort; the daemon never mints. Retargets 1g's "key absent" remediation. |
-| `4c` | CLI entry point, subcommand dispatch, and the exit-code table. No REPL yet. |
-| `4d` | Project registry and `pm-ai project add`. **Added by the spec review** — `build()` resolves the project scope eagerly, so without it nothing runs on a clean machine. |
+| `4c` | CLI entry point, the dispatch and exit-code tables, and `doctor`. No REPL yet. |
+| `4j` | The three service leaves: `key enrol`, `config show`, `connector check`. |
+| `4d` | `projects.toml` parsed, rendered, read by `build()`, reported by `doctor`. **Added by the spec review.** |
+| `4k` | `pm-ai project add <path> [alias]` — creates the tree, generates `.gitignore`, adopts an existing one. |
+| `4g` | A writer for `config.toml` — `render_config` beside `load_config`. |
+| `4i` | The sixth `doctor` probe: what state `config.toml` is actually in. |
+| `4h` | `pm-ai setup` — enrol, register, prompt, write, then report `doctor`. First boot to green. |
 | `8a` | `HarvestResult`'s three outcomes and the `CoverageWindow` fix in `gitlab.py`. |
-| `8d` | Connector registry and the 10s CAP-35 health probes. |
+| `8d` | Connector registry, the port's two new members, and per-connector health probes. |
+| `8f` | `StoragePort` declares artifact I/O and a collection listing; a declared file mode. |
 | `8b` | Credential lifecycle — `pm-ai connector add`, encrypted-write-first, 600. |
 | `8c` | Each payload class declares its untrusted text fields, guarded at import. |
-| `8e` | Sanitization actually binds at the harvest boundary. See below. |
+| `8e` | Sanitization binds where it can be enforced: `ModelPort` accepts only `Sanitized`. See below. |
 | `11a` | Meeting records reach Tier 1 through `meetings/`; retires the in-memory dict. |
 | `33a` | `GraphAuthPort` and MSAL device-code adapter, refresh, stale-credential health reporting. |
 | `33b` | Graph calendar fetch — paging, throttling, `{dateTime, timeZone}` → aware UTC, honest coverage. |
 | `33c` | Calendar rows → Meeting records and `CALENDAR_EVENT_HELD`; `ConnectorPort` conformance. |
 | `22a` | Goal register parsed from `strategic_goals.md`; hand-edit tolerant, unparseable lines surfaced not dropped. |
+| `22b` | `render_goals`, `pm-ai goal set`, and the `goal_set` event-log entry. |
 | `23a` | `core/rendering.py` — the four sections, honest gaps, golden-file tests. |
-| `23d` | `project_scope_datasources` and AD-25's one-directional privacy wall. |
+| `23d` | `render_project_dashboard` — a separate renderer whose signature *is* AD-25's wall. |
 | `23b` | `pm-ai dashboard` wiring in `app/`: meetings + event_log + goals → render → `write_artifact`. |
 
 Wave 1 ends with a real `~/.manager-ai/memory/daily_dashboard.md` built from the
 PM's actual calendar and actual goals. **This is the working prototype, and a
 legitimate point to stop and reassess.**
 
+It also ends with `pm-ai` genuinely installable: `pm-ai setup` walks a clean
+machine to a configured one — key enrolled, project onboarded, `config.toml`
+written — and `pm-ai doctor` reports whether it worked. That was not in the
+original plan; it arrived on 2026-09-03 when the first-run experience was
+requested, and it is why the wave grew from seventeen slices to twenty-five.
+
 Ordering constraints inside the wave, as the build-order graph below derives
 them: `4a` and `4b` precede everything, because nothing runs without config and a
-key; `4c` precedes `4d` and `8b`, both of which add subcommands to the dispatch
-table it creates; `8d` precedes `8b` and `33a`, which register into it; `8a`
+key; `4c` precedes `4j`, `4k` and `8b`, all of which add subcommands to the
+dispatch table it creates; `8d` precedes `8b` and `33a`, which register into it; `8a`
 precedes `33b` so Graph inherits a `HarvestResult` that can report an honest
 outcome; `11a` precedes `33c` because the mapping writes Meeting records, and
 precedes `23a` because Time-Critical reads them; `22a` precedes `23a` because the
-renderer takes a goal register; `23a` precedes `23d`, which adds the scope wall
-to the same module; and `8c` precedes `8e`, the one pair with no dependants in
-this wave.
+renderer takes a goal register; `23a` precedes `23d`, which adds the second renderer
+to the same module and reuses its section renderers; and `8c` and `8e` are two independent slices with no
+dependants in this wave and, after 8e's renegotiation, no edge between them.
 
 ### Wave 2 — the full surface (7 slices)
 
@@ -630,8 +694,8 @@ this wave.
   either changes; nothing in wave 1 or 2 does.
 
   The rationale is *not* that sanitization already works. It does not — see
-  slice `8c`. An earlier draft of this document claimed the harvest boundary
-  sanitizes; that claim was wrong and the correction is why `8c` exists.
+  slice `8e`. An earlier draft of this document claimed the harvest boundary
+  sanitizes; that claim was wrong and the correction is why `8e` exists.
 - **Story 7 — Whisper and Ollama.** Decision 2 removed every model from the
   path. Transcript extraction does not need one: `core/extraction.py` is regex,
   not model-backed.
@@ -648,28 +712,51 @@ Stories 1 and 2 were 25 slices and built the storage, crypto, and log
 foundation. This path is 24 slices plus a spike — the same order of magnitude
 again. "Shortest" means shortest *given the four decisions above*, not small.
 
-The shortest path to something working is wave 1 alone: 17 slices.
+The shortest path to something working is wave 1 alone: 25 slices, one of them (`4a`) already implemented.
 
 ## Open questions
 
 1. **Does the tenant permit Graph transcript access?** Slice 0 answers it. A
    `403 GraphAccessToTranscriptsDisabled` removes slice 33e and `11b` from the
    plan entirely and there is no workaround.
-2. **Is "3-Tier" horizon or domain?** Decided as horizon above. A one-line
-   change now; a re-render later.
+2. **Is "3-Tier" horizon or domain?** **Domain**, and the earlier answer here —
+   "decided as horizon" — was wrong. Settled against the source on 2026-09-03:
+   `prd.md:63` names `strategic_goals.md` as "3-Tier Goals (Project, Team,
+   Personal Career Goals)", and `prd.md:424` says the domain "is what a goal is
+   *about*, and it is the `<Tier>` in the alignment tag, matching §2.1's '3-Tier
+   Goals'". `alignment_tag`'s docstring (`goals.py:99-104`) was right all along;
+   the word "Milestones" in CAP-9's section title is what misled both this entry
+   and `23a`. Corrected in `23a`.
 3. **Does a payload gaining a field need an operational schema version bump?**
-   Story 1i built the versioning; whether a Tier-1 Markdown entry format change
-   is in its remit needs checking against `1i` before `33d` is specced. This
-   covers both `MessagePayload.mentions` and slice `8c`'s persisted `for_model`.
+   **Answered 2026-09-02: no, and story 1i is the wrong owner.** `SCHEMA_VERSION`
+   (`service.py:133`) describes `operational.db`'s table shape, and a field added
+   to a Tier-1 Markdown line changes no column — the only thing the harvest write
+   path puts in SQLite is a `seen` dedup key. The version that would govern an
+   entry line is AD-27's entry grammar, which does not exist: 2c withdrew
+   `GRAMMAR_VERSION` after finding it written nowhere and read nowhere. `8e` no
+   longer persists `for_model` at all (see question 6), so what remains live is
+   `MessagePayload.mentions` in `33d` — the first slice that genuinely widens the
+   entry grammar, and the point at which AD-27's unmade design decision must be
+   taken rather than deferred.
 4. **How should a payload declare which of its fields is sanitizable text?**
    Decided in `8c` at review: keyed by payload **class**, not event type, since
    `ReviewPayload` serves two types; validated against the dataclass at import;
    refused by a typed error, never an `assert`, which
    `test_guards_survive_o.py:174-181` forbids anywhere in `pm_ai/`.
-5. **What display timezone owns "today"?** Raised by the review and still open.
-   `Meeting.start` is aware UTC, so a 23:30-local meeting is tomorrow in UTC and
-   the answer decides which meetings a 07:00 dashboard shows. `11a`'s
-   `for_day(day, *, tz)` takes it and `23a` must agree.
-6. **Does persisting `for_model` bump the operational schema version?** Story 1i
-   owns versioning. Now marked blocking in `8c` rather than deferrable, because
-   its task list already commits to persisting.
+5. **What display timezone owns "today"?** **Answered 2026-09-03: a fourth
+   `config.toml` key, `display_timezone`.** It had no owner in any story —
+   `render_dashboard` and `for_day` both took a `tz` and nothing supplied one,
+   `4a` had closed the vocabulary at three keys and `4h` forbids prompting for
+   anything `4a` does not accept. The key lands in `4g`, because a loader and a
+   renderer that disagree about a file format is the drift pair `4g` exists to
+   close; `23b` reads it once and passes it to both consumers, and an unset zone
+   is refused rather than defaulted to UTC.
+6. **Does persisting `for_model` bump the operational schema version?**
+   **Closed 2026-09-02 by removing the premise.** The question was a category
+   error (see question 3), and examining it retired the design that raised it:
+   AD-12 already requires the guard at the consumer through a `ModelPort`
+   accepting only `Sanitized`, no such port existed anywhere in `pm_ai/`, nothing
+   in the package referenced `Sanitized` except the module defining it, and
+   AD-31's audit record is scope provenance in the disclosure ledger rather than
+   the sanitized text. `8e` now declares the port and derives the copy at the
+   point of use, persisting nothing and leaving the entry grammar untouched.

@@ -7,7 +7,7 @@ paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pip
 scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, connectors, MCP skills, storage'
 status: final
 created: '2026-08-18'
-updated: '2026-08-27'
+updated: 2026-09-03
 binds: [FR-01..FR-40, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
 sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.14.2']
 companions: ['SOLUTION-DESIGN.md']
@@ -78,7 +78,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** an inbound listener appearing on a public interface as a side effect of a feature
 - **Rule:** The daemon binds strictly to `127.0.0.1`. Zero public listening ports, ever. Telegram uses **outbound long-polling only** — webhooks are prohibited, because they require a publicly reachable HTTPS endpoint or tunnel. Access is restricted to cryptographically paired Telegram user IDs; unpaired senders are rejected and logged.
 
-### AD-3 — Three storage tiers; only Tier 3 is disposable `[ADOPTED — revised 2026-08-27]`
+### AD-3 — Three storage tiers; only Tier 3 is disposable `[ADOPTED — revised 2026-09-03]`
 
 - **Binds:** storage, NFR-11, FR-02, FR-37, AD-9, AD-20
 - **Prevents:** the earlier version's own contradiction — it called `event_telemetry.db` disposable while the job queue, connector cursors, and idempotency ledger lived inside it, so the documented recovery path would have silently discarded pending external writes and reset every cursor, with the AD-3 test still passing
@@ -86,13 +86,13 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   | Tier | Contents | Promise |
   | --- | --- | --- |
-  | **1 — Truth** | `event_log/` segments per scope (incl. harvested telemetry per FR-27), `commitments_log.md`, coaching history, goals, rules, meeting records, and the application-scoped `disclosure.md` ledger (AD-38) | Plaintext markdown, append-only, hand-editable, git-diffable. A backup target. Bounded by FR-37 compaction, which replaces whole sealed segments rather than rewriting lines (AD-5). |
-  | **2 — Operational** | Job queue and its `PENDING_RETRY` buffer, connector cursors, executed-idempotency-key ledger, the harvest dedup set, staged proposals, `config.json`, and `personal_analytics.db` | Durable and **not derivable from Tier 1**. Must be backed up. Losing it loses pending external writes and resets harvest position — a real consequence, not a cache miss. |
+  | **1 — Truth** | `event_log/` segments per scope (incl. harvested telemetry per FR-27), `commitments_log.md`, coaching history, goals, rules, meeting records, and the application-scoped `disclosure.md` ledger (AD-38) | Plaintext markdown, append-only, hand-editable. In `BACKUP_TARGETS`. Bounded by FR-37 compaction, which replaces whole sealed segments rather than rewriting lines (AD-5). **Git-diffable only where the artifact's own declaration says so** — see the exclusion note below. |
+  | **2 — Operational** | Job queue and its `PENDING_RETRY` buffer, connector cursors, executed-idempotency-key ledger, the harvest dedup set, staged proposals, `config.json`, and `personal_analytics.db` | Durable and **not derivable from Tier 1**. In `BACKUP_TARGETS`, and the tier that most needs one. Losing it loses pending external writes and resets harvest position — a real consequence, not a cache miss. |
   | **3 — Derived** | `event_index.db` (search), `commitment_index.db`, `vector_index/` | Disposable. Rebuildable from Tier 1 with zero loss, **by a declared job** (AD-45). |
 
   **Tiers are physically separated, not merely labelled.** The earlier version named three tiers while the job queue (Tier 2) and the search indexes (Tier 3) shared one `event_telemetry.db` file — so "rebuild Tier 3 only" was unimplementable, and the natural implementation of a rebuild (delete the file, recreate it) would have destroyed pending external writes and every connector cursor.
 
-  | Tier | Artifact | Rebuild target? | Backup target? |
+  | Tier | Artifact | Rebuild target? | In `BACKUP_TARGETS`? |
   | --- | --- | --- | --- |
   | 1 | markdown segments per scope, `~/.pm-ai/disclosure.md`, config | no | **yes** |
   | 2 | `~/.pm-ai/private/operational.db` (plaintext, `0600`) | **never** | **yes** |
@@ -102,6 +102,16 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   `pm-ai reindex` deletes and rebuilds the Tier-3 artifacts and *cannot* reach Tier 2, because Tier 2 is a different file. That is a structural guarantee rather than a careful implementation. Discarding Tier 2 is a separate, explicitly-named operation whose consequences the CLI states first.
 
   **Raw captures are outside the tier model on purpose.** `transcripts/` and `telegram_cache/` hold transient input the pipeline consumes and NFR-09 purges at 30 days. They are **not Tier 3**: Tier 3 promises *rebuildable from Tier 1 with zero loss*, and no rebuild reconstructs a recording. They are never a backup target and nothing may depend on them surviving (AD-33). The exclusion is asserted in code against the tier table rather than left implicit — an artifact absent from every set is an oversight, which is how `personal_analytics.db` came to be covered by no backup; an artifact named as excluded is a decision.
+
+  **Tier 1 is not uniformly committed, and `[revised 2026-09-03]` it is mostly not.** "Git-diffable" was read as a tier-wide promise; it is per artifact, derived from the `gitignored` declaration on its node (AD-44). `disclosure.md` and `connectors/` were already Tier 1 and excluded. On 2026-09-03 the **project** tree's `memory/` and its four members — `event_log/`, `commitments_log.md`, `daily_dashboard.md`, `meetings/` — joined them, leaving `rules/` and `skills/` as the only committed project artifacts.
+
+  The reason is that a merge falsifies every mechanism that makes Tier 1 trustworthy. Two machines on one repository append to the same `%Y-%m.md`; the whole-file publish clobbers lines pulled in between; the dedup set is per machine, so the next harvest re-appends a teammate's events; sealed segments are declared immutable and a merge rewrites them; and "file order is arrival order, and it is the only exact one" is false after a merge. A shared Tier 1 would need a merge story none of AD-5, AD-35 or FR-37 has.
+
+  **This bears on backup and diffability only, never on the cross-scope wall.** AD-38's invariant is a scope relation with no git term in it `[2026-09-03]`, so nothing here relaxes what a project record may cite. Saying so explicitly, because the fork between these two readings was a live leak path for the few hours between the two amendments.
+
+  The cost is deliberate: a teammate's project events, meetings and commitments do not reach this machine, so every project-level aggregation is per-machine. `rules/` and `skills/` stay shared because they are human-authored and nothing local is derived from them. The `people` tree already had this shape, which is why it is a correction rather than a new design.
+
+  **`[revised 2026-09-03]` `BACKUP_TARGETS` declares what a backup would cover; it does not promise one exists.** Backup is **out of scope** — see Deferred. The tier rows above said "must be backed up", and the only mechanism the spine ever named for project Tier 1 was Deployment's "project rides in git", which Q6 removed. Nothing in the codebase performs a backup either: the set is derived from the tier table and only re-exported, with no consumer. Rather than invent a mechanism nobody asked for, the promise is relaxed to what the set actually is — a declaration of scope for a future capability. Every artifact stays classified, so when a backup is built it has its target list already; what is withdrawn is the assurance that something is doing it.
 
   **There is a third exclusion set, and finding it proved the rule above.** `logs/` is annotated "diagnostics, not a tier" in the storage diagram, and was in *no* set — precisely the oversight this AD warns about, sitting inside the AD that warns about it. `DIAGNOSTIC_ONLY` now names it, asserted pairwise disjoint from the tier table and from `RETENTION_MANAGED`. It is deliberately **not** folded into `RETENTION_MANAGED`: a rotating diagnostic log is not a raw capture, and putting it there would place it under an NFR-09 purge promise nothing implements. So the complete statement is: every persistent artifact is in exactly one of the three tiers, `RETENTION_MANAGED`, or `DIAGNOSTIC_ONLY` — and the sets are derived from the scope model (AD-44), so an artifact cannot enter one without a declaration to derive it from.
 
@@ -118,11 +128,13 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   - NFR-11 scopes to **Tier 3**. Tier 3 rebuilds to the fidelity Tier 1 *currently holds* — compaction (AD-5) is a deliberate, recorded reduction, so a rebuild after compaction reproduces the compacted view, not the pre-compaction detail.
   - **Restoring Tier 2 from a backup opens a re-execution window.** Mutations performed after the backup point are absent from the restored executed-key ledger, so a replayed job can act twice. Restore is a recovery event: the CLI must warn, and reconciliation against the external system is the operator's call, not something the idempotency key alone solves.
 
-### AD-4 — Three top-level scopes, and a fourth kind for other people's data `[revised 2026-08-19]`
+### AD-4 — Three top-level scopes, and a fourth kind for other people's data `[revised 2026-09-03]`
 
 - **Binds:** all storage paths, FR-16, FR-30, FR-31, NFR-07, AD-31
 - **Prevents:** project configuration contaminating the sovereign personal scope and breaking its portability across roles and companies — and, added after the scope model was found to have no legal home at all for a direct report's career record, that record landing in the one scope that travels to your next employer or the one scope your team can read
-- **Rule:** Three top-level scopes. `~/.pm-ai/` holds application-level state: daemon settings, project registry, per-project connector configuration, credentials. `~/.manager-ai/` holds sovereign personal material only — coaching, career, principles, goals, personal briefings — and contains **no** project-specific information or configuration. `<repo>/.project-ai/` holds committed per-project material, with one gitignored exception: `transcripts/`, the raw captures of its meetings (AD-23). Writing project config into `~/.manager-ai/` is prohibited.
+- **Rule:** Three top-level scopes. `~/.pm-ai/` holds application-level state: daemon settings, project registry, per-project connector configuration, credentials. `~/.manager-ai/` holds sovereign personal material only — coaching, career, principles, goals, personal briefings — and contains **no** project-specific information or configuration. `<repo>/.project-ai/` holds per-project material, of which `[revised 2026-09-03]` **only `rules/` and `skills/` are committed** — human-authored context and automation, the things a team shares. Everything under `memory/` is machine-local (Q6, AD-3), as are `transcripts/`, the raw captures of its meetings (AD-23). Writing project config into `~/.manager-ai/` is prohibited.
+
+  **A scope is an ownership boundary, not a sharing setting `[2026-09-03]`.** The three scopes were easy to read as "personal is private, project is shared", and Q6 broke that shorthand: most of the project scope is now machine-local. What the boundary decides is unchanged and was never about git — *whose* material this is, therefore which rules govern it, where it is written, and what it may reference (AD-38). Whether any given artifact travels is a separate answer, declared per node and derived into `GITIGNORED` (AD-44).
 
   Raw meeting transcripts previously sat in the application scope — documented as holding *no personal records*, which a recording of a meeting plainly is. Material now lands in the scope that owns its subject, the same rule AD-38 applies to log entries, and each scope holds its captures at the same relative path rather than in a directory of its own.
 
@@ -314,7 +326,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 ### AD-28 — Commitments belong to project scope; coaching commitments are a separate entity
 
 - **Binds:** FR-16, FR-34, AD-4, AD-25
-- **Prevents:** a 1:1 coaching undertaking being written into a git-committed project ledger, leaking personal material into a repository — and, symmetrically, a report's career goal being filed as either
+- **Prevents:** a 1:1 coaching undertaking being written into the project ledger, where it belongs to the wrong subject and — while the project scope was committed in full — was published to a repository `[motive restated 2026-09-03]` — and, symmetrically, a report's career goal being filed as either
 - **Rule:** Three distinct entities, three scopes, no shared storage and no shared code path:
 
   | Entity | What it is | Scope |
@@ -323,7 +335,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   | `CoachingCommitment` | the PM's own undertaking from a Socratic 1:1 (UJ-1) | personal |
   | `CareerGoal` | a direct report's goal agreed in a team 1:1 (UJ-4), HR-syncable on approval | people (AD-4) |
 
-  The project-scope ledger has no code path that accepts a personal or people entity. `CareerGoal` is not a `Commitment`: it is not verified against commit telemetry, and treating it as one would put a performance objective into a git-committed ledger.
+  The project-scope ledger has no code path that accepts a personal or people entity. `CareerGoal` is not a `Commitment`: it is not verified against commit telemetry, and treating it as one would file a performance objective in the project's ledger, where it belongs to neither the right subject nor the right sharing rules.
 
 ### AD-29 — Sanitization is non-destructive to the stored record
 
@@ -343,7 +355,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** each feature deciding independently what may enter a prompt — and a privacy charter whose central claim nothing can check
 - **Rule:** FR-16's adversary is **employer-controlled systems** — team channels, shared repositories, enterprise dashboards, HR platforms — not model APIs. Personal-scope material may therefore enter a frontier prompt, and the Socratic coaching flow routes to `claude-opus-5` as AD-15 specifies. Three obligations follow:
   1. **FR-16 must say so.** A charter that means something narrower than its words is worse than no charter, because it invites a reader to assume more protection than exists.
-  2. **Every frontier call records scope provenance** to the application-scoped disclosure ledger (AD-38) — never to `event_log/`, which exists per scope and one of whose scopes is git-committed. The record carries contributing scopes, task class, model, token counts, and destination. The CLI answers *"what has left this machine, and when"* from that one file. This converts the charter from an assurance into an audit.
+  2. **Every frontier call records scope provenance** to the application-scoped disclosure ledger (AD-38) — never to `event_log/`, which exists per scope, so "what has left this machine" would span N files — and whose project instance was committed in full when this was written. The record carries contributing scopes, task class, model, token counts, and destination. The CLI answers *"what has left this machine, and when"* from that one file. This converts the charter from an assurance into an audit.
   3. **The boundary is on the destination, not only the source.** Personal-scope material must never enter a prompt whose output is bound for a project-scope artifact or an external system. Burnout signals may shape your briefing; they may not reach a team-facing dashboard by way of a model that read both.
 
   **The HR platform is an adversary to `personal`, and a destination for `people` — because they are two different 1:1s.** The distinction is whose data it is, not which tool holds it:
@@ -370,7 +382,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   Any condition unmet ⇒ the command becomes a Proposal (AD-13). **Irreversible verbs always stage, regardless of source or speaker**: outbound email and DM (FR-26), MR/PR creation (FR-28), closures, deletions, and any external effect a later call cannot undo. The manual transcript adapter (AD-23) is **never** an auto-execute source — it is untrusted by construction — though it remains fully valid for extraction and staging. Every auto-execution emits a card carrying one-tap undo, plus its `event_log/` entry.
 
-### AD-33 — Cite the event, never the artifact that captured it `[NEW]`
+### AD-33 — Cite the event, never the artifact that captured it `[revised 2026-09-03]` `[NEW]`
 
 - **Binds:** every surfaced fact, FR-03, FR-25, FR-32, FR-33, FR-34, NFR-09, AD-29
 - **Prevents:** provenance pointing at a derived artifact that has its own lifecycle — so a transcript purge silently empties every citation that depended on it, and the drift auditor reports **clean** against sources that no longer exist
@@ -378,9 +390,9 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   **`Meeting` is a first-class Tier-1 record**: id, calendar event reference, title, start, duration, attendees, **scope**, derived-transcript pointer, processing status. It is also where FR-03's Man-Hour Cost inputs live, so FR-03, FR-32, and UJ-8 key off one entity rather than three ad-hoc lookups.
 
-  **A Meeting belongs to the scope that owns its subject, and `scope` is required rather than defaulted** — a team meeting to its project, a 1:1 with a direct report to `people` (AD-4), a purely personal session to `personal`. It decides two things no caller may guess: where the transcript is written, and whether a git-committed record may cite this meeting at all.
+  **A Meeting belongs to the scope that owns its subject, and `scope` is required rather than defaulted** — a team meeting to its project, a 1:1 with a direct report to `people` (AD-4), a purely personal session to `personal`. It decides two things no caller may guess: where the transcript is written, and whether a project-scope record may cite this meeting at all — `[revised 2026-09-03]` a **scope** question, not a git one, since AD-38's invariant tests the scope relation and holds for a project sitting in no repository.
 
-  This was wrong until 2026-08-20, and wrong in a way that made AD-38 false on the main path: `meetings/` was filed in the **personal** scope while commitments live in the git-committed project ledger, so **every commitment extracted from a meeting referenced personal-scope material by `source_ref`** — the exact phrasing AD-38 prohibits. Nothing detected it, because the write guard checks the scope a record *belongs to* and never the scope it *points at*. Both directions are now checked.
+  This was wrong until 2026-08-20, and wrong in a way that made AD-38 false on the main path: `meetings/` was filed in the **personal** scope while commitments live in the project ledger — then committed in full — so **every commitment extracted from a meeting referenced personal-scope material by `source_ref`** — the exact phrasing AD-38 prohibits. Nothing detected it, because the write guard checks the scope a record *belongs to* and never the scope it *points at*. Both directions are now checked.
 
   **Derived records are self-contained.** A ledger or decision entry carries everything needed to act on it and never depends on its source artifact still existing — which is what makes NFR-09's 30-day transcript purge a purely operational matter. Tracing walks *fact → meeting → transcript if present*; nothing may treat the third hop as a dependency.
 
@@ -433,20 +445,26 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   Expiry and execution are mutually exclusive by construction: the sweeper CASes `staged → expired`, the worker CASes `approved → executing`, and whichever loses observes the winner and stops. Mutations targeting the same external entity serialize through a per-target lock keyed by `target_ref`, so two approved changes to one work item cannot interleave.
 
-### AD-38 — The disclosure and cost ledger is application-scoped and never committed `[NEW]`
+### AD-38 — The disclosure and cost ledger is application-scoped and never committed `[revised 2026-09-03]`
 
 - **Binds:** AD-17, AD-24, AD-31, AD-4, FR-16, FR-27
-- **Prevents:** the audit mechanism becoming the leak. `event_log/` exists per scope, and `<repo>/.project-ai/` is git-committed — so a disclosure record naming `scopes={personal, project:alpha}` would be pushed to the employer's repository, publishing exactly what AD-31 was built to protect. Two independent reviewers found this; it inverts D1 rather than bending it. It also made AD-31's "what has left this machine" and AD-17's monthly total unanswerable, since both would span N files
+- **Prevents:** the audit mechanism becoming the leak. `event_log/` exists per scope, and `<repo>/.project-ai/` was git-committed in full when this AD was written — so a disclosure record naming `scopes={personal, project:alpha}` would be pushed to the employer's repository, publishing exactly what AD-31 was built to protect. `[2026-09-03]` Q6 closed that route for the project log itself, but **this AD is unchanged in force**: the separation is what makes AD-31's "what has left this machine" and AD-17's monthly total answerable from one file, and `rules/` and `skills/` remain committed, so a repository is still reachable from a project artifact. Two independent reviewers found this; it inverts D1 rather than bending it. It also made AD-31's "what has left this machine" and AD-17's monthly total unanswerable, since both would span N files
 - **Rule:** Two record kinds, deliberately separated:
 
   | Record | Home | Committed? |
   | --- | --- | --- |
-  | **Domain events** — decisions, commitments, work-item activity, meeting outcomes | `event_log/` in the scope that **owns the subject** | Project scope: yes, by design |
+  | **Domain events** — decisions, commitments, work-item activity, meeting outcomes | `event_log/` in the scope that **owns the subject** | **Never** `[revised 2026-09-03]`. Project `event_log/` was committed by design until Q6 made it, `commitments_log.md`, `daily_dashboard.md` and `meetings/` machine-local — see AD-3 |
   | **Disclosure & cost** — every frontier call's scope provenance, tokens, estimated spend | `~/.pm-ai/disclosure.md`, a **single** append-only Tier-1 ledger | Never. Application scope is outside every repository |
 
   Both AD-31's audit and AD-17's running total read one file, so both queries are answerable. And the general invariant that makes this safe rather than merely tidy:
 
-  **No record written to a git-committed scope may reference personal- or people-scope material** — not by content, not by `source_ref`, not by scope name. A cross-scope operation writes its project-visible part to the project log and everything else to the application ledger; it never writes one record naming both.
+  **No record written to the project scope may reference personal- or people-scope material** — not by content, not by `source_ref`, not by scope name. A cross-scope operation writes its project-visible part to the project log and everything else to the application ledger; it never writes one record naming both.
+
+  **`[revised 2026-09-03]` The invariant does not mention git, and must not.** It read "written to a git-committed scope" and was implemented as `is_git_committed`, a scope-kind predicate (`identity.py:78-80`). That was safe only while every project artifact was committed. Once Q6 made the project log machine-local the two questions came apart, and each answer alone is wrong: keep the git test and a project record may never cite a 1:1 even though nothing leaves the machine; drop it and the only remaining protection is a `.gitignore` staying correct — one `git add -f`, one directory committed before the rule existed, one skill quoting a commitment into an MR description, and a report's 1:1 is published.
+
+  So the subject is the **scope relation**, unconditionally. The material belongs to a different subject with different sharing rules, and that is true of a project sitting in no repository at all. This is AD-25's own principle — *"The wall is the scope boundary, not the directory"* — and the second correction of one conflation: `service.py:704-705` records `is_git_committed` being the wrong gate for the capture guard, in the opposite direction, and the fix was never propagated here.
+
+  **`is_git_committed` is therefore retired in favour of `is_project`.** With both guards testing the scope relation it has no production caller, and a predicate whose docstring asserts "project scope lives in the employer's repository" with nothing consuming it is a claim nobody can check. Its siblings are `is_personal` and `is_people`.
 
   `people` is included for the same structural reason and a sharper consequence: a direct report's performance objective committed to a repository is readable by that report's peers. The scope is `is_git_committed = false`, and the guard is on the writing boundary rather than on anyone's discretion.
 
@@ -830,7 +848,7 @@ graph LR
         P2["memory/: goals, coaching, dashboard,<br/>event_log/ segments, meetings/ (personal-subject<br/>sessions only) — T1, plaintext md"]
         P3["private/ — gitignored<br/>personal_analytics.db (T2, plaintext 0600)<br/>telegram_cache/ — ENCRYPTED, the other of two"]
     end
-    subgraph PROJ["repo/.project-ai/ — COMMITTED, plaintext md, T1"]
+    subgraph PROJ["repo/.project-ai/ — plaintext md, T1<br/>rules/ + skills/ COMMITTED; memory/ machine-local"]
         R1[rules/]
         R2["memory/: dashboard, commitments_log,<br/>event_log/ segments, meetings/ (summaries)"]
         R3[skills/]
@@ -870,7 +888,7 @@ erDiagram
 - **Supervision:** `launchd` user agent, `KeepAlive`, starts at login. Single daemon instance.
 - **Install / update:** isolated install via `uv tool install`.
 - **Health:** `pm-ai doctor` — declared-package install status (the first probe: a missing package is why every other probe would fail), SQLite extension support, keychain access, Ollama reachability, git presence, per-connector probe status and health state (AD-39), index and disk sizes, encryption-toggle state including a value set but *unrecognised*, which a boolean cannot carry.
-- **Backup:** Tier 1 **and Tier 2** — the markdown scopes (project rides in git; personal may be its own private repository), `~/.pm-ai/disclosure.md`, `operational.db`, and `~/.manager-ai/private/personal_analytics.db`, plus an exported keychain key. Tier 3 is explicitly **not** a backup target; `pm-ai reindex` rebuilds it. Backing up markdown alone would lose the job queue, cursors, executed-key ledger, and every burnout and workload trend — state AD-3 requires to survive and that no rebuild can reconstruct. **If the personal scope is kept as a private git repository, `private/` must be gitignored there**: the store is encrypted, but a personal-analytics history does not belong in version control even privately. Raw captures (`transcripts/`, `telegram_cache/`) are **not** a backup target in any scope — they are transient input under NFR-09's purge, outside the tier model, and nothing may depend on them (AD-33).
+- **Backup:** `[revised 2026-09-03]` **out of scope — no mechanism ships, and none is promised** (see Deferred). What follows is the *target list* a future one inherits, not a description of anything running. Tier 1 **and Tier 2** — the markdown scopes (personal may be its own private repository; **project Tier 1 no longer rides in git**, since Q6 made it machine-local), `~/.pm-ai/disclosure.md`, `operational.db`, and `~/.manager-ai/private/personal_analytics.db`, plus an exported keychain key. Tier 3 is explicitly **not** a backup target; `pm-ai reindex` rebuilds it. Backing up markdown alone would lose the job queue, cursors, executed-key ledger, and every burnout and workload trend — state AD-3 requires to survive and that no rebuild can reconstruct. **If the personal scope is kept as a private git repository, `private/` must be gitignored there**: the store is encrypted, but a personal-analytics history does not belong in version control even privately. Raw captures (`transcripts/`, `telegram_cache/`) are **not** a backup target in any scope — they are transient input under NFR-09's purge, outside the tier model, and nothing may depend on them (AD-33).
 - **Environments:** one — the user's Mac. No staging tier. A debug profile (`~/.pm-ai/config.toml`) may toggle **verbose logging**; it may **not** toggle encryption. Superseded 2026-08-27: encryption has no persistent off switch at all, only the `PM_AI_DISABLE_ENCRYPTION` environment variable, which dies with the process (AD-6).
 - **Boot sequence:** the daemon attaches AD-46's watchers **before** reconciling every watched path, so a write landing between the two is duplicate work rather than a silent miss. Boot reconciliation is unconditional and never periodic.
 
@@ -934,6 +952,7 @@ pm_ai/
 - **Linux support.** OS concerns are behind ports (AD-26); adapters are a later increment.
 - **Enforcing cost caps.** Accounting exists now; whether breach ever degrades or blocks is a product decision to revisit once real spend data exists (AD-17).
 - **Local-model selection.** The Stack names a *class* (8B-class instruct at `Q4_K_M`), not a pin. Phase 1 benchmarks the verified candidates — `llama3.1:8b`, `qwen3:8b` — running concurrently with whisper.cpp at the 16 GB baseline, and picks. Anything above 8B-class is out: the smallest `llama3.3` build is 26 GB.
+- **Backup.** `[2026-09-03]` Out of scope, and the Tier-1 and Tier-2 "must be backed up" promises are relaxed to `BACKUP_TARGETS` membership — a declared target list, not a running mechanism. The trigger was Q6 removing the only mechanism ever named for project Tier 1 ("project rides in git"), which exposed that no mechanism existed for anything: `BACKUP_TARGETS` is derived and has no consumer. Revisit before any deployment that is not the author's own machine, or the first time a Tier-2 loss actually costs something — Tier 2 is the tier no rebuild can reconstruct, so it is the one to build first, not Tier 1.
 - **Multi-user and shared deployment.** Single-user, single-machine by design; nothing in the scope model assumes otherwise.
 - **In-meeting real-time processing.** Explicitly a Non-Goal; all transcript work is post-meeting or on demand.
 - **Encryption of the derived tier.** Skipped deliberately (AD-6). Revisit only if an index starts holding recoverable raw text rather than embeddings and lookup structures. Widened 2026-08-27 from "the vector index" to the whole tier, since `derived.db` split in two.

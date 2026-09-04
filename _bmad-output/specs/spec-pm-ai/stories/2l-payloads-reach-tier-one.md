@@ -2,7 +2,7 @@
 title: 'Payloads reach Tier 1'
 type: 'feature'
 created: '2026-08-30'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 ---
 

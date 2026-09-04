@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
+from pm_ai.core.config import Config
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import MASTER_KEY_NAME, CryptoPort, KeychainPort, VcsPort
@@ -41,7 +42,21 @@ class Daemon:
     transcripts: dict[str, object]
     meetings: dict[str, object]
     scope: DataScope
-    pm_handle: str = "andrei@example.com"
+    # Every setting `config.toml` carries, held once. Defaults when the caller
+    # supplied none, which is a first run rather than an error.
+    config: Config = field(default_factory=Config)
+
+    @property
+    def pm_handle(self) -> str:
+        """Who the daemon treats as the PM, per `config.toml`.
+
+        A property rather than a field, so `Config` stays the single place the
+        value lives. It was a literal default here — one developer's own email
+        address, compiled into the package — until `pm_ai.core.config` existed
+        to be asked. Unset by default now, and an unset handle matches no
+        speaker, so nothing spoken auto-executes (AD-32).
+        """
+        return self.config.pm_handle
 
 
 def build(
@@ -53,6 +68,7 @@ def build(
     vcs: VcsPort | None = None,
     keychain: KeychainPort | None = None,
     encryption_disabled: bool | None = None,
+    config: Config | None = None,
 ) -> Daemon:
     """Wire the daemon against one resolver, which owns all four scopes (AD-4).
 
@@ -72,6 +88,15 @@ def build(
     `now` stays optional and defaults to a system-clock read. It is the default
     for the whole daemon: `StorageService` requires a clock and reads none of its
     own, so every timestamp it writes comes from here.
+
+    `config` is `config.toml`, already read and interpreted — passed in rather
+    than loaded here for the same reason `vcs` is: `pm_ai.core.config` parses
+    bytes and opens nothing, and the read belongs to the single reader. Taking
+    it as an argument is also what will let `4c` decide what an unparseable
+    config does to a `pm-ai doctor` run, rather than having composition raise
+    before any probe executes; there is no such subcommand and no such probe
+    today. `None` means no file was found, which is a first run and not an
+    error.
 
     `vcs` is the same arrangement for the other question the writer cannot answer
     itself: whether git would commit a raw capture. It defaults to the real `git`
@@ -132,6 +157,7 @@ def build(
         transcripts={"graph": GraphTranscriptAdapter(), "manual": ManualTranscriptAdapter()},
         meetings={},
         scope=scope,
+        config=config if config is not None else Config(),
     )
 
 
