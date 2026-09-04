@@ -14,6 +14,7 @@ can be produced by asking a real provider nicely.
 
 from __future__ import annotations
 
+import pathlib
 import threading
 import time
 
@@ -103,18 +104,45 @@ def test_an_empty_registry_is_empty_and_says_so():
     assert reg.check_health().probes == ()
 
 
-def test_an_empty_registry_would_make_the_architecture_gates_fail():
-    """The row that matters, asserted as the gates assert it.
+def test_both_architecture_gates_guard_against_an_empty_registry():
+    """Read the gates, because asserting on a local proves nothing about them.
 
     The defect 8d exists to prevent is in the *verification*, not in the code:
     both AD gates assert only inside a `for` body, so an empty registry passes
-    them without running one assertion. This is that shape, proven to fail.
+    them without running one assertion. An earlier version of this test wrote
+    its own `assert connectors` inside `pytest.raises(AssertionError)` — which
+    asserts that `assert ()` raises, and would have passed unchanged if both
+    gates dropped their guards. So the gates' own source is parsed instead, the
+    shape `test_enrolment.py` uses for `AES_KEY_BYTES`.
     """
-    registry_module.install(ConnectorRegistry())
-    assert registry_module.all_connectors() == ()
-    with pytest.raises(AssertionError):
-        connectors = registry_module.all_connectors()
-        assert connectors, "an empty registry must fail the gate, not satisfy it"
+    import ast
+
+    gates = ("test_ad27_connectors_only_emit_core_declared_event_types",
+             "test_ad34_connectors_do_not_mint_event_ids")
+    source = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "architecture" / "test_domain_invariants.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    for gate in gates:
+        (function,) = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == gate
+        ]
+        # The guard must be a statement of the function body itself. One nested
+        # inside the `for` is the very shape that passes over an empty registry.
+        guards = [
+            statement for statement in function.body
+            if isinstance(statement, ast.Assert)
+            and isinstance(statement.test, ast.Name)
+            and statement.test.id == "connectors"
+        ]
+        assert guards, (
+            f"{gate} has no top-level `assert connectors` guard. Without it the "
+            f"gate's loop body never runs on an empty registry and the test "
+            f"passes having asserted nothing."
+        )
 
 
 def test_a_duplicate_instance_name_is_refused_at_registration():
@@ -169,13 +197,32 @@ def test_a_gitlab_adapter_satisfies_the_connector_port():
 
 
 def test_a_reachable_provider_is_healthy_and_fast():
+    """`reach` is supplied, because the default one does not reach anything.
+
+    Constructing this with the stubbed transport and calling the result
+    `reachable` is how a report comes to carry an `OK` nothing measured — the
+    adapter now answers `WARNING` in that state, and the row below covers it.
+    """
     reg = ConnectorRegistry()
-    reg.register(gitlab("alpha", credential="t"), instance="gitlab:alpha")
+    reg.register(
+        gitlab("alpha", credential="t", reach=lambda: "gitlab answered"),
+        instance="gitlab:alpha",
+    )
     started = time.monotonic()
     report = reg.check_health()
     assert report.healthy
     assert [p.health for p in report.probes] == [Health.OK]
     assert time.monotonic() - started < 10.0
+
+
+def test_a_stubbed_transport_will_not_claim_reachability():
+    """A credential is configuration; `OK` would be a measurement."""
+    reg = ConnectorRegistry()
+    reg.register(gitlab("alpha", credential="t"), instance="gitlab:alpha")
+    (probe,) = reg.check_health().probes
+    assert probe.health is Health.WARNING
+    assert "stub" in probe.detail
+    assert not reg.check_health().healthy
 
 
 def test_no_credential_is_absent_not_failing():

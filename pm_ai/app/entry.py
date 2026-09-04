@@ -47,7 +47,7 @@ from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths, UnknownProject
 from pm_ai.ports import KeychainPort
 from pm_ai.storage.service import StorageService
-from pm_ai.surfaces.cli.dispatch import EXIT_UNEXPECTED, dispatch
+from pm_ai.surfaces.cli.dispatch import EXIT_REFUSAL, EXIT_UNEXPECTED, dispatch
 
 __all__ = ["CONFIG_ARTIFACT", "main", "read_optional"]
 
@@ -105,6 +105,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the one sentence saying what actually happened.
         print(code, file=sys.stderr)
         return EXIT_UNEXPECTED
+    except KeyboardInterrupt:
+        # Not an `Exception`, so the guard below never saw it: Ctrl-C during a
+        # ten-second connector probe produced a raw traceback and a status
+        # outside the five this table declares. Interrupting is a deliberate
+        # stop, which is what the refusal code means.
+        print("\npm-ai: interrupted", file=sys.stderr)
+        return EXIT_REFUSAL
     except Exception:
         traceback.print_exc()
         return EXIT_UNEXPECTED

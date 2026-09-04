@@ -128,7 +128,11 @@ def enrol(keychain: KeychainPort, *, key_name: str = MASTER_KEY_NAME) -> str:
         raise KeychainUnavailable(
             f"the keychain reported storing a key under {key_name!r} and then "
             f"reported that nothing is stored there. The key is not enrolled; "
-            f"do not treat this machine as set up. ({vanished})"
+            f"do not treat this machine as set up. Whether an entry exists "
+            f"under that name is exactly what the keychain just contradicted "
+            f"itself about, and this command does not remove one — if a repeat "
+            f"enrolment refuses as already-enrolled, delete the {key_name!r} "
+            f"entry in Keychain Access and enrol again. ({vanished})"
         ) from vanished
 
     if stored != key:
@@ -139,7 +143,12 @@ def enrol(keychain: KeychainPort, *, key_name: str = MASTER_KEY_NAME) -> str:
             f"the key read back from {key_name!r} is not the key that was just "
             f"stored ({len(stored)} bytes read, {len(key)} written). Enrolment "
             f"failed; anything sealed against this keychain would be sealed "
-            f"under a key nobody has."
+            f"under a key nobody has. An entry does exist under that name — "
+            f"this command does not remove it, because the bytes now held may "
+            f"be another process's key and deleting them would destroy whatever "
+            f"they already sealed. A repeat enrolment will refuse as "
+            f"already-enrolled until the {key_name!r} entry is removed by hand "
+            f"in Keychain Access."
         )
 
     return key_name

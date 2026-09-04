@@ -27,6 +27,15 @@ SAMPLE_ROW = {
 }
 
 
+def _stubbed_reach() -> str:
+    """The placeholder transport, named so a verdict can recognise it.
+
+    A lambda could not be compared by identity, which is what `check_health`
+    needs to tell "GitLab answered" apart from "nothing was asked".
+    """
+    return "gitlab (stubbed transport) answered"
+
+
 @dataclass
 class GitLabConnectorAdapter:
     project: str
@@ -47,7 +56,7 @@ class GitLabConnectorAdapter:
     # is stubbed for this slice, and a health probe that reached the network
     # could not be exercised against the failures it exists to report — a
     # provider that refuses, and one that never answers at all.
-    reach: Callable[[], str] = lambda: "gitlab (stubbed transport) answered"
+    reach: Callable[[], str] = _stubbed_reach
 
     def emits(self) -> frozenset[ObservedEventType]:
         """Only from the core taxonomy — a connector may not mint a type (AD-27)."""
@@ -132,6 +141,21 @@ class GitLabConnectorAdapter:
                 "reach the GitLab host. An unreachable connector is "
                 "indistinguishable from a sleeping laptop in the coverage "
                 "windows (AD-35), so it has to be reported here.",
+            )
+        if self.reach is _stubbed_reach:
+            # `OK` is a claim that this machine reached GitLab. The default
+            # transport is a stub that returns a string without opening a
+            # socket, so reporting `OK` from it would put a reachability
+            # verdict in the report that nothing measured. `8b` wires the real
+            # transport; until then the honest answer is that it is untested.
+            return Probe(
+                self.instance,
+                Health.WARNING,
+                f"{self.instance} has a credential, but its transport is still "
+                f"a stub — reachability has not been tested",
+                "Nothing to fix on this machine. The GitLab connector gains a "
+                "real HTTP transport in story 8b; until then this row reports "
+                "what is configured, not what answered.",
             )
         return Probe(self.instance, Health.OK, f"{answer}")
 

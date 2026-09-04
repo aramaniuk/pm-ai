@@ -53,7 +53,7 @@ single exemption so the rule keeps covering every other connector.
 
 from __future__ import annotations
 
-import concurrent.futures
+import threading
 import time
 from collections.abc import Iterable
 
@@ -168,52 +168,60 @@ class ConnectorRegistry:
         if not connectors:
             return Report(())
         deadline = time.monotonic() + timeout
-        # `ThreadPoolExecutor` rather than `threading.Thread`: the pool is what
-        # lets a probe be *abandoned* — `shutdown(wait=False)` returns while a
-        # blocked worker is still blocked, which a joined thread cannot do.
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(connectors), thread_name_prefix="connector-probe"
-        )
-        try:
-            futures = {name: executor.submit(c.check_health) for name, c in connectors}
-            probes = tuple(
-                _collect(name, future, deadline, timeout)
-                for name, future in futures.items()
+        # Daemon threads, not a pool. A probe past the deadline is *abandoned*,
+        # and `ThreadPoolExecutor` cannot abandon: its workers are non-daemon and
+        # joined by `threading._register_atexit`, so `shutdown(wait=False)`
+        # returns on time and the interpreter then blocks on the same worker at
+        # exit. Measured 2026-09-04 before this change: `check_health` returned
+        # in 0.31s against a 0.3s bound while the process took 8.23s to die, so
+        # the bound held for the report and not for the command a human waits on
+        # — which is the only thing CAP-35 is about.
+        results: dict[str, Probe] = {}
+
+        def _ask(instance: str, connector: ConnectorPort) -> None:
+            try:
+                results[instance] = connector.check_health()
+            except BaseException as raised:  # noqa: BLE001 - a probe never raises
+                # `check_health` is documented never to raise. A connector that
+                # breaks that contract must not take the other connectors'
+                # report down with it, so the breach is reported as its own row.
+                results[instance] = Probe(
+                    instance,
+                    Health.FAILING,
+                    f"{instance}'s health probe raised {raised!r} instead of "
+                    f"reporting. That is a bug in the connector, not a verdict "
+                    f"about the provider.",
+                    "Report this: a probe is required to return a Probe.",
+                )
+
+        threads = []
+        for instance, connector in connectors:
+            thread = threading.Thread(
+                target=_ask,
+                args=(instance, connector),
+                name=f"connector-probe-{instance}",
+                daemon=True,
             )
-        finally:
-            # Never `wait=True`: this call's bound is exactly the guarantee a
-            # join would give away, and `cancel_futures` only reclaims probes
-            # that never started.
-            executor.shutdown(wait=False, cancel_futures=True)
-        return Report(probes)
+            thread.start()
+            threads.append((instance, thread))
 
-
-def _collect(
-    instance: str,
-    future: concurrent.futures.Future[Probe],
-    deadline: float,
-    timeout: float,
-) -> Probe:
-    """One probe's answer, or the report we make on its behalf when there is none."""
-    try:
-        return future.result(timeout=max(0.0, deadline - time.monotonic()))
-    except concurrent.futures.TimeoutError:
-        return Probe(
-            instance,
-            Health.FAILING,
-            f"{instance} did not answer within {timeout:g}s; the attempt was abandoned",
-            "Distinct from the provider being down: this connector's probe never "
-            "returned. Treat a repeat as a defect in the adapter — a probe that "
-            "cannot answer inside its own bound is the probe's failure.",
-        )
-    except Exception as raised:  # noqa: BLE001 — the whole point: nothing propagates
-        return Probe(
-            instance,
-            Health.FAILING,
-            f"{instance}'s probe raised {raised!r}",
-            "A bug in the connector rather than a verdict about the provider. "
-            "Reported here so it cannot hide the connectors after it.",
-        )
+        probes = []
+        for instance, thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+            probes.append(
+                results.get(instance)
+                or Probe(
+                    instance,
+                    Health.FAILING,
+                    f"{instance} did not answer within {timeout:g}s and was "
+                    f"abandoned. Whether it is reachable is unknown, which is "
+                    f"not the same as unreachable.",
+                    "Check the provider's status and this connector's "
+                    "credential; a probe this slow usually means neither is "
+                    "answering.",
+                )
+            )
+        return Report(tuple(probes))
 
 
 # ── The process default, installed by the composition root ───────────────────

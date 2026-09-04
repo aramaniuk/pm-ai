@@ -18,7 +18,12 @@ import pytest
 
 from pm_ai.app import entry
 from pm_ai.platform.doctor import Health, Probe, Report
-from pm_ai.ports import MASTER_KEY_NAME, KeyNotFound
+from pm_ai.ports import (
+    MASTER_KEY_NAME,
+    KeyAlreadyEnrolled,
+    KeychainPort,
+    KeyNotFound,
+)
 from pm_ai.surfaces.cli import dispatch as cli
 from pm_ai.surfaces.cli.dispatch import (
     EXIT_OK,
@@ -428,8 +433,20 @@ class _Keychain:
             raise KeyNotFound(name)
         return self._secret
 
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        # Added when `4b` widened the port. Without it this fake satisfied a
+        # `KeychainPort` parameter it did not implement, which is the shape
+        # `test_cipher` and `test_doctor` both record catching before.
+        if self._secret is not None:
+            raise KeyAlreadyEnrolled(name)
+        self._secret = secret
+
     def delete(self, name: str) -> None:
         self._secret = None
+
+
+def test_the_dispatch_fake_satisfies_the_port_it_is_passed_as():
+    assert isinstance(_Keychain(), KeychainPort)
 
 
 # ── Findings from the 4c review, pinned ────────────────────────────────────────
@@ -495,9 +512,16 @@ def test_the_daemon_carries_the_very_keychain_it_was_built_with(tmp_path):
     from pm_ai.app.wiring import build
 
     class Custody:
+        """Whole, not partial. `KeychainPort` gained `store_if_absent` in 4b,
+        and a fake missing it satisfies a parameter while proving nothing —
+        the defect three other test files record having shipped already."""
+
         def fetch(self, name): raise KeyNotFound(name)
         def store(self, name, secret): return None
+        def store_if_absent(self, name, secret): return None
+        def delete(self, name): return None
 
     custody = Custody()
+    assert isinstance(custody, KeychainPort), "the fake must satisfy the port"
     daemon = build(tmp_path, "demo", keychain=custody)
     assert daemon.keychain is custody

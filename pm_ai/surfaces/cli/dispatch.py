@@ -281,8 +281,10 @@ def _config_show(context: Context) -> int:
         print(f"{name:<{width}}  {value!r:<8}  ({origin})")
     print()
     print(
-        "Values marked (default) are not in ~/.pm-ai/config.toml; pm-ai supplies "
-        "them. Values marked (set) came from the file."
+        "(default) means the value equals pm-ai's built-in default, and (set) "
+        "means it differs. `Config` keeps no provenance, so this compares "
+        "values, not origins: a key written into config.toml with the same "
+        "value the default already has reads as (default)."
     )
     return EXIT_OK
 

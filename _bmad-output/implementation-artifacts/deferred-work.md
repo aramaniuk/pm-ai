@@ -442,3 +442,27 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
   summary: Retiring `doctor.main()` left two specs citing it — `4i`'s Code Map names `pm_ai/platform/doctor.py:399 -- doctor.main(), a run_all call site`, and `1g`'s (done) verification commands run `python -m pm_ai.platform.doctor`.
   evidence: `doctor.main()` and the `__main__` block were removed on 2026-09-04 so the exit-code table has one declaration. `4i` is unbuilt and its Code Map will mislead its implementer: the surviving `run_all` call site is now `pm_ai/app/entry.py`'s `_diagnose`. `1g` is done and its probes are unaffected — only the command that reaches them changed, to `pm-ai doctor`. Neither spec was edited here: amending another slice's Code Map belongs to that slice's own build.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4b-master-key-enrolment.md`
+  summary: A read-back failure leaves an entry in the keychain that no pm-ai command can remove, so every later `pm-ai key enrol` refuses as already-enrolled.
+  evidence: Both post-store branches in `core/enrolment.py` raise after `store_if_absent` succeeded, and `KeychainPort.delete` is never called on that path. Deliberately not auto-removed: on the `stored != key` branch the bytes now held may be another process's key, and deleting them would destroy whatever they already sealed. The messages now name the manual recovery (delete the entry in Keychain Access), but the real fix is a `pm-ai key reset` command with its own confirmation, which no wave-1 slice owns.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4b-master-key-enrolment.md`
+  summary: `MacOSKeychainAdapter._add_generic_password` — the ctypes call behind the only conditional write pm-ai makes — is substituted in every test that reaches it, so its real marshalling is never executed.
+  evidence: All four tests exercising `store_if_absent` on the real adapter `monkeypatch.setattr(keychain_module, "_add_generic_password", ...)` first. Swapping the service/account argument pair, or dropping `restype = c_int32`, changes no observable in the suite — yet either would write under the wrong key or stop recognising `errSecDuplicateItem`, producing exactly the wedged state recorded above. `store` and `fetch` are verified the other way round, by substituting `keyring` and running the adapter's own code; `store_if_absent` should follow that pattern by faking `ctypes.CDLL`.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8d-connector-registry.md`
+  summary: The two architecture gates call `build()`, which replaces the process-global connector registry, and never restore it.
+  evidence: `tests/connectors/test_registry.py` has an autouse `_isolated_default` fixture for exactly this reason; `tests/architecture/test_domain_invariants.py` has none, so whichever of those tests runs last decides what a later reader of `all_connectors()` sees. Latent today because nothing reads it after them; a real leak the moment something does.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8d-connector-registry.md`
+  summary: `ConnectorRegistry.instances()` documents itself as what `doctor` lists without contacting anything, but `doctor.run_all` has no connector-membership probe and `instances()` has no production caller.
+  evidence: The stated split — membership in `doctor`, reachability in `connector check` — exists only in the docstring. Either `doctor` gains the probe or the docstring stops promising it.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4j-cli-service-subcommands.md`
+  summary: `key enrol` is gated behind full composition though it needs only the keychain, so an unparseable config or an unenrolled project blocks the command that fixes a fresh machine.
+  evidence: `entry.main` already builds `MacOSKeychainAdapter()` independently of `_compose`, but `_key_enrol` reaches it via `require_daemon().keychain`. This is the same first-run breakage `doctor` was explicitly designed to survive. `4h`'s setup sequence is where the ordering gets decided.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4j-cli-service-subcommands.md`
+  summary: Leaves now refuse trailing arguments, which sharpens the deferred argument-passing gap: `4k` and `8b` must give `Leaf` an arity declaration, not merely pass `rest` through.
+  evidence: `dispatch` prints "`<group> <leaf>` takes no arguments" and exits 2 for any word after a leaf, and tests assert it. The refusal is right for 4j's three argument-less leaves — silently dropping an invented `--dry-run` is worse — but `project add <path>` and `connector add` now have a tested branch to change rather than an absent one.

@@ -97,17 +97,19 @@ SCHEDULING_CALLS = {
     "ProcessPoolExecutor",
 }
 
-# The single file AD-9's connector rule does not cover, and why.
+# The one call AD-9's connector rule does not cover, and why.
 #
-# `pm_ai/connectors/registry.py` starts one thread per connector to bound
+# `pm_ai/connectors/registry.py` starts one daemon thread per connector to bound
 # CAP-35's ten-second health probe. That is a *deadline*, not a schedule: it runs
 # once when invoked, owns no cadence, keeps no state between calls, and touches
 # no cursor. A blocking socket read cannot be cancelled from outside, so a bound
 # without a thread would be a bound the adapter is merely asked to honour.
 #
-# Named by relative path rather than by filename, so a future
-# `connectors/<something>/registry.py` does not inherit the exemption.
-SCHEDULING_EXEMPT = {"connectors/registry.py"}
+# Keyed by relative path AND by call name. A file-wide exemption voids AD-9 for
+# the whole module: measured 2026-09-04, `threading.Timer(3600, self._reharvest)`
+# — a per-connector retry cadence, exactly what AD-9 forbids — passed this gate
+# unnoticed while the exemption was keyed by path alone.
+SCHEDULING_EXEMPT = {"connectors/registry.py": {"threading.Thread"}}
 
 
 def _mode_of(node: ast.Call) -> str:
@@ -269,12 +271,16 @@ def test_ad9_connectors_own_no_scheduling():
     Per-connector schedulers compete for rate limits and drift out of the
     daemon's cursor and backoff accounting.
     """
-    violations = [
-        f"{f.location(node)}  {name}(...)"
-        for f, node, name in calls(source_files("connectors"))
-        if name in SCHEDULING_CALLS
-        and f.path.relative_to(PACKAGE_ROOT).as_posix() not in SCHEDULING_EXEMPT
-    ]
+    exempted_calls_seen = set()
+    violations = []
+    for f, node, name in calls(source_files("connectors")):
+        if name not in SCHEDULING_CALLS:
+            continue
+        relative = f.path.relative_to(PACKAGE_ROOT).as_posix()
+        if name in SCHEDULING_EXEMPT.get(relative, frozenset()):
+            exempted_calls_seen.add((relative, name))
+            continue
+        violations.append(f"{f.location(node)}  {name}(...)")
     assert not violations, format_violations(
         violations,
         "AD-9: connectors expose harvest(since) and nothing else. The daemon's "
@@ -282,12 +288,20 @@ def test_ad9_connectors_own_no_scheduling():
     )
     # The exemption has to name a file that exists, or it silently stops being an
     # exemption and starts being a typo nobody notices.
-    for exempt in SCHEDULING_EXEMPT:
+    for exempt, allowed in SCHEDULING_EXEMPT.items():
         assert (PACKAGE_ROOT / exempt).is_file(), (
             f"SCHEDULING_EXEMPT names {exempt}, which does not exist. An "
             f"exemption for a moved or renamed file is a hole in AD-9 that reads "
             f"as a considered decision."
         )
+        # An exemption nothing uses is an exemption nobody re-justified. If the
+        # bound stops needing a thread, the permission to start one must go too.
+        for name in allowed:
+            assert (exempt, name) in exempted_calls_seen, (
+                f"SCHEDULING_EXEMPT permits {name} in {exempt}, which no longer "
+                f"calls it. Remove the exemption rather than leaving a standing "
+                f"permission for a call the code stopped making."
+            )
 
 
 def test_ad11_no_filesystem_discovery_of_projects():
