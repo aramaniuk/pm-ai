@@ -702,13 +702,20 @@ class GraphDeviceCodeAuth:
         `WARNING` on a healthy credential when this machine's clock is measurably
         adrift from the provider's: nothing is broken, and something will be.
 
-        CAP-35's ten seconds are **not** enforced here, for the reason
-        `ConnectorPort.check_health` states: a blocking call cannot cancel
-        itself, so a bound this method merely promised would be a bound in name.
-        This adapter is not a connector and is not in the registry that owns that
-        bound — the Graph connector 33b builds is, and asking Graph for a token
-        will happen inside its probe, under `ConnectorRegistry.check_health`'s
-        deadline. Until then nothing calls this on a timer.
+        No time bound, and that is the decision rather than an omission. CAP-35
+        scopes its ten seconds to `pm-ai connector add`, which "runs a live
+        health probe within 10 seconds" with a human at the keyboard, and
+        `ConnectorRegistry.check_health` extends the same deadline to `pm-ai
+        connector check`. Both are commands somebody is waiting on. This method
+        is neither, and the harvest that will call it is an asynchronous
+        background fetch with nobody waiting — a latency bound there would
+        measure nothing and refuse a slow but working provider.
+
+        Where a bound *is* owed, it is already inherited: `33b`'s
+        `GraphConnector` is a `ConnectorPort` in the registry, so its probe runs
+        under that deadline and this call happens inside it. `ConnectorPort.
+        check_health` states the structural half — a blocking call cannot cancel
+        itself, so a bound promised by a probe would be a bound in name.
         """
         try:
             stored = self.store.read()

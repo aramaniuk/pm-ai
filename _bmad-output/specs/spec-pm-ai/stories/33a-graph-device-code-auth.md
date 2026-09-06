@@ -2,7 +2,7 @@
 title: 'Graph device-code auth'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'done'
 baseline_commit: '8e78dc708c9a26ce853c61fc2e69ebae3ed56dea'
 review_loop_iteration: 1
 ---
@@ -49,9 +49,9 @@ review_loop_iteration: 1
 | Consent declined | user declines a scope | refused, naming the declined scope | `AuthDeclined` |
 | Partial consent | some scopes granted | refused rather than degraded — a connector holding six of seven scopes fails at an unpredictable resource | `AuthDeclined` |
 | Network unreachable at token endpoint | no route | reported as unreachable, distinctly from stale | `GraphUnreachable` |
-| Health probe, valid token | credential good | healthy within CAP-35's 10s bound | probe reports, never raises |
+| Health probe, valid token | credential good | healthy | probe reports, never raises |
 | Probe with nothing enrolled | no credential ever stored | reports `ABSENT`, distinctly from `FAILING` — a fresh install is not a broken machine | probe reports, never raises |
-| Token expires mid-harvest | page 3 returns 401 on a valid refresh token | silent refresh, the page retried once; pages already walked retained | `CredentialStale` only after the retry |
+| Cached token stops being accepted | a caller holding a live-looking cached token the provider now rejects | `force_refresh` reaches the provider rather than returning the cache | `CredentialStale`, distinct from `GraphUnreachable` |
 | Polling throttled | token endpoint answers `slow_down` or 429 | the interval from the device-code response is honoured and backed off | retried, not counted as abandoned |
 | Conditional access | AAD returns `interaction_required` | reported distinctly — the remedy is an interactive sign-in, neither waiting nor re-enrolment | `InteractionRequired` |
 | Local clock skewed | laptop clock hours off | expiry judged with tolerance; skew reported as its own state | distinct from stale |
@@ -97,6 +97,10 @@ review_loop_iteration: 1
 The credential-not-in-`connectors/graph.json` criterion moved to `8b`, which owns that write; this slice's tests are fake-MSAL unit tests with no storage in the path, so it could never have been asserted here.
 
 ## Spec Change Log
+
+- **2026-09-06, renegotiated on instruction: two matrix rows demanded behaviour that is not this slice's, and one of them is nobody's.** Both were written 2026-09-02, when 33a was scoped as "the auth slice" and the boundary with `33b` had not been drawn. The review found the code disagreeing with both; the code was right.
+  **CAP-35's ten seconds do not reach this method, and the clause is removed rather than deferred.** `SPEC.md` scopes the bound to `pm-ai connector add`, which "runs a live health probe within 10 seconds" with a human at the keyboard; `ConnectorRegistry.check_health` extends the same deadline to `pm-ai connector check`, also interactive. `GraphAuthPort.check_health` is neither command, and the harvest that will call it is an asynchronous background fetch with nobody waiting — a latency bound there measures nothing. The row was not premature, it was wrong on its own terms: `ConnectorPort.check_health` already states that a probe cannot enforce this bound at all, since a blocking call cannot cancel itself, and that the registry owns it. When `33b`'s `GraphConnector` probes under `pm-ai connector check`, it inherits that bound from the registry with no code here. The row now asserts the health states, which are covered and passing.
+  **The mid-harvest row is narrowed to the half this slice owns.** It demanded "the page retried once; pages already walked retained" — paging behaviour, from a slice whose frozen Never forbids all fetching. `33b`'s own matrix already carries that clause verbatim ("Token expires mid-fetch | 401 on page 3 | `33a`'s silent refresh, the page retried once; earlier pages retained"), so the split needed no addition there; the duplication was the defect, because a row in a `done` spec would have read as satisfied. What remains here is what the adapter actually owns and tests: `force_refresh` reaching the provider even when the cached token still looks live, and `CredentialStale` distinguishable from `GraphUnreachable`.
 
 - **2026-09-06, renegotiated on instruction: the Intent's consent premise was false, and two scope counts had gone stale.** Three corrections, one cause — the frozen block was written before a live tenant answered, and then amended twice without its prose counts following.
   **"No tenant-admin consent" was the rationale for choosing device code, and it is not true.** The delegated flow avoids the *app-only* path and the application access policy that path requires for transcripts; it does not avoid consent. Slice 0's grant came from an administrator, and two of the declared permissions normally require one. The flow choice survives — admin consent is a one-time app-registration prerequisite, not a per-sign-in step — but an operator reading the Intent would have planned a first enrolment that could not have succeeded. The Always clause, which had already been corrected per permission, is now named as the authority.
