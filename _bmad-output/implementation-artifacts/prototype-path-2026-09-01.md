@@ -55,7 +55,19 @@ correct given all four.
 3. **Full story 4** — daemon, loopback API, and REPL, split across the two waves
    rather than dropped.
 4. **Delegated auth, device-code flow** — the PM signs in interactively; no
-   tenant-admin consent, no application access policy.
+   client secret on the laptop, no hosted redirect URI, and no application
+   access policy. **Corrected 2026-09-06 against slice 0:** this decision
+   originally read "no tenant-admin consent", and that half was wrong. The
+   delegated flow avoids the *app-only* path and the application access policy
+   that path requires for transcripts — it does not avoid consent.
+   `ChannelMessage.Read.All` and `OnlineMeetingTranscript.Read.All` normally
+   require an administrator, and the grant slice 0 obtained came from one.
+   Whether an ordinary PM can self-consent to the rest is unmeasured. The
+   decision itself stands: admin consent is a one-time app-registration
+   prerequisite, not a per-sign-in step, so it does not favour a different
+   flow. It does mean a first enrolment needs an administrator to have granted
+   all seven declared scopes first — see `33a`'s Always clause, which is the
+   authority on the set.
 
 ## What was verified against live Graph docs
 

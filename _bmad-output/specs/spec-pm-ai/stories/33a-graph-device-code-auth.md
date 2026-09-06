@@ -10,7 +10,9 @@ review_loop_iteration: 1
 
 ## Intent
 
-**Problem:** The Graph transcript adapter reads from a `_fake_api` dict (`connectors/transcripts/graph.py:14`) and nothing in the repository can obtain a Microsoft token. Reaching Teams at all needs delegated auth, and the flow that fits a local-first single-PM tool is device code: the PM signs in once interactively, no tenant-admin consent, no application access policy.
+**Problem:** The Graph transcript adapter reads from a `_fake_api` dict (`connectors/transcripts/graph.py:14`) and nothing in the repository can obtain a Microsoft token. Reaching Teams at all needs delegated auth, and the flow that fits a local-first single-PM tool is device code: the PM signs in once interactively at a URL, no client secret sits on the laptop, and no redirect URI has to be hosted.
+
+**It does not avoid tenant-admin consent, and the first draft claimed it did.** What the delegated flow avoids is the *app-only* path and the application access policy that path requires for transcripts. Consent is a separate question, and slice 0 answered it the other way: `ChannelMessage.Read.All` and `OnlineMeetingTranscript.Read.All` normally require an administrator, the grant slice 0 obtained came from one, and whether an ordinary PM can self-consent to the remaining five is unmeasured. This does not change which flow fits — admin consent is a one-time app-registration prerequisite, not a per-sign-in step — but it does change what the operator has to arrange before a first enrolment can succeed at all, and the Always clause below is the authority on that.
 
 **Approach:** Add `GraphAuthPort` to `pm_ai/ports/` and the MSAL device-code adapter at `pm_ai/connectors/graph/auth.py`, storing the refresh token through `8b`'s enrolment. No resource is fetched in this story.
 
@@ -23,7 +25,7 @@ review_loop_iteration: 1
   **Declaring more raises the bar for a successful enrolment, and that is the accepted cost.** The granted set is compared against the declared set on every acquisition, so an administrator who grants six of seven produces a connector that refuses entirely rather than one that works for calendars. That is the intended behaviour — `8a` exists to stop a connector reporting coverage it does not have — but it means the app registration must carry all seven before anyone can enrol at all.
   **`OnlineMeetings.Read` is not optional, and was missing until slice 0 ran.** Reading a transcript and *finding the meeting that holds it* are two separate grants: `GET /me/onlineMeetings?$filter=JoinWebUrl eq '...'` is how `33e` resolves a calendar event to the meeting whose transcripts it wants, and without this permission that call returns `403 Forbidden "Insufficient permissions"` and the transcript endpoint is never reached. That 403 is **indistinguishable by status code** from the tenant-level transcript switch, so a connector missing this scope reports "this tenant has disabled transcripts" when the truth is "we never asked for the right permission".
   **`Team.ReadBasic.All` and `Channel.ReadBasic.All` are the same split again, for messages.** `ChannelMessage.Read.All` reads a channel message; it does not permit enumerating the teams and channels needed to find one. Slice 0 measured both refusals. Without them `33d` cannot walk to a message at all, and its alternative — explicit team and channel ids in configuration — is foreclosed by this decision rather than left open.
-  **Admin consent is stated per permission, not as a blanket.** `ChannelMessage.Read.All` and `OnlineMeetingTranscript.Read.All` are the two that normally require an administrator. Slice 0 confirmed all six consent and return a refresh token when an administrator grants them; it did **not** establish that an ordinary user can self-consent, so a deployment where the PM is not an admin is still an unknown.
+  **Admin consent is stated per permission, not as a blanket.** `ChannelMessage.Read.All` and `OnlineMeetingTranscript.Read.All` are the two that normally require an administrator. Slice 0 ran with an administrator granting the scopes it requested, and every scope it requested consented and returned a refresh token; it did **not** establish that an ordinary user can self-consent, so a deployment where the PM is not an admin is still an unknown. The count is deliberately not restated in this clause — the declared set is above, and a number repeated in prose is a number that goes stale, as both `three of four` and `all six` did between 2026-09-02 and 2026-09-06.
   **The tenant-level transcript switch is real and stays handled.** Slice 0 established that the permitted path exists and works end to end, which is what `33e`'s scope depended on — not that every tenant permits it. `GraphAccessToTranscriptsDisabled` remains a switch no request can work around, and `33e` degrades rather than retries.
 - **The refresh token is a credential** and goes through `8b`: sealed store first, connector configuration second. It never appears in output, logs or tracebacks.
 - **A stale credential reports as stale.** An expired refresh token is a distinct health state from a provider being unreachable, because the remedies differ — one needs the PM to sign in again, the other needs waiting.
@@ -44,7 +46,7 @@ review_loop_iteration: 1
 | Refresh token expired | stored token rejected | reported as stale, naming re-enrolment | `CredentialStale` |
 | PM abandons sign-in | device code expires unused | refused; nothing stored | `AuthTimedOut` |
 | Consent declined | user declines a scope | refused, naming the declined scope | `AuthDeclined` |
-| Partial consent | some scopes granted | refused rather than degraded — a connector holding three of four scopes fails at an unpredictable resource | `AuthDeclined` |
+| Partial consent | some scopes granted | refused rather than degraded — a connector holding six of seven scopes fails at an unpredictable resource | `AuthDeclined` |
 | Network unreachable at token endpoint | no route | reported as unreachable, distinctly from stale | `GraphUnreachable` |
 | Health probe, valid token | credential good | healthy within CAP-35's 10s bound | probe reports, never raises |
 | Probe with nothing enrolled | no credential ever stored | reports `ABSENT`, distinctly from `FAILING` — a fresh install is not a broken machine | probe reports, never raises |
@@ -66,17 +68,21 @@ review_loop_iteration: 1
 - `pyproject.toml` -- pin `msal`, following the pinning discipline the `anthropic` entry documents
 - `.importlinter:49-60` -- the contract that decides this module's home
 - `pm_ai/core/connector_enrolment.py` -- `8b`, which seals the token
+- `pm_ai/core/connector_enrolment.py:142` -- `stored_credentials`, the reader `8b` built; nothing outside enrolment's own duplicate check calls it
+- `pm_ai/app/wiring.py:256-319` -- `_enrolled_connectors`, which skips `system != "gitlab"` with the comment "33a adds Graph" and constructs every adapter holding no credential
+- `pm_ai/connectors/gitlab.py:56-60` -- the `credential: str | None` field, whose comment says `8b` owns putting a real one there; `8b` is done and did not
 - `pm_ai/platform/keychain.py` -- custody, the half that stays in `platform`
 - `pm_ai/connectors/transcripts/graph.py:14` -- the `_fake_api` that `33e` replaces using this auth
-- `_bmad-output/implementation-artifacts/slice-0-graph-spike-2026-09-06.md` -- what a live tenant actually answered; the source of the fifth scope and of the Ask First above
+- `_bmad-output/implementation-artifacts/slice-0-graph-spike-2026-09-06.md` -- what a live tenant actually answered; the source of three of the seven scopes (`OnlineMeetings.Read`, `Team.ReadBasic.All`, `Channel.ReadBasic.All`), of the Ask First now answered above, and of the admin-consent correction in the Intent
 
 ## Tasks & Acceptance
 
 **Execution:**
 - [ ] `pm_ai/ports/__init__.py` -- add `GraphAuthPort`
-- [ ] `pm_ai/connectors/graph/auth.py` -- add the device-code adapter, the **seven**-permission scope constant plus `offline_access`, and the four error types
+- [ ] `pm_ai/connectors/graph/auth.py` -- add the device-code adapter, the **seven**-permission scope constant plus `offline_access`, and the **five** error types the matrix names: `CredentialStale`, `AuthTimedOut`, `AuthDeclined`, `GraphUnreachable`, `InteractionRequired`
 - [ ] `pyproject.toml` -- pin `msal`
 - [ ] `.importlinter` -- add `msal` to `http-confined-to-adapters`'s forbidden modules
+- [ ] `pm_ai/app/wiring.py` -- read the sealed credential back in `_enrolled_connectors` and hand it to the adapter it builds. `deferred-work.md` assigns this here ("it is the wiring 33a needs"), and this is the slice that makes it observable: until a transport exists an adapter needs no token, but `pm-ai connector check` already reports a just-enrolled connector as `ABSENT`. `app` may import both `core` and `storage`, so `stored_credentials(storage)` is reachable from here and from nowhere lower
 - [ ] `tests/connectors/test_graph_auth.py` -- the matrix against a fake MSAL client; no network in any test
 
 **Acceptance Criteria:**
@@ -85,10 +91,21 @@ review_loop_iteration: 1
 - Given the declared scope set, then it equals exactly the seven resource permissions plus `offline_access`, asserted as a set so a silent addition *or omission* fails. The omission direction is the one slice 0 exercised: the set was short by `OnlineMeetings.Read`, and nothing failed until a live tenant returned a 403 that read as a tenant restriction.
 - Given an app registration that grants every declared scope except `OnlineMeetings.Read`, when a token is acquired, then `AuthDeclined` names that scope — rather than the connector starting and `33e` reporting the tenant as having transcripts disabled.
 - Given a stored token the provider rejects for conditional access rather than expiry, then `InteractionRequired` is raised, not `CredentialStale` — three remedies, three states.
+- Given a connector enrolled in a previous process, when the daemon composes, then the adapter it builds holds the credential from the sealed store and `pm-ai connector check` no longer reports it `ABSENT` — the state `8b`'s own success message ("active at the next start") already promised away.
 
 The credential-not-in-`connectors/graph.json` criterion moved to `8b`, which owns that write; this slice's tests are fake-MSAL unit tests with no storage in the path, so it could never have been asserted here.
 
 ## Spec Change Log
+
+- **2026-09-06, renegotiated on instruction: the Intent's consent premise was false, and two scope counts had gone stale.** Three corrections, one cause — the frozen block was written before a live tenant answered, and then amended twice without its prose counts following.
+  **"No tenant-admin consent" was the rationale for choosing device code, and it is not true.** The delegated flow avoids the *app-only* path and the application access policy that path requires for transcripts; it does not avoid consent. Slice 0's grant came from an administrator, and two of the declared permissions normally require one. The flow choice survives — admin consent is a one-time app-registration prerequisite, not a per-sign-in step — but an operator reading the Intent would have planned a first enrolment that could not have succeeded. The Always clause, which had already been corrected per permission, is now named as the authority.
+  **Two counts restated in prose had drifted.** The partial-consent matrix row still said "three of four scopes" and the admin-consent clause still said "all six consent" — both true when written, neither true after the set went to five and then seven. The row now says six of seven; the clause no longer restates a count at all, and says why. The declared set itself is stated once, in one place, which is the property those two sentences were quietly undermining.
+  **The `no application access policy` half of the original claim is kept**, unchanged and still correct: it was verified against the Graph reference on 2026-09-01 and re-confirmed by slice 0's end-to-end transcript read on the delegated path.
+
+- **2026-09-06, three unfrozen corrections the amendments left behind.**
+  **The task list said "the four error types" while the matrix named five.** `InteractionRequired` entered the matrix in the 2026-09-02 review as a third distinct remedy and the task's count was never updated, so an implementer working from the task list would have built four and left conditional access collapsed into staleness — the exact defect that review opened. All five are now named rather than counted.
+  **The Code Map credited slice 0 with "the fifth scope"**; it is the source of three of the seven, and of the admin-consent correction above.
+  **The credential read-back joins this slice's Code Map and tasks**, where `deferred-work.md` had already assigned it ("it is the wiring 33a needs") without the spec recording it. `8b` built `stored_credentials` and nothing outside enrolment's duplicate check calls it, `_enrolled_connectors` constructs every adapter with `credential=None`, and `gitlab.py`'s field comment still says `8b` owns putting a real one there — `8b` is done and did not. The consequence is live now, not at `33b`: `pm-ai connector check` reports a just-enrolled connector `ABSENT`, contradicting `8b`'s own "active at the next start". Reading it in `_enrolled_connectors` is compatible with the frozen **Never** — a sealed-store read is not a resource fetch.
 
 - **2026-09-06, the enumeration Ask First answered: declare them now.** `Team.ReadBasic.All` and `Channel.ReadBasic.All` join the declared set, taking it to seven resource permissions plus `offline_access`. The reasoning is the partial-consent rule: a scope added after a PM has enrolled stops the connector until they enrol again, so the cheap moment to ask is the only one. `ChannelMessage.Read.All` was already declared, so the incremental ask — enumerating teams and channels the PM is already a member of — is strictly smaller than the consent already being sought.
   **The cost is recorded rather than glossed.** Declaring seven means an administrator must grant all seven before anyone can enrol; six of seven produces a connector that refuses entirely rather than one that works for calendars. That follows from the partial-consent rule this slice already had, and is the intended behaviour under `8a`, but it is a higher bar than five and the spec now says so.
