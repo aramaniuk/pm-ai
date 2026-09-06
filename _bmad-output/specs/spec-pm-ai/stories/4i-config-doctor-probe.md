@@ -44,28 +44,31 @@ context: []
 
 ## Code Map
 
-- `pm_ai/platform/doctor.py:89-100` -- `Probe`, `Health` and `remediation`, the four states a probe may report
-- `pm_ai/platform/doctor.py:377-395` -- `run_all`, where a sixth probe joins five and whose signature gains the config input
-- `pm_ai/platform/doctor.py:247-272` -- `keychain_reachable`, the closest model: `ABSENT` for "reachable, nothing stored", with its remedy named
-- `pm_ai/platform/doctor.py:399` -- `doctor.main()`, a `run_all` call site
+- `pm_ai/domain/health.py:31-68` -- `Health`, `Probe` and `remediation`, the four states a probe may report. **Not in `doctor.py` any more**: they moved when `ConnectorPort` gained a health method, because a port may import only `pm_ai.domain`. `doctor.py:70` re-exports them, so every existing import still resolves
+- `pm_ai/platform/doctor.py:331-349` -- `run_all`, where a sixth probe joins five and whose signature gains the config input
+- `pm_ai/platform/doctor.py:201-244` -- `keychain_reachable`, the closest model: `ABSENT` for "reachable, nothing stored", with its remedy named
+- `pm_ai/app/entry.py:250` -- the `run_all` call site. `doctor.main()` and the `__main__` block were retired on 2026-09-04 so `4c`'s exit-code table has one declaration; the console script superseded them
 - `pm_ai/core/config.py:168` -- `load_config`, which this probe calls and whose `ConfigRefused` it carries
-- `tests/architecture/test_doctor.py:282-285,316,445,611` -- the four assertions a sixth probe breaks
+- `tests/architecture/test_doctor.py:292-295,313,468,634` -- the four assertions a sixth probe breaks
 
 ## Tasks & Acceptance
 
 **Execution:**
 - [ ] `pm_ai/platform/doctor.py` -- add the config probe with its states, and give `run_all` the config input -- the probe interprets bytes it is handed and opens nothing
-- [ ] `tests/architecture/test_doctor.py` -- **update the four assertions a sixth probe breaks**: the probe count and name set (`:282-285`), `:445`, `:611`, and the healthy-machine case (`:316`), which needs config bytes stood in the way `missing_distributions` already is -- then add the new probe's states
-- [ ] `pm_ai/platform/doctor.py` -- point the keychain `ABSENT` remediation at the command that fixes it, which `1g` deliberately left pending -- and assert the command name, not the bare word `"Enrol"` that `:123` currently matches
+- [ ] `tests/architecture/test_doctor.py` -- **update the four assertions a sixth probe breaks**: the probe count and name set (`:292-295`), `:468`, `:634`, and the healthy-machine case (`:313`), which needs config bytes stood in the way `missing_distributions` already is -- then add the new probe's states
+- [ ] `pm_ai/platform/doctor.py` -- point the keychain `ABSENT` remediation at the command that fixes it, which `1g` deliberately left pending -- and assert the command name, not the bare word `"Enrol"` that `:133` currently matches
 
 **Acceptance Criteria:**
 - Given a `config.toml` the loader refuses, when the probe runs, then the report carries the loader's own message and `run_all` still returns every other probe.
 - Given a file that exists but cannot be read, then the probe reports the read failure and **not** `ABSENT` — the two have different remedies, and collapsing them tells a first-time operator to create a file they already have.
 - Given `run_all` with no config input available, then the probe reports unknown-from-here and `doctor` still exits having run every machine probe — the state `4c` requires it to survive.
-- Given the keychain `ABSENT` remediation, then it names its command literally, asserted by that string rather than by `"Enrol"` — the substring at `test_doctor.py:123` passes whichever command the text names, or none.
+- Given the keychain `ABSENT` remediation, then it names its command literally, asserted by that string rather than by `"Enrol"` — the substring at `test_doctor.py:133` passes whichever command the text names, or none.
 - Given `uv run pytest -q`, then the suite passes with six probes — the four existing assertions updated in this slice, not left for the next one to discover.
 
 ## Spec Change Log
+
+- **2026-09-06, Code Map citations re-derived against `10511bc`.** Every `doctor.py` line this slice pointed at had moved, all for one reason: the wave-1 CLI branch retired `doctor.main()` and its `__main__` block on 2026-09-04 so `4c`'s exit-code table has one declaration, and `Health`, `Probe` and `Report` moved to `pm_ai/domain/health.py` when `ConnectorPort` gained a health method. So the map sent an implementer to `doctor.py:399` for a function that no longer exists, to `:377-395` for a `run_all` now at `:331-349`, to `:247-272` for a `keychain_reachable` now at `:201-244`, and to `doctor.py` for three types that are no longer defined there. The four `test_doctor.py` assertions had shifted by the same edit. All re-derived and verified against the current tree; the surviving `run_all` call site is `pm_ai/app/entry.py:250`. **Citations only** — no task, criterion or behaviour changed, and the frozen block was not touched.
+  **Two frozen-block citations are stale and left as they are.** The Intent's `doctor.py:377-395` and the Boundaries' `doctor.py:378-382` both name `run_all` at its old address, and the Boundaries' `Probe (:96-100)` names the type at its old file. Correcting them needs the human's renegotiation; the substance of all three clauses is unaffected, and the Boundaries' `doctor.py:22-24` for the reports-never-raises rule is still exact.
 
 - **2026-09-03, split from `4g` at the sizing gate.** `4g` reached 2203 body tokens once the second multi-lens review's findings were applied under the human's unlock. The serializer stays there; this is the diagnostic. Carried over from that review: the probe must distinguish absent from unreadable from unobtainable (B26), and a sixth probe breaks four existing `test_doctor.py` assertions while `4g`'s Verification block claimed no new failures (C2). The remediation-retarget task and its criterion come from C8, which found that `test_doctor.py:123`'s bare `"Enrol"` substring passes whether the text names `pm-ai key enrol`, `pm-ai setup`, or no command at all.
 

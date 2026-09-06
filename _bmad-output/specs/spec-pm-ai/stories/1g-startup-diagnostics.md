@@ -89,6 +89,8 @@ The third is `git`. The capture write path asks git whether a transcript directo
 
 ## Spec Change Log
 
+**2026-09-06, the verification command moved to `pm-ai doctor`.** Citation only; nothing this story built changed. `4c` retired `doctor.main()` and the `__main__` block on 2026-09-04 so the exit-code table has one declaration, and `python -m pm_ai.platform.doctor` now exits 0 having printed nothing — a reproduction step that passes without reproducing anything. The acceptance criterion above is left as written: it records a verification that was performed under the command that existed then, and rewriting it would falsify the record rather than correct it.
+
 **2026-08-26, review pass 3 — a fifth probe, and the keychain's two causes split.** Prompted by reading the report the doctor actually prints: `keychain: the keyring package is not installed` was accurate and badly shaped.
 
 - **`packages_installed`, and it runs first.** The keychain probe had become the de-facto detector for "the runtime stack is not installed" — a much larger fact reported obliquely, as a message about a keychain. Generic over any distribution set rather than a keyring check in disguise, and the default derives the `runtime` extra from installed metadata, so adding a dependency extends the check with no edit. It reports **before** the others because when the answer is no, three of the four after it are answering questions that do not matter yet.
@@ -119,6 +121,6 @@ The extension probe checks `hasattr(connection, "enable_load_extension")` rather
 
 ## Verification
 
-- `uv run python -m pm_ai.platform.doctor` — expected: a readable report; extension support and `git` both present on this machine.
+- `uv run pm-ai doctor` — expected: a readable report; extension support and `git` both present on this machine. **Reproduce with this, not `python -m pm_ai.platform.doctor`**, which was the command when this story was verified: `doctor.main()` and the `__main__` block were retired on 2026-09-04 by `4c`, so the module form now prints nothing and exits 0 — it no longer fails, it silently verifies nothing. The probes themselves are unchanged; only the command that reaches them moved.
 - `uv run pytest -q -rs` — expected: previously passing tests still pass, skip count unchanged.
 - `uv run lint-imports` — expected: `Contracts: 12 kept, 0 broken.`
