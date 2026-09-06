@@ -2,7 +2,8 @@
 title: 'Graph device-code auth'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '8e78dc708c9a26ce853c61fc2e69ebae3ed56dea'
 review_loop_iteration: 1
 ---
 
@@ -48,9 +49,9 @@ review_loop_iteration: 1
 | Consent declined | user declines a scope | refused, naming the declined scope | `AuthDeclined` |
 | Partial consent | some scopes granted | refused rather than degraded — a connector holding six of seven scopes fails at an unpredictable resource | `AuthDeclined` |
 | Network unreachable at token endpoint | no route | reported as unreachable, distinctly from stale | `GraphUnreachable` |
-| Health probe, valid token | credential good | healthy within CAP-35's 10s bound | probe reports, never raises |
+| Health probe, valid token | credential good | healthy | probe reports, never raises |
 | Probe with nothing enrolled | no credential ever stored | reports `ABSENT`, distinctly from `FAILING` — a fresh install is not a broken machine | probe reports, never raises |
-| Token expires mid-harvest | page 3 returns 401 on a valid refresh token | silent refresh, the page retried once; pages already walked retained | `CredentialStale` only after the retry |
+| Cached token stops being accepted | a caller holding a live-looking cached token the provider now rejects | `force_refresh` reaches the provider rather than returning the cache | `CredentialStale`, distinct from `GraphUnreachable` |
 | Polling throttled | token endpoint answers `slow_down` or 429 | the interval from the device-code response is honoured and backed off | retried, not counted as abandoned |
 | Conditional access | AAD returns `interaction_required` | reported distinctly — the remedy is an interactive sign-in, neither waiting nor re-enrolment | `InteractionRequired` |
 | Local clock skewed | laptop clock hours off | expiry judged with tolerance; skew reported as its own state | distinct from stale |
@@ -78,12 +79,12 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` -- add `GraphAuthPort`
-- [ ] `pm_ai/connectors/graph/auth.py` -- add the device-code adapter, the **seven**-permission scope constant plus `offline_access`, and the **five** error types the matrix names: `CredentialStale`, `AuthTimedOut`, `AuthDeclined`, `GraphUnreachable`, `InteractionRequired`
-- [ ] `pyproject.toml` -- pin `msal`
-- [ ] `.importlinter` -- add `msal` to `http-confined-to-adapters`'s forbidden modules
-- [ ] `pm_ai/app/wiring.py` -- read the sealed credential back in `_enrolled_connectors` and hand it to the adapter it builds. `deferred-work.md` assigns this here ("it is the wiring 33a needs"), and this is the slice that makes it observable: until a transport exists an adapter needs no token, but `pm-ai connector check` already reports a just-enrolled connector as `ABSENT`. `app` may import both `core` and `storage`, so `stored_credentials(storage)` is reachable from here and from nowhere lower
-- [ ] `tests/connectors/test_graph_auth.py` -- the matrix against a fake MSAL client; no network in any test
+- [x] `pm_ai/ports/__init__.py` -- add `GraphAuthPort`
+- [x] `pm_ai/connectors/graph/auth.py` -- add the device-code adapter, the **seven**-permission scope constant plus `offline_access`, and the **five** error types the matrix names: `CredentialStale`, `AuthTimedOut`, `AuthDeclined`, `GraphUnreachable`, `InteractionRequired`
+- [x] `pyproject.toml` -- pin `msal`
+- [x] `.importlinter` -- add `msal` to `http-confined-to-adapters`'s forbidden modules
+- [x] `pm_ai/app/wiring.py` -- read the sealed credential back in `_enrolled_connectors` and hand it to the adapter it builds. `deferred-work.md` assigns this here ("it is the wiring 33a needs"), and this is the slice that makes it observable: until a transport exists an adapter needs no token, but `pm-ai connector check` already reports a just-enrolled connector as `ABSENT`. `app` may import both `core` and `storage`, so `stored_credentials(storage)` is reachable from here and from nowhere lower
+- [x] `tests/connectors/test_graph_auth.py` -- the matrix against a fake MSAL client; no network in any test
 
 **Acceptance Criteria:**
 - Given a stored refresh token that the provider rejects, when a token is requested, then `CredentialStale` is raised and the health probe reports stale rather than unreachable — the two states an operator must be able to tell apart.
@@ -96,6 +97,10 @@ review_loop_iteration: 1
 The credential-not-in-`connectors/graph.json` criterion moved to `8b`, which owns that write; this slice's tests are fake-MSAL unit tests with no storage in the path, so it could never have been asserted here.
 
 ## Spec Change Log
+
+- **2026-09-06, renegotiated on instruction: two matrix rows demanded behaviour that is not this slice's, and one of them is nobody's.** Both were written 2026-09-02, when 33a was scoped as "the auth slice" and the boundary with `33b` had not been drawn. The review found the code disagreeing with both; the code was right.
+  **CAP-35's ten seconds do not reach this method, and the clause is removed rather than deferred.** `SPEC.md` scopes the bound to `pm-ai connector add`, which "runs a live health probe within 10 seconds" with a human at the keyboard; `ConnectorRegistry.check_health` extends the same deadline to `pm-ai connector check`, also interactive. `GraphAuthPort.check_health` is neither command, and the harvest that will call it is an asynchronous background fetch with nobody waiting — a latency bound there measures nothing. The row was not premature, it was wrong on its own terms: `ConnectorPort.check_health` already states that a probe cannot enforce this bound at all, since a blocking call cannot cancel itself, and that the registry owns it. When `33b`'s `GraphConnector` probes under `pm-ai connector check`, it inherits that bound from the registry with no code here. The row now asserts the health states, which are covered and passing.
+  **The mid-harvest row is narrowed to the half this slice owns.** It demanded "the page retried once; pages already walked retained" — paging behaviour, from a slice whose frozen Never forbids all fetching. `33b`'s own matrix already carries that clause verbatim ("Token expires mid-fetch | 401 on page 3 | `33a`'s silent refresh, the page retried once; earlier pages retained"), so the split needed no addition there; the duplication was the defect, because a row in a `done` spec would have read as satisfied. What remains here is what the adapter actually owns and tests: `force_refresh` reaching the provider even when the cached token still looks live, and `CredentialStale` distinguishable from `GraphUnreachable`.
 
 - **2026-09-06, renegotiated on instruction: the Intent's consent premise was false, and two scope counts had gone stale.** Three corrections, one cause — the frozen block was written before a live tenant answered, and then amended twice without its prose counts following.
   **"No tenant-admin consent" was the rationale for choosing device code, and it is not true.** The delegated flow avoids the *app-only* path and the application access policy that path requires for transcripts; it does not avoid consent. Slice 0's grant came from an administrator, and two of the declared permissions normally require one. The flow choice survives — admin consent is a one-time app-registration prerequisite, not a per-sign-in step — but an operator reading the Intent would have planned a first enrolment that could not have succeeded. The Always clause, which had already been corrected per permission, is now named as the authority.
@@ -134,3 +139,80 @@ Asserting the scope set as a set, in a test, is cheap insurance against the ordi
 - `uv run pytest tests/connectors/test_graph_auth.py -q` -- expected: all matrix rows pass, no network
 - `uv run lint-imports` -- expected: contracts kept
 - `uv run pytest -q` -- expected: no new failures
+
+## Suggested Review Order
+
+**Start here — what the slice declares**
+
+- The port the whole slice exists to satisfy; read its four methods before any adapter code.
+  [`ports/__init__.py:191`](../../../../pm_ai/ports/__init__.py#L191)
+
+- Seven resource permissions plus `offline_access`, in one place, as a frozenset the set assertion can compare against.
+  [`auth.py:96`](../../../../pm_ai/connectors/graph/auth.py#L96)
+
+**The error taxonomy — five remedies, and the sets that route to them**
+
+- The base every refusal inherits, so an unmapped provider code is never forced into a wrong remedy.
+  [`auth.py:166`](../../../../pm_ai/connectors/graph/auth.py#L166)
+
+- Throttling is a wait, not an abandoned sign-in — the frozen matrix's Polling throttled row.
+  [`auth.py:383`](../../../../pm_ai/connectors/graph/auth.py#L383)
+
+- `unauthorized_client` is an app-registration fault; signing in again cannot fix it.
+  [`auth.py:406`](../../../../pm_ai/connectors/graph/auth.py#L406)
+
+- Only genuine credential expiry reaches `CredentialStale`, which is what makes the state actionable.
+  [`auth.py:438`](../../../../pm_ai/connectors/graph/auth.py#L438)
+
+**Write ordering — where a credential can be lost**
+
+- Adopt before sealing: a response that cannot be adopted must leave nothing stored.
+  [`auth.py:561`](../../../../pm_ai/connectors/graph/auth.py#L561)
+
+- Rotate before asserting the grant. AAD retires a used refresh token, so the reverse order strands the connector permanently stale.
+  [`auth.py:632`](../../../../pm_ai/connectors/graph/auth.py#L632)
+
+- The claim covers the read and the write-back but not the round trip, which is what makes the loser's retry reachable.
+  [`auth.py:1025`](../../../../pm_ai/connectors/graph/auth.py#L1025)
+
+**Reporting, never raising**
+
+- Four answers because four different things are wrong and three are not a bad credential; forces a refresh so a revoked token cannot read as healthy.
+  [`auth.py:688`](../../../../pm_ai/connectors/graph/auth.py#L688)
+
+- Every MSAL touch goes through one guard, so a provider failure is a typed refusal and not a pm-ai bug.
+  [`auth.py:867`](../../../../pm_ai/connectors/graph/auth.py#L867)
+
+- An unmeasurable skew is reported as nothing at all rather than as zero, and clears a previous measurement.
+  [`auth.py:1094`](../../../../pm_ai/connectors/graph/auth.py#L1094)
+
+**Custody stays injected**
+
+- `connectors` may not open a file or reach a keychain, so the store is a Protocol the composition root supplies.
+  [`auth.py:235`](../../../../pm_ai/connectors/graph/auth.py#L235)
+
+**The read-back 8b left open**
+
+- The enrolled adapter replaces the built-in at a colliding instance name; `setdefault` silently kept the credential-less one.
+  [`wiring.py:190`](../../../../pm_ai/app/wiring.py#L190)
+
+- A credential sealed under another system, or one that is not a string, never reaches a probe required never to raise.
+  [`wiring.py:360`](../../../../pm_ai/app/wiring.py#L360)
+
+- The only layer that may call `stored_credentials`, opened lazily so a machine with no connectors never fetches the master key.
+  [`wiring.py:265`](../../../../pm_ai/app/wiring.py#L265)
+
+**Gates and peripherals**
+
+- `msal` is named directly in both contracts; grimp does not traverse third-party packages, so `requests` would not have caught it.
+  [`.importlinter:38`](../../../../.importlinter#L38)
+
+- Pinned to an exact version, following the discipline the `anthropic` entry documents.
+  [`pyproject.toml:62`](../../../../pyproject.toml#L62)
+
+- The frozen matrix, row by row, against a fake MSAL client; no network in any test.
+  [`test_graph_auth.py:1`](../../../../tests/connectors/test_graph_auth.py#L1)
+
+- The composition-level cases for the read-back, including the colliding name that had no coverage.
+  [`test_connector_enrolment.py:485`](../../../../tests/core/test_connector_enrolment.py#L485)
+

@@ -20,6 +20,7 @@ from pm_ai.connectors.registry import ConnectorRegistry, install as install_conn
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
+from pm_ai.core.connector_enrolment import stored_credentials
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
@@ -177,8 +178,16 @@ def build(
     # `run_harvest` raised `KeyError` for — which is the divergence the comment
     # above says cannot happen and `test_composition_populates_the_registry`
     # asserts cannot.
+    # The enrolled adapter *replaces* the built-in of the same name, and the
+    # collision is the ordinary case rather than a corner: the built-in above is
+    # keyed `gitlab:<project>`, and `gitlab.py`'s own ABSENT remediation tells the
+    # operator to run `pm-ai connector add gitlab gitlab:<project>` — the exact
+    # instance name that produces one. `setdefault` kept the credential-less
+    # built-in and dropped the adapter holding the sealed credential, so the
+    # connector the operator had just enrolled went on reporting ABSENT and the
+    # remedy printed was the one they had already followed.
     for instance, enrolled in _enrolled_connectors(storage, scope=scope, clock=clock):
-        connectors.setdefault(instance, enrolled)
+        connectors[instance] = enrolled
     enumerable = ConnectorRegistry()
     for instance, connector in connectors.items():
         enumerable.register(connector, instance=instance)
@@ -278,9 +287,25 @@ def _enrolled_connectors(
     A connector that fails to load is simply absent, which `connector check`
     reports as a missing row.
 
-    Credentials are *not* read. They live in the sealed store, and constructing
-    an adapter needs none — the harvest that needs one fetches it when it runs.
+    Credentials **are** read, since story 33a. They were not until then, and the
+    consequence was live rather than theoretical: `8b`'s success message tells
+    the operator the connector becomes active at the next start, and the next
+    start built every adapter with `credential=None`, so `pm-ai connector check`
+    reported a connector enrolled ten seconds ago as `ABSENT` — a fresh install
+    on a machine somebody had just finished setting up. `stored_credentials` was
+    built by `8b` and, outside enrolment's own duplicate check, called by
+    nothing. This is the only layer that can call it: `app` may import both
+    `core` and `storage`, and nothing lower may import both.
+
+    A sealed-store read is not a resource fetch, which is what keeps this inside
+    `33a`'s boundaries: no provider is contacted here, and the adapter is handed
+    a string.
     """
+    # Fetched on first need, not up front. Opening the sealed store costs a
+    # master-key fetch from the keychain, and a machine with no connectors
+    # enrolled — every machine before the first `connector add` — paid it on
+    # every `build()` to read a mapping nothing then consulted.
+    credentials: dict[str, dict[str, str]] | None = None
     built: list[tuple[str, GitLabConnectorAdapter]] = []
     for entry in _enrolled_configurations(storage):
         instance = entry.get("instance")
@@ -293,8 +318,10 @@ def _enrolled_connectors(
         if entry.get("enabled") is not True:
             continue
         if system != "gitlab":
-            # The only adapter that exists. An enrolled system pm-ai cannot
-            # build is skipped rather than guessed at; 33a adds Graph.
+            # The only *connector* adapter that exists. An enrolled system pm-ai
+            # cannot build is skipped rather than guessed at. Story 33a added
+            # Graph *auth* and no Graph connector — a token is not a harvester —
+            # so the Graph rows here arrive with 33b's calendar adapter.
             continue
         # The connector's own declared project, not one re-derived from its
         # name. The instance is a path component and may not contain `/`, while
@@ -309,13 +336,71 @@ def _enrolled_connectors(
         )
         if not project:
             continue
+        # The credential the sealed store holds for *this* instance, or `None`
+        # when there is none. `None`, absent and blank are one state to the
+        # adapter's health probe — no usable credential — so a half-finished
+        # enrolment still reports ABSENT rather than claiming to be configured.
+        if credentials is None:
+            credentials = _stored_credentials(storage)
+        held = _credential_for(credentials.get(instance), system=system)
         try:
             built.append(
-                (instance, GitLabConnectorAdapter(project=project, scope=scope, now=clock))
+                (
+                    instance,
+                    GitLabConnectorAdapter(
+                        project=project, scope=scope, now=clock, credential=held
+                    ),
+                )
             )
         except Exception:
             continue
     return tuple(built)
+
+
+def _credential_for(sealed: object, *, system: str) -> str | None:
+    """The sealed credential for one instance, or `None` when there is none to use.
+
+    Two refusals, both of which used to hand something through:
+
+    - **Not a string.** `private/config.json` is decrypted JSON, so a
+      hand-repaired or half-written entry can hold a number, a list or a nested
+      object. `GitLabConnectorAdapter.check_health` calls `.strip()` on the value
+      and would have raised inside a probe that is required never to raise, which
+      takes the whole `connector check` report down with it.
+    - **Sealed under a different system.** An entry recording `system: "graph"`
+      against a configuration that says `gitlab` is two different connectors
+      wearing one instance name, and handing a Microsoft refresh token to the
+      GitLab adapter would send it to the wrong provider. Reported as `ABSENT`,
+      which is the honest answer: this instance has no credential *for this
+      system*.
+    """
+    if not isinstance(sealed, Mapping):
+        return None
+    recorded = sealed.get("system")
+    if isinstance(recorded, str) and recorded and recorded != system:
+        return None
+    credential = sealed.get("credential")
+    return credential if isinstance(credential, str) else None
+
+
+def _stored_credentials(storage: StorageService) -> dict[str, dict[str, str]]:
+    """The sealed store's credentials, or nothing when it cannot be opened.
+
+    Swallowed for the reason every failure in `_enrolled_connectors` is: the
+    daemon must compose on a broken machine so `pm-ai doctor` can run and say
+    what is broken. The sealed store needs the master key, so a keyless or
+    locked machine raises here — and a `build()` that raised would take the
+    diagnostics down with it.
+
+    The cost is stated rather than hidden: a connector whose credential could
+    not be *read* reports `ABSENT`, the same as one that has none. The keychain
+    probe is what tells those two apart, and it reports the cause directly
+    instead of through a connector row.
+    """
+    try:
+        return stored_credentials(storage)
+    except Exception:
+        return {}
 
 
 def _enrolled_configurations(

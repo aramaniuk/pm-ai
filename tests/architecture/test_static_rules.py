@@ -354,6 +354,10 @@ def test_ad24_event_log_is_not_a_debug_sink():
     [
         ("core", "httpx"),
         ("core", "requests"),
+        # Named directly because `include_external_packages` cannot see it: grimp
+        # does not traverse third-party source, so `msal`'s own dependency on
+        # `requests` never becomes an edge from `pm_ai.core`.
+        ("core", "msal"),
         ("core", "sqlite3"),
         ("core", "anthropic"),
         ("core", "ollama"),

@@ -6,12 +6,15 @@ package. `pm_ai.core.connector_enrolment` receives this as a parameter typed
 `CredentialProbePort`, which is the same arrangement that makes story 8d's
 health probes legal in this package and illegal one layer down.
 
-**No transport yet.** Story 33a brings the Graph device-code flow and the real
-HTTP client with it. Until then a system pm-ai has no probe for is refused by
-name — `UnknownConnectorSystem` — rather than passed, because a probe that
-returned "fine" without asking anything would put a credential on disk on the
-strength of a check that never happened. That is the failure this whole slice
-is ordered to prevent, and it would be introduced by the probe itself.
+**No transport yet, for either system.** Story 33a brought the Graph
+device-code flow and the first real HTTP client with it, and deliberately no
+probe: that slice fetches no resource and enrols no Graph connector, so a
+`graph` entry here would be a check nothing calls. GitLab's transport is still a
+stub. A system pm-ai has no probe for is refused by name —
+`UnknownConnectorSystem` — rather than passed, because a probe that returned
+"fine" without asking anything would put a credential on disk on the strength of
+a check that never happened. That is the failure this whole slice is ordered to
+prevent, and it would be introduced by the probe itself.
 """
 
 from __future__ import annotations
@@ -45,8 +48,8 @@ def _gitlab(credential: str) -> str:
         "pm-ai cannot yet check a GitLab credential: the GitLab connector's "
         "transport is still a stub that opens no socket, so there is nothing "
         "to ask. Enrolment refuses rather than sealing a credential on the "
-        "strength of a check that did not happen. The real transport arrives "
-        "with the Graph work in story 33a."
+        "strength of a check that did not happen. GitLab's real transport is "
+        "still outstanding; story 33a built Microsoft Graph's, not this one's."
     )
 
 

@@ -39,6 +39,27 @@ runtime = [
     "fastapi==0.141.1",
     "uvicorn==0.52.3",
     "keyring==25.7.0",
+    # PINNED EXACTLY 2026-09-06, resolved against PyPI and introspected in a
+    # throwaway venv — the discipline the `anthropic` entry above documents,
+    # applied because this one is a *credential* path. Story 33a's device-code
+    # flow is the only thing that obtains a Microsoft token, and a floating
+    # minor that changed how `_decorate_scope` treats reserved scopes would
+    # change what the PM is asked to consent to without a diff.
+    #
+    # Two behaviours measured in 1.38.0 that the adapter is written against, and
+    # that this pin is what keeps true:
+    #   - `offline_access` is REFUSED as a user-provided scope ("The reserved
+    #     list: ['offline_access', 'openid', 'profile']") and added by MSAL
+    #     itself, so the declared set and the requested list differ by design.
+    #   - `obtain_token_by_device_flow` owns the polling loop, honours the
+    #     `interval` from the device-code response, and adds RFC 8628's five
+    #     seconds on `slow_down`. The adapter therefore runs no loop of its own,
+    #     which is also what AD-9 requires of anything in `pm_ai.connectors`.
+    #
+    # Imported lazily in `pm_ai.connectors.graph.auth`, so the package loads
+    # without this extra and a missing install is a typed refusal rather than a
+    # skipped test that reads as coverage.
+    "msal==1.38.0",
     # AES-256-GCM for the two encrypted files (AD-6). Wheels for macOS arm64, so
     # no source build — the property `sqlcipher3` lacked. Imported lazily in
     # `pm_ai.storage.crypto`, so the package loads without this extra.
@@ -89,11 +110,11 @@ pythonpath = ["tests/architecture"]
 files = ["pm_ai"]
 python_version = "3.13"
 # The optional runtime extras are not installed in this environment on purpose —
-# `keyring` and `sqlite_vec` are imported inside the functions that
+# `keyring`, `msal` and `sqlite_vec` are imported inside the functions that
 # use them so a missing extra cannot become a skipped test that reads as
 # coverage. Their absence must not read as a type error.
 [[tool.mypy.overrides]]
-module = ["keyring.*", "sqlite_vec.*"]
+module = ["keyring.*", "msal.*", "sqlite_vec.*"]
 ignore_missing_imports = true
 
 [build-system]
