@@ -450,6 +450,119 @@ def _instances() -> tuple[str, ...]:
     return default_registry().instances()
 
 
+class _Keychain:
+    """Custody that answers, so composition never reaches the real keychain.
+
+    A whole `KeychainPort`, not the one method `LazyKeyCrypto` calls: the
+    parameter is typed, and a partial fake asserts a conformance it does not
+    have.
+    """
+
+    def __init__(self, secret: bytes | None = KEY) -> None:
+        self._secret = secret
+
+    def store(self, name: str, secret: bytes) -> None:
+        self._secret = secret
+
+    def store_if_absent(self, name: str, secret: bytes) -> None:
+        from pm_ai.ports import KeyAlreadyEnrolled
+
+        if self._secret is not None:
+            raise KeyAlreadyEnrolled(name)
+        self._secret = secret
+
+    def fetch(self, name: str) -> bytes:
+        if self._secret is None:
+            raise KeyNotFound(name)
+        return self._secret
+
+    def delete(self, name: str) -> None:
+        if self._secret is None:
+            raise KeyNotFound(name)
+        self._secret = None
+
+
+def test_a_composed_adapter_holds_the_credential_the_sealed_store_keeps(tmp_path):
+    """Story 33a — the read-back that makes "active at the next start" true.
+
+    `8b` sealed the credential and nothing ever read it: `_enrolled_connectors`
+    built every adapter with `credential=None`, so `pm-ai connector check`
+    reported a connector enrolled ten seconds earlier as `ABSENT` — a fresh
+    install, on a machine somebody had just finished setting up. That is
+    precisely the state `8b`'s own success message promised away.
+
+    Asserted through the health probe as well as the field, because `ABSENT` is
+    what an operator actually sees and the field is only how it gets there.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.domain.health import Health
+
+    storage = _storage(tmp_path)
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:sealed",
+        credential=SECRET, probe=accepts,
+    )
+
+    daemon = build(tmp_path, "demo", keychain=_Keychain())
+    connector = daemon.connectors["gitlab:sealed"]
+
+    assert connector.credential == SECRET, (
+        "the adapter was built with no credential, so a freshly enrolled "
+        "connector reports ABSENT on the very next start"
+    )
+    assert connector.check_health().health is not Health.ABSENT
+
+
+def test_a_connector_with_no_sealed_credential_still_reports_absent(tmp_path):
+    """The read-back must not invent one for a configuration written by hand.
+
+    `connectors/` is unencrypted and hand-editable on purpose, so an entry with
+    nothing sealed against it is reachable — and it is exactly the half-finished
+    state `ABSENT` exists to name.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.domain.health import Health
+
+    storage = _storage(tmp_path)
+    storage.write_artifact(
+        json.dumps(
+            {"instance": "gitlab:handwritten", "system": "gitlab", "enabled": True}
+        ).encode(),
+        scope=APPLICATION,
+        artifact="connectors/",
+        name="gitlab:handwritten.json",
+    )
+
+    daemon = build(tmp_path, "demo", keychain=_Keychain())
+    connector = daemon.connectors["gitlab:handwritten"]
+
+    assert connector.credential is None
+    assert connector.check_health().health is Health.ABSENT
+
+
+def test_an_unopenable_sealed_store_does_not_stop_the_daemon_composing(tmp_path):
+    """`doctor` diagnoses a locked keychain, and cannot if `build()` raises.
+
+    The cost is stated rather than hidden: the connector reports `ABSENT` rather
+    than "I could not read your credential". The keychain probe is what reports
+    the cause, directly, instead of through a connector row.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.domain.health import Health
+
+    storage = _storage(tmp_path)
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:locked",
+        credential=SECRET, probe=accepts,
+    )
+
+    daemon = build(tmp_path, "demo", keychain=_Keychain(secret=None))
+    connector = daemon.connectors["gitlab:locked"]
+
+    assert connector.credential is None
+    assert connector.check_health().health is Health.ABSENT
+
+
 def test_a_disabled_entry_is_not_registered(tmp_path):
     """`enabled: false` is the off switch the file format already declares."""
     from pm_ai.app.wiring import build

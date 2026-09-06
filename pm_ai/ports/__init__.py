@@ -7,6 +7,7 @@ say what it returns. Adapters implement these; core depends on them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -184,6 +185,70 @@ class CredentialProbePort(Protocol):
     """
 
     def __call__(self, system: str, credential: str) -> str: ...
+
+
+@runtime_checkable
+class GraphAuthPort(Protocol):
+    """Delegated Microsoft Graph auth, as the rest of pm-ai may see it (story 33a).
+
+    Declared here for the reason every port is: the adapter lives in
+    `pm_ai.connectors` because the device-code flow speaks HTTP to the token
+    endpoint (`.importlinter`'s `http-confined-to-adapters`), and nothing below
+    `connectors` may import it. Token **acquisition** is an adapter's; token
+    **custody** is `pm_ai.platform`'s keychain and the sealed store behind it.
+
+    The three refusals this protocol's implementations raise are deliberately
+    distinct, because their remedies are: a stale credential needs the PM to
+    sign in again, an unreachable endpoint needs waiting, and conditional access
+    needs an interactive sign-in that neither of the other two would produce.
+    The concrete classes live beside the adapter — a caller that needs to tell
+    them apart imports them from there, exactly as `ScopePathPort`'s callers
+    catch `pm_ai.domain.ScopeResolutionError` rather than the resolver's own
+    classes.
+
+    Nothing here returns, logs or formats a refresh token except `sign_in`,
+    whose whole purpose is to hand one to enrolment for sealing.
+    """
+
+    scopes: frozenset[str]
+    """Every permission this connector will ever ask consent for, in one place.
+
+    Compared against what the provider actually granted on **every**
+    acquisition, not only at enrolment: an administrator who revokes one
+    permission afterwards must stop the connector rather than leave it failing
+    at whichever resource happens to need that scope.
+    """
+
+    def sign_in(self, present: Callable[[str], None]) -> str:
+        """Run the interactive flow and return the credential to seal.
+
+        `present` receives the sentence the human acts on — a code and a URL.
+        The implementation opens no browser and handles no password: the PM
+        signs in themselves, wherever they already are.
+
+        Returns the credential enrolment stores, which is the only value in this
+        protocol that carries secret material. It is never logged, never
+        returned by anything else here, and never written to a connector's
+        unencrypted configuration.
+        """
+
+    def access_token(self, *, force_refresh: bool = False) -> str:
+        """A bearer token for Graph, refreshed silently and without prompting.
+
+        `force_refresh` discards a cached access token and asks the provider
+        again. It is what a harvester calls after a page returns 401 on a
+        credential that was valid when the walk started — the alternative is
+        reporting a long harvest as stale on a perfectly good credential.
+        """
+
+    def check_health(self) -> Probe:
+        """Whether this machine can currently obtain a Graph token.
+
+        **Reports; never raises**, like every other probe. `ABSENT` when nothing
+        has been enrolled — a fresh install is not a broken machine — and
+        `FAILING` with a detail that says *which* refusal it was, because the
+        three remedies are three different pieces of advice.
+        """
 
 
 @runtime_checkable

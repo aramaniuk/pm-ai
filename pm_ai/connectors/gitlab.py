@@ -55,8 +55,12 @@ class GitLabConnectorAdapter:
     _fake_api: list[dict] = field(default_factory=list)
     # Whether a token has been enrolled for this instance. `None` is the
     # first-run state `check_health` reports as ABSENT — a machine nobody has
-    # finished setting up, which is not a broken one. Story `8b` owns putting a
-    # real credential here; until then it is injected like everything else.
+    # finished setting up, which is not a broken one. Story `8b` seals the
+    # credential and story `33a` reads it back: `pm_ai.app.wiring
+    # ._enrolled_connectors` fills this from the sealed store at composition,
+    # which is the only layer that may open both `core` and `storage`. Between
+    # the two slices this stayed `None` on every real machine, and a connector
+    # enrolled ten seconds earlier reported ABSENT.
     credential: str | None = None
     # Injected exactly as `_fake_api` is, and for the same reason: the HTTP call
     # is stubbed for this slice, and a health probe that reached the network
@@ -162,9 +166,10 @@ class GitLabConnectorAdapter:
                 Health.WARNING,
                 f"{self.instance} has a credential, but its transport is still "
                 f"a stub — reachability has not been tested",
-                "Nothing to fix on this machine. The GitLab connector gains a "
-                "real HTTP transport in story 33a; until then this row reports "
-                "what is configured, not what answered.",
+                "Nothing to fix on this machine. The GitLab connector has no "
+                "real HTTP transport yet — story 33a brought Microsoft Graph's "
+                "and not this one's — so until it does, this row reports what is "
+                "configured rather than what answered.",
             )
         return Probe(self.instance, Health.OK, f"{answer}")
 

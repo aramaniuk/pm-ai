@@ -45,6 +45,12 @@ forbidden_modules =
     ollama
 
 # Only inbound connectors and outbound skills may speak HTTP at all.
+#
+# `msal` joined the list with story 33a, and the reason is worth keeping: it
+# reaches `requests` transitively, so a Graph device-code adapter misplaced into
+# `pm_ai.platform` would have spoken HTTP from the one layer this contract
+# forbids it in — and passed, because the contract named only the three clients
+# below. A violation that passes the gate is worse than one that fails.
 [importlinter:contract:http-confined-to-adapters]
 name = AD-1 — HTTP clients confined to connectors and skills
 type = forbidden
@@ -56,6 +62,7 @@ forbidden_modules =
     httpx
     requests
     aiohttp
+    msal
 
 
 # ── AD-15: all model access flows through the router ───────────────────────────
