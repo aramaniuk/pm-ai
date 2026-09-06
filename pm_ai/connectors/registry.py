@@ -55,7 +55,8 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from typing import TypeVar
 
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.health import Health, Probe, Report
@@ -65,6 +66,7 @@ __all__ = [
     "ConnectorRegistry",
     "DuplicateConnector",
     "HEALTH_PROBE_SECONDS",
+    "run_bounded",
     "all_connectors",
     "check_health",
     "default_registry",
@@ -74,6 +76,8 @@ __all__ = [
 
 # CAP-35's bound, in seconds. Named rather than defaulted inline so `pm-ai
 # connector check` and this module cannot each carry their own idea of it.
+_T = TypeVar("_T")
+
 HEALTH_PROBE_SECONDS = 10.0
 
 
@@ -83,6 +87,48 @@ HEALTH_PROBE_SECONDS = 10.0
 # from `pm_ai.core`, which sits below this package in the enforced layer stack
 # and may not import it. Two classes with one name, in two packages that cannot
 # see each other, is a refusal a caller catches half of.
+
+
+
+def run_bounded(call: Callable[[], _T], *, timeout: float, label: str) -> _T:
+    """Run `call` on a daemon thread and give up on it at `timeout`.
+
+    The one bounded call in this codebase, and it lives here because
+    `connectors/registry.py` is the single file AD-9's no-scheduling rule
+    exempts — a deadline is not a cadence. Story 8b's credential probe needs the
+    same bound and `pm_ai/connectors/probe.py` calls this rather than starting
+    its own thread, so the exemption stays one file wide instead of two.
+
+    A blocking socket read cannot be cancelled from outside, so the thread is
+    *abandoned* rather than killed: it may still be running when this returns,
+    and whatever it eventually answers is discarded. Daemon, so an abandoned
+    probe cannot hold the interpreter open at exit — which it did until
+    2026-09-04, when `check_health` answered a 0.3s bound in 0.31s and the
+    process took 8.23s to die.
+
+    Raises `TimeoutError` at the deadline. Anything the call itself raises is
+    re-raised here, so a caller's own `except` still sees what it expects.
+    """
+    box: dict[str, object] = {}
+
+    def _run() -> None:
+        try:
+            box["value"] = call()
+        except BaseException as raised:  # noqa: BLE001 - relayed, not swallowed
+            box["raised"] = raised
+
+    thread = threading.Thread(target=_run, name=f"bounded-{label}", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if "raised" in box:
+        raise box["raised"]  # type: ignore[misc]
+    if "value" not in box:
+        raise TimeoutError(
+            f"{label} did not answer within {timeout:g}s and was abandoned. "
+            f"Whether it would have answered is unknown, which is not the same "
+            f"as a refusal."
+        )
+    return box["value"]  # type: ignore[return-value]
 
 
 class ConnectorRegistry:

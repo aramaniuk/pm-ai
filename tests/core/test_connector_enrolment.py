@@ -500,3 +500,62 @@ def test_an_unrecognised_sibling_entry_is_refused_not_silently_dropped(storage):
     assert "gitlab:odd" in str(refused.value)
     raw = storage.read_artifact(scope=APPLICATION, artifact="config.json")
     assert json.loads(raw.decode())["connectors"]["gitlab:odd"] == "a bare string"
+
+
+def test_the_configuration_records_the_project_rather_than_implying_it(storage, tmp_path):
+    """An instance name cannot express `group/project`; the config can."""
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential=SECRET, probe=accepts
+    )
+    (written,) = _connector_files(tmp_path)
+    assert json.loads(written.read_text())["project"] == "alpha"
+
+
+def test_a_grouped_project_is_reachable_by_editing_the_plaintext_config(tmp_path):
+    """The instance stays a safe path component; the project need not be.
+
+    A real GitLab project is `group/project`, which `_assert_nameable` refuses
+    as an instance name — correctly, since it is interpolated into a path. The
+    project is a separate declared field, so the two are no longer the same
+    string, and `connectors/` is unencrypted precisely so this line can be
+    corrected by hand.
+    """
+    from pm_ai.app.wiring import build
+
+    storage = _storage(tmp_path)
+    storage.write_artifact(
+        json.dumps(
+            {
+                "instance": "gitlab:platform",
+                "system": "gitlab",
+                "enabled": True,
+                "project": "acme/platform",
+            }
+        ).encode(),
+        scope=APPLICATION,
+        artifact="connectors/",
+        name="gitlab:platform.json",
+    )
+    daemon = build(tmp_path, "demo")
+    assert daemon.connectors["gitlab:platform"].project == "acme/platform", (
+        "the adapter was built for the project the instance name implied "
+        "rather than the one the configuration declared"
+    )
+
+
+def test_a_slash_is_still_refused_in_an_instance_name(storage):
+    """The path component must stay one; only the project may hold a separator."""
+    with pytest.raises(MalformedInstanceName):
+        enrol_connector(
+            storage, system="gitlab", instance="gitlab:acme/platform",
+            credential=SECRET, probe=accepts,
+        )
+
+
+def test_a_malformed_system_name_says_system_not_instance(storage):
+    with pytest.raises(MalformedInstanceName) as refused:
+        enrol_connector(
+            storage, system="git lab", instance="gitlab:alpha",
+            credential=SECRET, probe=accepts,
+        )
+    assert "system name" in str(refused.value)

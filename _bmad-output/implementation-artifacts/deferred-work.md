@@ -502,3 +502,7 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
   summary: `_append` still writes at the umask, so the declared restricted mode reaches two of the three writers.
   evidence: `disclosure.md` is declared GITIGNORED in the application tree and goes through `append_disclosure` → `_append` → `path.open("a")`, never `_publish`, where `restricted_mode` is consulted. `write_artifact` and `write_capture` both honour the declaration; this one does not, which is the selective enforcement the mode rule was introduced to end.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
+  summary: RESOLVED 2026-09-04 — three entries above are closed, ahead of story 33a: the credential probe is bounded, the connector's project is declared rather than derived, and `_assert_nameable` names the argument it judges.
+  evidence: Closed on branch `wave-1/pre-33a-deferred` rather than left for 33a, because all three change what 33a builds against. The probe bound reuses `registry.run_bounded` so AD-9's exemption stays one file wide instead of two. The remaining 8b/8f entries above — no `connector remove`, `assert_writable` promising more than it asks, `_append` at the umask, and the credential never being read back — are untouched and still open.
