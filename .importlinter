@@ -28,6 +28,13 @@ layers =
 # ── AD-1: the MCP skill layer is the only egress ───────────────────────────────
 # Core must be I/O-free. An HTTP client in core means a feature is one import away
 # from bypassing sanitization, authorization, and the event log.
+#
+# `msal` is listed here as well as in the contract below, and not by transitivity:
+# grimp does not traverse third-party packages, so `msal` reaching `requests`
+# inside its own source is invisible to the `requests` line above. Named in one
+# contract and not the other, `pm_ai.core` could have imported `msal` and spoken
+# HTTP to the Microsoft token endpoint while both contracts passed — the same
+# gap-that-passes story 33a added the entry below to close, one layer down.
 [importlinter:contract:core-is-io-free]
 name = AD-1 — core imports no I/O client
 type = forbidden
@@ -37,6 +44,7 @@ forbidden_modules =
     httpx
     requests
     aiohttp
+    msal
     urllib
     socket
     subprocess

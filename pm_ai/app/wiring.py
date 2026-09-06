@@ -178,8 +178,16 @@ def build(
     # `run_harvest` raised `KeyError` for — which is the divergence the comment
     # above says cannot happen and `test_composition_populates_the_registry`
     # asserts cannot.
+    # The enrolled adapter *replaces* the built-in of the same name, and the
+    # collision is the ordinary case rather than a corner: the built-in above is
+    # keyed `gitlab:<project>`, and `gitlab.py`'s own ABSENT remediation tells the
+    # operator to run `pm-ai connector add gitlab gitlab:<project>` — the exact
+    # instance name that produces one. `setdefault` kept the credential-less
+    # built-in and dropped the adapter holding the sealed credential, so the
+    # connector the operator had just enrolled went on reporting ABSENT and the
+    # remedy printed was the one they had already followed.
     for instance, enrolled in _enrolled_connectors(storage, scope=scope, clock=clock):
-        connectors.setdefault(instance, enrolled)
+        connectors[instance] = enrolled
     enumerable = ConnectorRegistry()
     for instance, connector in connectors.items():
         enumerable.register(connector, instance=instance)
@@ -293,7 +301,11 @@ def _enrolled_connectors(
     `33a`'s boundaries: no provider is contacted here, and the adapter is handed
     a string.
     """
-    credentials = _stored_credentials(storage)
+    # Fetched on first need, not up front. Opening the sealed store costs a
+    # master-key fetch from the keychain, and a machine with no connectors
+    # enrolled — every machine before the first `connector add` — paid it on
+    # every `build()` to read a mapping nothing then consulted.
+    credentials: dict[str, dict[str, str]] | None = None
     built: list[tuple[str, GitLabConnectorAdapter]] = []
     for entry in _enrolled_configurations(storage):
         instance = entry.get("instance")
@@ -328,7 +340,9 @@ def _enrolled_connectors(
         # when there is none. `None`, absent and blank are one state to the
         # adapter's health probe — no usable credential — so a half-finished
         # enrolment still reports ABSENT rather than claiming to be configured.
-        held = credentials.get(instance, {}).get("credential")
+        if credentials is None:
+            credentials = _stored_credentials(storage)
+        held = _credential_for(credentials.get(instance), system=system)
         try:
             built.append(
                 (
@@ -341,6 +355,32 @@ def _enrolled_connectors(
         except Exception:
             continue
     return tuple(built)
+
+
+def _credential_for(sealed: object, *, system: str) -> str | None:
+    """The sealed credential for one instance, or `None` when there is none to use.
+
+    Two refusals, both of which used to hand something through:
+
+    - **Not a string.** `private/config.json` is decrypted JSON, so a
+      hand-repaired or half-written entry can hold a number, a list or a nested
+      object. `GitLabConnectorAdapter.check_health` calls `.strip()` on the value
+      and would have raised inside a probe that is required never to raise, which
+      takes the whole `connector check` report down with it.
+    - **Sealed under a different system.** An entry recording `system: "graph"`
+      against a configuration that says `gitlab` is two different connectors
+      wearing one instance name, and handing a Microsoft refresh token to the
+      GitLab adapter would send it to the wrong provider. Reported as `ABSENT`,
+      which is the honest answer: this instance has no credential *for this
+      system*.
+    """
+    if not isinstance(sealed, Mapping):
+        return None
+    recorded = sealed.get("system")
+    if isinstance(recorded, str) and recorded and recorded != system:
+        return None
+    credential = sealed.get("credential")
+    return credential if isinstance(credential, str) else None
 
 
 def _stored_credentials(storage: StorageService) -> dict[str, dict[str, str]]:

@@ -68,7 +68,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, NoReturn, Protocol, runtime_checkable
+from typing import Any, ClassVar, NoReturn, Protocol, TypeVar, runtime_checkable
 
 from pm_ai.domain.health import Health, Probe
 
@@ -254,12 +254,16 @@ class RefreshTokenStore(Protocol):
         """Replace the sealed credential, after the provider rotated it."""
 
     def exclusive(self) -> AbstractContextManager[None]:
-        """Serialise the read-modify-write around a refresh.
+        """Serialise one read or one write against other holders of this store.
 
-        AAD rotates the refresh token on use, so two processes that both read
-        the old one and both write back leave one of them holding a token the
-        provider has already retired. The read and the write have to be one
-        step, exactly as the sealed store's own read-modify-write is.
+        AAD rotates the refresh token on use, so two processes that both read the
+        old one and both write back leave one of them holding a token the
+        provider has already retired. The claim is taken for the read and again
+        for the write-back, and deliberately **not** held across the acquisition
+        in between: a lock held over a network round trip serialises the two
+        processes so completely that the retry the matrix's concurrent-refresh
+        row requires can never run, and an implementation may not assume it is
+        re-entrant.
         """
 
 
@@ -327,12 +331,17 @@ class SealedCredential:
 
 @dataclass
 class InMemoryRefreshTokenStore:
-    """The default custody: this process, and nowhere else.
+    """Custody in this process and nowhere else, chosen explicitly or not at all.
 
     Not a production store and does not pretend to be one — it survives no
     restart. It exists so `sign_in` has somewhere to put the token it just
     obtained, in the same process, before enrolment seals the value it returns.
     A composition root that has the sealed store hands in one backed by it.
+
+    It was `GraphDeviceCodeAuth.store`'s `default_factory` until a review pointed
+    out what that meant: the store that loses the credential on every restart was
+    what any construction got *by silence*. `store` is required now, so reaching
+    for this one is a decision a reader can see.
 
     `exclusive` is a no-op here because one process cannot race itself for this
     object; a sealed-store implementation is where the claim does work.
@@ -357,16 +366,52 @@ class InMemoryRefreshTokenStore:
 # than a chain of `if`s so a reader can see every code pm-ai claims to
 # understand, and so an unrecognised one is visibly unrecognised.
 
-_ABANDONED = frozenset({"authorization_pending", "slow_down", "expired_token", "code_expired"})
+_ABANDONED = frozenset({"authorization_pending", "expired_token", "code_expired"})
 """Terminal from `acquire_token_by_device_flow`, which means the flow expired.
 
-Measured against msal 1.38.0: `authorization_pending` and `slow_down` are its
-*retriable* errors, and its polling loop returns them only once the flow's own
+Measured against msal 1.38.0: `authorization_pending` is its ordinary
+*retriable* error, and its polling loop returns it only once the flow's own
 `expires_at` has passed. So seeing one here is not throttling — it is a code
-nobody used. Throttling never reaches this module: MSAL honours the interval
-from the device-code response and adds RFC 8628's five seconds on `slow_down`,
-which is why this adapter passes the flow object through untouched and supplies
-no `exit_condition` that would shorten the wait.
+nobody used.
+
+`slow_down` is deliberately **not** in this set. It is the matrix's throttling
+row, whose remedy is backing off and trying again, and reporting it as an
+abandoned sign-in would tell the PM they missed a code they never got the chance
+to use. See `_THROTTLED`.
+"""
+
+_THROTTLED = frozenset({"slow_down", "temporarily_unavailable"})
+"""The endpoint is rate-limiting, which is a wait rather than a verdict.
+
+MSAL's own loop honours the `interval` the device-code response carried and adds
+RFC 8628's five seconds each time the endpoint answers `slow_down`, which is why
+this adapter hands the flow object back untouched and supplies no
+`exit_condition`. So a `slow_down` that reaches *here* is one MSAL was still
+being given when it ran out of flow — throttling that outlasted the code, not a
+code nobody used.
+
+Reported as `GraphUnreachable` because that is the state whose remedy is
+waiting: nothing was learned about the credential, and sending the PM to enrol
+again would have them replace a token the provider never looked at.
+"""
+
+_HTTP_THROTTLED = 429
+"""The same fact as `slow_down`, when the provider states it as a status.
+
+MSAL surfaces the status on the response dict for a token error, and a 429 with
+an error code pm-ai has no mapping for would otherwise land on the unmapped base
+class — an operator told to report a bug for a rate limit.
+"""
+
+_APP_REGISTRATION = frozenset({"unauthorized_client"})
+"""The app registration is wrong, which is nobody's credential.
+
+`unauthorized_client` used to sit in `_STALE`, which produced "Sign in again;
+this is the credential, not the network" for a registration that does not permit
+the device-code grant at all — the misdiagnosis class this slice exists to
+prevent, since no number of sign-ins fixes it. It is not one of the five auth
+states for the same reason the missing-`msal` refusal is not: the remedy is on
+the app registration, not on this machine's credential, network or consent.
 """
 
 _DECLINED = frozenset({"access_denied", "consent_required"})
@@ -390,9 +435,12 @@ read as expiry — collapsing the third remedy into the first, which is exactly
 the defect the two-state design had.
 """
 
-_STALE = frozenset({"invalid_grant", "invalid_token", "token_expired", "unauthorized_client"})
+_STALE = frozenset({"invalid_grant", "invalid_token", "token_expired"})
 
 _WITHHELD = "[the provider's message is withheld: it quoted the credential]"
+
+_T = TypeVar("_T")
+"""What `_guarded` returns: whatever the guarded call did, unchanged."""
 
 _ECHO_WINDOW = 8
 """How long a run of credential characters is enough to be worth not printing.
@@ -468,6 +516,16 @@ class GraphDeviceCodeAuth:
     """
 
     client_id: str
+    store: RefreshTokenStore
+    """Custody, required rather than defaulted.
+
+    `InMemoryRefreshTokenStore` used to be the `default_factory` here, which made
+    the store whose own docstring says it survives no restart the one any
+    construction got *by silence* — a daemon wired without thinking about
+    custody would have re-prompted for a sign-in on every start. There is no safe
+    default for where a credential lives, so there is no default.
+    """
+
     tenant: str = "organizations"
     """The authority segment. `organizations` is any work or school tenant.
 
@@ -477,10 +535,19 @@ class GraphDeviceCodeAuth:
     """
 
     instance: str = "graph"
-    store: RefreshTokenStore = field(default_factory=InMemoryRefreshTokenStore)
-    scopes: frozenset[str] = GRAPH_SCOPES
     client_factory: Callable[[str, str], Any] = _msal_public_client
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    scopes: ClassVar[frozenset[str]] = GRAPH_SCOPES
+    """The declared set, and not a constructor argument.
+
+    A field with `GRAPH_SCOPES` as its default let a caller pass `scopes=` and
+    override the very set `_assert_granted` compares the grant against — so the
+    "declared in one place" invariant, and the partial-consent refusal that rests
+    on it, could be switched off from the call site while the module-level
+    constant test still passed. A `ClassVar` keeps the attribute the port
+    declares and removes the argument.
+    """
 
     # In-process state. Not constructor arguments: a caller supplying a cached
     # access token would be supplying a claim about a provider it never asked.
@@ -509,6 +576,12 @@ class GraphDeviceCodeAuth:
         Returns the credential story 8b seals. It also lands in this adapter's
         store, so `access_token` works in the same process before the enrolment
         that seals it has run.
+
+        Every refusal below happens *before* that write. The order used to be the
+        other way around for the last check — `_adopt` can still refuse a
+        response that carries no access token — which left a credential sealed
+        that this method never returned: an enrolment nobody completed, holding
+        a token nothing on the machine refers to.
         """
         app = self._application()
         flow = self._call(app.initiate_device_flow, self._resource_scopes())
@@ -532,14 +605,28 @@ class GraphDeviceCodeAuth:
                 f"have to prompt for a sign-in every hour, which is not a "
                 f"connector. Grant it on the app registration and enrol again."
             )
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            # Truthy and not a string — a list, a number, a nested object. Sealed
+            # unchecked, this became a `CredentialStale` at the *next* start, one
+            # process away from the sign-in that caused it, and read as an
+            # expired token rather than as a response pm-ai could not use.
+            raise GraphAuthError(
+                f"the sign-in returned a refresh token that is not a string "
+                f"({type(refresh_token).__name__}), so pm-ai cannot seal it. "
+                f"Nothing was stored. This is a response shape pm-ai does not "
+                f"understand rather than anything about the credential — report "
+                f"it."
+            )
         sealed = SealedCredential(
             refresh_token=refresh_token,
             home_account_id=self._enrolling_account(app, result),
         )
         credential = sealed.encode()
+        # Adopted first, because it is the last thing that can refuse: a response
+        # with no usable access token must not leave a sealed credential behind.
+        self._adopt(result)
         with self.store.exclusive():
             self.store.write(credential)
-        self._adopt(result)
         return credential
 
     def access_token(self, *, force_refresh: bool = False) -> str:
@@ -551,13 +638,28 @@ class GraphDeviceCodeAuth:
         pages already walked are kept and the page is retried, rather than a long
         harvest being reported stale against a good credential.
 
-        The read, the acquisition and the write-back are one step under the
-        store's claim. AAD rotates the refresh token on use, so a process that
-        read the old one before another process rotated it would otherwise seal
-        a token the provider has already retired. When the acquisition is
-        refused, the store is re-read once: a value that changed underneath means
-        somebody else rotated it, and the loser retries with the winner's token
-        rather than reporting a credential that is not actually stale.
+        The read and the write-back each happen under the store's claim, and the
+        acquisition between them deliberately does not. AAD rotates the refresh
+        token on use, so a process that wrote back outside the claim could
+        clobber a newer token; but holding the claim *across* the network call
+        would serialise two processes so completely that the loser could never
+        exist — and the retry below, which the matrix's concurrent-refresh row
+        requires, would be unreachable code proving nothing. Releasing it around
+        the acquisition is what makes both halves real: the write is claimed, and
+        a token another process retired underneath this one is a case that can
+        actually happen and is actually handled.
+
+        When the acquisition is refused, the store is re-read: a value that
+        changed underneath means somebody else rotated it, and the loser retries
+        with the winner's token rather than reporting a credential that is not
+        actually stale.
+
+        The rotated token is sealed **before** the granted set is compared, and
+        the order is the point. An acquisition that succeeds at the provider and
+        then fails the scope comparison still carried a fresh refresh token, and
+        AAD has already retired the one it replaced — so discarding it left the
+        store holding a dead credential and the connector reporting stale
+        forever, even after an administrator restored the missing permission.
         """
         cached = self._access_token
         if not force_refresh and cached is not None and self._cached_token_is_live():
@@ -565,21 +667,23 @@ class GraphDeviceCodeAuth:
         app = self._application()
         with self.store.exclusive():
             sealed = self._sealed()
-            result = self._acquire(app, sealed, force_refresh=force_refresh)
-            if "error" in result:
+        result = self._acquire(app, sealed, force_refresh=force_refresh)
+        if "error" in result:
+            with self.store.exclusive():
                 rotated = self._sealed_or_none()
-                if rotated is not None and rotated.refresh_token != sealed.refresh_token:
-                    result = self._acquire(app, rotated, force_refresh=force_refresh)
-                    sealed = rotated
-                if "error" in result:
-                    self._refuse(
-                        result,
-                        during="refreshing the Graph credential",
-                        secret=sealed.refresh_token,
-                    )
-            self._assert_granted(result)
+            if rotated is not None and rotated.refresh_token != sealed.refresh_token:
+                result = self._acquire(app, rotated, force_refresh=force_refresh)
+                sealed = rotated
+            if "error" in result:
+                self._refuse(
+                    result,
+                    during="refreshing the Graph credential",
+                    secret=sealed.refresh_token,
+                )
+        with self.store.exclusive():
             self._rotate(sealed, result)
-            return self._adopt(result)
+        self._assert_granted(result)
+        return self._adopt(result)
 
     def check_health(self) -> Probe:
         """Whether this machine can obtain a Graph token right now.
@@ -618,7 +722,12 @@ class GraphDeviceCodeAuth:
                 "and the keychain is unlocked. Whether the credential is good "
                 "is unknown, which is not the same as bad.",
             )
-        if stored is None:
+        if stored is None or (isinstance(stored, str) and not stored.strip()):
+            # `None`, empty and blank are one state: nothing usable is enrolled.
+            # A blank string is what a half-finished enrolment leaves behind, and
+            # reading it as a *malformed* credential reported a machine nobody
+            # had set up as one whose credential had gone bad — the same
+            # conflation `GitLabConnectorAdapter.check_health` already refuses.
             return Probe(
                 self.instance,
                 Health.ABSENT,
@@ -628,7 +737,12 @@ class GraphDeviceCodeAuth:
                 f"then, which is a setup step outstanding rather than a fault.",
             )
         try:
-            self.access_token()
+            # Forced, because a probe reports on the *credential* and not on this
+            # process's memory. A warm in-process cache answered `OK` for up to
+            # `expires_in - EXPIRY_MARGIN` after the credential was revoked, so a
+            # daemon that had refreshed a minute earlier reported a dead
+            # connector healthy for the next fifty-five.
+            self.access_token(force_refresh=True)
         except CredentialStale as stale:
             return Probe(
                 self.instance,
@@ -655,6 +769,19 @@ class GraphDeviceCodeAuth:
                 "enrol again. pm-ai refuses rather than running with part of the "
                 "set, because a connector that works for some resources and 403s "
                 "on others reports coverage it does not have.",
+            )
+        except AuthTimedOut as unfinished:
+            # Reachable from a refresh, not only from a sign-in: AAD answers
+            # `expired_token` on a refresh token whose device-code flow was never
+            # completed. Without this clause a mapped state fell through to the
+            # catch-all and told the operator to report a bug in pm-ai.
+            return Probe(
+                self.instance,
+                Health.FAILING,
+                f"{self.instance}'s sign-in was never completed: {unfinished}",
+                "Enrol again and finish the sign-in while the code it prints is "
+                "still live. Nothing is broken on this machine — the flow was "
+                "started and abandoned.",
             )
         except GraphUnreachable as silent:
             return Probe(
@@ -689,11 +816,17 @@ class GraphDeviceCodeAuth:
                 "strength of it.",
             )
         if self._skew is not None and abs(self._skew) > CLOCK_SKEW_TOLERANCE:
+            # `abs` in the text as well as in the comparison. A machine *ahead*
+            # of the provider gives a negative `timedelta`, which renders as
+            # "-1 day, 21:55:00" — a sentence an operator has to decode before
+            # they can read their own clock error.
+            drift = abs(self._skew)
+            direction = "behind" if self._skew < timedelta(0) else "ahead of"
             return Probe(
                 self.instance,
                 Health.WARNING,
                 f"{self.instance} holds a working credential, and this machine's "
-                f"clock is {self._skew} from the provider's",
+                f"clock is {drift} {direction} the provider's",
                 "Fix the clock. Nothing is broken yet, and token lifetimes, "
                 "meeting windows and coverage windows are all judged against it.",
             )
@@ -707,9 +840,18 @@ class GraphDeviceCodeAuth:
         return f"https://login.microsoftonline.com/{self.tenant}"
 
     def _application(self) -> Any:
-        """The MSAL client, built once and kept for its account cache."""
+        """The MSAL client, built once and kept for its account cache.
+
+        Built inside the same guard every other MSAL call runs under.
+        `PublicClientApplication.__init__` validates the authority over HTTP, so
+        constructing one on a machine with no route raised whatever MSAL's HTTP
+        client raised — out of `access_token` untyped, and out of `check_health`
+        as "a bug in pm-ai" for a network that was simply down.
+        """
         if self._app is None:
-            self._app = self.client_factory(self.client_id, self.authority)
+            self._app = self._guarded(
+                lambda: self.client_factory(self.client_id, self.authority)
+            )
         return self._app
 
     def _resource_scopes(self) -> list[str]:
@@ -722,8 +864,8 @@ class GraphDeviceCodeAuth:
         """
         return sorted(self.scopes - {OFFLINE_ACCESS, "openid", "profile"})
 
-    def _call(self, method: Callable[..., Any], *args: Any) -> dict[str, Any]:
-        """Run one MSAL call, turning a transport failure into an unreachable.
+    def _guarded(self, action: Callable[[], _T]) -> _T:
+        """Run one thing that touches MSAL, turning any failure into an unreachable.
 
         Broad on purpose. The only thing being contacted is the Microsoft token
         endpoint, and MSAL relays whatever its HTTP client raised — a DNS
@@ -732,9 +874,14 @@ class GraphDeviceCodeAuth:
         to name. So anything raised out of the call is a provider that did not
         answer. This adapter's own refusals pass through untouched, which is
         what keeps a declined consent from being reported as a dead network.
+
+        Every MSAL touch goes through here, including the ones that do not return
+        a response dict — building the client, and reading its account cache.
+        They used to sit outside, so a real MSAL failure in either was the one
+        thing `check_health` reported as "a bug in pm-ai".
         """
         try:
-            answered = method(*args)
+            return action()
         except GraphAuthError:
             raise
         except Exception as unreachable:  # noqa: BLE001 — see the docstring
@@ -743,6 +890,10 @@ class GraphDeviceCodeAuth:
                 f"answer: {unreachable!r}. Nothing is known about the "
                 f"credential, which is not the same as it being rejected."
             ) from unreachable
+
+    def _call(self, method: Callable[..., Any], *args: Any) -> dict[str, Any]:
+        """One MSAL call that answers with a response dict, or an unreachable."""
+        answered = self._guarded(lambda: method(*args))
         return answered if isinstance(answered, dict) else {}
 
     def _prompt(self, flow: Mapping[str, Any]) -> str:
@@ -785,17 +936,11 @@ class GraphDeviceCodeAuth:
         self, app: Any, account: Mapping[str, Any], *, force_refresh: bool
     ) -> dict[str, Any]:
         """`acquire_token_silent`, whose `None` means "nothing cached", not a failure."""
-        try:
-            answered = app.acquire_token_silent(
+        answered = self._guarded(
+            lambda: app.acquire_token_silent(
                 self._resource_scopes(), account=account, force_refresh=force_refresh
             )
-        except GraphAuthError:
-            raise
-        except Exception as unreachable:  # noqa: BLE001 — see `_call`
-            raise GraphUnreachable(
-                f"the Microsoft token endpoint at {self.authority} did not "
-                f"answer: {unreachable!r}."
-            ) from unreachable
+        )
         return answered if isinstance(answered, dict) else {}
 
     def _cached_account(self, app: Any, sealed: SealedCredential) -> Mapping[str, Any] | None:
@@ -807,7 +952,7 @@ class GraphDeviceCodeAuth:
         `home_account_id` means the next call would refresh *some* identity, and
         which one would depend on iteration order.
         """
-        accounts = app.get_accounts()
+        accounts = self._guarded(app.get_accounts)
         if not accounts:
             return None
         matching = [
@@ -837,10 +982,16 @@ class GraphDeviceCodeAuth:
             oid, tid = claims.get("oid"), claims.get("tid")
             if isinstance(oid, str) and oid and isinstance(tid, str) and tid:
                 return f"{oid}.{tid}"
-        accounts = [a for a in app.get_accounts() if a.get("home_account_id")]
+        accounts = [a for a in self._guarded(app.get_accounts) if a.get("home_account_id")]
         if len(accounts) == 1:
             return str(accounts[0]["home_account_id"])
-        raise AuthDeclined(
+        # `CredentialStale`, matching `_cached_account`, because it is the same
+        # fact — the account behind this credential cannot be identified — and
+        # the matrix's ambiguous-cache row names that state. `AuthDeclined` said
+        # consent was refused, which it was not: consent succeeded and the
+        # identity is what is missing, and `AuthDeclined`'s own docstring scopes
+        # it to consent.
+        raise CredentialStale(
             f"the sign-in succeeded and did not say which account it was for "
             f"({len(accounts)} in MSAL's cache, no usable id-token claims). "
             f"pm-ai will not seal a credential it cannot later match to an "
@@ -859,8 +1010,17 @@ class GraphDeviceCodeAuth:
         return stored
 
     def _sealed_or_none(self) -> SealedCredential | None:
+        """The decoded credential, or `None` for a store holding nothing usable.
+
+        A blank string counts as nothing. It is what a half-finished enrolment
+        leaves behind, and decoding it produced "the sealed credential is not the
+        document this adapter writes" — a corruption message for a machine
+        nobody had finished setting up.
+        """
         raw = self.store.read()
-        return None if raw is None else SealedCredential.decode(raw)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        return SealedCredential.decode(raw)
 
     def _rotate(self, used: SealedCredential, result: Mapping[str, Any]) -> None:
         """Seal the new refresh token when the provider issued one.
@@ -868,14 +1028,34 @@ class GraphDeviceCodeAuth:
         AAD rotates on use and the old token stops working, so skipping this
         write means the *next* start reports stale on a credential that was
         renewed seconds ago. Written inside the caller's claim, never outside it.
+
+        A store that refuses the write is a typed refusal rather than whatever
+        custody raised. It is the worst moment for one — the provider has already
+        retired the token this machine still holds — so the refusal says that,
+        and says it is custody rather than the credential.
         """
         issued = result.get("refresh_token")
         if isinstance(issued, str) and issued and issued != used.refresh_token:
-            self.store.write(
-                SealedCredential(
-                    refresh_token=issued, home_account_id=used.home_account_id
-                ).encode()
-            )
+            replacement = SealedCredential(
+                refresh_token=issued, home_account_id=used.home_account_id
+            ).encode()
+            try:
+                self.store.write(replacement)
+            except Exception as uncommitted:  # noqa: BLE001 — see the docstring
+                # Redacted and *unchained*. A store that quoted the credential
+                # into its own exception would otherwise put it in the message
+                # and in the traceback, and "no credential material, ever, not in
+                # the traceback of whatever it was raised from" is this module's
+                # promise rather than a hope about somebody else's formatting.
+                said = _without(_without(repr(uncommitted), issued), used.refresh_token)
+                raise GraphAuthError(
+                    f"Microsoft issued a replacement credential for "
+                    f"{self.instance} and it could not be sealed: {said}. The "
+                    f"provider has already retired the one this machine holds, "
+                    f"so the next start will report stale — that is custody "
+                    f"failing, not the credential. Check the master key is "
+                    f"enrolled and the keychain is unlocked, then enrol again."
+                ) from None
 
     def _adopt(self, result: Mapping[str, Any]) -> str:
         """Take the access token, its expiry, and whatever the clock says.
@@ -884,6 +1064,12 @@ class GraphDeviceCodeAuth:
         Skew from the id token's `iat` when there is one — a claim about the
         provider's clock at the moment it minted the token, which is the only
         comparison available without a second request.
+
+        Skew is **replaced** on every adoption, including with `None`. It used to
+        be assigned only when an `iat` was present, so a `WARNING` measured once
+        outlived the clock being fixed: every later response without an `iat` left
+        the old reading in place and the probe kept reporting a drift nothing had
+        re-measured.
         """
         token = result.get("access_token")
         if not isinstance(token, str) or not token:
@@ -902,12 +1088,31 @@ class GraphDeviceCodeAuth:
             # Caching a token of unknown age is how a request goes out with a
             # dead one and the 401 is blamed on the credential.
             self._expires_at = None
-        claims = result.get("id_token_claims")
-        if isinstance(claims, Mapping):
-            issued = claims.get("iat")
-            if isinstance(issued, (int, float)):
-                self._skew = moment - datetime.fromtimestamp(float(issued), tz=timezone.utc)
+        self._skew = self._measured_skew(result, moment)
         return token
+
+    def _measured_skew(self, result: Mapping[str, Any], moment: datetime) -> timedelta | None:
+        """This machine's clock against the provider's, or `None` when unmeasurable.
+
+        `None` covers three cases that are one fact: no id-token claims, no
+        `iat`, and an `iat` no calendar can hold. The last one used to raise
+        `OverflowError`/`OSError` — a value like `1e30`, or a negative one on
+        some platforms — straight out of `access_token` as something that is not
+        a `GraphAuthError` at all, past every caller's `except GraphAuthError`
+        and into `check_health`'s catch-all as "a bug in pm-ai". An unusable
+        timestamp is a skew nobody measured, which is exactly what `None` says.
+        """
+        claims = result.get("id_token_claims")
+        if not isinstance(claims, Mapping):
+            return None
+        issued = claims.get("iat")
+        if isinstance(issued, bool) or not isinstance(issued, (int, float)):
+            return None
+        try:
+            minted = datetime.fromtimestamp(float(issued), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+        return moment - minted
 
     def _cached_token_is_live(self) -> bool:
         """Whether the token in hand is still safely usable."""
@@ -976,7 +1181,16 @@ class GraphDeviceCodeAuth:
         description = _without(str(result.get("error_description") or "").strip(), secret)
         said = f"{code or 'an unnamed error'}{f' ({suberror})' if suberror else ''}"
         detail = f": {description}" if description else ""
+        status = result.get("http_status")
 
+        if code in _THROTTLED or status == _HTTP_THROTTLED:
+            raise GraphUnreachable(
+                f"the Microsoft token endpoint throttled {during} — "
+                f"{said}{detail}. That is a rate limit rather than a verdict: "
+                f"the interval the provider asked for is honoured and backed "
+                f"off, nothing was learned about the credential, and the remedy "
+                f"is to try again rather than to enrol anything."
+            )
         if suberror in _INTERACTION_SUBERRORS or code in _INTERACTION:
             raise InteractionRequired(
                 f"Microsoft refused {during} and asked for an interactive "
@@ -1000,6 +1214,14 @@ class GraphDeviceCodeAuth:
                 f"Microsoft rejected the stored credential during {during} — "
                 f"{said}{detail}. Sign in again; this is the credential, not the "
                 f"network."
+            )
+        if code in _APP_REGISTRATION:
+            raise GraphAuthError(
+                f"Microsoft refused {during} because of the app registration "
+                f"itself — {said}{detail}. This is not the stored credential and "
+                f"not this machine: check the client id, that the registration "
+                f"is a public client, and that it allows the device-code flow. "
+                f"Signing in again cannot fix it."
             )
         raise GraphAuthError(
             f"Microsoft refused {during} with {said}{detail}, which pm-ai has no "

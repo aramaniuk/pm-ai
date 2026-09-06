@@ -2,7 +2,7 @@
 title: 'Graph device-code auth'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-progress'
+status: 'in-review'
 baseline_commit: '8e78dc708c9a26ce853c61fc2e69ebae3ed56dea'
 review_loop_iteration: 1
 ---
@@ -135,3 +135,80 @@ Asserting the scope set as a set, in a test, is cheap insurance against the ordi
 - `uv run pytest tests/connectors/test_graph_auth.py -q` -- expected: all matrix rows pass, no network
 - `uv run lint-imports` -- expected: contracts kept
 - `uv run pytest -q` -- expected: no new failures
+
+## Suggested Review Order
+
+**Start here — what the slice declares**
+
+- The port the whole slice exists to satisfy; read its four methods before any adapter code.
+  [`ports/__init__.py:191`](../../../../pm_ai/ports/__init__.py#L191)
+
+- Seven resource permissions plus `offline_access`, in one place, as a frozenset the set assertion can compare against.
+  [`auth.py:96`](../../../../pm_ai/connectors/graph/auth.py#L96)
+
+**The error taxonomy — five remedies, and the sets that route to them**
+
+- The base every refusal inherits, so an unmapped provider code is never forced into a wrong remedy.
+  [`auth.py:166`](../../../../pm_ai/connectors/graph/auth.py#L166)
+
+- Throttling is a wait, not an abandoned sign-in — the frozen matrix's Polling throttled row.
+  [`auth.py:383`](../../../../pm_ai/connectors/graph/auth.py#L383)
+
+- `unauthorized_client` is an app-registration fault; signing in again cannot fix it.
+  [`auth.py:406`](../../../../pm_ai/connectors/graph/auth.py#L406)
+
+- Only genuine credential expiry reaches `CredentialStale`, which is what makes the state actionable.
+  [`auth.py:438`](../../../../pm_ai/connectors/graph/auth.py#L438)
+
+**Write ordering — where a credential can be lost**
+
+- Adopt before sealing: a response that cannot be adopted must leave nothing stored.
+  [`auth.py:561`](../../../../pm_ai/connectors/graph/auth.py#L561)
+
+- Rotate before asserting the grant. AAD retires a used refresh token, so the reverse order strands the connector permanently stale.
+  [`auth.py:632`](../../../../pm_ai/connectors/graph/auth.py#L632)
+
+- The claim covers the read and the write-back but not the round trip, which is what makes the loser's retry reachable.
+  [`auth.py:1025`](../../../../pm_ai/connectors/graph/auth.py#L1025)
+
+**Reporting, never raising**
+
+- Four answers because four different things are wrong and three are not a bad credential; forces a refresh so a revoked token cannot read as healthy.
+  [`auth.py:688`](../../../../pm_ai/connectors/graph/auth.py#L688)
+
+- Every MSAL touch goes through one guard, so a provider failure is a typed refusal and not a pm-ai bug.
+  [`auth.py:867`](../../../../pm_ai/connectors/graph/auth.py#L867)
+
+- An unmeasurable skew is reported as nothing at all rather than as zero, and clears a previous measurement.
+  [`auth.py:1094`](../../../../pm_ai/connectors/graph/auth.py#L1094)
+
+**Custody stays injected**
+
+- `connectors` may not open a file or reach a keychain, so the store is a Protocol the composition root supplies.
+  [`auth.py:235`](../../../../pm_ai/connectors/graph/auth.py#L235)
+
+**The read-back 8b left open**
+
+- The enrolled adapter replaces the built-in at a colliding instance name; `setdefault` silently kept the credential-less one.
+  [`wiring.py:190`](../../../../pm_ai/app/wiring.py#L190)
+
+- A credential sealed under another system, or one that is not a string, never reaches a probe required never to raise.
+  [`wiring.py:360`](../../../../pm_ai/app/wiring.py#L360)
+
+- The only layer that may call `stored_credentials`, opened lazily so a machine with no connectors never fetches the master key.
+  [`wiring.py:265`](../../../../pm_ai/app/wiring.py#L265)
+
+**Gates and peripherals**
+
+- `msal` is named directly in both contracts; grimp does not traverse third-party packages, so `requests` would not have caught it.
+  [`.importlinter:38`](../../../../.importlinter#L38)
+
+- Pinned to an exact version, following the discipline the `anthropic` entry documents.
+  [`pyproject.toml:62`](../../../../pyproject.toml#L62)
+
+- The frozen matrix, row by row, against a fake MSAL client; no network in any test.
+  [`test_graph_auth.py:1`](../../../../tests/connectors/test_graph_auth.py#L1)
+
+- The composition-level cases for the read-back, including the colliding name that had no coverage.
+  [`test_connector_enrolment.py:485`](../../../../tests/core/test_connector_enrolment.py#L485)
+

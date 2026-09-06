@@ -16,7 +16,7 @@ against msal 1.38.0 rather than remembered: `initiate_device_flow` returns
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -36,6 +36,7 @@ from pm_ai.connectors.graph.auth import (
     InMemoryRefreshTokenStore,
     InteractionRequired,
     SealedCredential,
+    _WITHHELD,
 )
 from pm_ai.domain.health import Health
 
@@ -235,20 +236,56 @@ def test_a_first_sign_in_presents_a_code_and_seals_the_refresh_token():
 def test_signing_in_opens_no_browser_and_asks_for_no_password():
     """The human does the signing in. The adapter's whole interaction is a string.
 
-    Asserted structurally rather than by reading the message: `present` is the
-    only channel out of `sign_in`, so an adapter that launched a browser would
-    have to do it through a module this test can see is not imported.
+    Asserted over the module's **syntax tree**, not its text. A substring scan
+    read comments and docstrings as violations — the word "browser" in a sentence
+    explaining that no browser is opened failed it — while missing every spelling
+    that does not contain the searched word: `os.system("open ...")`,
+    `subprocess.run([...])`, `sys.stdin.readline()`. Imports and call targets are
+    what actually launch something, so those are what this reads.
     """
+    import ast
+    import pathlib
+
     import pm_ai.connectors.graph.auth as module
 
     source = module.__file__
     assert source is not None
-    text = open(source, encoding="utf-8").read()
-    for forbidden in ("webbrowser", "getpass", "input("):
-        assert forbidden not in text, (
-            f"{forbidden} in the device-code adapter — the PM signs in "
-            f"themselves, wherever they already are"
-        )
+    tree = ast.parse(pathlib.Path(source).read_text(encoding="utf-8"))
+
+    imported: set[str] = set()
+    called: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+        elif isinstance(node, ast.Call):
+            target = node.func
+            if isinstance(target, ast.Name):
+                called.add(target.id)
+            elif isinstance(target, ast.Attribute):
+                called.add(target.attr)
+
+    forbidden_imports = {"webbrowser", "getpass", "subprocess", "os", "pty", "tty"}
+    assert not (forbidden_imports & imported), (
+        f"{sorted(forbidden_imports & imported)} imported by the device-code "
+        f"adapter — the PM signs in themselves, wherever they already are"
+    )
+    forbidden_calls = {
+        "input",
+        "getpass",
+        "system",
+        "popen",
+        "Popen",
+        "startfile",
+        "open_new",
+        "open_new_tab",
+        "readline",
+    }
+    assert not (forbidden_calls & called), (
+        f"{sorted(forbidden_calls & called)} called by the device-code adapter — "
+        f"it prints a code and waits; it never reads a password or launches a UI"
+    )
 
 
 def test_the_polling_interval_the_provider_set_is_the_one_that_is_honoured():
@@ -287,6 +324,55 @@ def test_an_abandoned_sign_in_is_refused_and_stores_nothing():
     assert auth.store.read() is None, "an abandoned sign-in left a credential behind"
 
 
+def test_throttling_is_a_wait_and_not_an_abandoned_sign_in():
+    """The matrix's throttling row: honoured and backed off, "retried, not counted
+    as abandoned".
+
+    `slow_down` sat in `_ABANDONED`, and every member of that set renders as "the
+    device code expired before anyone signed in with it" — so a PM who was
+    watching the code being rate-limited was told they had walked away from it,
+    and `AuthTimedOut` says to start over rather than to wait.
+    """
+    for throttled in (
+        {"error": "slow_down", "error_description": "AADSTS90101: too many requests"},
+        {"error": "temporarily_unavailable"},
+        {"error": "an_unmapped_code", "http_status": 429},
+    ):
+        auth = _auth(FakeMsal(device_result=throttled))
+        with pytest.raises(GraphUnreachable) as refused:
+            auth.sign_in(lambda message: None)
+        assert not isinstance(refused.value, AuthTimedOut), f"{throttled} read as abandoned"
+        assert "throttled" in str(refused.value)
+        assert auth.store.read() is None
+
+
+def test_a_bad_app_registration_is_not_reported_as_a_stale_credential():
+    """`unauthorized_client` is the registration, and no sign-in fixes one.
+
+    Mapped to `CredentialStale` it produced "Sign in again; this is the
+    credential, not the network" — a remedy that cannot work, for a fault that is
+    neither the credential nor the network.
+    """
+    client = FakeMsal(
+        refresh_results=[
+            {
+                "error": "unauthorized_client",
+                "error_description": "AADSTS7000218: the request body must contain "
+                "client_assertion or client_secret",
+            }
+        ]
+    )
+    auth = _auth(client, credential=_enrolled())
+
+    with pytest.raises(GraphAuthError) as refused:
+        auth.access_token()
+
+    assert not isinstance(refused.value, CredentialStale)
+    assert "app registration" in str(refused.value)
+    assert "Signing in again cannot fix it" in str(refused.value)
+    assert auth.check_health().health is Health.FAILING
+
+
 def test_a_declined_consent_names_what_was_declined():
     client = FakeMsal(
         device_result={
@@ -321,19 +407,85 @@ def test_a_sign_in_without_a_refresh_token_names_offline_access():
     assert auth.store.read() is None
 
 
+def test_a_sign_in_with_no_access_token_seals_nothing():
+    """The last refusal in `sign_in` used to land *after* the write.
+
+    `_adopt` refuses a response carrying no usable access token, and it ran after
+    `store.write` — so this path sealed a credential that `sign_in` then never
+    returned: an enrolment nobody completed, holding a token nothing on the
+    machine refers to. Every other refusal here is asserted with an empty store,
+    and this one now can be too.
+    """
+    client = FakeMsal(device_result=_token(access_token=None))
+    auth = _auth(client)
+
+    with pytest.raises(GraphAuthError) as refused:
+        auth.sign_in(lambda message: None)
+
+    assert "without an access token" in str(refused.value)
+    assert auth.store.read() is None, "a refused sign-in left a credential sealed"
+
+
+def test_a_refresh_token_that_is_not_a_string_is_refused_before_it_is_sealed():
+    """Truthy is not usable, and the next start is the wrong place to find out.
+
+    Sealed unchecked, a list or a number became a `CredentialStale` at the next
+    decode — one process away from the sign-in that caused it, and reported as an
+    expired credential rather than as a response pm-ai cannot use.
+    """
+    client = FakeMsal(device_result=_token(refresh_token=["not", "a", "string"]))
+    auth = _auth(client)
+
+    with pytest.raises(GraphAuthError) as refused:
+        auth.sign_in(lambda message: None)
+
+    assert "not a string" in str(refused.value)
+    assert auth.store.read() is None
+
+
+def test_an_unidentifiable_enrolling_account_is_stale_and_not_declined():
+    """The matrix's ambiguous-cache row names `CredentialStale`, in both directions.
+
+    `_cached_account` raised `CredentialStale` for exactly this fact while
+    `_enrolling_account` raised `AuthDeclined` — which says consent was refused,
+    when consent had just succeeded and only the identity was missing.
+    `AuthDeclined`'s own docstring scopes it to consent.
+    """
+    client = FakeMsal(
+        device_result=_token(id_token_claims={}),
+        accounts=[
+            {"home_account_id": "one-account.a-tenant"},
+            {"home_account_id": "another.a-tenant"},
+        ],
+    )
+    auth = _auth(client)
+
+    with pytest.raises(CredentialStale) as refused:
+        auth.sign_in(lambda message: None)
+
+    assert not isinstance(refused.value, AuthDeclined)
+    assert "which account" in str(refused.value)
+    assert auth.store.read() is None
+
+
 # ── Silent refresh ───────────────────────────────────────────────────────────
 
 
 def test_a_valid_refresh_token_yields_an_access_token_without_prompting():
+    """Prompting is asserted against the client, not against a list nobody wrote to.
+
+    The earlier version built a `shown` list, handed it to nothing, and asserted
+    it was empty — plus `auth_present is not None` on a bound method, which no
+    implementation could ever fail. What actually constitutes a prompt is a
+    device flow, so this asserts none was started.
+    """
     client = FakeMsal()
-    shown: list[str] = []
     auth = _auth(client, credential=_enrolled())
-    auth_present = shown.append  # never called: `access_token` takes no callback
 
     assert auth.access_token() == ACCESS
     assert client.refreshed_with == [(REFRESH, sorted(GRAPH_RESOURCE_SCOPES))]
-    assert shown == [], "a silent refresh prompted"
-    assert auth_present is not None
+    assert client.initiated_with is None, "a silent refresh started a device flow"
+    assert client.polled_with == [], "a silent refresh waited for a human"
 
 
 def test_a_rotated_refresh_token_is_sealed_in_place_of_the_one_that_was_used():
@@ -557,7 +709,48 @@ def test_a_skewed_local_clock_is_reported_as_its_own_state():
     assert "Fix the clock" in probe.remediation
 
 
+def test_a_clock_ahead_of_the_provider_is_reported_in_readable_units():
+    """`abs()` in the sentence, not only in the comparison.
+
+    A machine *behind* the provider gives a positive `timedelta` and reads
+    fine; one ahead gives a negative, which `str()` renders as "-1 day,
+    21:55:00" — an operator has to do modular arithmetic to learn their clock is
+    two hours and five minutes fast.
+    """
+    ahead = NOW + timedelta(hours=2, minutes=5)
+    client = FakeMsal(
+        refresh_results=[
+            _token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id",
+                                    "iat": int(NOW.timestamp())})
+        ]
+    )
+    auth = _auth(client, credential=_enrolled(), now=lambda: ahead)
+
+    probe = auth.check_health()
+
+    assert probe.health is Health.WARNING
+    assert "-1 day" not in probe.detail, "a negative timedelta reached the operator"
+    assert "2:05:00" in probe.detail
+    assert "ahead of" in probe.detail
+
+
 def test_a_healthy_credential_with_no_measurable_skew_reports_ok():
+    """No `iat` at all — the genuinely *unmeasured* case.
+
+    This row supplied `iat == NOW` and called it unmeasurable, which is a
+    measured skew of exactly zero: the opposite state, and one that passes
+    whether or not the adapter can tell "no reading" from "a reading of zero".
+    """
+    client = FakeMsal(
+        refresh_results=[_token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id"})]
+    )
+    auth = _auth(client, credential=_enrolled())
+
+    assert auth.check_health().health is Health.OK
+    assert auth._skew is None, "an unmeasured skew was recorded as a measurement"
+
+
+def test_a_measured_skew_inside_the_tolerance_still_reports_ok():
     client = FakeMsal(
         refresh_results=[
             _token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id",
@@ -566,6 +759,50 @@ def test_a_healthy_credential_with_no_measurable_skew_reports_ok():
     )
     auth = _auth(client, credential=_enrolled())
 
+    assert auth.check_health().health is Health.OK
+    assert auth._skew == timedelta(0)
+
+
+def test_a_fixed_clock_clears_the_skew_warning():
+    """The reading is replaced on every acquisition, including with "no reading".
+
+    Assigned only when an `iat` was present, a `WARNING` measured once outlived
+    the repair: every later response without an `iat` left the stale reading in
+    place, so an operator who fixed their clock kept being told to fix it.
+    """
+    adrift = NOW + CLOCK_SKEW_TOLERANCE + timedelta(hours=2)
+    claims = {"oid": "an-object-id", "tid": "a-tenant-id"}
+    client = FakeMsal(
+        refresh_results=[
+            _token(id_token_claims={**claims, "iat": int(NOW.timestamp())}),
+            _token(id_token_claims=claims),
+        ]
+    )
+    auth = _auth(client, credential=_enrolled(), now=lambda: adrift)
+
+    assert auth.check_health().health is Health.WARNING
+    assert auth.check_health().health is Health.OK, (
+        "a skew reading nothing re-measured outlived the clock being fixed"
+    )
+
+
+def test_an_uninterpretable_issued_at_is_an_unmeasured_skew_and_not_a_crash():
+    """An `iat` no calendar can hold used to escape as `OverflowError`/`OSError`.
+
+    Neither is a `GraphAuthError`, so it went past every caller's `except` and
+    reached `check_health`'s catch-all as "a bug in pm-ai" — for a provider
+    response with one implausible field in it.
+    """
+    client = FakeMsal(
+        refresh_results=[
+            _token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id",
+                                    "iat": 1e30})
+        ]
+    )
+    auth = _auth(client, credential=_enrolled())
+
+    assert auth.access_token() == ACCESS
+    assert auth._skew is None
     assert auth.check_health().health is Health.OK
 
 
@@ -635,6 +872,14 @@ class RotatingStore:
 
     `after` is returned from the second read onward, which is what puts the
     rotation *between* the acquisition and the re-read rather than before both.
+
+    `exclusive` **serialises for real** — it is a re-entrancy-detecting lock
+    rather than a no-op, because the earlier no-op was what let the retry branch
+    look reachable. With the claim held across the acquisition, as the adapter
+    used to hold it, a second read inside one claim can only ever return the
+    value the first did, so the retry proved nothing about a store that actually
+    locks. Every read and write records which claim it happened under, so a
+    write outside one is a failure rather than an invisible pass.
     """
 
     def __init__(self, before: str, after: str) -> None:
@@ -642,25 +887,47 @@ class RotatingStore:
         self._after = after
         self.reads = 0
         self.entered = 0
+        self.held = False
         self.writes: list[str] = []
+        self.unclaimed: list[str] = []
 
     def read(self) -> str | None:
         self.reads += 1
+        if not self.held:
+            self.unclaimed.append("read")
         if self.reads > 1:
             self.value = self._after
         return self.value
 
     def write(self, credential: str) -> None:
+        if not self.held:
+            self.unclaimed.append("write")
         self.writes.append(credential)
         self.value = credential
 
     @contextmanager
     def exclusive(self):
+        assert not self.held, (
+            "the claim was taken while already held — a real sealed-store lock "
+            "would deadlock here, and holding it across the network call is what "
+            "makes the concurrent-refresh retry unreachable"
+        )
         self.entered += 1
-        yield
+        self.held = True
+        try:
+            yield
+        finally:
+            self.held = False
 
 
 def test_the_loser_of_a_concurrent_refresh_retries_before_reporting_stale():
+    """The matrix's concurrent-refresh row, against a store that really serialises.
+
+    The retry is only reachable because the claim is released around the
+    acquisition: held across it, the re-read happens inside the same claim as the
+    first read and can never see a different value, so the branch was dead code
+    under any store whose `exclusive()` does what its docstring says.
+    """
     client = FakeMsal(
         refresh_results=[
             {"error": "invalid_grant", "error_description": "already redeemed"},
@@ -679,7 +946,7 @@ def test_the_loser_of_a_concurrent_refresh_retries_before_reporting_stale():
     assert [token for token, _ in client.refreshed_with] == [REFRESH, "the-winners-token"], (
         "the loser reported stale instead of retrying with the rotated token"
     )
-    assert store.entered == 1, "the read-modify-write ran outside the claim"
+    assert store.unclaimed == [], f"the store was touched outside a claim: {store.unclaimed}"
 
 
 def test_the_rotated_token_is_written_under_the_claim():
@@ -694,8 +961,66 @@ def test_the_rotated_token_is_written_under_the_claim():
 
     auth.access_token()
 
-    assert store.entered == 1
+    assert store.unclaimed == [], f"the store was touched outside a claim: {store.unclaimed}"
+    assert store.entered >= 2, "the read and the write-back were not each claimed"
     assert SealedCredential.decode(store.writes[-1]).refresh_token == ROTATED
+
+
+def test_the_rotated_token_is_sealed_even_when_the_scope_comparison_refuses():
+    """The response that both rotated the credential and failed the set comparison.
+
+    AAD retires a refresh token the moment it is used, so an acquisition that
+    succeeded at the provider and then failed `_assert_granted` still carried the
+    only live credential this machine has. Discarding it left the store holding a
+    dead token, and the connector reported stale forever — including after an
+    administrator granted the missing permission back, because by then there was
+    nothing left to refresh with.
+    """
+    narrowed = " ".join(sorted(GRAPH_RESOURCE_SCOPES - {"Chat.Read"}))
+    client = FakeMsal(refresh_results=[_token(refresh_token=ROTATED, scope=narrowed)])
+    auth = _auth(client, credential=_enrolled())
+
+    with pytest.raises(AuthDeclined):
+        auth.access_token()
+
+    assert SealedCredential.decode(auth.store.read()).refresh_token == ROTATED, (
+        "the rotated credential was discarded, so the store now holds a token "
+        "AAD has already retired"
+    )
+
+
+def test_a_store_that_cannot_seal_the_rotated_token_says_so_as_a_typed_refusal():
+    """Custody failing at the worst moment is still a refusal, not a raw traceback."""
+
+    class WriteRefused:
+        def read(self):
+            return _enrolled()
+
+        def write(self, credential):
+            raise RuntimeError(f"the keychain refused while holding {REFRESH}")
+
+        def exclusive(self):
+            return nullcontext()
+
+    auth = GraphDeviceCodeAuth(
+        client_id=CLIENT_ID,
+        store=WriteRefused(),
+        client_factory=lambda client_id, authority: FakeMsal(
+            refresh_results=[_token(refresh_token=ROTATED)]
+        ),
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(GraphAuthError) as refused:
+        auth.access_token()
+
+    assert "could not be sealed" in str(refused.value)
+    assert "custody" in str(refused.value)
+    rendered = f"{refused.value}{refused.value.args}{refused.value.__cause__!r}"
+    assert REFRESH not in rendered and ROTATED not in rendered, (
+        "a custody failure that quoted the credential was relayed verbatim"
+    )
+    assert auth.check_health().health is Health.FAILING
 
 
 # ── The health probe ─────────────────────────────────────────────────────────
@@ -709,6 +1034,71 @@ def test_nothing_enrolled_reports_absent_and_not_failing():
 
     assert probe.health is Health.ABSENT
     assert "connector add graph" in probe.remediation
+
+
+def test_a_blank_stored_credential_reports_absent_and_not_stale():
+    """A half-finished enrolment is a setup step outstanding, not a bad token.
+
+    An empty or whitespace string decoded as a malformed document and reported
+    "the sealed credential is not the document this adapter writes" — a
+    corruption message for a machine nobody had finished setting up, which is the
+    same conflation `GitLabConnectorAdapter` already refuses for its own field.
+    """
+    for blank in ("", "   ", "\n"):
+        auth = _auth(FakeMsal(), credential=blank)
+        probe = auth.check_health()
+        assert probe.health is Health.ABSENT, f"{blank!r} did not read as absent"
+        assert "connector add graph" in probe.remediation
+        with pytest.raises(CredentialStale) as refused:
+            auth.access_token()
+        assert "nothing to refresh" in str(refused.value)
+
+
+def test_the_probe_asks_the_provider_rather_than_this_process_s_memory():
+    """A warm cache is not evidence about a credential.
+
+    `check_health` asked with `force_refresh=False`, so a daemon that had
+    refreshed a minute earlier reported `OK` for the rest of the access token's
+    life — up to `expires_in - EXPIRY_MARGIN`, fifty-five minutes on AAD's
+    default — on a credential that had since been revoked.
+    """
+    client = FakeMsal(
+        refresh_results=[
+            _token(),
+            {"error": "invalid_grant", "error_description": "the token was revoked"},
+        ]
+    )
+    auth = _auth(client, credential=_enrolled())
+
+    assert auth.access_token() == ACCESS
+    probe = auth.check_health()
+
+    assert probe.health is Health.FAILING, (
+        "a cached access token reported a revoked credential as healthy"
+    )
+    assert "stale" in probe.detail
+    assert len(client.refreshed_with) == 2, "the probe never asked the provider"
+
+
+def test_an_abandoned_sign_in_reaching_the_probe_is_not_reported_as_a_bug():
+    """`AuthTimedOut` is a mapped state, and fell through to the catch-all.
+
+    Reachable from a refresh rather than only from a sign-in: AAD answers
+    `expired_token` on a refresh token whose flow was never completed. The
+    operator was told to report a bug in pm-ai for a sign-in somebody walked away
+    from.
+    """
+    client = FakeMsal(refresh_results=[{"error": "expired_token"}])
+    auth = _auth(client, credential=_enrolled())
+
+    with pytest.raises(AuthTimedOut):
+        auth.access_token()
+    probe = auth.check_health()
+
+    assert probe.health is Health.FAILING
+    assert "bug in pm-ai" not in probe.detail
+    assert "never completed" in probe.detail
+    assert "finish the sign-in" in probe.remediation
 
 
 def test_an_unreachable_provider_reports_failing_distinctly_from_stale():
@@ -797,6 +1187,61 @@ def test_no_refusal_carries_the_refresh_token():
         assert REFRESH not in rendered, f"a refusal quoted the refresh token: {refusal}"
 
 
+def test_a_provider_that_echoes_only_part_of_the_token_is_still_withheld():
+    """The `_ECHO_WINDOW` case, which the whole-token rows cannot exercise.
+
+    Most APIs identify a credential back to you by its first characters — "token
+    glpat-not-a… is expired". A whole-string check passes that and prints half
+    the secret, which is why the comparison slides an eight-character window; and
+    every existing row embedded the *entire* token, so a plain `in` check would
+    have satisfied them all and the window was never measured.
+    """
+    fragment = REFRESH[:12]
+    assert fragment not in _WITHHELD and len(fragment) > 8
+    client = FakeMsal(
+        refresh_results=[
+            {
+                "error": "invalid_grant",
+                "error_description": f"the token {fragment}... has expired",
+            }
+        ]
+    )
+    auth = _auth(client, credential=_enrolled())
+
+    with pytest.raises(CredentialStale) as refused:
+        auth.access_token()
+
+    rendered = f"{refused.value}{refused.value.args}"
+    assert fragment not in rendered, "a truncated echo of the credential was printed"
+    assert _WITHHELD in rendered, "the withheld marker must say why the message is gone"
+
+
+def test_a_provider_that_echoes_the_device_code_is_withheld_too():
+    """The other secret this adapter holds, and the only untested redaction path.
+
+    The device code is a bearer of the sign-in for as long as the flow is live —
+    anyone who reads it out of a log can complete the PM's sign-in — so `sign_in`
+    passes it to `_refuse` as the secret to check the provider's sentence
+    against. Nothing exercised that argument.
+    """
+    code = "a-device-code-long-enough-to-window"
+    client = FakeMsal(
+        flow=_flow(device_code=code),
+        device_result={
+            "error": "expired_token",
+            "error_description": f"the code {code[:15]} was never used",
+        },
+    )
+    auth = _auth(client)
+
+    with pytest.raises(AuthTimedOut) as refused:
+        auth.sign_in(lambda message: None)
+
+    rendered = f"{refused.value}{refused.value.args}"
+    assert code[:15] not in rendered
+    assert _WITHHELD in rendered
+
+
 def test_a_malformed_sealed_credential_is_refused_without_quoting_it():
     auth = _auth(FakeMsal(), credential="not a credential document")
 
@@ -822,6 +1267,37 @@ def test_the_store_default_satisfies_its_protocol():
     assert isinstance(InMemoryRefreshTokenStore(), RefreshTokenStore)
 
 
+def test_custody_has_no_default_and_must_be_chosen():
+    """`InMemoryRefreshTokenStore` was the `default_factory`, so silence chose it.
+
+    Its own docstring says it is not a production store and survives no restart,
+    which made "wired without thinking about custody" indistinguishable from
+    "wired for a test" — and produced a daemon that re-prompted for a sign-in on
+    every start. There is no safe default for where a credential lives.
+    """
+    with pytest.raises(TypeError) as refused:
+        GraphDeviceCodeAuth(client_id=CLIENT_ID)  # type: ignore[call-arg]
+
+    assert "store" in str(refused.value)
+
+
+def test_the_declared_scope_set_cannot_be_overridden_by_a_caller():
+    """One place, enforced by the constructor rather than only by a constant test.
+
+    `scopes` was a field defaulting to `GRAPH_SCOPES`, so a call site could hand
+    in its own set — and `_assert_granted` compares the grant against
+    `self.scopes`, so the partial-consent refusal was switchable off from
+    outside while every module-level assertion about `GRAPH_SCOPES` still passed.
+    """
+    with pytest.raises(TypeError):
+        GraphDeviceCodeAuth(  # type: ignore[call-arg]
+            client_id=CLIENT_ID,
+            store=InMemoryRefreshTokenStore(),
+            scopes=frozenset({"Calendars.Read"}),
+        )
+    assert _auth(FakeMsal()).scopes == GRAPH_SCOPES
+
+
 def test_an_unimportable_msal_is_a_typed_refusal_and_not_a_traceback(monkeypatch):
     """The lazy import's whole purpose, exercised without the network.
 
@@ -841,7 +1317,9 @@ def test_an_unimportable_msal_is_a_typed_refusal_and_not_a_traceback(monkeypatch
     monkeypatch.setitem(sys.modules, "msal", None)
 
     with pytest.raises(GraphAuthError) as refused:
-        GraphDeviceCodeAuth(client_id=CLIENT_ID).sign_in(lambda message: None)
+        GraphDeviceCodeAuth(
+            client_id=CLIENT_ID, store=InMemoryRefreshTokenStore()
+        ).sign_in(lambda message: None)
 
     assert "could not be imported" in str(refused.value)
     assert "uv sync --extra runtime" in str(refused.value)
@@ -853,15 +1331,54 @@ def test_a_probe_reports_even_when_the_adapter_itself_breaks():
     One connector's broken probe must not take the report down with it, which is
     the rule `Probe` exists to encode and the reason the catch-all in
     `check_health` is a contract rather than a shrug.
+
+    Broken *here* means the adapter's own wiring, not MSAL: a clock that raises
+    is nothing a provider said. An MSAL call that fails is a different fact, and
+    the row below is what keeps the two apart.
     """
 
-    class Exploding:
-        def get_accounts(self, username=None):
-            raise RuntimeError("a bug in the adapter, not a verdict")
+    def broken_clock():
+        raise RuntimeError("a bug in the adapter, not a verdict")
 
-    auth = _auth(Exploding(), credential=_enrolled())
+    auth = _auth(FakeMsal(), credential=_enrolled(), now=broken_clock)
 
     probe = auth.check_health()
 
     assert probe.health is Health.FAILING
     assert "bug in pm-ai" in probe.detail
+
+
+def test_an_msal_call_that_fails_is_unreachable_rather_than_a_pm_ai_bug():
+    """`get_accounts` and the client constructor are MSAL, not this module.
+
+    Both sat outside the guard every other MSAL touch runs under, so a real
+    failure in either surfaced untyped from `access_token` and as "a bug in
+    pm-ai" from `check_health` — an operator told to file a report because their
+    network was down. The previous version of the row above asserted exactly that
+    mislabelling and so locked it in.
+    """
+
+    class Exploding:
+        def get_accounts(self, username=None):
+            raise RuntimeError("MSAL could not read its token cache")
+
+    auth = _auth(Exploding(), credential=_enrolled())
+    with pytest.raises(GraphUnreachable):
+        auth.access_token()
+    probe = auth.check_health()
+    assert probe.health is Health.FAILING
+    assert "bug in pm-ai" not in probe.detail
+    assert "could not reach" in probe.detail
+
+    def refusing_factory(client_id, authority):
+        raise OSError("no route to the authority")
+
+    unbuildable = GraphDeviceCodeAuth(
+        client_id=CLIENT_ID,
+        store=InMemoryRefreshTokenStore(_enrolled()),
+        client_factory=refusing_factory,
+        now=lambda: NOW,
+    )
+    with pytest.raises(GraphUnreachable):
+        unbuildable.access_token()
+    assert "bug in pm-ai" not in unbuildable.check_health().detail

@@ -513,6 +513,134 @@ def test_a_composed_adapter_holds_the_credential_the_sealed_store_keeps(tmp_path
     assert connector.check_health().health is not Health.ABSENT
 
 
+def test_the_enrolled_adapter_wins_at_the_name_the_builtin_already_holds(tmp_path):
+    """The collision is the ordinary case, not a corner.
+
+    `build()` seeds `connectors` with `gitlab:<project>`, and `gitlab.py`'s own
+    ABSENT remediation tells the operator to run `pm-ai connector add gitlab
+    gitlab:<project>` — the exact instance name that collides. `setdefault` then
+    kept the credential-less built-in and dropped the adapter holding the sealed
+    credential, so the connector they had just enrolled went on reporting ABSENT
+    and printing the remedy they had already followed. Every other row here uses
+    a name that cannot collide, so none of them could fail on this.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.domain.health import Health
+
+    storage = _storage(tmp_path)
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:demo",
+        credential=SECRET, probe=accepts,
+    )
+
+    daemon = build(tmp_path, "demo", keychain=_Keychain())
+    connector = daemon.connectors["gitlab:demo"]
+
+    assert connector.credential == SECRET, (
+        "the built-in adapter for this project shadowed the enrolled one, so the "
+        "sealed credential never reached a connector"
+    )
+    assert connector.check_health().health is not Health.ABSENT
+    assert set(_instances()) == set(daemon.connectors)
+
+
+def test_a_credential_sealed_under_another_system_is_not_handed_to_gitlab(tmp_path):
+    """One instance name, two systems, is not a credential to pass along.
+
+    A Microsoft refresh token handed to the GitLab adapter would be sent to the
+    wrong provider, and the row would claim to be configured while it was not.
+    `ABSENT` is the honest answer: this instance has no credential *for this
+    system*.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.domain.health import Health
+
+    storage = _storage(tmp_path)
+    storage.write_artifact(
+        json.dumps(
+            {"connectors": {"gitlab:crossed": {"system": "graph", "credential": SECRET}}}
+        ).encode(),
+        scope=APPLICATION,
+        artifact="config.json",
+    )
+    storage.write_artifact(
+        json.dumps(
+            {"instance": "gitlab:crossed", "system": "gitlab", "enabled": True}
+        ).encode(),
+        scope=APPLICATION,
+        artifact="connectors/",
+        name="gitlab:crossed.json",
+    )
+
+    daemon = build(tmp_path, "demo", keychain=_Keychain())
+    connector = daemon.connectors["gitlab:crossed"]
+
+    assert connector.credential is None
+    assert connector.check_health().health is Health.ABSENT
+
+
+def test_a_non_string_sealed_credential_does_not_reach_a_probe(tmp_path):
+    """`private/config.json` is decrypted JSON, so the value can be anything.
+
+    `GitLabConnectorAdapter.check_health` calls `.strip()` on it, and a number or
+    a list would have raised `AttributeError` inside a probe that is required
+    never to raise — which takes the whole `connector check` report down with
+    it rather than reporting one bad row.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.domain.health import Health
+
+    storage = _storage(tmp_path)
+    storage.write_artifact(
+        json.dumps(
+            {"connectors": {"gitlab:odd": {"system": "gitlab", "credential": 12345}}}
+        ).encode(),
+        scope=APPLICATION,
+        artifact="config.json",
+    )
+    storage.write_artifact(
+        json.dumps({"instance": "gitlab:odd", "system": "gitlab", "enabled": True}).encode(),
+        scope=APPLICATION,
+        artifact="connectors/",
+        name="gitlab:odd.json",
+    )
+
+    daemon = build(tmp_path, "demo", keychain=_Keychain())
+    connector = daemon.connectors["gitlab:odd"]
+
+    assert connector.credential is None
+    assert connector.check_health().health is Health.ABSENT  # must not raise
+
+
+def test_a_machine_with_no_connectors_never_opens_the_sealed_store(tmp_path, monkeypatch):
+    """Opening it costs a master-key fetch from the keychain.
+
+    Read before the loop, every `build()` on every machine paid that — including
+    every machine before the first `connector add` — to produce a mapping nothing
+    then consulted.
+    """
+    from pm_ai.app import wiring
+
+    opened = []
+
+    def counting(storage):
+        opened.append(storage)
+        return {}
+
+    monkeypatch.setattr(wiring, "_stored_credentials", counting)
+
+    wiring.build(tmp_path, "demo", keychain=_Keychain())
+    assert opened == [], "the sealed store was opened with no connector enrolled"
+
+    storage = _storage(tmp_path)
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:one",
+        credential=SECRET, probe=accepts,
+    )
+    wiring.build(tmp_path, "demo", keychain=_Keychain())
+    assert len(opened) == 1, "the sealed store was not read once a connector existed"
+
+
 def test_a_connector_with_no_sealed_credential_still_reports_absent(tmp_path):
     """The read-back must not invent one for a configuration written by hand.
 
