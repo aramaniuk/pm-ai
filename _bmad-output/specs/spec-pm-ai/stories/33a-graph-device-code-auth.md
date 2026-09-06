@@ -2,7 +2,8 @@
 title: 'Graph device-code auth'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-progress'
+baseline_commit: '8e78dc708c9a26ce853c61fc2e69ebae3ed56dea'
 review_loop_iteration: 1
 ---
 
@@ -78,12 +79,12 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` -- add `GraphAuthPort`
-- [ ] `pm_ai/connectors/graph/auth.py` -- add the device-code adapter, the **seven**-permission scope constant plus `offline_access`, and the **five** error types the matrix names: `CredentialStale`, `AuthTimedOut`, `AuthDeclined`, `GraphUnreachable`, `InteractionRequired`
-- [ ] `pyproject.toml` -- pin `msal`
-- [ ] `.importlinter` -- add `msal` to `http-confined-to-adapters`'s forbidden modules
-- [ ] `pm_ai/app/wiring.py` -- read the sealed credential back in `_enrolled_connectors` and hand it to the adapter it builds. `deferred-work.md` assigns this here ("it is the wiring 33a needs"), and this is the slice that makes it observable: until a transport exists an adapter needs no token, but `pm-ai connector check` already reports a just-enrolled connector as `ABSENT`. `app` may import both `core` and `storage`, so `stored_credentials(storage)` is reachable from here and from nowhere lower
-- [ ] `tests/connectors/test_graph_auth.py` -- the matrix against a fake MSAL client; no network in any test
+- [x] `pm_ai/ports/__init__.py` -- add `GraphAuthPort`
+- [x] `pm_ai/connectors/graph/auth.py` -- add the device-code adapter, the **seven**-permission scope constant plus `offline_access`, and the **five** error types the matrix names: `CredentialStale`, `AuthTimedOut`, `AuthDeclined`, `GraphUnreachable`, `InteractionRequired`
+- [x] `pyproject.toml` -- pin `msal`
+- [x] `.importlinter` -- add `msal` to `http-confined-to-adapters`'s forbidden modules
+- [x] `pm_ai/app/wiring.py` -- read the sealed credential back in `_enrolled_connectors` and hand it to the adapter it builds. `deferred-work.md` assigns this here ("it is the wiring 33a needs"), and this is the slice that makes it observable: until a transport exists an adapter needs no token, but `pm-ai connector check` already reports a just-enrolled connector as `ABSENT`. `app` may import both `core` and `storage`, so `stored_credentials(storage)` is reachable from here and from nowhere lower
+- [x] `tests/connectors/test_graph_auth.py` -- the matrix against a fake MSAL client; no network in any test
 
 **Acceptance Criteria:**
 - Given a stored refresh token that the provider rejects, when a token is requested, then `CredentialStale` is raised and the health probe reports stale rather than unreachable — the two states an operator must be able to tell apart.
