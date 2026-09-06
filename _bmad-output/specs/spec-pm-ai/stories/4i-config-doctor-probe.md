@@ -11,18 +11,18 @@ context: []
 
 ## Intent
 
-**Problem:** `doctor` cannot say whether `config.toml` is readable. Its five probes ask about runtime packages, the sqlite extension, the keychain, the encryption toggle and git (`doctor.py:377-395`), and none asks about config — so five healthy probes can be reported on a machine whose configuration is unparseable. `4c` promises in a matrix row that an unparseable `config.toml` becomes "one reported probe result", and has no task touching `doctor.py`; `4h` needs the probe to assert that setup left the machine ready.
+**Problem:** `doctor` cannot say whether `config.toml` is readable. Its five probes ask about runtime packages, the sqlite extension, the keychain, the encryption toggle and git (`doctor.py:341-349`), and none asks about config — so five healthy probes can be reported on a machine whose configuration is unparseable. `4c` promises in a matrix row that an unparseable `config.toml` becomes "one reported probe result", and has no task touching `doctor.py`; `4h` needs the probe to assert that setup left the machine ready.
 
 **Approach:** A sixth probe, taking already-read bytes so it opens nothing, and reporting the states a configuration can actually be in.
 
 ## Boundaries & Constraints
 
 **Always:**
-- **A probe reports; it never raises.** `doctor.py:22-24` states the rule and `Probe` (`:96-100`) is the shape. A `ConfigRefused` from the loader is caught and carried as the probe's own detail, because an operator needs the loader's message, not a traceback.
+- **A probe reports; it never raises.** `doctor.py:22-24` states the rule and `Probe` (`pm_ai/domain/health.py:57-68`) is the shape. A `ConfigRefused` from the loader is caught and carried as the probe's own detail, because an operator needs the loader's message, not a traceback.
 - **The input distinguishes three states, not two.** Absent, unreadable and unobtainable are different answers with different remedies, so the probe takes a value that can say which — never `bytes | None`, which reports a permission error as an ordinary first run and tells an operator to create a file they already have.
 - **`doctor` survives a failed composition.** `4c` requires it, so "nothing could read the file from here" is a reportable state rather than an exception, and it is distinct from the file being absent.
-- **Every probe still runs when one fails.** `run_all` is sequential and independent on purpose (`doctor.py:378-382`); adding a sixth does not change that.
-- **The probe opens nothing.** `read_artifact` is the single reader (`service.py:1065`); the caller reads and this probe interprets, the same split `4a` established for the loader.
+- **Every probe still runs when one fails.** `run_all` is sequential and independent on purpose (`doctor.py:332-336`); adding a sixth does not change that.
+- **The probe opens nothing.** `read_artifact` is the single reader (`pm_ai/storage/service.py:1093`); the caller reads and this probe interprets, the same split `4a` established for the loader.
 
 **Ask First:** Nothing.
 
@@ -67,8 +67,14 @@ context: []
 
 ## Spec Change Log
 
+- **2026-09-06, the frozen-block citations corrected on instruction — three named, and a fourth found while sweeping.** Addresses only. Every claim these clauses make is still true of the code; each one named where it used to live, all three for the same 2026-09-04 cause as the Code Map entry below.
+  **The Intent's `doctor.py:377-395` and the Boundaries' `doctor.py:378-382` both pointed past the end of the file** — `doctor.py` is 349 lines. The five probes and their order are unchanged, now at `:341-349`; `run_all`'s "sequential and independent on purpose" is verbatim in its docstring, now at `:332-336`. An implementer following either got nothing, and knew it.
+  **The Boundaries' `Probe (:96-100)` was the one worth fixing first, because it resolved.** `doctor.py:96-100` is real code today — `required_distributions`, which parses pyproject metadata and has nothing to do with `Probe` — in the file the citation names, under a plausible docstring, so it reads as though the right place had been found. `Probe` moved to `pm_ai/domain/health.py:57-68` when `ConnectorPort` gained a health method, because a port may import only `pm_ai.domain`; the citation now names that file rather than a shifted line in this one. This slice adds a sixth `Probe` with new states, so its shape is the first thing its implementer must read.
+  **A fourth turned up when every citation in the file was bounds-checked rather than only the three reported.** The Boundaries' `service.py:1065` for "`read_artifact` is the single reader" is `Probe (:96-100)`'s failure again, in a different file and from a different cause: `8f` added roughly two hundred lines to `pm_ai/storage/service.py`, moving `read_artifact` to `:1093`, and `:1065` now lands inside another method's docstring — about path validation and refusing ledgers. Real code, wrong method, no error. Corrected, and the path spelled out in full so a bare `service.py` cannot be read as some other service.
+  **`doctor.py:22-24` was left untouched** — it is still exact for the reports-never-raises rule.
+
 - **2026-09-06, Code Map citations re-derived against `10511bc`.** Every `doctor.py` line this slice pointed at had moved, all for one reason: the wave-1 CLI branch retired `doctor.main()` and its `__main__` block on 2026-09-04 so `4c`'s exit-code table has one declaration, and `Health`, `Probe` and `Report` moved to `pm_ai/domain/health.py` when `ConnectorPort` gained a health method. So the map sent an implementer to `doctor.py:399` for a function that no longer exists, to `:377-395` for a `run_all` now at `:331-349`, to `:247-272` for a `keychain_reachable` now at `:201-244`, and to `doctor.py` for three types that are no longer defined there. The four `test_doctor.py` assertions had shifted by the same edit. All re-derived and verified against the current tree; the surviving `run_all` call site is `pm_ai/app/entry.py:250`. **Citations only** — no task, criterion or behaviour changed, and the frozen block was not touched.
-  **Two frozen-block citations are stale and left as they are.** The Intent's `doctor.py:377-395` and the Boundaries' `doctor.py:378-382` both name `run_all` at its old address, and the Boundaries' `Probe (:96-100)` names the type at its old file. Correcting them needs the human's renegotiation; the substance of all three clauses is unaffected, and the Boundaries' `doctor.py:22-24` for the reports-never-raises rule is still exact.
+  **The three frozen-block citations were corrected on 2026-09-06 too**, on instruction — see the entry above. When this entry was written they were left as they stood, pending renegotiation.
 
 - **2026-09-03, split from `4g` at the sizing gate.** `4g` reached 2203 body tokens once the second multi-lens review's findings were applied under the human's unlock. The serializer stays there; this is the diagnostic. Carried over from that review: the probe must distinguish absent from unreadable from unobtainable (B26), and a sixth probe breaks four existing `test_doctor.py` assertions while `4g`'s Verification block claimed no new failures (C2). The remediation-retarget task and its criterion come from C8, which found that `test_doctor.py:123`'s bare `"Enrol"` substring passes whether the text names `pm-ai key enrol`, `pm-ai setup`, or no command at all.
 
