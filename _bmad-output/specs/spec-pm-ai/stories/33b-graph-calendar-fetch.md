@@ -2,7 +2,8 @@
 title: 'Graph calendar fetch'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-progress'
+baseline_commit: 'bf327c84049d4cbcd896694de0d4f3114aa2f274'
 review_loop_iteration: 0
 ---
 
@@ -70,9 +71,10 @@ Split from the original `33b` on 2026-09-02 at the sizing gate: fetching Graph c
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/client.py` -- paging, 429 handling, the `Prefer` header, and 401 refresh-and-retry
-- [ ] `pm_ai/connectors/graph/calendar.py` -- `CalendarRow`, the fetch, UTC conversion, window clamping, `MalformedCalendarRow`
-- [ ] `tests/connectors/test_graph_calendar_fetch.py` -- the matrix against recorded Graph payload fixtures; no network in any test
+- [x] `pm_ai/connectors/graph/client.py` -- paging, 429 handling, the `Prefer` header, and 401 refresh-and-retry
+- [x] `pm_ai/connectors/graph/calendar.py` -- `CalendarRow`, the fetch, UTC conversion, window **splitting**, `MalformedCalendarRow`
+- [x] `pyproject.toml` -- `tzdata` declared, per the Boundaries clause that names it
+- [x] `tests/connectors/test_graph_calendar_fetch.py` -- the matrix against Graph payload fixtures built to slice 0's measured shapes; no network in any test
 
 **Acceptance Criteria:**
 - Given a recorded `calendarView` payload whose times are in a non-UTC mailbox zone, then every emitted row's start is the correct aware-UTC instant — the case that otherwise refuses every event in the tenant.

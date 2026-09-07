@@ -64,6 +64,22 @@ runtime = [
     # no source build — the property `sqlcipher3` lacked. Imported lazily in
     # `pm_ai.storage.crypto`, so the package loads without this extra.
     "cryptography>=50.0.0",
+    # Declared by story 33b, and load-bearing for one specific failure. Graph
+    # answers `calendarView` with a naive `dateTime` and a separate `timeZone`,
+    # and a mailbox whose default is a Windows zone sends a Windows id —
+    # "W. Europe Standard Time". `pm_ai.connectors.graph.calendar` maps those to
+    # IANA names itself (CLDR ships no Python package and `tzdata` carries no
+    # Windows mapping), but resolving the IANA name it maps to needs a timezone
+    # database, and `zoneinfo` falls back to this package when the platform has
+    # none. macOS has system zoneinfo and does not need it; a slim Linux
+    # container has neither, and there the absence is not a wrong time but
+    # `UnresolvableTimezone` on every non-UTC row in the tenant.
+    #
+    # Unpinned deliberately, and it is the one entry in this extra that should
+    # be: the IANA database is *the* moving target — a country changing its DST
+    # rules is a release — and pinning it would freeze this machine's idea of
+    # when meetings happen. A release is data, not code.
+    "tzdata",
     # AD-46's FileWatcherPort adapter — the single change-detection pipeline.
     # Declared here though nothing imports it yet, which is this extra's whole
     # pattern: five of the six entries above have no importer either. It was
