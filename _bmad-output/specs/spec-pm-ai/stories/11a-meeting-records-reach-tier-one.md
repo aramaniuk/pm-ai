@@ -2,7 +2,8 @@
 title: 'Meeting records reach Tier 1'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '7a650687f9e462e31635a74dc8577b8069309544'
 review_loop_iteration: 1
 ---
 
@@ -70,12 +71,12 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/meeting_records.py` -- add `MeetingRecords` with `put`, `get`, `for_day(day, *, tz)`, `MeetingNotFound`, `MalformedMeeting`, and the safe-name encoding
-- [ ] `pm_ai/app/wiring.py` -- replace the `meetings` dict with the accessor
-- [ ] `pm_ai/app/pipelines.py` -- write through the accessor, citation check unmoved
-- [ ] `pm_ai/core/meeting_records.py` -- the render/parse pair for the record, preserving `## Notes` and the amendment log on rewrite
-- [ ] `tests/core/test_meeting_records.py` -- the matrix, including a hand-edited file, a malformed one, and a rewrite that must not lose the notes
-- [ ] `tests/slice/test_meeting_persistence.py` -- write, discard the accessor, rebuild against the same temporary root, read back -- the only shape that can observe persistence at all
+- [x] `pm_ai/core/meeting_records.py` -- add `MeetingRecords` with `put`, `get`, `for_day(day, *, tz)`, `MeetingNotFound`, `MalformedMeeting`, and the safe-name encoding
+- [x] `pm_ai/app/wiring.py` -- replace the `meetings` dict with the accessor
+- [x] `pm_ai/app/pipelines.py` -- write through the accessor, citation check unmoved
+- [x] `pm_ai/core/meeting_records.py` -- the render/parse pair for the record, preserving `## Notes` and the amendment log on rewrite
+- [x] `tests/core/test_meeting_records.py` -- the matrix, including a hand-edited file, a malformed one, and a rewrite that must not lose the notes
+- [x] `tests/slice/test_meeting_persistence.py` -- write, discard the accessor, rebuild against the same temporary root, read back -- the only shape that can observe persistence at all
 
 **Acceptance Criteria:**
 - Given a meeting written through one accessor, when a **freshly built** accessor over the same temporary root reads it, then the record is returned. Stated this way because a `core` unit test against a `StoragePort` cannot represent a restart, so an accessor that caches in memory and never persists would satisfy both the original criterion and the read-back matrix row.
