@@ -206,6 +206,64 @@ def test_rows_whose_clocks_cannot_be_believed_claim_no_coverage(tmp_path):
     assert wired.storage.coverage_windows(INSTANCE) == []
 
 
+def test_a_refused_rows_clock_cannot_earn_coverage_for_the_rows_that_survived(tmp_path):
+    """Row *rows returned, no usable clock*, from the direction that hid.
+
+    The credibility predicate walked the raw page while the coverage gate asked
+    about surviving events, so a refused row's believable timestamp answered
+    "can anything here be placed in time" on behalf of rows nobody kept. Here
+    the only surviving event is dated 2126 and the credible clock belongs to the
+    row that was thrown away: no event that persists can be placed in time, so
+    no window may be claimed.
+    """
+    emitted_but_unplaceable = {
+        "sha": "aaaaaa", "message": "from the future",
+        "author_email": "a@example.com",
+        "committed_at": datetime(2126, 9, 7, 12, 0, tzinfo=timezone.utc),
+    }
+    refused_but_well_dated = {
+        "sha": "bbbbbb", "message": None,  # refused: `message` is not a string
+        "author_email": "a@example.com", "committed_at": NOW,
+    }
+    rows = [emitted_but_unplaceable, refused_but_well_dated]
+
+    result = connector(_fake_api=[dict(r) for r in rows]).harvest(Cursor())
+
+    assert result.outcome is HarvestOutcome.HARVESTED
+    assert len(result.events) == 1
+    assert len(result.refusals) == 1
+    assert result.coverage is None, (
+        "the only credible clock belonged to a refused row, so coverage was "
+        "claimed on evidence the harvest discarded"
+    )
+
+    wired = daemon(tmp_path, rows=[dict(r) for r in rows])
+    run_harvest(wired, INSTANCE)
+    assert wired.storage.coverage_windows(INSTANCE) == []
+
+
+def test_a_surviving_rows_clock_still_earns_coverage_beside_a_refusal(tmp_path):
+    """The opposite direction, so the rule cannot degrade into "any refusal voids".
+
+    A refusal beside a placeable event withholds nothing: rows arrived, one of
+    them persists and can be placed in time, and that is what coverage records.
+    """
+    rows = [
+        {"sha": "cccccc", "message": "readable", "author_email": "a@example.com",
+         "committed_at": NOW},
+        {"sha": "dddddd", "message": None, "author_email": "a@example.com",
+         "committed_at": NOW},
+    ]
+
+    result = connector(_fake_api=[dict(r) for r in rows]).harvest(Cursor())
+
+    assert len(result.events) == 1
+    assert len(result.refusals) == 1
+    assert result.coverage == CoverageWindow(
+        connector_instance=INSTANCE, start=NOW, end=NOW
+    )
+
+
 def test_a_cursor_advances_even_when_no_coverage_was_earned(tmp_path):
     """Row: *cursor with no coverage* — the cursor is saved, the window is not.
 

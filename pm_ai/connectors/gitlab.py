@@ -429,6 +429,13 @@ class GitLabConnectorAdapter:
         # as the `KeyError` did, which is what the matrix's partial-page row
         # forbids one field lower.
         mapped: list[NormalizedEvent] = []
+        # The raw rows whose mapping succeeded. The credibility predicate below
+        # must read *these* and not `rows`: a refused row is discarded, so
+        # letting its timestamp answer "can anything here be placed in time"
+        # claims coverage on the strength of evidence nothing kept. Graph's
+        # `_any_credible_clock` reads its emitted rows for the same reason —
+        # that asymmetry is what hid this.
+        kept: list[dict] = []
         refusals: list[RowRefusal] = []
         for row in rows:
             try:
@@ -441,6 +448,8 @@ class GitLabConnectorAdapter:
                         reason=str(refused),
                     )
                 )
+            else:
+                kept.append(row)
         events = tuple(mapped)
 
         coverage: CoverageWindow | None = None
@@ -449,7 +458,7 @@ class GitLabConnectorAdapter:
         # a mapping defect read as a kept-or-broken promise. See
         # `HarvestResult.__post_init__`, which refuses that combination.
         if events and reached_at is not None and self._bounded_by_a_credible_clock(
-            rows, now=finished_at
+            kept, now=finished_at
         ):
             coverage = CoverageWindow(
                 # Keyed on `instance`, which is what `save_cursor` stores the
