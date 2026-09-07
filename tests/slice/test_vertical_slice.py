@@ -94,12 +94,25 @@ def test_dedup_survives_a_restart(daemon, tmp_path):
 
 
 def test_harvest_records_a_coverage_window(daemon):
-    """AD-35 — coverage rides in the return type, so a connector cannot forget it."""
+    """AD-35 — coverage rides in the return type, and now says what it measured.
+
+    The assertion was `start <= NOW - 30min <= end`, which held for exactly one
+    reason: `harvest` fabricated a four-hour window ending at the clock, so any
+    instant in the recent past fell inside it. Story `8a` deleted that
+    fabrication, and this row moved with it in the same commit rather than
+    becoming a surprise for whoever ran the suite next.
+
+    Both bounds are the injected clock now, because that is what coverage
+    *is* — `ingested_at` terms, from the connector's own clock, at the moment the
+    first page came back and the moment fetching finished. This daemon's clock is
+    frozen at `NOW`, so the honest window is a point.
+    """
     run_harvest(daemon, "gitlab:alpha")
     windows = daemon.storage.coverage_windows("gitlab:alpha")
-    assert windows, "no coverage recorded"
-    start, end = windows[-1]
-    assert start <= NOW - timedelta(minutes=30) <= end
+    assert windows == [(NOW, NOW)], (
+        "coverage must be the connector's own clock across the fetch, not an "
+        "interval computed backwards from it"
+    )
 
 
 def test_unresolved_author_does_not_become_an_identity(daemon, tmp_path):

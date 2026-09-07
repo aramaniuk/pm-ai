@@ -2,7 +2,8 @@
 title: 'Honest harvest outcomes and coverage'
 type: 'bugfix'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-review'
+baseline_commit: 'c3a2703f919f5405f66e664be382ebed82078935'
 review_loop_iteration: 1
 ---
 
@@ -59,13 +60,13 @@ Split from the original `8a` on 2026-09-02 at the sizing gate: the domain type c
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/harvest.py` -- add the three-member `outcome`, a `failure` field, and make `coverage` optional rather than mandatory-and-therefore-invented
-- [ ] `pm_ai/connectors/gitlab.py` -- derive coverage from returned rows; delete the `timedelta(hours=4)` construction
-- [ ] `pm_ai/app/pipelines.py` -- do not save a coverage window that was not reported
-- [ ] `pm_ai/ports/__init__.py`, `pm_ai/storage/service.py:1357-1370` -- retype `save_cursor`'s `coverage: object` to `CoverageWindow | None` on both the port and the service, replacing the three `getattr(coverage, ...)` reads with attribute access -- this is what makes "accepts an absent window **explicitly**" true rather than duck-typed, and what lets mypy catch a caller passing the wrong thing
-- [ ] `pm_ai/storage/service.py` -- give the failure outcome a durable home beside the cursor and coverage, and a read-back -- without it `harvest_failed` has no source and a dead credential reads as patience
-- [ ] `tests/slice/test_vertical_slice.py:96-103` -- update the coverage assertion in **this** slice's commit -- it asserts `start <= NOW - 30min <= end`, which holds only for the fabricated four-hour window this slice deletes
-- [ ] `tests/connectors/test_coverage_honesty.py` -- the matrix, with the empty-200, partial-page and re-run cases explicit
+- [x] `pm_ai/domain/harvest.py` -- add the three-member `outcome`, a `failure` field, and make `coverage` optional rather than mandatory-and-therefore-invented
+- [x] `pm_ai/connectors/gitlab.py` -- derive coverage from returned rows; delete the `timedelta(hours=4)` construction
+- [x] `pm_ai/app/pipelines.py` -- do not save a coverage window that was not reported
+- [x] `pm_ai/ports/__init__.py`, `pm_ai/storage/service.py:1357-1370` -- retype `save_cursor`'s `coverage: object` to `CoverageWindow | None` on both the port and the service, replacing the three `getattr(coverage, ...)` reads with attribute access -- this is what makes "accepts an absent window **explicitly**" true rather than duck-typed, and what lets mypy catch a caller passing the wrong thing
+- [x] `pm_ai/storage/service.py` -- give the failure outcome a durable home beside the cursor and coverage, and a read-back -- without it `harvest_failed` has no source and a dead credential reads as patience
+- [x] `tests/slice/test_vertical_slice.py:96-103` -- update the coverage assertion in **this** slice's commit -- it asserts `start <= NOW - 30min <= end`, which holds only for the fabricated four-hour window this slice deletes
+- [x] `tests/connectors/test_coverage_honesty.py` -- the matrix, with the empty-200, partial-page and re-run cases explicit
 
 **Acceptance Criteria:**
 - Given a fetch returning two pages, then exactly one window is read back through `coverage_windows(instance)`, its `start` equals the earliest point actually reached and its `end` the fetch-completion instant — a **positive** bound assertion. An absence assertion cannot stand alone: `save_cursor` keys on `coverage.connector_instance`, so a fabricated window under a different key already returns `[]`, and a `grep` for `timedelta(hours=4)` is satisfied by `timedelta(minutes=240)`.

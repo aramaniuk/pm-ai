@@ -2,6 +2,13 @@
 
 The HTTP call is stubbed for the slice; everything around it is the real shape a
 connector must have: one method, no scheduling, no id minting, no writes.
+
+Story `8a` deleted the one thing here that was not a shape but a claim. `harvest`
+reported a coverage window of `now() - 4h` to `now()`, unconditionally, tied to
+nothing that proved a fetch had happened — so a provider declining with an empty
+`200` recorded four hours of harvest coverage, and AD-35's fail-closed guard read
+that as evidence we had looked. Coverage is now derived from pages that actually
+came back, and its absence is expressible.
 """
 
 from __future__ import annotations
@@ -10,8 +17,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from pm_ai.domain.clocks import ImplausibleTimestamp, validate_occurred_at
 from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType, Provenance
-from pm_ai.domain.harvest import Cursor, HarvestResult
+from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestOutcome, HarvestResult
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import DataScope, SourceRef, resolve_actor
 from pm_ai.domain.lifecycle import CoverageWindow
@@ -31,6 +39,47 @@ SAMPLE_ROW = {
     # inside the five-minute future skew tolerance.
     "committed_at": datetime(2026, 1, 15, 9, 30, tzinfo=timezone.utc),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class Page:
+    """One provider response: the rows it carried, and where the next one starts.
+
+    `next_offset` is `None` on the last page, stated rather than inferred from a
+    short one. "Fewer rows than asked for" is a heuristic, and a provider that
+    happens to fill its final page would send the walk round again — which is
+    also the difference between a window bounded by pages actually walked and a
+    window bounded by a guess.
+    """
+
+    rows: tuple[dict, ...] = ()
+    next_offset: int | None = None
+
+
+class PageUnavailable(Exception):
+    """What a transport raises when a page cannot be fetched.
+
+    The retry semantics ride on the exception rather than inside its message,
+    because `harvest` converts this into a `HarvestFailure` and "wait 90 seconds"
+    (a 429 with `Retry-After`) is a different instruction to an operator than
+    "this token is dead".
+
+    Never escapes `harvest`. A raise cannot carry the coverage a partial fetch
+    already earned, which is exactly why the outcome is a value.
+
+    `reason` must carry no credential material. It becomes a `HarvestFailure`,
+    which is persisted in Tier 2 and never rebuilt, so a transport that pasted a
+    signed URL or an authorization header into its message would put a token in a
+    durable row and in every report that reads one.
+    """
+
+    def __init__(
+        self, reason: str, *, retryable: bool, retry_after: timedelta | None = None
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.retryable = retryable
+        self.retry_after = retry_after
 
 
 def _stubbed_reach() -> str:
@@ -67,6 +116,16 @@ class GitLabConnectorAdapter:
     # could not be exercised against the failures it exists to report — a
     # provider that refuses, and one that never answers at all.
     reach: Callable[[], str] = _stubbed_reach
+    # How many rows one page carries. Injected for the same reason `now` is: the
+    # coverage window's `start` is the instant the *first* page came back, and a
+    # connector that can only ever fetch one page cannot be tested against the
+    # partial-page failure that rule exists for.
+    page_size: int = 100
+    # The transport seam, alongside `reach`. `None` walks `_fake_api` in
+    # `page_size` slices; a real GitLab client — and a test standing in for one
+    # that refuses on page two — is injected here. Returns a `Page` or raises
+    # `PageUnavailable`; `harvest` converts the raise into a value.
+    fetch_page: Callable[[int], Page] | None = None
 
     def emits(self) -> frozenset[ObservedEventType]:
         """Only from the core taxonomy — a connector may not mint a type (AD-27)."""
@@ -97,7 +156,10 @@ class GitLabConnectorAdapter:
             # AD-34 — a native handle resolves to an Actor or to UNRESOLVED,
             # never to itself
             actor=resolve_actor(system="gitlab", handle=row["author_email"]),
-            occurred_at=row["committed_at"],  # provider clock (AD-35)
+            # Provider clock (AD-35), and `.get` because absent is a real state:
+            # `NormalizedEvent.occurred_at` is `datetime | None` and a row with
+            # no timestamp is a row we cannot place in time, not a KeyError.
+            occurred_at=row.get("committed_at"),
             payload=CommitPayload(sha=row["sha"], message=row["message"]),
             # AD-36 — a connector may NEVER assert `external`. It cannot see
             # the executed-mutation ledger, so it cannot know whether this is
@@ -173,19 +235,146 @@ class GitLabConnectorAdapter:
             )
         return Probe(self.instance, Health.OK, f"{answer}")
 
-    def harvest(self, since: Cursor) -> HarvestResult:
-        started = self.now()
-        offset = int(since.token or b"0")
-        rows = self._fake_api[offset:]
+    def _fetch_from_fake_api(self, offset: int) -> Page:
+        """The default transport: `_fake_api`, walked in `page_size` slices.
 
-        events = tuple(self._to_event(r) for r in rows)
+        Paginated rather than sliced-to-the-end so the one shape that matters —
+        several pages, of which a later one can fail — is expressible against the
+        stub. The whole coverage rule is about which pages came back.
+        """
+        rows = tuple(self._fake_api[offset : offset + self.page_size])
+        walked = offset + len(rows)
+        return Page(rows=rows, next_offset=walked if walked < len(self._fake_api) else None)
+
+    def _bounded_by_a_credible_clock(self, rows: list[dict], *, now: datetime) -> bool:
+        """Whether any returned row can be placed in time at all (AD-35).
+
+        This does **not** supply the window's bounds — those are this
+        connector's own clock, because coverage is expressed in `ingested_at`
+        and a bound lifted off a provider row would be the mixed-clock defect
+        AD-35 forbids. What the rows decide is whether there is any coverage to
+        claim: a page of rows whose timestamps are all absent or all
+        unbelievable tells us something arrived and nothing about when, and an
+        unknowable start is not a guessable one.
+
+        Flagging, not rejecting: the events still persist, and `PersistResult.
+        flagged` counts them. This only withholds the coverage claim.
+        """
+        for row in rows:
+            at = row.get("committed_at")
+            if at is None:
+                continue
+            try:
+                validate_occurred_at(at, now=now)
+            except ImplausibleTimestamp:
+                continue
+            return True
+        return False
+
+    def harvest(self, since: Cursor) -> HarvestResult:
+        """Walk pages from `since`, and report what actually happened (AD-9, AD-35).
+
+        Reports; never raises on a transport failure. A page-one-succeeded,
+        page-two-failed fetch has to hand back page one's events, page one's real
+        coverage window *and* the failure, and an exception can carry at most the
+        last of those.
+
+        Three things are only ever derived from pages that came back:
+
+        - the coverage window exists at all (rows arrived, and at least one of
+          them can be placed in time);
+        - its `start` is this connector's clock at the instant the first page
+          returned, and its `end` the clock when fetching stopped — never
+          `now() - some_interval`, which is what the deleted four-hour window
+          was: a claim about the world computed from nothing but the clock;
+        - the cursor advances only past pages fully walked, so a failure on page
+          two leaves page three to be fetched again rather than skipped.
+        """
+        fetch = self.fetch_page or self._fetch_from_fake_api
+        origin = int(since.token or b"0")
+        offset = origin
+        resume = origin
+        rows: list[dict] = []
+        # The instant the *first* page came back, and `None` for as long as none
+        # has. It is what separates "the provider answered" from "we asked" —
+        # and the latter earns no coverage no matter how long it took.
+        reached_at: datetime | None = None
+        failure: HarvestFailure | None = None
+
+        while True:
+            try:
+                page = fetch(offset)
+            except PageUnavailable as refused:
+                failure = HarvestFailure(
+                    reason=f"{self.instance} could not fetch from offset {offset}: {refused.reason}",
+                    retryable=refused.retryable,
+                    retry_after=refused.retry_after,
+                )
+                break
+            except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
+                # Broad on purpose. Anything a transport can throw has to become
+                # this value, or the pages already walked lose their coverage on
+                # the way up the stack. Not retryable, because a fault nobody
+                # classified is not one we may promise will clear on its own.
+                failure = HarvestFailure(
+                    reason=f"{self.instance} could not fetch from offset {offset}: {unexpected!r}",
+                    retryable=False,
+                )
+                break
+
+            if reached_at is None:
+                reached_at = self.now()
+            rows.extend(page.rows)
+            walked = offset + len(page.rows)
+            if page.next_offset is None:
+                resume = walked
+                break
+            if page.next_offset <= offset:
+                # A provider handing back a position that does not advance would
+                # loop here forever, re-harvesting the same rows. Reported as a
+                # failure so the pages already walked keep their coverage.
+                resume = walked
+                failure = HarvestFailure(
+                    reason=(
+                        f"{self.instance} was told the next page begins at "
+                        f"{page.next_offset} while fetching from {offset}, which "
+                        f"does not advance — walking it again would never end"
+                    ),
+                    retryable=False,
+                )
+                break
+            resume = page.next_offset
+            offset = page.next_offset
+
+        finished_at = self.now()
+        events = tuple(self._to_event(row) for row in rows)
+
+        coverage: CoverageWindow | None = None
+        if rows and reached_at is not None and self._bounded_by_a_credible_clock(
+            rows, now=finished_at
+        ):
+            coverage = CoverageWindow(
+                # Keyed on `instance`, which is what `save_cursor` stores the
+                # window under and what `coverage_windows` reads it back by.
+                connector_instance=self.instance,
+                start=reached_at,
+                end=finished_at,
+            )
+
+        if failure is not None:
+            outcome = HarvestOutcome.FAILED
+        elif events:
+            outcome = HarvestOutcome.HARVESTED
+        else:
+            outcome = HarvestOutcome.EMPTY
+
         return HarvestResult(
             events=events,
-            cursor=Cursor(str(len(self._fake_api)).encode()),
-            # AD-35 — reported in the return type so it cannot be forgotten
-            coverage=CoverageWindow(
-                connector_instance=self.instance,
-                start=started - timedelta(hours=4),
-                end=started,
-            ),
+            # `since` itself when nothing was walked, so "the cursor did not
+            # move" is identity rather than a re-encoding that happens to parse
+            # to the same integer.
+            cursor=since if resume == origin else Cursor(str(resume).encode()),
+            outcome=outcome,
+            coverage=coverage,
+            failure=failure,
         )

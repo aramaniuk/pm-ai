@@ -198,9 +198,19 @@ def evaluate_commitment(
     `harvest_failed` is **required and has no default**, deliberately. A default
     of `False` would be the safe verdict — `UNKNOWN` never fires an irreversible
     nudge — and would silently reintroduce exactly the indefinite waiting this
-    parameter exists to end. AD-9 put `CoverageWindow` in `HarvestResult`'s
-    return type for the same reason: so a caller cannot omit it and leave the
-    guard unarmed without noticing.
+    parameter exists to end. `HarvestResult.outcome` is required and has no
+    default for the same reason, and it is where this argument's value comes
+    from: story `8a` gave the failure a durable home beside the cursor, so
+    `StoragePort.harvest_failure(instance)` answers this question after a
+    restart. Before it, both "ran and failed" and "ran and learned nothing"
+    persisted as the absence of a coverage window and this parameter had no
+    source at all — a required argument nobody could supply honestly.
+
+    `HarvestResult.coverage` is **not** the arming mechanism, and reading it as
+    one was the defect `8a` fixed. A mandatory `CoverageWindow` cannot be
+    forgotten and can be fabricated: the GitLab connector satisfied it with
+    `now() - 4h` to `now()`, so an empty `200` armed `covered` with evidence
+    nothing had gathered. It is optional now, and its absence is a real answer.
 
     Order matters. `covered` is consulted before `harvest_failed`: if the window
     *was* harvested, absence of evidence within it is real evidence of absence,
