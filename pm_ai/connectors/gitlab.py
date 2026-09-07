@@ -19,7 +19,13 @@ from datetime import datetime, timedelta, timezone
 
 from pm_ai.domain.clocks import ImplausibleTimestamp, validate_occurred_at
 from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType, Provenance
-from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestOutcome, HarvestResult
+from pm_ai.domain.harvest import (
+    Cursor,
+    HarvestFailure,
+    HarvestOutcome,
+    HarvestResult,
+    RowRefusal,
+)
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import DataScope, SourceRef, resolve_actor
 from pm_ai.domain.lifecycle import CoverageWindow
@@ -80,6 +86,22 @@ class PageUnavailable(Exception):
         self.reason = reason
         self.retryable = retryable
         self.retry_after = retry_after
+
+
+class RowRefused(ValueError):
+    """One provider row cannot be mapped, and the harvest continues without it.
+
+    The GitLab twin of `graph.calendar.CalendarRowRefused`, and it exists for
+    the reason that one does: `_to_event` subscripted `row["sha"]`,
+    `row["message"]` and `row["author_email"]`, and the mapping ran *outside*
+    every `try` in `harvest` — so one row missing one field raised a `KeyError`
+    out of the method and discarded page one's events, page one's real coverage
+    and the outcome, which is exactly what this connector's own docstring and
+    `8a`'s partial-page row forbid.
+
+    A `ValueError` because the provider's data is what is wrong, matching
+    `ImplausibleTimestamp` one layer down.
+    """
 
 
 def _stubbed_reach() -> str:
@@ -147,20 +169,62 @@ class GitLabConnectorAdapter:
 
         `sample_events` goes through here too, so the sample an architecture gate
         inspects is built by the code a real harvest runs rather than beside it.
+
+        Raises `RowRefused` for a row it will not map, never a `KeyError`: the
+        caller records the refusal and keeps walking. Three fields are read and
+        each absence has a different right answer, so each is stated rather than
+        subscripted.
         """
+        sha = row.get("sha")
+        if not isinstance(sha, str) or not sha.strip():
+            raise RowRefused(
+                f"a gitlab row carries no usable `sha` ({sha!r}), so nothing "
+                f"downstream could key the commit on it or cite it (AD-34). "
+                f"Refused rather than emitted under an invented identifier."
+            )
+        sha = sha.strip()
+        message = row.get("message")
+        if not isinstance(message, str):
+            raise RowRefused(
+                f"gitlab commit {sha} carries no `message` string "
+                f"({type(message).__name__}). Refused rather than emitted with "
+                f"a substituted one: the message is the evidence a verifier "
+                f"reads, and an invented empty body reads as a commit that said "
+                f"nothing."
+            )
+        at = row.get("committed_at")
+        if at is not None and not isinstance(at, datetime):
+            # The shape real GitLab sends — `committed_at` as an ISO string.
+            # Refused here, naming the gap, because everything downstream
+            # compares it as a datetime: `validate_occurred_at` reaches
+            # `_assert_comparable`, which asks a `str` for `.tzinfo` and raises
+            # `AttributeError` — out of the coverage check, out of `harvest`,
+            # and out of `persist_events`, none of which catch it. This
+            # connector's transport is still stubbed and does not parse provider
+            # timestamps; until it does, a string clock is a mapping gap that
+            # refuses one row rather than an exception that ends the harvest.
+            raise RowRefused(
+                f"gitlab commit {sha} carries a `committed_at` of type "
+                f"{type(at).__name__} rather than a datetime. Refused rather "
+                f"than passed on: every clock comparison downstream (AD-35) "
+                f"expects an aware datetime, and this connector's transport "
+                f"does not parse provider timestamps yet."
+            )
         return NormalizedEvent(
             scope=self.scope,
             type=ObservedEventType.COMMIT_PUSHED,
             # AD-34 grammar — not a URL, so it joins across connectors
-            source_ref=SourceRef.parse(f"gitlab:{self.project}:commit:{row['sha']}"),
+            source_ref=SourceRef.parse(f"gitlab:{self.project}:commit:{sha}"),
             # AD-34 — a native handle resolves to an Actor or to UNRESOLVED,
-            # never to itself
-            actor=resolve_actor(system="gitlab", handle=row["author_email"]),
-            # Provider clock (AD-35), and `.get` because absent is a real state:
+            # never to itself. `.get`, and no refusal: an absent handle is what
+            # `UNRESOLVED` is *for*, and a commit whose author pm-ai cannot name
+            # is still a commit that happened.
+            actor=resolve_actor(system="gitlab", handle=row.get("author_email")),
+            # Provider clock (AD-35), and absent is a real state:
             # `NormalizedEvent.occurred_at` is `datetime | None` and a row with
             # no timestamp is a row we cannot place in time, not a KeyError.
-            occurred_at=row.get("committed_at"),
-            payload=CommitPayload(sha=row["sha"], message=row["message"]),
+            occurred_at=at,
+            payload=CommitPayload(sha=sha, message=message),
             # AD-36 — a connector may NEVER assert `external`. It cannot see
             # the executed-mutation ledger, so it cannot know whether this is
             # pm-ai's own write coming back. Normalization decides; this
@@ -262,7 +326,17 @@ class GitLabConnectorAdapter:
         """
         for row in rows:
             at = row.get("committed_at")
-            if at is None:
+            if not isinstance(at, datetime):
+                # Absent, or a shape this connector will not map — a provider
+                # ISO string is the real case. Skipped for the same reason
+                # `None` is: it places no row in time. Not merely `is None`,
+                # because `validate_occurred_at` reaches `_assert_comparable`,
+                # which asks the value for `.tzinfo` and raises `AttributeError`
+                # — out of this predicate and out of `harvest`, past every
+                # failure handler. `_to_event` already refuses such a row; this
+                # walks the raw page, so it has to refuse it too, and the bug
+                # was order-dependent: one credible row ahead of it returned
+                # early and hid the escape.
                 continue
             try:
                 validate_occurred_at(at, now=now)
@@ -347,10 +421,34 @@ class GitLabConnectorAdapter:
             offset = page.next_offset
 
         finished_at = self.now()
-        events = tuple(self._to_event(row) for row in rows)
+        # Mapped one row at a time, because a row that cannot be read must not
+        # discard the rows beside it, the coverage this fetch earned, or the
+        # outcome. `_to_event` raises `RowRefused` rather than `KeyError` now,
+        # but the difference only matters if the caller catches it — mapping
+        # them in one comprehension left the refusal escaping `harvest` exactly
+        # as the `KeyError` did, which is what the matrix's partial-page row
+        # forbids one field lower.
+        mapped: list[NormalizedEvent] = []
+        refusals: list[RowRefusal] = []
+        for row in rows:
+            try:
+                mapped.append(self._to_event(row))
+            except RowRefused as refused:
+                sha = row.get("sha")
+                refusals.append(
+                    RowRefusal(
+                        identifier=sha if isinstance(sha, str) and sha.strip() else None,
+                        reason=str(refused),
+                    )
+                )
+        events = tuple(mapped)
 
         coverage: CoverageWindow | None = None
-        if rows and reached_at is not None and self._bounded_by_a_credible_clock(
+        # `events`, not `rows`: a page whose every row was refused reached the
+        # provider but yielded nothing readable, and coverage over it would let
+        # a mapping defect read as a kept-or-broken promise. See
+        # `HarvestResult.__post_init__`, which refuses that combination.
+        if events and reached_at is not None and self._bounded_by_a_credible_clock(
             rows, now=finished_at
         ):
             coverage = CoverageWindow(
@@ -363,7 +461,11 @@ class GitLabConnectorAdapter:
 
         if failure is not None:
             outcome = HarvestOutcome.FAILED
-        elif events:
+        elif events or refusals:
+            # Refusals count as having harvested: rows arrived. A page whose
+            # every row was refused and a provider with nothing in it both
+            # produce no events, and `refusals` is what tells them apart —
+            # which is also why `__post_init__` refuses EMPTY beside a refusal.
             outcome = HarvestOutcome.HARVESTED
         else:
             outcome = HarvestOutcome.EMPTY
@@ -377,4 +479,5 @@ class GitLabConnectorAdapter:
             outcome=outcome,
             coverage=coverage,
             failure=failure,
+            refusals=tuple(refusals),
         )

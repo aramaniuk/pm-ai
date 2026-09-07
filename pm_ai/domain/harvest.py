@@ -103,6 +103,34 @@ class HarvestFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class RowRefusal:
+    """One provider row a connector would not map, and why. The harvest continued.
+
+    A value rather than a raise, for the same reason the failure is one: a row
+    that cannot be read must not discard the rows beside it, the coverage the
+    fetch earned, or the outcome. `gitlab.harvest` mapped its rows outside every
+    `try`, so a single row missing a field raised out of the method and took
+    page one's events, its real coverage and its outcome with it — the shape the
+    matrix's partial-page row forbids, one field lower.
+
+    Counted rather than logged, exactly as `33b`'s `RowRefusal` is: a harvest
+    that refused every row and a harvest of a provider with nothing in it both
+    produce no events, and only this tells them apart.
+
+    `reason` carries no credential material, for the same reason
+    `HarvestFailure.reason` does not — it names a row, and rows come from
+    providers.
+    """
+
+    identifier: str | None
+    """What the row could be cited by — a commit sha — or `None` when the thing
+    missing was the identifier itself.
+    """
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class HarvestResult:
     """What every connector returns (AD-9, AD-35).
 
@@ -121,6 +149,14 @@ class HarvestResult:
     outcome: HarvestOutcome
     coverage: CoverageWindow | None = None
     failure: HarvestFailure | None = None
+    refusals: tuple[RowRefusal, ...] = ()
+    """The rows that came back and could not be mapped, one by one.
+
+    Separate from `failure`, which is about the *fetch*: a page that arrived
+    carrying one unreadable row among fifty is not a failed fetch, and reporting
+    it as one would tell an operator to expect the harvest to have moved
+    nothing. Empty is the ordinary answer.
+    """
 
     def __post_init__(self) -> None:
         if (self.outcome is HarvestOutcome.FAILED) != (self.failure is not None):
@@ -130,16 +166,29 @@ class HarvestResult:
                 f"reason with any other outcome is a failure nothing will "
                 f"persist — which is how a dead connector reads as patience."
             )
-        if self.outcome is HarvestOutcome.HARVESTED and not self.events:
+        if self.outcome is HarvestOutcome.HARVESTED and not self.events and not self.refusals:
             raise ValueError(
-                "outcome=harvested with no events. EMPTY is the value for a "
-                "provider that answered with nothing; collapsing the two loses "
-                "the only distinction AD-35's two silences are built on."
+                "outcome=harvested with no events and nothing refused. EMPTY is "
+                "the value for a provider that answered with nothing; "
+                "collapsing the two loses the only distinction AD-35's two "
+                "silences are built on."
             )
+        # HARVESTED with no events but with refusals is the third case, and it
+        # is legal: rows came back and none could be read. EMPTY is refused for
+        # it below, so without this it was unrepresentable — `gitlab.harvest`
+        # raised out of the method for a page it had just refused row by row,
+        # which is the escape the row-at-a-time mapping exists to stop.
         if self.outcome is HarvestOutcome.EMPTY and self.events:
             raise ValueError(
                 f"outcome=empty with {len(self.events)} events. Whatever came "
                 f"back, the run did not learn nothing."
+            )
+        if self.outcome is HarvestOutcome.EMPTY and self.refusals:
+            raise ValueError(
+                f"outcome=empty with {len(self.refusals)} refused row(s). Rows "
+                f"came back and pm-ai could not read them, which is not the "
+                f"same as a provider that answered with nothing — and it is the "
+                f"one of the two that needs somebody to look."
             )
         if self.coverage is not None and not self.events:
             raise ValueError(
@@ -148,6 +197,13 @@ class HarvestResult:
                 "fetch that came back empty is a four-hour claim tied to the "
                 "clock and to nothing else."
             )
+        # Refused rows deliberately do **not** earn coverage, though they do
+        # make the outcome HARVESTED. Coverage arms AD-35's fail-closed reading
+        # — within a covered window, absence of evidence is evidence of absence,
+        # and `evaluate_commitment` returns BROKEN. If every row was refused the
+        # absence is pm-ai's own mapping defect, not a broken promise, and FR-26
+        # nudges are irreversible. So a page nobody could read stays UNKNOWN and
+        # `refusals` is what says somebody has to look.
 
 
 @dataclass(frozen=True, slots=True)

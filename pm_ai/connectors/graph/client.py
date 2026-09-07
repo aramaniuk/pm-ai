@@ -326,6 +326,55 @@ class TokenSource(Protocol):
     def access_token(self, *, force_refresh: bool = False) -> str: ...
 
 
+def _no_redirect_opener() -> Any:
+    """A `urllib` opener that refuses a redirect rather than following it.
+
+    The default opener follows 301/302/307/308 by itself, and
+    `HTTPRedirectHandler.redirect_request` carries the original request's
+    headers — `Authorization` among them — onto the new URL. So a `Location`
+    pointing at another origin, or down to `http`, would hand the bearer token
+    over *before* any check in this module ran: `_assert_on_host` guards the URL
+    this client asks for and every `@odata.nextLink` it is offered, and a
+    redirect is neither of those. That is why the refusal lives in the opener
+    rather than in a check on the response — a check would run after the token
+    had already been sent.
+
+    Refused rather than re-checked-and-followed. `calendarView` does not
+    redirect, so a redirect here is a fact about the network rather than about
+    the calendar, and "follow it while the host still matches" would be a second
+    walk that neither the page cap nor the seen-link set bounds.
+
+    Returning `None` from `redirect_request` is `urllib`'s own way to decline:
+    no handler answers the 3xx, so `HTTPDefaultErrorHandler` raises it as an
+    `HTTPError` carrying the redirect status, which the caller below turns into
+    a refusal naming what it would have cost to follow.
+    """
+    import urllib.request
+
+    class RefusesRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *asked: Any, **named: Any) -> None:
+            return None
+
+    return urllib.request.build_opener(RefusesRedirects())
+
+
+def _same_origin(sent: str, landed: str) -> bool:
+    """Whether a response came back from the origin the request was sent to.
+
+    Compared against the *request* rather than against `GRAPH_HOST`, because
+    `GraphClient.host` is configurable and this transport is the default for
+    whatever it is pointed at. The property worth asserting is not "this is
+    Graph" — the client already checked that — but "the credential did not
+    travel anywhere else".
+    """
+    asked, answered = urlsplit(sent), urlsplit(landed)
+    return (asked.scheme, (asked.hostname or "").casefold(), asked.port) == (
+        answered.scheme,
+        (answered.hostname or "").casefold(),
+        answered.port,
+    )
+
+
 def _urllib_transport(request: GraphRequest) -> GraphResponse:
     """The real transport: one `GET` over stdlib HTTP, imported at call time.
 
@@ -354,7 +403,12 @@ def _urllib_transport(request: GraphRequest) -> GraphResponse:
     An HTTP error status is an *answer*, not an exception, so `HTTPError` is
     caught and returned as the status it carries — the whole point of this
     client is that 401, 403 and 429 mean three different things. Anything else
-    raised out of `urlopen` is a request that never got an answer.
+    raised out of the opener is a request that never got an answer.
+
+    A **redirect is not an answer either**, and it is not followed: see
+    `_no_redirect_opener`. `urllib`'s default opener would follow it and copy
+    the `Authorization` header to the new URL, which is how a bearer token
+    leaves the origin every other check in this module is about.
     """
     import urllib.error
     import urllib.request
@@ -371,13 +425,34 @@ def _urllib_transport(request: GraphRequest) -> GraphResponse:
             f"client speaks https to {GRAPH_HOST} and nothing else."
         )
     try:
-        with urllib.request.urlopen(outbound, timeout=30) as answer:  # noqa: S310
+        with _no_redirect_opener().open(outbound, timeout=30) as answer:  # noqa: S310
+            landed = str(getattr(answer, "url", "") or request.url)
+            if not _same_origin(request.url, landed):
+                # Belt-and-braces behind the refusing opener: if any handler
+                # ever moves the request, the answer is refused rather than
+                # read, because by then the token has already been sent.
+                raise GraphProtocolError(
+                    f"the Graph request to {_path_only(request.url)} was "
+                    f"answered from {_path_only(landed)} — a different origin "
+                    f"from the one the bearer token was sent to. Refusing the "
+                    f"answer rather than reading it."
+                )
             return GraphResponse(
                 status=int(answer.status),
                 body=_decoded(answer.read()),
                 headers={key: value for key, value in answer.headers.items()},
             )
     except urllib.error.HTTPError as answered:
+        if 300 <= int(answered.code) < 400:
+            raise GraphProtocolError(
+                f"Graph answered {answered.code} for {_path_only(request.url)} "
+                f"with a redirect, and this client does not follow one: "
+                f"`urllib`'s redirect handler copies the `Authorization` header "
+                f"onto whatever the `Location` names, so an off-origin — or "
+                f"plain-http — redirect would send the bearer token there "
+                f"before any origin check could run. Not retryable: waiting "
+                f"does not make that safe."
+            ) from answered
         # A status this client interprets, not a failure. The body is read
         # because a 429 sometimes carries its hint there as well as in a header.
         return GraphResponse(
@@ -385,12 +460,27 @@ def _urllib_transport(request: GraphRequest) -> GraphResponse:
             body=_decoded(answered.read()),
             headers={key: value for key, value in answered.headers.items()},
         )
+    except GraphCallFailed:
+        # The two refusals above are already the sentence a caller needs, so
+        # they must not be reworded as "no answer" by the branch below.
+        raise
     except Exception as silent:  # noqa: BLE001 — see the docstring
         raise GraphUnavailable(
             f"the Graph request did not get an answer "
             f"({type(silent).__name__}: {silent}). Nothing was learned about "
             f"the window, which is not the same as it being empty."
         ) from silent
+
+
+def _path_only(url: str) -> str:
+    """A URL as it may appear in a refusal: path only, never the query.
+
+    Module-level because the transport composes refusals too, and a second
+    spelling of this rule is how a `$skiptoken` eventually reaches a durable
+    row. `GraphClient._named` is this function.
+    """
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.hostname}{parts.path}"
 
 
 def _decoded(raw: bytes) -> Mapping[str, Any] | None:
@@ -754,5 +844,4 @@ class GraphClient:
         reports. `Cursor.__repr__` hides the same class of value for the same
         reason.
         """
-        parts = urlsplit(url)
-        return f"{parts.scheme}://{parts.hostname}{parts.path}"
+        return _path_only(url)

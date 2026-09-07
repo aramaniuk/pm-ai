@@ -1577,6 +1577,50 @@ class StorageService:
         `ERROR` forever, so a successful attempt clears the row. The row is
         current state, not history — `evaluate_commitment` asks whether this
         connector is broken *now*.
+
+        **Validated before the first `execute`, and rolled back if anything
+        after it raises.** The refusal below used to fire *after* the cursor
+        insert, on a connection with no `rollback`, so a refused save left the
+        cursor advance pending — and the next unrelated `commit()` on this
+        shared connection promoted it. A refused write that durably advances a
+        cursor is the same both-or-neither property the matrix states one method
+        up for a persist that raises after page one, and it is stated here
+        rather than left to statement order.
+        """
+        if coverage is not None and coverage.connector_instance != instance:
+            # Refused rather than silently stored under the window's own key.
+            # `coverage_windows(instance)` reads back by this column, so a
+            # window whose `connector_instance` disagrees with the instance
+            # being saved lands where nothing looks for it — and an absence
+            # assertion over the intended key passes while the row exists.
+            raise CoverageInstanceMismatch(
+                f"coverage for {coverage.connector_instance!r} was offered "
+                f"while saving the cursor for {instance!r}. The window is "
+                f"stored under its own `connector_instance` and read back by "
+                f"instance, so storing this would file real coverage where "
+                f"nothing reads it and leave {instance!r} looking uncovered."
+            )
+        try:
+            self._write_cursor(instance, cursor, coverage, failure)
+        except Exception:
+            # Nothing this method wrote may survive a refusal it raised. The
+            # connection is shared, so a pending statement is not discarded by
+            # leaving this frame — it waits for whoever commits next.
+            self._db.rollback()
+            raise
+        self._db.commit()
+
+    def _write_cursor(
+        self,
+        instance: str,
+        cursor: Cursor,
+        coverage: CoverageWindow | None,
+        failure: HarvestFailure | None,
+    ) -> None:
+        """The three statements `save_cursor` commits, with nothing decided here.
+
+        Split out so the caller owns the transaction — validate, write, commit
+        or roll back — rather than interleaving a raise with half the writes.
         """
         self._db.execute(
             "INSERT INTO cursors (instance, token) VALUES (?, ?) "
@@ -1584,25 +1628,16 @@ class StorageService:
             (instance, cursor.token),
         )
         if coverage is not None:
-            if coverage.connector_instance != instance:
-                # Refused rather than silently stored under the window's own key.
-                # `coverage_windows(instance)` reads back by this column, so a
-                # window whose `connector_instance` disagrees with the instance
-                # being saved lands where nothing looks for it — and an absence
-                # assertion over the intended key passes while the row exists.
-                raise CoverageInstanceMismatch(
-                    f"coverage for {coverage.connector_instance!r} was offered "
-                    f"while saving the cursor for {instance!r}. The window is "
-                    f"stored under its own `connector_instance` and read back by "
-                    f"instance, so storing this would file real coverage where "
-                    f"nothing reads it and leave {instance!r} looking uncovered."
-                )
-            # `WHERE NOT EXISTS` rather than a plain insert: a re-run over the
-            # same range must leave one window and not two. The constraint is in
-            # the statement rather than in a `UNIQUE` index because Tier 2 is
-            # never rebuilt (AD-3) — creating a unique index on every open would
-            # refuse to start against a store that already holds a duplicate
-            # from the era that inserted unconditionally.
+            # `WHERE NOT EXISTS` rather than a plain insert, and what it buys
+            # is replay idempotence, not range deduplication. A window is
+            # recorded in `ingested_at` terms, so two harvests of one calendar
+            # range happen at two different instants and are two real windows —
+            # there is nothing to collapse. What this stops is a *retried* save
+            # of one `HarvestResult`, whose bounds are byte-identical. The
+            # constraint is in the statement rather than in a `UNIQUE` index
+            # because Tier 2 is never rebuilt (AD-3) — creating a unique index
+            # on every open would refuse to start against a store that already
+            # holds a duplicate from the era that inserted unconditionally.
             self._db.execute(
                 "INSERT INTO coverage (instance, start, end) "
                 "SELECT ?, ?, ? WHERE NOT EXISTS ("
@@ -1636,7 +1671,6 @@ class StorageService:
                     self._at().isoformat(),
                 ),
             )
-        self._db.commit()
 
     def harvest_failure(self, instance: str) -> HarvestFailure | None:
         """The last harvest failure for `instance`, or `None` if the last one worked.

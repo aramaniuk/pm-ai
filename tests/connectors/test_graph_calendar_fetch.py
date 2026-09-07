@@ -345,6 +345,75 @@ def test_an_empty_window_claims_no_coverage():
     assert result.walked_through == result.window.end
 
 
+def test_rows_whose_clocks_cannot_be_believed_claim_no_coverage():
+    """`8a`'s matrix row 2, which this connector omitted: *rows returned, no
+    usable clock* → harvested something, and **no** coverage claimed.
+
+    The rule is `gitlab.py`'s `_bounded_by_a_credible_clock`, and it has to be
+    the same rule because both connectors fill the same `CoverageWindow | None`
+    slot and `8a` answers the question once for both. Graph claimed a window for
+    a page whose every timestamp was outside the range it had asked for —
+    something arrived and nothing says when, and an unknowable start is not a
+    guessable one.
+
+    The rows are still emitted and still flagged. Withholding coverage is not
+    refusing data: `33c` persists these and `PersistResult.flagged` counts them.
+    """
+    fetch, _, _, _, _ = _fetcher(
+        _page(
+            _event(
+                id="from-the-future",
+                start=_zoned("2126-09-07T10:00:00", "UTC"),
+                end=_zoned("2126-09-07T11:00:00", "UTC"),
+            ),
+            _event(
+                id="the-zero-value-parse",
+                start=_zoned("1970-01-01T00:00:00", "UTC"),
+                end=_zoned("1970-01-01T01:00:00", "UTC"),
+            ),
+        )
+    )
+    result = fetch.fetch()
+
+    assert [row.event_id for row in result.rows] == ["from-the-future", "the-zero-value-parse"]
+    assert all(row.clock_flag is not None for row in result.rows), (
+        "the premise of the row: not one of these can be placed in time"
+    )
+    assert result.refusals == (), "flagged is not refused"
+    assert result.failure is None, "the fetch itself worked perfectly"
+    assert result.pages == 1
+    assert result.coverage is None, (
+        "coverage was claimed over a page whose every clock the connector itself "
+        "had already disbelieved — a window tied to the local clock and to "
+        "nothing else, which is the fabrication 8a exists to delete"
+    )
+
+
+def test_one_believable_clock_among_many_flagged_rows_is_enough_to_earn_coverage():
+    """The other direction, which is what keeps the rule from being "any flag
+    voids the fetch".
+
+    `gitlab.py` returns on the *first* row it can place in time, and this is the
+    same predicate: a tenant with one skewed meeting still had its calendar
+    reached, and withholding coverage there would report a working connector as
+    never having looked.
+    """
+    fetch, _, clock, _, _ = _fetcher(
+        _page(
+            _event(
+                id="from-the-future",
+                start=_zoned("2126-09-07T10:00:00", "UTC"),
+                end=_zoned("2126-09-07T11:00:00", "UTC"),
+            ),
+            _event(id="ordinary"),
+        )
+    )
+    result = fetch.fetch()
+
+    assert result.coverage is not None
+    assert (result.coverage.start, result.coverage.end) == (BASE + TICK, clock.at)
+
+
 # ── Timezones ────────────────────────────────────────────────────────────────
 
 
@@ -996,7 +1065,16 @@ def test_a_body_that_is_not_a_json_object_is_refused_rather_than_read_as_empty()
 
 
 def test_a_page_with_no_value_array_is_recorded_rather_than_silently_empty():
-    """The one shape that would otherwise read as "the calendar is empty"."""
+    """The one shape that would otherwise read as "the calendar is empty".
+
+    The `walked_through` assertion is the load-bearing one, and it was the
+    missing one: the walk ends *normally* here — a 200, no `nextLink`, no
+    refusal from the client — so the cursor advanced to the end of a span that
+    was asked for and never answered. That is what turns "pm-ai could not read
+    this page" into "there were no meetings in this range", permanently, since
+    no later run revisits a span the cursor has passed. Every other assertion
+    below held while that was happening.
+    """
     fetch, _, _, _, _ = _fetcher(GraphResponse(status=200, body={"@odata.context": "…"}))
     result = fetch.fetch()
 
@@ -1004,6 +1082,39 @@ def test_a_page_with_no_value_array_is_recorded_rather_than_silently_empty():
     assert result.failure is None
     (refusal,) = result.refusals
     assert refusal.event_id is None
+    assert result.walked_through != result.window.end, (
+        "the cursor advanced past a span whose page pm-ai could not read, which "
+        "makes the unreadable page evidence of an empty calendar for good"
+    )
+    assert result.walked_through is None, "nothing was walked to completion"
+    assert result.coverage is None, "and no row arrived, so nothing was covered"
+
+
+def test_a_span_pm_ai_could_not_read_holds_the_cursor_back_past_later_spans_too():
+    """`walked_through` is one high-water mark, so it cannot skip the hole.
+
+    A window split into two spans, the first answered with a page that has no
+    `value` array and the second answered perfectly. Advancing to the second
+    span's end would carry the first span's hole past the cursor with it — the
+    reason the fetch tracks "may the cursor still advance" rather than
+    overwriting the mark per span.
+    """
+    fetch, transport, _, _, _ = _fetcher(
+        GraphResponse(status=200, body={"@odata.context": "…"}),
+        _page(_event(id="the-second-span")),
+        policy=_policy(width=timedelta(days=1), first_run_reach_back=timedelta(days=1)),
+        max_span=timedelta(days=1),
+    )
+    result = fetch.fetch()
+
+    assert len(transport.requests) == 2, "the later span is still walked"
+    assert [row.event_id for row in result.rows] == ["the-second-span"]
+    assert result.failure is None
+    assert len(result.refusals) == 1
+    assert result.walked_through is None, (
+        "the cursor advanced to the second span's end, which files the first "
+        "span's unread page away as an empty range"
+    )
 
 
 # ── Rows pm-ai will not emit ─────────────────────────────────────────────────

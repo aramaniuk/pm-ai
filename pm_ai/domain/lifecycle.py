@@ -161,14 +161,22 @@ class CoverageWindow:
     Recorded in `ingested_at` terms — the local clock — because it describes what
     the daemon did, not what happened in the world. Asking the coverage question
     in `occurred_at` terms is one of the mixed-clock bugs both reviewers found.
+
+    **There is deliberately no `covers(moment)` here.** One existed until story
+    `8a` and had no caller anywhere; it asked `start <= moment <= end`, a
+    single-window point test that only looked usable while the GitLab connector
+    fabricated a four-hour window wide enough for any recent instant to fall
+    inside. Now that a window is the seconds a fetch actually took,
+    `evaluate_commitment`'s `covered` needs the union of many windows over the
+    period evidence would have arrived in, with a gap tolerance — the harvest
+    cycle is the natural one. That fold reads `coverage_windows(instance)`; it is
+    not a method on one window, and offering one invites the fabrication's
+    assumption back in.
     """
 
     connector_instance: str
     start: datetime
     end: datetime
-
-    def covers(self, moment: datetime) -> bool:
-        return self.start <= moment <= self.end
 
 
 def evaluate_commitment(

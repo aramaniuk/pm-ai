@@ -2,7 +2,7 @@
 title: 'Graph calendar fetch'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-progress'
+status: 'in-review'
 baseline_commit: 'bf327c84049d4cbcd896694de0d4f3114aa2f274'
 review_loop_iteration: 0
 ---

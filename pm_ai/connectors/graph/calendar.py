@@ -702,6 +702,11 @@ class CalendarFetch:
     reached something, and a window over a fetch that returned no rows is a
     claim tied to the clock and to nothing else (`harvest.py:144-150` refuses
     exactly that pairing).
+
+    `None` too when rows came back and not one of them could be placed in time
+    — `8a`'s second matrix row, which this connector used to ignore. Something
+    arrived and nothing says when, and an unknowable start is not a guessable
+    one.
     """
 
     failure: HarvestFailure | None = None
@@ -750,11 +755,17 @@ class GraphCalendarFetch:
 
         Three things are derived only from what came back:
 
-        - **coverage exists at all** when rows arrived. The requested range
-          decides *whether* it was earned; its bounds are this machine's clock
-          from the instant the first page returned to the instant the walk
-          stopped.
-        - **`walked_through`** advances only past spans walked to completion.
+        - **coverage exists at all** when rows arrived *and at least one of them
+          can be placed in time* — the same rule `gitlab.py`'s
+          `_bounded_by_a_credible_clock` applies, because both connectors write
+          the same `CoverageWindow | None` slot and `8a`'s matrix answers the
+          question once for both: rows with no usable clock claim no coverage.
+          The requested range decides *whether* it was earned; its bounds are
+          this machine's clock from the instant the first page returned to the
+          instant the walk stopped.
+        - **`walked_through`** advances only past spans walked to completion —
+          and a span holding a page that could not be read is not one of them,
+          however normally the walk ended.
         - **`refusals`** name the rows that could not be read, one by one, so a
           calendar that is empty and a calendar pm-ai cannot parse are
           distinguishable.
@@ -769,9 +780,15 @@ class GraphCalendarFetch:
         reached_at: datetime | None = None
         walked_through: datetime | None = None
         failure: HarvestFailure | None = None
+        # Whether the cursor may still advance. It stops for good at the first
+        # span that was asked for and not fully answered: `walked_through` is
+        # one high-water mark, so advancing past a *later* span would carry the
+        # hole with it.
+        advancing = True
 
         for span in window.spans(max_span=self.max_span):
             url = self.client.calendar_view(span.start, span.end)
+            answered = True
             try:
                 for body in self.client.walk(url, deadline=deadline):
                     if reached_at is None:
@@ -779,7 +796,8 @@ class GraphCalendarFetch:
                         # was asked. Asking earns no coverage however long it took.
                         reached_at = self.now()
                     pages += 1
-                    self._read(body, window=window, into=rows, refusing=refusals)
+                    if not self._read(body, window=window, into=rows, refusing=refusals):
+                        answered = False
             except GraphCallFailed as refused:
                 failure = self._failure(
                     span, refused.reason, retryable=refused.retryable, hint=refused.retry_after
@@ -806,12 +824,22 @@ class GraphCalendarFetch:
                     span, f"{type(unexpected).__name__}: {unexpected}", retryable=False
                 )
                 break
-            walked_through = span.end
+            if not answered:
+                # A 200 whose body pm-ai could not read is a span asked for and
+                # not answered, even though the walk ended normally. The refusal
+                # already says the page "is not counted as evidence of an empty
+                # calendar"; advancing the cursor past it would have made it
+                # exactly that, permanently, because no later run revisits a
+                # span the cursor has passed.
+                advancing = False
+                continue
+            if advancing:
+                walked_through = span.end
 
         finished = self.now()
         coverage = (
             CoverageWindow(connector_instance=self.instance, start=reached_at, end=finished)
-            if rows and reached_at is not None
+            if reached_at is not None and _any_credible_clock(rows)
             else None
         )
         return CalendarFetch(
@@ -833,12 +861,18 @@ class GraphCalendarFetch:
         window: CalendarWindow,
         into: list[CalendarRow],
         refusing: list[RowRefusal],
-    ) -> None:
+    ) -> bool:
         """Map one page's `value` array, refusing rows one at a time.
 
         A refusal is per row and never per page: one event with no `start`
         must not discard the fifty beside it, which is the whole reason the
         refusals are a returned value rather than an exception.
+
+        Returns whether the page itself could be read. `False` is a 200 with no
+        `value` array at all — a page that was asked for and not answered — and
+        the caller holds the cursor back on it. A per-row refusal does not make
+        this `False`: the page was read, one event in it was unreadable, and
+        re-asking would refuse the same row forever.
         """
         values = body.get("value")
         if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
@@ -853,7 +887,7 @@ class GraphCalendarFetch:
                     ),
                 )
             )
-            return
+            return False
         for raw in values:
             try:
                 into.append(self._row(raw, window=window))
@@ -861,6 +895,7 @@ class GraphCalendarFetch:
                 refusing.append(
                     RowRefusal(event_id=_identifier(raw) or None, reason=str(refused))
                 )
+        return True
 
     def _row(self, raw: Any, *, window: CalendarWindow) -> CalendarRow:
         """One Graph event as a `CalendarRow`, or the refusal that names it."""
@@ -919,6 +954,26 @@ class GraphCalendarFetch:
             retryable=retryable,
             retry_after=hint,
         )
+
+
+def _any_credible_clock(rows: Sequence[CalendarRow]) -> bool:
+    """Whether any emitted row can be placed in time at all (AD-35, `8a`).
+
+    The Graph half of the rule `gitlab.py._bounded_by_a_credible_clock` states
+    for GitLab, and deliberately the same rule: both connectors fill the same
+    `CoverageWindow | None` slot, and `8a`'s matrix answers this once — *rows
+    returned, no usable clock → harvested something, no coverage claimed*. Graph
+    omitted the second half and claimed coverage for a page whose every
+    timestamp was outside the range that was asked for.
+
+    Like GitLab's, this does **not** supply the window's bounds: those are this
+    machine's clock, because coverage is `ingested_at`. What the rows decide is
+    whether there is any coverage to claim, and a row already carries that
+    verdict — `clock_flag` is `None` exactly when `_clock_flag` believed the
+    provider's instant. Flagging, not rejecting: the rows are still emitted and
+    `33c` still persists them; only the coverage claim is withheld.
+    """
+    return any(row.clock_flag is None for row in rows)
 
 
 # ── Reading provider fields, each in one place ───────────────────────────────

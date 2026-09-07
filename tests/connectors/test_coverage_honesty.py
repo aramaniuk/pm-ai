@@ -237,6 +237,110 @@ def test_a_duplicate_row_across_pages_counts_its_span_once(tmp_path):
     )
 
 
+# ── Rows that came back and could not be read ────────────────────────────────
+#
+# Not a matrix row of its own, and the reason it belongs in this file anyway:
+# the matrix's *partial-page* row says a page that arrived keeps its events and
+# its earned coverage even when something else went wrong. `_to_event`
+# subscripted `row["sha"]`, `row["message"]` and `row["author_email"]`, and the
+# mapping ran outside every `try` in `harvest` — so one row missing one field
+# raised out of the method and took page one's events, page one's real coverage
+# and the outcome with it, one field lower than the row that forbids exactly
+# that.
+
+UNREADABLE = {
+    "sha": "3b7e02",
+    # Not a string, which is the one shape `_to_event` refuses outright: the
+    # message is the evidence a verifier reads, and an invented empty body reads
+    # as a commit that said nothing.
+    "message": None,
+    "author_email": "alex@example.com",
+    "committed_at": NOW - timedelta(hours=1),
+}
+
+
+def test_one_unreadable_row_costs_that_row_and_nothing_beside_it(tmp_path):
+    """The good row, the refusal, and the coverage — all three in one value.
+
+    The coverage is the half that carries the weight. A raise out of the mapping
+    discarded a window this fetch had genuinely earned, and a window discarded
+    is indistinguishable, later, from a window never earned: AD-35's fail-closed
+    guard reads both as "we never looked".
+    """
+    result = connector(_fake_api=[dict(ROWS[0]), dict(UNREADABLE)]).harvest(Cursor())
+
+    assert result.outcome is HarvestOutcome.HARVESTED
+    assert len(result.events) == 1
+    assert result.events[0].payload.sha == ROWS[0]["sha"]
+    (refusal,) = result.refusals
+    assert refusal.identifier == UNREADABLE["sha"], (
+        "the refusal names the row, or nobody can go and look at it"
+    )
+    assert "message" in refusal.reason
+    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW), (
+        "the coverage the fetch earned was discarded along with the row it could "
+        "not read"
+    )
+    assert result.failure is None, "an unreadable row is not a failed fetch"
+
+    wired = daemon(tmp_path, rows=[dict(ROWS[0]), dict(UNREADABLE)])
+    persisted = run_harvest(wired, INSTANCE)
+    assert persisted.persisted == 1
+    assert wired.storage.coverage_windows(INSTANCE) == [(NOW, NOW)]
+    assert wired.storage.harvest_failure(INSTANCE) is None
+
+
+def test_a_committed_at_that_arrives_as_a_string_refuses_one_row_not_the_harvest():
+    """The shape real GitLab sends, and the exception it used to raise.
+
+    `committed_at` on the wire is an ISO **string**. Passed on unparsed it
+    reaches `validate_occurred_at`, whose `_assert_comparable` asks a `str` for
+    `.tzinfo` — an `AttributeError` out of the coverage check, out of `harvest`,
+    and out of `run_harvest`, none of which catch it. So the whole harvest died
+    on a field that is present and well-formed at the provider.
+
+    Refused by name instead, and the credible row beside it keeps its coverage.
+    """
+    stringly = {
+        "sha": "5c1d4e",
+        "message": "committed_at as GitLab really sends it",
+        "author_email": "alex@example.com",
+        "committed_at": "2026-08-19T07:00:00+00:00",
+    }
+    result = connector(_fake_api=[dict(ROWS[0]), stringly]).harvest(Cursor())
+
+    assert result.outcome is HarvestOutcome.HARVESTED
+    assert [event.payload.sha for event in result.events] == [ROWS[0]["sha"]]
+    (refusal,) = result.refusals
+    assert refusal.identifier == "5c1d4e"
+    assert "str" in refusal.reason and "datetime" in refusal.reason
+    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW)
+
+
+def test_a_refused_row_advances_the_cursor_past_itself(tmp_path):
+    """Otherwise the same unreadable row is re-fetched and re-refused forever.
+
+    A refusal is a decision about the row, not a reason to come back for it:
+    re-asking would refuse it identically, and a cursor held back on it would
+    never reach the rows behind it.
+    """
+    wired = daemon(tmp_path, rows=[dict(ROWS[0]), dict(UNREADABLE)])
+    run_harvest(wired, INSTANCE)
+    assert wired.storage.load_cursor(INSTANCE) == Cursor(b"2")
+
+
+def test_a_page_whose_every_row_is_refused_is_harvested_not_empty():
+    """Rows arrived and pm-ai could not read them, which is the one of the two
+    silences that needs somebody to look — so it cannot collapse into EMPTY.
+    """
+    result = connector(_fake_api=[dict(UNREADABLE)]).harvest(Cursor())
+
+    assert result.outcome is HarvestOutcome.HARVESTED
+    assert result.events == ()
+    assert len(result.refusals) == 1
+    assert result.coverage is None, "no event survived, so there is nothing to cover"
+
+
 # ── Rows that returned nothing ───────────────────────────────────────────────
 
 
@@ -471,6 +575,48 @@ def test_a_window_saved_under_a_disagreeing_instance_is_refused(tmp_path):
         wired.storage.save_cursor(INSTANCE, Cursor(b"1"), elsewhere)
     assert "gitlab:beta" in str(refused.value) and INSTANCE in str(refused.value)
     assert wired.storage.coverage_windows("gitlab:beta") == []
+
+
+def test_a_refused_window_leaves_no_cursor_advance_for_a_later_commit_to_promote(tmp_path):
+    """The other half of the refusal: it must not half-write.
+
+    The refusal above used to fire *after* the cursor insert, on a shared
+    connection with no `rollback`, so a refused `save_cursor` left an advance
+    pending — invisible for as long as nothing else committed, and then durable
+    the moment any unrelated write did. That trailing commit is what made the
+    old bug visible, so it is part of this test rather than an afterthought:
+    without it the assertion would pass against a store holding a pending
+    advance that the next real harvest would promote.
+
+    Both-or-neither, the same property the matrix states one method up for a
+    persist that raises after page one.
+    """
+    wired = daemon(tmp_path, rows=ROWS)
+    assert wired.storage.load_cursor(INSTANCE) == Cursor()
+    elsewhere = CoverageWindow("gitlab:beta", NOW, NOW)
+
+    with pytest.raises(CoverageInstanceMismatch):
+        wired.storage.save_cursor(INSTANCE, Cursor(b"99"), elsewhere)
+
+    assert wired.storage.load_cursor(INSTANCE) == Cursor(), (
+        "the refused save left its cursor insert pending on the connection"
+    )
+
+    # An unrelated, entirely legitimate write, which commits — and would carry
+    # the pending advance with it.
+    wired.storage.save_cursor("gitlab:beta", Cursor(b"1"), None)
+
+    assert wired.storage.load_cursor(INSTANCE) == Cursor(), (
+        "a later commit promoted the cursor advance the refusal was supposed to "
+        "have discarded"
+    )
+    assert wired.storage.load_cursor("gitlab:beta") == Cursor(b"1"), (
+        "the rollback must discard the refused write and nothing else"
+    )
+
+    restarted = build(tmp_path, "alpha", now=lambda: NOW)
+    assert restarted.storage.load_cursor(INSTANCE) == Cursor(), "and it did not outlive the process"
+    assert restarted.storage.coverage_windows("gitlab:beta") == []
 
 
 @pytest.mark.parametrize(
