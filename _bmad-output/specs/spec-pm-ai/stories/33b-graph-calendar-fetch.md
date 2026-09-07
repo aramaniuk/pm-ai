@@ -2,7 +2,8 @@
 title: 'Graph calendar fetch'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: 'bf327c84049d4cbcd896694de0d4f3114aa2f274'
 review_loop_iteration: 0
 ---
 
@@ -70,9 +71,10 @@ Split from the original `33b` on 2026-09-02 at the sizing gate: fetching Graph c
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/client.py` -- paging, 429 handling, the `Prefer` header, and 401 refresh-and-retry
-- [ ] `pm_ai/connectors/graph/calendar.py` -- `CalendarRow`, the fetch, UTC conversion, window clamping, `MalformedCalendarRow`
-- [ ] `tests/connectors/test_graph_calendar_fetch.py` -- the matrix against recorded Graph payload fixtures; no network in any test
+- [x] `pm_ai/connectors/graph/client.py` -- paging, 429 handling, the `Prefer` header, and 401 refresh-and-retry
+- [x] `pm_ai/connectors/graph/calendar.py` -- `CalendarRow`, the fetch, UTC conversion, window **splitting**, `MalformedCalendarRow`
+- [x] `pyproject.toml` -- `tzdata` declared, per the Boundaries clause that names it
+- [x] `tests/connectors/test_graph_calendar_fetch.py` -- the matrix against Graph payload fixtures built to slice 0's measured shapes; no network in any test
 
 **Acceptance Criteria:**
 - Given a recorded `calendarView` payload whose times are in a non-UTC mailbox zone, then every emitted row's start is the correct aware-UTC instant — the case that otherwise refuses every event in the tenant.
@@ -103,3 +105,62 @@ Converting defensively even with the `Prefer` header sent is deliberate belt-and
 - `uv run pytest tests/connectors/test_graph_calendar_fetch.py -q` -- expected: all matrix rows pass, no network
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: contracts kept
+
+## Suggested Review Order
+
+**Start here — one authenticated read, bounded four ways**
+
+- The walk: origin check before a link is followed, a seen-link set, a page cap, a wall-clock budget.
+  [`client.py:753`](../../../../pm_ai/connectors/graph/client.py#L753)
+
+- The status dispatch — 401 refreshes once, 403 is a consent change and never a refresh.
+  [`client.py:623`](../../../../pm_ai/connectors/graph/client.py#L623)
+
+- The only production transport, and now the one every status classification is verified against.
+  [`client.py:419`](../../../../pm_ai/connectors/graph/client.py#L419)
+
+- Redirects refused, because `HTTPRedirectHandler` copies `Authorization` to the new URL.
+  [`client.py:370`](../../../../pm_ai/connectors/graph/client.py#L370)
+
+- A status this client does not interpret gets its own refusal rather than a wrong one.
+  [`client.py:248`](../../../../pm_ai/connectors/graph/client.py#L248)
+
+- The hint honoured in both spellings, and unable to raise out of the 429 branch.
+  [`client.py:914`](../../../../pm_ai/connectors/graph/client.py#L914)
+
+**Time, converted once**
+
+- `{dateTime, timeZone}` to aware UTC — defensively, even with the `Prefer` header sent.
+  [`calendar.py:383`](../../../../pm_ai/connectors/graph/calendar.py#L383)
+
+- Windows ids resolved through CLDR, and a zone in no map refuses its row by name.
+  [`calendar.py:334`](../../../../pm_ai/connectors/graph/calendar.py#L334)
+
+- The 139-row map, and why `tzdata` is a declared dependency.
+  [`calendar.py:166`](../../../../pm_ai/connectors/graph/calendar.py#L166)
+
+**The window, split and never clamped**
+
+- Servable spans walked in order; `walked_through` advances only past one fully answered.
+  [`calendar.py:794`](../../../../pm_ai/connectors/graph/calendar.py#L794)
+
+- Both widths required, because the Ask First reserves them for a human.
+  [`calendar.py:531`](../../../../pm_ai/connectors/graph/calendar.py#L531)
+
+- The 240-minute floor: a window narrower than the cycle leaves a gap the next run skips.
+  [`calendar.py:133`](../../../../pm_ai/connectors/graph/calendar.py#L133)
+
+- The same coverage rule `8a` states for GitLab — no credible clock, no claim.
+  [`calendar.py:1031`](../../../../pm_ai/connectors/graph/calendar.py#L1031)
+
+**Peripherals**
+
+- `tzdata` declared unpinned, deliberately: the IANA database is the moving target.
+  [`pyproject.toml:82`](../../../../pyproject.toml#L82)
+
+- The 21 matrix rows against a fake transport; no socket, no sleep.
+  [`test_graph_calendar_fetch.py:1`](../../../../tests/connectors/test_graph_calendar_fetch.py#L1)
+
+- The transport itself, with the opener patched in-process.
+  [`test_graph_transport.py:1`](../../../../tests/connectors/test_graph_transport.py#L1)
+

@@ -15,9 +15,15 @@ from typing import Protocol, runtime_checkable
 from pm_ai.domain.disclosure import DisclosureRecord
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import NormalizedEvent, ObservedEventType
-from pm_ai.domain.harvest import Cursor, HarvestResult, PersistResult
+from pm_ai.domain.harvest import (
+    Cursor,
+    HarvestFailure,
+    HarvestResult,
+    PersistResult,
+)
 from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
+from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.vcs import TrackingVerdict
 
 
@@ -554,7 +560,42 @@ class StoragePort(Protocol):
 
     def persist_events(self, events: tuple[NormalizedEvent, ...], *, scope: DataScope) -> PersistResult: ...
     def load_cursor(self, instance: str) -> Cursor: ...
-    def save_cursor(self, instance: str, cursor: Cursor, coverage: object) -> None: ...
+
+    def save_cursor(
+        self,
+        instance: str,
+        cursor: Cursor,
+        coverage: CoverageWindow | None,
+        failure: HarvestFailure | None,
+    ) -> None:
+        """Where a harvest got to, what it covered, whether it failed (AD-35).
+
+        `coverage` was typed `object` here and read through three `getattr` calls
+        in the single writer, so "accepts an absent window explicitly" was a
+        claim no type carried: any object at all satisfied it, and a caller
+        handing over the wrong thing was a runtime discovery rather than a mypy
+        error. `CoverageWindow | None` is the rule — absence is the ordinary
+        answer for a provider that returned nothing, and it is now the *only*
+        other thing this parameter takes.
+
+        **`failure` has no default, and that is the same rule one field over.**
+        Passing `None` *deletes* the `harvest_failures` row — the write that says
+        "this connector is working again" — so a default would let any
+        three-argument call silently repair a dead connector, and
+        `evaluate_commitment` would read a broken machine as patience. It is
+        stated for the reason `harvest_failed`, `HarvestFailure.retryable` and
+        `WindowPolicy`'s two widths are all required: the caller knows which of
+        the three outcomes it had, and a default here would answer on its behalf.
+        """
+
+    def harvest_failure(self, instance: str) -> HarvestFailure | None:
+        """The last harvest failure for `instance`, or `None` if the last one worked.
+
+        Declared here because `evaluate_commitment` requires `harvest_failed` and
+        had no source for it: a failed harvest and an empty one both persisted as
+        the absence of a coverage window, so after a restart they were one state
+        and a dead credential resolved to `UNKNOWN` — patience, forever.
+        """
     def was_executed(self, idempotency_key: str) -> bool: ...
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None: ...
     # Reads, added with story 2h. The port declared only writes, so an accessor

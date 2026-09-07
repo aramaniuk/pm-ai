@@ -32,8 +32,20 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # decided. Without it, pm-ai's own writes harvest back as external evidence.
     attributed = attribute_all(result.events, daemon.storage.executed_mutations())
 
+    # Persist first, then record where the harvest got to. The order is the
+    # matrix row about a persist that raises after page one: `persist_events` is
+    # all-or-nothing, and this call sequence means a refusal there discards page
+    # one's cursor *and* its coverage together rather than leaving a cursor that
+    # advanced past events nobody stored.
     persisted = daemon.storage.persist_events(attributed, scope=daemon.scope)
-    daemon.storage.save_cursor(instance, result.cursor, result.coverage)  # AD-35
+    # AD-35 — `result.coverage` is `CoverageWindow | None` and `None` is passed
+    # through as itself. A harvest that learned nothing records no window: the
+    # connector used to fabricate one from the clock to satisfy a mandatory
+    # field, and the fail-closed guard read that fabrication as evidence.
+    #
+    # `result.failure` travels with it, in the same write, so "ran and failed"
+    # survives the process as something other than the absence of coverage.
+    daemon.storage.save_cursor(instance, result.cursor, result.coverage, result.failure)
     return persisted
 
 

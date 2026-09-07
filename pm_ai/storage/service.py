@@ -54,9 +54,9 @@ from pm_ai.domain.event_entries import (
     render_entry,
 )
 from pm_ai.domain.events import NormalizedEvent
-from pm_ai.domain.harvest import Cursor, PersistResult
+from pm_ai.domain.harvest import Cursor, HarvestFailure, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
-from pm_ai.domain.lifecycle import ProposalState
+from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.storage_tiers import (
     CAPTURES,
@@ -107,6 +107,13 @@ CREATE TABLE IF NOT EXISTS coverage (
     start    TEXT NOT NULL,
     end      TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS harvest_failures (
+    instance    TEXT PRIMARY KEY,
+    reason      TEXT NOT NULL,
+    retryable   INTEGER NOT NULL,
+    retry_after REAL,
+    at          TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS executed (
     key         TEXT PRIMARY KEY,
     lock_key    TEXT NOT NULL,
@@ -134,6 +141,15 @@ CREATE TABLE IF NOT EXISTS schema_version (
 # migration behind it stamps a store that was never changed, and a migration
 # with no version behind it runs on every open.
 SCHEMA_VERSION = 1
+
+# Not bumped by story `8a`, which added the `harvest_failures` table, and the
+# reason is the same one `_migrate`'s docstring gives for why it exists at all.
+# `CREATE TABLE IF NOT EXISTS` is a no-op on a store that has the table and
+# *creates* it on one that does not, and `_SCHEMA` runs on every open — so a new
+# table is picked up by a version-1 store without a migration step. What that
+# statement cannot do is add a column to a table that already exists, which is
+# the case migration 1 was written for. A version bump with no migration behind
+# it would stamp a store nothing changed.
 
 # Version 0 is the *unversioned era* — every store written before this story.
 # It is not a shape: two stores can both be at 0 and differ, because the era had
@@ -500,6 +516,17 @@ class ReconciliationRequired(RuntimeError):
 
     Retrying is not safe and neither is assuming success. The operator, or a
     provider-side idempotency token, resolves it.
+    """
+
+
+class CoverageInstanceMismatch(ValueError):
+    """A coverage window was offered under one instance and saved under another.
+
+    Coverage rows are keyed on `CoverageWindow.connector_instance` and read back
+    by instance, so the two disagreeing is not a cosmetic slip: the window lands
+    where nothing looks for it, the instance that harvested reads as uncovered,
+    and an absence assertion over the intended key passes with a real row on
+    disk. Refused at the write, where both names are still in scope.
     """
 
 
@@ -1524,20 +1551,171 @@ class StorageService:
         ).fetchone()
         return Cursor(row[0]) if row else Cursor()
 
-    def save_cursor(self, instance: str, cursor: Cursor, coverage: object) -> None:
+    def save_cursor(
+        self,
+        instance: str,
+        cursor: Cursor,
+        coverage: CoverageWindow | None,
+        failure: HarvestFailure | None,
+    ) -> None:
+        """Record where a harvest got to, what it covered, and whether it failed.
+
+        One statement group and one `commit`, because these three are one fact
+        about one attempt. Split across two writes, a crash in between leaves a
+        cursor that advanced past events whose coverage was never recorded.
+
+        `coverage: CoverageWindow | None` **by signature**, not by duck-typing.
+        It was `object`, read through three `getattr` calls, which meant "accepts
+        an absent window explicitly" was aspirational: any object at all was
+        accepted, a misspelled attribute silently became "no coverage", and mypy
+        could not see a caller passing the wrong thing. Absence is the ordinary
+        answer now — a provider that returned an empty `200` covered nothing —
+        so the type says so.
+
+        `failure=None` records "the last attempt did not fail", and that is a
+        write rather than a no-op: a failure that outlived its repair reads as
+        `ERROR` forever, so a successful attempt clears the row. The row is
+        current state, not history — `evaluate_commitment` asks whether this
+        connector is broken *now*.
+
+        Which is exactly why `failure` has **no default**. Because passing `None`
+        deletes a durable row, a default would have made every three-argument
+        call — a cursor restore, a test replay, a caller written before this
+        parameter existed — report a dead connector as repaired, silently. The
+        caller always knows which of `8a`'s three outcomes it had, so it says.
+
+        **Validated before the first `execute`, and rolled back if anything
+        after it raises.** The refusal below used to fire *after* the cursor
+        insert, on a connection with no `rollback`, so a refused save left the
+        cursor advance pending — and the next unrelated `commit()` on this
+        shared connection promoted it. A refused write that durably advances a
+        cursor is the same both-or-neither property the matrix states one method
+        up for a persist that raises after page one, and it is stated here
+        rather than left to statement order.
+        """
+        if coverage is not None and coverage.connector_instance != instance:
+            # Refused rather than silently stored under the window's own key.
+            # `coverage_windows(instance)` reads back by this column, so a
+            # window whose `connector_instance` disagrees with the instance
+            # being saved lands where nothing looks for it — and an absence
+            # assertion over the intended key passes while the row exists.
+            raise CoverageInstanceMismatch(
+                f"coverage for {coverage.connector_instance!r} was offered "
+                f"while saving the cursor for {instance!r}. The window is "
+                f"stored under its own `connector_instance` and read back by "
+                f"instance, so storing this would file real coverage where "
+                f"nothing reads it and leave {instance!r} looking uncovered."
+            )
+        try:
+            self._write_cursor(instance, cursor, coverage, failure)
+        except Exception:
+            # Nothing this method wrote may survive a refusal it raised. The
+            # connection is shared, so a pending statement is not discarded by
+            # leaving this frame — it waits for whoever commits next.
+            self._db.rollback()
+            raise
+        self._db.commit()
+
+    def _write_cursor(
+        self,
+        instance: str,
+        cursor: Cursor,
+        coverage: CoverageWindow | None,
+        failure: HarvestFailure | None,
+    ) -> None:
+        """The three statements `save_cursor` commits, with nothing decided here.
+
+        Split out so the caller owns the transaction — validate, write, commit
+        or roll back — rather than interleaving a raise with half the writes.
+        """
         self._db.execute(
             "INSERT INTO cursors (instance, token) VALUES (?, ?) "
             "ON CONFLICT(instance) DO UPDATE SET token = excluded.token",
             (instance, cursor.token),
         )
-        start = getattr(coverage, "start", None)
-        end = getattr(coverage, "end", None)
-        if start is not None and end is not None:
+        if coverage is not None:
+            # `WHERE NOT EXISTS` rather than a plain insert, and what it buys
+            # is replay idempotence, not range deduplication. A window is
+            # recorded in `ingested_at` terms, so two harvests of one calendar
+            # range happen at two different instants and are two real windows —
+            # there is nothing to collapse. What this stops is a *retried* save
+            # of one `HarvestResult`, whose bounds are byte-identical. The
+            # constraint is in the statement rather than in a `UNIQUE` index
+            # because Tier 2 is never rebuilt (AD-3) — creating a unique index
+            # on every open would refuse to start against a store that already
+            # holds a duplicate from the era that inserted unconditionally.
             self._db.execute(
-                "INSERT INTO coverage (instance, start, end) VALUES (?, ?, ?)",
-                (getattr(coverage, "connector_instance", instance), start.isoformat(), end.isoformat()),
+                "INSERT INTO coverage (instance, start, end) "
+                "SELECT ?, ?, ? WHERE NOT EXISTS ("
+                "  SELECT 1 FROM coverage WHERE instance = ? AND start = ? AND end = ?"
+                ")",
+                (
+                    coverage.connector_instance,
+                    coverage.start.isoformat(),
+                    coverage.end.isoformat(),
+                    coverage.connector_instance,
+                    coverage.start.isoformat(),
+                    coverage.end.isoformat(),
+                ),
             )
-        self._db.commit()
+        if failure is None:
+            self._db.execute("DELETE FROM harvest_failures WHERE instance = ?", (instance,))
+        else:
+            self._db.execute(
+                "INSERT INTO harvest_failures (instance, reason, retryable, retry_after, at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(instance) DO UPDATE SET "
+                "  reason = excluded.reason, retryable = excluded.retryable, "
+                "  retry_after = excluded.retry_after, at = excluded.at",
+                (
+                    instance,
+                    failure.reason,
+                    int(failure.retryable),
+                    failure.retry_after.total_seconds()
+                    if failure.retry_after is not None
+                    else None,
+                    # This service's clock, not `failure.at`. The connector reads
+                    # its own clock for coverage bounds; when a row was written is
+                    # the single writer's fact (AD-5, AD-30), and taking it from
+                    # the value would let a connector with a skewed clock date a
+                    # failure into next week. `harvest_failure()` reads it back.
+                    self._at().isoformat(),
+                ),
+            )
+
+    def harvest_failure(self, instance: str) -> HarvestFailure | None:
+        """The last harvest failure for `instance`, or `None` if the last one worked.
+
+        The source `evaluate_commitment`'s required `harvest_failed` never had.
+        Both "ran and learned nothing" and "ran and failed" used to persist as
+        the absence of a coverage window, so once the process exited they were
+        one state — and a connector with a dead token read as a sleeping laptop,
+        which resolves to `UNKNOWN` and waits forever.
+
+        `at` comes back with it. The column was written from the first commit and
+        read by nothing, which made the age of a failure unknowable: "this token
+        is dead" recorded three minutes ago and the same sentence recorded in
+        March are one row to a reader that cannot see when it was stamped, and
+        Tier 2 is never rebuilt, so there is no second place to recover it from.
+        """
+        row = self._db.execute(
+            "SELECT reason, retryable, retry_after, at FROM harvest_failures "
+            "WHERE instance = ?",
+            (instance,),
+        ).fetchone()
+        if row is None:
+            return None
+        reason, retryable, retry_after, at = row
+        return HarvestFailure(
+            reason=reason,
+            retryable=bool(retryable),
+            retry_after=timedelta(seconds=retry_after) if retry_after is not None else None,
+            # Stored as an ISO string by `_write_cursor`; `None` only for a row
+            # written before this column was read, which no shipped version
+            # produced — Tier 2 is never rebuilt, so tolerated rather than
+            # assumed absent.
+            at=datetime.fromisoformat(at) if at is not None else None,
+        )
 
     def coverage_windows(self, instance: str) -> list[tuple[datetime, datetime]]:
         """AD-35 — what the sweeper consults before it may say BROKEN."""
