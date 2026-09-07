@@ -2,7 +2,7 @@
 title: 'Honest harvest outcomes and coverage'
 type: 'bugfix'
 created: '2026-09-02'
-status: 'in-review'
+status: 'done'
 baseline_commit: 'c3a2703f919f5405f66e664be382ebed82078935'
 review_loop_iteration: 1
 ---
@@ -104,3 +104,56 @@ Making coverage optional is the load-bearing change, and it is a type-level one:
 - `uv run pytest tests/connectors/test_coverage_honesty.py -q` -- expected: all matrix rows pass
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: contracts kept
+
+## Suggested Review Order
+
+**Start here — the type that made the lie necessary**
+
+- Three states, so a connector that learned nothing has a way to say so instead of inventing a window.
+  [`harvest.py:60`](../../../../pm_ai/domain/harvest.py#L60)
+
+- The guards that stop the outcome becoming a decoration; read `__post_init__` before any connector.
+  [`harvest.py:194`](../../../../pm_ai/domain/harvest.py#L194)
+
+- Coverage is `ingested_at`, and deliberately has no `covers()` — the docstring says why.
+  [`lifecycle.py:158`](../../../../pm_ai/domain/lifecycle.py#L158)
+
+**The fabrication, deleted**
+
+- Coverage derived from what came back: gated on a surviving event, bounded by this machine's clock.
+  [`gitlab.py:394`](../../../../pm_ai/connectors/gitlab.py#L394)
+
+- Reads the rows that survived, never the raw page — a refused row's clock earns nothing.
+  [`gitlab.py:349`](../../../../pm_ai/connectors/gitlab.py#L349)
+
+- Refuses a row rather than raising, so one bad field cannot discard the page's earned coverage.
+  [`gitlab.py:203`](../../../../pm_ai/connectors/gitlab.py#L203)
+
+- A row that came back and could not be read, counted — the only thing separating it from an empty provider.
+  [`harvest.py:139`](../../../../pm_ai/domain/harvest.py#L139)
+
+- The bound a provider-controlled loop needs; cites Graph's argument rather than restating it.
+  [`gitlab.py:66`](../../../../pm_ai/connectors/gitlab.py#L66)
+
+**The failure, given somewhere to live**
+
+- Validates the instance before the first write, so a refusal leaves no advance for a later commit to promote.
+  [`service.py:1554`](../../../../pm_ai/storage/service.py#L1554)
+
+- The read-back `evaluate_commitment`'s `harvest_failed` never had, with the age of the failure surfaced.
+  [`service.py:1686`](../../../../pm_ai/storage/service.py#L1686)
+
+- Reason, retryable and `at` — `retryable` has no default because a fault nobody classified is not a promise.
+  [`harvest.py:90`](../../../../pm_ai/domain/harvest.py#L90)
+
+- One rule both connectors cite, instead of two that disagreed by provider.
+  [`harvest.py:28`](../../../../pm_ai/domain/harvest.py#L28)
+
+**Peripherals**
+
+- Passes the coverage and the failure through; persist-then-save ordering stated.
+  [`pipelines.py:20`](../../../../pm_ai/app/pipelines.py#L20)
+
+- The eleven matrix rows, plus the refusal cases and the two coverage directions.
+  [`test_coverage_honesty.py:1`](../../../../tests/connectors/test_coverage_honesty.py#L1)
+
