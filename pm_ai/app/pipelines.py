@@ -60,7 +60,12 @@ def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: s
     # owned by `personal` or `people` cannot be cited from a git-committed scope,
     # and every extraction below will cite this meeting (AD-33).
     assert_citation_legal(cited=meeting.scope, into=daemon.scope)
-    daemon.meetings[meeting.meeting_id] = meeting  # Tier-1 record, the citation root
+    # The Tier-1 record, and the citation root every extraction below points at
+    # (AD-33). Through the accessor since story 11a: this was an assignment into
+    # a process-lifetime dict, so the record a citation resolved against was gone
+    # the moment the daemon stopped. `meeting.scope` decides which tree it lands
+    # in, which is why the check above runs first.
+    daemon.meetings.put(meeting)
     results = extract(transcript, meeting, pm_handle=daemon.pm_handle, provider=provider)
 
     executed, staged = [], []
