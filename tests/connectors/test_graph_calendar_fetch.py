@@ -29,25 +29,30 @@ knew Graph sends.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-from pm_ai.connectors.graph.auth import CredentialStale
+import pm_ai.connectors.graph.calendar as calendar_module
+from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+from pm_ai.connectors.graph.auth import AuthTimedOut, CredentialStale, GraphUnreachable
 from pm_ai.connectors.graph.client import (
     DEFAULT_THROTTLE_BACKOFF,
     GRAPH_BASE,
     PREFER_UTC,
     ConsentChanged,
+    GraphCallFailed,
     GraphClient,
     GraphProtocolError,
     GraphRequest,
     GraphResponse,
     GraphThrottled,
+    GraphUninterpretedStatus,
 )
 from pm_ai.connectors.graph.calendar import (
     HARVEST_CYCLE,
     WINDOWS_TIMEZONES,
+    CalendarRowRefused,
     CalendarWindow,
     GraphCalendarFetch,
     MalformedCalendarRow,
@@ -57,6 +62,8 @@ from pm_ai.connectors.graph.calendar import (
     zone_of,
 )
 from pm_ai.domain.clocks import ImplausibleTimestamp
+from pm_ai.domain.harvest import UNCLASSIFIED_FAULT_IS_RETRYABLE, Cursor
+from pm_ai.domain.identity import DataScope, ScopeKind
 
 BASE = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
 """This machine's clock at the instant every fetch below starts."""
@@ -481,17 +488,83 @@ def test_every_mapped_windows_zone_resolves_on_this_machine(windows_id, iana):
 
     A hand-written mapping table with one wrong IANA name refuses every event
     for one region and nothing else, which is the failure nobody notices. This
-    is the assertion that makes the table's 139 rows evidence rather than a
-    claim.
+    is the assertion that makes the table's rows evidence rather than a claim.
+
+    The identity assertion is what makes it exercise *the map*. `zone_of` tries
+    the UTC spellings first, so a mapped id that also happens to be one of them
+    was answered by the short-circuit and this test never touched the mapping
+    for it — which was true of exactly one row, CLDR's `UTC`, now removed as
+    unreachable. Comparing the resolved zone to `ZoneInfo(iana)` by equality
+    rather than only by offset is what would fail if such a row came back.
     """
     resolved = zone_of(windows_id)
-    assert ZoneInfo(iana), "the mapped IANA name loads on this machine"
+    assert resolved == ZoneInfo(iana), (
+        "the id was resolved by something other than the mapping — a row whose "
+        "key is short-circuited above is a row this test does not cover"
+    )
     for instant in (datetime(2026, 1, 15, 12), datetime(2026, 7, 15, 12)):
         # Both sides of a DST boundary, because a zone that agrees in January
         # and disagrees in July is the mapping error worth catching.
         assert instant.replace(tzinfo=resolved).utcoffset() == instant.replace(
             tzinfo=ZoneInfo(iana)
         ).utcoffset()
+
+
+def test_a_utc_mailbox_harvests_with_no_timezone_database_and_only_others_refuse(
+    monkeypatch,
+):
+    """The `_UTC_SPELLINGS` short-circuit's whole claim, and it had no test.
+
+    It is also the argument that justifies the `tzdata` dependency: with no
+    database at all, "a machine with no `tzdata` and no system zoneinfo still
+    harvests a UTC mailbox correctly, and only a non-UTC one refuses, which is a
+    far better failure than every row refusing". Both halves are asserted here
+    against a `ZoneInfo` that raises for everything, which is what such a
+    machine looks like from inside this module.
+    """
+
+    def no_database(name: str):
+        raise ZoneInfoNotFoundError(f"no time zone found with key {name}")
+
+    monkeypatch.setattr(calendar_module, "ZoneInfo", no_database)
+
+    fetch, _, _, _, _ = _fetcher(
+        _page(
+            _event(id="utc-mailbox"),
+            _event(id="berlin-mailbox", start=_zoned("2026-09-07T09:00:00", "Europe/Berlin")),
+            _event(
+                id="windows-mailbox",
+                start=_zoned("2026-09-07T09:00:00", "W. Europe Standard Time"),
+            ),
+        )
+    )
+    result = fetch.fetch()
+
+    assert [row.event_id for row in result.rows] == ["utc-mailbox"], (
+        "the ordinary case needs no database and must still harvest"
+    )
+    assert result.rows[0].start == datetime(2026, 9, 7, 10, 0, tzinfo=timezone.utc)
+    assert {refusal.event_id for refusal in result.refusals} == {
+        "berlin-mailbox",
+        "windows-mailbox",
+    }
+    for refusal in result.refusals:
+        assert "tzdata" in refusal.reason, "the remedy is the point of the refusal"
+    assert result.coverage is not None, "one mailbox was really read"
+
+
+def test_the_public_surface_names_the_base_refusal_and_the_zone_resolver():
+    """`__all__` is what a caller is told it may use.
+
+    `CalendarRowRefused` exists to be caught — its whole docstring is that the
+    fetcher's handling of both subclasses is identical — and it was absent while
+    both subclasses were listed. `zone_of` was absent while its sibling `to_utc`,
+    which cannot answer without it, was listed; this file imports it.
+    """
+    assert "CalendarRowRefused" in calendar_module.__all__
+    assert "zone_of" in calendar_module.__all__
+    assert issubclass(MalformedCalendarRow, CalendarRowRefused)
+    assert issubclass(UnresolvableTimezone, CalendarRowRefused)
 
 
 def test_a_zone_in_no_map_refuses_its_own_row_and_the_batch_continues():
@@ -706,6 +779,80 @@ def test_a_throttle_is_its_own_refusal_type_carrying_the_hint():
     assert throttled.value.retryable is True
 
 
+@pytest.mark.parametrize("stated", ["inf", "-inf", "1e400", "nan"])
+def test_a_retry_after_that_is_not_a_duration_falls_back_to_the_default(stated):
+    """`timedelta(seconds=float("inf"))` raises `OverflowError`, from inside the
+    429 branch — where nothing caught it.
+
+    So a header value could destroy the whole classification: the throttle, the
+    retryable verdict and the hint all went up as "a fault nobody classified",
+    non-retryable, which tells an operator to go and look at a rate limit that
+    would have cleared itself. `1e400` is the one that arrives without anybody
+    meaning it: `float` reads it as `inf` rather than refusing it.
+    """
+    fetch, _, _, _, waits = _fetcher(
+        GraphResponse(status=429, headers={"Retry-After": stated}),
+        _page(_event()),
+    )
+    result = fetch.fetch()
+
+    assert waits.seconds == [DEFAULT_THROTTLE_BACKOFF.total_seconds()], (
+        "a value that is not a duration is no hint at all, and 'honoured' for a "
+        "429 with no hint is the stated default"
+    )
+    assert result.failure is None
+    assert len(result.rows) == 1
+
+
+def test_an_absurd_retry_after_is_clamped_to_the_run_rather_than_raising():
+    """A finite number `timedelta` cannot hold — 1e30 seconds — is the same bug.
+
+    Clamped to the run's budget, which is the longest delay this call could ever
+    have honoured, and the raw value the provider stated is in the refusal for
+    whoever reads it. The outcome is the matrix row it belongs to: a hint past
+    the budget returns what was walked, retryable, with the hint travelling.
+    """
+    fetch, _, _, _, waits = _fetcher(
+        _page(_event(id="page-one-row"), next_link=_link(2)),
+        GraphResponse(status=429, headers={"Retry-After": "1e30"}),
+        budget=timedelta(minutes=10),
+    )
+    result = fetch.fetch()
+
+    assert waits.seconds == [], "nothing was waited out"
+    assert [row.event_id for row in result.rows] == ["page-one-row"]
+    assert result.failure is not None
+    assert result.failure.retryable is True, (
+        "the OverflowError used to escape as an unclassified, non-retryable "
+        "fault, losing a throttle that clears itself"
+    )
+    assert result.failure.retry_after == timedelta(minutes=10)
+    assert "1e30" in result.failure.reason, "the provider's own words, unparsed"
+
+
+def test_a_client_with_no_way_to_wait_refuses_instead_of_re_asking_immediately():
+    """`GraphClient.wait` defaults to *not waiting*, and nothing in `pm_ai`
+    constructs a client yet — so the first composition is `33c`'s.
+
+    A forgotten `wait` there would have turned every honoured `Retry-After` into
+    an immediate retry against a provider that is rate-limiting: one 429 into
+    three, and no test anywhere would have observed it, because every test here
+    injects a recorder. So the default is recognised by identity — the shape
+    `gitlab.check_health` uses for its stubbed transport — and the hint is
+    handed to the daemon instead of being spun through.
+    """
+    transport = Transport(GraphResponse(status=429, headers={"Retry-After": "5"}))
+    client = GraphClient(auth=Auth(), transport=transport, now=Clock())
+
+    with pytest.raises(GraphThrottled) as refused:
+        client.page(f"{GRAPH_BASE}/me/calendarView")
+
+    assert refused.value.retry_after == timedelta(seconds=5)
+    assert refused.value.retryable is True, "the daemon is being asked to come back"
+    assert "no way to wait" in str(refused.value)
+    assert len(transport.requests) == 1, "the page was not re-asked through a no-op sleep"
+
+
 def test_a_retry_after_in_the_past_is_zero_rather_than_negative():
     """A date already gone means "now", and a negative interval reads as nonsense."""
     client = GraphClient(auth=Auth(), transport=Transport(), now=Clock())
@@ -837,6 +984,34 @@ def test_a_403_is_its_own_refusal_type():
         client.page(f"{GRAPH_BASE}/me/calendarView")
 
 
+@pytest.mark.parametrize("status", [100, 204, 304, 302])
+def test_a_status_this_client_does_not_interpret_gets_its_own_refusal(status):
+    """The final branch caught everything left over and called it a 4xx.
+
+    So a 304 — or any 1xx or 3xx that reaches the dispatch — was reported as "a
+    request pm-ai got wrong rather than a provider fault", which sends an
+    operator to fix a request Graph never rejected. Named instead, with the code
+    in the sentence so the reading that is missing can be added.
+
+    A 204 is in the list on purpose: it is a 2xx, so it takes the *other* path —
+    a success with no JSON object to read, refused as such. The two must not
+    collapse into one another.
+    """
+    client = GraphClient(
+        auth=Auth(), transport=Transport(GraphResponse(status=status)), now=Clock()
+    )
+    with pytest.raises(GraphCallFailed) as refused:
+        client.page(f"{GRAPH_BASE}/me/calendarView")
+
+    assert str(status) in str(refused.value)
+    assert refused.value.retryable is False
+    if 200 <= status < 300:
+        assert not isinstance(refused.value, GraphUninterpretedStatus)
+    else:
+        assert isinstance(refused.value, GraphUninterpretedStatus)
+        assert "interprets" in str(refused.value)
+
+
 def test_a_provider_body_is_never_pasted_into_a_durable_failure_reason():
     """`HarvestFailure.reason` is written to Tier 2 and read back into reports.
 
@@ -928,6 +1103,23 @@ def test_a_window_narrower_than_the_harvest_cycle_is_refused_at_construction():
     assert WindowPolicy(width=HARVEST_CYCLE, first_run_reach_back=HARVEST_CYCLE).width == (
         HARVEST_CYCLE
     ), "exactly the cycle is permitted — the floor is the cycle, not more than it"
+
+
+def test_a_first_run_that_reaches_back_less_than_a_later_one_is_refused():
+    """`WindowPolicy`'s *other* construction refusal, which nothing asserted.
+
+    Replacing its condition with `if False:` left the suite green — a guard no
+    test exercises is a guard that can be deleted by accident. What it prevents
+    is quiet nonsense rather than a crash: a first run reaching back six hours
+    while every later run reaches back eight means the first harvest covers less
+    history than the second, and the operator who configured "reach back six
+    hours" gets eight anyway on run two.
+    """
+    with pytest.raises(ValueError, match="less history than the second"):
+        WindowPolicy(width=WIDTH, first_run_reach_back=WIDTH - timedelta(minutes=1))
+    assert WindowPolicy(width=WIDTH, first_run_reach_back=WIDTH).first_run_reach_back == WIDTH, (
+        "equal is permitted — the floor is `width`, not more than it"
+    )
 
 
 def test_the_window_policy_answers_nothing_the_ask_first_reserves():
@@ -1160,6 +1352,46 @@ def test_every_unreadable_start_shape_is_a_malformed_row(start):
         to_utc(start, field_name="start", event_id="an-event")
 
 
+def test_an_extreme_year_in_an_offset_zone_refuses_its_row_not_the_window():
+    """Graph really sends `0001-01-01` — it is what an unset date-time looks like.
+
+    Convert one from a zone *ahead* of UTC and the arithmetic walks off the low
+    end of `datetime`: `OverflowError`, raised from inside the standard library.
+    That is not a `CalendarRowRefused`, so it escaped the per-row handler and
+    landed in `fetch`'s broad `except` — one unset provider field abandoning
+    every remaining span of the window, and reporting the whole harvest as a
+    fault nobody could classify.
+    """
+    with pytest.raises(MalformedCalendarRow, match="UTC"):
+        to_utc(
+            {"dateTime": "0001-01-01T00:00:00.0000000", "timeZone": "Asia/Tokyo"},
+            field_name="start",
+            event_id="the-unset-one",
+        )
+
+    fetch, transport, _, _, _ = _fetcher(
+        _page(
+            _event(
+                id="the-unset-one",
+                start=_zoned("0001-01-01T00:00:00", "Asia/Tokyo"),
+                end=_zoned("0001-01-01T01:00:00", "Asia/Tokyo"),
+            ),
+            next_link=_link(2),
+        ),
+        _page(_event(id="the-page-behind-it")),
+    )
+    result = fetch.fetch()
+
+    assert [row.event_id for row in result.rows] == ["the-page-behind-it"], (
+        "the rest of the walk continued"
+    )
+    (refusal,) = result.refusals
+    assert refusal.event_id == "the-unset-one"
+    assert result.failure is None, "one unreadable instant is not a failed fetch"
+    assert result.walked_through == result.window.end
+    assert len(transport.requests) == 2
+
+
 def test_a_start_years_in_the_future_is_flagged_and_the_batch_still_returns():
     """Matrix: flagged per AD-35; the batch still returns.
 
@@ -1319,6 +1551,38 @@ def test_the_calendar_view_request_carries_the_range_and_nothing_unmeasured():
     assert result.window == CalendarWindow(start=BASE - REACH_BACK, end=BASE + WIDTH)
 
 
+def test_nothing_this_slice_sends_can_be_anything_but_a_get():
+    """The story's Always clause: "Read-only, class H egress (AD-1). This slice
+    issues `GET` and nothing else" — the one Always clause with no row.
+
+    Asserted structurally rather than by reading the code: `GraphRequest` has no
+    method field, so a mutation is not a flag away — adding one would be adding
+    a field here and a parameter in the transport, which this fails on. The
+    matching half, that the transport really names `GET` on the wire, is in
+    `tests/connectors/test_graph_transport.py`.
+    """
+    from dataclasses import fields
+
+    assert [field.name for field in fields(GraphRequest)] == ["url", "headers"], (
+        "a method field on the recorded request is how `GET and nothing else` "
+        "stops being structural"
+    )
+
+    fetch, transport, _, _, _ = _fetcher(
+        _page(_event(), next_link=_link(2)),
+        _page(),
+    )
+    fetch.fetch()
+
+    assert len(transport.requests) == 2
+    for request in transport.requests:
+        assert not [name for name in request.headers if name.casefold() == "x-http-method"], (
+            "Graph honours a method-override header, so a request carrying one "
+            "would be a write behind a GET"
+        )
+        assert set(request.headers) == {"Authorization", "Accept", "Prefer"}
+
+
 def test_a_naive_range_bound_is_refused_before_a_request_is_built():
     """Graph reads a naive `startDateTime` in the mailbox's own timezone."""
     client = GraphClient(auth=Auth(), transport=Transport(), now=Clock())
@@ -1347,24 +1611,95 @@ def test_the_fetch_budget_stops_a_walk_that_outlives_its_run():
     assert "budget" in result.failure.reason
 
 
-def test_an_auth_adapter_that_cannot_get_a_token_is_a_value_not_a_raise():
+@pytest.mark.parametrize(
+    ("refusal", "retryable"),
+    [
+        (CredentialStale("nothing is enrolled"), False),
+        # Its own row, because it is the arguable one. A device code that
+        # expired *is* recoverable — but only if somebody signs in, and this is
+        # a background fetch with nobody at the keyboard. `retryable` asks
+        # whether waiting could change the answer, and a daemon coming back
+        # alone in ten minutes gets the same expiry. The branch's comment
+        # enumerated four of `GraphAuthError`'s five subclasses and left this
+        # one out, so its hard-coded verdict was never a decision.
+        (AuthTimedOut("the device code expired before anyone signed in"), False),
+        # The branch *above* the auth one, and it had no test either: nothing
+        # was learned, so waiting is the remedy — and reading an unreachable
+        # network as a dead credential sends the PM to re-enrol a good token.
+        (GraphUnreachable("the token endpoint never answered"), True),
+    ],
+    ids=["credential-stale", "auth-timed-out", "unreachable"],
+)
+def test_an_auth_adapter_that_cannot_get_a_token_is_a_value_not_a_raise(refusal, retryable):
     """A fetch reports; it never raises. The coverage a partial walk earned
     cannot travel up a stack as an exception (`harvest.py:42-54`).
     """
     auth = Auth()
-    auth.raises = CredentialStale("nothing is enrolled")
+    auth.raises = refusal
     fetch, _, _, _, _ = _fetcher(auth=auth)
     result = fetch.fetch()
 
     assert result.rows == ()
     assert result.coverage is None
+    assert result.walked_through is None
     assert result.failure is not None
-    assert result.failure.retryable is False
+    assert result.failure.retryable is retryable
+    assert str(refusal) in result.failure.reason, (
+        "`33a`'s refusals are documented to carry no credential material, which "
+        "is what makes them safe to put in a durable row — and the remedy is in "
+        "the sentence or nobody can act on it"
+    )
+
+
+def test_a_clock_that_steps_backwards_mid_fetch_claims_no_coverage():
+    """`CoverageWindow` refuses `end < start`, and `fetch` still may not raise.
+
+    The window is two readings of this machine's clock, so an NTP correction or
+    a laptop waking between the first page and the finish produces a reversed
+    pair — constructed *after* the walk, outside every handler in `fetch`. So
+    the refusal would have turned a working harvest into a traceback. No
+    coverage is claimed instead: the fetch happened and there is no honest
+    interval to say it happened in.
+    """
+
+    class Rewinding:
+        """A clock that steps back on every reading, so the last is before the first."""
+
+        def __init__(self) -> None:
+            self.readings: list[datetime] = []
+
+        def __call__(self) -> datetime:
+            at = BASE - len(self.readings) * TICK
+            self.readings.append(at)
+            return at
+
+    rewinding = Rewinding()
+    fetch, _, _, _, _ = _fetcher(_page(_event(id="still-a-row")))
+    fetch.now = rewinding
+    fetch.client.now = rewinding
+    result = fetch.fetch()
+
+    assert rewinding.readings[-1] < rewinding.readings[0], "the premise of the row"
+    assert [row.event_id for row in result.rows] == ["still-a-row"], "the fetch worked"
+    assert result.failure is None, "and it was not turned into a failure either"
+    assert result.coverage is None, (
+        "a reversed window was constructed, which raises out of a method whose "
+        "whole contract is that it reports"
+    )
 
 
 def test_a_transport_that_explodes_is_a_failure_rather_than_a_traceback():
     """Anything a transport can throw becomes a value, or the spans already
     walked lose their coverage on the way up.
+
+    And the verdict is **not retryable**, which is the half this asserted
+    backwards. The client cannot tell a socket that dropped from a bug in an
+    injected callable, and only the first of those clears by waiting — so the
+    honest answer is the one `gitlab.harvest` has always given for its own
+    unclassified branch, stated once in `UNCLASSIFIED_FAULT_IS_RETRYABLE`
+    because a scheduler reading `HarvestFailure.retryable` cannot see which
+    connector produced it. The classified no-answer case keeps its `True`:
+    `_urllib_transport` opened the socket and knows.
     """
 
     def explode(request: GraphRequest) -> GraphResponse:
@@ -1376,11 +1711,83 @@ def test_a_transport_that_explodes_is_a_failure_rather_than_a_traceback():
     assert [row.event_id for row in result.rows] == ["page-one-row"]
     assert result.coverage is not None
     assert result.failure is not None
-    assert result.failure.retryable is True, (
-        "a transport that raised is a request that got no answer, and the "
-        "client cannot tell a socket error from a bug in an injected callable "
-        "— nothing was learned, so waiting is the honest remedy"
-    )
+    assert result.failure.retryable is UNCLASSIFIED_FAULT_IS_RETRYABLE is False
+
+
+def test_both_connectors_answer_the_unclassified_fault_question_identically():
+    """The rule is one rule, and it is asserted across the two connectors.
+
+    `HarvestFailure.retryable` reaches a scheduler with no record of which
+    provider produced it, so "wait, this will clear" and "a human has to look"
+    cannot depend on whether the fault happened to arise in GitLab's transport
+    or in Graph's. They disagreed: GitLab said non-retryable ("a fault nobody
+    classified is not one we may promise will clear on its own") and Graph said
+    retryable for the same `RuntimeError`.
+    """
+
+    def explode_graph(request: GraphRequest) -> GraphResponse:
+        raise RuntimeError("something nobody classified")
+
+    def explode_gitlab(offset: int):
+        raise RuntimeError("something nobody classified")
+
+    graph_fetch, _, _, _, _ = _fetcher(explode_graph)
+    graph_failure = graph_fetch.fetch().failure
+    gitlab_failure = GitLabConnectorAdapter(
+        project="alpha",
+        scope=DataScope(ScopeKind.PROJECT, "alpha"),
+        now=lambda: BASE,
+        fetch_page=explode_gitlab,
+    ).harvest(Cursor()).failure
+
+    assert graph_failure is not None and gitlab_failure is not None
+    assert graph_failure.retryable == gitlab_failure.retryable == UNCLASSIFIED_FAULT_IS_RETRYABLE
+    # And a provider 5xx is still the other answer, or the rule would have
+    # collapsed into "nothing is ever retryable".
+    five_hundred, _, _, _, _ = _fetcher(GraphResponse(status=503))
+    surfaced = five_hundred.fetch().failure
+    assert surfaced is not None and surfaced.retryable is True
+
+
+def test_an_exception_message_is_never_pasted_into_a_durable_failure_reason():
+    """The other half of the redaction rule, which only the 500-body path covered.
+
+    `GraphCallFailed` promises `reason` carries "no credential material and no
+    provider response body … composed here — from a status code and this
+    client's own words". Three paths interpolated a raw exception string
+    instead, and a `urllib` or SSL message carries the URL it failed on —
+    `$skiptoken` and all. This value is written to Tier 2, which is never
+    rebuilt, and read back into reports.
+
+    The type survives, because "an `SSLCertVerificationError`" and "a
+    `TimeoutError`" are different things to an operator. The message does not.
+    """
+    secret = "https://graph.microsoft.com/v1.0/me/calendarView?$skiptoken=SECRETPAGETOKEN"
+
+    def explode(request: GraphRequest) -> GraphResponse:
+        raise OSError(f"certificate verify failed for {secret}")
+
+    fetch, _, _, _, _ = _fetcher(explode)
+    result = fetch.fetch()
+
+    assert result.failure is not None
+    assert "SECRETPAGETOKEN" not in result.failure.reason
+    assert "$skiptoken" not in result.failure.reason
+    assert "OSError" in result.failure.reason, "the type is the actionable part"
+
+    # The fetcher's own broad `except` is the third path, and it is reached by
+    # something the client does not classify at all rather than by the transport.
+    def raise_from_the_walk(url, *, deadline=None):
+        raise ValueError(f"could not parse the page at {secret}")
+
+    walking, _, _, _, _ = _fetcher(_page(_event()))
+    walking.client.walk = raise_from_the_walk  # type: ignore[method-assign]
+    from_the_walk = walking.fetch()
+
+    assert from_the_walk.failure is not None
+    assert "SECRETPAGETOKEN" not in from_the_walk.failure.reason
+    assert "ValueError" in from_the_walk.failure.reason
+    assert from_the_walk.failure.retryable is UNCLASSIFIED_FAULT_IS_RETRYABLE
 
 
 def test_this_slice_emits_no_events_and_no_meeting_records():

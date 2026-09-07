@@ -74,6 +74,7 @@ default and the walk follows the links it actually returns.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -82,6 +83,7 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote, urlsplit
 
 from pm_ai.connectors.graph.auth import CredentialStale
+from pm_ai.domain.harvest import UNCLASSIFIED_FAULT_IS_RETRYABLE
 
 __all__ = [
     "ConsentChanged",
@@ -92,12 +94,14 @@ __all__ = [
     "GRAPH_HOST",
     "GraphCallFailed",
     "GraphClient",
+    "GraphFaultUnclassified",
     "GraphProtocolError",
     "GraphRefused",
     "GraphRequest",
     "GraphResponse",
     "GraphThrottled",
     "GraphUnavailable",
+    "GraphUninterpretedStatus",
     "PAGE_CAP",
     "PREFER_UTC",
     "THROTTLE_RETRIES",
@@ -212,6 +216,12 @@ class GraphUnavailable(GraphCallFailed):
     Both are "nothing was learned", which is the reading `GraphUnreachable`
     takes one layer up: retryable, and no coverage claimed for the page that
     did not arrive.
+
+    "Never got an answer" means a frame that *knows* that — `_urllib_transport`,
+    which opened the socket. An exception out of an injected transport is
+    `GraphFaultUnclassified` instead: from `_send` there is no telling a dropped
+    connection from a bug in pm-ai's own callable, and only one of those clears
+    by waiting.
     """
 
     retryable = True
@@ -233,6 +243,37 @@ class GraphRefused(GraphCallFailed):
     own terms produces the same rejection. A `400 Query option 'Top' is not
     allowed` is this class, and slice 0 hit exactly that three times.
     """
+
+
+class GraphUninterpretedStatus(GraphCallFailed):
+    """A status this client has no reading for: not 2xx, 401, 403, 429 or 5xx.
+
+    A 304, or any 1xx or 3xx that reaches the status dispatch. Its own refusal
+    because the alternative was worse than untidy: the final branch below used to
+    catch everything left over and report it as "a request pm-ai got wrong",
+    which tells an operator to go and fix a request that Graph never rejected.
+
+    Not retryable. Waiting does not turn an answer this client cannot interpret
+    into one it can — the remedy is a reading for that status, here.
+    """
+
+
+class GraphFaultUnclassified(GraphCallFailed):
+    """Something raised out of the injected transport that this client cannot place.
+
+    Distinct from `GraphUnavailable`, which is a *classified* fault: a 5xx, or —
+    in `_urllib_transport`, which knows it opened a socket — a request that
+    demonstrably got no answer. This class is what is left when an injected
+    callable raises anything at all, and the client cannot tell a network fault
+    from a bug in pm-ai's own wiring.
+
+    Its verdict is `pm_ai.domain.harvest.UNCLASSIFIED_FAULT_IS_RETRYABLE`, cited
+    rather than restated, because `gitlab.harvest` answers the same question for
+    the same reason and a scheduler reading `HarvestFailure.retryable` cannot see
+    which provider produced it.
+    """
+
+    retryable = UNCLASSIFIED_FAULT_IS_RETRYABLE
 
 
 class GraphProtocolError(GraphCallFailed):
@@ -466,10 +507,27 @@ def _urllib_transport(request: GraphRequest) -> GraphResponse:
         raise
     except Exception as silent:  # noqa: BLE001 — see the docstring
         raise GraphUnavailable(
-            f"the Graph request did not get an answer "
-            f"({type(silent).__name__}: {silent}). Nothing was learned about "
-            f"the window, which is not the same as it being empty."
+            # The exception *type* and nothing else. A `urllib` or SSL message
+            # carries the URL it failed on, `$skiptoken` and all, and this
+            # sentence becomes a `HarvestFailure.reason` in Tier 2, which is
+            # never rebuilt and is read back into reports. The traceback keeps
+            # the message for whoever is debugging; the durable row does not.
+            f"the Graph request did not get an answer ({type(silent).__name__}). "
+            f"Nothing was learned about the window, which is not the same as it "
+            f"being empty."
         ) from silent
+
+
+def _does_not_wait(seconds: float) -> None:
+    """The default `GraphClient.wait`: it returns without waiting, by name.
+
+    Named rather than a lambda for the reason `gitlab._stubbed_reach` is: a
+    lambda cannot be compared by identity, and the 429 branch needs to recognise
+    "nobody supplied a real sleep" so it can refuse rather than re-ask a
+    rate-limited provider immediately. A default that silently spins is the shape
+    that makes a forgotten injection a production defect nothing reports.
+    """
+    return None
 
 
 def _path_only(url: str) -> str:
@@ -536,14 +594,21 @@ class GraphClient:
     nobody can trust.
     """
 
-    wait: Callable[[float], None] = lambda seconds: None
+    wait: Callable[[float], None] = _does_not_wait
     """How a `Retry-After` this client will honour is waited out.
 
-    Defaults to *not waiting*, deliberately, and the composition root supplies
+    Defaults to `_does_not_wait`, deliberately, and the composition root supplies
     `time.sleep`. A blocking sleep as the default is the shape that makes a
     forgotten injection cost ten minutes inside a test suite rather than
     failing loudly — and every row of this slice's matrix that involves a
     throttle asserts on what was recorded here rather than on elapsed time.
+
+    **The default is recognised rather than trusted.** Nothing in `pm_ai`
+    constructs a `GraphClient` yet, so the first composition is `33c`'s; a
+    forgotten `wait` there would have turned every honoured hint into an
+    immediate retry against a provider that is rate-limiting, and no test would
+    have observed it. So the 429 branch compares this against
+    `_does_not_wait` by identity and refuses with the hint instead of spinning.
     """
 
     host: str = GRAPH_HOST
@@ -634,6 +699,25 @@ class GraphClient:
                         f"decision, and the hint travels with the failure.",
                         retry_after=hint,
                     )
+                if self.wait is _does_not_wait:
+                    # Loud rather than silent, exactly as `gitlab.check_health`
+                    # compares `self.reach is _stubbed_reach`. The default
+                    # `wait` does not wait, so honouring a hint through it would
+                    # re-ask a rate-limited provider immediately — the behaviour
+                    # that turns one 429 into a hundred — and nothing would say
+                    # so. A composition that has not supplied a real sleep is
+                    # handed the hint on a retryable failure instead.
+                    raise GraphThrottled(
+                        f"Graph throttled {self._named(url)} and asked for "
+                        f"{hint} ({source}), and this client was composed with "
+                        f"no way to wait: `GraphClient.wait` is still the "
+                        f"default that returns immediately. Re-asking now would "
+                        f"be a retry the provider just refused, so the hint "
+                        f"travels with the failure and the daemon decides. "
+                        f"Inject `time.sleep` at the composition root to honour "
+                        f"a hint inside one call.",
+                        retry_after=hint,
+                    )
                 throttled += 1
                 self.wait(hint.total_seconds())
                 continue
@@ -643,6 +727,19 @@ class GraphClient:
                     f"Graph answered {response.status} for {self._named(url)}. "
                     f"A provider error says nothing about the window, so no "
                     f"coverage is claimed for the page that did not arrive."
+                )
+
+            if response.status < 400:
+                # A 304, or any 1xx/3xx that reaches this dispatch — through an
+                # injected transport, or a status `_urllib_transport` did not
+                # already refuse. Named rather than swept into the branch below:
+                # reporting it as "a request pm-ai got wrong" sends an operator
+                # to fix a request Graph never rejected.
+                raise GraphUninterpretedStatus(
+                    f"Graph answered {response.status} for {self._named(url)}, "
+                    f"which is not a status this client interprets: it reads "
+                    f"2xx, 401, 403, 429 and 5xx, and everything else as a 4xx. "
+                    f"Refusing rather than guessing which of those it meant."
                 )
 
             raise GraphRefused(
@@ -763,11 +860,21 @@ class GraphClient:
             answered = self.transport(request)
         except GraphCallFailed:
             raise
-        except Exception as silent:  # noqa: BLE001 — see the docstring
-            raise GraphUnavailable(
-                f"the request to {self._named(url)} did not get an answer "
-                f"({type(silent).__name__}: {silent})."
-            ) from silent
+        except Exception as unclassified:  # noqa: BLE001 — see the docstring
+            raise GraphFaultUnclassified(
+                # The type, never the message: an exception a transport raises
+                # can carry the whole URL — `$skiptoken` included — and this
+                # sentence is persisted in Tier 2 and read back into reports.
+                #
+                # `GraphFaultUnclassified` rather than `GraphUnavailable`,
+                # because this frame cannot tell a socket that dropped from a
+                # bug in an injected callable, and only the first of those
+                # clears by waiting. The shared verdict is stated once, in
+                # `UNCLASSIFIED_FAULT_IS_RETRYABLE`.
+                f"the request to {self._named(url)} raised "
+                f"{type(unclassified).__name__} out of the transport, which is "
+                f"not an answer this client can classify."
+            ) from unclassified
         if not isinstance(answered, GraphResponse):
             raise GraphProtocolError(
                 f"the injected transport answered with "
@@ -817,18 +924,39 @@ class GraphClient:
         zero rather than negative: it means "now", and a negative `timedelta`
         would compare as fitting any budget while reading as nonsense in the
         refusal.
+
+        A hint no interval can hold is bounded rather than allowed to raise.
+        `float("inf")`, `1e400` — which *is* `inf` — and `nan` are not durations,
+        so they are read as no hint at all and take the stated default; and a
+        finite but absurd number of seconds (`1e30`) is clamped to this run's
+        budget, which is the longest delay this call could ever have honoured.
+        Both used to raise `OverflowError` out of the 429 branch, where the
+        fetcher caught it as a fault nobody classified — losing the throttle, the
+        hint and the retryable verdict to a header value.
         """
         raw = response.header("Retry-After")
         if raw is None or not raw.strip():
             return self.default_backoff
         stated = raw.strip()
         try:
-            return timedelta(seconds=max(0.0, float(stated)))
+            seconds = float(stated)
         except ValueError:
-            pass
+            seconds = None
+        if seconds is not None:
+            if not math.isfinite(seconds):
+                # Not a duration. Read as "the provider gave no usable hint"
+                # rather than as an unbounded one.
+                return self.default_backoff
+            try:
+                return timedelta(seconds=max(0.0, seconds))
+            except (OverflowError, OSError, ValueError):
+                return max(timedelta(0), self.budget)
         try:
             at = parsedate_to_datetime(stated)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # `OverflowError` for a date past `datetime`'s range, alongside the
+            # two the parser documents: a header value must not be able to raise
+            # out of the throttle branch at all.
             return self.default_backoff
         if at.tzinfo is None:
             # RFC 7231 dates are GMT; a parser that returns naive has told us

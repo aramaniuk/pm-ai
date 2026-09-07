@@ -1556,7 +1556,7 @@ class StorageService:
         instance: str,
         cursor: Cursor,
         coverage: CoverageWindow | None,
-        failure: HarvestFailure | None = None,
+        failure: HarvestFailure | None,
     ) -> None:
         """Record where a harvest got to, what it covered, and whether it failed.
 
@@ -1577,6 +1577,12 @@ class StorageService:
         `ERROR` forever, so a successful attempt clears the row. The row is
         current state, not history — `evaluate_commitment` asks whether this
         connector is broken *now*.
+
+        Which is exactly why `failure` has **no default**. Because passing `None`
+        deletes a durable row, a default would have made every three-argument
+        call — a cursor restore, a test replay, a caller written before this
+        parameter existed — report a dead connector as repaired, silently. The
+        caller always knows which of `8a`'s three outcomes it had, so it says.
 
         **Validated before the first `execute`, and rolled back if anything
         after it raises.** The refusal below used to fire *after* the cursor
@@ -1668,6 +1674,11 @@ class StorageService:
                     failure.retry_after.total_seconds()
                     if failure.retry_after is not None
                     else None,
+                    # This service's clock, not `failure.at`. The connector reads
+                    # its own clock for coverage bounds; when a row was written is
+                    # the single writer's fact (AD-5, AD-30), and taking it from
+                    # the value would let a connector with a skewed clock date a
+                    # failure into next week. `harvest_failure()` reads it back.
                     self._at().isoformat(),
                 ),
             )
@@ -1680,18 +1691,30 @@ class StorageService:
         the absence of a coverage window, so once the process exited they were
         one state — and a connector with a dead token read as a sleeping laptop,
         which resolves to `UNKNOWN` and waits forever.
+
+        `at` comes back with it. The column was written from the first commit and
+        read by nothing, which made the age of a failure unknowable: "this token
+        is dead" recorded three minutes ago and the same sentence recorded in
+        March are one row to a reader that cannot see when it was stamped, and
+        Tier 2 is never rebuilt, so there is no second place to recover it from.
         """
         row = self._db.execute(
-            "SELECT reason, retryable, retry_after FROM harvest_failures WHERE instance = ?",
+            "SELECT reason, retryable, retry_after, at FROM harvest_failures "
+            "WHERE instance = ?",
             (instance,),
         ).fetchone()
         if row is None:
             return None
-        reason, retryable, retry_after = row
+        reason, retryable, retry_after, at = row
         return HarvestFailure(
             reason=reason,
             retryable=bool(retryable),
             retry_after=timedelta(seconds=retry_after) if retry_after is not None else None,
+            # Stored as an ISO string by `_write_cursor`; `None` only for a row
+            # written before this column was read, which no shipped version
+            # produced — Tier 2 is never rebuilt, so tolerated rather than
+            # assumed absent.
+            at=datetime.fromisoformat(at) if at is not None else None,
         )
 
     def coverage_windows(self, instance: str) -> list[tuple[datetime, datetime]]:

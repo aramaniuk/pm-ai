@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pm_ai.domain.clocks import ImplausibleTimestamp, validate_occurred_at
 from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType, Provenance
 from pm_ai.domain.harvest import (
+    UNCLASSIFIED_FAULT_IS_RETRYABLE,
     Cursor,
     HarvestFailure,
     HarvestOutcome,
@@ -60,6 +61,36 @@ class Page:
 
     rows: tuple[dict, ...] = ()
     next_offset: int | None = None
+
+
+PAGE_CAP = 500
+"""How many pages one `harvest` may walk before it refuses.
+
+The bound `GraphClient.walk` applies, for the reason stated in that module's
+docstring — a loop whose continuation is a value the provider controls has to be
+bounded, and "the next offset must increase" is not a bound: a provider advancing
+one row per page satisfies it forever. Not restated here; `graph/client.py`'s
+"What the response body is allowed to decide" is the argument.
+
+The number differs from Graph's because the page size does. At the default 100
+rows a page this is 50,000 commits in one harvest, far more than any cycle asks
+for and small enough that a misbehaving provider cannot page until the budget
+runs out.
+"""
+
+FETCH_BUDGET = timedelta(minutes=10)
+"""How long one whole harvest may keep asking for pages, wall-clock.
+
+`GraphClient.budget`'s value and `GraphClient.budget`'s reasoning: chosen against
+CAP-2's 240-minute cycle, so a fetch cannot outlive its own cycle and overlap the
+next. It bounds the walk in the dimension the page cap does not — a provider
+answering slowly rather than endlessly.
+
+Measured from the instant the **first page came back**, not from the top of the
+call. The first request is always sent, because a harvest that refused before
+asking anything would report a failure it never attempted; what the budget bounds
+is how long the walk may keep going after that.
+"""
 
 
 class PageUnavailable(Exception):
@@ -148,6 +179,11 @@ class GitLabConnectorAdapter:
     # that refuses on page two — is injected here. Returns a `Page` or raises
     # `PageUnavailable`; `harvest` converts the raise into a value.
     fetch_page: Callable[[int], Page] | None = None
+    # The two bounds on the page loop, injected for the reason `now` is: a guard
+    # that cannot be exercised deterministically is a guard nobody can trust,
+    # and no test is going to walk five hundred pages to reach a cap.
+    page_cap: int = PAGE_CAP
+    budget: timedelta = FETCH_BUDGET
 
     def emits(self) -> frozenset[ObservedEventType]:
         """Only from the core taxonomy — a connector may not mint a type (AD-27)."""
@@ -321,8 +357,18 @@ class GitLabConnectorAdapter:
         unbelievable tells us something arrived and nothing about when, and an
         unknowable start is not a guessable one.
 
-        Flagging, not rejecting: the events still persist, and `PersistResult.
-        flagged` counts them. This only withholds the coverage claim.
+        Flagging, not rejecting: the events still persist, and this only
+        withholds the coverage claim.
+
+        **`PersistResult.flagged` counts one of the two halves, not both.** An
+        *implausible* provider clock is flagged and counted (`storage/service.py`
+        writes `occurred_at_flag=implausible` and increments the counter); an
+        *absent* one is not, because `validate_occurred_at(None)` returns `None`
+        without raising and `_append_batch` renders `occurred_at=unknown` — a
+        known answer rather than a suspect one, pinned by
+        `tests/slice/test_storage_resolution.py::test_an_absent_timestamp_is_not_flagged`.
+        So a page whose every row has no timestamp withholds coverage here and
+        adds nothing to `flagged`, and this docstring used to promise otherwise.
         """
         for row in rows:
             at = row.get("committed_at")
@@ -361,12 +407,53 @@ class GitLabConnectorAdapter:
           returned, and its `end` the clock when fetching stopped — never
           `now() - some_interval`, which is what the deleted four-hour window
           was: a claim about the world computed from nothing but the clock;
-        - the cursor advances only past pages fully walked, so a failure on page
-          two leaves page three to be fetched again rather than skipped.
+        - the cursor advances only past **rows actually received**, so a failure
+          on page two leaves page three to be fetched again rather than skipped.
+
+        That last rule had two definitions in one loop. The terminal and
+        non-advancing branches resumed from rows received; the ordinary branch
+        resumed from `page.next_offset` — the provider's *claim* about where the
+        next page begins — so a provider returning two rows while announcing
+        offset 5 advanced the cursor past rows 2, 3 and 4 permanently, since no
+        later run revisits a position the cursor has passed. `next_offset` still
+        decides what is *asked for* next; it decides nothing about what was
+        walked.
+
+        The loop is bounded twice, by `page_cap` and by `budget`. "The next
+        offset must increase" is not a bound — a provider advancing one row per
+        page satisfies it forever — and the argument is `graph/client.py`'s,
+        which states it for a continuation condition the response body controls.
         """
         fetch = self.fetch_page or self._fetch_from_fake_api
-        origin = int(since.token or b"0")
+        try:
+            origin = int(since.token or b"0")
+        except ValueError:
+            # A cursor is opaque to core (AD-9) and this connector is the only
+            # thing that may read one — but "opaque" cuts both ways: a token
+            # written by another connector, or by an older encoding of this one,
+            # is not a position here. Reported as the failure this method
+            # promises rather than raised out of it, and the cursor is handed
+            # back unchanged so nothing advances past rows nobody fetched.
+            return HarvestResult(
+                events=(),
+                cursor=since,
+                outcome=HarvestOutcome.FAILED,
+                failure=HarvestFailure(
+                    reason=(
+                        f"{self.instance} was handed a stored cursor of "
+                        f"{len(since.token)} byte(s) that is not a decimal "
+                        f"offset, so there is no position to resume from. "
+                        f"Nothing was fetched and the cursor is unchanged; a "
+                        f"cursor this connector did not write needs clearing "
+                        f"rather than waiting."
+                    ),
+                    retryable=False,
+                ),
+            )
         offset = origin
+        # Where the next run resumes: `origin` plus the rows this one actually
+        # received, and nothing else ever assigns it. One definition, in one
+        # place, so no branch can quietly adopt the provider's claim instead.
         resume = origin
         rows: list[dict] = []
         # The instant the *first* page came back, and `None` for as long as none
@@ -374,6 +461,7 @@ class GitLabConnectorAdapter:
         # and the latter earns no coverage no matter how long it took.
         reached_at: datetime | None = None
         failure: HarvestFailure | None = None
+        walked = 0
 
         while True:
             try:
@@ -388,10 +476,41 @@ class GitLabConnectorAdapter:
             except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
                 # Broad on purpose. Anything a transport can throw has to become
                 # this value, or the pages already walked lose their coverage on
-                # the way up the stack. Not retryable, because a fault nobody
-                # classified is not one we may promise will clear on its own.
+                # the way up the stack. Not retryable per
+                # `UNCLASSIFIED_FAULT_IS_RETRYABLE`, which is where that rule is
+                # stated for both connectors — a scheduler reading
+                # `HarvestFailure.retryable` cannot see which one produced it.
+                #
+                # The exception's **type** and not its `repr`: this sentence is
+                # written to Tier 2, never rebuilt, and read back into reports,
+                # and a transport's message is exactly where a signed URL or an
+                # authorization header would appear.
                 failure = HarvestFailure(
-                    reason=f"{self.instance} could not fetch from offset {offset}: {unexpected!r}",
+                    reason=(
+                        f"{self.instance} could not fetch from offset {offset}: "
+                        f"the transport raised {type(unexpected).__name__}, "
+                        f"which pm-ai cannot classify"
+                    ),
+                    retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
+                )
+                break
+
+            if not isinstance(page, Page):
+                # The check `GraphClient._send` applies to its injected
+                # transport, mirrored: `fetch_page` is a seam, and a callable
+                # that answers with `None` would raise `AttributeError` on
+                # `page.rows` *outside* every handler above — taking the pages
+                # already walked and their coverage with it. A wiring fault in
+                # pm-ai rather than anything GitLab said, so it is not
+                # retryable.
+                failure = HarvestFailure(
+                    reason=(
+                        f"{self.instance}'s transport answered with "
+                        f"{type(page).__name__} rather than a Page while "
+                        f"fetching from offset {offset}, so there are no rows "
+                        f"to read and no next offset. That is a wiring fault in "
+                        f"pm-ai rather than a provider fault."
+                    ),
                     retryable=False,
                 )
                 break
@@ -399,15 +518,14 @@ class GitLabConnectorAdapter:
             if reached_at is None:
                 reached_at = self.now()
             rows.extend(page.rows)
-            walked = offset + len(page.rows)
+            walked += 1
+            resume = origin + len(rows)
             if page.next_offset is None:
-                resume = walked
                 break
             if page.next_offset <= offset:
                 # A provider handing back a position that does not advance would
                 # loop here forever, re-harvesting the same rows. Reported as a
                 # failure so the pages already walked keep their coverage.
-                resume = walked
                 failure = HarvestFailure(
                     reason=(
                         f"{self.instance} was told the next page begins at "
@@ -417,7 +535,39 @@ class GitLabConnectorAdapter:
                     retryable=False,
                 )
                 break
-            resume = page.next_offset
+            if walked >= self.page_cap:
+                # The ceiling `next_offset > offset` does not give: a provider
+                # advancing one row per page satisfies that condition for as
+                # long as it likes. Refused with what was walked rather than
+                # stopped quietly, which would report a harvest as complete.
+                failure = HarvestFailure(
+                    reason=(
+                        f"{self.instance} reached the {self.page_cap}-page cap "
+                        f"with a further page still offered at offset "
+                        f"{page.next_offset}. The continuation condition is a "
+                        f"value the provider controls, so it is bounded; what "
+                        f"was walked keeps its coverage and the cursor stops "
+                        f"where the rows stopped."
+                    ),
+                    retryable=True,
+                )
+                break
+            if self.now() - reached_at >= self.budget:
+                # The other dimension: a provider answering slowly rather than
+                # endlessly. Retryable, because the next run resumes from the
+                # rows this one received rather than the window being reported
+                # complete.
+                failure = HarvestFailure(
+                    reason=(
+                        f"{self.instance} spent its {self.budget} fetch budget "
+                        f"after {walked} page(s), with a further page offered "
+                        f"at offset {page.next_offset}. The rest is the next "
+                        f"run's; a fetch that outlived its own harvest cycle "
+                        f"would overlap the one behind it."
+                    ),
+                    retryable=True,
+                )
+                break
             offset = page.next_offset
 
         finished_at = self.now()
@@ -457,8 +607,17 @@ class GitLabConnectorAdapter:
         # provider but yielded nothing readable, and coverage over it would let
         # a mapping defect read as a kept-or-broken promise. See
         # `HarvestResult.__post_init__`, which refuses that combination.
-        if events and reached_at is not None and self._bounded_by_a_credible_clock(
-            kept, now=finished_at
+        if (
+            events
+            and reached_at is not None
+            # This machine's clock, not the provider's: an NTP correction or a
+            # laptop waking mid-harvest steps it backwards, and the pair would
+            # be a reversed window — which `CoverageWindow` refuses, out of a
+            # method whose contract is that it reports rather than raises. No
+            # coverage claimed instead: the fetch happened and there is no
+            # honest interval to say it happened in.
+            and finished_at >= reached_at
+            and self._bounded_by_a_credible_clock(kept, now=finished_at)
         ):
             coverage = CoverageWindow(
                 # Keyed on `instance`, which is what `save_cursor` stores the

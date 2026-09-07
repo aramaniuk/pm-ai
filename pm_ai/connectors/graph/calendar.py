@@ -64,13 +64,18 @@ from zoneinfo import ZoneInfo
 from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable
 from pm_ai.connectors.graph.client import GraphCallFailed, GraphClient
 from pm_ai.domain.clocks import ImplausibleTimestamp, validate_occurred_at
-from pm_ai.domain.harvest import HarvestFailure
+from pm_ai.domain.harvest import UNCLASSIFIED_FAULT_IS_RETRYABLE, HarvestFailure
 from pm_ai.domain.lifecycle import CoverageWindow
 
 __all__ = [
     "CalendarAttendee",
     "CalendarFetch",
     "CalendarRow",
+    # The base, listed beside its two subclasses because catching it is its
+    # whole purpose: a caller that wants "this row could not be read" without
+    # caring which diagnosis it was has one name, and omitting it from `__all__`
+    # made the public surface offer only the two halves.
+    "CalendarRowRefused",
     "CalendarWindow",
     "GraphCalendarFetch",
     "HARVEST_CYCLE",
@@ -81,6 +86,9 @@ __all__ = [
     "WINDOWS_TIMEZONES",
     "WindowPolicy",
     "to_utc",
+    # Beside `to_utc`, which cannot answer without it. This slice's own tests
+    # import it to assert the refusal directly rather than through a row.
+    "zone_of",
 ]
 
 
@@ -212,7 +220,12 @@ WINDOWS_TIMEZONES: Mapping[str, str] = {
     "mid-atlantic standard time": "Etc/GMT+2",
     "azores standard time": "Atlantic/Azores",
     "cape verde standard time": "Atlantic/Cape_Verde",
-    "utc": "Etc/UTC",
+    # CLDR's `UTC` row is deliberately absent. `_UTC_SPELLINGS` short-circuits
+    # `"utc"` before this map is consulted, so a `"utc": "Etc/UTC"` entry here
+    # was unreachable — and worse, it made the "every mapped zone resolves" test
+    # pass through the short-circuit for that one row rather than through the
+    # mapping it claims to exercise. A `UTC` mailbox is still handled, by the
+    # branch that needs no timezone database at all.
     "gmt standard time": "Europe/London",
     "greenwich standard time": "Atlantic/Reykjavik",
     "sao tome standard time": "Africa/Sao_Tome",
@@ -394,9 +407,37 @@ def to_utc(stamp: Mapping[str, Any] | None, *, field_name: str, event_id: str) -
             f"emitted with a guessed time."
         )
     naive_or_aware = _parsed(raw.strip(), field_name=field_name, event_id=event_id)
-    if naive_or_aware.tzinfo is not None:
-        return naive_or_aware.astimezone(timezone.utc)
-    return naive_or_aware.replace(tzinfo=zone_of(stamp.get("timeZone"))).astimezone(timezone.utc)
+    if naive_or_aware.tzinfo is None:
+        naive_or_aware = naive_or_aware.replace(tzinfo=zone_of(stamp.get("timeZone")))
+    return _in_utc(naive_or_aware, field_name=field_name, event_id=event_id)
+
+
+def _in_utc(aware: datetime, *, field_name: str, event_id: str) -> datetime:
+    """`astimezone(utc)`, with the conversion's own failures refused per row.
+
+    Graph really sends `0001-01-01T00:00:00` — this slice's fixtures carry it in
+    `responseStatus.time`, and it is what an unset date-time field looks like on
+    the wire. Convert one of those from a zone *ahead* of UTC and the arithmetic
+    walks off the low end of `datetime`: `OverflowError`, raised from inside the
+    standard library. `ZoneInfo` can raise `OSError` on an extreme instant for
+    the same class of reason.
+
+    Neither is a `CalendarRowRefused`, so both used to escape `_read`'s per-row
+    handler and land in `fetch`'s broad `except` — abandoning every remaining
+    span of the window because one event had an unset timestamp. Refused as the
+    malformed row it is instead, by name, with the batch continuing.
+    """
+    try:
+        return aware.astimezone(timezone.utc)
+    except (OverflowError, OSError, ValueError) as unconvertible:
+        raise MalformedCalendarRow(
+            f"event {event_id!r} carries a {field_name} of "
+            f"{aware.isoformat()}, which cannot be expressed as an instant in "
+            f"UTC ({type(unconvertible).__name__}) — an extreme year in a zone "
+            f"offset from UTC walks off the end of the calendar. Refused for "
+            f"this row rather than raised: one unset provider field must not "
+            f"abandon the rest of the window."
+        ) from unconvertible
 
 
 def _parsed(raw: str, *, field_name: str, event_id: str) -> datetime:
@@ -810,18 +851,39 @@ class GraphCalendarFetch:
                 failure = self._failure(span, str(silent), retryable=True)
                 break
             except GraphAuthError as unauthenticated:
-                # `CredentialStale`, `AuthDeclined`, `InteractionRequired` and
-                # the unmapped base. None of them clears by waiting, and all of
-                # them are the operator's to act on.
+                # The whole enumeration, since `GraphUnreachable` — the fifth
+                # subclass — is caught above: `CredentialStale`, `AuthTimedOut`,
+                # `AuthDeclined`, `InteractionRequired`, and the base `33a`
+                # raises for an error code it has no mapping for.
+                #
+                # **`AuthTimedOut` included, and it is not retryable either.** A
+                # device code that expired is the one auth failure that clears
+                # *if somebody signs in*, which is precisely what makes waiting
+                # the wrong verdict here: this is a background fetch with nobody
+                # at the keyboard, and a daemon coming back alone in ten minutes
+                # gets the same expiry. `retryable` asks whether waiting could
+                # change the answer, not whether the credential is recoverable —
+                # so all five say no, and all five name a remedy a human
+                # performs.
                 failure = self._failure(span, str(unauthenticated), retryable=False)
                 break
             except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
                 # Broad on purpose: anything a transport or a mapping can throw
                 # has to become this value, or the spans already walked lose
-                # their coverage on the way up. Not retryable, because a fault
-                # nobody classified is not one pm-ai may promise will clear.
+                # their coverage on the way up. Not retryable, per
+                # `UNCLASSIFIED_FAULT_IS_RETRYABLE` — the rule `gitlab.harvest`
+                # cites for the same branch, stated in one place because a
+                # scheduler cannot see which connector produced the failure.
+                #
+                # The exception **type** and not its message: this sentence is
+                # persisted in Tier 2, never rebuilt, and read back into reports,
+                # and an arbitrary exception's message can carry a URL with a
+                # `$skiptoken` in it.
                 failure = self._failure(
-                    span, f"{type(unexpected).__name__}: {unexpected}", retryable=False
+                    span,
+                    f"{type(unexpected).__name__} was raised while walking the "
+                    f"span, and pm-ai cannot classify it",
+                    retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
                 )
                 break
             if not answered:
@@ -839,7 +901,17 @@ class GraphCalendarFetch:
         finished = self.now()
         coverage = (
             CoverageWindow(connector_instance=self.instance, start=reached_at, end=finished)
-            if reached_at is not None and _any_credible_clock(rows)
+            # `finished >= reached_at` is the third condition, and it is about
+            # *this machine's* clock rather than the provider's: an NTP
+            # correction or a laptop waking between the first page and the
+            # finish steps the clock backwards, and the pair would then be a
+            # reversed window — which `CoverageWindow` now refuses outright, out
+            # of a method whose whole contract is that it reports rather than
+            # raises. No coverage is claimed instead: the fetch really happened,
+            # and there is no honest interval to say it happened in.
+            if reached_at is not None
+            and finished >= reached_at
+            and _any_credible_clock(rows)
             else None
         )
         return CalendarFetch(

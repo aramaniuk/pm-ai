@@ -70,7 +70,7 @@ def test_reharvest_is_idempotent_on_the_natural_key(daemon):
     """
     run_harvest(daemon, "gitlab:alpha")
     # Simulate a cursor reset / restore through the public write path.
-    daemon.storage.save_cursor("gitlab:alpha", Cursor(), None)
+    daemon.storage.save_cursor("gitlab:alpha", Cursor(), None, None)
     second = run_harvest(daemon, "gitlab:alpha")
     assert (second.persisted, second.duplicates) == (0, 2)
 
@@ -87,7 +87,7 @@ def test_dedup_survives_a_restart(daemon, tmp_path):
 
     restarted = build(tmp_path, "alpha", now=lambda: NOW)
     restarted.connectors["gitlab:alpha"]._fake_api = daemon.connectors["gitlab:alpha"]._fake_api
-    restarted.storage.save_cursor("gitlab:alpha", Cursor(), None)  # replay the window
+    restarted.storage.save_cursor("gitlab:alpha", Cursor(), None, None)  # replay the window
 
     second = run_harvest(restarted, "gitlab:alpha")
     assert (second.persisted, second.duplicates) == (0, 2)

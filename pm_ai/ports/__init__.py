@@ -566,7 +566,7 @@ class StoragePort(Protocol):
         instance: str,
         cursor: Cursor,
         coverage: CoverageWindow | None,
-        failure: HarvestFailure | None = None,
+        failure: HarvestFailure | None,
     ) -> None:
         """Where a harvest got to, what it covered, whether it failed (AD-35).
 
@@ -577,6 +577,15 @@ class StoragePort(Protocol):
         error. `CoverageWindow | None` is the rule — absence is the ordinary
         answer for a provider that returned nothing, and it is now the *only*
         other thing this parameter takes.
+
+        **`failure` has no default, and that is the same rule one field over.**
+        Passing `None` *deletes* the `harvest_failures` row — the write that says
+        "this connector is working again" — so a default would let any
+        three-argument call silently repair a dead connector, and
+        `evaluate_commitment` would read a broken machine as patience. It is
+        stated for the reason `harvest_failed`, `HarvestFailure.retryable` and
+        `WindowPolicy`'s two widths are all required: the caller knows which of
+        the three outcomes it had, and a default here would answer on its behalf.
         """
 
     def harvest_failure(self, instance: str) -> HarvestFailure | None:

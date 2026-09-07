@@ -25,6 +25,24 @@ from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.lifecycle import CoverageWindow
 
 
+UNCLASSIFIED_FAULT_IS_RETRYABLE = False
+"""Whether a fault no connector classified may be promised to clear on its own.
+
+**The one place the rule is stated, cited by every connector that needs it.** A
+scheduler reads `HarvestFailure.retryable` and cannot see which provider produced
+it, so two connectors answering this question differently would make the same
+fault mean "come back in a minute" from one and "a human has to look" from the
+other. `gitlab.harvest` and `graph.calendar.GraphCalendarFetch` both catch
+everything their transports can raise, and `graph.client.GraphFaultUnclassified`
+is the same verdict one layer lower.
+
+`False`, because an exception nobody classified is as likely to be a bug in pm-ai
+as a hiccup at the provider, and no amount of waiting clears a bug. A provider
+**5xx** is a different fact and stays retryable: the provider said, in its own
+words, that the fault is its and transient.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class Cursor:
     """Provider-defined position. Opaque to everything but its own connector.
@@ -99,6 +117,21 @@ class HarvestFailure:
     `None` means "no hint", not "retry immediately": a retryable failure with no
     stated delay is the scheduler's decision, and inventing a number here would
     put a made-up interval where a measured one belongs.
+    """
+
+    at: datetime | None = None
+    """When the failure was recorded, filled in by storage on the way back out.
+
+    `None` on a value a connector just built: a connector reads its own clock for
+    coverage bounds and nothing else, and the instant that matters for this row is
+    the one the single writer stamped it with (AD-5, AD-30) — so `save_cursor`
+    ignores whatever is here and writes `harvest_failures.at` from the storage
+    clock, and `harvest_failure()` reads it back into this field.
+
+    Surfaced rather than dropped because the column is Tier 2 and never rebuilt:
+    a failure recorded four minutes ago and one recorded in March are the same
+    `reason` and a different problem, and a reader that cannot see which is which
+    cannot tell a connector that just broke from one nobody has looked at since.
     """
 
 

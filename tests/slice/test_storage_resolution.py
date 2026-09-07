@@ -398,7 +398,7 @@ def test_a_refused_write_does_not_swallow_the_batch(daemon, tmp_path):
     with pytest.raises(ScopeResolutionError):
         storage.persist_events(events, scope=PROJECT)
 
-    storage.save_cursor("gitlab:alpha", Cursor(), None)  # the unrelated commit
+    storage.save_cursor("gitlab:alpha", Cursor(), None, None)  # the unrelated commit
 
     result = storage.persist_events(events, scope=PROJECT)
     assert (result.persisted, result.duplicates) == (2, 0), (

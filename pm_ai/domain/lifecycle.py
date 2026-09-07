@@ -178,6 +178,32 @@ class CoverageWindow:
     start: datetime
     end: datetime
 
+    def __post_init__(self) -> None:
+        """Refuse a window that ends before it began, the way `CalendarWindow` does.
+
+        A connector builds these from two readings of its own clock — the instant
+        the first page came back and the instant fetching stopped — and a machine
+        whose clock steps backwards between the two (an NTP correction, a laptop
+        waking) would otherwise store `end < start`. Nothing downstream reads a
+        reversed interval as suspect: the fold `evaluate_commitment`'s `covered`
+        needs asks whether a union of windows spans a period, and a backwards one
+        contributes a negative span, which is a hole nobody can see.
+
+        `start == end` is **not** refused, unlike `CalendarWindow`'s range. A
+        coverage window is the seconds a fetch actually took, and a fetch that
+        began and finished inside one clock reading really did cover an instant —
+        which is also the ordinary shape under a frozen test clock.
+        """
+        if self.end < self.start:
+            raise ValueError(
+                f"CoverageWindow for {self.connector_instance!r} ends at "
+                f"{self.end.isoformat()}, before it began at "
+                f"{self.start.isoformat()}. Coverage is two readings of one "
+                f"connector's clock, so a reversed pair is a clock that moved "
+                f"backwards mid-fetch rather than a window — and a negative span "
+                f"in the coverage fold is a gap nothing reports."
+            )
+
 
 def evaluate_commitment(
     *,

@@ -210,6 +210,11 @@ def test_every_status_graph_answers_with_arrives_as_exactly_that_status(status, 
     answer = _urllib_transport(_request())
 
     assert isinstance(answer, GraphResponse)
+    assert sockets.opened[0].get_method() == "GET", (
+        "the story's Always clause is that this slice issues `GET` and nothing "
+        "else, and this is the one place a method is named at all — "
+        "`GraphRequest` deliberately has no field for one"
+    )
     assert answer.status == status, (
         "the status the provider answered with is the only thing that tells the "
         "client which of its four refusals to raise"
@@ -381,11 +386,27 @@ def test_a_url_that_is_not_https_never_reaches_a_socket(monkeypatch):
 def test_a_request_that_gets_no_answer_at_all_is_graph_unavailable(monkeypatch):
     """A socket error says nothing about the window, which is not the same as
     the window being empty — the distinction `GraphUnavailable` carries.
+
+    Retryable, and it is the one broad branch that may be: this frame opened the
+    socket, so "no answer" is a classification rather than a shrug. `_send`'s
+    equivalent cannot say that about an injected callable and is
+    `GraphFaultUnclassified` instead.
+
+    The exception's **message** does not travel. `urllib` and SSL messages name
+    the URL they failed on — `$skiptoken` and all — and this sentence becomes a
+    `HarvestFailure.reason` in Tier 2, which is never rebuilt and is read back
+    into reports. The type stays, because the remedy differs between a timeout
+    and a certificate failure.
     """
-    _no_sockets(monkeypatch, OSError("connection reset by peer"))
+    _no_sockets(monkeypatch, OSError(f"connection reset by peer while reading {URL}"))
 
     with pytest.raises(GraphUnavailable) as silent:
         _urllib_transport(_request())
 
     assert "OSError" in str(silent.value)
+    assert "connection reset" not in str(silent.value), (
+        "a transport's own message is exactly where a URL with a skiptoken in "
+        "it reaches a durable row"
+    )
+    assert "startDateTime" not in str(silent.value)
     assert silent.value.retryable is True
