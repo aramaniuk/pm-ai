@@ -145,12 +145,11 @@ def test_a_real_shaped_graph_id_is_accepted_and_read_back(tmp_path):
         calendar_event_ref=GRAPH_ID,
     )
     first = _daemon(tmp_path)
-    first.meetings.put(graph_meeting, tentative=True)
+    first.meetings.put(graph_meeting)
     del first
 
     reread = _daemon(tmp_path).meetings.get(GRAPH_ID, scope=PROJECT)
     assert reread.meeting == as_stored(graph_meeting)
-    assert reread.tentative is True
 
 
 def test_a_personal_meeting_is_refused_before_any_file_is_written(tmp_path):

@@ -2,7 +2,7 @@
 title: 'Meeting records reach Tier 1'
 type: 'feature'
 created: '2026-09-02'
-status: 'done'
+status: 'in-review'
 baseline_commit: '7a650687f9e462e31635a74dc8577b8069309544'
 review_loop_iteration: 1
 ---
@@ -26,7 +26,7 @@ review_loop_iteration: 1
 - **The record is the ledger's field grammar, without the ledger's envelope.** One `key=value` per line, rendered by `render_value` and parsed by `scan_fields` (`event_entries.py:171-184,356`), then a free body. It is **not** a ledger line: `parse_line` requires `- [id] category actor=` and refuses duplicate keys, and this is a document with sections. Saying so matters, because the next reader will otherwise assume `parse_line` applies.
 - **`attendees` is one comma-separated value, and comma is therefore reserved.** The grammar has no lists and `parse_line` refuses duplicate keys, so the list cannot be repeated fields. Store handles only — a display name like "Smith, Bob" would split into two attendees, and nothing would notice.
 - **Man-Hour Cost is never stored.** CAP-1 puts it in the *summary card* header, which is a rendered surface, and it derives from `blended_hourly_rate` in `config.toml` — so a stored value is wrong the moment the rate changes. The record stores `attendees` and `duration_minutes`; the renderer multiplies.
-- **`tentative` is stored, `stale` is derived.** Tentative is provider data — Graph's response status — and must be persisted. Stale means "absent from a window we actually harvested", which `8a`'s `CoverageWindow` already makes derivable, so storing it would be a second source of truth that goes wrong quietly.
+- **Only meetings that have happened are recorded, so neither `tentative` nor `stale` is a field here.** Decided 2026-09-07: a future meeting is not persisted at all. The calendar is its source of truth, and a local copy of a record that can change outside pm-ai at any moment cannot be kept accurate — it is duplication whose staleness the system would then have to model. `tentative` is a response status for a meeting that has not occurred, and `stale` means "absent from a window we harvested", which is a cancellation; both are questions about the future and neither has an answer about a meeting already held. A held meeting's `start` is immutable, which is what makes the record — and the day in its filename — stable for the life of the citation.
 - **The record has machine-owned and human-owned regions, and a write preserves the human's.** pm-ai owns the fields; `## Notes` is copied through verbatim. A `## Summary` region is reserved and left empty by this slice — it is transcript-derived and needs a model, which decision 2 puts beyond wave 2. This is what resolves the contradiction between this slice's replace-on-rewrite row and `33c`'s never-silently-overwrite-a-hand-edit rule: the regions differ, so both hold.
 - **A meeting id is stable for the life of the record**, because `source_ref` derives from it (`meetings.py:37-39`) and a 30-day transcript purge must not empty a citation.
 
@@ -87,6 +87,11 @@ review_loop_iteration: 1
 - Given `grep -n "meetings" pm_ai/app/wiring.py`, then no `dict` remains.
 
 ## Spec Change Log
+
+- **2026-09-07, renegotiated on instruction: no future meeting is recorded.** The calendar is the source of truth for a meeting that has not happened, and consumers read it live. A local copy of a record that can be moved or cancelled outside pm-ai cannot be kept accurate, so storing it buys duplication plus the obligation to model its staleness. The three arguments for persisting it — a pure renderer, an offline 07:00 render, and cancellation detection — were weighed and judged not worth that cost; the network exposure at render time is accepted deliberately.
+  **`tentative` and `stale` leave this slice.** Both are questions about a meeting that has not occurred: a response status, and an absence from a harvested window. Neither is answerable about a meeting already held.
+  **This makes the record's identity stable rather than volatile**, which retires a defect rather than creating one. A held meeting's `start` cannot move, so keying the filename on its UTC day is sound, `MeetingDisplaced` becomes unreachable, and the hand-edit that made a record invisible to `for_day` loses the motive that would have driven an operator to it — there is no rescheduling of the past.
+  **`for_day` is kept**, though the dashboard no longer sources today's meetings from it. It is the day query over meetings that happened; `derivation-services.md` names search indexing as the other reader.
 
 - **2026-09-03, the record format decided, and the review's findings applied.** The `Ask First` is answered: the record is the ledger's **field** grammar — `key=value` per line through `render_value`/`scan_fields` — plus a free body, and explicitly *not* a ledger line, since `parse_line` requires the `- [id] category actor=` envelope and refuses duplicate keys. One wart is stated rather than discovered: `attendees` is a comma-separated value because the grammar has no lists, so comma is reserved and handles are stored without display names.
   **Man-Hour Cost is computed, never stored** — CAP-1 puts it in a rendered card and it derives from a `config.toml` value that changes. **`tentative` is stored and `stale` is derived** from `8a`'s coverage, so there is one source of truth for each.

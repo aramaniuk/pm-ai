@@ -49,13 +49,27 @@ which is a rendered surface, and it derives from `blended_hourly_rate` in
 record stores `attendees` and `duration_minutes`; `Meeting.man_hour_cost`
 multiplies.
 
-**`tentative` is stored, `stale` is derived.** Tentative is provider data —
-Graph's response status — and cannot be recomputed once the payload is gone.
-Stale means "absent from a window pm-ai actually harvested", which story 8a's
-`CoverageWindow` already makes derivable, so storing it would be a second source
-of truth that goes wrong quietly. It is a field of `MeetingRecord` rather than of
-`Meeting` because `Meeting` is the *domain* entity and this is one provider's
-answer about it.
+## Only meetings that have happened are recorded
+
+Decided 2026-09-07: a future meeting is not persisted at all. The calendar is its
+source of truth, and a local copy of a record that can be moved or cancelled
+outside pm-ai at any moment cannot be kept accurate — it is duplication whose
+staleness the system would then have to model. Consumers that want a meeting
+which has not yet happened read the calendar live (story `33b`).
+
+So **neither `tentative` nor `stale` is a field here.** `tentative` is a response
+status for a meeting that has not occurred, and `stale` means "absent from a
+window pm-ai actually harvested", which is a cancellation; both are questions
+about the future and neither has an answer about a meeting already held. `33c`'s
+amended spec keeps the flag useful without making it durable — it is to ride on
+the in-memory `Meeting` that slice returns, and reach no file. That is a
+statement about `33c`, which is unimplemented: `Meeting` has no such field
+today, and the only `tentative` elsewhere in `pm_ai` is the connector's parse of
+Graph's response status.
+
+That is also what makes a record's identity stable rather than volatile: a held
+meeting's `start` cannot move, so keying the filename on its UTC day is sound for
+the life of the citation.
 
 ## Machine-owned and human-owned regions
 
@@ -131,7 +145,6 @@ _TITLE = "title"
 _START = "start"
 _DURATION = "duration_minutes"
 _ATTENDEES = "attendees"
-_TENTATIVE = "tentative"
 _SCOPE = "scope"
 _CALENDAR_REF = "calendar_event_ref"
 
@@ -141,7 +154,6 @@ _FIELDS: tuple[str, ...] = (
     _START,
     _DURATION,
     _ATTENDEES,
-    _TENTATIVE,
     _SCOPE,
     _CALENDAR_REF,
 )
@@ -193,9 +205,15 @@ class MeetingDisplaced(ValueError):
 
     Refused rather than either silently duplicated or silently left under the
     stale name — under the stale name `for_day` would never find it again, which
-    is a wrong answer rather than an error. A rescheduled meeting therefore needs
-    the old member removed by hand; giving the writer a delete is the real fix
-    and is recorded in `deferred-work.md`.
+    is a wrong answer rather than an error.
+
+    **The 2026-09-07 decision made this unreachable, and it is kept anyway.**
+    Only meetings that have already happened are recorded, and a held meeting's
+    `start` cannot move, so no legitimate `put` can now land a second day's name
+    on an existing id. Kept because a guard that refuses an impossible state is
+    correct and cheap: reaching it would mean something upstream had recorded a
+    meeting that had not happened, and a refusal names that at the write rather
+    than leaving `get` to pick between two records.
     """
 
 
@@ -204,17 +222,20 @@ class MeetingDisplaced(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class MeetingRecord:
-    """What one file in `meetings/` holds: the meeting, plus what only it knows.
+    """What one file in `meetings/` holds: the meeting, plus the human's notes.
 
-    Three parts rather than a fattened `Meeting`, because they have three
-    different owners. `meeting` is the domain entity. `tentative` is one
-    provider's answer about it. `notes` is the human's, and is never an argument
-    to `put` — the accessor reads it off the existing record and writes it back,
-    so no caller can set, clear or regenerate it.
+    Two parts rather than a fattened `Meeting`, because they have two different
+    owners. `meeting` is the domain entity. `notes` is the human's, and is never
+    an argument to `put` — the accessor reads it off the existing record and
+    writes it back, so no caller can set, clear or regenerate it.
+
+    There is no provider region. `tentative` was one until the 2026-09-07
+    decision that no future meeting is recorded: a response status is an answer
+    about a meeting that has not occurred, and every record here is of one that
+    has.
     """
 
     meeting: Meeting
-    tentative: bool = False
     notes: str = ""
 
 
@@ -281,7 +302,6 @@ def render_record(record: MeetingRecord) -> str:
         _START: start.isoformat(),
         _DURATION: str(duration),
         _ATTENDEES: _render_attendees(meeting.attendees),
-        _TENTATIVE: "true" if record.tentative else "false",
         _SCOPE: str(meeting.scope),
     }
     if meeting.calendar_event_ref is not None:
@@ -347,7 +367,6 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
             scope=_parse_scope(fields[_SCOPE], source=source),
             calendar_event_ref=fields.get(_CALENDAR_REF),
         ),
-        tentative=_parse_flag(fields[_TENTATIVE], source=source),
         notes=notes,
     )
 
@@ -368,8 +387,14 @@ class MeetingRecords:
     def __init__(self, storage: StoragePort) -> None:
         self._storage = storage
 
-    def put(self, meeting: Meeting, *, tentative: bool = False) -> None:
+    def put(self, meeting: Meeting) -> None:
         """Write one record into the scope that owns its subject.
+
+        Only for a meeting that has already happened. A future meeting is not
+        persisted at all (decided 2026-09-07) — the calendar is its source of
+        truth and consumers read it live — which is why there is no `tentative`
+        argument here: a response status is an answer about a meeting that has
+        not occurred.
 
         Fields are replaced whole and `## Notes` is carried over byte-identical.
         The notes are lifted out of the previous file's *raw text*, before any
@@ -394,7 +419,7 @@ class MeetingRecords:
                 )
             notes = _notes_of(self._text(member, scope=scope) or "")
         self._storage.write_artifact(
-            render_record(MeetingRecord(meeting, tentative, notes)).encode("utf-8"),
+            render_record(MeetingRecord(meeting, notes)).encode("utf-8"),
             scope=scope,
             artifact=MEETINGS,
             name=name,
@@ -536,6 +561,17 @@ def _render_attendees(attendees: tuple[Actor, ...]) -> str:
 def _parse_field(
     line: str, *, fields: dict[str, str], source: str
 ) -> tuple[str, str]:
+    """One `key=value` line of the field block, or a refusal naming the file.
+
+    A key outside `_FIELDS` is refused rather than ignored, and that is also the
+    whole of the answer to a hand-added `tentative=` line. No record pm-ai wrote
+    ever carried one — `tentative` left the record on 2026-09-07 before any
+    production caller of `put` existed — so a file containing it was hand-edited,
+    and the honest report is the same one every unknown key gets: this is not a
+    field of a meeting record. It is deliberately *not* special-cased by name,
+    because a key retired from the grammar is an unknown key, and one retired key
+    given a bespoke message would be the start of a second grammar to maintain.
+    """
     try:
         pairs = scan_fields(line, line=line)
     except MalformedEntry as unreadable:
@@ -610,16 +646,6 @@ def _parse_scope(value: str, *, source: str) -> DataScope:
             f"holds the record and whether a git-committed artifact may cite it, "
             f"so it is not a field to guess at."
         ) from unparseable
-
-
-def _parse_flag(value: str, *, source: str) -> bool:
-    if value not in ("true", "false"):
-        raise MalformedMeeting(
-            f"{source}: tentative={value!r} is neither `true` nor `false`. It is "
-            f"the provider's own answer about this meeting, and a third state "
-            f"read as either one is a claim pm-ai did not receive."
-        )
-    return value == "true"
 
 
 # ── Guards ───────────────────────────────────────────────────────────────────

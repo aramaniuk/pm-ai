@@ -26,7 +26,7 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 - **Every interpolated string is escaped** — goal titles and actor names are hand-authored or provider-supplied and reach the same Markdown as meeting titles.
 - **Ordering is total**: meetings by `(start, meeting_id)`, so a re-render is byte-identical.
 
-**Ask First:** Nothing. The display timezone was decided on 2026-09-03: it is `config.toml`'s fourth key, `display_timezone`, added by `4g`. `run_dashboard` reads it from the loaded `Config` and passes it to both `render_dashboard` and `for_day`, so the two cannot disagree.
+**Ask First:** Nothing. The display timezone was decided on 2026-09-03: it is `config.toml`'s fourth key, `display_timezone`, added by `4g`. `run_dashboard` reads it from the loaded `Config` and passes it to `render_dashboard` and to the live calendar read that selects the day, so the two cannot disagree. Since 2026-09-07 that read is `33b`'s fetch rather than `11a`'s `for_day`: an upcoming meeting is not persisted, so today's schedule comes from the calendar.
 
 **Never:** No project render — `render_project_dashboard` is `23d`'s, a separate function with its own sources and sections, so this one cannot be handed personal-scope data by mistake. No model call of any kind — the renderer is deterministic and the prototype path puts no model in the path. No file write (`23b`). No scheduling (`9a`). No scope-boundary logic (`23d`). No commitment data: nothing produces commitments yet, and a section implying otherwise would be invented evidence.
 
@@ -35,7 +35,8 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Full day | three meetings, message entries, goals at all horizons | four sections, all populated; meetings ordered by `(start, meeting_id)` | N/A |
-| No meetings | `for_day` returned nothing | "No meetings on your calendar today" | N/A |
+| No meetings | the calendar answered, with nothing in the day | "No meetings on your calendar today" — it names a query result, and the query succeeded | N/A |
+| Calendar unreachable | the fetch failed or was refused | the section says the calendar could not be read, naming that; **never** "No meetings on your calendar today" | reported, never raised |
 | All of today's meetings ended | meetings returned, all past | "All N of today's meetings have ended" — **not** the no-meetings string | N/A |
 | Meeting in progress | started before `now`, not ended | listed as time-critical | N/A |
 | Meeting spanning midnight | started yesterday, ends today | listed | N/A |
@@ -57,7 +58,7 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 
 - `pm_ai/core/rendering.py` -- new; the four section renderers and the heading constants
 - `pm_ai/domain/goals.py:33-39` -- `GoalHorizon`, the three tiers
-- `pm_ai/core/meeting_records.py` -- `for_day(day, *, tz)`, `11a`'s query this section consumes
+- `pm_ai/connectors/graph/calendar.py` -- `33b`'s fetch, which supplies the day's meetings live. **Not** `11a`'s `for_day`: since 2026-09-07 an upcoming meeting is not recorded, so the day ahead cannot come from `meetings/`
 - `pm_ai/core/event_log.py:52-70` -- `EventLog.read`, bounded on `ingested_at`
 - `pm_ai/domain/clocks.py` -- the precedent for refusing a non-UTC instant once
 - `pm_ai/domain/scope_model.py:540` -- the personal `daily_dashboard.md` CAP-9 names
@@ -75,6 +76,10 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 - Given the rendered output, then every empty-section string names a file, a query or a window — never a state of the world.
 
 ## Spec Change Log
+
+- **2026-09-07, the day's meetings come from the calendar, not from `meetings/`.** Consequent on the decision that no future meeting is persisted: the calendar owns a meeting that has not happened, so this section reads it live. `render_dashboard` stays pure and its signature is unchanged — it is still handed `Meeting` values; only their provider moves from `11a`'s `for_day` to `33b`'s fetch, in `23b`, which is the layer allowed to do I/O.
+  **A matrix row was added, because the honesty rule now has a case it did not have.** With a local read, "no meetings today" and "could not ask" were the same silence. With a live read they are different facts, and this section's own Always forbids stating one when the other is true — "No meetings on your calendar today" *names a query result*, and there is no query result when the fetch failed. `8a`'s `HarvestOutcome` and `HarvestFailure` already distinguish ran-and-learned-nothing from ran-and-failed, so the reason is available to state rather than needing to be invented.
+  **The network exposure is accepted deliberately**: a 07:00 render with no route to the calendar now reports that instead of rendering yesterday's local copy as though it were today.
 
 - **2026-09-03, amended against the second multi-lens review and the day's decisions.**
   **"3-Tier means `GoalHorizon`" was wrong** (B9/D-8), and it contradicted `alignment_tag`'s docstring, which cites the same spec section. The PRD settles it twice: the three tiers are `Project`, `Team`, `Personal` — the **domain**. Corrected, and a matrix row followed.

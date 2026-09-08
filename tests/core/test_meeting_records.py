@@ -172,11 +172,10 @@ def test_a_rewrite_replaces_the_fields_and_preserves_the_notes(records, tmp_path
     member.write_text(member.read_text() + hand_written, encoding="utf-8")
     before = hashlib.sha256(hand_written.encode("utf-8")).hexdigest()
 
-    records.put(meeting(title="second title"), tentative=True)
+    records.put(meeting(title="second title"))
 
     reread = records.get("mtg_01HX", scope=PROJECT)
     assert reread.meeting.title == "second title"
-    assert reread.tentative is True
     assert hashlib.sha256(reread.notes.encode("utf-8")).hexdigest() == before
     assert members(tmp_path, PROJECT) == [member.name], "one id, one record"
 
@@ -201,6 +200,12 @@ def test_a_rewrite_over_a_mangled_machine_region_still_keeps_the_notes(records, 
 def test_a_start_that_moves_to_another_day_is_refused_rather_than_duplicated(records):
     """One id with two records is a citation nothing can resolve, and the single
     writer offers no delete — so the write is refused and says what to remove.
+
+    The 2026-09-07 decision made this unreachable through a legitimate write: a
+    held meeting's `start` cannot move, and no future one is recorded. The guard
+    and this test are kept anyway — reaching it would mean something upstream had
+    recorded a meeting that had not happened, which is worth a refusal at the
+    write rather than two records for `get` to choose between.
     """
     records.put(meeting())
     with pytest.raises(MeetingDisplaced):
@@ -276,14 +281,17 @@ def test_the_record_never_stores_the_man_hour_cost(records, tmp_path):
     assert "rate" not in text
 
 
-def test_tentative_is_stored_and_stale_is_not(records, tmp_path):
-    """Provider data is persisted; a derivable claim is not stored twice."""
-    records.put(meeting(), tentative=True)
+def test_neither_tentative_nor_stale_is_a_field(records, tmp_path):
+    """Decided 2026-09-07: only meetings that have happened are recorded, so both
+    questions are about a meeting this record can never be of. `tentative` is a
+    response status for a meeting that has not occurred and `stale` means absent
+    from a harvested window, which is a cancellation.
+    """
+    records.put(meeting())
     text = (collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]).read_text()
 
-    assert "tentative=true" in text
+    assert "tentative" not in text
     assert "stale" not in text
-    assert records.get("mtg_01HX", scope=PROJECT).tentative is True
 
 
 # ── Names ────────────────────────────────────────────────────────────────────
@@ -473,43 +481,48 @@ def test_a_well_formed_hand_edit_is_read_back(records, tmp_path):
         pytest.param("meeting_id=a meeting_id=b\n", id="two-pairs-on-one-line"),
         pytest.param(
             'meeting_id=mtg_01HX\ntitle=a\ntitle=b\nstart=2026-09-04T09:00:00+00:00\n'
-            "duration_minutes=45\nattendees=x\ntentative=false\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=x\nscope=project:alpha\n",
             id="duplicate-key",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=x\ntentative=false\nscope=project:alpha\n"
+            "duration_minutes=45\nattendees=x\nscope=project:alpha\n"
             "man_hour_cost=900\n",
             id="unknown-key",
         ),
         pytest.param(
+            # `tentative` is retired, so a hand-added one is an unknown key and
+            # nothing more — the refusal every key outside the grammar gets,
+            # rather than a bespoke message for one name that used to be a field.
+            # No record pm-ai wrote can carry it: the field left the module before
+            # `put` had a production caller.
+            "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
+            "duration_minutes=45\nattendees=x\nscope=project:alpha\ntentative=false\n",
+            id="retired-tentative-key",
+        ),
+        pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00\n"
-            "duration_minutes=45\nattendees=x\ntentative=false\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=x\nscope=project:alpha\n",
             id="naive-start",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=not-a-time\n"
-            "duration_minutes=45\nattendees=x\ntentative=false\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=x\nscope=project:alpha\n",
             id="unparseable-start",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=half an hour\nattendees=x\ntentative=false\nscope=project:alpha\n",
+            "duration_minutes=half an hour\nattendees=x\nscope=project:alpha\n",
             id="duration-not-a-number",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=a,,b\ntentative=false\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=a,,b\nscope=project:alpha\n",
             id="empty-attendee",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=x\ntentative=maybe\nscope=project:alpha\n",
-            id="third-tentative-state",
-        ),
-        pytest.param(
-            "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=x\ntentative=false\nscope=nowhere\n",
+            "duration_minutes=45\nattendees=x\nscope=nowhere\n",
             id="unknown-scope",
         ),
         pytest.param('title="unclosed\n', id="unclosed-quote"),
@@ -556,7 +569,6 @@ def test_a_binary_file_under_a_record_name_is_refused(records, tmp_path):
     "record",
     [
         pytest.param(MeetingRecord(meeting()), id="ordinary"),
-        pytest.param(MeetingRecord(meeting(), tentative=True), id="tentative"),
         pytest.param(
             MeetingRecord(meeting(), notes="hand written\n\n### heading\n"), id="notes"
         ),
@@ -591,9 +603,7 @@ def test_a_record_survives_render_and_parse(record):
     """
     round_tripped = parse_record(render_record(record), source="under-test.md")
 
-    assert round_tripped == MeetingRecord(
-        as_stored(record.meeting), record.tentative, record.notes
-    )
+    assert round_tripped == MeetingRecord(as_stored(record.meeting), record.notes)
 
 
 def test_an_empty_calendar_ref_is_not_the_same_as_none():
