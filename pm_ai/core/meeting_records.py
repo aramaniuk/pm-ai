@@ -81,6 +81,17 @@ overwritten — the regions differ, so both hold.
 `## Summary` is reserved and left empty here. It is transcript-derived and needs
 a model, which is out of waves 1 and 2; amendments — the other half of that
 design — are queued in `deferred-work.md` with the reasoning that removed them.
+
+**Reserved means refused, not ignored.** Everything between the field block and
+`## Notes` is pm-ai's, and the only thing this slice writes there is the
+`## Summary` heading — so anything else a hand edit leaves in that region is a
+`MalformedMeeting` naming the region and pointing at `## Notes`. Until this was
+enforced the region was parsed past and dropped on the next rewrite: a
+hand-written summary body vanished, and a `duration_minutes=999` line placed one
+line *below* the blank separator parsed away in silence while the record went on
+reporting 30. That is precisely the failure `_parse_field` refuses an unknown key
+for — "a typo silently dropped is a value the writer believes it stored" — in a
+file whose whole premise is that a human may edit it.
 """
 
 from __future__ import annotations
@@ -90,8 +101,13 @@ import re
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 
-from pm_ai.domain.event_entries import MalformedEntry, render_value, scan_fields
-from pm_ai.domain.identity import Actor, DataScope
+from pm_ai.domain.event_entries import (
+    MAX_ENTRY_LENGTH,
+    MalformedEntry,
+    render_value,
+    scan_fields,
+)
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.ports import StoragePort
 
@@ -165,6 +181,31 @@ event" from "an event whose reference is the empty string" across a round trip.
 """
 
 _REQUIRED: frozenset[str] = frozenset(_FIELDS) - {_CALENDAR_REF}
+
+_DECIMAL = re.compile(r"^(?:0|[1-9][0-9]*)$")
+"""The one spelling of `duration_minutes` this grammar reads or writes.
+
+`int()` is not the parser for a text field. It accepts Python *source* syntax —
+`1_0` is ten, `+45` is forty-five — and every non-ASCII decimal digit besides,
+so a file saying `1_0` parsed as `10` and a file saying `٤٥` parsed as `45`: the
+text and the value disagreed, and the record is the thing a human reads and
+diffs. Canonical rather than merely unambiguous (`007` is refused too), because
+`23a` requires a byte-identical re-render and a value with two spellings has two
+renders.
+"""
+
+_RECORDING_SCOPES: frozenset[ScopeKind] = frozenset(
+    {ScopeKind.PERSONAL, ScopeKind.PEOPLE, ScopeKind.PROJECT}
+)
+"""The three trees that declare `meetings/` (`scope_model.py:554,650,716`).
+
+Spelled here so this module refuses an application-scoped meeting in its own
+vocabulary. `ScopePaths.resolve` refuses it too — with `ArtifactNotInScope`,
+which is a `pm_ai.platform` sentence about a directory rather than this one's
+sentence about a meeting — and the scope is a *parsed field*, so a record
+hand-edited to `scope=application` would otherwise read back as a `Meeting` this
+accessor cannot store and surface a path error two layers down on the next `put`.
+"""
 
 
 # ── Refusals ─────────────────────────────────────────────────────────────────
@@ -280,8 +321,7 @@ def record_name(meeting_id: str, start: datetime) -> str:
     """
     _assert_recordable_id(meeting_id)
     day = _assert_utc(start, where="Meeting.start").date().isoformat()
-    digest = hashlib.sha256(meeting_id.encode("utf-8")).hexdigest()
-    return f"{day}-{_slug(meeting_id)}-{digest}.md"
+    return f"{day}-{_slug(meeting_id)}{_digest_suffix(meeting_id)}"
 
 
 def render_record(record: MeetingRecord) -> str:
@@ -296,18 +336,22 @@ def render_record(record: MeetingRecord) -> str:
     _assert_recordable_id(meeting.meeting_id)
     start = _assert_utc(meeting.start, where="Meeting.start")
     duration = _assert_duration(meeting.duration_minutes)
+    scope = _assert_records_meetings(meeting.scope, where="Meeting.scope")
     values: dict[str, str] = {
         _MEETING_ID: meeting.meeting_id,
-        _TITLE: meeting.title,
+        _TITLE: _assert_recordable_text(meeting.title, where="Meeting.title"),
         _START: start.isoformat(),
         _DURATION: str(duration),
         _ATTENDEES: _render_attendees(meeting.attendees),
-        _SCOPE: str(meeting.scope),
+        _SCOPE: str(scope),
     }
     if meeting.calendar_event_ref is not None:
         values[_CALENDAR_REF] = meeting.calendar_event_ref
     lines = [
-        f"{key}={render_value(values[key], where=f'field {key!r}')}"
+        _assert_readable_length(
+            f"{key}={render_value(values[key], where=f'field {key!r}')}",
+            where=f"the rendered {key!r}",
+        )
         for key in _FIELDS
         if key in values
     ]
@@ -328,6 +372,13 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
     exactly as it was read. A record with no `## Notes` heading at all yields
     empty notes rather than a refusal: the machine-owned region is intact, the
     human region is simply absent, and the next `put` writes the heading back.
+
+    Between the two lies the reserved `## Summary` region, which is pm-ai's and
+    which this slice leaves empty — so anything in it beyond the heading itself
+    is refused rather than parsed past. That region used to be read and dropped:
+    a hand-written summary body disappeared on the next `put`, and a
+    `duration_minutes=` line one line below the blank separator was ignored
+    while the writer believed it had been stored.
     """
     lines = text.splitlines(keepends=True)
     notes_at = next(
@@ -342,12 +393,20 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
     head = lines if notes_at is None else lines[:notes_at]
 
     fields: dict[str, str] = {}
-    for raw in head:
+    reserved_at = len(head)
+    for index, raw in enumerate(head):
         line = raw.rstrip("\r\n")
         if not line.strip() or line.startswith("##"):
+            reserved_at = index
             break
+        # Both bounds the renderer keeps, asked on the way in as well. A value
+        # this module will not write is a value it must not accept back — the
+        # rule `MalformedMeeting` states — and a hand edit is the only thing that
+        # can put an unbounded line or a raw NUL in a file pm-ai wrote.
+        _assert_readable_length(line, where=f"{source}: a field")
         key, value = _parse_field(line, fields=fields, source=source)
         fields[key] = value
+    _assert_reserved_region_empty(head[reserved_at:], source=source)
 
     missing = sorted(_REQUIRED - fields.keys())
     if missing:
@@ -359,8 +418,8 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
         )
     return MeetingRecord(
         meeting=Meeting(
-            meeting_id=fields[_MEETING_ID],
-            title=fields[_TITLE],
+            meeting_id=_assert_recordable_id(fields[_MEETING_ID]),
+            title=_assert_recordable_text(fields[_TITLE], where=f"{source}: title"),
             start=_parse_start(fields[_START], source=source),
             duration_minutes=_parse_duration(fields[_DURATION], source=source),
             attendees=_parse_attendees(fields[_ATTENDEES], source=source),
@@ -400,30 +459,49 @@ class MeetingRecords:
         The notes are lifted out of the previous file's *raw text*, before any
         field is parsed, deliberately: a record whose machine-owned region got
         mangled by hand must not cost the human their notes, and the fields being
-        replaced anyway are exactly what the mangling damaged.
+        replaced anyway are exactly what the mangling damaged. That extends to a
+        member that is not valid UTF-8 — `_repairable_text` decodes it lossily
+        rather than refusing, because `put` is the one operation that can repair
+        such a file and it must not be the operation that raises on it.
 
         A record for this id already sitting under another day's name is refused
         rather than duplicated — see `MeetingDisplaced`.
+
+        **This is a read-modify-write, and it is one step.** The previous member
+        is listed and read, and the replacement written, inside
+        `StoragePort.exclusive` over `meetings/` — the same claim `8b` takes over
+        `private/config.json`, and for the same reason: two `put`s that each read
+        a different snapshot of the notes would each write their own back and one
+        human edit would be gone. The claim refuses rather than waits, so a
+        concurrent `put` in another process raises `ArtifactBusy` naming the
+        claim file instead of quietly winning.
+        **What the claim does not cover is a human's editor**, which honours no
+        claim of pm-ai's: an edit saved between the read and the write is still
+        lost. Stated rather than implied, because the region this preserves is
+        exactly the region a human is expected to be editing — closing that
+        window needs the single writer to compare what it read against what is
+        on disk at publish time, which no artifact operation does today.
         """
-        scope = meeting.scope
+        scope = _assert_records_meetings(meeting.scope, where="Meeting.scope")
         name = record_name(meeting.meeting_id, meeting.start)
-        notes = ""
-        for member in self._members_for(meeting.meeting_id, scope=scope):
-            if member != name:
-                raise MeetingDisplaced(
-                    f"{meeting.meeting_id} is already recorded in {scope} as "
-                    f"{member}, and its start now falls on another UTC day, so "
-                    f"this write would publish {name} and leave that one behind. "
-                    f"One id with two records is a citation nothing can resolve; "
-                    f"remove the stale member and write again."
-                )
-            notes = _notes_of(self._text(member, scope=scope) or "")
-        self._storage.write_artifact(
-            render_record(MeetingRecord(meeting, notes)).encode("utf-8"),
-            scope=scope,
-            artifact=MEETINGS,
-            name=name,
-        )
+        with self._storage.exclusive(scope=scope, artifact=MEETINGS):
+            notes = ""
+            for member in self._members_for(meeting.meeting_id, scope=scope):
+                if member != name:
+                    raise MeetingDisplaced(
+                        f"{meeting.meeting_id} is already recorded in {scope} as "
+                        f"{member}, and its start now falls on another UTC day, so "
+                        f"this write would publish {name} and leave that one "
+                        f"behind. One id with two records is a citation nothing "
+                        f"can resolve; remove the stale member and write again."
+                    )
+                notes = _notes_of(self._repairable_text(member, scope=scope))
+            self._storage.write_artifact(
+                render_record(MeetingRecord(meeting, notes)).encode("utf-8"),
+                scope=scope,
+                artifact=MEETINGS,
+                name=name,
+            )
 
     def get(self, meeting_id: str, *, scope: DataScope) -> MeetingRecord:
         """The record that id names, or `MeetingNotFound`.
@@ -432,10 +510,18 @@ class MeetingRecords:
         in the name is what narrows the listing to one candidate, and the field
         is what confirms it. That is the difference between a lookup that is
         probably right and one that is right.
+
+        The confirmation lives in `_record`, which refuses a member whose name
+        and content disagree and names both ids. It is there rather than here so
+        that `for_day` gets it too, and because the honest answer to "the name
+        says one meeting and the field says another" is a refusal rather than
+        `MeetingNotFound`: absence is the ordinary state of a clean machine, and
+        reporting a contradiction as absence hands the caller the wrong sentence.
         """
+        scope = _assert_records_meetings(scope, where="get(scope=…)")
         for member in self._members_for(meeting_id, scope=scope):
             record = self._record(member, scope=scope)
-            if record is not None and record.meeting.meeting_id == meeting_id:
+            if record is not None:
                 return record
         raise MeetingNotFound(
             f"no meeting {meeting_id!r} is recorded in {scope}. Nothing has been "
@@ -470,6 +556,18 @@ class MeetingRecords:
                 f"this query cannot honour — pass `day.date()` and say which "
                 f"zone it is a date in."
             )
+        if not isinstance(tz, tzinfo):
+            raise MalformedMeeting(
+                f"for_day(..., tz={tz!r}) was not given a timezone. `None` in "
+                f"particular is not 'no preference': `datetime.combine` reads it "
+                f"as the machine's local zone, so the query would answer for "
+                f"whichever zone the daemon happens to be running in and say "
+                f"nothing about having done so — a boundary read as local time "
+                f"without announcing that it did (AD-35), and the exact silence "
+                f"the explicit parameter exists to prevent. Refused for the same "
+                f"reason a `datetime` day is, one line up."
+            )
+        scope = _assert_records_meetings(scope, where="for_day(scope=…)")
         begin, end = _utc_span(day, tz)
         days = _utc_days(begin, end)
         found: list[MeetingRecord] = []
@@ -498,7 +596,7 @@ class MeetingRecords:
         Uniqueness rests on the provider id story 33c keys on; the limit is
         recorded rather than papered over.
         """
-        suffix = f"-{hashlib.sha256(meeting_id.encode('utf-8')).hexdigest()}.md"
+        suffix = _digest_suffix(meeting_id)
         return tuple(
             member
             for member in self._storage.list_collection(scope=scope, artifact=MEETINGS)
@@ -527,18 +625,49 @@ class MeetingRecords:
                 f"than a record to salvage."
             ) from undecodable
 
+    def _repairable_text(self, member: str, *, scope: DataScope) -> str:
+        """One member's text for `put` to salvage `## Notes` out of, never a refusal.
+
+        Deliberately not `_text`. That method refuses a member which is not
+        UTF-8, which is right for a *read*: a binary file under a record's name
+        is a foreign file rather than a record, and reporting it as a meeting
+        would be inventing one. It was wrong for `put`, which raised on exactly
+        the file it is the only operation able to repair — a corrupted record
+        could neither be read nor rewritten, so nothing could fix it.
+
+        Lossy rather than discarded. A corruption confined to the machine-owned
+        region leaves the human's notes intact and they are carried over; one
+        inside the notes carries U+FFFD through, which is visible in the file the
+        PM then reads rather than silence. Absence answers as no notes, which is
+        the same sentence `_text` tells `get`.
+        """
+        raw = self._storage.read_artifact(scope=scope, artifact=MEETINGS, name=member)
+        return "" if raw is None else raw.decode("utf-8", errors="replace")
+
     def _record(self, member: str, *, scope: DataScope) -> MeetingRecord | None:
         text = self._text(member, scope=scope)
-        return None if text is None else parse_record(text, source=member)
+        if text is None:
+            return None
+        record = parse_record(text, source=member)
+        _assert_name_agrees(member, record.meeting)
+        return record
 
 
 # ── Field rendering and parsing ──────────────────────────────────────────────
 
 
 def _render_attendees(attendees: tuple[Actor, ...]) -> str:
-    handles = []
+    handles: list[str] = []
     for attendee in attendees:
         handle = attendee.actor_id
+        if handle in handles:
+            raise MalformedMeeting(
+                f"attendee handle {handle!r} appears twice. `attendees` is a set "
+                f"of the people who were in the room, and every count that reads "
+                f"it groups by actor: a repeated handle makes one person two in "
+                f"the Man-Hour Cost, in every per-actor tally, and in anything "
+                f"`23a` renders from the list."
+            )
         if not handle or handle.strip() != handle:
             raise MalformedMeeting(
                 f"attendee handle {handle!r} is empty or padded. It is one item "
@@ -610,13 +739,22 @@ def _parse_start(value: str, *, source: str) -> datetime:
 
 
 def _parse_duration(value: str, *, source: str) -> int:
-    try:
-        minutes = int(value)
-    except ValueError as unparseable:
+    """A canonical decimal integer, which is narrower than `int()` accepts.
+
+    `int()` reads Python source syntax and every Unicode decimal digit, so
+    `duration_minutes=1_0` used to parse as ten and `+45` as forty-five: the file
+    said one thing and the record held another, in the one field the Man-Hour
+    Cost multiplies. `_DECIMAL` carries the rest of the reasoning.
+    """
+    if not _DECIMAL.match(value):
         raise MalformedMeeting(
-            f"{source}: duration_minutes={value!r} is not an integer."
-        ) from unparseable
-    return _assert_duration(minutes, source=source)
+            f"{source}: duration_minutes={value!r} is not a decimal integer. "
+            f"Minutes are written as digits with no sign, no underscore and no "
+            f"leading zero — `0` for an all-day meeting per `33c`, and nothing "
+            f"negative, since Man-Hour Cost multiplies this by the attendee "
+            f"count and the blended rate."
+        )
+    return _assert_duration(int(value), source=source)
 
 
 def _parse_attendees(value: str, *, source: str) -> tuple[Actor, ...]:
@@ -634,18 +772,27 @@ def _parse_attendees(value: str, *, source: str) -> tuple[Actor, ...]:
             f"is the separator and nothing else, so `a,,b` names a person the "
             f"record cannot identify."
         )
+    repeated = sorted({handle for handle in handles if handles.count(handle) > 1})
+    if repeated:
+        raise MalformedMeeting(
+            f"{source}: attendees={value!r} names {repeated} more than once. One "
+            f"person listed twice is two people to the Man-Hour Cost and to "
+            f"every per-actor count that groups by handle — refused on the way "
+            f"in for the reason it is refused on the way out."
+        )
     return tuple(Actor(actor_id=handle) for handle in handles)
 
 
 def _parse_scope(value: str, *, source: str) -> DataScope:
     try:
-        return DataScope.parse(value)
+        parsed = DataScope.parse(value)
     except ValueError as unparseable:
         raise MalformedMeeting(
             f"{source}: scope={value!r} is not a scope. It decides which tree "
             f"holds the record and whether a git-committed artifact may cite it, "
             f"so it is not a field to guess at."
         ) from unparseable
+    return _assert_records_meetings(parsed, where=f"{source}: scope")
 
 
 # ── Guards ───────────────────────────────────────────────────────────────────
@@ -692,15 +839,209 @@ def _assert_recordable_id(meeting_id: str) -> str:
     return meeting_id
 
 
+def _assert_recordable_text(value: str, *, where: str) -> str:
+    """Refuse the control characters the line grammar does not neutralise.
+
+    Narrower than `_assert_recordable_id`, and the asymmetry is the point rather
+    than an oversight. An id is interpolated into a filename and quoted verbatim
+    into every message that reports the record, so a newline there splits one
+    record's name across two lines. A title is neither: `render_value` escapes
+    `\\`, `"`, `\n` and `\r`, so all four survive one line and round-trip
+    unchanged, and refusing them would refuse a real Graph subject that carries
+    one.
+
+    What escaping does not answer for is the rest of C0 and DEL. A NUL or a bell
+    inside a title reaches the file unescaped, where it is invisible to the PM
+    who is meant to read, grep and diff a plaintext record — and active in the
+    terminal that prints the record's name back at them. Tab, newline and
+    carriage return are the three exceptions, because the first is ordinary in
+    prose and the other two are escaped.
+    """
+    illegal = sorted(
+        {
+            character
+            for character in value
+            if (ord(character) < 32 and character not in "\t\n\r")
+            or ord(character) == 127
+        }
+    )
+    if illegal:
+        raise MalformedMeeting(
+            f"{where} contains the control character(s) {illegal!r}. The field "
+            f"grammar escapes a backslash, a quote, a newline and a carriage "
+            f"return, so those survive a line and are allowed — the rest of C0 "
+            f"and DEL survive nothing a human reads, and reach the terminal that "
+            f"reports the record."
+        )
+    return value
+
+
+def _assert_readable_length(line: str, *, where: str) -> str:
+    """One rendered field line, bounded as `render_entry` bounds a ledger line.
+
+    The record inherits the ledger's escaping and its per-line shape, and until
+    this guard it inherited neither of the ledger's bounds: `render_entry`
+    refuses a line past `MAX_ENTRY_LENGTH` because a segment is plaintext
+    Markdown the PM is meant to read, grep and diff by hand, and a record is the
+    same kind of file for the same reader. `title` and the joined `attendees` are
+    the two fields a caller can make arbitrarily long — a Graph subject and a
+    meeting with a thousand invitees — and either would have produced a file no
+    editor opens.
+    """
+    if len(line) > MAX_ENTRY_LENGTH:
+        raise MalformedMeeting(
+            f"{where} line is {len(line)} characters, past the "
+            f"{MAX_ENTRY_LENGTH} bound a ledger line keeps. A meeting record is "
+            f"plaintext Markdown meant to be read, grepped and diffed by hand, "
+            f"and one field carrying a megabyte defeats all three — refused here, "
+            f"where the message names the field, rather than as a file nobody "
+            f"can open."
+        )
+    return line
+
+
+def _assert_records_meetings(scope: DataScope, *, where: str) -> DataScope:
+    """Only a tree that declares `meetings/` may hold a record. See `_RECORDING_SCOPES`."""
+    if scope.kind not in _RECORDING_SCOPES:
+        raise MalformedMeeting(
+            f"{where}={scope} has no `meetings/`. The collection is declared in "
+            f"the personal, people and project trees and nowhere else "
+            f"(`scope_model.py:554,650,716`), so there is no directory in the "
+            f"{scope.kind.value} scope for this record to land in and nothing "
+            f"there for a citation to resolve against. Refused in this "
+            f"vocabulary rather than left to surface as a path error from the "
+            f"resolver two layers down."
+        )
+    return scope
+
+
+def _assert_name_agrees(member: str, meeting: Meeting) -> None:
+    """The filename and the record it holds must name the same meeting and day.
+
+    Both halves of the name are derived from the record's own fields, so a
+    disagreement is a hand edit — and both disagreements used to be silent in
+    opposite directions, which is the worst available pair:
+
+    - **the day.** `for_day` opens only the members whose prefix falls inside
+      the span, and it then filters on the parsed `start`. A record whose `start`
+      was hand-moved to another day was therefore invisible on *every* day: the
+      prefix excluded it from the new day's read and the parsed instant excluded
+      it from the old day's, and neither stage called it an error. That is a
+      dashboard row that silently disappears, which the story's Design Notes say
+      must never happen.
+    - **the id.** The digest narrows a listing to one candidate and the field is
+      what confirms it. A record whose `meeting_id=` was hand-changed answered
+      `MeetingNotFound` — absence, the ordinary state of a clean machine —
+      rather than naming the contradiction.
+
+    Reachable only by hand now that a held meeting's `start` is immutable
+    (2026-09-07), which is exactly why it is worth a refusal that names both
+    values: the operator who made the edit is the only person who can undo it.
+    """
+    named_day, held_day = member[:10], meeting.start.date().isoformat()
+    if named_day != held_day:
+        raise MalformedMeeting(
+            f"{member} is named for {named_day} and holds a meeting starting on "
+            f"{held_day}. The filename's day is what lets `for_day` read one day "
+            f"without opening every file, so a record that disagrees with its own "
+            f"name is returned by no day at all — the {named_day} read filters it "
+            f"out on the parsed instant and the {held_day} read never opens it. "
+            f"Either restore start= to {named_day} or rename the file to carry "
+            f"{held_day}."
+        )
+    if not member.endswith(_digest_suffix(meeting.meeting_id)):
+        raise MalformedMeeting(
+            f"{member} does not carry the digest of {meeting.meeting_id!r}, the "
+            f"id it holds. The name's digest is what narrows a listing to one "
+            f"candidate and the field is what confirms it, so a record found "
+            f"under one id and declaring another resolves for neither. Either "
+            f"restore meeting_id= or rename the file to "
+            f"{record_name(meeting.meeting_id, meeting.start)}."
+        )
+
+
+def _assert_reserved_region_empty(lines: list[str], *, source: str) -> None:
+    """Nothing between the field block and `## Notes` but the reserved heading.
+
+    That region is pm-ai's — `## Summary` is machine-owned and this slice leaves
+    it empty — and it used to be read past and dropped on the next rewrite. Two
+    silent losses came out of that, and they are the two this refuses:
+
+    - a hand-written `## Summary` body disappeared on the next `put`, with no
+      message and nothing in the file to say it had been there;
+    - a field-shaped line placed one line *below* the blank separator was
+      ignored, so `duration_minutes=999` or `title=hijacked` parsed away while
+      the record went on reporting the value it already held.
+
+    The second is what `_parse_field` refuses an unknown key for, in this file's
+    own words: a typo silently dropped is a value the writer believes it stored.
+    The first is the same rule for prose. Both point the human at `## Notes`,
+    which is theirs, is copied through verbatim, and is where a hand-written
+    paragraph belongs until a model can fill the summary in (`11b`, story 7).
+    """
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if not line.strip() or line == SUMMARY_HEADING:
+            continue
+        key = line.partition("=")[0].strip()
+        if "=" in line and key in _FIELDS:
+            raise MalformedMeeting(
+                f"{source} declares {key!r} below the field block, in the "
+                f"reserved `## Summary` region, where nothing reads it. The field "
+                f"block is the *leading* run of lines and ends at the first blank "
+                f"line, so this line is dropped and the record keeps whatever "
+                f"value it already had — the same silent loss an unknown key is "
+                f"refused for. Move it up into the field block."
+            )
+        raise MalformedMeeting(
+            f"{source} has content in the reserved `## Summary` region: "
+            f"{line!r}. That region is pm-ai's and this slice writes nothing into "
+            f"it — it is transcript-derived and needs a model — so anything left "
+            f"there is dropped by the next write rather than kept. Hand-written "
+            f"prose belongs under `## Notes`, which is copied through "
+            f"byte-identical."
+        )
+
+
 def _assert_utc(moment: datetime, *, where: str) -> datetime:
-    if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+    if moment.tzinfo is None or not _is_utc(moment.tzinfo, moment):
         raise MalformedMeeting(
             f"{where}={moment!r} is not aware UTC. Every instant in a record is, "
             f"so a naive one cannot be compared against the day boundary "
             f"`for_day` computes — and a naive value reads as local time without "
-            f"announcing that it did (AD-35)."
+            f"announcing that it did (AD-35). A *named* zone that merely happens "
+            f"to be zero-offset at this instant is refused too: `Europe/London` "
+            f"would otherwise be accepted in January and refused in July for the "
+            f"same calendar, and the record's day — which its filename carries — "
+            f"would depend on which half of the year the meeting fell in. "
+            f"Convert with `.astimezone(timezone.utc)`."
         )
     return moment
+
+
+def _is_utc(zone: tzinfo, moment: datetime) -> bool:
+    """Whether `zone` *is* UTC, rather than zero-offset at one instant.
+
+    A single `utcoffset()` read cannot tell the two apart, and half the zones
+    that fail this test pass it for part of the year: `Europe/London` is +00:00
+    in January and +01:00 in July. Sampled six months either side as well as at
+    the instant itself, which is enough to separate a fixed-zero zone from any
+    zone in the database that has a summer — three reads rather than a
+    whole-year walk, because no rule keeps a zone at +00:00 for six months and
+    moves it in the other six.
+    """
+    naive = moment.replace(tzinfo=None)
+    for shift in (timedelta(0), timedelta(days=183), timedelta(days=-183)):
+        try:
+            offset = zone.utcoffset(naive + shift)
+        except (OverflowError, ValueError):
+            # Only within a few months of `datetime.min`/`max`, which no meeting
+            # is. Refused rather than assumed UTC: a zone that cannot answer for
+            # an instant is not one this record can be keyed on.
+            return False
+        if offset != timedelta(0):
+            return False
+    return True
 
 
 def _assert_duration(minutes: int, *, source: str | None = None) -> int:
@@ -729,6 +1070,17 @@ def _slug(meeting_id: str) -> str:
     return reduced or "_"
 
 
+def _digest_suffix(meeting_id: str) -> str:
+    """The tail of the filename an id owns, spelled once.
+
+    `record_name` composes it, `_members_for` matches on it and
+    `_assert_name_agrees` checks a member against it — three callers, so a
+    fourth spelling of the same `sha256` is a way for a lookup to stop finding
+    what a write produced.
+    """
+    return f"-{hashlib.sha256(meeting_id.encode('utf-8')).hexdigest()}.md"
+
+
 def _notes_of(text: str) -> str:
     """The human-owned region of a record's raw text, without parsing the rest."""
     lines = text.splitlines(keepends=True)
@@ -743,6 +1095,12 @@ def _utc_span(day: date, tz: tzinfo) -> tuple[datetime, datetime]:
 
     Half-open because a meeting starting at exactly midnight belongs to the day
     that begins, and to one day only.
+
+    Not necessarily 24 hours wide. A DST transition makes the local day 23 or 25
+    hours — measured: `America/Havana` 2018-11-04 spans 25 and
+    `America/Sao_Paulo` 2018-11-04 spans 23 — which is why both ends are
+    converted from the local wall clock rather than one end being offset from
+    the other.
     """
     begin = datetime.combine(day, time.min, tzinfo=tz).astimezone(timezone.utc)
     end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=tz).astimezone(
@@ -754,9 +1112,17 @@ def _utc_span(day: date, tz: tzinfo) -> tuple[datetime, datetime]:
 def _utc_days(begin: datetime, end: datetime) -> frozenset[str]:
     """Which `YYYY-MM-DD` filename prefixes can hold a record inside the span.
 
-    One or two: a 24-hour half-open interval touches at most two UTC dates.
-    Computed by walking rather than assumed, so an offset no zone has today
-    would widen the read instead of losing a record.
+    One or two in every zone the database describes, but the count is **walked
+    rather than reasoned to**, and the reason it used to give for that was
+    wrong. "A 24-hour half-open interval touches at most two UTC dates" assumed
+    a width no local day guarantees: a DST transition makes it 23 or 25 hours
+    (`America/Havana` 2018-11-04 is 25, `America/Sao_Paulo` 2018-11-04 is 23),
+    and zone offsets range over ±14 hours. The conclusion survives the correction
+    — the widest span any of that produces still touches two dates — and the
+    walk is what makes it survive: an interval of any width yields exactly the
+    prefixes it covers, so an unusual span widens the read instead of losing a
+    record. Reasoning from a fixed 24 hours would have been reasoning from
+    something no zone promises.
     """
     days: set[str] = set()
     cursor = begin.date()

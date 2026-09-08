@@ -24,6 +24,7 @@ import pytest
 from pm_ai.core.meeting_records import (
     MEETINGS,
     NOTES_HEADING,
+    SUMMARY_HEADING,
     MalformedMeeting,
     MeetingDisplaced,
     MeetingNotFound,
@@ -34,18 +35,54 @@ from pm_ai.core.meeting_records import (
     record_name,
     render_record,
 )
+
+# The grammar's closed key set, imported rather than restated. Two tests below
+# assert that the file carries no key outside it, and a second hand-written copy
+# of the tuple would go on passing after the module's had a key added to it.
+from pm_ai.core.meeting_records import _FIELDS
+from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.platform.paths import ScopePaths
+from pm_ai.ports import ArtifactBusy
 from pm_ai.storage.crypto import PlaintextCrypto
-from pm_ai.storage.service import MalformedCaptureName, StorageService
+from pm_ai.storage.service import StorageService
 
 NOW = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
 PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="bob")
+APPLICATION = DataScope(ScopeKind.APPLICATION)
 UTC = timezone.utc
 TOKYO = timezone(timedelta(hours=9))
+WELL_FORMED = (
+    "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
+    "duration_minutes=45\nattendees=x\nscope=project:alpha\n"
+)
+"""A minimal record body, for the hand-edit cases that vary one field of it."""
+
+
+class _MemberVanishes:
+    """The real writer, with one member removed between the listing and the read.
+
+    Delegates everything but `read_artifact` for that one name, so what is under
+    test is the accessor's handling of `read_artifact`'s `None` rather than a
+    double's idea of storage. It exists because the state it produces — a member
+    `list_collection` reported and `read_artifact` cannot find — is a genuine
+    race and not something a sequence of filesystem calls can be made to hit.
+    """
+
+    def __init__(self, storage: StorageService, vanished: str) -> None:
+        self._storage = storage
+        self._vanished = vanished
+
+    def __getattr__(self, name):
+        return getattr(self._storage, name)
+
+    def read_artifact(self, *, scope, artifact, name=None):
+        if name == self._vanished:
+            return None
+        return self._storage.read_artifact(scope=scope, artifact=artifact, name=name)
 
 
 class _NoRepository:
@@ -105,6 +142,20 @@ def collection(tmp_path: Path, scope: DataScope) -> Path:
 def members(tmp_path: Path, scope: DataScope) -> list[str]:
     directory = collection(tmp_path, scope)
     return sorted(entry.name for entry in directory.iterdir()) if directory.is_dir() else []
+
+
+def field_keys(text: str) -> list[str]:
+    """The keys the field block declares — the only place a stored value can be.
+
+    The two tests below used to search the *whole file* for a substring, which
+    includes the human-supplied title, the attendee handles and the notes: a
+    meeting titled "Corporate cost review" contains "cost", and "corporate"
+    contains "rate", so both assertions failed on ordinary data rather than on a
+    stored Man-Hour Cost. The claim is about the grammar, so it is asserted
+    against the grammar.
+    """
+    head, _, _ = text.partition(f"\n\n{SUMMARY_HEADING}")
+    return [line.partition("=")[0] for line in head.splitlines()]
 
 
 # ── Write and read back ──────────────────────────────────────────────────────
@@ -273,12 +324,17 @@ def test_a_negative_duration_is_refused(records):
 def test_the_record_never_stores_the_man_hour_cost(records, tmp_path):
     """CAP-1 puts the cost in a rendered card and it derives from a `config.toml`
     value, so a stored one is wrong the moment the rate changes.
+
+    Titled so the assertion this replaced would fail: "Corporate cost review"
+    contains "cost", and "corporate" contains "rate". The claim is that no *key*
+    holds a cost, so that is what is asserted — the title is the human's and may
+    say anything.
     """
-    records.put(meeting())
+    records.put(meeting(title="Corporate cost review"))
     text = (collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]).read_text()
 
-    assert "cost" not in text
-    assert "rate" not in text
+    assert "man_hour_cost" not in field_keys(text)
+    assert not set(field_keys(text)) - set(_FIELDS)
 
 
 def test_neither_tentative_nor_stale_is_a_field(records, tmp_path):
@@ -286,12 +342,17 @@ def test_neither_tentative_nor_stale_is_a_field(records, tmp_path):
     questions are about a meeting this record can never be of. `tentative` is a
     response status for a meeting that has not occurred and `stale` means absent
     from a harvested window, which is a cancellation.
+
+    A field key, not a substring, for the reason one field over: a title reading
+    "a tentative agenda and a stale backlog" is ordinary English and broke the
+    whole-file search on both words.
     """
-    records.put(meeting())
+    records.put(meeting(title="a tentative agenda and a stale backlog"))
     text = (collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]).read_text()
 
-    assert "tentative" not in text
-    assert "stale" not in text
+    keys = field_keys(text)
+    assert "tentative" not in keys and "stale" not in keys
+    assert not set(keys) - set(_FIELDS)
 
 
 # ── Names ────────────────────────────────────────────────────────────────────
@@ -339,13 +400,30 @@ def test_the_name_is_stable_across_rewrites(records):
 
 
 @pytest.mark.parametrize(
-    "unsafe", ["../memory/leak.md", "..\\leak", "", "   ", "mtg\n01", "  mtg_01HX"]
+    ("unsafe", "refusal"),
+    [
+        pytest.param("../memory/leak.md", "path separator", id="posix-traversal"),
+        pytest.param("..\\leak", "path separator", id="windows-traversal"),
+        pytest.param("", "empty or only whitespace", id="empty"),
+        pytest.param("   ", "empty or only whitespace", id="whitespace-only"),
+        pytest.param("mtg\n01", "control character", id="newline"),
+        pytest.param("  mtg_01HX", "padded with whitespace", id="padded"),
+    ],
 )
-def test_a_path_unsafe_id_is_refused_before_anything_is_written(records, tmp_path, unsafe):
+def test_a_path_unsafe_id_is_refused_before_anything_is_written(
+    records, tmp_path, unsafe, refusal
+):
     """Matrix: an id containing `../` is refused, as `write_artifact` already
     refuses for captures — asked here so the message names the meeting.
+
+    Pinned to `MalformedMeeting` *and* to the message. This accepted either that
+    or `MalformedCaptureName`, which meant it would still pass with
+    `_assert_recordable_id` deleted and the storage layer catching the fallout —
+    precisely the outcome the guard exists to improve on, since the whole reason
+    it duplicates a refusal one layer down is that its sentence names the
+    meeting.
     """
-    with pytest.raises((MalformedMeeting, MalformedCaptureName)):
+    with pytest.raises(MalformedMeeting, match=refusal):
         records.put(meeting(unsafe))
     assert members(tmp_path, PROJECT) == []
 
@@ -422,12 +500,80 @@ def test_a_midnight_start_belongs_to_the_day_that_begins(records):
     assert records.for_day(date(2026, 9, 3), tz=UTC, scope=PROJECT) == ()
 
 
+@pytest.mark.parametrize(
+    ("zone", "day", "instants", "expected"),
+    [
+        pytest.param(
+            "America/Havana",
+            date(2018, 11, 4),
+            # The local day is 25 hours: the clocks fall back at 01:00 local, so
+            # the span is 2018-11-04T04:00Z → 2018-11-05T05:00Z. 00:30 local is
+            # before the transition and 23:30 local is after it.
+            (
+                datetime(2018, 11, 4, 4, 30, tzinfo=timezone.utc),
+                datetime(2018, 11, 5, 4, 30, tzinfo=timezone.utc),
+            ),
+            ["mtg_open", "mtg_close"],
+            id="twenty-five-hour-day",
+        ),
+        pytest.param(
+            "America/Sao_Paulo",
+            date(2018, 11, 4),
+            # 23 hours: the clocks spring forward, so the span is
+            # 2018-11-04T03:00Z → 2018-11-05T02:00Z. 01:30 and 23:30 local.
+            (
+                datetime(2018, 11, 4, 3, 30, tzinfo=timezone.utc),
+                datetime(2018, 11, 5, 1, 30, tzinfo=timezone.utc),
+            ),
+            ["mtg_open", "mtg_close"],
+            id="twenty-three-hour-day",
+        ),
+    ],
+)
+def test_a_day_a_dst_transition_reshapes_is_read_whole(
+    records, zone, day, instants, expected
+):
+    """A local day is not always 24 hours, and `_utc_days` used to reason as if
+    it were.
+
+    Measured: `America/Havana` 2018-11-04 spans 25 hours and
+    `America/Sao_Paulo` 2018-11-04 spans 23. The conclusion the docstring drew —
+    at most two UTC filename prefixes — survives; the premise it drew it from
+    did not, and the walk is what makes the arithmetic independent of the width.
+    Both ends of each day are asserted, and so is the exclusion of the neighbours
+    a mis-shaped span would leak into.
+    """
+    tz = ZoneInfo(zone)
+    opening, closing = instants
+    records.put(meeting("mtg_open", start=opening))
+    records.put(meeting("mtg_close", start=closing))
+
+    found = records.for_day(day, tz=tz, scope=PROJECT)
+    assert [held.meeting.meeting_id for held in found] == expected
+    assert records.for_day(day - timedelta(days=1), tz=tz, scope=PROJECT) == ()
+    assert records.for_day(day + timedelta(days=1), tz=tz, scope=PROJECT) == ()
+
+
 def test_for_day_refuses_a_datetime(records):
     """A `datetime` is a `date` subclass, so this would otherwise silently drop
     the time of day the caller believed it was passing.
     """
     with pytest.raises(MalformedMeeting, match="datetime"):
         records.for_day(NOW, tz=UTC, scope=PROJECT)
+
+
+def test_for_day_refuses_a_missing_timezone(records):
+    """`tz=None` answered in the machine's local zone and said nothing about it.
+
+    Measured before the fix: `for_day(date(2026, 9, 4), tz=None)` computed
+    2026-09-03T21:00Z → 2026-09-04T21:00Z on the machine this was run on. The
+    annotation says `tzinfo` and the module refuses the *other* type-hint
+    violation — a `datetime` day — with a paragraph on why an implicit boundary
+    is unacceptable, and `_assert_utc`'s own message names the "reads as local
+    time without announcing that it did" failure. Same refusal.
+    """
+    with pytest.raises(MalformedMeeting, match="timezone"):
+        records.for_day(date(2026, 9, 4), tz=None, scope=PROJECT)
 
 
 def test_a_malformed_record_for_another_day_does_not_break_this_day(records, tmp_path):
@@ -525,6 +671,53 @@ def test_a_well_formed_hand_edit_is_read_back(records, tmp_path):
             "duration_minutes=45\nattendees=x\nscope=nowhere\n",
             id="unknown-scope",
         ),
+        pytest.param(
+            # A scope that parses and has no `meetings/`. Left to the resolver
+            # this surfaced as `ArtifactNotInScope` — a `pm_ai.platform` sentence
+            # about a directory, out of this vocabulary and out of the type
+            # `MalformedMeeting` a caller catches.
+            WELL_FORMED.replace("scope=project:alpha", "scope=application"),
+            id="scope-with-no-meetings-collection",
+        ),
+        pytest.param(
+            WELL_FORMED.replace("attendees=x", "attendees=a,b,a"),
+            id="duplicate-attendee",
+        ),
+        pytest.param(
+            WELL_FORMED.replace("duration_minutes=45", "duration_minutes=1_0"),
+            id="duration-in-python-integer-syntax",
+        ),
+        pytest.param(
+            WELL_FORMED.replace("duration_minutes=45", "duration_minutes=+45"),
+            id="duration-signed",
+        ),
+        pytest.param(
+            WELL_FORMED.replace("duration_minutes=45", "duration_minutes=٤٥"),
+            id="duration-in-arabic-indic-digits",
+        ),
+        pytest.param(
+            WELL_FORMED.replace("duration_minutes=45", "duration_minutes=007"),
+            id="duration-with-leading-zeros",
+        ),
+        pytest.param(
+            # Both bounds the renderer keeps, asked on the way in too: a value
+            # this module will not write is a value it must not accept back.
+            WELL_FORMED.replace("title=a", "title=weekly\x00sync"),
+            id="control-character-in-title",
+        ),
+        pytest.param(
+            WELL_FORMED.replace("title=a", f"title={'x' * (MAX_ENTRY_LENGTH + 1)}"),
+            id="field-line-past-the-length-bound",
+        ),
+        pytest.param(
+            # Refused by the name-agreement check rather than by the id guard —
+            # `record_name` cannot mint a filename for an id it refuses, so a
+            # traversal id on disk always disagrees with its own name. The id
+            # guard's own parse-side case is asserted against `parse_record`
+            # directly, below.
+            WELL_FORMED.replace("meeting_id=mtg_01HX", "meeting_id=../leak"),
+            id="path-unsafe-id-disagreeing-with-its-name",
+        ),
         pytest.param('title="unclosed\n', id="unclosed-quote"),
     ],
 )
@@ -560,6 +753,262 @@ def test_a_binary_file_under_a_record_name_is_refused(records, tmp_path):
 
     with pytest.raises(MalformedMeeting, match="UTF-8"):
         records.get("mtg_01HX", scope=PROJECT)
+
+
+def test_a_rewrite_repairs_a_record_that_is_not_utf_8(records, tmp_path):
+    """`put` is the one operation that can fix a corrupted record, so it is the
+    one operation that must not raise on one.
+
+    It did: the notes were lifted through the same reader `get` uses, which
+    refuses a member that is not UTF-8 — correct for a read and fatal for a
+    repair, since the file could then be neither read nor rewritten and nothing
+    could get it back. The decode is lossy instead, so a corruption confined to
+    the machine-owned region leaves the human's notes intact.
+    """
+    records.put(meeting())
+    member = collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]
+    member.write_bytes(b"\xff\xfe not a record\n\n## Notes\nkeep me\n")
+    with pytest.raises(MalformedMeeting, match="UTF-8"):
+        records.get("mtg_01HX", scope=PROJECT)
+
+    records.put(meeting(title="repaired"))
+
+    reread = records.get("mtg_01HX", scope=PROJECT)
+    assert reread.meeting.title == "repaired"
+    assert reread.notes == "keep me\n"
+
+
+def test_a_record_whose_start_day_disagrees_with_its_name_is_refused(records, tmp_path):
+    """It was invisible on every day, and neither stage called it an error.
+
+    `for_day` opens only the members whose filename prefix falls inside the span
+    and then filters on the parsed `start`, so a record hand-moved to another day
+    was excluded from its new day by the prefix and from its old day by the
+    instant. The Design Notes say a missing dashboard row nobody can explain is
+    the thing this module refuses, so the disagreement is named where the record
+    is opened.
+    """
+    records.put(meeting())
+    member = collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]
+    member.write_text(
+        member.read_text().replace("start=2026-09-04T", "start=2026-09-06T"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MalformedMeeting, match="2026-09-04.*2026-09-06|2026-09-06"):
+        records.get("mtg_01HX", scope=PROJECT)
+    with pytest.raises(MalformedMeeting, match="2026-09-06"):
+        records.for_day(date(2026, 9, 4), tz=UTC, scope=PROJECT)
+    # The other two days never open the file — its prefix is outside their span —
+    # so they answer empty. That is why the refusal has to land on the day whose
+    # read does open it, which is the day the operator edited away from.
+    assert records.for_day(date(2026, 9, 5), tz=UTC, scope=PROJECT) == ()
+    assert records.for_day(date(2026, 9, 6), tz=UTC, scope=PROJECT) == ()
+
+
+def test_a_record_whose_id_disagrees_with_its_name_is_refused(records, tmp_path):
+    """The digest narrows the listing and the field confirms it — and the
+    confirmation was untested and answered with the wrong sentence.
+
+    A name carrying one id's digest over a record declaring another used to fall
+    through to `MeetingNotFound`, which is absence: the ordinary state of a clean
+    machine, reported for a contradiction only a hand edit can produce.
+    """
+    records.put(meeting())
+    member = collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]
+    member.write_text(
+        member.read_text().replace("meeting_id=mtg_01HX", "meeting_id=mtg_someone_else"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MalformedMeeting, match="mtg_someone_else"):
+        records.get("mtg_01HX", scope=PROJECT)
+    with pytest.raises(MalformedMeeting, match="digest"):
+        records.for_day(date(2026, 9, 4), tz=UTC, scope=PROJECT)
+
+
+# ── The reserved `## Summary` region ─────────────────────────────────────────
+
+
+def test_a_field_shaped_line_below_the_field_block_is_refused(records, tmp_path):
+    """The field block is the *leading* run of lines, so a field one line below
+    the blank separator was parsed away and the record kept its old value.
+
+    Measured before the fix: `duration_minutes=999` and `title=hijacked` placed
+    there left `get` reporting 45 and the original title, with no message. That
+    is what `_parse_field` refuses an unknown key for — a typo silently dropped
+    is a value the writer believes it stored — in a file whose whole premise is
+    that a human may edit it.
+    """
+    records.put(meeting())
+    member = collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]
+    member.write_text(
+        member.read_text().replace(
+            f"{SUMMARY_HEADING}\n", f"{SUMMARY_HEADING}\nduration_minutes=999\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MalformedMeeting, match="duration_minutes"):
+        records.get("mtg_01HX", scope=PROJECT)
+
+
+def test_a_hand_written_summary_body_is_refused_rather_than_dropped(records, tmp_path):
+    """`## Summary` is machine-owned and empty until a model can fill it, so a
+    paragraph written there was read past on parse and gone on the next `put`.
+
+    Refused, and the refusal points at `## Notes` — which is the human's, is
+    copied through byte-identical, and is where the paragraph belongs.
+    """
+    records.put(meeting())
+    member = collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]
+    member.write_text(
+        member.read_text().replace(
+            f"{SUMMARY_HEADING}\n", f"{SUMMARY_HEADING}\nWe agreed to cut scope.\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MalformedMeeting, match=r"## Notes"):
+        records.get("mtg_01HX", scope=PROJECT)
+
+
+def test_the_reserved_region_still_tolerates_its_own_absence(records, tmp_path):
+    """Refusing content there must not become refusing a record without the
+    heading: the machine region is intact and the next `put` writes it back, the
+    same forgiveness `## Notes` gets.
+    """
+    records.put(meeting())
+    member = collection(tmp_path, PROJECT) / members(tmp_path, PROJECT)[0]
+    member.write_text(
+        member.read_text().replace(f"{SUMMARY_HEADING}\n\n", ""), encoding="utf-8"
+    )
+
+    assert records.get("mtg_01HX", scope=PROJECT).meeting == as_stored(meeting())
+
+
+# ── Scopes that can hold a record ────────────────────────────────────────────
+
+
+def test_a_scope_with_no_meetings_collection_is_refused_in_this_vocabulary(records):
+    """`meetings/` is declared in three trees and the application scope is not
+    one of them, so a record there has nowhere to land.
+
+    All three entry points, because the scope arrives three ways: a `Meeting`
+    field for `put`, an argument for `get` and `for_day`, and a parsed field on
+    the way back in. Left to `ScopePaths.resolve` this escaped as
+    `ArtifactNotInScope` — a `pm_ai.platform` refusal about a directory, which is
+    neither this module's vocabulary nor a type its callers catch.
+    """
+    with pytest.raises(MalformedMeeting, match="meetings/"):
+        records.put(meeting("mtg_app", scope=APPLICATION))
+    with pytest.raises(MalformedMeeting, match="meetings/"):
+        records.get("mtg_app", scope=APPLICATION)
+    with pytest.raises(MalformedMeeting, match="meetings/"):
+        records.for_day(date(2026, 9, 4), tz=UTC, scope=APPLICATION)
+    with pytest.raises(MalformedMeeting, match="meetings/"):
+        render_record(MeetingRecord(meeting("mtg_app", scope=APPLICATION)))
+
+
+# ── Attendees counted once, fields bounded ───────────────────────────────────
+
+
+def test_a_duplicate_attendee_handle_is_refused(records):
+    """One person listed twice is two people to the Man-Hour Cost and to every
+    per-actor count that groups by handle.
+    """
+    with pytest.raises(MalformedMeeting, match="twice"):
+        records.put(meeting(attendees=(Actor("actor_alex"), Actor("actor_alex"))))
+
+
+def test_a_display_name_does_not_make_two_handles_one_attendee(records):
+    """The handle is what the record holds, so two actors differing only in
+    display name are one duplicate rather than two attendees.
+    """
+    with pytest.raises(MalformedMeeting, match="twice"):
+        records.put(
+            meeting(attendees=(Actor("actor_alex", "Alex"), Actor("actor_alex", "A. Smith")))
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param("title", id="title"),
+        pytest.param("attendees", id="attendees"),
+    ],
+)
+def test_a_field_line_past_the_ledgers_length_bound_is_refused(records, field):
+    """The record inherits the ledger's escaping; it inherited neither of its
+    bounds. `render_entry` refuses a line past `MAX_ENTRY_LENGTH` because a
+    segment is plaintext Markdown meant to be read, grepped and diffed by hand,
+    and a record is the same kind of file for the same reader — `title` and the
+    joined `attendees` are the two fields a caller can make arbitrarily long.
+    """
+    oversized = (
+        {"title": "x" * (MAX_ENTRY_LENGTH + 1)}
+        if field == "title"
+        else {"attendees": tuple(Actor(f"actor_{n:05d}") for n in range(2000))}
+    )
+    with pytest.raises(MalformedMeeting, match=str(MAX_ENTRY_LENGTH)):
+        records.put(meeting(**oversized))
+
+
+@pytest.mark.parametrize("control", ["\x00", "\x07", "\x1b"])
+def test_a_control_character_in_a_title_is_refused(records, control):
+    """`_assert_recordable_id` refuses these in an id and `title` took them raw.
+
+    Narrower than the id's refusal, deliberately: `render_value` escapes a
+    backslash, a quote, a newline and a carriage return, so those four survive a
+    line and a real Graph subject carrying one is still storable — the
+    round-trip case `title-needing-every-escape` is what pins that. What
+    escaping does not answer for is the rest of C0 and DEL, which are invisible
+    in the file and active in the terminal that prints it.
+    """
+    with pytest.raises(MalformedMeeting, match="control character"):
+        records.put(meeting(title=f"weekly{control}sync"))
+
+
+# ── The claim `put` holds ────────────────────────────────────────────────────
+
+
+def test_put_takes_an_exclusive_claim_over_the_collection(records, storage):
+    """`put` reads the previous member and then replaces the file whole, which is
+    a read-modify-write and was unlocked.
+
+    Two concurrent `put`s each preserved a different snapshot of `## Notes` and
+    each wrote their own back, so one human edit was lost — the same loss `8b`
+    takes this claim over `private/config.json` to prevent. It refuses rather
+    than waits, so a second writer is named instead of quietly winning.
+
+    The claim does not cover a *human's* editor, which honours nothing of
+    pm-ai's; that window is stated on `put` rather than implied to be closed.
+    """
+    with storage.exclusive(scope=PROJECT, artifact=MEETINGS):
+        with pytest.raises(ArtifactBusy):
+            records.put(meeting())
+
+
+def test_a_member_listed_then_removed_is_absent_rather_than_malformed(
+    storage, records, tmp_path
+):
+    """`_text` answers `None` for a member that was listed and then removed, and
+    `get` and `for_day` do two different right things with it.
+
+    The branch documented both and no case constructed the state — it is a race
+    between `list_collection` and `read_artifact` that no ordering of filesystem
+    calls produces on demand, so one member's read is intercepted while every
+    other call goes to the real writer.
+    """
+    records.put(meeting("mtg_gone"))
+    records.put(meeting("mtg_here"))
+    vanished = next(name for name in members(tmp_path, PROJECT) if "mtg_gone" in name)
+    racing = MeetingRecords(_MemberVanishes(storage, vanished))
+
+    with pytest.raises(MeetingNotFound):
+        racing.get("mtg_gone", scope=PROJECT)
+    found = racing.for_day(date(2026, 9, 4), tz=UTC, scope=PROJECT)
+    assert [held.meeting.meeting_id for held in found] == ["mtg_here"]
 
 
 # ── The render/parse pair ────────────────────────────────────────────────────
@@ -606,6 +1055,32 @@ def test_a_record_survives_render_and_parse(record):
     assert round_tripped == MeetingRecord(as_stored(record.meeting), record.notes)
 
 
+def test_parse_record_refuses_what_render_record_will_not_write():
+    """Render and parse move together: a value this module will not write is one
+    it must not accept back — the rule `MalformedMeeting`'s docstring states.
+
+    Asserted against `parse_record` rather than through the accessor for the id
+    case, because `record_name` cannot mint a filename for an id it refuses, so
+    no member on disk can carry one and the name-agreement check answers first.
+    `parse_record` is public and `33c` will hand it text.
+    """
+    with pytest.raises(MalformedMeeting, match="path separator"):
+        parse_record(
+            WELL_FORMED.replace("meeting_id=mtg_01HX", "meeting_id=../leak"),
+            source="under-test.md",
+        )
+    with pytest.raises(MalformedMeeting, match="control character"):
+        parse_record(
+            WELL_FORMED.replace("title=a", "title=weekly\x07sync"),
+            source="under-test.md",
+        )
+    with pytest.raises(MalformedMeeting, match=str(MAX_ENTRY_LENGTH)):
+        parse_record(
+            WELL_FORMED.replace("title=a", f"title={'x' * (MAX_ENTRY_LENGTH + 1)}"),
+            source="under-test.md",
+        )
+
+
 def test_an_empty_calendar_ref_is_not_the_same_as_none():
     """The field is omitted for `None` and rendered for `""`, which is the only
     way the two survive a round trip as different values.
@@ -622,10 +1097,14 @@ def test_an_empty_calendar_ref_is_not_the_same_as_none():
 def test_the_summary_region_is_reserved_and_left_empty():
     """It is transcript-derived and needs a model, which decision 2 puts beyond
     wave 2 — so the region exists and this slice writes nothing into it.
+
+    Partitioned on `SUMMARY_HEADING`, not on the literal — the same file already
+    imports `NOTES_HEADING` for the other heading, and a literal here would have
+    left a green test pinning the old spelling after a rename.
     """
     text = render_record(MeetingRecord(meeting()))
 
-    head, _, rest = text.partition("## Summary\n")
+    head, _, rest = text.partition(f"{SUMMARY_HEADING}\n")
     assert rest.strip() == NOTES_HEADING
     assert head.endswith("\n\n")
 
@@ -641,3 +1120,36 @@ def test_a_naive_start_is_refused_at_render():
 def test_a_non_utc_offset_start_is_refused_at_render():
     with pytest.raises(MalformedMeeting, match="aware UTC"):
         render_record(MeetingRecord(meeting(start=datetime(2026, 9, 4, 9, 0, tzinfo=TOKYO))))
+
+
+def test_a_named_zone_that_is_merely_zero_offset_today_is_refused():
+    """`Europe/London` is +00:00 in January and +01:00 in July, so an offset read
+    at one instant accepted the same calendar in winter and refused it in summer.
+
+    The record's UTC day is in its filename, so which half of the year a meeting
+    fell in decided whether it could be stored at all — and a January meeting
+    stored through a London zone would have been compared against `for_day`'s UTC
+    boundary as if it were UTC, which it is only by coincidence.
+    """
+    london = ZoneInfo("Europe/London")
+    winter = datetime(2026, 1, 14, 9, 0, tzinfo=london)
+    assert winter.utcoffset() == timedelta(0), "the case's premise: zero offset"
+
+    with pytest.raises(MalformedMeeting, match="aware UTC"):
+        render_record(MeetingRecord(meeting(start=winter)))
+    with pytest.raises(MalformedMeeting, match="aware UTC"):
+        render_record(
+            MeetingRecord(meeting(start=datetime(2026, 7, 14, 9, 0, tzinfo=london)))
+        )
+
+
+def test_a_zone_that_really_is_utc_is_still_accepted():
+    """The guard above must refuse a zone that merely coincides with UTC, not
+    every zone that is not the `timezone.utc` singleton — `ZoneInfo("UTC")` and a
+    zero fixed offset are both UTC for all time.
+    """
+    for zone in (ZoneInfo("UTC"), timezone(timedelta(0)), timezone.utc):
+        text = render_record(
+            MeetingRecord(meeting(start=datetime(2026, 9, 4, 9, 0, tzinfo=zone)))
+        )
+        assert parse_record(text, source="a.md").meeting.start == NOW

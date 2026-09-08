@@ -7,18 +7,24 @@ exactly the defect this story exists to fix: `Daemon.meetings` was a
 `dict[str, object]`, so every citation `run_transcript_ingestion` minted
 resolved against process memory and died with the process.
 
-Each test here therefore **discards the accessor** — and in most cases the whole
-daemon — and rebuilds it against the same temporary root before reading.
+Each test here therefore **builds a second daemon over the same temporary root**
+and reads through that. Rebuilding is the whole mechanism: the second daemon's
+accessor shares nothing with the first, so a value it returns came off the disk.
+A `del` on the first daemon's local name was here too and was doing none of that
+work — it drops one reference and guarantees no collection — so it is gone
+rather than reading as an assurance this file cannot give.
 """
 
 from __future__ import annotations
 
-import re
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 
+import pm_ai.app.pipelines
 import pm_ai.app.wiring
 from pm_ai.app.pipelines import run_transcript_ingestion
 from pm_ai.app.wiring import build
@@ -70,9 +76,7 @@ def test_a_record_survives_a_restart(tmp_path):
     """The criterion. Written through one accessor; read through a freshly built
     one over the same root, with nothing of the first surviving.
     """
-    first = _daemon(tmp_path)
-    first.meetings.put(MEETING)
-    del first
+    _daemon(tmp_path).meetings.put(MEETING)
 
     second = _daemon(tmp_path)
     assert second.meetings.get("mtg_01HX", scope=PROJECT).meeting == as_stored(MEETING)
@@ -94,7 +98,6 @@ def test_a_days_records_survive_a_restart(tmp_path):
             scope=PROJECT,
         )
     )
-    del first
 
     found = _daemon(tmp_path).meetings.for_day(
         date(2026, 9, 4), tz=timezone.utc, scope=PROJECT
@@ -123,11 +126,60 @@ def test_ingestion_persists_the_meeting_it_cites(tmp_path):
     assert result["extractions"], "the fixture is meant to extract something"
     for extraction in result["extractions"]:
         assert str(extraction.cites) == "meeting:mtg_01HX"
-    del daemon
 
     assert _daemon(tmp_path).meetings.get("mtg_01HX", scope=PROJECT).meeting.title == (
         MEETING.title
     )
+
+
+def test_an_extraction_that_fails_leaves_no_record_behind(tmp_path, monkeypatch):
+    """Moving the meeting to disk made this pipeline non-atomic, and the order
+    is what answers for it.
+
+    `put` was called before `extract`, so a failure in extraction left a durable
+    citation root for an ingestion that minted no citations — a state the
+    in-memory dict could not reach across a restart, and a line that can raise
+    where a dict assignment could not. `extract` is the step that fails and it
+    writes nothing, so it goes first.
+    """
+
+    def _explodes(*args, **kwargs):
+        raise RuntimeError("the transcript path failed after the citation check")
+
+    monkeypatch.setattr(pm_ai.app.pipelines, "extract", _explodes)
+    daemon = _daemon(tmp_path)
+
+    with pytest.raises(RuntimeError):
+        run_transcript_ingestion(daemon, _transcript(MEETING), MEETING)
+
+    directory = daemon.storage.paths.resolve(PROJECT, "meetings/")
+    assert not directory.exists() or not list(directory.iterdir())
+    with pytest.raises(MeetingNotFound):
+        _daemon(tmp_path).meetings.get("mtg_01HX", scope=PROJECT)
+
+
+def test_a_failure_while_staging_still_leaves_the_record_its_proposals_cite(
+    tmp_path, monkeypatch
+):
+    """The other half of the ordering: the record is written *before* anything
+    that cites it.
+
+    Every proposal the loop stages carries `cites=meeting:…` (AD-33), so a
+    failure part-way through must leave the citation root on disk — a staged
+    proposal whose `cites` resolves to nothing is worse than one extraction lost.
+    """
+    daemon = _daemon(tmp_path)
+
+    def _explodes(proposal):
+        raise RuntimeError("staging failed on the first proposal")
+
+    monkeypatch.setattr(daemon.storage, "stage_proposal", _explodes)
+
+    with pytest.raises(RuntimeError):
+        run_transcript_ingestion(daemon, _transcript(MEETING), MEETING)
+
+    reread = _daemon(tmp_path).meetings.get("mtg_01HX", scope=PROJECT)
+    assert reread.meeting.title == MEETING.title
 
 
 def test_a_real_shaped_graph_id_is_accepted_and_read_back(tmp_path):
@@ -144,9 +196,7 @@ def test_a_real_shaped_graph_id_is_accepted_and_read_back(tmp_path):
         scope=PROJECT,
         calendar_event_ref=GRAPH_ID,
     )
-    first = _daemon(tmp_path)
-    first.meetings.put(graph_meeting)
-    del first
+    _daemon(tmp_path).meetings.put(graph_meeting)
 
     reread = _daemon(tmp_path).meetings.get(GRAPH_ID, scope=PROJECT)
     assert reread.meeting == as_stored(graph_meeting)
@@ -179,15 +229,18 @@ def test_a_personal_meeting_is_refused_before_any_file_is_written(tmp_path):
 def test_the_wiring_holds_an_accessor_and_no_dict(tmp_path):
     """Criterion: `grep -n "meetings" pm_ai/app/wiring.py` leaves no `dict`.
 
-    Asserted rather than run by hand, because the dict is the defect: a field
-    typed `dict[str, object]` re-introduced beside the accessor would keep every
-    test above passing while one caller wrote into memory again.
+    Asserted against the *annotation*, not the file's text. This read `wiring.py`
+    and failed any line containing both `\\bmeetings\\b` and `dict`, and it
+    passed only because a comment happened to wrap so that "meetings/" and
+    "`dict[str, object]`" landed on separate lines: re-wrapping that paragraph
+    broke the suite with nothing regressed, and a mapping reintroduced under a
+    `Mapping` alias would have kept it green. The field's declared type is the
+    thing the criterion is about, so it is what is read — with the built daemon
+    beside it, because an annotation is not what a caller gets.
     """
-    source = Path(pm_ai.app.wiring.__file__).read_text(encoding="utf-8")
-    offending = [
-        line
-        for line in source.splitlines()
-        if re.search(r"\bmeetings\b", line) and "dict" in line
-    ]
-    assert not offending, offending
-    assert isinstance(_daemon(tmp_path).meetings, MeetingRecords)
+    hints = get_type_hints(pm_ai.app.wiring.Daemon)
+    assert hints["meetings"] is MeetingRecords
+
+    accessor = _daemon(tmp_path).meetings
+    assert isinstance(accessor, MeetingRecords)
+    assert not isinstance(accessor, Mapping), "an accessor, not a mapping"

@@ -60,13 +60,33 @@ def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: s
     # owned by `personal` or `people` cannot be cited from a git-committed scope,
     # and every extraction below will cite this meeting (AD-33).
     assert_citation_legal(cited=meeting.scope, into=daemon.scope)
-    # The Tier-1 record, and the citation root every extraction below points at
+    results = extract(transcript, meeting, pm_handle=daemon.pm_handle, provider=provider)
+    # The Tier-1 record, and the citation root every extraction above points at
     # (AD-33). Through the accessor since story 11a: this was an assignment into
     # a process-lifetime dict, so the record a citation resolved against was gone
     # the moment the daemon stopped. `meeting.scope` decides which tree it lands
-    # in, which is why the check above runs first.
+    # in, which is why the legality check runs first.
+    #
+    # **After `extract` and before the first write that cites the meeting**, and
+    # both halves of that are the ordering rather than an accident. Moving the
+    # record to disk made this pipeline non-atomic in a way the dict could not
+    # be: a dict assignment cannot fail and does not survive a restart, while
+    # this line can raise and does. So:
+    #
+    # - `extract` runs first because it is the step that fails — a malformed
+    #   transcript, a provider verb it cannot parse — and it produces nothing
+    #   durable, so its failure leaves no record for an ingestion that minted no
+    #   citations. That was the state reachable when the write came first.
+    # - the record is written before the loop below, because everything the loop
+    #   writes cites this meeting: a staged proposal or an executed mutation
+    #   whose `cites` resolves to nothing is worse than one extraction lost, so a
+    #   failure part-way through staging leaves a record its partial proposals
+    #   can still be resolved against.
+    #
+    # What remains is a record for a transcript that extracted *nothing*, and
+    # that is deliberate: the meeting happened, `Meeting` is Tier-1 in its own
+    # right, and `33c` records meetings with no transcript at all.
     daemon.meetings.put(meeting)
-    results = extract(transcript, meeting, pm_handle=daemon.pm_handle, provider=provider)
 
     executed, staged = [], []
     for i, ex in enumerate(results):
