@@ -544,10 +544,18 @@ class WindowPolicy:
     width: timedelta
     """The steady-state half-width: how far back and how far forward each run reaches.
 
-    Forward as well as back, because a calendar's useful half is in the future —
-    `33c` writes upcoming meetings as records — and backward on *every* run, not
-    only the first, so a meeting cancelled or moved after it was harvested is
-    seen again within one cycle.
+    Forward as well as back, and the forward reach survives the 2026-09-07
+    renegotiation that falsified the reason first given for it. `33c` does **not**
+    write upcoming meetings as records — no meeting that has not happened is
+    persisted at all, because the calendar owns it and a local copy of a row that
+    can move or vanish outside pm-ai cannot be kept accurate. What the forward
+    reach buys instead is the read itself: `33c` maps the rows ahead of `now` to
+    in-memory `Meeting`s and hands them back, which is how a surface answers "the
+    day ahead" without an event log that has no field for a meeting's title or
+    start.
+
+    Backward on *every* run, not only the first, so a meeting moved or cancelled
+    after it was harvested is seen again within one cycle.
     """
 
     first_run_reach_back: timedelta

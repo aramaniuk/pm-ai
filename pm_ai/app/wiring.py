@@ -10,12 +10,25 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+from pm_ai.connectors.graph import (
+    CLIENT_ID_KEY,
+    TENANT_KEY,
+    GraphConnector,
+    MissingGraphSetting,
+    UnknownProject,
+    graph_category_scopes,
+    graph_window_policy,
+)
+from pm_ai.connectors.graph.auth import GraphDeviceCodeAuth, InMemoryRefreshTokenStore
+from pm_ai.connectors.graph.calendar import GraphCalendarFetch
+from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.connectors.registry import ConnectorRegistry, install as install_connectors
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
@@ -26,6 +39,7 @@ from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
     MASTER_KEY_NAME,
+    ConnectorPort,
     CryptoPort,
     KeychainPort,
     VcsPort,
@@ -47,7 +61,13 @@ class Daemon:
     storage: StorageService
     crypto: CryptoPort
     skills: SkillRegistry
-    connectors: dict[str, GitLabConnectorAdapter]
+    # Typed against the port rather than one adapter, since story 33c. The
+    # annotation said `dict[str, GitLabConnectorAdapter]` while the registry beside
+    # it held `ConnectorPort`s, so the moment a second connector family existed
+    # mypy — gated inside pytest since story 1k — refused the assignment. The port
+    # is also the honest type: `run_harvest` reaches this dict and calls exactly
+    # the four methods `ConnectorPort` declares.
+    connectors: dict[str, ConnectorPort]
     transcripts: dict[str, object]
     # The Tier-1 accessor over `meetings/`, not a mapping. This was
     # `dict[str, object]` until story 11a, which meant every citation
@@ -170,7 +190,7 @@ def build(
         _announce_disabled_encryption(storage)
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
-    connectors: dict[str, GitLabConnectorAdapter] = {
+    connectors: dict[str, ConnectorPort] = {
         f"gitlab:{project}": GitLabConnectorAdapter(project=project, scope=scope, now=clock)
     }
     # The daemon holds the instances; `pm_ai.connectors.registry` enumerates
@@ -194,7 +214,9 @@ def build(
     # built-in and dropped the adapter holding the sealed credential, so the
     # connector the operator had just enrolled went on reporting ABSENT and the
     # remedy printed was the one they had already followed.
-    for instance, enrolled in _enrolled_connectors(storage, scope=scope, clock=clock):
+    for instance, enrolled in _enrolled_connectors(
+        storage, scope=scope, clock=clock, registered=_registrar(resolver)
+    ):
         connectors[instance] = enrolled
     enumerable = ConnectorRegistry()
     for instance, connector in connectors.items():
@@ -270,12 +292,49 @@ def _announce_disabled_encryption(storage: StorageService) -> None:
     )
 
 
+def _registrar(resolver: ScopePaths) -> Callable[[str], bool]:
+    """Whether a project id is one this machine's registry knows (AD-11).
+
+    A predicate rather than a set, because "registered" is the resolver's
+    question and the two resolvers answer it differently on purpose: a
+    production one knows only what `pm-ai project add` wrote, while a rooted one
+    invents a repository beneath its root for any id — which is what makes it the
+    test factory. Reading `project_roots` directly would have called every id in
+    a test unregistered and refused every category mapping in the suite.
+
+    Handed to `pm_ai.connectors`, which may not import this resolver: the layer
+    stack makes them independent siblings, so the composition root asks and
+    passes the answer.
+    """
+
+    def registered(project_id: str) -> bool:
+        try:
+            resolver.repository(project_id)
+        except Exception:
+            # `ScopeResolutionError` is the refusal family `ScopePathPort`
+            # promises — an unregistered project, and an id that cannot be a
+            # directory name — and it is not the only thing a resolver can
+            # raise: `repository` touches the filesystem, so a permission error
+            # or an `OSError` from a broken registry reaches here too.
+            #
+            # Every one of them is "no" to the question this predicate asks, and
+            # none of them is a reason to stop composing. Narrower, an
+            # unexpected fault propagated through `CategoryScopes.__post_init__`
+            # and out of `build()`, taking down `pm-ai doctor` — the command
+            # that diagnoses a machine whose project registry is broken.
+            return False
+        return True
+
+    return registered
+
+
 def _enrolled_connectors(
     storage: StorageService,
     *,
     scope: DataScope,
     clock: Callable[[], datetime],
-) -> tuple[tuple[str, GitLabConnectorAdapter], ...]:
+    registered: Callable[[str], bool],
+) -> tuple[tuple[str, ConnectorPort], ...]:
     """What `pm-ai connector add` wrote, as adapters, so enrolment survives a restart.
 
     Story 8b's success message tells the operator the connector becomes active
@@ -314,7 +373,7 @@ def _enrolled_connectors(
     # enrolled — every machine before the first `connector add` — paid it on
     # every `build()` to read a mapping nothing then consulted.
     credentials: dict[str, dict[str, str]] | None = None
-    built: list[tuple[str, GitLabConnectorAdapter]] = []
+    built: list[tuple[str, ConnectorPort]] = []
     for entry in _enrolled_configurations(storage):
         instance = entry.get("instance")
         system = entry.get("system")
@@ -325,11 +384,24 @@ def _enrolled_connectors(
         # an operator will actually write meaning "not this one".
         if entry.get("enabled") is not True:
             continue
-        if system != "gitlab":
-            # The only *connector* adapter that exists. An enrolled system pm-ai
-            # cannot build is skipped rather than guessed at. Story 33a added
-            # Graph *auth* and no Graph connector — a token is not a harvester —
-            # so the Graph rows here arrive with 33b's calendar adapter.
+        if system not in ("gitlab", "graph"):
+            # An enrolled system pm-ai has no adapter for is skipped rather than
+            # guessed at. Two families exist: `gitlab` below, and `graph` since
+            # story 33c, which is the connector `33a`'s token and `33b`'s
+            # calendar fetch were built for.
+            continue
+        if system == "graph":
+            if credentials is None:
+                credentials = _stored_credentials(storage)
+            graph = _graph_connector(
+                entry,
+                instance=instance,
+                credential=_credential_for(credentials.get(instance), system=system),
+                clock=clock,
+                registered=registered,
+            )
+            if graph is not None:
+                built.append((instance, graph))
             continue
         # The connector's own declared project, not one re-derived from its
         # name. The instance is a path component and may not contain `/`, while
@@ -363,6 +435,138 @@ def _enrolled_connectors(
         except Exception:
             continue
     return tuple(built)
+
+
+def _graph_connector(
+    entry: Mapping[str, object],
+    *,
+    instance: str,
+    credential: str | None,
+    clock: Callable[[], datetime],
+    registered: Callable[[str], bool],
+) -> GraphConnector | None:
+    """One Graph enrolment row as a connector, or `None` with the reason said out loud.
+
+    **Five settings come off the row and four of them are undefaulted**: the
+    Entra `client_id` this laptop signs in through, the two harvest widths, and
+    the Outlook-category-to-project mapping — which defaults to empty, and that
+    absence is safe because it means every meeting is personal, exactly what an
+    untagged row gets anyway. The fifth is `tenant`, which *is* defaulted, to
+    `GraphDeviceCodeAuth`'s own value rather than to a copy of it. This docstring
+    said "four settings and none of them is defaulted" while the code beside it
+    defaulted `tenant` to a literal, which is two claims one file apart that
+    could not both be true.
+
+    They live in `connectors/<instance>.json` — per-machine, gitignored,
+    hand-editable — rather than in `config.toml`, whose vocabulary stays closed
+    at three keys: which app asks for a PM's calendar and how much of it to read
+    are facts about this machine, not about pm-ai.
+
+    **A row missing a setting builds nothing and the missing key is named**, on
+    stderr, rather than being skipped silently the way every other failure here
+    is. The difference is what the operator can do about it: an unreadable
+    credential store is diagnosed by `pm-ai doctor`, while a `connectors/` row
+    one key short is a file they are holding open, and a connector that quietly
+    fails to appear is indistinguishable from one that was never enrolled.
+
+    Returns `None` rather than raising, because `build()` must compose on a
+    misconfigured machine — that is the whole reason the diagnostics can run at
+    all.
+    """
+    client_id = entry.get(CLIENT_ID_KEY)
+    if not isinstance(client_id, str) or not client_id.strip():
+        _unbuilt(
+            instance,
+            f"it carries no usable {CLIENT_ID_KEY!r}. That is the Entra "
+            f"application the PM consents to, and pm-ai does not supply one: "
+            f"inventing it would be pm-ai choosing whose app asks for their "
+            f"calendar.",
+        )
+        return None
+    try:
+        policy = graph_window_policy(entry)
+        categories = graph_category_scopes(entry, registered=registered)
+    except (MissingGraphSetting, UnknownProject, ValueError) as refused:
+        # The refusals this row is *expected* to produce, each of which composed
+        # a sentence naming what to change. `ValueError` is
+        # `WindowPolicy.__post_init__`'s: CAP-2's 240-minute floor, and a
+        # reach-back shorter than the width every later run covers anyway.
+        _unbuilt(instance, str(refused))
+        return None
+    except Exception as unexpected:  # noqa: BLE001 — `build()` composes regardless
+        # And everything else, for the reason the rest of this module swallows:
+        # the row is plaintext and hand-editable, and no hand edit may stop
+        # `build()` composing — `pm-ai doctor` is the command that diagnoses a
+        # bad row, and it cannot run if the daemon will not compose. The live
+        # instance was `OverflowError` from an absurd minute count, which is
+        # bounded in `_minutes` now; this clause is what stops the next one
+        # being found the same way. The **type** and not just the message,
+        # because an unclassified fault's message rarely says what file it is
+        # about.
+        _unbuilt(
+            instance,
+            f"reading it raised {type(unexpected).__name__}: {unexpected}. That "
+            f"is a row pm-ai could not classify rather than a setting it can "
+            f"name — report it.",
+        )
+        return None
+
+    tenant = entry.get(TENANT_KEY)
+    named_tenant = tenant.strip() if isinstance(tenant, str) and tenant.strip() else None
+    auth = GraphDeviceCodeAuth(
+        client_id=client_id.strip(),
+        # The fifth setting, and the one that *is* defaulted — to the adapter's
+        # own value, read off the field rather than copied. A literal here would
+        # be a second place `organizations` is decided, and the two would agree
+        # until the day the adapter's changed. `organizations` is any work or
+        # school tenant; the row names one when this PM's Entra application is
+        # single-tenant.
+        tenant=named_tenant if named_tenant is not None else GraphDeviceCodeAuth.tenant,
+        # Custody, and the honest limit of this slice. The sealed store is read
+        # at composition and the adapter is handed what it held; a refresh token
+        # the provider rotates mid-run is kept for the life of this process and
+        # not written back, so the next start signs in from the enrolled one
+        # again. Writing back needs an update path through `8b`'s sealed store
+        # that does not exist, and a store that silently lost the rotation would
+        # be worse than one that visibly never had it.
+        store=InMemoryRefreshTokenStore(credential=credential),
+        instance=instance,
+        now=clock,
+    )
+    return GraphConnector(
+        auth=auth,
+        calendar=GraphCalendarFetch(
+            client=GraphClient(
+                auth=auth,
+                now=clock,
+                # The real one, supplied here because `GraphClient` defaults to a
+                # wait that does not wait — a blocking sleep as the default is
+                # what makes a forgotten injection cost ten minutes inside a test
+                # suite. Its 429 branch compares this against that default by
+                # identity and refuses rather than spinning, so the composition
+                # root is the only place the honoured hint can come from.
+                wait=time.sleep,
+            ),
+            instance=instance,
+            windows=policy,
+            now=clock,
+        ),
+        categories=categories,
+        now=clock,
+    )
+
+
+def _unbuilt(instance: str, reason: str) -> None:
+    """Say why a connector this machine is configured for was not constructed.
+
+    stderr, and nothing else: the daemon has not composed yet, so there is no
+    event log to write into and no storage to reach that has not already been
+    the thing that failed.
+    """
+    print(
+        f"WARNING: the Graph connector {instance!r} was not built — {reason}",
+        file=sys.stderr,
+    )
 
 
 def _credential_for(sealed: object, *, system: str) -> str | None:

@@ -281,19 +281,28 @@ class MeetingRecord:
 
 
 def as_stored(meeting: Meeting) -> Meeting:
-    """The meeting as the record can hold it — handles, without display names.
+    """The meeting as the record can hold it — handles, and no response status.
 
     The comparison a caller needs to state the render/parse property honestly.
-    `attendees` is one comma-separated value and comma is reserved, so a display
-    name cannot be stored beside a handle; `get` therefore returns actors with
-    `display_name=None`, and this is what "equal after a round trip" means for a
-    meeting that arrived with display names attached.
+    Two things are lost and each is lost deliberately:
 
-    Everything else round-trips unchanged, so this is the whole of the loss.
+    - **display names.** `attendees` is one comma-separated value and comma is
+      reserved, so a display name cannot be stored beside a handle; `get`
+      therefore returns actors with `display_name=None`, and this is what "equal
+      after a round trip" means for a meeting that arrived with them attached.
+    - **`tentative`.** It joined `Meeting` with story `33c` and is not a field of
+      the record — a response status is an answer about a meeting that has not
+      occurred, and every record here is of one that has. Cleared here rather
+      than left standing, because leaving it would make the round-trip property
+      false for a meeting a connector had marked and would report that as a
+      render/parse defect rather than as the rule it is.
+
+    Everything else round-trips unchanged, so those two are the whole of the loss.
     """
     return replace(
         meeting,
         attendees=tuple(Actor(actor_id=attendee.actor_id) for attendee in meeting.attendees),
+        tentative=False,
     )
 
 

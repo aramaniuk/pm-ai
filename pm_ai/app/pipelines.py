@@ -11,7 +11,8 @@ from pm_ai.core.extraction import extract
 from pm_ai.core.normalize import attribute_all
 from pm_ai.core.sanitize import sanitize
 from pm_ai.domain.disclosure import assert_citation_legal
-from pm_ai.domain.identity import TargetRef
+from pm_ai.domain.events import NormalizedEvent
+from pm_ai.domain.identity import DataScope, TargetRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.harvest import PersistResult
@@ -32,12 +33,49 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # decided. Without it, pm-ai's own writes harvest back as external evidence.
     attributed = attribute_all(result.events, daemon.storage.executed_mutations())
 
+    # The Tier-1 records this harvest earned, written **before** their events
+    # (story 33c). A `CALENDAR_EVENT_HELD` cites `meeting:<id>` (AD-33), so an
+    # event persisted ahead of a failed `meetings/` write leaves a citation
+    # nothing can resolve — and the failure is propagated rather than counted,
+    # because the alternative is a batch of events whose referents are missing.
+    #
+    # Through `11a`'s accessor, and to `meeting.scope` rather than the daemon's:
+    # a connector may not import `pm_ai.storage`, which is why the records travel
+    # out on the result and are written here.
+    #
+    # **No `scope=` here, while every `persist_events` call below carries one,
+    # and the asymmetry is the two writers' rather than an oversight.**
+    # `MeetingRecords.put` takes no scope at all: it reads `meeting.scope` and
+    # writes into that tree, so a record cannot be offered to a scope other than
+    # its own and there is no cross-scope offer for a guard to refuse. An event
+    # can — `persist_events` takes the destination as an argument — which is why
+    # that path had to be restructured to group by `event.scope` the moment a
+    # connector emitted in two.
+    #
+    # So no, `put` does **not** run `disclosure.assert_writable`, the AD-38 write
+    # guard `_append_batch` runs on every event — and running it here would be
+    # running a tautology. That guard compares the scopes a record *references*
+    # against the scope it is *bound for*, and for a `Meeting` those are one
+    # value: `referenced_scopes` reads `record.scope`, which is the very field
+    # `put` derives the destination from. It can only ever compare
+    # `meeting.scope` with itself. The guard has teeth on the event path because
+    # there the destination is an argument that can disagree with
+    # `event.scope` — which is exactly the disagreement `_persist_by_scope`
+    # below exists to stop producing.
+    #
+    # What does bind a record is narrower and earlier: `_assert_records_meetings`
+    # refuses any scope whose tree does not declare `meetings/`, and the project
+    # ids a connector may put there were checked against the registry when its
+    # `CategoryScopes` was built.
+    for meeting in result.records:
+        daemon.meetings.put(meeting)
+
     # Persist first, then record where the harvest got to. The order is the
     # matrix row about a persist that raises after page one: `persist_events` is
     # all-or-nothing, and this call sequence means a refusal there discards page
     # one's cursor *and* its coverage together rather than leaving a cursor that
     # advanced past events nobody stored.
-    persisted = daemon.storage.persist_events(attributed, scope=daemon.scope)
+    persisted = _persist_by_scope(daemon, attributed)
     # AD-35 — `result.coverage` is `CoverageWindow | None` and `None` is passed
     # through as itself. A harvest that learned nothing records no window: the
     # connector used to fabricate one from the clock to satisfy a mandatory
@@ -47,6 +85,49 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # survives the process as something other than the absence of coverage.
     daemon.storage.save_cursor(instance, result.cursor, result.coverage, result.failure)
     return persisted
+
+
+def _persist_by_scope(
+    daemon: Daemon, events: tuple[NormalizedEvent, ...]
+) -> PersistResult:
+    """Write each event into the scope it declares, and report the whole run.
+
+    One `persist_events` call per scope, because an event carries its own and
+    AD-38's write guard reads it: a personal meeting harvested by a
+    project-scoped daemon is a `CommittedScopeLeak` the moment it is offered to
+    the project's log, and it is *right* that it is — a private appointment in
+    the employer's repository is the leak the scope model exists to refuse. Story
+    33c is the first connector to emit events in more than one scope; before it,
+    every event carried the daemon's own and this grouping produced exactly the
+    single call it replaced.
+
+    An empty harvest still calls the writer once, in the daemon's scope, so the
+    `at` a caller reads is a real clock read from the single writer rather than
+    one composed here (AD-5).
+
+    All-or-nothing per scope rather than across the batch, which is the cost of
+    the split and is stated rather than hidden: `persist_events` is the unit of
+    atomicity and there is no cross-scope transaction to be had — the two logs
+    are different files in different trees, one of them committed.
+    """
+    if not events:
+        return daemon.storage.persist_events((), scope=daemon.scope)
+    grouped: dict[DataScope, list[NormalizedEvent]] = {}
+    for event in events:
+        grouped.setdefault(event.scope, []).append(event)
+    written = [
+        daemon.storage.persist_events(tuple(batch), scope=scope)
+        for scope, batch in grouped.items()
+    ]
+    return PersistResult(
+        persisted=sum(result.persisted for result in written),
+        duplicates=sum(result.duplicates for result in written),
+        # The last writer's stamp, not one composed here: `at` is a clock read
+        # the single writer owns (AD-5), and averaging or inventing one would put
+        # a timestamp in the report that nothing measured.
+        at=written[-1].at,
+        flagged=sum(result.flagged for result in written),
+    )
 
 
 def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: str = "gitlab") -> dict:

@@ -32,6 +32,21 @@ class Meeting:
     # violation by construction.
     scope: DataScope
     calendar_event_ref: str | None = None
+    # Carried in memory and written to no file (story 33c, decided 2026-09-07).
+    #
+    # A response status is an answer about a meeting that has **not** happened,
+    # and no meeting that has not happened is recorded: the calendar owns it, and
+    # a local copy of a row that can move or vanish outside pm-ai cannot be kept
+    # accurate. So this rides the `Meeting` a connector hands back for the day
+    # ahead — the dashboard renders it — and `pm_ai.core.meeting_records` has no
+    # `tentative` field to put it in. `render_record` writes the keys in `_FIELDS`
+    # and this is not one of them, which is what makes "stored nowhere" a
+    # property of the grammar rather than of every caller remembering.
+    #
+    # `False` by default because that is what a record read back off disk knows:
+    # `parse_record` constructs a `Meeting` without it, and a held meeting has no
+    # tentative answer to have lost.
+    tentative: bool = False
 
     @property
     def source_ref(self) -> SourceRef:
