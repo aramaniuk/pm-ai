@@ -40,6 +40,7 @@ from pm_ai.connectors.gitlab import GitLabConnectorAdapter, Page, PageUnavailabl
 from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestOutcome, HarvestResult
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.lifecycle import CoverageWindow
+from pm_ai.domain.meetings import Meeting
 from pm_ai.storage.service import CoverageInstanceMismatch
 
 NOW = datetime(2026, 8, 19, 9, 0, tzinfo=timezone.utc)
@@ -48,6 +49,21 @@ INSTANCE = "gitlab:alpha"
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 TICK = timedelta(seconds=1)
+
+MEETING = Meeting(
+    meeting_id="AAMk-one",
+    title="a meeting a harvest mapped",
+    start=NOW - timedelta(hours=1),
+    duration_minutes=30,
+    attendees=(),
+    scope=DataScope(ScopeKind.PERSONAL),
+)
+"""One mapped meeting, for the two rows of the table below that need evidence.
+
+Story 33c's `records` and `live` are the second and third things a harvest can
+come back holding, and the outcome has to stay honest about them exactly as it
+does about events.
+"""
 
 ROWS = [
     {
@@ -826,6 +842,14 @@ def test_a_refused_window_leaves_no_cursor_advance_for_a_later_commit_to_promote
             {"outcome": HarvestOutcome.EMPTY, "coverage": CoverageWindow(INSTANCE, NOW, NOW)},
             "returned no rows",
         ),
+        (
+            {"outcome": HarvestOutcome.EMPTY, "records": (MEETING,)},
+            "did not learn nothing",
+        ),
+        (
+            {"outcome": HarvestOutcome.EMPTY, "live": (MEETING,)},
+            "did not learn nothing",
+        ),
     ],
 )
 def test_harvest_result_refuses_an_outcome_its_fields_contradict(kwargs, complaint):
@@ -834,6 +858,13 @@ def test_harvest_result_refuses_an_outcome_its_fields_contradict(kwargs, complai
     Chiefly the third row: coverage claimed by a harvest that returned no rows is
     the fabrication this story deletes, and a type that accepts it leaves the
     next connector free to reintroduce it.
+
+    The last two rows are story 33c's carriers. `records` and `live` are the
+    other two ways a harvest can hold evidence, and EMPTY is the value AD-35's
+    fail-closed reading treats as "the provider answered and there was nothing
+    there" — so a window that mapped a meeting and reported EMPTY would arm that
+    reading against its own evidence. Added because the refusal shipped with its
+    three siblings pinned here and itself untested.
     """
     with pytest.raises(ValueError) as refused:
         HarvestResult(events=(), cursor=Cursor(), **kwargs)

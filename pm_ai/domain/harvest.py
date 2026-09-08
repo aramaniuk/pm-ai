@@ -23,6 +23,7 @@ from enum import Enum
 
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.lifecycle import CoverageWindow
+from pm_ai.domain.meetings import Meeting
 
 
 UNCLASSIFIED_FAULT_IS_RETRYABLE = False
@@ -191,6 +192,40 @@ class HarvestResult:
     nothing. Empty is the ordinary answer.
     """
 
+    records: tuple[Meeting, ...] = ()
+    """Tier-1 domain records this harvest earned, for `app` to write (story 33c).
+
+    Beside `events` rather than derived from them, because a record cannot be
+    derived from one: `MeetingHeldPayload` carries `meeting_id`, an attendee
+    *count* and a duration — no title, no start, no `calendar_event_ref` and no
+    attendee list. A `Meeting` rebuilt from an event would be a different, poorer
+    meeting wearing the same id.
+
+    Written by `pm_ai.app.pipelines` through `pm_ai.core.meeting_records`, and
+    **before** the events are persisted: a `CALENDAR_EVENT_HELD` cites
+    `meeting:<id>` (AD-33), so an event emitted ahead of a failed record write
+    leaves a citation nothing can resolve.
+
+    Only meetings that have already happened belong here. One that has not is
+    `live` below — the calendar owns it, and pm-ai keeps no copy.
+    """
+
+    live: tuple[Meeting, ...] = ()
+    """Meetings mapped and handed back **without** being persisted anywhere.
+
+    The other half of story 33c's past/future split, and the reason it is a
+    second field rather than a flag on the first: `records` is the list `app`
+    writes, so anything in it is written, and a caller that had to consult a
+    boolean before writing would be one `if` away from persisting a meeting the
+    calendar can move or cancel ten seconds later.
+
+    Nothing here reaches a file. It exists so a surface asking a connector for
+    the day ahead gets domain objects rather than provider rows — the read the
+    dashboard makes instead of reading `event_log/`, which could not answer it:
+    `MeetingHeldPayload` has no field for a title or a start, so a meeting that
+    has not happened has no honest representation as an event (AD-27).
+    """
+
     def __post_init__(self) -> None:
         if (self.outcome is HarvestOutcome.FAILED) != (self.failure is not None):
             raise ValueError(
@@ -199,12 +234,18 @@ class HarvestResult:
                 f"reason with any other outcome is a failure nothing will "
                 f"persist — which is how a dead connector reads as patience."
             )
-        if self.outcome is HarvestOutcome.HARVESTED and not self.events and not self.refusals:
+        if (
+            self.outcome is HarvestOutcome.HARVESTED
+            and not self.events
+            and not self.refusals
+            and not self.records
+            and not self.live
+        ):
             raise ValueError(
-                "outcome=harvested with no events and nothing refused. EMPTY is "
-                "the value for a provider that answered with nothing; "
-                "collapsing the two loses the only distinction AD-35's two "
-                "silences are built on."
+                "outcome=harvested with no events, no records, nothing live and "
+                "nothing refused. EMPTY is the value for a provider that "
+                "answered with nothing; collapsing the two loses the only "
+                "distinction AD-35's two silences are built on."
             )
         # HARVESTED with no events but with refusals is the third case, and it
         # is legal: rows came back and none could be read. EMPTY is refused for
@@ -223,7 +264,20 @@ class HarvestResult:
                 f"same as a provider that answered with nothing — and it is the "
                 f"one of the two that needs somebody to look."
             )
-        if self.coverage is not None and not self.events:
+        if self.outcome is HarvestOutcome.EMPTY and (self.records or self.live):
+            raise ValueError(
+                f"outcome=empty with {len(self.records)} record(s) and "
+                f"{len(self.live)} live meeting(s). A harvest that mapped a "
+                f"meeting did not learn nothing, and EMPTY is the value AD-35's "
+                f"fail-closed reading treats as 'the provider answered and there "
+                f"was nothing there'."
+            )
+        # `records` and `live` join `events` here rather than being a second
+        # rule, because they are the same evidence in a different shape: story
+        # 33c's connector maps a window of upcoming meetings to `live` and emits
+        # no event at all, and a window that reached the provider and came back
+        # full of them has earned its coverage exactly as a page of commits has.
+        if self.coverage is not None and not self.events and not self.records and not self.live:
             raise ValueError(
                 "coverage claimed by a harvest that returned no rows. Coverage "
                 "is evidence a fetch reached something (AD-35); a window over a "
