@@ -21,6 +21,7 @@ from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
 from pm_ai.core.connector_enrolment import stored_credentials
+from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
@@ -48,7 +49,14 @@ class Daemon:
     skills: SkillRegistry
     connectors: dict[str, GitLabConnectorAdapter]
     transcripts: dict[str, object]
-    meetings: dict[str, object]
+    # The Tier-1 accessor over `meetings/`, not a mapping. This was
+    # `dict[str, object]` until story 11a, which meant every citation
+    # `run_transcript_ingestion` minted resolved against process memory and died
+    # with the process — while `Meeting` is declared Tier-1 in three scope trees
+    # and is the citation root AD-33 makes durable. The accessor is the third of
+    # the three `derivation-services.md` rule 3 names, and it writes to the scope
+    # each meeting itself declares.
+    meetings: MeetingRecords
     scope: DataScope
     # Custody of the master key, held rather than reconstructed. `pm_ai.surfaces`
     # may not import `keyring` (`.importlinter`'s `os-behind-platform`), so a CLI
@@ -200,7 +208,7 @@ def build(
         # AD-23 — both adapters wired from day one, so the pipeline is exercisable
         # without a live tenant.
         transcripts={"graph": GraphTranscriptAdapter(), "manual": ManualTranscriptAdapter()},
-        meetings={},
+        meetings=MeetingRecords(storage),
         scope=scope,
         keychain=custody,
         config=config if config is not None else Config(),

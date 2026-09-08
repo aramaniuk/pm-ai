@@ -2,7 +2,8 @@
 title: 'Meeting records reach Tier 1'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '7a650687f9e462e31635a74dc8577b8069309544'
 review_loop_iteration: 1
 ---
 
@@ -25,7 +26,7 @@ review_loop_iteration: 1
 - **The record is the ledger's field grammar, without the ledger's envelope.** One `key=value` per line, rendered by `render_value` and parsed by `scan_fields` (`event_entries.py:171-184,356`), then a free body. It is **not** a ledger line: `parse_line` requires `- [id] category actor=` and refuses duplicate keys, and this is a document with sections. Saying so matters, because the next reader will otherwise assume `parse_line` applies.
 - **`attendees` is one comma-separated value, and comma is therefore reserved.** The grammar has no lists and `parse_line` refuses duplicate keys, so the list cannot be repeated fields. Store handles only — a display name like "Smith, Bob" would split into two attendees, and nothing would notice.
 - **Man-Hour Cost is never stored.** CAP-1 puts it in the *summary card* header, which is a rendered surface, and it derives from `blended_hourly_rate` in `config.toml` — so a stored value is wrong the moment the rate changes. The record stores `attendees` and `duration_minutes`; the renderer multiplies.
-- **`tentative` is stored, `stale` is derived.** Tentative is provider data — Graph's response status — and must be persisted. Stale means "absent from a window we actually harvested", which `8a`'s `CoverageWindow` already makes derivable, so storing it would be a second source of truth that goes wrong quietly.
+- **Only meetings that have happened are recorded, so neither `tentative` nor `stale` is a field here.** Decided 2026-09-07: a future meeting is not persisted at all. The calendar is its source of truth, and a local copy of a record that can change outside pm-ai at any moment cannot be kept accurate — it is duplication whose staleness the system would then have to model. `tentative` is a response status for a meeting that has not occurred, and `stale` means "absent from a window we harvested", which is a cancellation; both are questions about the future and neither has an answer about a meeting already held. A held meeting's `start` is immutable, which is what makes the record — and the day in its filename — stable for the life of the citation.
 - **The record has machine-owned and human-owned regions, and a write preserves the human's.** pm-ai owns the fields; `## Notes` is copied through verbatim. A `## Summary` region is reserved and left empty by this slice — it is transcript-derived and needs a model, which decision 2 puts beyond wave 2. This is what resolves the contradiction between this slice's replace-on-rewrite row and `33c`'s never-silently-overwrite-a-hand-edit rule: the regions differ, so both hold.
 - **A meeting id is stable for the life of the record**, because `source_ref` derives from it (`meetings.py:37-39`) and a 30-day transcript purge must not empty a citation.
 
@@ -60,22 +61,26 @@ review_loop_iteration: 1
 ## Code Map
 
 - `pm_ai/core/meeting_records.py` -- new; the accessor, its parser and renderer
+- `pm_ai/domain/event_entries.py:171-184,356` -- `render_value` / `scan_fields`, which *are* the record's field grammar, plus `MAX_ENTRY_LENGTH`, the per-line bound the record now keeps too; cited by the frozen Always and unchanged
 - `pm_ai/domain/meetings.py:17-50` -- `Meeting`, `source_ref`, `transcript_home`, `man_hour_cost`; unchanged
 - `pm_ai/app/wiring.py:43` -- the `meetings` dict this story removes from `Daemon`
 - `pm_ai/app/pipelines.py:50-51` -- the citation check and the dict write
 - `pm_ai/storage/service.py:1022,1065` -- `write_artifact` / `read_artifact` and the `name` parameter for `Collection` members
+- `pm_ai/storage/service.py:1205` -- `exclusive`, the claim `put`'s read-modify-write is held under
 - `pm_ai/domain/scope_model.py:554,650,716` -- the three `meetings/` declarations
+- `tests/core/test_meeting_records.py` -- new; the matrix, the render/parse pair, the hand edits
+- `tests/slice/test_meeting_persistence.py` -- new; the restart cases and the ingestion ordering
 - `_bmad-output/specs/spec-pm-ai/derivation-services.md` -- rule 3, which names this accessor
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/meeting_records.py` -- add `MeetingRecords` with `put`, `get`, `for_day(day, *, tz)`, `MeetingNotFound`, `MalformedMeeting`, and the safe-name encoding
-- [ ] `pm_ai/app/wiring.py` -- replace the `meetings` dict with the accessor
-- [ ] `pm_ai/app/pipelines.py` -- write through the accessor, citation check unmoved
-- [ ] `pm_ai/core/meeting_records.py` -- the render/parse pair for the record, preserving `## Notes` and the amendment log on rewrite
-- [ ] `tests/core/test_meeting_records.py` -- the matrix, including a hand-edited file, a malformed one, and a rewrite that must not lose the notes
-- [ ] `tests/slice/test_meeting_persistence.py` -- write, discard the accessor, rebuild against the same temporary root, read back -- the only shape that can observe persistence at all
+- [x] `pm_ai/core/meeting_records.py` -- add `MeetingRecords` with `put`, `get`, `for_day(day, *, tz)`, `MeetingNotFound`, `MalformedMeeting`, and the safe-name encoding
+- [x] `pm_ai/app/wiring.py` -- replace the `meetings` dict with the accessor
+- [x] `pm_ai/app/pipelines.py` -- write through the accessor, citation check unmoved
+- [x] `pm_ai/core/meeting_records.py` -- the render/parse pair for the record, preserving `## Notes` on rewrite and leaving the reserved `## Summary` region empty. Said "and the amendment log" until 2026-09-08: amendments left this slice on 2026-09-03 in the same day's change-log entry, and there is no amendment log to preserve
+- [x] `tests/core/test_meeting_records.py` -- the matrix, including a hand-edited file, a malformed one, and a rewrite that must not lose the notes
+- [x] `tests/slice/test_meeting_persistence.py` -- write, discard the accessor, rebuild against the same temporary root, read back -- the only shape that can observe persistence at all
 
 **Acceptance Criteria:**
 - Given a meeting written through one accessor, when a **freshly built** accessor over the same temporary root reads it, then the record is returned. Stated this way because a `core` unit test against a `StoragePort` cannot represent a restart, so an accessor that caches in memory and never persists would satisfy both the original criterion and the read-back matrix row.
@@ -86,6 +91,16 @@ review_loop_iteration: 1
 - Given `grep -n "meetings" pm_ai/app/wiring.py`, then no `dict` remains.
 
 ## Spec Change Log
+
+- **2026-09-08, the review's findings applied. Two of them changed behaviour the frozen block did not describe, so they are stated here.**
+  **The region between the field block and `## Notes` is now refused rather than ignored.** It was read past on parse and dropped on rewrite, so a hand-written `## Summary` body disappeared on the next `put` and a field-shaped line one line *below* the blank separator — `duration_minutes=999`, `title=hijacked` — parsed away in silence while the record went on reporting the value it held. That contradicted this module's own rule for an unknown key ("a typo silently dropped is a value the writer believes it stored") in a file whose premise is that a human may edit it. `## Summary` stays machine-owned and empty; anything else there is a `MalformedMeeting` pointing at `## Notes`.
+  **The ingestion order changed.** `pipelines.py` wrote the record *before* `extract`, so a failure in extraction left a durable citation root for an ingestion that minted no citations — a state the in-memory dict could not reach across a restart, and a line that can raise where a dict assignment could not. `extract` now runs first (it is the step that fails, and it writes nothing) and the record is written before the loop that stages or executes anything citing it. A record for a transcript that extracted nothing is kept deliberately: the meeting happened, `Meeting` is Tier-1 in its own right, and `33c` records meetings with no transcript at all.
+  **Ten other refusals were tightened**, each of them a silence rather than a wrong answer: `for_day(tz=None)` answered in the machine's local zone; a record whose `start` day or `meeting_id` disagreed with its filename was invisible to `for_day` on every day or reported as absent; `put` raised on a non-UTF-8 member, the one file it is the only operation able to repair; duplicate attendee handles double-counted a person in the Man-Hour Cost; `duration_minutes` accepted Python integer syntax, so the file's text and the parsed value could disagree; a scope with no `meetings/` escaped as `ArtifactNotInScope` from two layers down; a named zone that is merely zero-offset in winter was accepted as UTC; `put`'s read-modify-write took no claim; and neither `title` nor the joined `attendees` was bounded the way a ledger line is.
+
+- **2026-09-07, renegotiated on instruction: no future meeting is recorded.** The calendar is the source of truth for a meeting that has not happened, and consumers read it live. A local copy of a record that can be moved or cancelled outside pm-ai cannot be kept accurate, so storing it buys duplication plus the obligation to model its staleness. The three arguments for persisting it — a pure renderer, an offline 07:00 render, and cancellation detection — were weighed and judged not worth that cost; the network exposure at render time is accepted deliberately.
+  **`tentative` and `stale` leave this slice.** Both are questions about a meeting that has not occurred: a response status, and an absence from a harvested window. Neither is answerable about a meeting already held.
+  **This makes the record's identity stable rather than volatile**, which retires a defect rather than creating one. A held meeting's `start` cannot move, so keying the filename on its UTC day is sound, `MeetingDisplaced` becomes unreachable, and the hand-edit that made a record invisible to `for_day` loses the motive that would have driven an operator to it — there is no rescheduling of the past.
+  **`for_day` is kept**, though the dashboard no longer sources today's meetings from it. It is the day query over meetings that happened; `derivation-services.md` names search indexing as the other reader.
 
 - **2026-09-03, the record format decided, and the review's findings applied.** The `Ask First` is answered: the record is the ledger's **field** grammar — `key=value` per line through `render_value`/`scan_fields` — plus a free body, and explicitly *not* a ledger line, since `parse_line` requires the `- [id] category actor=` envelope and refuses duplicate keys. One wart is stated rather than discovered: `attendees` is a comma-separated value because the grammar has no lists, so comma is reserved and handles are stored without display names.
   **Man-Hour Cost is computed, never stored** — CAP-1 puts it in a rendered card and it derives from a `config.toml` value that changes. **`tentative` is stored and `stale` is derived** from `8a`'s coverage, so there is one source of truth for each.
@@ -116,3 +131,67 @@ Surfacing a malformed hand-edited record rather than skipping it follows the rul
 - `uv run pytest tests/slice -q` -- expected: the transcript slice still passes against the accessor
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: contracts kept
+
+## Suggested Review Order
+
+**Start here — what a record is**
+
+- The accessor `derivation-services.md` rule 3 names: holds no path, takes a `StoragePort`.
+  [`meeting_records.py:436`](../../../../pm_ai/core/meeting_records.py#L436)
+
+- Three parts, each load-bearing: the day so `for_day` opens one day, the slug for a human, the digest for a provider id that is neither safe nor short.
+  [`meeting_records.py:300`](../../../../pm_ai/core/meeting_records.py#L300)
+
+- The record: machine-owned fields, a reserved `## Summary`, and the human's `## Notes`.
+  [`meeting_records.py:265`](../../../../pm_ai/core/meeting_records.py#L265)
+
+**The drift pair, and what it refuses**
+
+- Renders the ledger's field grammar without its envelope; every field bounded the way a ledger line is.
+  [`meeting_records.py:327`](../../../../pm_ai/core/meeting_records.py#L327)
+
+- Refuses rather than ignores — the rule the reserved region broke until this review.
+  [`meeting_records.py:362`](../../../../pm_ai/core/meeting_records.py#L362)
+
+- A field-shaped line below the field block is a value its writer believes was stored; it is refused, not dropped.
+  [`meeting_records.py:963`](../../../../pm_ai/core/meeting_records.py#L963)
+
+- The filename and the body must agree about the day and the id, or the record is invisible to `for_day` on every day.
+  [`meeting_records.py:918`](../../../../pm_ai/core/meeting_records.py#L918)
+
+- Aware UTC is not "offset zero today" — a named zone is sampled either side of a transition.
+  [`meeting_records.py:1006`](../../../../pm_ai/core/meeting_records.py#L1006)
+
+**Writing, and the ordering that makes a citation honest**
+
+- One claim over the collection around list-read-write; the half a human's editor cannot honour is stated, not claimed fixed.
+  [`meeting_records.py:449`](../../../../pm_ai/core/meeting_records.py#L449)
+
+- Extract before the record is written, so a failure leaves no citation root nothing cites.
+  [`pipelines.py:89`](../../../../pm_ai/app/pipelines.py#L89)
+
+- The dict that lost every citation on exit, retired for the accessor.
+  [`wiring.py:59`](../../../../pm_ai/app/wiring.py#L59)
+
+**Reading**
+
+- The digest narrows, then the id is confirmed — the difference between probably right and right.
+  [`meeting_records.py:506`](../../../../pm_ai/core/meeting_records.py#L506)
+
+- A local day is a UTC interval that can straddle two dates, and a DST transition makes it 23 or 25 hours.
+  [`meeting_records.py:532`](../../../../pm_ai/core/meeting_records.py#L532)
+
+- The premise "a 24-hour interval touches at most two UTC dates" was wrong; the conclusion survives, and both measurements are named.
+  [`meeting_records.py:1112`](../../../../pm_ai/core/meeting_records.py#L1112)
+
+**Peripherals**
+
+- Unreachable since no future meeting is recorded, and kept as a guard against a state that cannot occur.
+  [`meeting_records.py:237`](../../../../pm_ai/core/meeting_records.py#L237)
+
+- One case per matrix row, against a real temp root.
+  [`test_meeting_records.py:1`](../../../../tests/core/test_meeting_records.py#L1)
+
+- Discards the daemon and rebuilds it, which is what a caching accessor cannot survive.
+  [`test_meeting_persistence.py:1`](../../../../tests/slice/test_meeting_persistence.py#L1)
+

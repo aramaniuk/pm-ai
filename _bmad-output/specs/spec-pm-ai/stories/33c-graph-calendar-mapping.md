@@ -19,10 +19,10 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 ## Boundaries & Constraints
 
 **Always:**
-- **Upcoming meetings are records, not events.** `CALENDAR_EVENT_HELD` is past tense and `MeetingHeldPayload` carries no title or start (`events.py:130-133`), so a future meeting cannot be expressed as an event without opening a closed enumeration — which a connector may never do (AD-27). Future rows become `meetings/` records via `11a`; only ended rows emit an event.
+- **Upcoming meetings are neither records nor events — they are read live.** Decided 2026-09-07: the calendar is the source of truth for a meeting that has not happened, and a local copy of a row that can move or vanish outside pm-ai cannot be kept accurate. So an upcoming row is mapped to a `Meeting` in memory and handed to whoever asked; nothing is persisted. Only an **ended** row is written to `meetings/` via `11a` and emits `CALENDAR_EVENT_HELD`. The closed-enumeration constraint still holds and still matters — `MeetingHeldPayload` carries no title or start (`events.py:130-133`) and a connector may never open the enumeration (AD-27) — which is why an upcoming row cannot be an event either, and why `23b` reaches this fetch rather than the event log for the day ahead.
 - **`Meeting.scope` comes from connector configuration mapping an Outlook category to a project.** The PM tags the meeting in Outlook and the mapping lives in `connectors/` — application scope, Tier 1, gitignored (`scope_model.py:451`) — so it is per-machine and uncommitted, and stays out of `config.toml`, whose vocabulary is closed. **An unmapped row is personal**: it is the PM's own meeting, it still appears in the personal dashboard, and nothing is silently dropped. A Graph event carries no pm-ai scope, so the mapping is the only honest source.
 - **An all-day row records `0` minutes.** An all-day entry is a marker — a birthday, an OOO block, a sprint boundary — not a meeting, so it contributes nothing to cost while still appearing in Time-Critical Activities. 1440 is the answer the spec calls wrong by an order of magnitude: five attendees at £100/h would report £12,000 for a birthday. `duration_minutes` is `int` on both `Meeting` and `MeetingHeldPayload`, so the convention must be a whole number, which `0` is.
-- **`tentative` is stored and `stale` is derived.** Tentative is provider data — Graph's response status — and `11a`'s record carries it. Stale means "absent from a window we actually harvested", which `8a`'s `CoverageWindow` makes derivable, so storing it would be a second source of truth that goes wrong quietly.
+- **`tentative` is carried, never stored, and `stale` is gone.** Tentative is a response status on a meeting that has not occurred, so it rides on the in-memory `Meeting` the dashboard renders and reaches no file — `11a` no longer has the field. `stale` meant "absent from a window we harvested", which is a cancellation; with no stored future record there is nothing to go stale, and a row that disappears from the calendar simply is not in the next live read.
 - **Records leave the connector through `HarvestResult`.** It carries events, cursor and coverage today, and a record cannot be derived from an event: `MeetingHeldPayload` holds `meeting_id`, `attendee_count` and `duration_minutes` — a *count*, not the attendee list — and no `title`, `start` or `calendar_event_ref`. So the result widens, this slice returns domain records alongside events, and `app/pipelines.py` writes them through `11a`'s accessor before persisting the events. `pm_ai.connectors` may not import `pm_ai.storage`, so the write cannot happen here.
 - **`emits()` returns exactly `{CALENDAR_EVENT_HELD}`.** `MESSAGE_POSTED` joins it in `33d`.
 - **A connector mints no event id** (AD-34) and **never asserts `Provenance.EXTERNAL`** (AD-36) — it emits `UNKNOWN` and `core.normalize` decides, as `gitlab.py:51-57` does. Hard-coding `EXTERNAL` would make pm-ai's own writes admissible as evidence that its own promises were kept.
@@ -38,19 +38,19 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Upcoming row | starts in 3h | `Meeting` record written; **no** event emitted | N/A |
+| Upcoming row | starts in 3h | mapped to a `Meeting` and returned; **nothing** written, **no** event emitted | N/A |
 | Ended row | finished yesterday | `CALENDAR_EVENT_HELD` emitted with attendee count and duration | N/A |
-| In progress | started, not ended | record written, no event — it has not been held yet | N/A |
+| In progress | started, not ended | mapped and returned, nothing written, no event — it has not been held yet | N/A |
 | `end` exactly equals `now` | boundary instant | bounds inclusive on one side only, so ended and in-progress are disjoint | N/A |
-| Recurring series | a weekly recurrence in the window | each occurrence is its own record | N/A |
+| Recurring series | a weekly recurrence in the window | each occurrence is its own `Meeting`; the ended ones are each their own record | N/A |
 | Modified occurrence | one instance moved, with its own id | keyed on the occurrence id, not the series master's | N/A |
-| Cancelled row, never written | marked cancelled, no existing record | not written | N/A |
-| Cancelled after an earlier harvest wrote it | a record exists, the row is now cancelled | the existing record is marked, not left as upcoming — "not written" is a no-op against a record already on disk | N/A |
+| Cancelled upcoming row | marked cancelled, still in the window | not returned and not written — it is not a meeting the PM has | N/A |
+| Cancelled after it had already ended | an ended row, later marked cancelled | the record stands — a meeting that happened is not undone by a later calendar edit, and its citations must keep resolving | N/A |
 | Row mapped to a project | its Outlook category is in the mapping | record lands in that project's `meetings/` | N/A |
 | Row with no mapped category | any untagged meeting | personal scope | N/A |
 | Category maps to an unregistered project | a stale mapping entry | refused, naming the category and the project id | `UnknownProject` |
 | Declined by the PM | declined, still on the calendar | not written | N/A |
-| Tentative | tentatively accepted | recorded with `tentative` set — a stored field, because it is provider data | N/A |
+| Tentative | tentatively accepted | carried on the returned `Meeting` for display; stored nowhere, because it is a question about a meeting that has not happened | N/A |
 | All-day row | midnight to midnight | `duration_minutes` is `0`, so `man_hour_cost` is `0.0` at any attendee count | N/A |
 | Attendee edges | null `emailAddress`, a distribution list, zero attendees | null resolves to `UNRESOLVED`; group expansion stated; zero recorded as zero | N/A |
 | No online meeting | a room booking with no join reference | record written; `calendar_event_ref` still holds the event id | N/A |
@@ -80,7 +80,7 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 - [ ] `tests/connectors/test_graph_calendar_mapping.py` -- the matrix against `33b`'s row fixtures
 
 **Acceptance Criteria:**
-- Given a window containing one ended and one upcoming row, then exactly one `CALENDAR_EVENT_HELD` is persisted and two `meetings/` records exist — the past/future split, asserted rather than described.
+- Given a window containing one ended and one upcoming row, then exactly one `CALENDAR_EVENT_HELD` is persisted, exactly **one** `meetings/` record exists, and both rows are returned to the caller — the past/future split, asserted rather than described.
 - Given every emitted event, then `authored_by` is `Provenance.UNKNOWN` — asserted, because AD-36's rule lives only in a comment and the AD-34 test inspects only the absent `id`.
 - Given `GraphConnector`, then `isinstance(GraphConnector(...), ConnectorPort)` holds **and `sample_events()` returns a non-empty tuple** — `8d` declares both members on the port, and the conformance test at `test_domain_invariants.py:793-826` enumerates only `ScopePaths`, `GitVcs` and `StorageService`, so it passes before this slice starts. `8d` extends it to connectors; this slice asserts its own adapter against it.
 - Given the AD-27 and AD-34 tests with `GraphConnector` registered, then both pass and `all_connectors()` returns two connectors — `8d`'s non-empty assertion now has a second member.
@@ -91,6 +91,11 @@ Split from the original `33b` on 2026-09-02 at the sizing gate.
 - Given a `HarvestResult` from this connector, then it carries the records **and** the events, and `app` writes the records first — asserted on the order, because an event citing `meeting:<id>` emitted before its record leaves an unresolvable AD-33 citation.
 
 ## Spec Change Log
+
+- **2026-09-07, renegotiated on instruction: an upcoming row is read live, never recorded.** The calendar owns a meeting that has not happened. A local copy of a row that can be moved or cancelled outside pm-ai cannot be kept accurate, so persisting it buys duplication plus the obligation to model staleness — and this slice was where that obligation showed up, as a cancellation-marking rewrite and a `tentative` field.
+  **The past/future split survives and gets sharper.** It was already forced by a closed enumeration: `MeetingHeldPayload` has no title or start, so an upcoming meeting has no honest representation as an event. It now cuts between *returned* and *persisted* rather than between two kinds of record. Only an ended row becomes a `meetings/` record and a `CALENDAR_EVENT_HELD`.
+  **Four matrix rows changed and one reversed.** Upcoming, in-progress and tentative rows are mapped and returned rather than written. The cancellation pair collapses: an upcoming cancelled row is simply not returned, and a row cancelled *after* it ended keeps its record — a meeting that happened is not undone by a later calendar edit, and its citations must keep resolving. That last row previously said the record was "marked, not left as upcoming", which no longer has a meaning.
+  **`tentative` stays useful and stops being durable** — it rides the in-memory `Meeting` so the dashboard can show it, and reaches no file.
 
 - **2026-09-03, both `Ask First` clauses answered, and the review's findings applied.**
   **`Meeting.scope`** comes from connector configuration mapping an Outlook category to a project, with an unmapped row defaulting to personal — the PM tags the meeting in a UI they already use, and the mapping sits in `connectors/`, per-machine and uncommitted. **An all-day row records `0` minutes**, which makes the criterion a value rather than the self-reference the review's C6 found: "equals the stated convention" was satisfied by any constant, including the 1440 this spec itself calls wrong by an order of magnitude.

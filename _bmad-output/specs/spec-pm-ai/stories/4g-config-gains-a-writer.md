@@ -13,13 +13,13 @@ context: []
 
 **Problem:** `config.toml` has a reader and no writer. `4a` gave it `load_config` and deliberately no write path, so the one artifact holding `pm_handle` must be typed by hand from a closed vocabulary documented nowhere — an operator discovers what the file may say by triggering refusals one key at a time. A file only a human can write cannot be set from the CLI, or later from Telegram.
 
-**Approach:** `render_config(Config) -> bytes` beside `load_config`, and the fourth key `4a` reserved to the human — `display_timezone`, which `23a`'s renderer and `11a`'s `for_day` both need and which had no source anywhere in wave 1. Nothing calls it in this slice — `4h` is its first caller, exactly as `4c` was the loader's.
+**Approach:** `render_config(Config) -> bytes` beside `load_config`, and the fourth key `4a` reserved to the human — `display_timezone`, which `23a`'s renderer and the calendar read that selects the day both need and which had no source anywhere in wave 1. (It named `11a`'s `for_day` as the second consumer until 2026-09-07, when upcoming meetings stopped being persisted and the day's schedule moved to a live read; the key, its validation and its single-read rule are unchanged.) Nothing calls it in this slice — `4h` is its first caller, exactly as `4c` was the loader's.
 
 ## Boundaries & Constraints
 
 **Always:**
 - **Serialization in `core`, the write elsewhere.** `core` is I/O-free by contract: `render_config` returns bytes and something above it writes them, the mirror of how `load_config` takes bytes and opens nothing. Telegram is the second channel (story 5) and surfaces reach adapters only through core (AD-30), so neither surface may own this.
-- **`display_timezone` is a fourth key, validated against the zone database.** `4a` closed the vocabulary at three and reserved a fourth to the human, who added this one on 2026-09-03. It is refused unless `ZoneInfo` accepts it, because a typo'd zone that reaches `for_day` silently shifts which meetings count as today — and `zoneinfo` raises `ZoneInfoNotFoundError`, not a `ValueError`, so the refusal must catch it deliberately.
+- **`display_timezone` is a fourth key, validated against the zone database.** `4a` closed the vocabulary at three and reserved a fourth to the human, who added this one on 2026-09-03. It is refused unless `ZoneInfo` accepts it, because a typo'd zone silently shifts which meetings count as today in whichever query selects the day — `11a`'s `for_day` when this was written, `33b`'s live fetch since 2026-09-07 — and `zoneinfo` raises `ZoneInfoNotFoundError`, not a `ValueError`, so the refusal must catch it deliberately.
 - **The loader and the renderer gain the key together.** A field added to one and not the other is the drift pair this slice exists to close, and `ACCEPTED_KEYS` derives from the dataclass so a field added without a read is admitted and silently dropped.
 - **Round-trip or nothing.** `load_config(render_config(c)) == c` for every admissible `Config`. A renderer and a parser are two vocabularies that drift, which is why `4a` derives `ACCEPTED_KEYS` from the dataclass rather than maintaining a second list.
 - **A key at its unset default is omitted, never emitted.** This is policy, not a loader constraint: `4a` refuses an explicitly written unset `pm_handle` and an explicit zero rate, but it *accepts* `verbose_logging = false`. So only the renderer stands between an operator and a file that states a setting they expect an effect from.
@@ -74,6 +74,8 @@ context: []
 - Given `pyproject.toml`, then no TOML-writing dependency appears in it.
 
 ## Spec Change Log
+
+- **2026-09-07, the second consumer of `display_timezone` changed name.** Consequent on the decision that no future meeting is persisted: the day's schedule is read live from `33b` rather than from `11a`'s `for_day`, so the two citations naming `for_day` as this key's other reader are corrected. Nothing about the key changes — it is still the fourth and last, still reserved to the human, still validated against the zone database, and still read once so a renderer and a day-selection cannot disagree. Only the reader on the far side of that single read is different.
 
 - **2026-09-03, gained the fourth config key.** `display_timezone`, answering the `Ask First` `4a` reserved to the human. `render_dashboard(..., *, tz)` and `for_day(day, *, tz)` both took a timezone and nothing supplied it: `4g` emitted only three keys, `4h` forbids prompting for anything `4a` does not accept, and `23a`'s own `Ask First` recorded that it had no owner in any story. It lands here rather than in a slice of its own because a loader and a renderer that disagree about a file format is the drift pair this slice exists to close. Its validation is against the zone database, since a typo'd zone shifts which meetings count as today, and `zoneinfo` raises `ZoneInfoNotFoundError` rather than a `ValueError`.
 

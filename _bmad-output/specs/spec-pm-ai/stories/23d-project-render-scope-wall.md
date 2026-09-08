@@ -32,7 +32,8 @@ review_loop_iteration: 1
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Project day | two project meetings, project log entries | Time-Critical and Proactive Enablement, both populated | N/A |
-| No project meetings | `for_day` returned nothing for that scope | "No meetings on this project's calendar today" | N/A |
+| No project meetings | the calendar answered, with nothing mapped to that project | "No meetings on this project's calendar today" | N/A |
+| Calendar unreachable | the fetch failed for a project render | the section says the calendar could not be read; **never** "No meetings on this project's calendar today" | reported, never raised |
 | No project entries | empty project log | Proactive Enablement states no signals in the window | N/A |
 | Proactive Enablement in wave 1 | `MESSAGE_POSTED` arrives with `33d` | states so — knowingly empty, as in `23a` | N/A |
 | Identical data, both renders | the same meetings passed to each function | the Time-Critical section is byte-identical | N/A |
@@ -68,6 +69,8 @@ review_loop_iteration: 1
 - Given `grep -rn "project_scope_datasources" pm_ai/`, then there is no match — the approach this slice carried until 2026-09-03 is not built.
 
 ## Spec Change Log
+
+- **2026-09-07, the project render reads the calendar too.** Consequent on the decision that no future meeting is persisted: a project's day comes from the live fetch filtered to that scope, not from `for_day` over `meetings/`. The scope wall this slice exists to hold is unaffected — it governs what a project-scope render may *open*, and a live read narrowed to one project opens strictly less than a cross-scope one. The unreachable-calendar row is added for the same reason as in `23a`: with a live read, "no meetings" and "could not ask" stop being the same silence.
 
 - **2026-09-03, rewritten: the wall became a signature.** The original approach was `project_scope_datasources(project=...)` — a list of what a project render may open, plus a test asserting nothing personal appears in it. The human replaced it: the two dashboards are **separate functions** with their own sources, sections and outputs. `render_project_dashboard` has no goals parameter, so the leak has no expression. Strictly stronger than a list and a test that remembers to check it, and the same move as `8e`'s unforgeable `Sanitized`.
   That dissolved three findings rather than fixing them. **A8** — `core.rendering` cannot resolve a project tree or raise `UnknownProject`, since it may not import `pm_ai.platform.paths` — is moot, because there is no path to resolve. **The vacuous-pass problem** in the gate is replaced by a signature assertion. And the slice's own `Ask First` about what the project 3-Tier section says is answered by the section not existing: CAP-9's four-section rule names the personal file by path, so nothing requires four sections here.
