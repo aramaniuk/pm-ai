@@ -52,7 +52,8 @@ and ends this morning appear without a date filter here silently dropping it.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
+from enum import Enum
 
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import GoalRegister
@@ -68,6 +69,7 @@ __all__ = [
     "LEADERSHIP_NOTES",
     "MESSAGE_WINDOW",
     "NO_MEETINGS",
+    "NO_REASON_GIVEN",
     "PROACTIVE_ENABLEMENT",
     "STRATEGIC_MILESTONES",
     "TIME_CRITICAL",
@@ -125,6 +127,16 @@ It names a *query result*: the calendar was asked and answered with nothing. It
 is therefore forbidden when the fetch failed (there is no result to report) and
 forbidden when meetings came back and have all ended (the result was not
 nothing).
+"""
+
+NO_REASON_GIVEN = "the connector gave no reason"
+"""What stands in when `HarvestFailure.reason` is blank or only whitespace.
+
+`reason` has no default and is meant to carry the provider's own words, but
+nothing in the type stops an empty string, and `escape` strips — so the sentence
+would read "…are unknown: " and stop. That the connector said nothing is a fact
+about the failure, and stating it keeps the line a sentence rather than a
+truncated one a reader assumes was cut off.
 """
 
 # The categories Proactive Enablement reads. One member today; a tuple because
@@ -218,9 +230,15 @@ def _time_critical(
         # Never `NO_MEETINGS`. The fetch produced no answer, so there is no
         # result to report — and a dashboard that reported yesterday's silence
         # as today's empty calendar is the failure this branch exists for.
+        #
+        # `escape` strips, so a reason that was only whitespace arrives here
+        # empty and the sentence would end on a dangling colon. That the
+        # connector said nothing is itself a fact, and stating it is what keeps
+        # the line a sentence.
+        reason = escape(meetings.reason) or NO_REASON_GIVEN
         return (
             f"The calendar could not be read, so today's meetings are unknown: "
-            f"{escape(meetings.reason)}\n\n"
+            f"{reason}\n\n"
             f"{_retry_advice(meetings)}"
         )
 
@@ -229,6 +247,18 @@ def _time_critical(
     # failing rather than as the caller being told what it handed over.
     for meeting in meetings:
         _assert_utc(meeting.start, name=f"meeting {meeting.meeting_id!r} start")
+        # Refused for the same reason a naive start is: a negative duration
+        # makes `_end` land before `start`, so a meeting hours away computes as
+        # ended — and one such value flips the whole section to "all of today's
+        # meetings have ended", a claim about every other meeting on the page.
+        if meeting.duration_minutes < 0:
+            raise ValueError(
+                f"meeting {meeting.meeting_id!r} has duration_minutes="
+                f"{meeting.duration_minutes}, which ends it before it starts. "
+                f"The section decides `ended` from `start + duration`, so a "
+                f"negative value would report an upcoming meeting as finished "
+                f"and take the rest of the day's meetings down with it."
+            )
     # Total, so a re-render of the same day is byte-identical: `start` alone
     # ties for two meetings booked at the same minute, and `sorted` would then
     # preserve whatever order the fetch's paging happened to produce.
@@ -301,10 +331,32 @@ def _retry_advice(failure: HarvestFailure) -> str:
         )
     if failure.retry_after is not None:
         return (
-            f"The provider asked for a wait of {failure.retry_after}; the next "
-            f"harvest should clear it."
+            f"The provider asked for a wait of "
+            f"{_duration_words(failure.retry_after)}; the next harvest should "
+            f"clear it."
         )
     return "The connector reports this as retryable; the next harvest may clear it."
+
+
+def _duration_words(delta: timedelta) -> str:
+    """A wait, spelled the way a PM reads one.
+
+    `str(timedelta)` renders `0:00:30`, which is a repr of a Python object in a
+    file somebody reads at 07:00. The value is the provider's own hint, so it is
+    stated exactly — rounded to the second it was measured in, never softened to
+    "about a minute", which would be a number this code did not compute.
+    """
+    seconds = round(delta.total_seconds())
+    if seconds <= 0:
+        # A hint of zero or less is not a wait. Saying "0 seconds" would read as
+        # a measurement; saying there is no wait is what the value means.
+        return "no wait at all"
+    parts: list[str] = []
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute"), (1, "second")):
+        count, seconds = divmod(seconds, size)
+        if count:
+            parts.append(f"{count} {unit}" + ("" if count == 1 else "s"))
+    return " ".join(parts)
 
 
 # ── Proactive Enablement ─────────────────────────────────────────────────────
@@ -316,7 +368,13 @@ def _proactive_enablement(
     """Message signals inside the window, or the reason the window is empty."""
     since = now - MESSAGE_WINDOW
     inside: list[tuple[datetime, EventEntry]] = []
-    unplaceable = 0
+    # Three separate counts, because they are three different facts and the
+    # section prints what it counted. Folding them into one number forced one
+    # sentence to stand for all of them, and that sentence — "carries no
+    # `ingested_at`" — was false for two of the three.
+    absent = 0
+    unreadable = 0
+    ahead = 0
     seen = 0
     for entry in entries:
         if entry.category in SIGNAL_CATEGORIES:
@@ -328,17 +386,28 @@ def _proactive_enablement(
             # clothes.
             continue
         at = _ingested_at(entry)
-        if at is None:
-            # Excluded from the window and counted, never dated from `now`. An
-            # entry written before story `2e` stamped the field cannot answer
-            # the question the window asks, and a substituted timestamp is
-            # indistinguishable from a real one (AD-35).
-            unplaceable += 1
+        if isinstance(at, _Unplaceable):
+            if at is _Unplaceable.ABSENT:
+                # Excluded from the window and counted, never dated from `now`.
+                # An entry written before story `2e` stamped the field cannot
+                # answer the question the window asks, and a substituted
+                # timestamp is indistinguishable from a real one (AD-35).
+                absent += 1
+            else:
+                # A field that is there and cannot be read is not a missing
+                # field, and the calendar branch already makes exactly this
+                # distinction between "could not be read" and "nothing there".
+                unreadable += 1
             continue
-        if since <= at <= now:
+        if at > now:
+            # Writer or provider clock skew. Outside the window like anything
+            # else, but the only exclusion this section used to make in silence.
+            ahead += 1
+            continue
+        if since <= at:
             inside.append((at, entry))
 
-    footnote = _unplaceable_note(unplaceable)
+    footnote = _window_notes(absent=absent, unreadable=unreadable, ahead=ahead)
     if not inside:
         # The build note only when the log holds no `message_posted` entry at
         # all. Printing "no connector writes these" beside a log that plainly
@@ -379,41 +448,85 @@ def _signal_line(at: datetime, entry: EventEntry, *, tz: tzinfo, now: datetime) 
     return line
 
 
-def _unplaceable_note(count: int) -> str:
-    """What the window could not judge, said rather than swallowed.
+def _window_notes(*, absent: int, unreadable: int, ahead: int) -> str:
+    """Everything the window excluded for a reason other than being old.
 
     A bounded `EventLog.read` drops these silently — correctly, since the range
     asks a question they cannot answer — so this is the only place a PM can
     learn that the count above is short, and by how many.
+
+    Three sentences rather than one, because they are three different facts. One
+    counter printed under one wording made the dashboard say "carries no
+    `ingested_at`" about an entry whose `ingested_at` was there and readable,
+    which is the invented claim this module is arranged against.
     """
-    if not count:
-        return ""
-    subject = "entry carries" if count == 1 else "entries carry"
-    them = "it" if count == 1 else "them"
-    return (
-        f"\n\n{count} message log {subject} no `ingested_at`, so the window "
-        f"could not place {them}. Counted here rather than dated from the "
-        f"local clock."
-    )
+    notes: list[str] = []
+    if absent:
+        notes.append(
+            f"{absent} message log {_carry(absent)} no `ingested_at`, so the "
+            f"window could not place {_them(absent)}. Counted here rather than "
+            f"dated from the local clock."
+        )
+    if unreadable:
+        notes.append(
+            f"{unreadable} message log {_carry(unreadable)} an `ingested_at` "
+            f"that could not be read as an instant, so the window could not "
+            f"place {_them(unreadable)}. Counted here rather than guessed at."
+        )
+    if ahead:
+        notes.append(
+            f"{ahead} message log {_carry(ahead)} an `ingested_at` later than "
+            f"this render's instant, so the window — which ends there — "
+            f"excluded {_them(ahead)}. Counted here rather than dropped in "
+            f"silence; a stamp in the future is a clock disagreeing, not a "
+            f"signal that did not happen."
+        )
+    return "".join(f"\n\n{note}" for note in notes)
 
 
-def _ingested_at(entry: EventEntry) -> datetime | None:
-    """The write clock the window is measured on, or `None` when unplaceable.
+def _carry(count: int) -> str:
+    return "entry carries" if count == 1 else "entries carry"
 
-    An unparseable value is the same absence as a missing one for this purpose —
-    the entry cannot be placed in the window either way — and guessing at it is
-    the backfill AD-35 forbids.
+
+def _them(count: int) -> str:
+    return "it" if count == 1 else "them"
+
+
+class _Unplaceable(Enum):
+    """Why an entry got no instant — two facts the section states separately."""
+
+    ABSENT = "absent"
+    """No `ingested_at` field at all: an entry written before story `2e`."""
+
+    UNREADABLE = "unreadable"
+    """A field that is there and yields no instant — malformed, or naive.
+
+    Naive belongs here rather than being converted: there is no zone to assume,
+    and assuming one is the silent wrong answer. It is a value that could not be
+    read *as an instant*, which is precisely what the sentence says.
+    """
+
+
+def _ingested_at(entry: EventEntry) -> datetime | _Unplaceable:
+    """The write clock the window is measured on, or why there is none.
+
+    An aware value at any offset is a real instant and is converted to UTC —
+    `2026-09-09T10:30:00+02:00` is 08:30Z and belongs in a window that holds
+    08:30Z. Refusing it dropped a placeable signal and then printed a reason
+    that was not the one computed. Only `now` and the meeting starts are held to
+    UTC-on-arrival: those come from this codebase's own callers, while this
+    field is read back off a ledger line.
     """
     raw = dict(entry.fields).get("ingested_at")
     if raw is None:
-        return None
+        return _Unplaceable.ABSENT
     try:
         at = datetime.fromisoformat(raw)
     except ValueError:
-        return None
-    if at.tzinfo is None or at.utcoffset() != timedelta(0):
-        return None
-    return at
+        return _Unplaceable.UNREADABLE
+    if at.tzinfo is None or at.utcoffset() is None:
+        return _Unplaceable.UNREADABLE
+    return at.astimezone(timezone.utc)
 
 
 # ── 3-Tier Strategic Milestones ──────────────────────────────────────────────
@@ -499,6 +612,10 @@ def escape(text: str) -> str:
     Markdown spelling, so it becomes a visible `\n`/`\r`/`\t` — the value stays
     on its line and the reader can see what was in it. A structural character
     has one, so it is backslash-escaped and renders as itself.
+
+    `_INVISIBLE` is the first class with a wider net than C0: U+2028 and the
+    bidi overrides sit above the `char < " "` test and do a control character's
+    damage, so they take a control character's visible spelling.
     """
     out: list[str] = []
     # Stripped *before* escaping, not after: once a trailing newline has become
@@ -520,6 +637,8 @@ def escape(text: str) -> str:
             # `\x0b` in a title is the kind of thing that makes two renders of
             # the same data look identical and diff.
             out.append(f"\\x{ord(char):02x}")
+        elif char in _INVISIBLE:
+            out.append(f"\\u{ord(char):04x}")
         else:
             out.append(char)
     return "".join(out)
@@ -548,9 +667,42 @@ def code(text: str) -> str:
             out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}[char])
         elif char < " " or char == "\x7f":
             out.append(f"\\x{ord(char):02x}")
+        elif char in _INVISIBLE:
+            # The same set as `escape`, for the same reason: a code span is
+            # still one line of a Markdown file, and U+2028 ends it.
+            out.append(f"\\u{ord(char):04x}")
         else:
             out.append(char)
     return "".join(out)
+
+
+_INVISIBLE = frozenset(
+    chr(point)
+    for point in (
+        {0x2028, 0x2029}  # LINE SEPARATOR, PARAGRAPH SEPARATOR
+        | set(range(0x202A, 0x202F))  # the bidi embeddings and overrides
+        | set(range(0x2066, 0x206A))  # the bidi isolates
+    )
+)
+r"""Characters that are not C0 and behave like one anyway.
+
+The same class as the `\n` this file already escapes, one plane up and therefore
+missed by the `char < " "` test. U+2028 is a line break to any renderer that
+honours the Unicode definition, so it ends a bullet and everything after it
+reads as a new item — exactly the failure `escape` exists to prevent. U+202E
+reverses the visible order of the rest of the line, so a title carrying one
+decides how the *rest of the dashboard's line* reads; the isolates are the same
+mechanism with a different scope.
+
+Rendered as a visible `\uXXXX` rather than backslash-escaped, following the C0
+branch: there is no Markdown escape for a character with no glyph, and a
+visible spelling keeps the value on its line where the reader can see what was
+in it.
+
+Declared by code point rather than as a string of literals, because a literal
+here is invisible in the source too — a set nobody can read in a diff is a set
+nobody can review.
+"""
 
 
 _STRUCTURAL = frozenset("|`[]<>")

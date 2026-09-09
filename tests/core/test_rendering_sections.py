@@ -76,7 +76,7 @@ def meeting(
 
 def message(
     *,
-    at: datetime | None,
+    at: datetime | str | None,
     actor: str = "u_dana",
     channel: str = "#payments",
     excerpt: str | None = None,
@@ -87,10 +87,14 @@ def message(
     `at=None` is the pre-`2e` entry the matrix names: the field is absent, not
     empty, because that is what an entry written before storage stamped the
     clock actually looks like.
+
+    A `str` is written to the field verbatim, which is how a value that is
+    *there and unreadable* is expressed — the ledger is text, so the renderer
+    reads back whatever was on the line, not a `datetime` somebody validated.
     """
     fields: list[tuple[str, str]] = []
     if at is not None:
-        fields.append(("ingested_at", at.isoformat()))
+        fields.append(("ingested_at", at if isinstance(at, str) else at.isoformat()))
     fields.append(("src", "slack:msg/1"))
     fields.append(("channel", channel))
     if excerpt is not None:
@@ -267,8 +271,68 @@ def test_a_retryable_failure_says_the_next_harvest_may_clear_it():
             )
         )
     )["Time-Critical Activities"]
-    assert "0:00:30" in body
+    # The provider's own hint, in words. `str(timedelta)` renders `0:00:30`,
+    # which is a Python repr in the file a PM reads at 07:00.
+    assert "a wait of 30 seconds" in body
+    assert "0:00:30" not in body
     assert NO_MEETINGS not in body
+
+
+@pytest.mark.parametrize(
+    ("wait", "words"),
+    [
+        (timedelta(seconds=30), "30 seconds"),
+        (timedelta(seconds=1), "1 second"),
+        (timedelta(seconds=90), "1 minute 30 seconds"),
+        (timedelta(hours=2), "2 hours"),
+        (timedelta(days=1, seconds=5), "1 day 5 seconds"),
+        (timedelta(0), "no wait at all"),
+    ],
+    ids=["seconds", "singular", "mixed", "hours", "days", "zero"],
+)
+def test_the_providers_wait_hint_is_spelled_out(wait, words):
+    """Each unit, and the singular — a repr leaks in whichever arm is untested."""
+    body = sections(
+        render(meetings=HarvestFailure(reason="429", retryable=True, retry_after=wait))
+    )["Time-Critical Activities"]
+    assert f"a wait of {words};" in body
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected", "forbidden"),
+    [
+        (
+            HarvestFailure(reason="the tenant refused the token", retryable=False),
+            "will not clear on its own",
+            "may clear it",
+        ),
+        (
+            HarvestFailure(reason="the laptop has no route", retryable=True),
+            "the next harvest may clear it",
+            "will not clear on its own",
+        ),
+    ],
+    ids=["permanent", "retryable-with-no-hint"],
+)
+def test_retryable_decides_the_advice_in_both_directions(failure, expected, forbidden):
+    """Both arms, because one asserted arm lets the sentences be swapped.
+
+    A dead credential and a throttled minute are the same absent calendar and a
+    different thing to do about it, so telling the operator to wait for one that
+    will never clear is the whole failure `retryable` exists to prevent.
+    """
+    body = sections(render(meetings=failure))["Time-Critical Activities"]
+    assert expected in body
+    assert forbidden not in body
+
+
+def test_a_blank_failure_reason_does_not_leave_a_dangling_colon():
+    """`reason` has no default but nothing stops an empty one, and `escape` strips."""
+    body = sections(
+        render(meetings=HarvestFailure(reason="   ", retryable=False))
+    )["Time-Critical Activities"]
+    assert "unknown: the connector gave no reason" in body
+    assert not any(line.rstrip().endswith(":") for line in body.split("\n"))
 
 
 def test_a_day_whose_meetings_have_all_ended_says_so():
@@ -355,6 +419,67 @@ def test_a_naive_meeting_start_is_refused_rather_than_sorted():
         render(meetings=(naive,))
 
 
+def test_a_negative_duration_is_refused_rather_than_reported_as_ended():
+    """`ended` is computed from `start + duration`, so a negative one lies.
+
+    And it does not lie about one line: a single meeting that ends before it
+    starts satisfies `all(...)`, so an upcoming meeting takes the whole section
+    with it into "all of today's meetings have ended".
+    """
+    backwards = meeting(
+        "m_backwards",
+        "Standup",
+        start=datetime(2026, 9, 9, 14, 0, tzinfo=timezone.utc),  # hours from now
+        minutes=-60,
+    )
+    with pytest.raises(ValueError, match="m_backwards"):
+        render(meetings=(backwards,))
+
+
+def test_a_meeting_ending_exactly_at_now_has_ended():
+    """The `<=` in `_ended`, which its own comment justifies and nothing pinned."""
+    body = sections(
+        render(
+            meetings=(
+                meeting(
+                    "m_just_over",
+                    "Standup",
+                    start=NOW - timedelta(minutes=30),
+                    minutes=30,  # ends at exactly `now`
+                ),
+                meeting("m_later", "Retro", start=NOW + timedelta(hours=1)),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert "Standup — ended" in body
+    assert "Retro — upcoming" in body
+
+
+def test_a_zero_duration_meeting_is_placed_by_its_start():
+    """A calendar hold with no length still has a state, and it is `start`'s."""
+    body = sections(
+        render(
+            meetings=(
+                meeting("m_hold_now", "Hold", start=NOW, minutes=0),
+                meeting("m_hold_later", "Later hold", start=NOW + timedelta(hours=1), minutes=0),
+            )
+        )
+    )["Time-Critical Activities"]
+    # Zero length at exactly `now`: `_ended`'s `<=` is what decides this one.
+    assert "Hold — ended, 0 min" in body
+    assert "Later hold — upcoming, 0 min" in body
+
+
+def test_an_untitled_meeting_says_so_rather_than_rendering_a_gap():
+    """A provider may return an empty subject; the bullet still has to read."""
+    body = sections(
+        render(
+            meetings=(meeting("m_blank", "   ", start=NOW + timedelta(hours=1)),)
+        )
+    )["Time-Critical Activities"]
+    assert "(untitled) — upcoming" in body
+
+
 # ── Matrix: Proactive Enablement ─────────────────────────────────────────────
 
 
@@ -379,6 +504,103 @@ def test_an_entry_with_no_ingested_at_is_counted_not_dated_from_now():
     body = sections(render(entries=(message(at=None),)))["Proactive Enablement"]
     assert "1 message log entry carries no `ingested_at`" in body
     assert "u_dana" not in body  # it was not placed, so it is not listed
+
+
+def test_two_entries_with_no_ingested_at_are_counted_in_the_plural():
+    """The other arm of the sentence, which nothing exercised."""
+    body = sections(
+        render(
+            entries=(
+                message(at=None, entry_id="evt_a"),
+                message(at=None, entry_id="evt_b"),
+            )
+        )
+    )["Proactive Enablement"]
+    assert "2 message log entries carry no `ingested_at`" in body
+    assert "could not place them" in body
+
+
+def test_an_aware_offset_ingested_at_is_converted_and_placed():
+    """`+02:00` is a real instant. 08:30Z is inside a window ending at 10:30Z.
+
+    It was refused and then reported as "carries no `ingested_at`" — a signal
+    dropped, and a printed reason the code had not computed, in the module whose
+    rule is that a claim it did not compute may not appear in the output.
+    """
+    offset = message(
+        at="2026-09-09T10:30:00+02:00",  # 08:30 UTC, two hours before `now`
+        actor="u_offset",
+        entry_id="evt_offset",
+    )
+    body = sections(render(entries=(offset,)))["Proactive Enablement"]
+    assert "u_offset" in body
+    assert "**10:30**" in body  # 08:30Z, rendered in the +02:00 display zone
+    assert "ingested_at" not in body
+
+
+def test_an_unreadable_ingested_at_is_not_reported_as_a_missing_one():
+    """Two different facts, two different sentences — as the calendar branch does."""
+    body = sections(
+        render(entries=(message(at="last tuesday", actor="u_junk"),))
+    )["Proactive Enablement"]
+    assert "1 message log entry carries an `ingested_at` that could not be read" in body
+    assert "carries no `ingested_at`" not in body
+    assert "u_junk" not in body  # it was not placed, so it is not listed
+
+
+def test_a_naive_ingested_at_is_unplaceable_and_does_not_break_the_render():
+    """The tzinfo guard, pinned: without it the comparison raises `TypeError`.
+
+    And not out of this section — out of `render_dashboard`, so one malformed
+    ledger line takes the meetings, the goals and the whole file down with it.
+    """
+    body = sections(
+        render(entries=(message(at="2026-09-09T10:00:00", actor="u_naive"),))
+    )["Proactive Enablement"]
+    assert "could not be read as an instant" in body
+    assert "u_naive" not in body
+
+
+def test_an_entry_stamped_after_now_is_counted_rather_than_dropped():
+    """Writer or provider clock skew — the one exclusion made in silence."""
+    body = sections(
+        render(
+            entries=(message(at=NOW + timedelta(minutes=5), actor="u_ahead"),)
+        )
+    )["Proactive Enablement"]
+    assert "1 message log entry carries an `ingested_at` later than this render" in body
+    assert "u_ahead" not in body
+
+
+def test_the_window_includes_both_of_its_endpoints():
+    """`since <= at <= now` — an entry on either bound is inside it."""
+    body = sections(
+        render(
+            entries=(
+                message(at=NOW - MESSAGE_WINDOW, actor="u_oldest", entry_id="evt_a"),
+                message(at=NOW, actor="u_newest", entry_id="evt_b"),
+            )
+        )
+    )["Proactive Enablement"]
+    assert "u_oldest" in body
+    assert "u_newest" in body
+    assert "message log" not in body  # nothing was excluded, so nothing is noted
+
+
+def test_two_signals_at_one_instant_are_ordered_by_entry_id():
+    """The Proactive tie-break, mirroring the meetings one.
+
+    Byte-identical re-render is an acceptance criterion, and two entries sharing
+    an `ingested_at` is exactly where a sort on the instant alone falls back on
+    whatever order the log happened to be read in.
+    """
+    at = NOW - timedelta(minutes=5)
+    first = message(at=at, actor="u_alpha", entry_id="evt_a")
+    second = message(at=at, actor="u_beta", entry_id="evt_b")
+    one = render(entries=(first, second))
+    other = render(entries=(second, first))
+    assert one == other
+    assert one.index("u_alpha") < one.index("u_beta")
 
 
 def test_a_message_outside_the_window_is_not_a_signal():
@@ -551,6 +773,63 @@ def test_markdown_unsafe_text_is_escaped_and_the_structure_survives():
     body = sections(text)
     assert "All clear!" in body["Time-Critical Activities"]  # as content, not a claim
     assert "dana \\| *ops*" in body["Proactive Enablement"]
+
+
+def test_a_link_in_a_title_reaches_the_dashboard_as_text_not_as_a_link():
+    """The bracket and angle-bracket halves of `_STRUCTURAL`, which nothing pinned.
+
+    Only `|` was asserted anywhere, so narrowing the set to `` frozenset("|`") ``
+    passed the whole suite — and shipped `[click here](http://attacker)` as a
+    live link into the file a PM opens at 07:00.
+    """
+    text = render(
+        meetings=(
+            meeting(
+                "m_bait",
+                "[click here](http://attacker/) <script>x</script> C:\\\\path",
+                start=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc),
+            ),
+        )
+    )
+    body = sections(text)["Time-Critical Activities"]
+    assert "\\[click here\\]" in body
+    assert "(http://attacker/)" in body  # the parens are inert without the brackets
+    assert "\\<script\\>" in body
+    assert "\\\\" in body  # the backslash doubled, so it cannot escape what follows
+    for live in ("[click here](", "<script>"):
+        assert live not in body, f"{live!r} reached the dashboard unescaped"
+
+
+@pytest.mark.parametrize(
+    ("point", "spelled"),
+    [
+        (0x2028, "\\u2028"),  # LINE SEPARATOR — a line break to renderers that honour it
+        (0x2029, "\\u2029"),  # PARAGRAPH SEPARATOR
+        (0x202E, "\\u202e"),  # RIGHT-TO-LEFT OVERRIDE — reverses the rest of the line
+        (0x2066, "\\u2066"),  # LEFT-TO-RIGHT ISOLATE
+    ],
+    ids=["line-sep", "para-sep", "rtl-override", "isolate"],
+)
+def test_invisible_separators_and_bidi_overrides_are_spelled_out(point, spelled):
+    """The same class as the `\\n` already escaped, one plane up.
+
+    `char < " "` catches C0 and misses these, so a title carrying U+2028 broke
+    the bullet and one carrying U+202E decided how the rest of the line read.
+    """
+    hostile = f"Sync{chr(point)}All clear!"
+    assert escape(hostile) == f"Sync{spelled}All clear!"
+    assert code(hostile) == f"Sync{spelled}All clear!"
+    body = sections(
+        render(
+            meetings=(
+                meeting(
+                    "m_bidi", hostile, start=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+                ),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert chr(point) not in body
+    assert spelled in body
 
 
 def test_escape_leaves_a_line_intact_and_code_does_not_backslash_a_span():
