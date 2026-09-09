@@ -15,9 +15,11 @@ import pytest
 
 from pm_ai.core.goal_register import (
     ARTIFACT,
+    DOMAIN_SPELLINGS,
     HORIZON_SPELLINGS,
     GoalRegister,
     MalformedGoals,
+    _listed,
     parse_goals,
 )
 from pm_ai.domain.goals import (
@@ -353,16 +355,35 @@ def test_a_goal_that_loses_its_brackets_is_refused():
 
 @pytest.mark.parametrize(
     "goal_id",
-    ["my id", "a:b", "g/a", "[nested]", "-leading", ".leading", "goal id"],
+    ["my id", "a:b", "g/a", "-leading", ".leading", "goal id"],
 )
 def test_an_id_that_is_not_citation_safe_is_refused(goal_id):
     """`SourceRef.parse('goal:my id')` succeeds (`identity.py:223-227`) — it only
     counts colon-separated parts — so the charset is what actually rejects this.
     A citation with a space in it is unparseable by anything splitting on
-    whitespace."""
+    whitespace.
+
+    Asserted against text only the charset refusal carries. `"citation"` alone
+    passed for `[nested]`, which never reaches this gate at all — the shape
+    refusal names citations too.
+    """
     with pytest.raises(MalformedGoals) as refusal:
         parse(f"## Project\n- [{goal_id}] (short) A\n".encode())
-    assert "citation" in str(refusal.value).lower()
+    message = str(refusal.value)
+    assert "citation-safe" in message
+    assert "AD-34" in message
+    assert repr(goal_id) in message
+
+
+def test_a_nested_bracket_fails_the_shape_before_the_charset():
+    """`- [[nested]] (short) A` never reaches the charset gate: `_GOAL` cannot
+    match it, so it is refused for its shape. Pinned separately because it used
+    to sit in the charset parametrize above and passed on a shared word."""
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(b"## Project\n- [[nested]] (short) A\n")
+    message = str(refusal.value)
+    assert "- [id] (horizon) Title" in message
+    assert "citation-safe" not in message
 
 
 def test_a_valid_id_charset_is_accepted():
@@ -410,3 +431,277 @@ def test_malformed_goals_is_not_unresolved_goal():
     assert not issubclass(MalformedGoals, UnresolvedGoal)
     assert not issubclass(UnresolvedGoal, MalformedGoals)
     assert issubclass(MalformedGoals, ValueError)
+
+
+# ── Line classification: what is a goal, and what is never one ───────────────
+#
+# Every test below was a real defect. The six in this first block returned a
+# successful, quietly-short register — the exact failure "an unreadable goal is
+# surfaced, never dropped" exists to forbid — and the rest refused an ordinary
+# hand-written markdown file, which the matrix row "Surrounding prose | notes
+# between goals | ignored; goals still parsed" exists to forbid.
+
+
+def test_an_unclosed_fence_is_refused_and_names_the_line_it_opened_on():
+    """The largest silent drop available to this parser.
+
+    A fence left open swallows every goal below it. This returned `['g_a']`,
+    `present=True`, with `g_b` simply gone.
+    """
+    raw = (
+        b"## Project\n"
+        b"- [g_a] (short) A\n"
+        b"\n"
+        b"```\n"
+        b"- [g_ex] (short) ex\n"
+        b"\n"
+        b"## Team\n"
+        b"- [g_b] (long) B\n"
+    )
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(raw)
+    message = str(refusal.value)
+    assert "line 4" in message
+    assert "never closed" in message
+
+
+def test_a_fence_is_not_closed_by_the_other_fence_character():
+    """A ``` block "closed" by `~~~` is still open, and the rest of the file is
+    still being eaten."""
+    raw = (
+        b"## Project\n"
+        b"- [g_a] (short) A\n"
+        b"\n"
+        b"```\n"
+        b"- [g_ex] (short) ex\n"
+        b"~~~\n"
+        b"\n"
+        b"## Team\n"
+        b"- [g_b] (long) B\n"
+    )
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(raw)
+    assert "line 4" in str(refusal.value)
+
+
+def test_a_shorter_run_does_not_close_a_longer_fence():
+    """Otherwise a fence opened with ```` and holding a ``` example ends early,
+    and the code sample's next line is harvested as a phantom goal."""
+    raw = (
+        b"## Project\n"
+        b"- [g_a] (short) A\n"
+        b"\n"
+        b"````\n"
+        b"```\n"
+        b"- [g_x] (short) X\n"
+        b"````\n"
+    )
+    register = parse(raw)
+    assert set(register) == {"g_a"}
+
+
+def test_a_longer_run_closes_a_shorter_fence():
+    """The other half of the same rule: at least as long, not exactly as long."""
+    raw = b"## Project\n- [g_a] (short) A\n\n```\n- [g_x] (short) X\n`````\n"
+    assert set(parse(raw)) == {"g_a"}
+
+
+def test_an_ordered_list_item_is_a_goal():
+    """A numbered list is an ordinary way to write three goals down. This
+    returned an empty register."""
+    register = parse(b"## Project\n\n1. [g_a] (short) A\n2) [g_b] (long) B\n")
+    assert set(register) == {"g_a", "g_b"}
+    assert register["g_a"].domain is GoalDomain.PROJECT
+
+
+def test_a_goal_that_lost_its_bullet_marker_is_still_a_goal():
+    """Deleting the `-` is a slip in an edit, not a decision to write prose, and
+    the line is unmistakably a goal. This returned an empty register."""
+    register = parse(b"## Project\n\n[g_a] (short) A\n")
+    assert set(register) == {"g_a"}
+    assert register["g_a"].title == "A"
+
+
+def test_a_bare_prose_line_under_a_domain_heading_is_still_prose():
+    """The other side of the rule above: only a *goal-shaped* unmarked line is a
+    goal, or every sentence in the section would be refused."""
+    raw = b"## Project\n\nThese came out of the Q3 planning session.\n\n- [g_a] (short) A\n"
+    assert set(parse(raw)) == {"g_a"}
+
+
+def test_a_goal_shaped_line_with_no_id_outside_every_domain_is_refused():
+    """It names a horizon, so it is a goal that lost its `[id]`, not a note. The
+    `[`-prefix sniff missed it and dropped it in silence."""
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(b"## Marketing\n\n- (medium) Cut latency\n")
+    message = str(refusal.value)
+    assert "line 3" in message
+    assert "`## Project`" in message
+
+
+@pytest.mark.parametrize(
+    "bullet",
+    [b"- [ ] ask Dana", b"- [x] ask Dana", b"- [budget doc](http://x)"],
+)
+def test_a_checkbox_or_link_bullet_is_not_a_goal_outside_a_domain(bullet):
+    """The two commonest bullet forms in a hand-written file, in exactly the
+    prose section the matrix blesses. Both refused the whole file."""
+    assert parse(b"## Notes\n\n" + bullet + b"\n") == {}
+
+
+@pytest.mark.parametrize(
+    "bullet",
+    [b"- [ ] ask Dana", b"- [x] ask Dana", b"- [budget doc](http://x)"],
+)
+def test_a_checkbox_or_link_bullet_is_not_a_goal_inside_a_domain_either(bullet):
+    """A PM tracks the follow-ups next to the goal they belong to."""
+    raw = b"## Project\n\n- [g_a] (short) A\n" + bullet + b"\n"
+    assert set(parse(raw)) == {"g_a"}
+
+
+def test_a_link_whose_target_is_a_horizon_is_still_a_goal():
+    """`[g_a](short) A` is a goal written without the space, not a link — the
+    exclusion keys on the target, so it cannot swallow one."""
+    assert set(parse(b"## Project\n\n- [g_a](short) A\n")) == {"g_a"}
+
+
+def test_the_link_exclusion_does_not_swallow_a_goal_with_a_broken_horizon():
+    """The exclusion has to be narrow in both halves. `[g_a](quarterly) A` has a
+    citation-safe label and a target that is no destination, so it is the broken
+    goal it looks like and is refused — not skipped as a link."""
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(b"## Project\n\n- [g_a](quarterly) A\n")
+    assert "'quarterly'" in str(refusal.value)
+
+
+def test_the_checkbox_exclusion_does_not_swallow_a_goal_whose_id_is_x():
+    """`[x]` is a checkbox only when nothing that follows carries a `(...)`."""
+    register = parse(b"## Project\n\n- [x] (short) Ship it\n")
+    assert register["x"].title == "Ship it"
+
+
+def test_a_goal_shaped_line_nested_under_a_goal_is_still_a_goal():
+    """The indent rule skips a *detail bullet*, not a structured line. A nested
+    goal that failed to parse would otherwise vanish, which is the drop this
+    patch exists to close."""
+    assert set(parse(b"## Project\n\n- [g1] (short) A\n  - [g2] (long) B\n")) == {
+        "g1",
+        "g2",
+    }
+    with pytest.raises(MalformedGoals):
+        parse(b"## Project\n\n- [g1] (short) A\n  - [g2] (yearly) B\n")
+
+
+@pytest.mark.parametrize("rule", [b"* * *", b"---", b"___", b"- - -", b"***"])
+def test_a_thematic_break_is_not_a_bullet(rule):
+    """`* * *` matched the bullet pattern and refused the file for being a goal
+    with no id."""
+    raw = b"## Project\n\n- [g_a] (short) A\n\n" + rule + b"\n"
+    assert set(parse(raw)) == {"g_a"}
+
+
+@pytest.mark.parametrize("indent", [b"  ", b"    "])
+def test_a_detail_bullet_nested_under_a_goal_is_not_a_goal(indent):
+    """A sub-bullet is the goal's own note. It refused the file."""
+    raw = b"## Project\n\n- [g1] (short) Do it\n" + indent + b"- a note about it\n"
+    assert set(parse(raw)) == {"g1"}
+
+
+def test_a_subheading_inside_a_domain_section_does_not_clear_the_domain():
+    """The module docstring says level carries no meaning for naming a domain;
+    the code disagreed and refused this goal as domainless."""
+    register = parse(b"## Project\n\n### Q3\n\n- [g_a] (short) A\n")
+    assert register["g_a"].domain is GoalDomain.PROJECT
+
+
+def test_a_heading_at_the_domains_own_level_does_clear_it():
+    """The other half: `## Notes` after `## Project` ends the section, or every
+    note in it would be refused as a broken goal."""
+    raw = b"## Project\n\n- [g_a] (short) A\n\n## Notes\n\n- ask Dana\n"
+    assert set(parse(raw)) == {"g_a"}
+
+
+def test_a_heading_above_the_domains_level_clears_it_too():
+    raw = b"### Project\n\n- [g_a] (short) A\n\n## Notes\n\n- ask Dana\n"
+    assert set(parse(raw)) == {"g_a"}
+
+
+def test_a_backtick_decorated_heading_still_names_its_domain():
+    """Emphasis and a trailing colon were already stripped; a code tick was not."""
+    assert set(parse(b"## `Project`\n\n- [g_a] (short) A\n")) == {"g_a"}
+
+
+# ── Messages, line numbers and the exported vocabularies ─────────────────────
+
+
+def test_the_horizon_refusal_quotes_the_token_as_the_pm_typed_it():
+    """It used to quote the folded token, telling a PM who wrote `( Quarterly )`
+    that their file said `'quarterly'` — a word not in their file."""
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(b"## Project\n- [g_a] ( Quarterly ) A\n")
+    message = str(refusal.value)
+    assert "'Quarterly'" in message
+    assert "'quarterly'" not in message
+
+
+def test_the_horizon_refusal_groups_the_six_as_three_plus_three_synonyms():
+    """An alphabetical run of six reads like six tiers. There are three."""
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(b"## Project\n- [g_a] (quarterly) A\n")
+    message = str(refusal.value)
+    assert "synonyms" in message
+    assert message.index("`long`") < message.index("`operational`")
+    for spelling in HORIZON_SPELLINGS:
+        assert f"`{spelling}`" in message
+
+
+def test_an_exotic_line_separator_in_a_title_does_not_shift_line_numbers():
+    """`splitlines` also breaks on `\\x0c` and four other characters, so one
+    pasted into a title moved every line number below it — the one thing a
+    refusal message has to get right."""
+    with pytest.raises(MalformedGoals) as refusal:
+        parse(b"## Project\n- [g_a] (short) A\x0cB\n- [g_b] (yearly) B\n")
+    message = str(refusal.value)
+    assert "line 3" in message
+    assert "line 4" not in message
+
+
+def test_crlf_line_endings_parse_and_do_not_leak_into_a_title():
+    raw = b"## Project\r\n\r\n- [g_a] (short) A\r\n"
+    assert parse(raw)["g_a"].title == "A"
+
+
+def test_goal_ids_are_case_sensitive_and_deliberately_not_folded():
+    """Every other token is folded; an id is not, because it is a citation key
+    and folding it would change what `goal:<id>` resolves to. Stated so the
+    asymmetry is a decision rather than an oversight."""
+    register = parse(b"## Project\n- [g_a] (short) A\n- [G_a] (long) B\n")
+    assert set(register) == {"g_a", "G_a"}
+    assert register["g_a"].title == "A"
+    assert register["G_a"].title == "B"
+
+
+def test_the_exported_vocabularies_cannot_be_widened_by_an_importer():
+    """The tests above call these sets closed. An exported mutable `dict` let
+    any importer reopen them."""
+    with pytest.raises(TypeError):
+        DOMAIN_SPELLINGS["marketing"] = GoalDomain.PROJECT  # type: ignore[index]
+    with pytest.raises(TypeError):
+        HORIZON_SPELLINGS["quarterly"] = GoalHorizon.SHORT  # type: ignore[index]
+    assert set(DOMAIN_SPELLINGS) == {"project", "team", "personal"}
+
+
+@pytest.mark.parametrize(
+    ("spellings", "expected"),
+    [
+        ((), ""),
+        (("a",), "`a`"),
+        (("a", "b"), "`a` or `b`"),
+        (("a", "b", "c"), "`a`, `b` or `c`"),
+    ],
+)
+def test_the_list_joiner_is_correct_below_three_items(spellings, expected):
+    """`_listed(["x"])` returned `" or `x`"` and an empty iterable raised
+    `IndexError`. Latent while both vocabularies have three or more, and one
+    deletion away from being a crash inside a refusal message."""
+    assert _listed(spellings) == expected

@@ -44,17 +44,51 @@ Order in the file carries no meaning. What is not fine is a goal missing its id,
 its horizon or its title, because every one of those is load-bearing — the id is
 what a citation resolves to, and both enums are closed sets.
 
-**Inside a domain section every list item is a goal.** That is the rule that
-makes "an unreadable goal is surfaced, never dropped" mean something. The
-natural implementation — parse what matches, ignore what does not — satisfies
-every other rule while silently dropping a goal whose horizon has a typo in it,
-and a dropped goal is a citation that cannot resolve and a dashboard section
-that is quietly short. So a bullet under `## Project` that does not parse is a
-refusal, not prose. Prose is paragraphs, and bullets that live outside the three
-domain sections.
+## What is a goal, what is never one, and what is refused
+
+**Inside a domain section a list item is a goal.** That is the rule that makes
+"an unreadable goal is surfaced, never dropped" mean something. The natural
+implementation — parse what matches, ignore what does not — satisfies every
+other rule while silently dropping a goal whose horizon has a typo in it, and a
+dropped goal is a citation that cannot resolve and a dashboard section that is
+quietly short. So a list item under `## Project` that does not parse is a
+refusal, not prose. The marker is optional and may be ordered: `1. [g_a] ...`
+is a goal, and so is a bare `[g_a] (short) A` on its own line, because losing
+the `-` in an edit is a slip rather than a decision.
+
+Four shapes are **never** goals, wherever they sit, because a hand-written
+markdown file is full of them and refusing them would refuse the file:
+
+* a task-list checkbox — `- [ ] ask Dana`, `- [x] done`;
+* a bullet opening with a markdown link — `- [budget doc](http://x)`;
+* a thematic break — `* * *`, `---`, `___`;
+* a line indented past the goal above it that is not itself goal-shaped, which
+  is that goal's own detail bullet; and anything indented four spaces or more,
+  which markdown reads as code.
+
+The first two are narrowed rather than blunt, because an exclusion that ate a
+*malformed* goal would put the silent drop back one bullet shape at a time:
+`- [g_a](short) A` is a goal written without the space, `- [g_a](quarterly) A`
+is a goal with a bad horizon and is refused, and `- [x] (short) Ship it` is a
+goal whose id happens to be `x`.
+
+Outside every domain section the rule inverts: prose is the default and only a
+**goal-shaped** line is refused. Goal-shaped means it opens with `[...]` or with
+a parenthesised horizon spelling — enough that `- (medium) Cut latency` under
+`## Marketing` is refused for having no domain instead of vanishing, while
+`- ask Dana` under `## Notes` is read as what it looks like.
 
 A fenced code block is skipped whole, which is what lets the file document its
-own grammar in its own header without the worked example parsing as a goal.
+own grammar in its own header without the worked example parsing as a goal. The
+fence has to actually close: a closer matches its opener's character and is at
+least as long as it, and a fence still open at end of file is a refusal naming
+the line it opened on — an unterminated fence swallowing the second half of the
+file is the largest silent drop this parser could commit.
+
+Every closed vocabulary is case-folded and padding-tolerant: headings, horizon
+spellings. **Goal ids are not**, deliberately — `[g_a]` and `[G_a]` are two
+goals. An id is a citation key, and folding it would change what `goal:<id>`
+resolves to.
 
 ## Refusing the file, not the goal
 
@@ -80,7 +114,9 @@ states rather than one the parser papers over.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
+from typing import NamedTuple
 
 from pm_ai.domain.goals import Goal, GoalDomain, GoalHorizon
 from pm_ai.domain.identity import DataScope, MalformedReference, SourceRef
@@ -100,8 +136,12 @@ ARTIFACT = "strategic_goals.md"
 _BOM = b"\xef\xbb\xbf"
 
 # The three headings a goal may sit under. Closed, and spelled from the enum so
-# a fourth domain cannot be added to `GoalDomain` without appearing here.
-DOMAIN_SPELLINGS: dict[str, GoalDomain] = {domain.value: domain for domain in GoalDomain}
+# a fourth domain cannot be added to `GoalDomain` without appearing here. Frozen
+# with `MappingProxyType` because the tests call these sets closed and an
+# exported mutable `dict` lets any importer widen one from the outside.
+DOMAIN_SPELLINGS: Mapping[str, GoalDomain] = MappingProxyType(
+    {domain.value: domain for domain in GoalDomain}
+)
 
 # The horizon spellings accepted, closed the same way. The three synonyms are
 # not invented here: `GoalHorizon`'s own docstring names operational, tactical
@@ -109,35 +149,61 @@ DOMAIN_SPELLINGS: dict[str, GoalDomain] = {domain.value: domain for domain in Go
 # so a PM typing the word the PRD taught them is not making a mistake. Nothing
 # beyond those six is accepted — `short-term` is a refusal that lists all six,
 # which teaches the file's vocabulary at the moment it is needed.
-HORIZON_SPELLINGS: dict[str, GoalHorizon] = {
-    **{horizon.value: horizon for horizon in GoalHorizon},
-    "operational": GoalHorizon.SHORT,
-    "tactical": GoalHorizon.MEDIUM,
-    "strategic": GoalHorizon.LONG,
-}
+HORIZON_SPELLINGS: Mapping[str, GoalHorizon] = MappingProxyType(
+    {
+        **{horizon.value: horizon for horizon in GoalHorizon},
+        "operational": GoalHorizon.SHORT,
+        "tactical": GoalHorizon.MEDIUM,
+        "strategic": GoalHorizon.LONG,
+    }
+)
 
 # An id's charset, stated here rather than inferred from `SourceRef`.
 # `SourceRef.parse` only checks that a scopeless ref has two colon-separated
 # parts and a non-empty second (`identity.py:223-227`), so `goal:my id` parses
 # happily — a citation with a space in it, unparseable by anything that splits
-# on whitespace. This is the gate that actually rejects it.
+# on whitespace. This is the gate that actually rejects it. Case is *not*
+# folded: an id is a citation key, not a closed vocabulary.
 GOAL_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
 # ATX headings only, at any level, with markdown's three-space indent allowance
 # and its optional closing hashes. A `#` title and a `###` subsection both name
-# a domain if their text is one — level carries no meaning, and requiring `##`
-# would refuse a file whose author nested the sections one deeper.
-_HEADING = re.compile(r"^ {0,3}#{1,6}\s+(?P<text>.*?)\s*#*\s*$")
+# a domain if their text is one — level carries no meaning for *naming* one, and
+# requiring `##` would refuse a file whose author nested the sections one
+# deeper. Level does carry meaning for *ending* a section: see `parse_goals`.
+_HEADING = re.compile(r"^ {0,3}(?P<hashes>#{1,6})\s+(?P<text>.*?)\s*#*\s*$")
 
-# A list item. The trailing whitespace is required, so a `---` rule and a setext
-# underline are not bullets.
-_BULLET = re.compile(r"^\s*[-*+]\s+(?P<content>.+)$")
+# A list item — bulleted or ordered — within markdown's three-space indent
+# allowance. Four or more spaces is a code block or a continuation, not an item.
+_ITEM = re.compile(r"^(?P<indent> {0,3})(?:[-*+]|\d{1,9}[.)])[ \t]+(?P<content>.+)$")
 
-_FENCE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})")
+# Any other non-blank line, which is a goal only if it is goal-shaped: a bullet
+# marker lost in an edit must not lose the goal with it.
+_BARE = re.compile(r"^(?P<indent> {0,3})(?P<content>\S.*)$")
 
-# The goal line itself, after the bullet. Fixed order: the two structured tokens
+# `---`, `* * *`, `___`. Three or more of one character, spaces between allowed,
+# nothing else on the line. A rule is never a bullet, whatever `_ITEM` thinks.
+_THEMATIC = re.compile(r"^ {0,3}(?P<char>[-*_])[ \t]*(?:(?P=char)[ \t]*){2,}$")
+
+_FENCE_OPEN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+_FENCE_CLOSE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})[ \t]*$")
+
+# A task-list checkbox. `[ ]` is never a goal — an empty id is not an id. `[x]`
+# is a goal only if the rest of the line is one, so an id of `x` is not lost.
+_CHECKBOX = re.compile(r"^\[(?P<mark>[ xX])\](?:[ \t]|$)")
+
+# A markdown inline link at the head of the line. Distinguished from a goal by
+# the missing space and by the target: `[g_a](short) A` is a goal, because
+# `short` is a horizon, and `[budget doc](http://x)` is a link.
+_LINK = re.compile(r"^\[[^\]]*\]\((?P<target>[^()]*)\)")
+
+# The goal line itself, after the marker. Fixed order: the two structured tokens
 # lead and everything after them is the title.
 _GOAL = re.compile(r"^\[(?P<goal_id>[^\]]*)\]\s*\((?P<horizon>[^)]*)\)\s*(?P<title>.*)$")
+
+# A line that names a horizon but no id. Goal-shaped enough to refuse rather
+# than drop, which is what a goal whose `[id]` was deleted looks like.
+_HORIZON_FIRST = re.compile(r"^\((?P<horizon>[^)]*)\)")
 
 _SHAPE = "- [id] (horizon) Title"
 
@@ -184,6 +250,15 @@ class GoalRegister(dict[str, Goal]):
         return f"GoalRegister({dict(self)!r}, present={self.present!r})"
 
 
+class _Fence(NamedTuple):
+    """An open code fence, remembered well enough to close it and to name it."""
+
+    char: str
+    length: int
+    number: int
+    line: str
+
+
 def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
     """Interpret `strategic_goals.md`'s bytes into a register.
 
@@ -206,41 +281,71 @@ def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
     goals: dict[str, Goal] = {}
     lines: dict[str, int] = {}
     domain: GoalDomain | None = None
-    fence: str | None = None
-    for number, line in enumerate(_decode(raw).splitlines(), start=1):
-        opener = _FENCE.match(line)
-        if opener is not None:
-            token = opener["fence"][0]
-            fence = token if fence is None else (None if token == fence else fence)
-            continue
+    domain_level = 0
+    goal_indent: int | None = None
+    fence: _Fence | None = None
+    for number, line in enumerate(_split(_decode(raw)), start=1):
         if fence is not None:
+            closer = _FENCE_CLOSE.match(line)
+            if closer is not None and _closes(closer["fence"], fence):
+                fence = None
+            continue
+        opener = _FENCE_OPEN.match(line)
+        if opener is not None and not (
+            opener["fence"].startswith("`") and "`" in opener["info"]
+        ):
+            fence = _Fence(opener["fence"][0], len(opener["fence"]), number, line)
             continue
         heading = _HEADING.match(line)
         if heading is not None:
-            # A heading that names no domain ends the section rather than
-            # refusing: `# Strategic Goals` and `## Notes` are ordinary in a
-            # hand-written file. What it costs is paid below, where a goal with
-            # no domain in effect is refused instead of dropped.
-            domain = DOMAIN_SPELLINGS.get(_fold(heading["text"]))
+            # A heading that names a domain opens that section at its own level.
+            # One that names none — `# Strategic Goals`, `## Notes` — ends the
+            # section only if it is at or above that level; a `### Q3` *inside*
+            # `## Project` is a subsection of it, not the end of it. What the
+            # tolerance costs is paid below, where a goal with no domain in
+            # effect is refused instead of dropped.
+            named = DOMAIN_SPELLINGS.get(_fold(heading["text"]))
+            if named is not None:
+                domain, domain_level = named, len(heading["hashes"])
+            elif len(heading["hashes"]) <= domain_level:
+                domain = None
+            goal_indent = None
             continue
-        bullet = _BULLET.match(line)
-        if bullet is None:
+        if _THEMATIC.match(line) is not None:
             continue
-        content = bullet["content"].strip()
+        item = _ITEM.match(line)
+        listed = item is not None
+        candidate = item if item is not None else _BARE.match(line)
+        if candidate is None:
+            continue
+        content = candidate["content"].strip()
+        if _never_a_goal(content):
+            continue
+        indent = len(candidate["indent"])
+        # A list item inside a domain section is a goal whether or not it looks
+        # like one — that is what "surfaced, never dropped" costs. Three kinds
+        # of line are held to the stricter goal-shaped test instead, because
+        # each is far more often prose: one with no list marker, one outside
+        # every domain section, and one indented past the goal above it, which
+        # is that goal's own detail bullet. A *goal-shaped* nested line is still
+        # a goal, so nothing structured is dropped by the indent rule.
+        nested = goal_indent is not None and indent > goal_indent
+        if (not listed or domain is None or nested) and not _goal_shaped(content):
+            continue
         if domain is None:
-            if not content.startswith("["):
-                continue
             raise MalformedGoals(
                 _at(
                     number,
                     line,
-                    f"opens with an `[id]`, so it is a goal, but no "
-                    f"{_headings()} heading is in effect above it. A goal's "
-                    f"domain comes from the section it sits under, so a goal "
-                    f"outside all three has none. Move it under one of them, or "
-                    f"remove the `[...]` if the line is prose.",
+                    f"is goal-shaped — it opens with an `[id]` or a "
+                    f"`(horizon)` — but no {_headings()} heading is in effect "
+                    f"above it. A goal's domain comes from the section it sits "
+                    f"under, so a goal outside all three has none. Move it "
+                    f"under one of them, or drop the leading token if the line "
+                    f"is prose.",
                 )
             )
+        goal_indent = indent
         goal = _goal(content, domain=domain, scope=scope, number=number, line=line)
         first = lines.get(goal.goal_id)
         if first is not None:
@@ -256,7 +361,72 @@ def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
             )
         lines[goal.goal_id] = number
         goals[goal.goal_id] = goal
+    if fence is not None:
+        raise MalformedGoals(
+            _at(
+                fence.number,
+                fence.line,
+                f"opens a code fence that is never closed, so everything below "
+                f"it was skipped as a worked example — silently, which is the "
+                f"one thing this parser must not do. A fence closes on a line "
+                f"holding nothing but at least {fence.length} `{fence.char}` "
+                f"characters; `{'~' if fence.char == '`' else '`'}` does not "
+                f"close it and a shorter run does not either.",
+            )
+        )
     return GoalRegister(goals, present=True)
+
+
+def _closes(run: str, fence: _Fence) -> bool:
+    """A fence closes on its own character, at least as long as it opened."""
+    return run[0] == fence.char and len(run) >= fence.length
+
+
+def _never_a_goal(content: str) -> bool:
+    """The two bullet shapes a markdown file is full of and a goal never is.
+
+    Both are narrowed so that they exclude notes without swallowing goals — an
+    exclusion that quietly ate a malformed goal would reintroduce, one bullet
+    shape at a time, the silent drop this whole module is arranged against.
+    """
+    checkbox = _CHECKBOX.match(content)
+    if checkbox is not None:
+        # `[ ]` can never be a goal: an empty id is not an id. `[x]`/`[X]` is a
+        # checkbox unless the rest of the line carries a `(...)` token, so a
+        # goal whose id is `x` — even one with a broken horizon — still lands.
+        if checkbox["mark"] == " " or _GOAL.match(content) is None:
+            return True
+    link = _LINK.match(content)
+    if link is None:
+        return False
+    target = link["target"].strip()
+    if _token(target) in HORIZON_SPELLINGS:
+        # `[g_a](short) A` is a goal written without the space, not a link.
+        return False
+    label = content[1 : content.index("]")].strip()
+    # A goal's id is citation-safe and a horizon is one bare word, so a line is
+    # a link when either half says so: a label no id could be, or a target that
+    # is a destination. `- [g_a](quarterly) A` is neither, and is refused as the
+    # broken goal it is rather than skipped as prose.
+    return GOAL_ID.match(label) is None or _destination(target)
+
+
+def _destination(target: str) -> bool:
+    """A link target, told from a mistyped horizon by what a URL or path holds."""
+    return not target or any(character in target for character in ":/.#?") or " " in target
+
+
+def _goal_shaped(content: str) -> bool:
+    """Enough of a goal that dropping it would be dropping a goal.
+
+    An `[id]` opener or a `(horizon)` opener. Not a full parse — the point is to
+    tell `- [g_a] short A` and `- (medium) Cut latency`, both broken goals, from
+    `- ask Dana`, which is a note.
+    """
+    if content.startswith("["):
+        return True
+    horizon = _HORIZON_FIRST.match(content)
+    return horizon is not None and _token(horizon["horizon"]) in HORIZON_SPELLINGS
 
 
 def _goal(
@@ -304,17 +474,19 @@ def _goal(
         raise MalformedGoals(
             _at(number, line, f"has an id that is not a citable reference: {exc}")
         ) from exc
-    spelling = match["horizon"].strip().casefold()
-    horizon = HORIZON_SPELLINGS.get(spelling)
+    spelling = match["horizon"].strip()
+    horizon = HORIZON_SPELLINGS.get(_token(spelling))
     if horizon is None:
         raise MalformedGoals(
             _at(
                 number,
                 line,
+                # Quoted as the PM typed it. Folding it first told them their
+                # file said `'quarterly'` when what they wrote was `Quarterly`.
                 f"has the horizon {spelling!r}. The set is closed: "
-                f"{_listed(sorted(HORIZON_SPELLINGS))}. The horizon is when a goal "
-                f"lands and is a separate axis from its domain, which the "
-                f"heading above already gave.",
+                f"{_horizons()}. The horizon is when a goal lands and is a "
+                f"separate axis from its domain, which the heading above "
+                f"already gave.",
             )
         )
     title = match["title"].strip()
@@ -355,21 +527,56 @@ def _decode(raw: bytes) -> str:
         ) from exc
 
 
+def _split(text: str) -> list[str]:
+    """Lines as an editor counts them, and as a refusal message names them.
+
+    Not `str.splitlines`, which also breaks on `\\x0b`, `\\x0c`, `\\x85`,
+    `\\u2028` and `\\u2029`. One of those pasted into a title would shift every
+    line number below it in every refusal message this module writes, and the
+    line number is the one thing those messages have to get right.
+    """
+    return [line.removesuffix("\r") for line in text.split("\n")]
+
+
 def _fold(text: str) -> str:
     """A heading's text, as typed, reduced to what it says.
 
-    Emphasis and a trailing colon are decoration a hand-writer adds and a closed
-    set should not turn into an unknown domain.
+    Emphasis, code ticks and a trailing colon are decoration a hand-writer adds
+    and a closed set should not turn into an unknown domain.
     """
-    return text.strip().strip("*_:#").strip().casefold()
+    return _token(text.strip().strip("*_:#`"))
+
+
+def _token(text: str) -> str:
+    return text.strip().casefold()
 
 
 def _headings() -> str:
     return _listed(f"## {spelling.capitalize()}" for spelling in sorted(DOMAIN_SPELLINGS))
 
 
+def _horizons() -> str:
+    """The six, grouped as they mean rather than sorted as they spell.
+
+    An alphabetical run of six reads like six tiers. Three plus three synonyms
+    reads like the three tiers `GoalHorizon` actually has.
+    """
+    canonical = _listed(horizon.value for horizon in GoalHorizon)
+    synonyms = _listed(
+        spelling
+        for spelling, horizon in HORIZON_SPELLINGS.items()
+        if spelling != horizon.value
+    )
+    return f"{canonical}, or the synonyms {synonyms}"
+
+
 def _listed(spellings: Iterable[str]) -> str:
+    """`a`, `b` or `c` — and still correct at two, one and none of them."""
     names = [f"`{spelling}`" for spelling in spellings]
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
     return f"{', '.join(names[:-1])} or {names[-1]}"
 
 
