@@ -2,8 +2,9 @@
 title: 'Goal register from strategic_goals.md'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-progress'
 review_loop_iteration: 1
+baseline_commit: '2bdc2bfd27705435349f87a1dd889ad098fb4ba4'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -72,8 +73,8 @@ Rejected: the `key=value` grammar `11a` uses for meeting records. Four lines per
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/goal_register.py` -- add `parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister` and `MalformedGoals`, where the result distinguishes absent from present-and-empty
-- [ ] `tests/core/test_goal_register.py` -- one test per matrix row, including a deliberately messy but valid hand-edited file
+- [x] `pm_ai/core/goal_register.py` -- add `parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister` and `MalformedGoals`, where the result distinguishes absent from present-and-empty
+- [x] `tests/core/test_goal_register.py` -- one test per matrix row, including a deliberately messy but valid hand-edited file
 
 **Acceptance Criteria:**
 - Given a file with two goals sharing an id, when parsed, then it is refused and the message names the id — a register that silently kept one would make `resolve` return an arbitrary goal.
