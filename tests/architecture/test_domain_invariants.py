@@ -227,7 +227,20 @@ def test_ad6_markdown_is_never_encrypted():
 def test_ad25_project_rendering_cannot_open_the_personal_store():
     """AD-25 — the privacy charter is a wall, not a remembered tag check."""
     rendering = mod("pm_ai.core.rendering")
-    opened = [str(s) for s in rendering.project_scope_datasources(project="alpha")]
+    # The module is not the subject; `project_scope_datasources` is, and the two
+    # arrived in different slices. `23a` created `pm_ai.core.rendering` for the
+    # *personal* dashboard, which turned this skip into an `AttributeError` one
+    # story ahead of the wall it guards — and `conftest.py` returns early on a
+    # failing run, so the skip ratchet would not even have reported it. Story
+    # `23d` adds the project render and its datasource wall together, and the
+    # skip becomes a pass in that commit.
+    datasources = getattr(rendering, "project_scope_datasources", None)
+    if datasources is None:
+        pytest.skip(
+            "pm_ai.core.rendering.project_scope_datasources not implemented yet "
+            "(story 23d — the project render and its scope wall)"
+        )
+    opened = [str(s) for s in datasources(project="alpha")]
     # Assert against the personal SCOPE, not one filename. This previously looked
     # for "manager-ai-private"; once that directory was folded into the personal
     # scope the substring could never appear, so the check would have passed

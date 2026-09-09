@@ -2,8 +2,9 @@
 title: 'Dashboard sections'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-progress'
 review_loop_iteration: 1
+baseline_commit: '2ef0a95ee50dd191e08871715f900d34382e1e78'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -66,8 +67,8 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/rendering.py` -- add `render_dashboard(...)`, the four section renderers, the heading constants and the empty-section strings
-- [ ] `tests/core/test_rendering_sections.py` -- one test per matrix row, plus a golden file for the full-day case. The full-day fixture is **forward-looking**: wave 1 produces no message entries, so that row exercises `23c`'s state
+- [x] `pm_ai/core/rendering.py` -- add `render_dashboard(...)`, the four section renderers, the heading constants and the empty-section strings
+- [x] `tests/core/test_rendering_sections.py` -- one test per matrix row, plus a golden file for the full-day case. The full-day fixture is **forward-looking**: wave 1 produces no message entries, so that row exercises `23c`'s state
 
 **Acceptance Criteria:**
 - Given every combination of empty inputs, then all four headings are present and no section body is empty — each states its reason.
