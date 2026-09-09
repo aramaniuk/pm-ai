@@ -2,7 +2,7 @@
 title: 'Goal register from strategic_goals.md'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 1
 baseline_commit: '2bdc2bfd27705435349f87a1dd889ad098fb4ba4'
 ---
@@ -110,3 +110,55 @@ Refusing the whole file on one bad goal, rather than returning the goals that pa
 - `uv run pytest tests/core/test_goal_register.py -q` -- expected: all matrix rows pass
 - `uv run lint-imports` -- expected: contracts kept
 - `uv run pytest -q` -- expected: no new failures
+
+## Suggested Review Order
+
+**The contract, before any code**
+
+- The grammar, the recognition rule, and why a partial register is refused outright.
+  [`goal_register.py:1`](../../../../pm_ai/core/goal_register.py#L1)
+
+- Absent versus present-and-empty — the one thing a plain mapping cannot carry.
+  [`goal_register.py:221`](../../../../pm_ai/core/goal_register.py#L221)
+
+**Line classification — where the review found the real defects**
+
+- The loop: fence, heading, item, bare line. Every silent drop lived here.
+  [`goal_register.py:262`](../../../../pm_ai/core/goal_register.py#L262)
+
+- Checkbox, link, thematic break, detail bullet — narrowed so none can eat a malformed goal.
+  [`goal_register.py:385`](../../../../pm_ai/core/goal_register.py#L385)
+
+- Outside a domain section the rule inverts: prose by default, goal-shaped refused.
+  [`goal_register.py:419`](../../../../pm_ai/core/goal_register.py#L419)
+
+- A fence must close on its own character and length; one left open is a refusal.
+  [`goal_register.py:253`](../../../../pm_ai/core/goal_register.py#L253)
+
+- A deeper heading no longer clears the domain the section above established.
+  [`goal_register.py:174`](../../../../pm_ai/core/goal_register.py#L174)
+
+**Validating one goal**
+
+- Shape, then charset, then the unreachable second gate the frozen block asks for.
+  [`goal_register.py:432`](../../../../pm_ai/core/goal_register.py#L432)
+
+- The id charset, stated here rather than inferred from `SourceRef`.
+  [`goal_register.py:167`](../../../../pm_ai/core/goal_register.py#L167)
+
+- Six spellings, frozen — the three enum values plus `GoalHorizon`'s own synonyms.
+  [`goal_register.py:152`](../../../../pm_ai/core/goal_register.py#L152)
+
+- UTF-8 refused distinctly from a grammar failure, with the BOM's byte offset restored.
+  [`goal_register.py:508`](../../../../pm_ai/core/goal_register.py#L508)
+
+**Tests**
+
+- The sixteen frozen matrix rows, in matrix order.
+  [`test_goal_register.py:58`](../../../../tests/core/test_goal_register.py#L58)
+
+- The twenty-four that fail against the pre-patch module.
+  [`test_goal_register.py:436`](../../../../tests/core/test_goal_register.py#L436)
+
+- `alignment_tag` end to end — the call that raised `UnresolvedGoal` before this slice.
+  [`test_goal_register.py:106`](../../../../tests/core/test_goal_register.py#L106)
