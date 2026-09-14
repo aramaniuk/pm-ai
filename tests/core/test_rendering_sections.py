@@ -217,10 +217,15 @@ def test_full_day_populates_all_four_sections():
 
 def test_full_day_orders_meetings_by_start_then_id():
     """The tie on `start` is broken by `meeting_id`, so paging cannot reorder."""
+    # Scoped to the section under test: a signal line carrying an excerpt is also
+    # `- **…** … — …`, so filtering the whole document passes only while meetings
+    # happen to be rendered first.
     listed = [
-        line for line in full_day().split("\n") if line.startswith("- **") and "—" in line
+        line
+        for line in sections(full_day())["Time-Critical Activities"].split("\n")
+        if line.startswith("- **")
     ]
-    assert [line.split("**")[2].split("—")[0].strip() for line in listed[:3]] == [
+    assert [line.split("**")[2].split("—")[0].strip() for line in listed] == [
         "1:1 with Dana",  # m_1on1 and m_standup share 09:00; the id decides
         "Standup",
         "Payments Gateway Sync",
@@ -489,7 +494,9 @@ def test_no_message_entries_names_the_window():
     assert "event log between" in body
     assert "2026-09-08 12:30" in body  # NOW - MESSAGE_WINDOW, in the display zone
     assert "2026-09-09 12:30" in body
-    assert MESSAGE_WINDOW == timedelta(hours=24)
+    # The two stamps are the window, and they are 24h apart — asserting
+    # MESSAGE_WINDOW against its own literal here would restate the constant
+    # rather than check that the render names it.
 
 
 def test_the_empty_section_says_nothing_writes_the_category_yet():
@@ -849,16 +856,21 @@ def test_a_goal_id_renders_as_the_citation_it_resolves_to():
 # ── Acceptance criteria ──────────────────────────────────────────────────────
 
 
-EMPTY_INPUTS = [
-    {"meetings": (), "entries": (), "register": None},
-    {"meetings": (), "entries": (), "register": b""},
-    {"meetings": (), "entries": (), "register": ALL_HORIZONS},
-    {"meetings": "failure", "entries": (), "register": None},
-    {"meetings": "failure", "entries": (), "register": b""},
-]
+# "Every combination" is meant literally: both meeting states against all three
+# goal states. The sixth — an unreachable calendar beside a full goal register —
+# is the one an ad-hoc list drops, and it is the case where a populated section
+# sits next to a stated failure.
+EMPTY_INPUTS = {
+    "answered-empty + no goals file": {"meetings": (), "register": None},
+    "answered-empty + empty goals file": {"meetings": (), "register": b""},
+    "answered-empty + goals": {"meetings": (), "register": ALL_HORIZONS},
+    "calendar-failed + no goals file": {"meetings": "failure", "register": None},
+    "calendar-failed + empty goals file": {"meetings": "failure", "register": b""},
+    "calendar-failed + goals": {"meetings": "failure", "register": ALL_HORIZONS},
+}
 
 
-@pytest.mark.parametrize("case", EMPTY_INPUTS, ids=range(len(EMPTY_INPUTS)))
+@pytest.mark.parametrize("case", EMPTY_INPUTS.values(), ids=EMPTY_INPUTS)
 def test_every_combination_of_empty_inputs_renders_four_stated_sections(case):
     """Acceptance — all four headings, and no body that is merely blank."""
     meetings = (
@@ -874,7 +886,7 @@ def test_every_combination_of_empty_inputs_renders_four_stated_sections(case):
         assert body[heading].strip(), f"{heading} rendered blank"
 
 
-@pytest.mark.parametrize("case", EMPTY_INPUTS, ids=range(len(EMPTY_INPUTS)))
+@pytest.mark.parametrize("case", EMPTY_INPUTS.values(), ids=EMPTY_INPUTS)
 def test_no_empty_section_claims_a_state_of_the_world(case):
     """Acceptance — every empty-section string names a file, a query or a window.
 
