@@ -2,8 +2,9 @@
 title: 'Dashboard sections'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 1
+baseline_commit: '2ef0a95ee50dd191e08871715f900d34382e1e78'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -66,8 +67,8 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/rendering.py` -- add `render_dashboard(...)`, the four section renderers, the heading constants and the empty-section strings
-- [ ] `tests/core/test_rendering_sections.py` -- one test per matrix row, plus a golden file for the full-day case. The full-day fixture is **forward-looking**: wave 1 produces no message entries, so that row exercises `23c`'s state
+- [x] `pm_ai/core/rendering.py` -- add `render_dashboard(...)`, the four section renderers, the heading constants and the empty-section strings
+- [x] `tests/core/test_rendering_sections.py` -- one test per matrix row, plus a golden file for the full-day case. The full-day fixture is **forward-looking**: wave 1 produces no message entries, so that row exercises `23c`'s state
 
 **Acceptance Criteria:**
 - Given every combination of empty inputs, then all four headings are present and no section body is empty — each states its reason.
@@ -103,3 +104,54 @@ CAP-9's "no empty section" clause is met in the sense that no section is *blank*
 - `uv run pytest tests/core/test_rendering_sections.py -q` -- expected: all matrix rows pass
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: `core` imports no I/O client
+
+## Suggested Review Order
+
+**The contract, and the two silences it exists to keep apart**
+
+- The honesty rule, and why every empty section states a query rather than a mood.
+  [`rendering.py:164`](../../../../pm_ai/core/rendering.py#L164)
+
+- `Sequence[Meeting] | HarvestFailure` — "could not ask" and "nothing there" cannot collapse.
+  [`rendering.py:225`](../../../../pm_ai/core/rendering.py#L225)
+
+- A dead credential and a throttled minute are a different thing to do about it.
+  [`rendering.py:320`](../../../../pm_ai/core/rendering.py#L320)
+
+**Where the review found the parser claiming what it had not computed**
+
+- Aware non-UTC is converted, not refused; only naive is unplaceable.
+  [`rendering.py:510`](../../../../pm_ai/core/rendering.py#L510)
+
+- Three exclusions, three sentences — absent, unreadable, and stamped past this render.
+  [`rendering.py:451`](../../../../pm_ai/core/rendering.py#L451)
+
+- The window, and the rationale that outlives its own constant once `9a` schedules renders.
+  [`rendering.py:114`](../../../../pm_ai/core/rendering.py#L114)
+
+**Text that must not restructure the page**
+
+- The structural set, and the deliberate exclusion of `*` and `_`.
+  [`rendering.py:708`](../../../../pm_ai/core/rendering.py#L708)
+
+- Invisible separators and bidi overrides, spelled out rather than passed through.
+  [`rendering.py:679`](../../../../pm_ai/core/rendering.py#L679)
+
+- One meeting line: escaped title, ended/upcoming, and the date only when it is not today's.
+  [`rendering.py:286`](../../../../pm_ai/core/rendering.py#L286)
+
+**The AD-25 gate this slice had to keep skipping**
+
+- Re-keyed on `render_project_dashboard`; the old key was a symbol `23d` will never create.
+  [`test_domain_invariants.py:227`](../../../../tests/architecture/test_domain_invariants.py#L227)
+
+**Tests**
+
+- The seventeen frozen matrix rows.
+  [`test_rendering_sections.py:208`](../../../../tests/core/test_rendering_sections.py#L208)
+
+- The six mutations the review proved nothing caught.
+  [`test_rendering_sections.py:523`](../../../../tests/core/test_rendering_sections.py#L523)
+
+- The byte-for-byte full day.
+  [`dashboard_full_day.md`](../../../../tests/core/goldens/dashboard_full_day.md)
