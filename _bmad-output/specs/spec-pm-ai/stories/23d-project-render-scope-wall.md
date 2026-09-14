@@ -2,7 +2,7 @@
 title: 'The project dashboard is its own renderer'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 1
 baseline_commit: '9789297c9d8d1449c9a43e16f1d4f2a8b9ffbd5e'
 ---
@@ -88,3 +88,49 @@ baseline_commit: '9789297c9d8d1449c9a43e16f1d4f2a8b9ffbd5e'
 - `uv run pytest -q` -- expected: no new failures, `EXPECTED_SKIPS` one lower
 - `uv run mypy` -- expected: clean. The two fixtures under `tests/core/` are invisible to it (`files = ["pm_ai"]`) and are checked by the suite instead, one expected to pass and one to fail
 - `uv run lint-imports` -- expected: `core` imports no I/O client, as in `23a`
+
+## Suggested Review Order
+
+**The wall**
+
+- The deliverable is what this signature lacks: no goals parameter, no register.
+  [`rendering.py:262`](../../../../pm_ai/core/rendering.py#L262)
+
+- Two sections, because those are what project-scope sources support; CAP-9 binds the personal path only.
+  [`rendering.py:128`](../../../../pm_ai/core/rendering.py#L128)
+
+- AD-25's only runtime gate: a missing function now fails loudly rather than skipping.
+  [`test_domain_invariants.py:253`](../../../../tests/architecture/test_domain_invariants.py#L253)
+
+- Matches annotations as well as names — `context: GoalRegister` is the same leak relabelled.
+  [`test_domain_invariants.py:284`](../../../../tests/architecture/test_domain_invariants.py#L284)
+
+**Shared, so the two files cannot drift**
+
+- The heading join, extracted from `23a` — a second copy is how a blank line goes missing.
+  [`rendering.py:310`](../../../../pm_ai/core/rendering.py#L310)
+
+- The timezone refusal, extracted with it; also narrows `tzinfo | None` to `tzinfo`.
+  [`rendering.py:328`](../../../../pm_ai/core/rendering.py#L328)
+
+- Splits on `_document`'s own separator and strips nothing, so "byte-identical" means bytes.
+  [`test_project_rendering.py:143`](../../../../tests/core/test_project_rendering.py#L143)
+
+- Four branches compared: populated, empty day, all-ended, failed fetch.
+  [`test_project_rendering.py:411`](../../../../tests/core/test_project_rendering.py#L411)
+
+**The negative type assertion, and its control**
+
+- A register cannot reach the function: two `arg-type`, one `call-arg`.
+  [`test_project_rendering.py:293`](../../../../tests/core/test_project_rendering.py#L293)
+
+- The control the refusals need — an ordinary call must still type-check.
+  [`test_project_rendering.py:276`](../../../../tests/core/test_project_rendering.py#L276)
+
+**Peripherals**
+
+- The signature asserted directly, beside the architecture gate that also asserts it.
+  [`test_project_rendering.py:213`](../../../../tests/core/test_project_rendering.py#L213)
+
+- Lowered by one as a delta: the AD-25 gate runs instead of skipping.
+  [`conftest.py:58`](../../../../tests/conftest.py#L58)
