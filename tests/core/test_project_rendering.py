@@ -45,6 +45,27 @@ from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+"""Deliberately not `from conftest import REPO_ROOT`, which is how
+`tests/architecture/test_types.py` reaches the same value.
+
+That import resolves by collection order rather than by `pythonpath`, and it
+fails from *this* directory. Two conftests claim the module name `conftest`:
+`tests/conftest.py`, which pytest imports for any run under `tests/`, and
+`tests/architecture/conftest.py`, which `pythonpath = ["tests/architecture"]`
+puts on `sys.path`. Whichever is imported first wins the name.
+`test_types.py` always wins it, because a run that collects it also loads the
+conftest beside it. A run that collects only this file does not, and measuring
+it says so:
+
+    $ uv run pytest tests/core/test_project_rendering.py -q
+    ImportError: cannot import name 'REPO_ROOT' from 'conftest'
+    (/Users/…/tests/conftest.py)
+
+The whole suite passes either way — `architecture` sorts before `core` — which
+is what makes the breakage easy to ship and annoying to meet: it appears only
+when someone runs this one file, which is the story's own first Verification
+command. One line of duplication is the cheaper of the two.
+"""
 
 ALPHA = DataScope(ScopeKind.PROJECT, project_id="alpha")
 """The project whose day this is. `11a`'s accessor reads one scope; `23b` passes
@@ -117,6 +138,26 @@ def render(
     # Typed loosely on purpose: the timezone row passes `None`, which is the
     # value the function is required to refuse.
     return render_project_dashboard(meetings, entries, now, tz=tz)  # type: ignore[arg-type]
+
+
+def raw_blocks(text: str) -> dict[str, str]:
+    r"""Each `## heading\n\nbody` block, verbatim — nothing stripped.
+
+    `sections()` below strips, which is right for asking what a body *says* and
+    wrong for asking whether two documents are byte-identical: a trailing space
+    or a doubled blank line would differ between the two renderers and a
+    stripped comparison would not see it, while the test's name and the story's
+    acceptance criterion both say "byte-identical".
+
+    Split on `"\n\n## "` — the exact separator `_document` joins with — so the
+    block boundaries are the renderer's own rather than a re-derivation of them.
+    Bodies cannot contain that sequence: `escape` turns a newline in any
+    interpolated value into a visible `\n` before it is placed.
+    """
+    assert text.endswith("\n"), "the document must end on a line"
+    head, *rest = text[:-1].split("\n\n## ")
+    blocks = [head, *(f"## {chunk}" for chunk in rest)]
+    return {block.split("\n", 1)[0].removeprefix("## "): block for block in blocks}
 
 
 def sections(text: str) -> dict[str, str]:
@@ -199,41 +240,86 @@ def test_no_parameter_is_annotated_with_a_goal_type():
     assert not [hint for hint in hints if "Goal" in hint]
 
 
-def test_a_register_cannot_be_passed_under_mypy():
-    """Acceptance — the checker refuses the call, in its own words.
+def _mypy(fixture_name: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """`mypy` over one fixture, with a cache of its own.
 
-    A subprocess with an explicit path, which is what overrides `files =
-    ["pm_ai"]`; the ordinary `uv run mypy` stays clean because it never reads
-    `tests/`. A missing binary is a failure and never a skip, for the reason
-    `test_types.py` states: a skip here would report green while the only
-    compile-time half of the wall went unchecked.
+    An explicit path is what overrides `[tool.mypy] files = ["pm_ai"]`; the
+    ordinary `uv run mypy` stays clean because it never reads `tests/`. A
+    private `--cache-dir` and `--no-incremental` follow
+    `test_coverage_honesty.py`'s precedent, so a stale cache from a previous run
+    cannot decide the result — this is the one test whose *output text* is the
+    assertion.
     """
-    fixture = Path(__file__).parent / "mypy_fixture_project_render_goals.py"
     if shutil.which("mypy") is None:
         pytest.fail(
-            "mypy is not on PATH, so the negative type check did not run. It is "
-            "a declared dev dependency; use `uv run pytest`, which puts "
-            ".venv/bin on PATH, or `uv sync`."
+            "mypy is not on PATH, so the type-level half of the wall did not "
+            "run. It is a declared dev dependency, which makes its absence a "
+            "broken environment rather than an optional feature, and a skip "
+            "would report green while nothing checked the signature. Use "
+            "`uv run pytest`, which puts .venv/bin on PATH, or `uv sync`."
         )
-    result = subprocess.run(
-        ["mypy", str(fixture.relative_to(REPO_ROOT))],
+    fixture = (Path(__file__).parent / fixture_name).relative_to(REPO_ROOT)
+    return subprocess.run(
+        [
+            "mypy",
+            "--no-incremental",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            str(fixture),
+        ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
     )
+
+
+def test_an_ordinary_call_type_checks(tmp_path):
+    """The positive control, and the reason the refusals below mean anything.
+
+    Asserting only that a register is rejected reads green against annotations
+    that had regressed into rejecting *everything* — `meetings: None` would pass
+    that test while the function had become uncallable. `8e`'s shipped
+    precedent, `test_coverage_honesty.py:911`, pairs the two for exactly this
+    reason, and this follows it.
+    """
+    result = _mypy("mypy_fixture_project_render_valid.py", tmp_path)
+    assert result.returncode == 0, (
+        "the ordinary calls a real caller makes no longer type-check, so the "
+        "refusals in the other fixture prove nothing about the register "
+        f"specifically:\n\n{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_a_register_cannot_be_passed_under_mypy(tmp_path):
+    """Acceptance — the checker refuses the call, in its own words.
+
+    Read together with `test_an_ordinary_call_type_checks`: that one says the
+    signature accepts what it should, this one says it refuses the register.
+    Neither is evidence alone.
+    """
+    result = _mypy("mypy_fixture_project_render_goals.py", tmp_path)
     assert result.returncode != 0, (
         "AD-25: mypy accepted a call handing `render_project_dashboard` the "
         f"personal goal register:\n\n{result.stdout}\n{result.stderr}"
     )
+    # Only the fixture's own diagnostics. `mypy` follows imports, so an error
+    # inside `pm_ai` would otherwise be counted as one of the three below and a
+    # refusal that had stopped happening would be masked by an unrelated bug.
+    reported = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("tests/core/mypy_fixture_project_render_goals.py")
+        and ": error:" in line
+    ]
     # Named codes, not just a non-zero exit: the fixture could start failing for
     # an unrelated reason — a renamed import, a moved module — and a test that
     # only checked the exit status would read green while proving nothing about
     # the register.
-    assert "[arg-type]" in result.stdout, result.stdout
-    assert "[call-arg]" in result.stdout, result.stdout
+    assert [line for line in reported if "[arg-type]" in line], result.stdout
+    assert [line for line in reported if "[call-arg]" in line], result.stdout
     # One per deliberately-wrong call in the fixture. A fourth would mean a real
     # error crept in beside them; two would mean one stopped being refused.
-    assert result.stdout.count("error:") == 3, result.stdout
+    assert len(reported) == 3, result.stdout
 
 
 def test_the_fixture_is_invisible_to_the_ordinary_mypy_run():
@@ -242,6 +328,8 @@ def test_the_fixture_is_invisible_to_the_ordinary_mypy_run():
     `mypy_fixture_project_render_goals.py` holds three errors on purpose. If
     `[tool.mypy] files` ever grew `tests`, `uv run mypy` would go permanently
     red and the deliberate errors would be indistinguishable from real ones.
+    (Its positive counterpart, `mypy_fixture_project_render_valid.py`, is clean
+    and would survive that — which is why this guards the one that is not.)
     """
     config = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'files = ["pm_ai"]' in config
@@ -326,17 +414,45 @@ def test_the_shared_section_renders_byte_identically_in_both_files():
     Unconditional, and that is the point of the 2026-09-14 wording decision: it
     holds on the empty-day branch too, where the two callers hand over the same
     empty sequence and nothing distinguishes them.
+
+    All four branches of `_time_critical`, because the Spec Change Log asserts
+    that the three besides the empty day "were already scope-neutral" — a claim
+    worth measuring rather than restating. Compared as raw blocks, so "identical"
+    means the bytes and not a stripped paraphrase of them.
     """
     empty = GoalRegister(present=False)
-    for meetings in (PROJECT_MEETINGS, (), HarvestFailure(reason="429", retryable=True)):
-        personal = sections(
-            render_dashboard(meetings, PROJECT_ENTRIES, empty, NOW, tz=DISPLAY)
+    # The all-ended branch needs its own instant: it is reached by a `now` past
+    # the end of every meeting, not by different meetings.
+    end_of_day = datetime(2026, 9, 9, 20, 0, tzinfo=timezone.utc)
+    cases = (
+        ("populated", PROJECT_MEETINGS, NOW),
+        ("empty day", (), NOW),
+        ("all ended", PROJECT_MEETINGS, end_of_day),
+        ("failed fetch", HarvestFailure(reason="429", retryable=True), NOW),
+    )
+    for label, meetings, now in cases:
+        personal = raw_blocks(
+            render_dashboard(meetings, PROJECT_ENTRIES, empty, now, tz=DISPLAY)
         )
-        project = sections(
-            render_project_dashboard(meetings, PROJECT_ENTRIES, NOW, tz=DISPLAY)
+        project = raw_blocks(
+            render_project_dashboard(meetings, PROJECT_ENTRIES, now, tz=DISPLAY)
         )
-        assert project["Time-Critical Activities"] == personal["Time-Critical Activities"]
-        assert project["Proactive Enablement"] == personal["Proactive Enablement"]
+        for heading in PROJECT_HEADINGS:
+            assert project[heading] == personal[heading], label
+
+
+def test_the_all_ended_branch_is_the_one_being_compared():
+    """The premise of the `all ended` row above, stated so it cannot rot.
+
+    Without this, a `now` that quietly stopped being past the last meeting would
+    make that row a second copy of `populated` and the loop would still pass.
+    """
+    end_of_day = datetime(2026, 9, 9, 20, 0, tzinfo=timezone.utc)
+    body = sections(render(meetings=PROJECT_MEETINGS, now=end_of_day))[
+        "Time-Critical Activities"
+    ]
+    assert body.startswith("All 2 of today's meetings have ended")
+    assert NO_MEETINGS not in body
 
 
 def test_the_shared_section_is_identical_with_a_populated_register_too():
@@ -349,10 +465,10 @@ def test_the_shared_section_is_identical_with_a_populated_register_too():
     register = parse_goals(
         b"## Project\n\n- [g_alpha] (short) Ship the migration\n", scope=PERSONAL
     )
-    personal = sections(
+    personal = raw_blocks(
         render_dashboard(PROJECT_MEETINGS, PROJECT_ENTRIES, register, NOW, tz=DISPLAY)
     )
-    project = sections(
+    project = raw_blocks(
         render_project_dashboard(PROJECT_MEETINGS, PROJECT_ENTRIES, NOW, tz=DISPLAY)
     )
     assert project["Time-Critical Activities"] == personal["Time-Critical Activities"]

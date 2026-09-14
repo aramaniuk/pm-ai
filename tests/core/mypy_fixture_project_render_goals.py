@@ -8,7 +8,20 @@ Not collected by pytest and not imported by anything — the filename is outside
 An explicit path argument is what makes that possible. `[tool.mypy] files =
 ["pm_ai"]` in `pyproject.toml` means `uv run mypy` with no arguments never looks
 at `tests/`, so the deliberate errors here stay invisible to the ordinary run
-and are visible to the one test that wants them. The shape is story `8e`'s.
+and are visible to the one test that wants them.
+
+The precedent is `tests/connectors/test_coverage_honesty.py:911` — the shipped
+one, which runs `mypy` on generated callers to pin `save_cursor`'s signature.
+Story `8e` describes this shape too and is cited for it in several places, but
+it is `ready-for-dev` and unbuilt, so nothing was verified there; a checked-in
+fixture file rather than a generated one is this slice's own choice, taken
+because these three calls want the commentary around them.
+
+What `8e`'s precedent does have and is worth keeping is the **pair**: a bad call
+refused *and* a good call accepted. Asserting only the refusals would hold just
+as well against annotations that had regressed into rejecting everything, which
+is a different bug with the same green test. The accepted half lives in
+`mypy_fixture_project_render_valid.py`, and the two are checked together.
 
 Every call below is wrong by design. `# type: ignore` on any of them would
 delete the evidence this file exists to produce.

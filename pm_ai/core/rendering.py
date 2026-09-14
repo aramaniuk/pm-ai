@@ -1,16 +1,20 @@
-"""`daily_dashboard.md`, rendered — CAP-9's four sections and nothing else.
+"""`daily_dashboard.md`, rendered — both of them, from one set of sections.
 
-CAP-9 asks for `~/.manager-ai/memory/daily_dashboard.md` by 07:00 with exactly
-four headed sections — Time-Critical Activities, Proactive Enablement, 3-Tier
-Strategic Milestones, Leadership Notes — and no empty section. Nothing turned
-meetings, log entries and goals into that text; this module is that function.
+Two files carry that name. `render_dashboard` writes the personal one, which is
+what CAP-9 asks for: `~/.manager-ai/memory/daily_dashboard.md` by 07:00 with
+exactly four headed sections — Time-Critical Activities, Proactive Enablement,
+3-Tier Strategic Milestones, Leadership Notes — and no empty section.
+`render_project_dashboard` writes a project's, which CAP-9 does not govern and
+which carries the two sections its own sources support. Nothing turned meetings,
+log entries and goals into either text; this module is those two functions and
+the section renderers they share.
 
-**Pure, and structurally so.** `render_dashboard` takes its inputs and its
-instant, reads no clock, opens no file and calls no model. `core` is I/O-free by
-contract, and the injected clock is the rule story `1b` established: a renderer
-that read `datetime.now()` would be the second clock in a codebase whose storage
-service exists to have exactly one, and untestable at the only boundary that
-matters. Every section is therefore golden-file testable.
+**Pure, and structurally so.** Both take their inputs and their instant, read no
+clock, open no file and call no model. `core` is I/O-free by contract, and the
+injected clock is the rule story `1b` established: a renderer that read
+`datetime.now()` would be the second clock in a codebase whose storage service
+exists to have exactly one, and untestable at the only boundary that matters.
+Every section is therefore golden-file testable.
 
 ## Nothing is invented
 
