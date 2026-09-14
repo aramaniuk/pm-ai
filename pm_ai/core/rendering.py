@@ -32,16 +32,32 @@ Two consequences worth stating outright, because they are what the wording costs
 - **"all of today's meetings have ended" is not "no meetings today".** By
   mid-afternoon the second is a lie about a day that had four meetings in it.
 
+## Two renderers, sharing sections and never inputs
+
+`render_project_dashboard` (`23d`) is the second one. It is a **separate
+function** with its own sources and its own sections rather than a flag on this
+one, and the deliverable is what its signature lacks: no goals parameter, no
+register, no personal-scope input of any kind. All three goal domains live in
+the personal `strategic_goals.md` (`scope_model.py:541-544`, which says outright
+that there is "no project-scope counterpart"), so a project render that *could*
+be handed a register is one wrong branch — `goals = personal_register` — away
+from writing the PM's career goals into a project artifact. AD-25 asks for a
+wall rather than a remembered tag check, and a parameter that does not exist is
+the only version of that which cannot be forgotten.
+
+What the two share is the **section renderers**, never the inputs. Given the
+same meetings, `_time_critical` produces byte-identical Markdown for both files;
+that is the point, and it is why `NO_MEETINGS` names no one's calendar in
+particular. Duplicating the section text is how two dashboards drift into two
+formats.
+
 ## What this module does not do
 
-No project render. `render_project_dashboard` is `23d`'s, a separate function
-with its own sources and its own sections, so this one cannot be handed
-project-scope data by mistake — a property of there being two functions rather
-than of a scope check somebody remembers to write. No file write (`23b`), no
-scheduling (`9a`), no scope-boundary logic (`23d`), no model call of any kind,
-and no commitment data: nothing in this build produces commitments, and a
-section implying otherwise would be the invented evidence the whole module is
-arranged against.
+No file write (`23b`), no scheduling (`9a`), no scope *filtering* — `11a`'s
+accessor reads one scope and the caller passes what it read, so neither renderer
+inspects `Meeting.scope` — no model call of any kind, and no commitment data:
+nothing in this build produces commitments, and a section implying otherwise
+would be the invented evidence the whole module is arranged against.
 
 It also does **not** decide which day it is rendering. The caller selects the
 meetings — `23b` reads the calendar for the display day — and this function
@@ -71,11 +87,13 @@ __all__ = [
     "NO_MEETINGS",
     "NO_REASON_GIVEN",
     "PROACTIVE_ENABLEMENT",
+    "PROJECT_HEADINGS",
     "STRATEGIC_MILESTONES",
     "TIME_CRITICAL",
     "code",
     "escape",
     "render_dashboard",
+    "render_project_dashboard",
 ]
 
 
@@ -101,6 +119,29 @@ question a reader has to answer by remembering what the renderer does.
 
 No `#` title above them and no `###` beneath them: CAP-9 says *exactly* four
 headed sections, and the tiers below are a nested list for that reason.
+"""
+
+PROJECT_HEADINGS: tuple[str, ...] = (
+    TIME_CRITICAL,
+    PROACTIVE_ENABLEMENT,
+)
+"""The project dashboard's two, which are what its sources support.
+
+Not a subset of CAP-9's four by omission — CAP-9 does not bind this file. Its
+success criterion names `~/.manager-ai/memory/daily_dashboard.md` *by path*
+("exactly the four headed sections … and no empty section"), which is the
+personal artifact. The project render's inputs are project-scope meetings and a
+project-scope event log, and those two sources support exactly these two
+sections.
+
+The other two are absent for reasons worth separating. **3-Tier Strategic
+Milestones cannot exist here**: every goal domain lives in the personal
+`strategic_goals.md`, so the section would have nothing to read that this
+function is allowed to be handed — which is the same fact the missing parameter
+states. **Leadership Notes** is synthesis, and there is no model in this path.
+Rendering either as a heading over a sentence explaining its own emptiness would
+put two permanently hollow sections in a file whose whole discipline is that it
+states only what it computed.
 """
 
 GOALS_PATH = f"~/.manager-ai/memory/{GOALS_ARTIFACT}"
@@ -200,6 +241,92 @@ def render_dashboard(
     twice returns byte-identical output: nothing here reads a clock and every
     ordering is total.
     """
+    tz = _require_tz(tz)
+    _assert_utc(now, name="now")
+
+    return _document(
+        HEADINGS,
+        (
+            _time_critical(meetings, now=now, tz=tz),
+            _proactive_enablement(entries, now=now, tz=tz),
+            _strategic_milestones(goals),
+            _leadership_notes(),
+        ),
+    )
+
+
+def render_project_dashboard(
+    meetings: Sequence[Meeting] | HarvestFailure,
+    entries: Sequence[EventEntry],
+    now: datetime,
+    *,
+    tz: tzinfo | None,
+) -> str:
+    """A project's day, as Markdown — and nothing of the PM's.
+
+    **The signature is the wall.** There is no `goals` parameter here and no
+    fourth positional slot of any kind, so the leak AD-25 names has no
+    expression rather than a rule against it: a caller cannot hand this function
+    the personal register by choosing the wrong branch, because there is nowhere
+    for it to go. That absence is this function's deliverable, and
+    `test_ad25_project_rendering_cannot_open_the_personal_store` asserts it by
+    reading `inspect.signature` rather than by grepping a list of allowed
+    sources — a signature cannot drift silently, and a list needs a test that
+    remembers to check it.
+
+    **It filters nothing.** `meetings` and `entries` are rendered as handed over.
+    `11a`'s accessor reads one scope, `23b` passes what it read, and a scope
+    check here would be a second, weaker copy of a boundary the callers already
+    hold — the "remembered tag check" AD-25 asks this not to be. A personal-scope
+    meeting passed in renders like any other; keeping it out is the caller's job,
+    and the parameter list is what makes the *consequential* half impossible.
+
+    `meetings` is the calendar's answer, not a list, for the same reason as in
+    `render_dashboard`: a project's day comes from a live fetch narrowed to that
+    scope (`33b`, 2026-09-07), and a fetch that failed is not a day with nothing
+    in it.
+
+    `now` must be aware UTC and `tz` must be supplied, both exactly as above.
+    Rendering the same inputs twice returns byte-identical output, and so does
+    rendering them through the other function: the two sections below are the
+    same two functions.
+    """
+    tz = _require_tz(tz)
+    _assert_utc(now, name="now")
+
+    return _document(
+        PROJECT_HEADINGS,
+        (
+            _time_critical(meetings, now=now, tz=tz),
+            _proactive_enablement(entries, now=now, tz=tz),
+        ),
+    )
+
+
+def _document(headings: Sequence[str], sections: Sequence[str]) -> str:
+    """Headed bodies, joined — the one place either dashboard's shape is decided.
+
+    Shared so that the two files cannot differ in anything but which sections
+    they carry. A second copy of this join is how a blank line goes missing from
+    one of them and nobody notices for a month.
+    """
+    blocks = [
+        f"## {heading}\n\n{body}"
+        for heading, body in zip(headings, sections, strict=True)
+    ]
+    # A blank line before every heading, because a `##` on the line after a list
+    # item is not a heading to a Markdown parser — it is more list item, and the
+    # file's section shape would exist only for a reader squinting at the
+    # source. One trailing newline, so the file ends on a line.
+    return "\n\n".join(blocks) + "\n"
+
+
+def _require_tz(tz: tzinfo | None) -> tzinfo:
+    """The display zone, refused rather than defaulted — for both renderers.
+
+    Narrows the type as well as checking it, so every section below takes a
+    `tzinfo` rather than an optional one.
+    """
     if tz is None:
         raise ValueError(
             "tz is required. The display timezone decides which instants count "
@@ -210,23 +337,7 @@ def render_dashboard(
             "and pass the same value to the calendar read that selected these "
             "meetings, so the two cannot disagree."
         )
-    _assert_utc(now, name="now")
-
-    sections = (
-        _time_critical(meetings, now=now, tz=tz),
-        _proactive_enablement(entries, now=now, tz=tz),
-        _strategic_milestones(goals),
-        _leadership_notes(),
-    )
-    blocks = [
-        f"## {heading}\n\n{body}"
-        for heading, body in zip(HEADINGS, sections, strict=True)
-    ]
-    # A blank line before every heading, because a `##` on the line after a list
-    # item is not a heading to a Markdown parser — it is more list item, and the
-    # file's four-section shape would exist only for a reader squinting at the
-    # source. One trailing newline, so the file ends on a line.
-    return "\n\n".join(blocks) + "\n"
+    return tz
 
 
 # ── Time-Critical Activities ─────────────────────────────────────────────────

@@ -44,7 +44,11 @@ import pytest
 # `test_ad34_connectors_do_not_mint_event_ids` run instead of skipping. A delta
 # rather than an absolute on purpose — `23d` lowers it by one as well, and which
 # of the two lands first decides the number, not the work.
-EXPECTED_SKIPS = 25
+# Lowered by one in story 23d's commit, from 25: `render_project_dashboard`
+# exists, so `test_ad25_project_rendering_cannot_open_the_personal_store` runs
+# instead of skipping — AD-25's only runtime check, which had skipped since it
+# was written.
+EXPECTED_SKIPS = 24
 
 _VERDICT = pytest.StashKey[str]()
 
