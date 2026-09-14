@@ -2,7 +2,7 @@
 title: 'The project dashboard is its own renderer'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-progress'
+status: 'in-review'
 review_loop_iteration: 1
 baseline_commit: '9789297c9d8d1449c9a43e16f1d4f2a8b9ffbd5e'
 ---
@@ -64,14 +64,14 @@ baseline_commit: '9789297c9d8d1449c9a43e16f1d4f2a8b9ffbd5e'
 
 **Acceptance Criteria:**
 - Given `inspect.signature(render_project_dashboard)`, then no parameter accepts a goal register — the wall, asserted as a signature rather than as a list, because a signature cannot drift silently and a list can.
-- Given a fixture passing a goal register to `render_project_dashboard`, when mypy runs on it, then it reports `arg-type` — the same shape `8e` uses, verified there to work under an explicit path argument.
+- Given a fixture passing a goal register to `render_project_dashboard`, when mypy runs on it, then it reports `arg-type` — and, given the fixture of ordinary calls beside it, exit zero. Both halves, because refusals alone read green against annotations that had regressed into refusing everything. **This slice is the first to build the shape.** `8e` describes it and is cited for it here and in the fixture, but is `ready-for-dev` and unbuilt, so nothing was verified there; the shipped precedent is `tests/connectors/test_coverage_honesty.py:911`, which runs mypy on generated callers to pin `save_cursor`'s signature and pairs an accepted call with its refusals.
 - Given the same meetings and entries passed to both renderers, then their Time-Critical sections are byte-identical — asserted, because two dashboards that drift into two formats is what sharing the section renderers prevents.
 - Given the suite, then `test_ad25_project_rendering_cannot_open_the_personal_store` passes rather than skips, and its body would fail if the parameter were added back.
 - Given `grep -rn "project_scope_datasources" pm_ai/`, then there is no match — the approach this slice carried until 2026-09-03 is not built.
 
 ## Spec Change Log
 
-- **2026-09-14, the empty-day sentence is neutral in both files.** This block asked for two things that cannot both hold: that the two renderers *share* their section renderers, and that a project render with an empty calendar say "No meetings on this project's calendar today". A shared `_time_critical` is one input to one output, and the empty-day branch receives an empty sequence from either caller — so the project wording is reachable only by telling the function which dashboard called it, which is the coupling sharing exists to prevent, and which makes the byte-identical criterion false on that one branch. Raised before any code was written; the human settled it by removing the possessive from **both** sides rather than parameterising: `NO_MEETINGS` becomes "No meetings on the calendar today" and both files emit it. The byte-identical constraint and its acceptance criterion therefore stand **unconditionally** — no narrowing to "given meetings" — and the three other branches (failure, all-ended, populated) were already scope-neutral, measured against the shipped renderer at the gate. The constant's change lands in this slice's first commit, against `23a`'s module.
+- **2026-09-14, the empty-day sentence is neutral in both files.** This block asked for two things that cannot both hold: that the two renderers *share* their section renderers, and that a project render with an empty calendar say "No meetings on this project's calendar today". A shared `_time_critical` is one input to one output, and the empty-day branch receives an empty sequence from either caller — so the project wording is reachable only by telling the function which dashboard called it, which is the coupling sharing exists to prevent, and which makes the byte-identical criterion false on that one branch. Raised before any code was written; the human settled it by removing the possessive from **both** sides rather than parameterising: `NO_MEETINGS` becomes "No meetings on the calendar today" and both files emit it. The byte-identical constraint and its acceptance criterion therefore stand **unconditionally** — no narrowing to "given meetings" — and the three other branches (failure, all-ended, populated) were already scope-neutral, measured against the shipped renderer at the gate. The constant's change landed in `9789297`, against `23a`'s module — which is this story's own `baseline_commit`, so it is behind the work reviewed here rather than inside it.
 
 - **2026-09-07, the project render reads the calendar too.** Consequent on the decision that no future meeting is persisted: a project's day comes from the live fetch filtered to that scope, not from `for_day` over `meetings/`. The scope wall this slice exists to hold is unaffected — it governs what a project-scope render may *open*, and a live read narrowed to one project opens strictly less than a cross-scope one. The unreachable-calendar row is added for the same reason as in `23a`: with a live read, "no meetings" and "could not ask" stop being the same silence.
 
@@ -84,5 +84,7 @@ baseline_commit: '9789297c9d8d1449c9a43e16f1d4f2a8b9ffbd5e'
 
 **Commands:**
 - `uv run pytest tests/core/test_project_rendering.py tests/architecture/test_domain_invariants.py -q` -- expected: matrix passes and the AD-25 gate passes rather than skips
+- `uv run pytest tests/core/test_rendering_sections.py -q` -- expected: `23a`'s suite and its golden file unchanged. Listed because this slice **rewrites the body of `render_dashboard`**, routing a shipped function through the new `_document` and `_require_tz`; nothing in the two files above would notice a regression there
 - `uv run pytest -q` -- expected: no new failures, `EXPECTED_SKIPS` one lower
-- `uv run mypy` -- expected: clean
+- `uv run mypy` -- expected: clean. The two fixtures under `tests/core/` are invisible to it (`files = ["pm_ai"]`) and are checked by the suite instead, one expected to pass and one to fail
+- `uv run lint-imports` -- expected: `core` imports no I/O client, as in `23a`
