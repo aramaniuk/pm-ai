@@ -32,7 +32,7 @@ review_loop_iteration: 1
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Project day | two project meetings, project log entries | Time-Critical and Proactive Enablement, both populated | N/A |
-| No project meetings | the calendar answered, with nothing mapped to that project | "No meetings on this project's calendar today" | N/A |
+| No project meetings | the calendar answered, with nothing mapped to that project | `NO_MEETINGS` — "No meetings on the calendar today", the same string the personal render emits | N/A |
 | Calendar unreachable | the fetch failed for a project render | the section says the calendar could not be read; **never** "No meetings on this project's calendar today" | reported, never raised |
 | No project entries | empty project log | Proactive Enablement states no signals in the window | N/A |
 | Proactive Enablement in wave 1 | `MESSAGE_POSTED` arrives with `33d` | states so — knowingly empty, as in `23a` | N/A |
@@ -69,6 +69,8 @@ review_loop_iteration: 1
 - Given `grep -rn "project_scope_datasources" pm_ai/`, then there is no match — the approach this slice carried until 2026-09-03 is not built.
 
 ## Spec Change Log
+
+- **2026-09-14, the empty-day sentence is neutral in both files.** This block asked for two things that cannot both hold: that the two renderers *share* their section renderers, and that a project render with an empty calendar say "No meetings on this project's calendar today". A shared `_time_critical` is one input to one output, and the empty-day branch receives an empty sequence from either caller — so the project wording is reachable only by telling the function which dashboard called it, which is the coupling sharing exists to prevent, and which makes the byte-identical criterion false on that one branch. Raised before any code was written; the human settled it by removing the possessive from **both** sides rather than parameterising: `NO_MEETINGS` becomes "No meetings on the calendar today" and both files emit it. The byte-identical constraint and its acceptance criterion therefore stand **unconditionally** — no narrowing to "given meetings" — and the three other branches (failure, all-ended, populated) were already scope-neutral, measured against the shipped renderer at the gate. The constant's change lands in this slice's first commit, against `23a`'s module.
 
 - **2026-09-07, the project render reads the calendar too.** Consequent on the decision that no future meeting is persisted: a project's day comes from the live fetch filtered to that scope, not from `for_day` over `meetings/`. The scope wall this slice exists to hold is unaffected — it governs what a project-scope render may *open*, and a live read narrowed to one project opens strictly less than a cross-scope one. The unreachable-calendar row is added for the same reason as in `23a`: with a live read, "no meetings" and "could not ask" stop being the same silence.
 

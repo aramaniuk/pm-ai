@@ -21,7 +21,7 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 
 **Always:**
 - **A pure function.** `render_dashboard(meetings, entries, goals, now, *, tz) -> str`. No I/O, no clock read, no storage — `core` is I/O-free and the injected clock is the rule 1b established. Every section is golden-file testable.
-- **Nothing is invented.** A section with no data states the computed reason. A claim the code did not compute may not appear in the output — "No meetings on your calendar today" names a query result; "All clear!" names a state of the world nothing measured.
+- **Nothing is invented.** A section with no data states the computed reason. A claim the code did not compute may not appear in the output — "No meetings on the calendar today" names a query result; "All clear!" names a state of the world nothing measured.
 - **All four headings always render**, in CAP-9's order, so the file's shape is stable for a human skimming it at 07:00 and for anything that later parses it.
 - **3-Tier means `GoalDomain`** — `Project`, `Team`, `Personal`. Settled by the source, against an earlier draft of this clause: `prd.md:63` names `strategic_goals.md` as "3-Tier Goals (Project, Team, Personal Career Goals)", and `prd.md:424` says the domain "is what a goal is *about*, and it is the `<Tier>` in the alignment tag, matching §2.1's '3-Tier Goals'". `alignment_tag`'s docstring (`goals.py:99-104`) was right all along; the word "Milestones" in the section title is what misled this spec.
 - **Every interpolated string is escaped** — goal titles and actor names are hand-authored or provider-supplied and reach the same Markdown as meeting titles.
@@ -36,8 +36,8 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Full day | three meetings, message entries, goals at all horizons | four sections, all populated; meetings ordered by `(start, meeting_id)` | N/A |
-| No meetings | the calendar answered, with nothing in the day | "No meetings on your calendar today" — it names a query result, and the query succeeded | N/A |
-| Calendar unreachable | the fetch failed or was refused | the section says the calendar could not be read, naming that; **never** "No meetings on your calendar today" | reported, never raised |
+| No meetings | the calendar answered, with nothing in the day | "No meetings on the calendar today" — it names a query result, and the query succeeded | N/A |
+| Calendar unreachable | the fetch failed or was refused | the section says the calendar could not be read, naming that; **never** "No meetings on the calendar today" | reported, never raised |
 | All of today's meetings ended | meetings returned, all past | "All N of today's meetings have ended" — **not** the no-meetings string | N/A |
 | Meeting in progress | started before `now`, not ended | listed as time-critical | N/A |
 | Meeting spanning midnight | started yesterday, ends today | listed | N/A |
@@ -73,13 +73,15 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
 **Acceptance Criteria:**
 - Given every combination of empty inputs, then all four headings are present and no section body is empty — each states its reason.
 - Given the full-day golden case rendered twice with the same inputs, then the output is byte-identical — no clock read, no ordering nondeterminism.
-- Given a day whose meetings have all ended, then the output says so rather than "No meetings on your calendar today" — a false claim by mid-afternoon, in the artifact whose stated purpose is that it never asserts what it did not compute.
+- Given a day whose meetings have all ended, then the output says so rather than "No meetings on the calendar today" — a false claim by mid-afternoon, in the artifact whose stated purpose is that it never asserts what it did not compute.
 - Given the rendered output, then every empty-section string names a file, a query or a window — never a state of the world.
 
 ## Spec Change Log
 
+- **2026-09-14, `NO_MEETINGS` drops "your".** Renegotiated by the human at `23d`'s pre-flight gate, and it changes shipped text in a story already marked done. `23d` requires that both dashboards share `_time_critical` *and* that the project render name the project's own calendar — which a shared renderer cannot do, since one input yields one output and the empty-day branch has nothing to tell the two callers apart. The instruction closes it by removing the possessive from both sides rather than by parameterising the sentence: the constant now reads "No meetings on the calendar today", identical in both files. Nothing else about the claim moves — it still names a query result, and the two branches forbidden from using it are unchanged. Tests import the constant rather than the literal, so no assertion pinned the old wording; the illustrative quotes in this spec's own frozen block were updated in the same commit so they do not quote text the code no longer emits.
+
 - **2026-09-07, the day's meetings come from the calendar, not from `meetings/`.** Consequent on the decision that no future meeting is persisted: the calendar owns a meeting that has not happened, so this section reads it live. `render_dashboard` stays pure and its signature is unchanged — it is still handed `Meeting` values; only their provider moves from `11a`'s `for_day` to `33b`'s fetch, in `23b`, which is the layer allowed to do I/O.
-  **A matrix row was added, because the honesty rule now has a case it did not have.** With a local read, "no meetings today" and "could not ask" were the same silence. With a live read they are different facts, and this section's own Always forbids stating one when the other is true — "No meetings on your calendar today" *names a query result*, and there is no query result when the fetch failed. `8a`'s `HarvestOutcome` and `HarvestFailure` already distinguish ran-and-learned-nothing from ran-and-failed, so the reason is available to state rather than needing to be invented.
+  **A matrix row was added, because the honesty rule now has a case it did not have.** With a local read, "no meetings today" and "could not ask" were the same silence. With a live read they are different facts, and this section's own Always forbids stating one when the other is true — "No meetings on the calendar today" *names a query result*, and there is no query result when the fetch failed. `8a`'s `HarvestOutcome` and `HarvestFailure` already distinguish ran-and-learned-nothing from ran-and-failed, so the reason is available to state rather than needing to be invented.
   **The network exposure is accepted deliberately**: a 07:00 render with no route to the calendar now reports that instead of rendering yesterday's local copy as though it were today.
 
 - **2026-09-03, amended against the second multi-lens review and the day's decisions.**
@@ -90,7 +92,7 @@ Split from the original `23a` on 2026-09-02 at the sizing gate: what the dashboa
   **One review claim did not hold, and is recorded as not applying.** B8 said this slice and `23b` were specified against a "degrades quietly to `UNALIGNED`" model and would crash on an absent goals file. Neither mentions `resolve` or `alignment_tag`: the 3-Tier section lists goals rather than resolving recommendations, so `UnresolvedGoal` is unreachable here. `22a`'s Intent was wrong; the knock-on was not.
 
 - **2026-09-02, split at the sizing gate.** The original `23a` measured 2,377 tokens and carried both the section rendering and `project_scope_datasources`, the AD-25 scope wall. The wall is now `23d`. Recorded because the review had judged this a single concern spanning layers, and splitting it was a human's call; the seam chosen separates two different failure classes — text that misleads, and a privacy leak.
-- **Inherited from the 2026-09-02 multi-lens review**, which found "No meetings on your calendar today" false by mid-afternoon; that wave 1 leaves *two* sections permanently stating a reason rather than one, since Proactive Enablement reads `MESSAGE_POSTED` and `33d` supplies it in wave 2; and that Ask First was "Nothing" when the display timezone owning "today" had no owner in any story.
+- **Inherited from the 2026-09-02 multi-lens review**, which found "No meetings on the calendar today" false by mid-afternoon; that wave 1 leaves *two* sections permanently stating a reason rather than one, since Proactive Enablement reads `MESSAGE_POSTED` and `33d` supplies it in wave 2; and that Ask First was "Nothing" when the display timezone owning "today" had no owner in any story.
 
 ## Design Notes
 

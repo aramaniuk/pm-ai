@@ -16,7 +16,7 @@ matters. Every section is therefore golden-file testable.
 
 The rule that shapes every string below. A section with no data states the
 *computed reason* — a file that is absent, a query that returned nothing, a
-window that held nothing. "No meetings on your calendar today" names a query
+window that held nothing. "No meetings on the calendar today" names a query
 result. "All clear!" names a state of the world nothing measured, and would be
 false on a day with an unread inbox.
 
@@ -120,13 +120,23 @@ section names it — an empty section that says "in the window" without saying
 which window has not told the reader anything.
 """
 
-NO_MEETINGS = "No meetings on your calendar today"
-"""The exact claim, kept as a constant because two rules bear on it.
+NO_MEETINGS = "No meetings on the calendar today"
+"""The exact claim, kept as a constant because three rules bear on it.
 
 It names a *query result*: the calendar was asked and answered with nothing. It
 is therefore forbidden when the fetch failed (there is no result to report) and
 forbidden when meetings came back and have all ended (the result was not
 nothing).
+
+The third rule is why it says "the calendar" rather than "your calendar": this
+string is emitted by a section renderer that `23d`'s project dashboard shares,
+and a shared renderer is one input to one output. Naming the reader's own
+calendar would have forced the empty-day branch to know which of the two
+dashboards called it — the one thing sharing a section renderer is meant to
+avoid — and the alternative, a per-caller sentence passed in, makes "identical
+data renders identical Markdown" false on exactly the branch where nothing
+distinguishes the two inputs. Neutral wording keeps the claim true in both
+files: the query result is the same fact whichever calendar was asked.
 """
 
 NO_REASON_GIVEN = "the connector gave no reason"
