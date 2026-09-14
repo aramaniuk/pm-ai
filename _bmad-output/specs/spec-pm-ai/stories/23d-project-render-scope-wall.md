@@ -2,8 +2,9 @@
 title: 'The project dashboard is its own renderer'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-progress'
 review_loop_iteration: 1
+baseline_commit: '9789297c9d8d1449c9a43e16f1d4f2a8b9ffbd5e'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -56,10 +57,10 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/rendering.py` -- add `render_project_dashboard(meetings, entries, now, *, tz)`, reusing `23a`'s section renderers -- no goals parameter, and that absence is the deliverable
-- [ ] `tests/architecture/test_domain_invariants.py:214-227` -- retarget the AD-25 gate: assert through `inspect.signature` that `render_project_dashboard` accepts no goals parameter, and that it is not empty of assertions -- the current body greps `str(s)` over a returned list, which passes vacuously when the list is empty, as its own comment records nearly happening once
-- [ ] `tests/conftest.py` -- lower `EXPECTED_SKIPS` **by one** in this slice's commit -- a delta, because `8d` lowers it by two and the ratchet fails in both directions (`conftest.py:81`)
-- [ ] `tests/core/test_project_rendering.py` -- the matrix, including the byte-identical shared-section case
+- [x] `pm_ai/core/rendering.py` -- add `render_project_dashboard(meetings, entries, now, *, tz)`, reusing `23a`'s section renderers -- no goals parameter, and that absence is the deliverable
+- [x] `tests/architecture/test_domain_invariants.py:214-227` -- retarget the AD-25 gate: assert through `inspect.signature` that `render_project_dashboard` accepts no goals parameter, and that it is not empty of assertions -- the current body greps `str(s)` over a returned list, which passes vacuously when the list is empty, as its own comment records nearly happening once. **Already retargeted in `23a`'s commit**, where creating `pm_ai.core.rendering` would otherwise have turned the skip into an `AttributeError`; this slice supplies the subject and removes the skip
+- [x] `tests/conftest.py` -- lower `EXPECTED_SKIPS` **by one** in this slice's commit -- a delta, because `8d` lowers it by two and the ratchet fails in both directions (`conftest.py:81`) -- 25 to 24
+- [x] `tests/core/test_project_rendering.py` -- the matrix, including the byte-identical shared-section case, plus `tests/core/mypy_fixture_project_render_goals.py` for the negative type assertion
 
 **Acceptance Criteria:**
 - Given `inspect.signature(render_project_dashboard)`, then no parameter accepts a goal register — the wall, asserted as a signature rather than as a list, because a signature cannot drift silently and a list can.
