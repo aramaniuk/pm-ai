@@ -34,15 +34,14 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Alias collides | two paths, same alias | refused; the existing entry is not replaced | `DuplicateProject` |
-| Same id, different path | a move | refused — artifacts already resolved under the old path | `DuplicateProject` |
 | Empty registry | `projects.toml` present, no entries | parses to an empty mapping; `doctor` reports `ABSENT` | N/A |
 | Absent registry | no file | parses to an empty mapping — a first run, not an error | N/A |
 | One entry | a well-formed file | id, absolute path and alias round-trip through render and parse | N/A |
-| Relative path in the file | a hand-edited `./alpha` | refused, naming the key — `_absolute_map` would take it as-is | `RegistryMalformed` |
-| Duplicate id in the file | a hand-edit with two of one id | refused, not last-wins | `RegistryMalformed` |
+| Relative path in the file | a hand-edited `./alpha` | refused, naming the key — `_absolute_map` would take it as-is | `ProjectPathUnusable` |
+| Duplicate id in the file | a hand-edit with two of one id | refused, not last-wins — `tomllib` already refuses both shapes, so this is pinned by test and has no branch | `RegistryMalformed` |
 | Registry hand-edited to malformed TOML | a human broke the file | refused, naming the line; never silently reset | `RegistryMalformed` |
-| Registry unreadable | a directory, or EACCES | refused, distinctly from absent — an unreadable registry must not be minted over | propagated |
-| Registry names a path since deleted | repository moved away | reported by `doctor`; refused for that project alone | `UnknownProject` |
+| Registry unreadable | a directory, or EACCES | reported, distinctly from absent — an unreadable registry must not be minted over | carried in `RegistryState`, never raised |
+| Registry names a path since deleted | repository moved away | reported by `doctor`, naming the project | no refusal — see the 2026-09-15 amendment |
 
 </frozen-after-approval>
 
@@ -60,9 +59,12 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 
 **Execution:**
 - [ ] `pm_ai/core/project_registry.py` -- add `parse_registry(raw: bytes | None)`, `render_registry(mapping)`, `DuplicateProject`, `ProjectPathUnusable`, `RegistryMalformed` -- pure over bytes, no filesystem
-- [ ] `pm_ai/app/wiring.py` -- read the registry and pass the mapping to `ScopePaths.production()`
-- [ ] `pm_ai/platform/doctor.py` -- add the registry probe, `ABSENT` when empty or missing
+- [ ] `pm_ai/app/wiring.py` -- `registered_projects(keychain)`: the bootstrap resolver, the single-reader read, and the parse -- this is the module that may build a `StorageService`, and `4i`'s `ArtifactState` is what it returns alongside the mapping
+- [ ] `pm_ai/app/entry.py` -- `_registered_projects()` delegates to it and `_compose` passes the mapping to `ScopePaths.production()` -- **`entry.py:246` is the `production()` call site, not `wiring.py`**, which names it only in prose
+- [ ] `pm_ai/app/entry.py` -- give two-or-more registered projects its own probe and remedy -- `_select` raises `UnknownProject` into `_compose`'s `ScopeResolutionError` arm, which tells an operator whose projects both resolve to "Re-enrol the repository". Unreachable until this slice fills the registry; `deferred-work.md:420` assigns the choice policy here
+- [ ] `pm_ai/platform/doctor.py` -- add the registry probe, `ABSENT` when empty or missing, naming a project whose path is gone
 - [ ] `tests/architecture/test_static_rules.py` -- widen `test_story_4a_tomllib_is_imported_by_exactly_one_module` to a named allowlist of two modules -- `projects.toml` is TOML and `4a` scoped the rule to one importer
+- [ ] `tests/architecture/test_static_rules.py` -- extend `4a`'s no-filesystem sweep to cover `project_registry.py` -- the same "pure over bytes" guarantee, and `4g` proved a one-directional version of it goes stale
 - [ ] `tests/core/test_project_registry.py` -- one test per matrix row, plus the render/parse round trip
 
 **Acceptance Criteria:**
@@ -70,10 +72,30 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 - Given a registry holding two entries, when one is added through `render_registry`, then all three are present — asserted on the rendered bytes, because `write_artifact` replaces whole and an interface taking a single entry is what loses the other two.
 - Given an onboarded project, when the daemon is built for it, then `scope_root` resolves without raising — the condition every other wave-1 slice depends on and none currently establishes.
 - Given a hand-edited malformed `projects.toml`, then it is refused by name and this module returns no mapping — a registry that parses to empty is a registry that gets minted over.
+- Given a `projects.toml` that is unreadable rather than absent, then `doctor` reports `FAILING` and nothing raises out of composition — the state `_compose`'s `OSError` arm currently misattributes to `~/.pm-ai` ownership.
+- Given two registered projects, when any subcommand runs, then the refusal names the ambiguity and not a directory that resolves fine.
 - Given `grep -rn "tomllib" pm_ai/`, then exactly two modules import it and the sweep names both.
 - Given `grep -rn "ScopePaths.real\|projects_registry()" pm_ai/`, then there is no match — neither name exists, and both appeared in this spec until 2026-09-03.
 
 ## Spec Change Log
+
+- **2026-09-15, built together with `4i`, and the error vocabulary closed.** The human combined the two slices at the readiness check, because they collide on one file and cannot be parallelised the way the path graph implies: both add a probe, both change `run_all`'s signature, and both must edit the same four assertions in `tests/architecture/test_doctor.py` (`:292-295`, `:313`, `:468`, `:634`, each asserting `len(report.probes) == 5`). `4i`'s spec calls itself "a sixth probe"; built together, the registry probe and the config probe are the sixth and seventh, and `4i` is amended to say so. Combined body exceeds wave 1's 1600-token gate — flagged and accepted rather than re-split, since splitting is what created the collision.
+
+  Four matrix rows changed, each for a measured reason rather than a preference:
+
+  **Row "same id, different path" is deleted — it was unbuildable here.** `render_registry` takes a mapping keyed by id, so two paths under one id cannot be expressed as its input. It is an *add*, and `4k` owns the read-modify-write that can actually encounter a move. "Alias collides" stays: that one *is* expressible across a whole mapping, and `render_registry` validates it.
+
+  **Row "relative path" now raises `ProjectPathUnusable`.** The class was named in the Execution tasks and appeared in no row, while this row was the only one whose failure is about a path rather than about syntax. They were the same refusal under two names. `RegistryMalformed` now means exactly "this file did not parse", which is a line a caller can act on.
+
+  **Row "duplicate id in the file" keeps its verdict and loses its branch.** Measured: `tomllib` already refuses both shapes — `Cannot declare ('projects', 'alpha') twice` for repeated tables, `Cannot overwrite a value` for repeated keys. The row survives as a test pinning "not last-wins" against a future parser swap; writing a duplicate check would have been dead code asserting something the parser guarantees.
+
+  **Row "registry unreadable" is reported, not propagated.** `4i`'s frozen Always is the stricter and more recent rule — absent, unreadable and unobtainable are three answers with three remedies — and both probes need the same carrier. Propagating instead lands in `_compose`'s `OSError` arm, which blames `~/.pm-ai` ownership for any I/O failure anywhere in `build()`; `deferred-work.md` already records that as wrong.
+
+  **Row "path since deleted" loses its refusal half.** Three things were true at once: `UnknownProject` is defined at `paths.py:231` in `platform` and `core` may not import it; `paths.py` performs no existence check anywhere, its only filesystem call being one `mkdir` at `:599`, so `repository()` returns a path for a deleted directory without complaint; and "refused for that project alone" therefore described behavior nothing had. The probe reports it, which is what the row's own first clause already said. Adding a `stat` to the resolver was considered and declined — it would put filesystem access in a module that has none, to serve a row that asked for reporting.
+
+  One task was pointing at the wrong module. The Execution list said `wiring.py` reads the registry and passes the mapping to `ScopePaths.production()`; `wiring.py` never calls `production()` — `entry.py:246` does, and the reader seam is `_registered_projects()` at `entry.py:186`, whose docstring already names this slice. Underneath that sat an ordering problem no task mentioned: `projects.toml` must be read before the resolver exists, but `StorageService` is the single reader and is constructed *on* a resolver. `_config()` sidesteps this by reading after `build()` returns; the registry cannot. The read therefore needs a bootstrap `production()` over an empty mapping and a `StorageService` built on it, in `wiring.py`, which is the one module permitted to import both `storage` and `platform`.
+
+  Last, this slice makes a known-wrong path reachable for the first time: with two projects registered, `_select` raises `UnknownProject` into `_compose`'s `ScopeResolutionError` arm and tells an operator whose projects both resolve to "Re-enrol the repository". `deferred-work.md:420` assigns the choice policy here, so the ambiguity gets its own probe rather than shipping a message that is wrong the moment the registry is useful.
 
 - **2026-09-03, split at the sizing gate.** The rewrite below reached 2136 body tokens against wave 1's 1600. `4k` takes the `pm-ai project add` command and everything filesystem-shaped — path resolution, id derivation, directory creation, structure and `.gitignore` generation, adopting an existing tree, and the exclusive read-modify-write. This slice keeps the registry, its reader and its probe: the same reader-first split `4a`/`4g` used for `config.toml`, and for the same reason — a pure parser is testable without a machine.
   Writing it also surfaced a conflict no lens found: **`projects.toml` is TOML**, and `4a`'s `Never` forbids `tomllib` outside `pm_ai/core/config.py`, enforced by a sweep this session helped write. Widening that sweep to a named allowlist of two modules is now a task here, rather than a guard someone deletes in passing.
