@@ -12,11 +12,14 @@ needs a subprocess and every branch is reachable.
 from __future__ import annotations
 
 import ast
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from pm_ai.app import entry
+from pm_ai.core.config import Config
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.platform.doctor import Health, Probe, Report
 from pm_ai.ports import (
@@ -646,6 +649,11 @@ def test_an_undeclared_scope_is_refused_by_name(registered, scope, capsys):
         (["dashboard", "extra"], "takes options, not `extra`"),
         (["dashboard", "--bogus", "x"], "has no `--bogus` option"),
         (["dashboard", "--scope"], "with no value after it"),
+        # A missing value, not a scope named `--bogus`. Swallowing the next
+        # option produced a refusal about the wrong word entirely and hid the
+        # option the operator forgot to fill in.
+        (["dashboard", "--scope", "--bogus"], "`--bogus` is another option"),
+        (["dashboard", "--scope="], "with an empty value"),
         (
             ["dashboard", "--scope", "personal", "--scope", "personal"],
             "was given `--scope` twice",
@@ -684,6 +692,11 @@ def test_dashboard_needs_a_daemon_and_says_so(monkeypatch, capsys):
         (cli.ConfigRefused("display_timezone is not set"), "display_timezone"),
         (cli.MalformedGoals("line 4: duplicate goal id `g_x`"), "g_x"),
         (cli.MalformedEntry("2026-09.md line 2: no closing bracket"), "2026-09.md"),
+        # Not a subclass of `MalformedEntry`, so the row above does not stand in
+        # for it: `parse_segment` raises one or the other and a tuple that had
+        # quietly lost this member would turn a corrupt segment into a traceback.
+        (cli.UnknownCategory("2026-09.md line 9: `gossip` is not a category"), "gossip"),
+        (cli.ScopeResolutionError("people:bob declares no daily_dashboard.md"), "people:bob"),
     ],
 )
 def test_every_pipeline_refusal_exits_3_with_its_own_sentence(
@@ -733,3 +746,51 @@ def test_the_default_dashboard_callable_refuses_rather_than_returning_a_path(
     printed = capsys.readouterr().err
     assert "wiring fault" in printed
     assert "Traceback" not in printed
+
+
+def test_the_real_dashboard_closure_writes_a_file_through_the_cli(
+    registered, monkeypatch, capsys
+):
+    """The one test that runs `pm-ai dashboard` with nothing stubbed between the
+    argument vector and the bytes on disk.
+
+    Everything above replaces `entry._dashboard`, so the closure it builds — the
+    `run_dashboard` call, the scope it forwards and the instant it reads off
+    `daemon.clock` — was observed by nothing. Mutating `now=daemon.clock()` to a
+    naive value left the whole suite green, which is exactly the kind of gap a
+    seam-heavy CLI suite produces.
+    """
+    monkeypatch.setattr(
+        entry,
+        "_config",
+        lambda storage: Config(display_timezone="Europe/Warsaw", pm_handle="a@b.c"),
+    )
+    assert entry.main(["dashboard"]) == EXIT_OK
+
+    written = registered / ".manager-ai" / "memory" / "daily_dashboard.md"
+    assert written.is_file()
+    text = written.read_text(encoding="utf-8")
+    assert text.startswith("## Time-Critical Activities")
+    assert str(written) in capsys.readouterr().out
+
+
+def test_the_daemon_holds_the_very_clock_it_was_built_with(tmp_path):
+    """`23b` reads `daemon.clock` rather than composing a second `datetime.now()`.
+
+    Asserted by identity, because a second clock is not a wrong value — it is a
+    right value from the wrong source, and every timestamp comparison in the
+    suite would go on passing while the dashboard's day boundary and the single
+    writer's stamps came off different reads.
+    """
+    from pm_ai.app.wiring import build
+
+    fixed = lambda: datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
+    assert build(tmp_path, "alpha", now=fixed).clock is fixed
+
+
+def test_a_daemon_built_with_no_clock_still_has_one_that_answers():
+    """The default, so the field cannot be a hole on the real composition path."""
+    from pm_ai.app.wiring import build
+
+    clock = build(Path(tempfile.mkdtemp()), "alpha").clock
+    assert clock().tzinfo is timezone.utc

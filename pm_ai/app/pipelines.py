@@ -6,6 +6,7 @@ no other layer is permitted to do (AD-30).
 
 from __future__ import annotations
 
+import errno
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -299,8 +300,41 @@ def run_dashboard(
         # this path at all, which is the half a signature cannot enforce.
         document = render_project_dashboard(meetings, entries, now, tz=zone)
 
-    return daemon.storage.write_artifact(
-        document.encode("utf-8"), scope=scope, artifact=DASHBOARD_ARTIFACT
+    try:
+        return daemon.storage.write_artifact(
+            document.encode("utf-8"), scope=scope, artifact=DASHBOARD_ARTIFACT
+        )
+    except OSError as blocked:
+        named = _blocked_by_a_directory(daemon, scope=scope)
+        if named is None:
+            raise
+        raise named from blocked
+
+
+def _blocked_by_a_directory(
+    daemon: Daemon, *, scope: DataScope
+) -> IsADirectoryError | None:
+    """The write refused because a directory stands where a `File` is declared.
+
+    `None` when it is anything else — a full disk, a read-only mount — which is
+    re-raised untouched: pm-ai did not decline those, and dressing them in a
+    sentence of its own would put a policy voice over a broken filesystem.
+
+    Named here rather than in the single writer, because the writer's
+    `os.replace` reports only `[Errno 21] Is a directory` with no path and no
+    idea what was expected. The empty-directory case raises `IsADirectoryError`
+    and the non-empty one `ENOTEMPTY`, which is why the discriminator is the
+    target's own node type rather than the errno.
+    """
+    target = daemon.storage.paths.resolve(scope, DASHBOARD_ARTIFACT)
+    if not target.is_dir():
+        return None
+    return IsADirectoryError(
+        errno.EISDIR,
+        f"{DASHBOARD_ARTIFACT} is declared a File in {scope} and a directory is "
+        f"standing where it belongs, so the dashboard could not be written. "
+        f"Nothing was changed; move or remove the directory",
+        str(target),
     )
 
 
@@ -379,12 +413,19 @@ def _todays_calendar(
         return NoCalendarConnector()
 
     day_start, day_end = _day_bounds(now, zone=zone)
-    answered: list[Meeting] = []
+    collected: list[Meeting] = []
     unread: list[UnreadCalendar] = []
+    answered = 0
     for instance in instances:
         result = _ask(daemon, instance)
         if result.failure is not None:
             unread.append(UnreadCalendar(instance=instance, failure=result.failure))
+        else:
+            # Counted rather than inferred from whether rows came back. A
+            # calendar that answered and held nothing *measured* the day, and a
+            # calendar that could not be read did not — the whole distinction the
+            # union exists for, and one an empty list cannot carry.
+            answered += 1
         # A failed fetch still carries the spans it did walk, and those meetings
         # are real. Data that is present is never discarded because data
         # elsewhere is missing — which is the same rule that makes a partial day
@@ -394,21 +435,30 @@ def _todays_calendar(
         # holds what has not ended and `records` what has, and a dashboard read
         # at 15:00 that showed only the former would report an afternoon of four
         # finished meetings as an empty calendar.
-        answered.extend(
+        collected.extend(
             meeting
             for meeting in (*result.records, *result.live)
             if _on_day(meeting, start=day_start, end=day_end)
             and _belongs(meeting, scope=scope)
         )
 
-    meetings = _deduplicate(answered)
+    meetings = _deduplicate(collected)
     if not unread:
         return meetings
-    if not meetings:
-        # Nothing was read at all, so there is no query result to report and the
-        # renderer must say so rather than show an empty day.
-        return _one_failure(unread)
-    return PartialCalendar(meetings=meetings, unread=tuple(unread))
+    if answered or meetings:
+        # Something was read. **Whether any calendar answered, not whether the
+        # merged list is non-empty**: a connector reporting an empty day and a
+        # connector that could not be reached are different facts, and collapsing
+        # the first into the `HarvestFailure` branch would tell the reader the
+        # day is unknown when one calendar measured it and found nothing.
+        #
+        # `meetings` alone also keeps a partial walk here: a connector that
+        # failed on its second span still handed over its first span's rows, and
+        # those are present data.
+        return PartialCalendar(meetings=meetings, unread=tuple(unread))
+    # Nothing was read at all, so there is no query result to report and the
+    # renderer must say so rather than show an empty day.
+    return _one_failure(unread)
 
 
 def _ask(daemon: Daemon, instance: str) -> HarvestResult:
@@ -526,8 +576,17 @@ def _deduplicate(meetings: list[Meeting]) -> tuple[Meeting, ...]:
     per-mailbox `id`, so the same meeting reaching two tenants arrives under two
     different ids and id-matching alone would deduplicate nothing in the case
     that motivates deduplicating at all. `ical_uid` is the key that survives the
-    crossing: two meetings match when both carry a non-empty one and it is
-    equal, or failing that when `meeting_id` is equal.
+    crossing, and the key is the **pair** `(ical_uid, start)`: whether Graph
+    reuses one `iCalUId` across a recurring series' occurrences is unmeasured —
+    the 2026-09-06 spike listed the field and never compared two occurrences —
+    and the pair is correct either way, because two tenants' copies of one
+    meeting share the instant and two occurrences of a series do not.
+
+    The `meeting_id` fallback applies **only when neither side carries a uid**.
+    A meeting that carries one has already been judged on it, and tying it to
+    another by id as well collapses two meetings whose uids disagree — where a
+    disagreeing uid is the evidence that they are different meetings, not a tie
+    for the id to break.
 
     **Never on start and title.** Two organisations each holding a "Weekly Sync"
     at 09:00 is a real double-booking, and it is the single most actionable fact
@@ -539,16 +598,22 @@ def _deduplicate(meetings: list[Meeting]) -> tuple[Meeting, ...]:
     the tentative flag.
     """
     kept: list[Meeting] = []
-    seen_uids: set[str] = set()
-    seen_ids: set[str] = set()
+    seen: set[tuple[str, datetime]] = set()
+    seen_unidentified: set[str] = set()
     for meeting in meetings:
         uid = meeting.ical_uid
-        if uid and uid in seen_uids:
-            continue
-        if meeting.meeting_id in seen_ids:
-            continue
-        kept.append(meeting)
         if uid:
-            seen_uids.add(uid)
-        seen_ids.add(meeting.meeting_id)
+            key = (uid, meeting.start)
+            if key in seen:
+                continue
+            seen.add(key)
+            # Deliberately **not** also recorded by id. A meeting carrying a uid
+            # has been judged on it; falling back to the id for it as well is
+            # what collapsed two meetings that share an id and disagree about
+            # their uid — and a uid that disagrees is evidence of difference.
+        else:
+            if meeting.meeting_id in seen_unidentified:
+                continue
+            seen_unidentified.add(meeting.meeting_id)
+        kept.append(meeting)
     return tuple(kept)

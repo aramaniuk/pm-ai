@@ -254,10 +254,13 @@ def render_dashboard(
 ) -> str:
     """CAP-9's four sections, as Markdown, from these inputs and this instant.
 
-    `meetings` is the calendar's *answer*, not a list: a `HarvestFailure` says
-    the fetch could not be completed and carries why, and a sequence says it
-    could. Collapsing the two into an empty list is precisely the confusion the
-    honesty rule forbids, so the type refuses to do it.
+    `meetings` is the calendar's *answer*, not a list, and `CalendarAnswer` has
+    four members because there are four distinct facts: a sequence is a query
+    that ran, a `HarvestFailure` is a fetch that could not be completed, a
+    `NoCalendarConnector` is no calendar to ask at all, and a `PartialCalendar`
+    is some calendars answering while others did not. Collapsing any of them into
+    an empty list is precisely the confusion the honesty rule forbids, so the
+    type refuses to do it.
 
     `entries` is the scope's event log, **unbounded**. The window is applied
     here rather than by `EventLog.read`, because a bounded read drops an entry
@@ -314,9 +317,12 @@ def render_project_dashboard(
     and the parameter list is what makes the *consequential* half impossible.
 
     `meetings` is the calendar's answer, not a list, for the same reason as in
-    `render_dashboard`: a project's day comes from a live fetch narrowed to that
-    scope (`33b`, 2026-09-07), and a fetch that failed is not a day with nothing
-    in it.
+    `render_dashboard`, and it is the same four-member `CalendarAnswer`: a
+    project's day comes from a live fetch narrowed to that scope (`33b`,
+    2026-09-07), and a fetch that failed is not a day with nothing in it — nor is
+    a machine with no calendar enrolled, nor a day only half of which was read.
+    All four render through the same `_time_critical`, which is what keeps the
+    two files saying the same thing about the same answer.
 
     `now` must be aware UTC and `tz` must be supplied, both exactly as above.
     Rendering the same inputs twice returns byte-identical output, and so does

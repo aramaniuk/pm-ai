@@ -415,7 +415,7 @@ def test_a_malformed_event_log_segment_refuses_and_leaves_the_file_intact(tmp_pa
     # the matrix row says: a hand-edited or corrupt segment. `write_artifact`
     # refuses a ledger outright, and that refusal is the reason this file can
     # only ever arrive from outside pm-ai.
-    segments = built.storage._paths.resolve(PERSONAL, "event_log/", create=True)
+    segments = built.storage.paths.resolve(PERSONAL, "event_log/", create=True)
     (segments / "2026-09.md").write_bytes(b"this line is not a ledger entry\n")
     with pytest.raises(MalformedEntry, match="2026-09.md"):
         run_dashboard(built, now=NOW)
@@ -455,9 +455,41 @@ def test_a_directory_where_the_file_is_declared_propagates(tmp_path):
     filesystem as a policy decision.
     """
     built = daemon(tmp_path, _Calendar("graph:contoso"))
-    target = built.storage._paths.resolve(PERSONAL, DASHBOARD_ARTIFACT, create=True)
+    target = built.storage.paths.resolve(PERSONAL, DASHBOARD_ARTIFACT, create=True)
     target.mkdir()
-    with pytest.raises(OSError):
+    with pytest.raises(IsADirectoryError) as refused:
+        run_dashboard(built, now=NOW)
+    # The row asks for the path *and* the expected node type. `os.replace`
+    # reports `[Errno 21] Is a directory` and neither, which is a sentence an
+    # operator cannot act on: it names no file and no expectation.
+    said = str(refused.value)
+    assert str(target) in said
+    assert "declared a File" in said
+    assert DASHBOARD_ARTIFACT in said
+
+
+def test_a_non_empty_directory_in_the_way_is_named_the_same_way(tmp_path):
+    """The other errno. An empty directory raises `IsADirectoryError` and a
+    populated one `ENOTEMPTY`, which is why the node type rather than the errno
+    is what decides the sentence."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    target = built.storage.paths.resolve(PERSONAL, DASHBOARD_ARTIFACT, create=True)
+    target.mkdir()
+    (target / "a-file-somebody-put-here").write_text("x")
+    with pytest.raises(IsADirectoryError, match="declared a File"):
+        run_dashboard(built, now=NOW)
+
+
+def test_a_write_that_fails_for_any_other_reason_is_left_alone(tmp_path, monkeypatch):
+    """Only the directory case is re-dressed. A full disk is not pm-ai declining,
+    and a tidy sentence over it would read as a policy decision."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+
+    def full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(type(built.storage), "write_artifact", full)
+    with pytest.raises(OSError, match="No space left on device"):
         run_dashboard(built, now=NOW)
 
 
@@ -563,6 +595,50 @@ def test_the_same_meeting_id_from_two_tenants_is_also_listed_once(tmp_path):
     assert body.count("Vendor Review") == 1
 
 
+def test_two_occurrences_of_one_series_today_are_both_listed(tmp_path):
+    """Matrix — the start is in the key, so it does not matter whether Graph
+    reuses one `iCalUId` across a series.
+
+    Unmeasured is why it is in the key: the 2026-09-06 spike listed the field and
+    never compared two occurrences. Two tenants' copies of one meeting share the
+    instant; two occurrences of a series do not.
+    """
+    built = daemon(
+        tmp_path,
+        _Calendar(
+            "graph:contoso",
+            live=(
+                meeting("m_occ_1", "Daily Sync", start=_at(9, 0), ical_uid="series-1"),
+                meeting("m_occ_2", "Daily Sync", start=_at(15, 0), ical_uid="series-1"),
+            ),
+        ),
+    )
+    body = sections(written(_run(built)))["Time-Critical Activities"]
+    assert body.count("Daily Sync") == 2
+
+
+def test_two_meetings_with_one_id_and_two_uids_are_both_listed(tmp_path):
+    """Matrix — a uid that disagrees is evidence of difference, not a tie for the
+    id to break.
+
+    The id fallback exists for rows that carry no uid at all. Applying it to rows
+    that do collapses two meetings the provider distinguished.
+    """
+    built = daemon(
+        tmp_path,
+        _Calendar(
+            "graph:apex",
+            live=(meeting("m_same", "Vendor Review", ical_uid="uid-a"),),
+        ),
+        _Calendar(
+            "graph:zebra",
+            live=(meeting("m_same", "Vendor Review", ical_uid="uid-z"),),
+        ),
+    )
+    body = sections(written(_run(built)))["Time-Critical Activities"]
+    assert body.count("Vendor Review") == 2
+
+
 def test_two_meetings_sharing_a_start_and_a_title_are_both_listed(tmp_path):
     """Acceptance — resemblance is not identity.
 
@@ -600,6 +676,56 @@ def test_one_calendar_answering_and_one_failing_renders_both_facts(tmp_path):
     assert "graph:zebra" in body
     assert "throttled" in body
     assert NO_MEETINGS not in body
+
+
+def test_one_calendar_answering_nothing_and_another_failing_is_still_partial(tmp_path):
+    """Matrix — a calendar that answered and held nothing is not a calendar that
+    could not be read.
+
+    The `HarvestFailure` branch would say today's meetings are unknown, which is
+    false: one calendar measured the day. The branch is therefore on whether any
+    connector *answered*, never on whether the merged list came back non-empty.
+    """
+    built = daemon(
+        tmp_path,
+        _Calendar("graph:apex"),  # answered, and the day held nothing
+        _Calendar(
+            "graph:zebra",
+            failure=HarvestFailure(reason="graph:zebra lost its token", retryable=False),
+        ),
+    )
+    body = sections(written(_run(built)))["Time-Critical Activities"]
+    assert "The calendars that answered held nothing" in body
+    assert "graph:zebra" in body
+    # Never the whole-day claim, and never the unknown-day one either.
+    assert NO_MEETINGS not in body
+    assert "The calendar could not be read" not in body
+
+
+def test_a_partly_walked_harvest_keeps_its_rows_and_is_still_named_unread(tmp_path):
+    """One connector, one `HarvestFailure`, and meetings anyway.
+
+    A page-one-succeeded, page-two-failed walk has real meetings, and discarding
+    them would mean a connector that fails on its last span shows nothing all
+    morning. It is still named, because the day it handed over is not the whole
+    day.
+    """
+    built = daemon(
+        tmp_path,
+        _Calendar(
+            "graph:contoso",
+            live=(meeting("m_a", "Payments Gateway Sync"),),
+            failure=HarvestFailure(
+                reason="graph:contoso could not finish the second span",
+                retryable=True,
+            ),
+        ),
+    )
+    body = sections(written(_run(built)))["Time-Critical Activities"]
+    assert "Payments Gateway Sync" in body
+    assert "graph:contoso" in body
+    assert "could not finish the second span" in body
+    assert "The calendar could not be read" not in body
 
 
 def test_every_calendar_failing_is_the_failure_branch_and_names_both(tmp_path):
@@ -666,6 +792,76 @@ def test_the_day_boundary_is_the_display_zones_and_not_utcs(tmp_path):
     body = sections(written(_run(built)))["Time-Critical Activities"]
     assert "Late Call" in body
     assert "Next Morning" not in body
+
+
+DAY_OPENS = datetime(2026, 9, 8, 22, 0, tzinfo=timezone.utc)
+"""Midnight on the display day in Europe/Warsaw, as a UTC instant.
+
+Where an all-day row actually starts: Graph sends one anchored to local
+midnight, which is also the one instant a zero-length span cannot overlap the
+day with — `start` and `end` are both exactly the boundary.
+"""
+
+
+def test_an_all_day_marker_at_local_midnight_is_placed_by_its_start(tmp_path):
+    """`33c` records an all-day row as zero minutes, so it has no span to overlap
+    the day with and has to be placed by its start instead.
+
+    At local midnight — where an all-day row really lands — the overlap test
+    fails on both sides: the marker ends exactly when the day opens. Dropping it
+    is silent in the worst way, because the section then reports a day with an
+    OOO block across the whole of it as a day the calendar answered nothing for.
+
+    A second, upcoming meeting is present so the section renders as a list: a day
+    whose only entry has ended collapses to one summary line (`23a`), and this
+    row is about placement rather than about that branch.
+    """
+    built = daemon(
+        tmp_path,
+        _Calendar(
+            "graph:contoso",
+            live=(
+                meeting("m_ooo", "Andrei OOO", start=DAY_OPENS, minutes=0),
+                meeting("m_later", "Payments Gateway Sync", start=_at(13, 0)),
+            ),
+        ),
+    )
+    body = sections(written(_run(built)))["Time-Critical Activities"]
+    assert "Andrei OOO" in body
+    assert "Payments Gateway Sync" in body
+
+
+def test_a_zero_length_marker_outside_the_day_is_still_excluded(tmp_path):
+    """The other half, so the branch is a placement and not an "always keep".
+
+    Yesterday's midnight marker and tomorrow's both fail it, from opposite
+    directions — the first because it ends before the day opens, the second
+    because it starts after the day closes.
+    """
+    built = daemon(
+        tmp_path,
+        _Calendar(
+            "graph:contoso",
+            live=(
+                meeting(
+                    "m_yesterday",
+                    "Yesterday OOO",
+                    start=DAY_OPENS - timedelta(days=1),
+                    minutes=0,
+                ),
+                meeting(
+                    "m_tomorrow",
+                    "Tomorrow OOO",
+                    start=DAY_OPENS + timedelta(days=1),
+                    minutes=0,
+                ),
+            ),
+        ),
+    )
+    body = sections(written(_run(built)))["Time-Critical Activities"]
+    assert "Yesterday OOO" not in body
+    assert "Tomorrow OOO" not in body
+    assert NO_MEETINGS in body
 
 
 def test_a_meeting_that_began_yesterday_and_is_still_running_is_listed(tmp_path):

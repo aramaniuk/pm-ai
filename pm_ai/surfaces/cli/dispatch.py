@@ -832,10 +832,25 @@ def _options(
             # silently is how they go on believing it.
             return {}, f"was given `--{option}` twice"
         if assigned:
+            if not inline:
+                # `--scope=` is an operator who meant to type a value and did
+                # not. Passed through, it reaches the handler as `""` and is
+                # refused as "not a scope" — a message about a word nobody
+                # wrote.
+                return {}, f"was given `--{option}=` with an empty value"
             parsed[option] = inline
             continue
         if not remaining:
             return {}, f"was given `--{option}` with no value after it"
+        if remaining[0].startswith("--"):
+            # `--scope --bogus` is a missing value, not a scope named
+            # `--bogus`. Swallowing the next option as a value produced a
+            # refusal about the wrong word entirely, and hid the option the
+            # operator forgot to fill in.
+            return {}, (
+                f"was given `--{option}` with no value after it — "
+                f"`{remaining[0]}` is another option"
+            )
         parsed[option] = remaining.pop(0)
     return parsed, None
 
