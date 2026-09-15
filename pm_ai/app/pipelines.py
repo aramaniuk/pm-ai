@@ -6,16 +6,53 @@ no other layer is permitted to do (AD-30).
 
 from __future__ import annotations
 
+import errno
+from datetime import datetime, timedelta, timezone, tzinfo
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
 from pm_ai.app.wiring import Daemon
+from pm_ai.core.config import ConfigRefused
+from pm_ai.core.event_log import EventLog
 from pm_ai.core.extraction import extract
+from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
+from pm_ai.core.goal_register import parse_goals
 from pm_ai.core.normalize import attribute_all
+from pm_ai.core.rendering import (
+    CalendarAnswer,
+    render_dashboard,
+    render_project_dashboard,
+)
 from pm_ai.core.sanitize import sanitize
 from pm_ai.domain.disclosure import assert_citation_legal
-from pm_ai.domain.events import NormalizedEvent
-from pm_ai.domain.identity import DataScope, TargetRef
+from pm_ai.domain.events import NormalizedEvent, ObservedEventType
+from pm_ai.domain.identity import DataScope, ScopeKind, TargetRef
 from pm_ai.domain.lifecycle import ProposalState
+from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.proposals import Proposal
-from pm_ai.domain.harvest import PersistResult
+from pm_ai.domain.harvest import (
+    UNCLASSIFIED_FAULT_IS_RETRYABLE,
+    Cursor,
+    HarvestFailure,
+    HarvestOutcome,
+    HarvestResult,
+    NoCalendarConnector,
+    PartialCalendar,
+    PersistResult,
+    UnreadCalendar,
+)
+from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
+
+DASHBOARD_ARTIFACT = "daily_dashboard.md"
+"""CAP-9's file, spelled once — the personal tree's copy and the project's.
+
+Declared in exactly two scope trees (`scope_model.py:540,733`), which is what
+makes `--scope people:bob` a refusal by name rather than a path that resolves to
+somewhere nothing declared.
+"""
+
+PERSONAL = DataScope(ScopeKind.PERSONAL)
+"""CAP-9 names `~/.manager-ai/memory/daily_dashboard.md`, so this is the default."""
 
 
 def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
@@ -196,3 +233,387 @@ def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: s
             daemon.storage.stage_proposal(p)
             staged.append(p)
     return {"executed": executed, "staged": staged, "extractions": results}
+
+
+# ── The dashboard pipeline (story 23b) ───────────────────────────────────────
+
+
+def run_dashboard(
+    daemon: Daemon, *, scope: DataScope | None = None, now: datetime
+) -> Path:
+    """Read the day, render it, and write `daily_dashboard.md`. Once, then exit.
+
+    In `app` for `run_harvest`'s reason: it has to touch storage, `core` and the
+    scope model at once, which no layer below may do (AD-30). It is also the only
+    layer that can reach a connector *and* the renderer, and today's schedule now
+    comes from a live calendar read rather than off disk — `core` is I/O-free and
+    `render_dashboard` is a pure function, so the composition root reads and the
+    renderer renders.
+
+    **Nothing here is a write but the last line.** No cursor is saved, no
+    `meetings/` record is mapped, no event is persisted and no event-log entry is
+    appended: a render projects truth rather than changing it, and a dashboard is
+    fully derivable from Tier 1 plus a clock, so a line per day per scope would
+    record nothing a reader could not reconstruct. That is also why `run_harvest`
+    is not called from here — a render that also ingests makes the one artifact
+    the PM reads at 07:00 a side effect of a write path, and hands a failed
+    harvest a second way to spoil the morning.
+
+    **Read and render fully before writing anything.** `write_artifact` replaces
+    a file whole, so opening the target first and meeting a malformed goals file
+    afterwards destroys yesterday's dashboard. The render is the last thing that
+    can fail, and it returns a string.
+
+    Returns the path written, so a surface can say where the file went without
+    composing one of its own.
+    """
+    scope = PERSONAL if scope is None else scope
+    _assert_dashboard_scope(scope)
+    # First, and before any read. The display zone decides which instants count
+    # as today, and it is read once here so that the day boundary the dashboard
+    # *shows* and the day boundary its meetings were *selected by* cannot
+    # disagree. Unset is refused rather than defaulted to UTC: a PM two zones
+    # away would silently get a day that is not theirs.
+    zone = _display_zone(daemon)
+
+    meetings = _todays_calendar(daemon, scope=scope, now=now, zone=zone)
+    entries = EventLog(daemon.storage).read(scope=scope)
+
+    if scope.kind is ScopeKind.PERSONAL:
+        # `read_artifact` answers `None` for an absent file, which `parse_goals`
+        # is defined to read as "no file" — distinct from `b""`, a file the PM
+        # created and has not filled in. The two need different sentences.
+        document = render_dashboard(
+            meetings,
+            entries,
+            parse_goals(
+                daemon.storage.read_artifact(scope=scope, artifact=GOALS_ARTIFACT),
+                scope=scope,
+            ),
+            now,
+            tz=zone,
+        )
+    else:
+        # A different function, not a flag. `render_project_dashboard` has no
+        # goals parameter, so this branch cannot hand it the personal register
+        # even by mistake (AD-25) — and no personal-scope artifact is opened on
+        # this path at all, which is the half a signature cannot enforce.
+        document = render_project_dashboard(meetings, entries, now, tz=zone)
+
+    try:
+        return daemon.storage.write_artifact(
+            document.encode("utf-8"), scope=scope, artifact=DASHBOARD_ARTIFACT
+        )
+    except OSError as blocked:
+        named = _blocked_by_a_directory(daemon, scope=scope)
+        if named is None:
+            raise
+        raise named from blocked
+
+
+def _blocked_by_a_directory(
+    daemon: Daemon, *, scope: DataScope
+) -> IsADirectoryError | None:
+    """The write refused because a directory stands where a `File` is declared.
+
+    `None` when it is anything else — a full disk, a read-only mount — which is
+    re-raised untouched: pm-ai did not decline those, and dressing them in a
+    sentence of its own would put a policy voice over a broken filesystem.
+
+    Named here rather than in the single writer, because the writer's
+    `os.replace` reports only `[Errno 21] Is a directory` with no path and no
+    idea what was expected. The empty-directory case raises `IsADirectoryError`
+    and the non-empty one `ENOTEMPTY`, which is why the discriminator is the
+    target's own node type rather than the errno.
+    """
+    target = daemon.storage.paths.resolve(scope, DASHBOARD_ARTIFACT)
+    if not target.is_dir():
+        return None
+    return IsADirectoryError(
+        errno.EISDIR,
+        f"{DASHBOARD_ARTIFACT} is declared a File in {scope} and a directory is "
+        f"standing where it belongs, so the dashboard could not be written. "
+        f"Nothing was changed; move or remove the directory",
+        str(target),
+    )
+
+
+def _assert_dashboard_scope(scope: DataScope) -> None:
+    """Refuse a scope whose tree declares no dashboard, by name.
+
+    `resolve` would refuse it too, but at the *write*, which is after every read
+    and every render — so the operator would pay for a fetch to be told the
+    command was never going to work. Named here, and named against the
+    declaration rather than a hand-kept list of two scopes.
+    """
+    if DASHBOARD_ARTIFACT in artifacts_in(scope.kind):
+        return
+    declared = sorted(
+        kind.value for kind in ScopeKind if DASHBOARD_ARTIFACT in artifacts_in(kind)
+    )
+    raise ScopeResolutionError(
+        f"{scope} declares no {DASHBOARD_ARTIFACT}, so there is nowhere in that "
+        f"tree for this command to write. It is declared in {', '.join(declared)} "
+        f"and nowhere else."
+    )
+
+
+def _display_zone(daemon: Daemon) -> tzinfo:
+    """`config.toml`'s `display_timezone`, or a refusal — never a default.
+
+    A typo'd zone never reaches here: `Config.__post_init__` validates the key
+    against the zone database when it is loaded, so the only state left to
+    handle is unset. `ConfigRefused` is the type for both, which is what keeps
+    "the zone is wrong" and "the zone is missing" one outcome to an operator
+    reading an exit code.
+    """
+    named = daemon.config.display_timezone
+    if not named:
+        raise ConfigRefused(
+            "display_timezone is not set in config.toml, so pm-ai does not know "
+            "which instants count as today. The dashboard's day boundary and the "
+            "calendar read that selects its meetings both depend on it, and "
+            "defaulting to UTC would put a meeting on the wrong day with nothing "
+            "on the page saying so. Set it to an IANA zone, such as "
+            "`display_timezone = \"Europe/Warsaw\"`."
+        )
+    return ZoneInfo(named)
+
+
+def _todays_calendar(
+    daemon: Daemon, *, scope: DataScope, now: datetime, zone: tzinfo
+) -> CalendarAnswer:
+    """What every enrolled calendar says about today, as one of four answers.
+
+    **Which connector is asked is derived from what connectors declare.** The
+    calendar is whichever enrolled instance's `emits()` contains
+    `CALENDAR_EVENT_HELD` — a capability `ConnectorPort` already declares — so
+    this slice keeps no second list of vendor names to fall out of step with the
+    first.
+
+    **Every calendar that answers is read, and no calendar's silence stops
+    another's answer.** Two enrolled connectors is the ordinary two-tenant PM
+    rather than a misconfiguration, so the days are merged rather than refused;
+    each is asked independently, and one that fails takes down its own rows and
+    nothing else.
+
+    **Sorted instance order, so a re-run of unchanged inputs is byte-identical**
+    — including which copy of a cross-invited meeting supplies the title and the
+    tentative flag.
+    """
+    instances = sorted(
+        instance
+        for instance, connector in daemon.connectors.items()
+        if ObservedEventType.CALENDAR_EVENT_HELD in connector.emits()
+    )
+    if not instances:
+        # Its own value, never a `HarvestFailure`: that branch of the renderer
+        # ends in `_retry_advice`, whose sentence quotes "the connector" — a
+        # report attributed to a connector nobody enrolled.
+        return NoCalendarConnector()
+
+    day_start, day_end = _day_bounds(now, zone=zone)
+    collected: list[Meeting] = []
+    unread: list[UnreadCalendar] = []
+    answered = 0
+    for instance in instances:
+        result = _ask(daemon, instance)
+        if result.failure is not None:
+            unread.append(UnreadCalendar(instance=instance, failure=result.failure))
+        else:
+            # Counted rather than inferred from whether rows came back. A
+            # calendar that answered and held nothing *measured* the day, and a
+            # calendar that could not be read did not — the whole distinction the
+            # union exists for, and one an empty list cannot carry.
+            answered += 1
+        # A failed fetch still carries the spans it did walk, and those meetings
+        # are real. Data that is present is never discarded because data
+        # elsewhere is missing — which is the same rule that makes a partial day
+        # a rendered day rather than a refused one.
+        #
+        # `records` as well as `live`, because the day is the whole day: `live`
+        # holds what has not ended and `records` what has, and a dashboard read
+        # at 15:00 that showed only the former would report an afternoon of four
+        # finished meetings as an empty calendar.
+        collected.extend(
+            meeting
+            for meeting in (*result.records, *result.live)
+            if _on_day(meeting, start=day_start, end=day_end)
+            and _belongs(meeting, scope=scope)
+        )
+
+    meetings = _deduplicate(collected)
+    if not unread:
+        return meetings
+    if answered or meetings:
+        # Something was read. **Whether any calendar answered, not whether the
+        # merged list is non-empty**: a connector reporting an empty day and a
+        # connector that could not be reached are different facts, and collapsing
+        # the first into the `HarvestFailure` branch would tell the reader the
+        # day is unknown when one calendar measured it and found nothing.
+        #
+        # `meetings` alone also keeps a partial walk here: a connector that
+        # failed on its second span still handed over its first span's rows, and
+        # those are present data.
+        return PartialCalendar(meetings=meetings, unread=tuple(unread))
+    # Nothing was read at all, so there is no query result to report and the
+    # renderer must say so rather than show an empty day.
+    return _one_failure(unread)
+
+
+def _ask(daemon: Daemon, instance: str) -> HarvestResult:
+    """One connector's harvest, with a contract breach costing only that one.
+
+    `ConnectorPort.harvest` reports rather than raises, and both connectors in
+    this build honour it. The guard is here anyway because the whole point of
+    asking each calendar independently is that one going wrong must not take the
+    others' rows with it — and an exception escaping this loop would do exactly
+    that, one line before the meetings that did arrive were rendered.
+
+    The exception's **type** and not its message: this sentence is read by a
+    human off a Markdown page, and a provider's own words arriving through an
+    unexamined `repr` is how a token ends up in a file.
+    """
+    try:
+        return daemon.connectors[instance].harvest(Cursor())
+    except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
+        return HarvestResult(
+            events=(),
+            cursor=Cursor(),
+            outcome=HarvestOutcome.FAILED,
+            failure=HarvestFailure(
+                reason=(
+                    f"{instance} raised {type(unexpected).__name__} instead of "
+                    f"reporting, which pm-ai cannot classify. That is a bug in "
+                    f"pm-ai rather than a verdict about the provider."
+                ),
+                retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
+            ),
+        )
+
+
+def _one_failure(unread: list[UnreadCalendar]) -> HarvestFailure:
+    """Every calendar failed, as the single value the renderer's branch takes.
+
+    One unread calendar passes its failure through **verbatim**, hint and all:
+    that is the ordinary single-tenant case, and paraphrasing a connector's own
+    sentence would lose the `Retry-After` the provider actually sent.
+
+    More than one is joined rather than picked between. Each reason already
+    names its own instance, so the sentence stays attributable; `retryable` is
+    the conjunction, because telling an operator to wait is only honest if
+    waiting clears *all* of them; and `retry_after` is dropped, because no
+    provider hinted at a wait covering somebody else's fault and composing one
+    would be a number nothing measured.
+    """
+    if len(unread) == 1:
+        return unread[0].failure
+    return HarvestFailure(
+        reason="; ".join(entry.failure.reason for entry in unread),
+        retryable=all(entry.failure.retryable for entry in unread),
+    )
+
+
+def _day_bounds(now: datetime, *, zone: tzinfo) -> tuple[datetime, datetime]:
+    """Midnight to midnight in the display zone, as two UTC instants.
+
+    The arithmetic is done on the *local* wall clock and converted afterwards,
+    which is what makes a DST day come out at 23 or 25 hours rather than at a
+    fixed 24. Adding a day to the UTC instant is the version that gets this
+    wrong, silently, twice a year.
+    """
+    local = now.astimezone(zone)
+    opened = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (
+        opened.astimezone(timezone.utc),
+        (opened + timedelta(days=1)).astimezone(timezone.utc),
+    )
+
+
+def _on_day(meeting: Meeting, *, start: datetime, end: datetime) -> bool:
+    """Whether a meeting touches the display day at all.
+
+    Overlap rather than "starts today", so a meeting that began yesterday
+    evening and is still running at 07:00 is on the page. The renderer decides
+    nothing about which day it is rendering — it renders what it is handed — so
+    dropping that meeting here would be this function silently deciding the PM
+    is not in it.
+
+    A zero-length row — an all-day marker, which `33c` records as zero minutes —
+    has no span to overlap with, so it is placed by its start.
+    """
+    if meeting.start >= end:
+        return False
+    finishes = meeting.start + timedelta(minutes=meeting.duration_minutes)
+    if finishes > start:
+        return True
+    return finishes == meeting.start and meeting.start >= start
+
+
+def _belongs(meeting: Meeting, *, scope: DataScope) -> bool:
+    """Whether this meeting may appear on this scope's dashboard.
+
+    **Asymmetric, deliberately.** A project dashboard carries only meetings the
+    connector placed in that project: AD-38 forbids a record written to the
+    project scope from referencing personal- or people-scope material, and a
+    project file listing the PM's 1:1 is exactly that. The personal dashboard
+    carries the PM's whole day, project meetings included, because CAP-9 asks
+    for *their* morning briefing and the meetings are all on their calendar —
+    filtering them out would empty the dashboard of a PM whose work is all
+    categorised, which is the failure mode the honesty rules exist to prevent.
+
+    The wall is one-directional because the leak is.
+    """
+    if scope.kind is ScopeKind.PERSONAL:
+        return True
+    return meeting.scope == scope
+
+
+def _deduplicate(meetings: list[Meeting]) -> tuple[Meeting, ...]:
+    """One meeting cross-invited to two tenants, listed once.
+
+    **Matched on identity, never on resemblance.** `meeting_id` is Graph's
+    per-mailbox `id`, so the same meeting reaching two tenants arrives under two
+    different ids and id-matching alone would deduplicate nothing in the case
+    that motivates deduplicating at all. `ical_uid` is the key that survives the
+    crossing, and the key is the **pair** `(ical_uid, start)`: whether Graph
+    reuses one `iCalUId` across a recurring series' occurrences is unmeasured —
+    the 2026-09-06 spike listed the field and never compared two occurrences —
+    and the pair is correct either way, because two tenants' copies of one
+    meeting share the instant and two occurrences of a series do not.
+
+    The `meeting_id` fallback applies **only when neither side carries a uid**.
+    A meeting that carries one has already been judged on it, and tying it to
+    another by id as well collapses two meetings whose uids disagree — where a
+    disagreeing uid is the evidence that they are different meetings, not a tie
+    for the id to break.
+
+    **Never on start and title.** Two organisations each holding a "Weekly Sync"
+    at 09:00 is a real double-booking, and it is the single most actionable fact
+    on the page — merging it away would hide the one thing the 07:00 reader most
+    needs to see.
+
+    The first copy in sorted-instance order is the one kept, so a re-run of
+    unchanged inputs is byte-identical down to which copy supplied the title and
+    the tentative flag.
+    """
+    kept: list[Meeting] = []
+    seen: set[tuple[str, datetime]] = set()
+    seen_unidentified: set[str] = set()
+    for meeting in meetings:
+        uid = meeting.ical_uid
+        if uid:
+            key = (uid, meeting.start)
+            if key in seen:
+                continue
+            seen.add(key)
+            # Deliberately **not** also recorded by id. A meeting carrying a uid
+            # has been judged on it; falling back to the id for it as well is
+            # what collapsed two meetings that share an id and disagree about
+            # their uid — and a uid that disagrees is evidence of difference.
+        else:
+            if meeting.meeting_id in seen_unidentified:
+                continue
+            seen_unidentified.add(meeting.meeting_id)
+        kept.append(meeting)
+    return tuple(kept)

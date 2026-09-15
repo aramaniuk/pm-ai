@@ -831,6 +831,12 @@ class GraphConnector:
             # this is not one of them, so a tentatively-accepted meeting is a
             # question the dashboard can show and no file can hold.
             tentative=(row.response or "").strip().casefold() == "tentativelyaccepted",
+            # In memory only, exactly as `tentative` is. `calendar_event_ref`
+            # above and `meeting_id` are both Graph's per-mailbox `id`, so a
+            # meeting cross-invited to two tenants arrives under two of them;
+            # this is the one identifier a surface reading both mailboxes can
+            # match the two copies on.
+            ical_uid=row.ical_uid,
         )
 
     def _to_event(self, meeting: Meeting, row: CalendarRow) -> NormalizedEvent:

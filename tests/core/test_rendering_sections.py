@@ -33,7 +33,12 @@ from pm_ai.core.rendering import (
 from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain.events import ObservedEventType
 from pm_ai.domain.goals import GoalDomain
-from pm_ai.domain.harvest import HarvestFailure
+from pm_ai.domain.harvest import (
+    HarvestFailure,
+    NoCalendarConnector,
+    PartialCalendar,
+    UnreadCalendar,
+)
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 
@@ -265,6 +270,168 @@ def test_an_unreachable_calendar_never_claims_an_empty_day():
     assert "could not be read" in body
     assert "the tenant refused the token" in body
     assert "will not clear on its own" in body
+
+
+def test_no_enrolled_calendar_is_its_own_answer_and_reports_no_connector():
+    """`23b`'s third state — and the whole reason it is not a `HarvestFailure`.
+
+    Asserted on the rendered *string* rather than on a branch being taken,
+    because the point of the value is that the page makes no claim about a
+    connector. `_retry_advice`'s unretryable sentence is the one that would be
+    printed if this reused `HarvestFailure`, and it names a report by a
+    connector that was never enrolled.
+    """
+    body = sections(render(meetings=NoCalendarConnector()))["Time-Critical Activities"]
+    assert NO_MEETINGS not in body
+    assert "No calendar is enrolled" in body
+    assert "the connector reports" not in body.casefold()
+    # Nor the other two advice sentences, which are the same defect in the
+    # retryable direction: there is no next harvest to clear anything.
+    assert "next harvest" not in body
+    assert "the provider asked for a wait" not in body.casefold()
+
+
+def test_no_enrolled_calendar_names_no_remedy():
+    """Measured, not tidiness: `pm-ai connector add graph <x>` refuses today.
+
+    `probe.PROBES` holds only `_gitlab`, so enrolling a `graph` system is
+    refused, and past the probe `enrol_connector` writes none of the four
+    settings a Graph connector needs. A dashboard printing a command that does
+    not work would be inventing a remedy, which is the same defect as inventing
+    a fact.
+    """
+    body = sections(render(meetings=NoCalendarConnector()))["Time-Critical Activities"]
+    assert "connector add" not in body
+    assert "pm-ai " not in body
+
+
+def test_a_partly_read_day_lists_what_arrived_and_names_what_did_not():
+    """`23b`'s fourth state — one calendar answered and another went dark.
+
+    Both halves, because the rule that settled it cuts both ways: data that is
+    present is not discarded because data elsewhere is missing, and a partial
+    day is never presented as a whole one.
+    """
+    body = sections(
+        render(
+            meetings=PartialCalendar(
+                meetings=(
+                    meeting(
+                        "m_payments",
+                        "Payments Gateway Sync",
+                        start=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc),
+                    ),
+                ),
+                unread=(
+                    UnreadCalendar(
+                        instance="graph:contoso",
+                        failure=HarvestFailure(
+                            reason="graph:contoso could not finish the span",
+                            retryable=True,
+                        ),
+                    ),
+                ),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert "Payments Gateway Sync" in body
+    assert "graph:contoso" in body
+    assert "could not finish the span" in body
+    assert "One calendar could not be read" in body
+    # Never the whole-day claim: some of this day was never read.
+    assert NO_MEETINGS not in body
+
+
+def test_a_partial_day_whose_answering_calendars_held_nothing_says_which():
+    """The empty half of a partial day is still not `NO_MEETINGS`.
+
+    `NO_MEETINGS` names a query result over *the* calendar, and here one
+    calendar was never asked successfully — so the claim would be about a day
+    nobody finished reading.
+    """
+    body = sections(
+        render(
+            meetings=PartialCalendar(
+                meetings=(),
+                unread=(
+                    UnreadCalendar(
+                        instance="graph:fabrikam",
+                        failure=HarvestFailure(reason="429", retryable=True),
+                    ),
+                ),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert NO_MEETINGS not in body
+    assert "The calendars that answered held nothing" in body
+    assert "graph:fabrikam" in body
+
+
+def test_two_unread_calendars_are_both_named_and_counted():
+    body = sections(
+        render(
+            meetings=PartialCalendar(
+                meetings=(
+                    meeting(
+                        "m_1",
+                        "Standup",
+                        start=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc),
+                    ),
+                ),
+                unread=(
+                    UnreadCalendar(
+                        instance="graph:contoso",
+                        failure=HarvestFailure(reason="token expired", retryable=False),
+                    ),
+                    UnreadCalendar(
+                        instance="graph:fabrikam",
+                        failure=HarvestFailure(reason="no route", retryable=True),
+                    ),
+                ),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert "2 calendars could not be read" in body
+    assert "graph:contoso" in body
+    assert "graph:fabrikam" in body
+
+
+def test_an_unread_calendar_with_a_blank_reason_still_reads_as_a_sentence():
+    """The `NO_REASON_GIVEN` rule, applied to the partial branch too."""
+    body = sections(
+        render(
+            meetings=PartialCalendar(
+                meetings=(),
+                unread=(
+                    UnreadCalendar(
+                        instance="graph:contoso",
+                        failure=HarvestFailure(reason="   ", retryable=False),
+                    ),
+                ),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert "the connector gave no reason" in body
+    assert not body.rstrip().endswith("—")
+
+
+def test_a_partial_day_renders_byte_identically_twice():
+    answer = PartialCalendar(
+        meetings=FULL_DAY_MEETINGS,
+        unread=(
+            UnreadCalendar(
+                instance="graph:contoso",
+                failure=HarvestFailure(reason="429", retryable=True),
+            ),
+        ),
+    )
+    assert render(meetings=answer) == render(meetings=answer)
+
+
+def test_a_partial_calendar_with_nothing_unread_is_refused():
+    """The value refuses to be a whole day wearing the partial name."""
+    with pytest.raises(ValueError, match="nothing unread"):
+        PartialCalendar(meetings=(), unread=())
 
 
 def test_a_retryable_failure_says_the_next_harvest_may_clear_it():

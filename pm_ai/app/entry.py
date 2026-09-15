@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import sys
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from pm_ai.app.pipelines import run_dashboard
 from pm_ai.app.wiring import Daemon, build
 from pm_ai.connectors.registry import check_health as probe_connectors
 from pm_ai.core.config import Config, ConfigRefused, load_config
@@ -89,6 +90,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             # is populated by `build()` and empty before it, and an empty
             # registry is a first-run state rather than a refusal.
             probe_connectors=lambda: probe_connectors(),
+            # `23b`'s pipeline, bound to the daemon this process built. Injected
+            # for `probe_connectors`' reason: `run_dashboard` reaches a
+            # connector, the scope model and the single writer at once, and
+            # `surfaces-through-core` forbids the CLI from importing any of the
+            # three. The instant comes from `daemon.clock` rather than from a
+            # `datetime.now()` here, so the day the dashboard renders and the
+            # timestamps storage stamps come off the same clock.
+            dashboard=_dashboard(daemon),
             # What stopped the daemon being built, so a refusal can name it.
             # `config.toml` is the case that needs it: `4j`'s matrix requires
             # `pm-ai config show` to report the loader's own message, and this
@@ -117,6 +126,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return EXIT_UNEXPECTED
+
+
+def _dashboard(daemon: Daemon | None) -> Callable[[DataScope], Path]:
+    """`run_dashboard`, bound to this process's daemon and to its clock.
+
+    A closure rather than the pipeline itself, because the CLI may not name
+    `Daemon` — `surfaces` sits below `app` — so what crosses the boundary is a
+    function of a scope.
+
+    The unbuilt case returns a callable that refuses rather than `None`. Nothing
+    should ever reach it: `_dashboard` in the CLI asks `require_daemon()` first
+    and gets the composition root's own sentence, which names *why* there is no
+    daemon. This is the guard behind that, and it raises rather than returning a
+    path a caller would print without a file behind it.
+    """
+    if daemon is None:
+        def unavailable(scope: DataScope) -> Path:
+            raise ScopeResolutionError(
+                f"no daemon was built on this machine, so the {scope} dashboard "
+                f"has nothing to render from. `pm-ai doctor` reports why."
+            )
+
+        return unavailable
+    # `daemon.clock` rather than a `datetime.now()` composed here: the daemon was
+    # built with one clock and the single writer stamps from it, so a dashboard
+    # whose day boundary came from a second read would be dated against a clock
+    # nothing else in the process consults (AD-5).
+    return lambda scope: run_dashboard(daemon, scope=scope, now=daemon.clock())
 
 
 def read_optional(

@@ -12,11 +12,15 @@ needs a subprocess and every branch is reachable.
 from __future__ import annotations
 
 import ast
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from pm_ai.app import entry
+from pm_ai.core.config import Config
+from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.platform.doctor import Health, Probe, Report
 from pm_ai.ports import (
     MASTER_KEY_NAME,
@@ -561,3 +565,232 @@ def test_a_real_machine_reaches_doctor_and_refuses_the_rest(capsys):
     assert "project" in capsys.readouterr().out
     assert entry.main(["config", "show"]) == EXIT_REFUSAL
     assert entry.main(["key", "enrol"]) == EXIT_REFUSAL
+
+
+# ── Story 23b — `pm-ai dashboard`, and the optional argument it brought ───────
+
+
+@pytest.fixture
+def rendered(monkeypatch):
+    """Record what scope the CLI asked the pipeline for, without running it.
+
+    The pipeline itself is exercised end to end in `tests/slice`. What is under
+    test here is the translation: which words parse, which refusals map onto
+    which exit code, and that `--scope` reaches the pipeline as a `DataScope`
+    rather than as the string the operator typed.
+    """
+    asked: list[DataScope] = []
+
+    def record(scope: DataScope) -> Path:
+        asked.append(scope)
+        return Path("/tmp/daily_dashboard.md")
+
+    monkeypatch.setattr(entry, "_dashboard", lambda daemon: record)
+    return asked
+
+
+def test_dashboard_defaults_to_the_personal_scope(registered, rendered, capsys):
+    """CAP-9 names `~/.manager-ai/memory/daily_dashboard.md`, so personal it is."""
+    assert entry.main(["dashboard"]) == EXIT_OK
+    assert [scope.kind for scope in rendered] == [ScopeKind.PERSONAL]
+    assert "daily_dashboard.md" in capsys.readouterr().out
+
+
+def test_dashboard_takes_a_project_scope(registered, rendered):
+    assert entry.main(["dashboard", "--scope", "project:alpha"]) == EXIT_OK
+    assert rendered == [DataScope(ScopeKind.PROJECT, project_id="alpha")]
+
+
+def test_the_option_may_be_written_with_an_equals_sign(registered, rendered):
+    assert entry.main(["dashboard", "--scope=project:alpha"]) == EXIT_OK
+    assert rendered == [DataScope(ScopeKind.PROJECT, project_id="alpha")]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["dashboard", "--scope", "alpha"],
+        ["dashboard", "--scope", "project:"],
+        ["dashboard", "--scope", "personal:someone"],
+    ],
+)
+def test_an_unparseable_scope_is_a_usage_error_before_any_read(
+    registered, rendered, argv, capsys
+):
+    """Matrix — `2`, not `3`. Nothing was asked of the daemon.
+
+    The distinction is the whole reason the parse is separate from the refusal:
+    `alpha` is a command line pm-ai cannot read, while `people:bob` below is one
+    it read and declined.
+    """
+    assert entry.main(argv) == EXIT_USAGE
+    assert not rendered
+    assert "is not a scope" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("scope", ["people:bob", "application"])
+def test_an_undeclared_scope_is_refused_by_name(registered, scope, capsys):
+    """Matrix — `3`. The scope parses; its tree declares no dashboard.
+
+    Run through the *real* pipeline rather than the recording double, because
+    the refusal being asserted is the pipeline's and its sentence is what the
+    operator reads.
+    """
+    assert entry.main(["dashboard", "--scope", scope]) == EXIT_REFUSAL
+    printed = capsys.readouterr().err
+    assert "daily_dashboard.md" in printed
+    assert "personal" in printed and "project" in printed
+    assert "Traceback" not in printed
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["dashboard", "extra"], "takes options, not `extra`"),
+        (["dashboard", "--bogus", "x"], "has no `--bogus` option"),
+        (["dashboard", "--scope"], "with no value after it"),
+        # A missing value, not a scope named `--bogus`. Swallowing the next
+        # option produced a refusal about the wrong word entirely and hid the
+        # option the operator forgot to fill in.
+        (["dashboard", "--scope", "--bogus"], "`--bogus` is another option"),
+        (["dashboard", "--scope="], "with an empty value"),
+        (
+            ["dashboard", "--scope", "personal", "--scope", "personal"],
+            "was given `--scope` twice",
+        ),
+    ],
+)
+def test_every_way_of_misspelling_the_option_is_a_usage_error(
+    registered, rendered, argv, expected, capsys
+):
+    """A word an operator typed is never silently dropped — `4j`'s rule, kept.
+
+    Two values for one option is refused rather than resolved last-one-wins: an
+    operator who wrote both believes something other than what would happen, and
+    picking one silently is how they go on believing it.
+    """
+    assert entry.main(argv) == EXIT_USAGE
+    assert not rendered
+    assert expected in capsys.readouterr().err
+
+
+def test_a_command_declaring_no_options_still_refuses_trailing_words(capsys):
+    """The `23b` mechanism narrows `4j`'s rule rather than relaxing it."""
+    assert entry.main(["doctor", "--scope", "personal"]) == EXIT_USAGE
+    assert "takes no arguments" in capsys.readouterr().err
+
+
+def test_dashboard_needs_a_daemon_and_says_so(monkeypatch, capsys):
+    monkeypatch.setattr(entry, "_registered_projects", dict)
+    assert entry.main(["dashboard"]) == EXIT_REFUSAL
+    assert "could not build a daemon" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "raised, fragment",
+    [
+        (cli.ConfigRefused("display_timezone is not set"), "display_timezone"),
+        (cli.MalformedGoals("line 4: duplicate goal id `g_x`"), "g_x"),
+        (cli.MalformedEntry("2026-09.md line 2: no closing bracket"), "2026-09.md"),
+        # Not a subclass of `MalformedEntry`, so the row above does not stand in
+        # for it: `parse_segment` raises one or the other and a tuple that had
+        # quietly lost this member would turn a corrupt segment into a traceback.
+        (cli.UnknownCategory("2026-09.md line 9: `gossip` is not a category"), "gossip"),
+        (cli.ScopeResolutionError("people:bob declares no daily_dashboard.md"), "people:bob"),
+    ],
+)
+def test_every_pipeline_refusal_exits_3_with_its_own_sentence(
+    registered, monkeypatch, raised, fragment, capsys
+):
+    """Passed through verbatim. These messages name the offending key, id or
+    segment, and a paraphrase here would drop the detail that makes them
+    actionable.
+    """
+    def refuse(scope):
+        raise raised
+
+    monkeypatch.setattr(entry, "_dashboard", lambda daemon: refuse)
+    assert entry.main(["dashboard"]) == EXIT_REFUSAL
+    printed = capsys.readouterr().err
+    assert fragment in printed
+    assert "Traceback" not in printed
+
+
+def test_an_unexpected_exception_from_the_pipeline_still_exits_1(
+    registered, monkeypatch, capsys
+):
+    """`23b` may not add to the exit-code table, and a bug is not a refusal."""
+    def burst(scope):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(entry, "_dashboard", lambda daemon: burst)
+    assert entry.main(["dashboard"]) == EXIT_UNEXPECTED
+    assert "Traceback" in capsys.readouterr().err
+
+
+def test_the_usage_line_spells_the_optional_argument(capsys):
+    assert "dashboard [--scope <scope>]" in cli.usage()
+
+
+def test_the_default_dashboard_callable_refuses_rather_than_returning_a_path(
+    registered, monkeypatch, capsys
+):
+    """The wiring guard, reached by not injecting the pipeline at all.
+
+    A command that printed a filename without having written one is worse than a
+    command that fails, so the `Context` default raises instead of returning a
+    path — and it lands on the refusal code rather than as a traceback.
+    """
+    monkeypatch.setattr(entry, "_dashboard", lambda daemon: cli._no_dashboard)
+    assert entry.main(["dashboard"]) == EXIT_REFUSAL
+    printed = capsys.readouterr().err
+    assert "wiring fault" in printed
+    assert "Traceback" not in printed
+
+
+def test_the_real_dashboard_closure_writes_a_file_through_the_cli(
+    registered, monkeypatch, capsys
+):
+    """The one test that runs `pm-ai dashboard` with nothing stubbed between the
+    argument vector and the bytes on disk.
+
+    Everything above replaces `entry._dashboard`, so the closure it builds — the
+    `run_dashboard` call, the scope it forwards and the instant it reads off
+    `daemon.clock` — was observed by nothing. Mutating `now=daemon.clock()` to a
+    naive value left the whole suite green, which is exactly the kind of gap a
+    seam-heavy CLI suite produces.
+    """
+    monkeypatch.setattr(
+        entry,
+        "_config",
+        lambda storage: Config(display_timezone="Europe/Warsaw", pm_handle="a@b.c"),
+    )
+    assert entry.main(["dashboard"]) == EXIT_OK
+
+    written = registered / ".manager-ai" / "memory" / "daily_dashboard.md"
+    assert written.is_file()
+    text = written.read_text(encoding="utf-8")
+    assert text.startswith("## Time-Critical Activities")
+    assert str(written) in capsys.readouterr().out
+
+
+def test_the_daemon_holds_the_very_clock_it_was_built_with(tmp_path):
+    """`23b` reads `daemon.clock` rather than composing a second `datetime.now()`.
+
+    Asserted by identity, because a second clock is not a wrong value — it is a
+    right value from the wrong source, and every timestamp comparison in the
+    suite would go on passing while the dashboard's day boundary and the single
+    writer's stamps came off different reads.
+    """
+    from pm_ai.app.wiring import build
+
+    fixed = lambda: datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
+    assert build(tmp_path, "alpha", now=fixed).clock is fixed
+
+
+def test_a_daemon_built_with_no_clock_still_has_one_that_answers():
+    """The default, so the field cannot be a hole on the real composition path."""
+    from pm_ai.app.wiring import build
+
+    clock = build(Path(tempfile.mkdtemp()), "alpha").clock
+    assert clock().tzinfo is timezone.utc

@@ -296,13 +296,21 @@ def as_stored(meeting: Meeting) -> Meeting:
       than left standing, because leaving it would make the round-trip property
       false for a meeting a connector had marked and would report that as a
       render/parse defect rather than as the rule it is.
+    - **`ical_uid`.** It joined `Meeting` with story `23b` on `tentative`'s exact
+      precedent and for the same structural reason: `_FIELDS` has no key for it,
+      so nothing it rides on reaches a file. It exists to match two copies of one
+      meeting arriving from two tenants *in memory*, during a single read of the
+      day — a question no record read back off disk is ever asked, since `put`
+      writes one meeting per id per scope.
 
-    Everything else round-trips unchanged, so those two are the whole of the loss.
+    Everything else round-trips unchanged, so those three are the whole of the
+    loss.
     """
     return replace(
         meeting,
         attendees=tuple(Actor(actor_id=attendee.actor_id) for attendee in meeting.attendees),
         tentative=False,
+        ical_uid=None,
     )
 
 

@@ -105,10 +105,20 @@ def _zoned(moment: datetime) -> dict:
     }
 
 
+ICAL_UID = "040000008200E00074C5B7101A82E00807D0B0F2A1B3DC01000000000000000010000000"
+"""One organiser's `iCalUId`, in the shape Graph sends — a long hex string.
+
+Deliberately unlike the `id` beside it, because that is the whole point of the
+field: `id` is per-mailbox and this is not, so a fixture where the two were
+similar would let a mapping that returned the wrong one look right.
+"""
+
+
 def _event(start: datetime, end: datetime, **overrides) -> dict:
     """One `calendarView` event in slice 0's measured shape."""
     event = {
         "id": "AAMkAGI2-single",
+        "iCalUId": ICAL_UID,
         "subject": "Sprint review",
         "start": _zoned(start),
         "end": _zoned(end),
@@ -610,6 +620,62 @@ def test_a_room_booking_with_no_join_reference_still_carries_the_event_id():
 
     (record,) = result.records
     assert record.calendar_event_ref == "AAMk-room"
+
+
+# ── iCalUId ──────────────────────────────────────────────────────────────────
+
+
+def test_the_ical_uid_rides_the_row_and_the_meeting_and_reaches_no_file(tmp_path):
+    """`23b`'s dedup key, end to end from the payload to the bytes on disk.
+
+    Three hops, because a break in any one of them is silent: the field has no
+    effect at all until two calendars are read at once, and a slice reading one
+    tenant would go on passing with `ical_uid` hard-wired to `None`.
+
+    The last assertion is `tentative`'s exactly — "not stored" and "stored as
+    empty" read alike from the caller, so it is made on the record's bytes.
+    """
+    (row,) = _connector(_upcoming()).calendar.fetch(since=None).rows
+    assert row.ical_uid == ICAL_UID, "the row carries what the payload sent"
+    assert row.event_id != row.ical_uid, (
+        "and it is not the per-mailbox `id`, which is the identifier it exists "
+        "to be different from"
+    )
+
+    (meeting,) = _harvest(_upcoming()).live
+    assert meeting.ical_uid == ICAL_UID, "and the mapping carries it onto the Meeting"
+
+    (record,) = _harvest(_ended()).records
+    assert record.ical_uid == ICAL_UID
+
+    daemon = build(tmp_path, "alpha", now=lambda: NOW)
+    daemon.meetings.put(record)
+    written = daemon.storage.read_artifact(
+        scope=PERSONAL,
+        artifact=MEETINGS,
+        name=record_name(record.meeting_id, record.start),
+    )
+    assert b"ical_uid" not in written
+    assert ICAL_UID.encode("utf-8") not in written, (
+        "the field is carried in memory so two copies of one meeting can be "
+        "matched during a single read of the day; no record read back off disk "
+        "is ever asked that question"
+    )
+    assert daemon.meetings.get(record.meeting_id, scope=PERSONAL).meeting == as_stored(
+        record
+    )
+
+
+@pytest.mark.parametrize("sent", [None, "", "   ", 7])
+def test_a_row_without_a_usable_ical_uid_carries_no_uid_at_all(sent):
+    """Absence stays absence, which is what makes the key safe to match on.
+
+    A blank or missing `iCalUId` collapsing to `""` would make every such
+    meeting equal to every other, and `23b` would merge two unrelated
+    appointments into one line on the day the provider stopped sending it.
+    """
+    (meeting,) = _harvest(_upcoming(iCalUId=sent)).live
+    assert meeting.ical_uid is None
 
 
 # ── Tentative ────────────────────────────────────────────────────────────────

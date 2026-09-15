@@ -164,6 +164,74 @@ class RowRefusal:
     reason: str
 
 
+# ── The calendar's other answers (story 23b) ─────────────────────────────────
+#
+# A surface asking "what is on today?" can get four answers, and only two of
+# them were expressible before this: a sequence of meetings, or a
+# `HarvestFailure`. The two below are the other two, and they are declared here
+# rather than in `meetings.py` because `PartialCalendar` holds a
+# `HarvestFailure` and this module already imports `Meeting` — declaring them
+# there would close an import cycle.
+
+
+@dataclass(frozen=True, slots=True)
+class NoCalendarConnector:
+    """Nothing enrolled on this machine declares `CALENDAR_EVENT_HELD`.
+
+    A third state, neither an empty day nor a failed fetch, and it needs its own
+    value because reusing `HarvestFailure` makes a renderer print a *report* —
+    "the connector reports this will not clear on its own" — attributed to a
+    connector that was never enrolled. That is a claim about a thing that does
+    not exist, in the one file the PM reads every morning.
+
+    Carries nothing. There is no instance to name, no provider to quote and no
+    reason beyond the absence itself; a field here would have to be composed
+    rather than measured.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class UnreadCalendar:
+    """One enrolled calendar that could not be read, named beside its reason.
+
+    The pair exists because `HarvestFailure` carries no instance: its `reason`
+    is a sentence a connector composed and may or may not begin with its own
+    name, and a dashboard saying *which* of two tenants went dark cannot depend
+    on that.
+    """
+
+    instance: str
+    failure: HarvestFailure
+
+
+@dataclass(frozen=True, slots=True)
+class PartialCalendar:
+    """Some calendars answered and some did not — the day, read in part.
+
+    Unrepresentable by a union carrying either a list or a failure, which is why
+    it is a member of its own. Two enrolled connectors where one answers and one
+    fails is an ordinary two-tenant morning, and the rule that settles it is the
+    same one that refuses to fail on two connectors at all: data that is present
+    is not discarded because data elsewhere is missing, and a partial day is
+    never presented as a whole one.
+
+    `meetings` may be empty — every answering calendar held nothing while
+    another failed — and that is still this value rather than a `HarvestFailure`,
+    because something *was* asked and answered.
+    """
+
+    meetings: tuple[Meeting, ...]
+    unread: tuple[UnreadCalendar, ...]
+
+    def __post_init__(self) -> None:
+        if not self.unread:
+            raise ValueError(
+                "PartialCalendar with nothing unread is a whole day wearing the "
+                "partial value's name. A sequence of meetings is what a day "
+                "every calendar answered for looks like."
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class HarvestResult:
     """What every connector returns (AD-9, AD-35).

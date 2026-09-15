@@ -80,10 +80,15 @@ from pm_ai.core.goal_register import GoalRegister
 from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain.events import ObservedEventType
 from pm_ai.domain.goals import Goal, GoalDomain
-from pm_ai.domain.harvest import HarvestFailure
+from pm_ai.domain.harvest import (
+    HarvestFailure,
+    NoCalendarConnector,
+    PartialCalendar,
+)
 from pm_ai.domain.meetings import Meeting
 
 __all__ = [
+    "CalendarAnswer",
     "GOALS_PATH",
     "HEADINGS",
     "LEADERSHIP_NOTES",
@@ -99,6 +104,29 @@ __all__ = [
     "render_dashboard",
     "render_project_dashboard",
 ]
+
+
+CalendarAnswer = (
+    Sequence[Meeting] | HarvestFailure | NoCalendarConnector | PartialCalendar
+)
+"""Everything "what is on today?" can honestly answer, and nothing else.
+
+Four members because there are four distinct facts, and the type exists so that
+no two of them can be collapsed into one sentence:
+
+- a **sequence** is a query that ran and returned these meetings — possibly none,
+  which is a measured empty day;
+- a **`HarvestFailure`** is a fetch that could not be completed, so there is no
+  query result to report at all;
+- a **`NoCalendarConnector`** is no calendar to ask, which is neither of the
+  above and must not borrow the second's wording — that wording quotes a
+  connector, and there is none to quote;
+- a **`PartialCalendar`** is some calendars answering and some not, which a
+  either/or union cannot express without throwing away one half.
+
+Widened from two members to four by story `23b`, the slice that performs the
+fetch and therefore the only one that can tell these four apart.
+"""
 
 
 # ── The four headings, in CAP-9's order ──────────────────────────────────────
@@ -217,7 +245,7 @@ NO_PRODUCER_YET = (
 
 
 def render_dashboard(
-    meetings: Sequence[Meeting] | HarvestFailure,
+    meetings: CalendarAnswer,
     entries: Sequence[EventEntry],
     goals: GoalRegister,
     now: datetime,
@@ -226,10 +254,13 @@ def render_dashboard(
 ) -> str:
     """CAP-9's four sections, as Markdown, from these inputs and this instant.
 
-    `meetings` is the calendar's *answer*, not a list: a `HarvestFailure` says
-    the fetch could not be completed and carries why, and a sequence says it
-    could. Collapsing the two into an empty list is precisely the confusion the
-    honesty rule forbids, so the type refuses to do it.
+    `meetings` is the calendar's *answer*, not a list, and `CalendarAnswer` has
+    four members because there are four distinct facts: a sequence is a query
+    that ran, a `HarvestFailure` is a fetch that could not be completed, a
+    `NoCalendarConnector` is no calendar to ask at all, and a `PartialCalendar`
+    is some calendars answering while others did not. Collapsing any of them into
+    an empty list is precisely the confusion the honesty rule forbids, so the
+    type refuses to do it.
 
     `entries` is the scope's event log, **unbounded**. The window is applied
     here rather than by `EventLog.read`, because a bounded read drops an entry
@@ -260,7 +291,7 @@ def render_dashboard(
 
 
 def render_project_dashboard(
-    meetings: Sequence[Meeting] | HarvestFailure,
+    meetings: CalendarAnswer,
     entries: Sequence[EventEntry],
     now: datetime,
     *,
@@ -286,9 +317,12 @@ def render_project_dashboard(
     and the parameter list is what makes the *consequential* half impossible.
 
     `meetings` is the calendar's answer, not a list, for the same reason as in
-    `render_dashboard`: a project's day comes from a live fetch narrowed to that
-    scope (`33b`, 2026-09-07), and a fetch that failed is not a day with nothing
-    in it.
+    `render_dashboard`, and it is the same four-member `CalendarAnswer`: a
+    project's day comes from a live fetch narrowed to that scope (`33b`,
+    2026-09-07), and a fetch that failed is not a day with nothing in it — nor is
+    a machine with no calendar enrolled, nor a day only half of which was read.
+    All four render through the same `_time_critical`, which is what keeps the
+    two files saying the same thing about the same answer.
 
     `now` must be aware UTC and `tz` must be supplied, both exactly as above.
     Rendering the same inputs twice returns byte-identical output, and so does
@@ -348,9 +382,53 @@ def _require_tz(tz: tzinfo | None) -> tzinfo:
 
 
 def _time_critical(
-    meetings: Sequence[Meeting] | HarvestFailure, *, now: datetime, tz: tzinfo
+    meetings: CalendarAnswer, *, now: datetime, tz: tzinfo
 ) -> str:
     """Today's schedule, or the reason there is none to show."""
+    if isinstance(meetings, NoCalendarConnector):
+        # Deliberately not the `HarvestFailure` branch below, and this is the
+        # whole reason the value exists. That branch ends in `_retry_advice`,
+        # which for an unretryable failure prints "The connector reports this
+        # will not clear on its own" — a report attributed to a connector that
+        # was never enrolled, in the artifact whose entire discipline is that it
+        # never asserts what it did not compute.
+        #
+        # No remedy is named either, and that is measured rather than lazy: the
+        # obvious sentence to print is `pm-ai connector add graph <instance>`,
+        # and it refuses — `probe.PROBES` holds no `graph`, and past the probe
+        # `enrol_connector` writes none of the settings a Graph connector needs.
+        # A dashboard that printed a command which does not work would be
+        # inventing a remedy, which is the same defect as inventing a fact.
+        return (
+            "No calendar is enrolled on this machine — nothing here declares "
+            "that it can report meetings — so today's schedule is unknown. "
+            "Nothing was asked and nothing answered, which is why this section "
+            "reports no query result at all."
+        )
+
+    if isinstance(meetings, PartialCalendar):
+        # Both halves, always. The meetings that arrived are real and are not
+        # discarded because a second calendar went dark, and the calendar that
+        # went dark is named because a day presented whole when it is partial is
+        # the more expensive of the two mistakes.
+        arrived = (
+            _scheduled(meetings.meetings, now=now, tz=tz)
+            if meetings.meetings
+            else "The calendars that answered held nothing for today."
+        )
+        count = len(meetings.unread)
+        heading = (
+            "One calendar could not be read, so this is part of the day:"
+            if count == 1
+            else f"{count} calendars could not be read, so this is part of the day:"
+        )
+        named = "\n".join(
+            f"- **{escape(unread.instance)}** — "
+            f"{escape(unread.failure.reason) or NO_REASON_GIVEN}"
+            for unread in meetings.unread
+        )
+        return f"{arrived}\n\n{heading}\n\n{named}"
+
     if isinstance(meetings, HarvestFailure):
         # Never `NO_MEETINGS`. The fetch produced no answer, so there is no
         # result to report — and a dashboard that reported yesterday's silence
@@ -367,6 +445,20 @@ def _time_critical(
             f"{_retry_advice(meetings)}"
         )
 
+    return _scheduled(meetings, now=now, tz=tz)
+
+
+def _scheduled(
+    meetings: Sequence[Meeting], *, now: datetime, tz: tzinfo
+) -> str:
+    """The meetings a calendar actually answered with, as the section's body.
+
+    Split out of `_time_critical` by `23b` so the partial-day branch can render
+    the half that arrived through exactly this code rather than through a second
+    copy of it — the same reason the two dashboards share `_time_critical`
+    itself. A second copy is how a partial day grows a different line format from
+    a whole one and nobody notices for a month.
+    """
     # Before the sort, not after: comparing a naive start against an aware one
     # raises `TypeError` from inside `sorted`, which surfaces as the render
     # failing rather than as the caller being told what it handed over.
