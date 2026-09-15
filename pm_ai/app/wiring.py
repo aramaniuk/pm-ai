@@ -12,7 +12,7 @@ import json
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,10 +33,22 @@ from pm_ai.connectors.registry import ConnectorRegistry, install as install_conn
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
+from pm_ai.core.project_registry import (
+    DuplicateProject,
+    ProjectEntry,
+    ProjectPathUnusable,
+    RegistryRefused,
+    parse_registry,
+    render_registry,
+)
+from pm_ai.core.project_scaffold import render_gitignore
 from pm_ai.core.connector_enrolment import stored_credentials
 from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
+from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
+from pm_ai.domain.health import ArtifactState, Presence
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.ports import (
     MASTER_KEY_NAME,
     ConnectorPort,
@@ -45,6 +57,7 @@ from pm_ai.ports import (
     VcsPort,
 )
 from pm_ai.platform.environment import encryption_disabled as encryption_off
+from pm_ai.platform.claims import exclusive
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.platform.vcs import GitVcs
@@ -53,7 +66,20 @@ from pm_ai.skills.registry import SkillRegistry
 from pm_ai.storage.crypto import LazyKeyCrypto, PlaintextCrypto
 from pm_ai.storage.service import StorageService
 
-__all__ = ["Daemon", "MASTER_KEY_NAME", "build"]
+__all__ = [
+    "Bootstrap",
+    "CONFIG_ARTIFACT",
+    "Daemon",
+    "MASTER_KEY_NAME",
+    "REGISTRY_ARTIFACT",
+    "bootstrap",
+    "build",
+    "onboard_project",
+    "Onboarded",
+]
+
+REGISTRY_ARTIFACT = "projects.toml"
+CONFIG_ARTIFACT = "config.toml"
 
 
 @dataclass
@@ -658,3 +684,309 @@ def _enrolled_configurations(
         if isinstance(decoded, dict):
             entries.append(decoded)
     return tuple(entries)
+
+
+@dataclass(frozen=True, slots=True)
+class Bootstrap:
+    """The two application artifacts `doctor` reports on, read before any daemon.
+
+    One read each, from one `StorageService`, so `doctor` and the daemon cannot
+    end up holding two different answers about the same file.
+    """
+
+    projects: Mapping[str, ProjectEntry]
+    registry: ArtifactState
+    config: ArtifactState
+
+
+def bootstrap(keychain: KeychainPort, *, paths: ScopePaths | None = None) -> Bootstrap:
+    """`projects.toml` and `config.toml`, read before the daemon exists.
+
+    ## Why the read happens here at all
+
+    The registry has to be read *before* the resolver exists — `production()`
+    takes the mapping as an argument (AD-11) — but `StorageService` is the
+    single reader (AD-5) and is constructed *on* a resolver. `config.toml` used
+    to sidestep the circle by being read after `build()` returned; the registry
+    cannot, because `build()` is what needs it.
+
+    So the read happens against a **bootstrap resolver**: `production()` over an
+    empty mapping, which resolves the application scope perfectly well and knows
+    no projects. That costs nothing here — both files are application-scope, and
+    nothing in this function touches a project tree. `pm_ai.app` is the one
+    layer permitted to import both `pm_ai.storage` and `pm_ai.platform`, which
+    is why this lives in `wiring` and not in `entry` beside its caller.
+
+    ## `config.toml` is read here too, and that is the point
+
+    It could be read after `build()`, and was until 2026-09-15. Then `doctor`
+    grew a probe for it and the arrangement produced a lie on the most ordinary
+    machine there is: a first run has no project, so composition stopped before
+    the config was ever read, and the probe reported `FAILING` —
+    "could not reach the file to find out" — about a file that was simply not
+    there yet. Read here, that machine gets `ABSENT` and the command that fixes
+    it. `UNOBTAINABLE` is left for what it actually describes: a run where even
+    this could not happen.
+
+    The cipher is the ordinary one and costs nothing: `LazyKeyCrypto` reaches
+    the keychain when an encrypted artifact is touched, and neither of these is.
+
+    ## A refusal is not an absence
+
+    The mapping is empty in three different situations — no file, an empty file,
+    and a file that would not parse — and only the first two mean "no projects
+    are enrolled". The `ArtifactState` carries the difference to `doctor`, which
+    is the surface that has somewhere to say it. Nothing here raises on a
+    malformed registry: `4c` requires `pm-ai doctor` to survive a machine that
+    is broken, and a registry nobody can parse is exactly that machine.
+    """
+    resolver = paths if paths is not None else ScopePaths.production()
+    storage = StorageService(
+        resolver,
+        now=lambda: datetime.now(timezone.utc),
+        vcs=GitVcs(),
+        crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
+    )
+    registry = _artifact_state(storage, REGISTRY_ARTIFACT)
+    config = _artifact_state(storage, CONFIG_ARTIFACT)
+    if registry.raw is None:
+        return Bootstrap({}, registry, config)
+    try:
+        return Bootstrap(parse_registry(registry.raw), registry, config)
+    except RegistryRefused:
+        # Carried, not raised, and not logged here either: the state holds the
+        # bytes, so `registry_readable` re-reads them and reports the parser's
+        # own message — which names the project or the line, and is the only
+        # form of this an operator can act on.
+        return Bootstrap({}, registry, config)
+
+
+def _artifact_state(storage: StorageService, artifact: str) -> ArtifactState:
+    """One application-scope artifact as the reader found it.
+
+    The distinction `4i` needs and `bytes | None` cannot express: absence is a
+    first run with a command to fix it, while a permission error is a machine
+    with a file it cannot open. Folded together, an operator is told to create a
+    file they already have — and for the registry that advice is destructive,
+    since `projects.toml` is rebuildable from nothing and the command they would
+    run writes over it.
+    """
+    try:
+        raw = storage.read_artifact(scope=DataScope(ScopeKind.APPLICATION), artifact=artifact)
+    except FileNotFoundError:
+        # Unreachable through the real service since `8f` gave `read_artifact`
+        # its `bytes | None` form, and kept for a fake that has not caught up —
+        # the same arrangement, and the same reason, as `entry.read_optional`.
+        return ArtifactState.absent()
+    except OSError as unreadable:
+        return ArtifactState.unreadable(str(unreadable))
+    return ArtifactState.absent() if raw is None else ArtifactState.read(raw)
+
+
+@dataclass(frozen=True, slots=True)
+class Onboarded:
+    """What `onboard_project` did, in enough detail for the CLI to say so."""
+
+    project_id: str
+    repository: Path
+    gitignore: Path
+    already_registered: bool
+    """True when the registry already held this id at this path.
+
+    An ordinary outcome and not a failure (the human's Q5): re-running
+    `project add` on an onboarded project reports and changes nothing. It is a
+    separate field rather than an exception because the *command* succeeds —
+    exit 0 — and only the sentence printed differs.
+    """
+
+
+def onboard_project(
+    keychain: KeychainPort,
+    raw_path: str,
+    alias: str | None = None,
+    *,
+    paths: ScopePaths | None = None,
+) -> Onboarded:
+    """`pm-ai project add <path> [alias]` — everything but the printing.
+
+    ## Why the sequence lives in `app`
+
+    It needs three things no other layer may hold at once: the filesystem, which
+    `core` may not touch; `pm_ai.storage`, which `surfaces` may not reach; and
+    `_directory_name`'s standard for an id, which lives in `pm_ai.platform` and
+    which `core` may not import. `app` is the only layer permitted all three.
+
+    ## The order, and why every step is where it is
+
+    Validation first, and entirely: a path that is a file, or a name that cannot
+    be a directory, is refused before anything is created. A refusal after a
+    partial create leaves a project half-onboarded and the operator with no way
+    to tell how far it got.
+
+    Then the exclusive claim, held across read, decide and write. `write_artifact`
+    publishes with `os.replace`, so two concurrent runs that both read a
+    one-entry registry both render a two-entry one and the second silently
+    discards the first's project. The claim is what makes "both entries are
+    present afterwards" true rather than usually true.
+
+    Inside the claim: `.gitignore` before the structure, and the registry last.
+
+    - **`.gitignore` first** because `_assert_git_excludes` refuses every write
+      to a `GITIGNORED` artifact that git would commit, and since `1n` that is
+      the project's whole `memory/` tree. A project onboarded without the rule
+      looks onboarded and fails on its first harvest.
+    - **The registry last** so the failure mode is the recoverable one. If the
+      registry write is refused, the directory and the rule remain and re-running
+      completes; the reverse order would leave a registered project with no home.
+
+    ## What it does not do
+
+    No `git init`, and no check for a repository: `service.py:714-717` already
+    treats "no working tree" as an answer rather than an unanswered question, so
+    a plain directory onboards and gets its rule anyway. No removal, and no
+    rename of an id — the id is the scope directory name, so changing it moves
+    every artifact and stales every `SourceRef`.
+    """
+    repository = _resolved(raw_path)
+    project_id = alias if alias is not None else repository.name
+    resolver = paths if paths is not None else ScopePaths.production()
+    # `replace` rather than a second `production()` call. Rebuilding the resolver
+    # from scratch here discarded everything `paths` said about the *layout* and
+    # kept only its project map, so a caller that handed in `ScopePaths.rooted()`
+    # — the documented way to get a temporary layout, and the one `bootstrap`
+    # above honours — had its registry written under the real `$HOME` anyway.
+    # Caught in review on 2026-09-15; the tests missed it because they redirect
+    # `HOME` instead of passing a resolver.
+    #
+    # Through the resolver rather than `_directory_name` directly: that helper is
+    # private to `pm_ai.platform.paths`, and `scope_root` applies exactly the
+    # same standard and raises the same `MalformedSubjectId`. Asked against a
+    # resolver that knows this project, so an unusable *id* is what refuses here
+    # rather than an unregistered one.
+    known = replace(
+        resolver, project_roots={**resolver.project_roots, project_id: repository}
+    )
+    scope = DataScope(ScopeKind.PROJECT, project_id)
+    known.scope_root(scope)
+    _assert_usable(repository)
+    storage = StorageService(
+        known,
+        now=lambda: datetime.now(timezone.utc),
+        vcs=GitVcs(),
+        crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
+    )
+    with exclusive(known.project_registry):
+        state = _artifact_state(storage, REGISTRY_ARTIFACT)
+        if state.presence is Presence.UNREADABLE:
+            # The registry exists and could not be opened. `parse_registry(None)`
+            # means *absent*, so falling through would render a registry holding
+            # this project alone and `os.replace` it over the one that could not
+            # be read — and `projects.toml` is Tier 1, rebuildable from nothing,
+            # so every other enrolled project would be gone with the command
+            # reporting success. Measured doing exactly that in review on
+            # 2026-09-15: two projects enrolled, the file chmod 000, and the
+            # registry afterwards held only the third.
+            raise ProjectPathUnusable(
+                f"{known.project_registry} exists and could not be read: "
+                f"{state.detail}. Nothing was onboarded. pm-ai will not write a "
+                f"new registry over one it cannot read — that would forget every "
+                f"project already enrolled, and nothing else records them. Fix "
+                f"the file's permissions and run this again."
+            )
+        held = parse_registry(state.raw)
+        claimed = {e.path: i for i, e in held.items()}
+        registered_as = claimed.get(repository)
+        if registered_as is not None and registered_as != project_id:
+            # Two ids for one repository is not a second project: both resolve to
+            # the same `<repo>/.project-ai`, so they would share one event log,
+            # one meeting set and one dashboard while every `SourceRef` disagreed
+            # about which project owned them — and `_compose` would refuse every
+            # subcommand but `doctor` as an ambiguous registry, on a machine with
+            # exactly one repository.
+            raise DuplicateProject(
+                f"{repository} is already onboarded as {registered_as!r}, so it "
+                f"cannot also be onboarded as {project_id!r}. One directory is "
+                f"one project: both ids would resolve to the same "
+                f"{PROJECT_DIRNAME} tree and pm-ai would then have no way to "
+                f"choose between them. To rename the project, edit its entry in "
+                f"{known.project_registry}."
+            )
+        entry = held.get(project_id)
+        if entry is not None and entry.path != repository:
+            raise DuplicateProject(
+                f"project {project_id!r} is already registered at {entry.path}, "
+                f"and this would point it at {repository}. Artifacts have "
+                f"already been written and referenced under the old path, so "
+                f"re-pointing the id would leave its event log and meetings "
+                f"invisible — that is a migration, not a registration. Onboard "
+                f"the new path under a different alias."
+            )
+        already = entry is not None
+        _create(repository)
+        try:
+            existing = storage.read_project_gitignore(project_id)
+        except OSError as unreadable:
+            # `read_project_gitignore` propagates every `OSError` but absence,
+            # deliberately — "cannot open" must not read as "no rules yet". Here
+            # it becomes a refusal rather than reaching `main`'s generic handler,
+            # which exits 1 with a traceback. Exit 1 means "pm-ai broke" in the
+            # one table that decides these, and this is an ordinary thing to be
+            # wrong with a machine.
+            raise ProjectPathUnusable(
+                f"{repository / GITIGNORE_FILENAME} exists and could not be "
+                f"read: {unreadable}. Nothing was onboarded. pm-ai appends its "
+                f"rules to what is already there, so it will not write this "
+                f"file without first reading it."
+            ) from unreadable
+        gitignore = storage.write_project_gitignore(
+            project_id, render_gitignore(existing)
+        )
+        for node in PROJECT_TREE:
+            if node.is_dir:
+                known.resolve(scope, node.key, create=True)
+        if not already:
+            storage.write_artifact(
+                scope=DataScope(ScopeKind.APPLICATION),
+                artifact=REGISTRY_ARTIFACT,
+                payload=render_registry(
+                    {**held, project_id: ProjectEntry(path=repository, alias=alias)}
+                ),
+            )
+    return Onboarded(project_id, repository, gitignore, already)
+
+
+def _resolved(raw_path: str) -> Path:
+    """The path as an absolute one, `~` expanded and the working directory applied.
+
+    Only absolute is stored (the human's Q4): a relative path in `projects.toml`
+    means a different directory to every process that reads it, and the daemon is
+    not started from the shell the operator typed this in.
+
+    Resolved rather than merely joined, so `..` and a symlinked parent settle
+    here instead of in `_absolute_map`, which takes what it is given. `strict` is
+    off because the directory legitimately may not exist yet — creating it is
+    this command's job.
+    """
+    expanded = Path(raw_path).expanduser()
+    return (expanded if expanded.is_absolute() else Path.cwd() / expanded).resolve()
+
+
+def _assert_usable(repository: Path) -> None:
+    """Refuse a path that cannot become a project directory, before anything is made."""
+    if repository.exists() and not repository.is_dir():
+        raise ProjectPathUnusable(
+            f"{repository} is not a directory. A project is onboarded at a "
+            f"directory — pm-ai creates one when it is missing, and will not "
+            f"replace a file that is already there."
+        )
+
+
+def _create(repository: Path) -> None:
+    """Make the project directory if it is absent, or say why that cannot happen."""
+    try:
+        repository.mkdir(parents=True, exist_ok=True)
+    except OSError as refused:
+        raise ProjectPathUnusable(
+            f"{repository} could not be created: {refused}. Nothing was "
+            f"onboarded — check the permissions on the parent directory."
+        ) from refused

@@ -18,6 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from pm_ai.core.project_registry import ProjectEntry, render_registry
+from pm_ai.platform.doctor import ArtifactState, Presence
+from pm_ai.app.wiring import Bootstrap, bootstrap
 from pm_ai.app import entry
 from pm_ai.core.config import Config
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -39,6 +42,34 @@ from pm_ai.surfaces.cli.dispatch import (
 )
 
 PACKAGE_ROOT = Path(entry.__file__).resolve().parent.parent
+
+
+
+def enrolled(**projects: Path):
+    """A stand-in for `entry._bootstrap`, in its post-`4d` shape.
+
+    It returns the projects *and* an `ArtifactState` for each of the two
+    artifacts, because a caller has to be able to tell an absent registry from
+    an unreadable one — a stub returning only the mapping would no longer
+    type-check and, worse, would let `doctor` report a first run on a machine
+    whose registry could not be opened.
+
+    `config` is left `ABSENT`: these fixtures redirect `HOME` at a fresh
+    directory, so that is the truth for every test using one, and the rows that
+    care about the config write a real file into it.
+    """
+    entries = {name: ProjectEntry(path=path) for name, path in projects.items()}
+    registry = (
+        ArtifactState.read(render_registry(entries)) if entries else ArtifactState.absent()
+    )
+
+    def read(keychain):
+        # The real bootstrap for `config.toml`, the stub for the registry: the
+        # fixtures write a config into the redirected `HOME` and expect it to be
+        # honoured, and stubbing it flat would make those rows assert nothing.
+        return Bootstrap(entries, registry, bootstrap(keychain).config)
+
+    return read
 
 
 def report(*probes: Probe) -> Report:
@@ -63,7 +94,14 @@ def probes(monkeypatch):
     """
 
     def install(*results: Probe) -> None:
-        monkeypatch.setattr(entry, "run_all", lambda keychain: report(*results))
+        # `**_artifacts` swallows the `config=` and `registry=` that `4d` and
+        # `4i` added to `run_all`. A stub is standing in for the machine probes,
+        # and the two artifact probes are exercised against the real function in
+        # `tests/architecture/test_doctor.py`, so what this fixture has to do
+        # with them is accept them rather than model them.
+        monkeypatch.setattr(
+            entry, "run_all", lambda keychain, **_artifacts: report(*results)
+        )
 
     install(*HEALTHY)
     return install
@@ -82,7 +120,7 @@ def registered(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     repository = tmp_path / "repo"
     repository.mkdir()
-    monkeypatch.setattr(entry, "_registered_projects", lambda: {"alpha": repository})
+    monkeypatch.setattr(entry, "_bootstrap", enrolled(alpha=repository))
     return home
 
 
@@ -156,7 +194,7 @@ def test_a_system_exit_from_below_becomes_a_returned_code(probes, monkeypatch):
     thing an explicit `argv` bought.
     """
 
-    def exits(keychain):
+    def exits(keychain, **_artifacts):
         raise SystemExit(7)
 
     monkeypatch.setattr(entry, "run_all", exits)
@@ -245,15 +283,27 @@ def test_doctor_survives_an_unregistered_machine(probes, capsys):
 def test_two_registered_projects_are_reported_rather_than_guessed_between(
     tmp_path, monkeypatch, probes, capsys
 ):
-    """Choosing between enrolled projects belongs to the slice that owns the registry."""
+    """Choosing between enrolled projects belongs to the slice that owns the registry.
+
+    The *message* became this slice's business on 2026-09-15. Until `4d` filled
+    the registry this path was unreachable, and it reported ambiguity as "the
+    enrolled project cannot be resolved to a directory", remedy "Re-enrol the
+    repository" — wrong in every word for an operator whose two projects both
+    resolve. Asserted against the old wording as well as the new, because the
+    old one was *plausible* and that is what let it sit there.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         entry,
-        "_registered_projects",
-        lambda: {"alpha": tmp_path / "a", "beta": tmp_path / "b"},
+        "_bootstrap",
+        enrolled(alpha=tmp_path / "a", beta=tmp_path / "b"),
     )
     assert entry.main(["doctor"]) == EXIT_UNHEALTHY
-    assert "cannot be resolved" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "2 projects are registered" in printed
+    assert "alpha" in printed and "beta" in printed
+    assert "cannot be resolved" not in printed
+    assert "Re-enrol" not in printed
 
 
 def test_an_unwritable_root_is_a_probe_result_not_a_traceback(
@@ -284,7 +334,7 @@ def test_an_absent_config_is_a_first_run_not_an_error(registered, probes, capsys
 def test_read_optional_turns_absence_into_a_value(registered, tmp_path):
     """Absence is a value on this path — through the wrapper and, since `8f`,
     through `read_artifact` itself, which is what the wrapper now delegates to."""
-    daemon = entry._compose(_Keychain())[0]
+    daemon = entry._compose(_Keychain()).daemon
     assert daemon is not None
     assert entry.read_optional(
         daemon.storage, scope=entry.APPLICATION, artifact="config.toml"
@@ -322,10 +372,10 @@ def test_a_config_reaches_the_daemon_when_it_parses(registered):
     path = registered / ".pm-ai" / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('pm_handle = "pm@example.com"\n', encoding="utf-8")
-    daemon, failure = entry._compose(_Keychain())
-    assert failure is None
-    assert daemon is not None
-    assert daemon.pm_handle == "pm@example.com"
+    composed = entry._compose(_Keychain())
+    assert composed.failure is None
+    assert composed.daemon is not None
+    assert composed.daemon.pm_handle == "pm@example.com"
 
 
 # ── Bugs, refusals, and the secret that must never be printed ────────────────
@@ -334,7 +384,7 @@ def test_a_config_reaches_the_daemon_when_it_parses(registered):
 def test_an_unexpected_exception_exits_1_with_a_traceback(registered, monkeypatch, capsys):
     """Distinct from 2 and from 3, which is the whole point of having three codes."""
 
-    def explodes(keychain):
+    def explodes(keychain, **_artifacts):
         raise RuntimeError("a bug anywhere below")
 
     monkeypatch.setattr(entry, "run_all", explodes)
@@ -356,7 +406,7 @@ def test_a_refusal_exits_3(registered, monkeypatch, capsys):
         "TABLE",
         {**cli.TABLE, "needy": Command("needs a daemon", lambda c: c.require_daemon() and 0)},
     )
-    monkeypatch.setattr(entry, "_registered_projects", dict)
+    monkeypatch.setattr(entry, "_bootstrap", enrolled())
     assert entry.main(["needy"]) == EXIT_REFUSAL
     printed = capsys.readouterr().err
     assert "could not build a daemon" in printed
@@ -542,16 +592,35 @@ def test_a_help_flag_with_trailing_words_is_a_usage_error(capsys):
     assert "takes no arguments" in capsys.readouterr().err
 
 
-def test_the_registry_reader_is_honestly_empty_until_4d():
+def test_the_registry_reader_reads_the_file_and_nothing_else(tmp_path, monkeypatch):
     """The real function, not the stub every other test installs.
 
-    `_registered_projects` is monkeypatched in all six of its other uses, so
-    nothing exercised the one thing that decides whether any subcommand but
-    `doctor` can run. AD-11 forbids discovering projects by scanning, so an
-    unread registry must be empty rather than guessed at — and when `4d` gives
-    it a reader, this test is what fails and names the contract it changed.
+    This test used to assert `_registered_projects() == {}` and carried a note
+    saying that when `4d` gave the registry a reader, it was what would fail and
+    name the contract it changed. It did, on 2026-09-15. What it asserts now is
+    the half of AD-11 that did *not* change: a project is registered, never
+    discovered. So a `.project-ai` directory sitting in plain sight, with no
+    entry in `projects.toml`, still enrols nothing.
     """
-    assert entry._registered_projects() == {}
+    home = tmp_path / "home"
+    (home / ".pm-ai").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    discoverable = tmp_path / "repo" / ".project-ai"
+    discoverable.mkdir(parents=True)
+
+    read = entry._bootstrap(_Keychain())
+
+    assert read.projects == {}
+    assert read.registry.presence is Presence.ABSENT
+
+    (home / ".pm-ai" / "projects.toml").write_bytes(
+        render_registry({"alpha": ProjectEntry(path=tmp_path / "repo")})
+    )
+    read = entry._bootstrap(_Keychain())
+
+    assert set(read.projects) == {"alpha"}
+    assert read.projects["alpha"].path == tmp_path / "repo"
+    assert read.registry.presence is Presence.READ
 
 
 def test_a_real_machine_reaches_doctor_and_refuses_the_rest(capsys):
@@ -681,7 +750,7 @@ def test_a_command_declaring_no_options_still_refuses_trailing_words(capsys):
 
 
 def test_dashboard_needs_a_daemon_and_says_so(monkeypatch, capsys):
-    monkeypatch.setattr(entry, "_registered_projects", dict)
+    monkeypatch.setattr(entry, "_bootstrap", enrolled())
     assert entry.main(["dashboard"]) == EXIT_REFUSAL
     assert "could not build a daemon" in capsys.readouterr().err
 
@@ -760,10 +829,14 @@ def test_the_real_dashboard_closure_writes_a_file_through_the_cli(
     naive value left the whole suite green, which is exactly the kind of gap a
     seam-heavy CLI suite produces.
     """
-    monkeypatch.setattr(
-        entry,
-        "_config",
-        lambda storage: Config(display_timezone="Europe/Warsaw", pm_handle="a@b.c"),
+    # Written rather than stubbed. `entry._config` was the seam this used until
+    # `4d` replaced it with `_artifact_state`, and a real file is closer to what
+    # the docstring above claims anyway: nothing between the argument vector and
+    # the bytes on disk.
+    config = registered / ".pm-ai" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'pm_handle = "a@b.c"\ndisplay_timezone = "Europe/Warsaw"\n', encoding="utf-8"
     )
     assert entry.main(["dashboard"]) == EXIT_OK
 

@@ -1084,6 +1084,78 @@ class StorageService:
             return
         staged.unlink(missing_ok=True)
 
+    def read_project_gitignore(self, project_id: str) -> bytes | None:
+        """A repository's `.gitignore`, or `None` when it has none.
+
+        The read half of the pair below, here for the reason the write half is:
+        no scope tree declares this file, so `read_artifact` cannot address it,
+        and the single reader is the single reader (AD-5) whether or not an
+        artifact happens to fit the table.
+
+        Absence is a value rather than an exception — an unversioned directory
+        genuinely has no `.gitignore`, and that is the ordinary first-onboarding
+        state, not a fault. Every other `OSError` propagates: a directory in the
+        way or a permission refusal must not read as "no rules yet", because the
+        caller's next move is to write a file it believes is absent.
+        """
+        target = self._paths.gitignore(project_id)
+        try:
+            return target.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def write_project_gitignore(self, project_id: str, payload: bytes) -> Path:
+        """Publish a repository's `.gitignore`. Story 4k's one write outside a scope.
+
+        It needs its own method because it is the one file pm-ai writes that no
+        scope tree declares: `.gitignore` belongs to the *repository*, not to the
+        `.project-ai/` scope inside it, so `ScopePathPort.gitignore()` resolves
+        it and `resolve()` deliberately cannot (`paths.py:540-543`). Without this
+        the onboarding sequence would have had to open it itself, and AD-5's
+        static sweep covers `pm_ai.app` precisely so that does not happen
+        quietly.
+
+        No git check, and that is not an oversight: `_assert_git_excludes` asks
+        whether git would commit an artifact, and this file is the *answer* to
+        that question. Guarding it with itself would refuse to write the rule
+        that makes every subsequent write legal — a project could then never be
+        onboarded inside a repository at all.
+
+        Whole-file replacement, so the caller renders the complete content. It is
+        a file a team owns and hand-edits, and `pm_ai.core.project_scaffold`
+        renders it by *appending* what is missing to what was read, which is what
+        keeps adoption from being replacement. An append-only writer here would
+        have been the wrong shape for the same reason `render_registry` takes the
+        whole mapping: the caller must have read before it can write.
+
+        `_publish` directly rather than `_replace`, and this is the one place
+        that is correct. `_replace` asks `is_encrypted`, which answers `True` for
+        any path it cannot locate inside a scope — a fail-closed default that is
+        right everywhere else and wrong here, because this file is *deliberately*
+        outside every scope. Measured 2026-09-15: routed through `_replace`, the
+        first `pm-ai project add` inside a repository wrote an AES-GCM blob over
+        the team's `.gitignore` — or, on a machine with no key enrolled, refused
+        with a keychain error while onboarding a plain directory. Plaintext is
+        not a default here; it is the artifact's nature.
+        """
+        target = self._paths.gitignore(project_id)
+        self._publish(
+            target,
+            payload,
+            staging=target.parent,
+            # Not a restricted mode and not an enclave: a `.gitignore` is
+            # committed, read by git and by every member of the team, and 0600
+            # on it would be a file the operator's own tooling cannot read on a
+            # shared checkout.
+            mode=None,
+            enclave=False,
+            # Overwriting is the point — the payload is the old content plus
+            # what was missing, so refusing a taken name would make onboarding
+            # work exactly once per repository.
+            exclusive=False,
+        )
+        return target
+
     def write_artifact(
         self, payload: bytes, *, scope: DataScope, artifact: str, name: str | None = None
     ) -> Path:

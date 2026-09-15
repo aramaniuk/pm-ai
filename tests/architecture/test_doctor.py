@@ -25,6 +25,7 @@ import pytest
 from pm_ai.platform import doctor
 from pm_ai.platform import vcs as vcs_module
 from pm_ai.platform.doctor import (
+    ArtifactState,
     Health,
     encryption_toggle,
     git_available,
@@ -289,9 +290,10 @@ def test_every_probe_still_runs_when_one_fails(monkeypatch):
 
     report = run_all(keychain=Keychain(raises=KeychainUnavailable("locked")))
 
-    assert len(report.probes) == 5, "a probe went missing when another failed"
+    assert len(report.probes) == 7, "a probe went missing when another failed"
     assert {p.name for p in report.probes} == {
         "runtime packages", "sqlite extension support", "keychain", "encryption", "git",
+        "config.toml", "project registry",
     }
     assert not report.healthy
 
@@ -310,18 +312,30 @@ def test_a_warning_alone_makes_the_report_unhealthy(monkeypatch):
     assert not report.healthy
 
 
-def test_a_fully_healthy_machine_reports_healthy(monkeypatch):
+def test_a_fully_healthy_machine_reports_healthy(monkeypatch, tmp_path):
     """Simulated, because this repo is deliberately not one.
 
     The `runtime` extra is unset here on purpose — pyproject says the
     architecture suite must run before the stack resolves — so the packages probe
     is correctly FAILING and a healthy verdict is unreachable without standing
     that in. Before the fifth probe existed this test passed by accident.
+
+    The sixth and seventh probes are stood in the same way and for the same
+    reason: they interpret bytes a caller read, so "healthy" is only expressible
+    here by supplying bytes that are. Their *default* is deliberately not
+    healthy — a run nobody handed a config to reports that it could not find
+    out, which is why this test has to say so explicitly.
     """
     monkeypatch.delenv(DISABLE_ENCRYPTION_VAR, raising=False)
     monkeypatch.setattr(doctor, "missing_distributions", lambda _names: ())
+    enrolled = tmp_path / "alpha"
+    enrolled.mkdir()
 
-    report = run_all(keychain=Keychain(secret=SECRET))
+    report = run_all(
+        keychain=Keychain(secret=SECRET),
+        config=ArtifactState.read(b'pm_handle = "@ana"\n'),
+        registry=ArtifactState.read(f'[projects.alpha]\npath = "{enrolled}"\n'.encode()),
+    )
 
     assert report.healthy, str(report)
     assert "pm-ai is healthy." in str(report)
@@ -465,7 +479,7 @@ def test_an_unusable_sqlite3_does_not_stop_the_other_probes(monkeypatch):
 
     report = run_all(keychain=Keychain(secret=SECRET))
 
-    assert len(report.probes) == 5
+    assert len(report.probes) == 7
     assert not report.healthy
 
 
@@ -631,7 +645,155 @@ def test_the_report_leads_with_the_cause_not_the_consequence(monkeypatch):
 
     report = run_all(keychain=Keychain(secret=SECRET))
 
-    assert len(report.probes) == 5
+    assert len(report.probes) == 7
     assert report.probes[0].name.endswith("packages"), (
         "the cause must be reported before the probes that report its consequences"
     )
+
+
+# ── The two artifact probes, added together by stories 4d and 4i ─────────────
+#
+# One section, because the two slices were combined once the readiness check
+# found they were not independent: both add a probe, both change `run_all`'s
+# signature, and both rewrite the four count assertions above. The carrier they
+# share is `4i`'s — absent, unreadable and unobtainable are three answers with
+# three remedies, and `bytes | None` can only say two of them.
+
+
+def test_an_absent_config_is_a_first_run_and_names_the_command_that_fixes_it():
+    probe = doctor.config_readable(ArtifactState.absent())
+
+    assert probe.health is Health.ABSENT
+    assert "pm-ai setup" in probe.remediation
+
+
+def test_an_unreadable_config_is_distinct_from_an_absent_one():
+    """The row this carrier exists for.
+
+    Collapsed into absence, a permission error tells a first-time operator to
+    create a file they already have — and the remedy they need, checking the
+    file's ownership, is never offered.
+    """
+    probe = doctor.config_readable(ArtifactState.unreadable("Permission denied"))
+
+    assert probe.health is Health.FAILING
+    assert "Permission denied" in probe.detail
+    assert probe.remediation != doctor.config_readable(ArtifactState.absent()).remediation
+
+
+def test_an_unobtainable_config_is_distinct_from_both():
+    """Composition failed, so nothing could even try to read it.
+
+    Reported rather than guessed at: `4c` requires `doctor` to survive a failed
+    composition, and the honest answer there is "not from here", which is
+    neither "no file" nor "unreadable".
+    """
+    probe = doctor.config_readable(ArtifactState.unobtainable("no daemon was built"))
+
+    assert probe.health is Health.FAILING
+    assert "no daemon was built" in probe.detail
+
+
+def test_an_unparseable_config_carries_the_loaders_own_message():
+    """Not a traceback and not a paraphrase — the loader names the key."""
+    probe = doctor.config_readable(ArtifactState.read(b"pm_handle = 7\n"))
+
+    assert probe.health is Health.FAILING
+    assert "pm_handle" in probe.detail
+
+
+def test_a_readable_config_without_a_handle_warns_rather_than_passes():
+    """Nobody is the PM, so no spoken command can execute (`4a`).
+
+    `4h` never produces this state, so reaching it means a hand-edit removed the
+    handle — exactly the kind of thing a diagnostic exists to notice, and
+    exactly the kind that is invisible until a command is ignored.
+    """
+    probe = doctor.config_readable(ArtifactState.read(b"verbose_logging = true\n"))
+
+    assert probe.health is Health.WARNING
+
+
+def test_a_healthy_config_passes():
+    probe = doctor.config_readable(ArtifactState.read(b'pm_handle = "@ana"\n'))
+
+    assert probe.health is Health.OK
+
+
+def test_an_absent_registry_is_a_first_run_and_names_project_add():
+    probe = doctor.registry_readable(ArtifactState.absent())
+
+    assert probe.health is Health.ABSENT
+    assert "pm-ai project add" in probe.remediation
+
+
+def test_a_present_but_empty_registry_reports_absent_too():
+    """"Reachable, nothing stored" — the distinction `keychain_reachable` draws.
+
+    Both mean no project is enrolled and both are fixed by the same command, so
+    reporting them differently would be a difference an operator cannot act on.
+    """
+    probe = doctor.registry_readable(ArtifactState.read(b"# nothing here\n"))
+
+    assert probe.health is Health.ABSENT
+
+
+def test_an_unreadable_registry_is_failing_and_never_minted_over(tmp_path):
+    """The state that must not read as a first run.
+
+    An unreadable registry reported as absent is a registry the next
+    `project add` writes over, and `projects.toml` is rebuildable from nothing.
+    """
+    probe = doctor.registry_readable(ArtifactState.unreadable("Is a directory"))
+
+    assert probe.health is Health.FAILING
+    assert "Is a directory" in probe.detail
+
+
+def test_a_malformed_registry_carries_the_parsers_message():
+    probe = doctor.registry_readable(ArtifactState.read(b"[projects.alpha]\npath = 7\n"))
+
+    assert probe.health is Health.FAILING
+    assert "alpha" in probe.detail
+
+
+def test_a_registry_naming_a_deleted_repository_names_the_project(tmp_path):
+    """Row 7, reduced to what it can actually be: reporting.
+
+    The refusal half was dropped on 2026-09-15 — `UnknownProject` lives in
+    `platform` and `core` may not raise it, and `ScopePaths` performs no
+    existence check to refuse with. The probe is where the operator learns, and
+    the project's name is the whole value of the row.
+    """
+    gone = tmp_path / "moved-away"
+    raw = f'[projects.alpha]\npath = "{gone}"\n'.encode()
+
+    probe = doctor.registry_readable(ArtifactState.read(raw))
+
+    assert probe.health is Health.FAILING
+    assert "alpha" in probe.detail
+
+
+def test_a_registry_whose_repository_exists_passes(tmp_path):
+    present = tmp_path / "alpha"
+    present.mkdir()
+    raw = f'[projects.alpha]\npath = "{present}"\n'.encode()
+
+    assert doctor.registry_readable(ArtifactState.read(raw)).health is Health.OK
+
+
+def test_both_probes_run_when_the_other_one_fails(tmp_path):
+    """The sequential-and-independent rule, on the two probes added last.
+
+    Asserted because these two are the first probes that interpret a *value* a
+    caller supplied rather than asking the machine, so a shared helper raising
+    on a bad input would take both of them down together.
+    """
+    report = run_all(
+        keychain=Keychain(secret=SECRET),
+        config=ArtifactState.read(b"pm_handle = 7\n"),
+        registry=ArtifactState.unreadable("Is a directory"),
+    )
+
+    names = {p.name for p in report.probes}
+    assert "config.toml" in names and "project registry" in names

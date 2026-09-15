@@ -2,7 +2,7 @@
 title: 'doctor reports the config'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
 context: []
 ---
@@ -54,18 +54,22 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/platform/doctor.py` -- add the config probe with its states, and give `run_all` the config input -- the probe interprets bytes it is handed and opens nothing
-- [ ] `tests/architecture/test_doctor.py` -- **update the four assertions a sixth probe breaks**: the probe count and name set (`:292-295`), `:468`, `:634`, and the healthy-machine case (`:313`), which needs config bytes stood in the way `missing_distributions` already is -- then add the new probe's states
-- [ ] `pm_ai/platform/doctor.py` -- point the keychain `ABSENT` remediation at the command that fixes it, which `1g` deliberately left pending -- and assert the command name, not the bare word `"Enrol"` that `:133` currently matches
+- [x] `pm_ai/platform/doctor.py` -- add the config probe with its states, and give `run_all` the config input -- the probe interprets bytes it is handed and opens nothing
+- [x] `tests/architecture/test_doctor.py` -- **update the four assertions a new probe breaks**: the probe count and name set (`:292-295`), `:468`, `:634`, and the healthy-machine case (`:313`), which needs config bytes stood in the way `missing_distributions` already is -- then add the new probe's states
+- [x] `pm_ai/platform/doctor.py` -- point the keychain `ABSENT` remediation at the command that fixes it, which `1g` deliberately left pending -- and assert the command name, not the bare word `"Enrol"` that `:133` currently matches
 
 **Acceptance Criteria:**
 - Given a `config.toml` the loader refuses, when the probe runs, then the report carries the loader's own message and `run_all` still returns every other probe.
 - Given a file that exists but cannot be read, then the probe reports the read failure and **not** `ABSENT` — the two have different remedies, and collapsing them tells a first-time operator to create a file they already have.
 - Given `run_all` with no config input available, then the probe reports unknown-from-here and `doctor` still exits having run every machine probe — the state `4c` requires it to survive.
 - Given the keychain `ABSENT` remediation, then it names its command literally, asserted by that string rather than by `"Enrol"` — the substring at `test_doctor.py:133` passes whichever command the text names, or none.
-- Given `uv run pytest -q`, then the suite passes with six probes — the four existing assertions updated in this slice, not left for the next one to discover.
+- Given `uv run pytest -q`, then the suite passes with seven probes — the four existing assertions updated in this slice, not left for the next one to discover.
 
 ## Spec Change Log
+
+- **2026-09-15, built together with `4d`, so this is not the sixth probe.** The human combined the two slices at `4d`'s readiness check. They were listed as independently unblocked and are not: both add a probe, both change `run_all`'s signature, and both must edit the same four `test_doctor.py` assertions this slice's second task already names. Built together, the registry probe and the config probe are the sixth and seventh; the counts in the criterion and the Verification block move from six to seven, and the task now says "a new probe" rather than "a sixth".
+  **The three-state input carrier this slice specifies now serves both probes.** `4d`'s matrix needs the same distinction for `projects.toml` — absent, unreadable, unobtainable — and named no type for it. Rather than two carriers that agree by convention, the one this slice's frozen Always requires is the one `run_all` takes for each. The Always is unchanged; what changed is that a second caller now depends on it.
+  **Behaviour, states and remedies are untouched.** No matrix row changed, and the frozen block was not edited.
 
 - **2026-09-06, the frozen-block citations corrected on instruction — three named, and a fourth found while sweeping.** Addresses only. Every claim these clauses make is still true of the code; each one named where it used to live, all three for the same 2026-09-04 cause as the Code Map entry below.
   **The Intent's `doctor.py:377-395` and the Boundaries' `doctor.py:378-382` both pointed past the end of the file** — `doctor.py` is 349 lines. The five probes and their order are unchanged, now at `:341-349`; `run_all`'s "sequential and independent on purpose" is verbatim in its docstring, now at `:332-336`. An implementer following either got nothing, and knew it.
@@ -85,6 +89,6 @@ context: []
 ## Verification
 
 **Commands:**
-- `uv run pytest tests/architecture/test_doctor.py -q` -- expected: all states pass, six probes
+- `uv run pytest tests/architecture/test_doctor.py -q` -- expected: all states pass, seven probes
 - `uv run pytest -q` -- expected: no new failures
 - `uv run mypy` -- expected: clean

@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-__all__ = ["Health", "Probe", "Report"]
+__all__ = ["ArtifactState", "Health", "Presence", "Probe", "Report"]
 
 
 class Health(Enum):
@@ -85,3 +85,54 @@ class Report:
     def __str__(self) -> str:
         verdict = "healthy" if self.healthy else "NOT healthy"
         return "\n".join([*(str(p) for p in self.probes), "", f"pm-ai is {verdict}."])
+
+
+class Presence(Enum):
+    """How a read of one artifact turned out. Four answers, not two.
+
+    `bytes | None` was the obvious carrier and the wrong one: it reports a
+    permission error as an ordinary first run, and tells an operator to create a
+    file they already have. Each of these has its own remedy —
+
+    - `READ`: here are the bytes; whether they *parse* is the probe's question.
+    - `ABSENT`: no file. A first run. `pm-ai setup`, or `pm-ai project add`.
+    - `UNREADABLE`: a file exists and could not be read — a directory in the
+      way, EACCES, a bad device. Check ownership; do not create anything.
+    - `UNOBTAINABLE`: nothing could even try, because composition failed. `4c`
+      requires `doctor` to survive that, so it is a reportable state rather than
+      the absence of one.
+    """
+
+    READ = "read"
+    ABSENT = "absent"
+    UNREADABLE = "unreadable"
+    UNOBTAINABLE = "unobtainable"
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactState:
+    """One artifact as the caller found it, for a probe that opens nothing.
+
+    Constructed through the four classmethods rather than directly, so a caller
+    cannot express `READ` with no bytes or `UNREADABLE` with no reason.
+    """
+
+    presence: Presence
+    raw: bytes | None = None
+    detail: str = ""
+
+    @classmethod
+    def read(cls, raw: bytes) -> ArtifactState:
+        return cls(Presence.READ, raw=raw)
+
+    @classmethod
+    def absent(cls) -> ArtifactState:
+        return cls(Presence.ABSENT)
+
+    @classmethod
+    def unreadable(cls, detail: str) -> ArtifactState:
+        return cls(Presence.UNREADABLE, detail=detail)
+
+    @classmethod
+    def unobtainable(cls, detail: str) -> ArtifactState:
+        return cls(Presence.UNOBTAINABLE, detail=detail)

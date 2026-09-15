@@ -50,6 +50,8 @@ import re
 import shutil
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 # Re-exported, not redefined. `Health`, `Probe` and `Report` moved to
@@ -58,7 +60,9 @@ from pathlib import Path
 # existing `from pm_ai.platform.doctor import Health, Probe, Report` still
 # resolves, and there is one `Health` in the process rather than two that agree
 # by convention.
-from pm_ai.domain.health import Health, Probe, Report
+from pm_ai.domain.health import ArtifactState, Health, Presence, Probe, Report
+from pm_ai.core.config import ConfigRefused, load_config
+from pm_ai.core.project_registry import RegistryRefused, parse_registry
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR, TRUTHY, raw_toggle
 from pm_ai.platform.vcs import GitVcs
@@ -70,7 +74,17 @@ from pm_ai.ports import (
     KeyNotFound,
 )
 
-__all__ = ["Health", "Probe", "Report", "packages_installed", "run_all"]
+__all__ = [
+    "ArtifactState",
+    "Health",
+    "Presence",
+    "Probe",
+    "Report",
+    "config_readable",
+    "packages_installed",
+    "registry_readable",
+    "run_all",
+]
 
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
@@ -328,16 +342,186 @@ def git_available() -> Probe:
     return Probe(name, Health.OK, f"{version.stdout.strip() or binary} answers exclusion queries")
 
 
-def run_all(keychain: KeychainPort | None = None) -> Report:
+
+# ── Artifacts pm-ai reads about itself (stories 4i, 4d) ──────────────────────
+#
+# The two probes below differ from the five above in kind: those ask the
+# machine, these interpret a value somebody handed them. That is deliberate and
+# it is what `ArtifactState` is for — `read_artifact` is the single reader
+# (`pm_ai/storage/service.py:1093`), so a probe that opened `config.toml` itself
+# would be a second reader with its own idea of what absence means.
+#
+# `ArtifactState` and `Presence` live in `pm_ai.domain.health`, beside `Probe`,
+# and are re-exported here. Same reason those three moved: `pm_ai.app.wiring`
+# produces the states and may not import this module — `.importlinter`'s AD-1
+# contract reaches `subprocess` through `pm_ai.platform.vcs` — so leaving them
+# here meant either a third ignored import in that contract or a second, quietly
+# divergent `ArtifactState`. Every `from pm_ai.platform.doctor import
+# ArtifactState` still resolves to the one in the process.
+
+
+def _bytes_or_probe(name: str, state: ArtifactState, *, absent: Probe) -> Probe | bytes:
+    """The three non-`READ` answers, which both artifact probes share.
+
+    Returns the bytes when there are bytes to interpret, which is where the two
+    probes stop being the same. Shared rather than repeated because the
+    distinction this draws is the whole point of `ArtifactState`, and a second
+    copy is where one of them would quietly lose a state.
+
+    Returning `Probe | bytes` rather than `Probe | None` beside a separate
+    `state.raw` read is what lets the caller narrow by `isinstance`. The
+    obvious spelling — return `None`, then `assert state.raw is not None` — is
+    the one story `1l` forbids: `python -O` deletes an `assert`, and an
+    invariant that holds only when the interpreter is not optimizing is not one.
+    """
+    if state.presence is Presence.ABSENT:
+        return absent
+    if state.presence is Presence.UNREADABLE:
+        return Probe(
+            name, Health.FAILING,
+            f"the file exists and could not be read: {state.detail}",
+            f"Check the ownership and permissions of {name}. It is present, so "
+            f"do not create a new one — a second file written over an "
+            f"unreadable one is how the first one's contents are lost.",
+        )
+    if state.presence is Presence.UNOBTAINABLE:
+        return Probe(
+            name, Health.FAILING,
+            f"pm-ai could not reach the file to find out: {state.detail}",
+            "Fix whatever the probes above report first. This is not a claim "
+            "that the file is missing — nothing got far enough to look.",
+        )
+    # `Presence.READ` carries bytes by construction: the classmethod is the only
+    # way to build one and it requires them.
+    return state.raw if state.raw is not None else b""
+
+
+def config_readable(state: ArtifactState) -> Probe:
+    """What state `config.toml` is actually in (story 4i).
+
+    Five healthy probes could be reported on a machine whose configuration is
+    unparseable, because none of them asked. `ConfigRefused` is caught and
+    carried as this probe's own detail: an operator needs the loader's message,
+    which names the offending key, and not a traceback.
+    """
+    name = "config.toml"
+    answer = _bytes_or_probe(
+        name,
+        state,
+        absent=Probe(
+            name, Health.ABSENT,
+            "no config.toml, so every setting is at its default",
+            "Run `pm-ai setup`. A first run has no config and that is not a "
+            "fault — but nothing has chosen a PM handle, so no spoken command "
+            "will execute until something does.",
+        ),
+    )
+    if isinstance(answer, Probe):
+        return answer
+    try:
+        config = load_config(answer)
+    except ConfigRefused as refused:
+        return Probe(
+            name, Health.FAILING,
+            f"config.toml says something pm-ai will not act on: {refused}",
+            "Fix or remove the offending key. An unreadable config is refused "
+            "rather than ignored, because a setting that reads as configured "
+            "while having no effect stays wrong forever.",
+        )
+    if not config.pm_handle:
+        return Probe(
+            name, Health.WARNING,
+            "config.toml parses, but no pm_handle is set, so nobody is the PM",
+            "Set `pm_handle`. Without it no speaker matches, so every spoken "
+            "command is quietly ignored while the daemon otherwise runs "
+            "normally — `pm-ai setup` never leaves it unset, so this is a "
+            "hand-edit.",
+        )
+    return Probe(name, Health.OK, f"config.toml parses; pm_handle is {config.pm_handle}")
+
+
+def registry_readable(state: ArtifactState) -> Probe:
+    """Which projects are enrolled, and whether their repositories are still there.
+
+    `ABSENT` covers both no file and a file with no entries. They are one answer
+    to an operator — nothing is enrolled, run `pm-ai project add` — and the
+    distinction `keychain_reachable` draws between "unreachable" and "reachable,
+    nothing stored" is the one that matters here too.
+
+    A registry naming a directory that has since moved away is `FAILING` and
+    names the project. Nothing refuses it: `ScopePaths.repository()` performs no
+    existence check, and adding one was declined on 2026-09-15 rather than put
+    filesystem access into a resolver that has none.
+    """
+    name = "project registry"
+    absent = Probe(
+        name, Health.ABSENT,
+        "no project is enrolled, so pm-ai has nothing to act on",
+        "Run `pm-ai project add <path>`. Projects enter the system through the "
+        "registry and never by being found on disk (AD-11), so an empty "
+        "registry means no work has been offered yet rather than something "
+        "broken.",
+    )
+    answer = _bytes_or_probe(name, state, absent=absent)
+    if isinstance(answer, Probe):
+        return answer
+    try:
+        projects = parse_registry(answer)
+    except RegistryRefused as refused:
+        return Probe(
+            name, Health.FAILING,
+            f"projects.toml cannot be read as a registry: {refused}",
+            "Repair the file by hand. It is never reset automatically: "
+            "projects.toml is rebuildable from nothing, so a registry that "
+            "parsed to empty would be one the next `project add` writes over, "
+            "forgetting every project it named.",
+        )
+    if not projects:
+        return absent
+    missing = sorted(
+        project_id for project_id, entry in projects.items() if not entry.path.is_dir()
+    )
+    if missing:
+        return Probe(
+            name, Health.FAILING,
+            f"{len(projects)} project(s) enrolled; the repository is gone for "
+            f"{', '.join(missing)}",
+            "Restore the directory, or re-enrol the project at its new path. "
+            "Every artifact already written for it resolves under the old one, "
+            "so moving a repository is not something pm-ai can follow on its "
+            "own.",
+        )
+    return Probe(name, Health.OK, f"{len(projects)} project(s) enrolled: {', '.join(sorted(projects))}")
+
+
+def run_all(
+    keychain: KeychainPort | None = None,
+    *,
+    config: ArtifactState | None = None,
+    registry: ArtifactState | None = None,
+) -> Report:
     """Every probe, whatever any single one of them says.
 
     Sequential and independent on purpose: one failure must not stop the others,
     or an operator fixes one thing at a time across four restarts.
+
+    `config` and `registry` arrive already read, because `read_artifact` is the
+    single reader and a probe that opened either file would be a second one.
+    Their default is `UNOBTAINABLE` rather than `ABSENT`, and the difference is
+    the whole reason `ArtifactState` exists: a caller that did not hand over the
+    bytes has not told this function the file is missing, and reporting it as a
+    first run would be an answer nobody gave.
+
+    The two are last in the order for the same reason `packages_installed` is
+    first — an operator reading top-down meets causes before consequences, and a
+    config that could not be obtained is usually downstream of something above
+    it.
     """
     if keychain is None:  # pragma: no cover - the real adapter, not used in tests
         from pm_ai.platform.keychain import MacOSKeychainAdapter
 
         keychain = MacOSKeychainAdapter()
+    nobody_said = ArtifactState.unobtainable("no caller supplied it to this run")
     return Report(
         (
             packages_installed(),
@@ -345,5 +529,7 @@ def run_all(keychain: KeychainPort | None = None) -> Report:
             keychain_reachable(keychain),
             encryption_toggle(),
             git_available(),
+            config_readable(config if config is not None else nobody_said),
+            registry_readable(registry if registry is not None else nobody_said),
         )
     )

@@ -47,6 +47,8 @@ from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
 from pm_ai.core.goal_register import MalformedGoals
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report
+from pm_ai.core.project_registry import RegistryRefused
+from pm_ai.domain.claims import ClaimHeld
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.core.connector_enrolment import (
@@ -139,6 +141,40 @@ class HealthReport(Protocol):
 
 
 
+@runtime_checkable
+class OnboardOutcome(Protocol):
+    """What `project add` produced, named structurally.
+
+    `pm_ai.app.wiring.Onboarded` is the real type and lives above this package
+    in the layer stack, so the CLI names the shape rather than the class — the
+    same arrangement `HealthReport` is in, and for the same contract.
+    """
+
+    @property
+    def project_id(self) -> str: ...
+    @property
+    def repository(self) -> Path: ...
+    @property
+    def gitignore(self) -> Path: ...
+    @property
+    def already_registered(self) -> bool: ...
+
+
+def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
+    """The `Context` default: no onboarding sequence was injected.
+
+    Refuses rather than returning a plausible-looking outcome, for
+    `_no_dashboard`'s reason: `project add` creates directories and writes a
+    registry, and a command that reported success without doing any of it would
+    leave an operator believing their project was enrolled.
+    """
+    raise Refusal(
+        f"no onboarding sequence was supplied to the CLI, so {path!r} was not "
+        f"enrolled. This is a wiring fault in pm-ai, not something wrong with "
+        f"the path."
+    )
+
+
 def _no_dashboard(scope: DataScope) -> Path:
     """The `Context` default: no pipeline was injected, so nothing may render.
 
@@ -212,6 +248,16 @@ class Context:
     handler reading `options["scope"]` cannot be reading a word the table never
     promised. Absent means the operator did not say, which is a handler's cue to
     use its own default — never an empty string.
+    """
+
+    onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding
+    """Enrols a project: creates the directory, the rules and the registry entry.
+
+    Injected for `dashboard`'s reason — the sequence reaches the filesystem, the
+    single writer and `pm_ai.platform`'s id standard at once, and only
+    `pm_ai.app` may do all three. Deliberately independent of `daemon`: this is
+    the command that makes a daemon possible, so requiring one would make it
+    unreachable on exactly the machine it exists for.
     """
 
     dashboard: Callable[[DataScope], Path] = _no_dashboard
@@ -289,6 +335,22 @@ class Command:
     Declared rather than inferred so the refusal and the usage text cannot
     disagree, and so a leaf that takes none keeps refusing trailing words — the
     behaviour 4j added, which silently dropping `rest` would have undone.
+    """
+
+    optional: tuple[str, ...] = ()
+    """Positionals this command accepts but does not require, after `takes`.
+
+    Added by story `4k`, whose `project add <path> [alias]` is the first command
+    with one. Neither existing mechanism could express it: `takes` is exact
+    arity — `len(supplied) != len(leaf.takes)` refuses — and `options` is
+    `--name value`, which is a different thing to type and a different thing to
+    read. The frozen matrix specifies a bare positional, and the alias is the
+    id: `pm-ai project add ~/dev/"My Project" payments`.
+
+    Declared on the table for `takes`' reason, and ordered: a handler reads
+    `context.arguments` positionally, so a missing optional is an absent tail
+    rather than a hole in the middle. There is one today and the arity check
+    below is written for any number.
     """
 
     options: tuple[str, ...] = ()
@@ -613,6 +675,38 @@ def _dashboard(context: Context) -> int:
     return EXIT_OK
 
 
+def _project_add(context: Context) -> int:
+    """`pm-ai project add <path> [alias]` — story 4k's surface.
+
+    Nothing here decides anything. The order — validate, claim, create, rule,
+    structure, register — and every refusal belong to
+    `pm_ai.app.wiring.onboard_project`; this reads one or two words and maps
+    what comes back onto `4c`'s table.
+
+    Needs no daemon, which is the point: on the machine this command exists for
+    there is no enrolled project, so composition has already stopped and
+    `require_daemon()` would refuse the one command that would fix it.
+
+    An already-onboarded project exits `0` and says so. It is an ordinary
+    outcome — the operator ran the command twice, or a colleague scripted it —
+    and a refusal would make `project add` unsafe to put in a setup script.
+    """
+    path, alias = (context.arguments + (None,))[:2]  # type: ignore[operator]
+    try:
+        outcome = context.onboard(str(path), None if alias is None else str(alias))
+    except (ScopeResolutionError, RegistryRefused, ClaimHeld) as refused:
+        raise Refusal(str(refused)) from refused
+    if outcome.already_registered:
+        print(
+            f"{outcome.project_id} is already onboarded at {outcome.repository}; "
+            f"nothing changed."
+        )
+        return EXIT_OK
+    print(f"{outcome.project_id} is onboarded at {outcome.repository}")
+    print(f"git exclusion rules are in {outcome.gitignore}")
+    return EXIT_OK
+
+
 TABLE: Mapping[str, Command] = {
     "dashboard": Command(
         "render this scope's daily_dashboard.md, once",
@@ -633,6 +727,17 @@ TABLE: Mapping[str, Command] = {
         "inspect ~/.pm-ai/config.toml",
         leaves={
             "show": Command("print every setting, marked set or default", _config_show),
+        },
+    ),
+    "project": Command(
+        "the projects pm-ai acts on (AD-11: registered, never discovered)",
+        leaves={
+            "add": Command(
+                "enrol a project: create its tree, its git rules and its entry",
+                _project_add,
+                takes=("path",),
+                optional=("alias",),
+            ),
         },
     ),
     "connector": Command(
@@ -660,8 +765,9 @@ def _spelled(name: str, command: Command) -> str:
     that gains an argument cannot keep an old usage line.
     """
     required = "".join(f" <{argument}>" for argument in command.takes)
+    positional = "".join(f" [{argument}]" for argument in command.optional)
     optional = "".join(f" [--{option} <{option}>]" for option in command.options)
-    return f"{name}{required}{optional}"
+    return f"{name}{required}{positional}{optional}"
 
 
 def usage(*, group: str | None = None) -> str:
@@ -707,6 +813,7 @@ def dispatch(
     diagnose: Callable[[], HealthReport],
     probe_connectors: Callable[[], Report],
     probe_credential: CredentialProbePort = _no_probe,
+    onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     unavailable: str | None = None,
 ) -> int:
@@ -727,6 +834,7 @@ def dispatch(
         diagnose=diagnose,
         probe_connectors=probe_connectors,
         probe_credential=probe_credential,
+        onboard=onboard,
         dashboard=dashboard,
         unavailable=unavailable,
     )
@@ -783,14 +891,22 @@ def dispatch(
         print(usage(group=name), file=sys.stderr)
         return EXIT_USAGE
     supplied = tuple(rest[1:])
-    if len(supplied) != len(leaf.takes):
+    if not len(leaf.takes) <= len(supplied) <= len(leaf.takes) + len(leaf.optional):
         # 4j refused every trailing word because no leaf took one. 8b's
-        # `connector add` does, so the refusal is now about *arity* — still a
+        # `connector add` does, so the refusal became about *arity* — still a
         # refusal, never a silent drop: the flag an operator invented to be
-        # careful with must not be the thing that vanishes.
+        # careful with must not be the thing that vanishes. 4k made it a range
+        # rather than an equality, because `project add` takes an optional alias;
+        # too many words still refuse, which is what keeps a typo'd third
+        # argument from being swallowed.
         expected = (
-            " ".join(f"<{argument}>" for argument in leaf.takes)
-            if leaf.takes
+            " ".join(
+                [
+                    *(f"<{argument}>" for argument in leaf.takes),
+                    *(f"[{argument}]" for argument in leaf.optional),
+                ]
+            )
+            if leaf.takes or leaf.optional
             else "no arguments"
         )
         print(
