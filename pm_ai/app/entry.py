@@ -35,16 +35,27 @@ from __future__ import annotations
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from pm_ai.app.pipelines import run_dashboard
-from pm_ai.app.wiring import Daemon, build
+from pm_ai.app.wiring import Bootstrap, Daemon, bootstrap, build
 from pm_ai.connectors.registry import check_health as probe_connectors
 from pm_ai.core.config import Config, ConfigRefused, load_config
+from pm_ai.core.project_registry import ProjectEntry
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.connectors.probe import probe_credential
-from pm_ai.platform.doctor import Health, Probe, Report, run_all
+from pm_ai.platform.doctor import (
+    ArtifactState,
+    Health,
+    Presence,
+    Probe,
+    Report,
+    config_readable,
+    registry_readable,
+    run_all,
+)
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths, UnknownProject
 from pm_ai.ports import KeychainPort
@@ -75,11 +86,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         keychain = MacOSKeychainAdapter()
-        daemon, failure = _compose(keychain)
+        composed = _compose(keychain)
+        daemon, failure = composed.daemon, composed.failure
         return dispatch(
             arguments,
             daemon=daemon,
-            diagnose=lambda: _diagnose(keychain, failure),
+            diagnose=lambda: _diagnose(keychain, composed),
             probe_credential=probe_credential,
             # `pm-ai connector check`'s probes, run from the one layer permitted
             # to reach `pm_ai.connectors` — `surfaces-through-core` forbids the
@@ -183,109 +195,169 @@ def read_optional(
         return None
 
 
-def _registered_projects() -> Mapping[str, Path]:
-    """The enrolled projects, from the registry `pm-ai project add` writes (AD-11).
+def _bootstrap(keychain: KeychainPort) -> Bootstrap:
+    """`projects.toml` and `config.toml`, read before anything is composed.
 
-    Empty, and honestly so: `projects.toml` has no reader until `4d`, which is
-    the slice that also writes it. A repository may not enter the system by
-    being found — searching the filesystem for `.project-ai` directories would
-    opt somebody's repository into harvesting without anyone asking — so an
-    unread registry is an empty one rather than a guess.
+    A delegation since `4d`. The read itself lives in `pm_ai.app.wiring`,
+    because it needs a bootstrap `ScopePaths.production()` and a
+    `StorageService` built on it — the registry has to be read before the
+    resolver that knows the projects can exist, and `wiring` is the module that
+    may construct both.
 
-    Until `4d` lands this makes `doctor` the only usable subcommand on every
-    machine, which is precisely the state this module is built to survive.
+    A repository still never enters the system by being found: nothing here
+    searches for `.project-ai` directories, because a search would opt somebody
+    else's checkout into harvesting without anyone having asked (AD-11).
     """
-    return {}
+    return bootstrap(keychain)
 
 
-def _select(projects: Mapping[str, Path]) -> str:
-    """Which enrolled project this invocation acts on.
+def _ambiguous(projects: Mapping[str, ProjectEntry]) -> Probe:
+    """Two or more enrolled projects, reported as what it is.
 
-    One registered project needs no choosing. More than one does, and the choice
-    — a flag, the working directory, a default in `config.toml` — belongs to the
-    slice that owns the registry. Refusing is what keeps this module from
-    inventing a policy another one is going to make.
+    Its own probe since `4d`, and the slice that made the state reachable is the
+    slice that had to fix it. `_select` raises `UnknownProject`, which
+    `_compose` catches in its `ScopeResolutionError` arm and reports as "the
+    enrolled project cannot be resolved to a directory", remedy "Re-enrol the
+    repository" — wrong in every word for an operator whose projects both
+    resolve perfectly well. It was unreachable only because the registry was
+    always empty, which stopped being true here.
+
+    Choosing between them — a flag, the working directory, a default in
+    `config.toml` — is still not this module's policy to invent. What changed is
+    that refusing now says so.
     """
-    if len(projects) == 1:
-        return next(iter(projects))
-    raise UnknownProject(
-        f"{len(projects)} projects are registered and pm-ai has no way to choose "
-        f"between them yet: {sorted(projects)}. Until it does, one enrolled "
-        f"project is the supported arrangement."
+    return Probe(
+        "project",
+        Health.FAILING,
+        f"{len(projects)} projects are registered and pm-ai has no way to "
+        f"choose between them yet: {', '.join(sorted(projects))}",
+        "Nothing is broken and nothing needs re-enrolling — every one of these "
+        "resolves. pm-ai has no project selection yet, so until it does, one "
+        "enrolled project is the supported arrangement. `pm-ai doctor` keeps "
+        "working meanwhile.",
     )
 
 
-def _compose(keychain: KeychainPort) -> tuple[Daemon | None, Probe | None]:
+@dataclass(frozen=True, slots=True)
+class _Composition:
+    """What composition produced, plus the two artifacts `doctor` reports on.
+
+    The states travel separately from the daemon because they outlive it: when
+    composition fails there is no `daemon.storage` to read `config.toml`
+    through, and "nothing could reach it from here" is precisely the answer
+    `4i`'s `UNOBTAINABLE` exists to carry. A `doctor` run that reported the
+    config as absent in that case would be inventing an answer nobody gave.
+    """
+
+    daemon: Daemon | None
+    failure: Probe | None
+    config: ArtifactState
+    registry: ArtifactState
+
+
+def _compose(keychain: KeychainPort) -> _Composition:
     """The daemon, or the one probe that explains why there isn't one.
 
-    Never raises for a reason an operator can act on. The three that reach here
-    — an unenrolled or unresolvable project, a root that will not answer, a
-    `config.toml` that will not parse — are reported rather than propagated,
-    because the command most likely to be running is the one asking what is
-    wrong.
+    Never raises for a reason an operator can act on. The four that reach here
+    — an unreadable or unparseable registry, no project enrolled, more than one
+    enrolled, a root that will not answer, a `config.toml` that will not parse —
+    are reported rather than propagated, because the command most likely to be
+    running is the one asking what is wrong.
 
     `config.toml` is read *after* the daemon exists rather than before, because
     `StorageService` is the single reader (AD-5) and there is no other legal way
     to open the file. `Config` reaches the daemon by assignment for the same
     reason: `build()` takes it as an argument, and the argument cannot be
     computed until `build()` has returned.
+
+    `projects.toml` cannot use that arrangement, which is why it is read through
+    `wiring.registered_projects` before anything else happens: `build()` needs
+    the mapping, so the read cannot wait for `build()` to return.
     """
-    projects = _registered_projects()
+    read = _bootstrap(keychain)
+    projects, registry, config = read.projects, read.registry, read.config
     if not projects:
-        return None, Probe(
-            "project",
-            Health.ABSENT,
-            "no project is enrolled, so pm-ai has nothing to act on",
-            "No project can be enrolled on this build yet: `pm-ai project add "
-            "<path>` is story 4k and is not implemented, so this is the "
-            "expected state rather than something to repair. Projects enter the "
-            "system through that registry and never by being found on disk "
-            "(AD-11), so an empty registry means no work has been offered yet.",
-        )
+        # The registry probe already says this, in all four of its states —
+        # absent, empty, unreadable and unparseable — and says it better than a
+        # second probe here could, because it is holding the bytes. Returned as
+        # the failure so a refusal from `dispatch` can name the same reason.
+        return _Composition(None, registry_readable(registry), config, registry)
+    if len(projects) > 1:
+        return _Composition(None, _ambiguous(projects), config, registry)
+    (project_id,) = projects
     try:
-        paths = ScopePaths.production(projects=projects)
-        daemon = build(None, _select(projects), paths=paths, keychain=keychain)
-        daemon.config = _config(daemon.storage)
-    except ScopeResolutionError as unresolvable:
-        return None, Probe(
-            "project", Health.FAILING,
-            f"the enrolled project cannot be resolved to a directory: {unresolvable}",
-            "Re-enrol the repository. Every subcommand but `doctor` needs a "
-            "scope to act in, and pm-ai will not guess at one.",
+        paths = ScopePaths.production(
+            projects={pid: entry.path for pid, entry in projects.items()}
         )
-    except ConfigRefused as refused:
-        return None, Probe(
-            "config.toml", Health.FAILING,
-            f"config.toml says something pm-ai will not act on: {refused}",
-            "Fix or remove the offending key. An unreadable config is refused "
-            "rather than ignored, because a setting that reads as configured "
-            "while having no effect stays wrong forever.",
+        daemon = build(None, project_id, paths=paths, keychain=keychain)
+    except ScopeResolutionError as unresolvable:
+        return _Composition(
+            None,
+            Probe(
+                "project", Health.FAILING,
+                f"the enrolled project cannot be resolved to a directory: {unresolvable}",
+                "Re-enrol the repository. Every subcommand but `doctor` needs a "
+                "scope to act in, and pm-ai will not guess at one.",
+            ),
+            config,
+            registry,
         )
     except OSError as unreadable:
-        return None, Probe(
-            "pm-ai root", Health.FAILING,
-            f"pm-ai's own directory could not be read or written: {unreadable}",
-            "Check the ownership and permissions of ~/.pm-ai. Nothing that "
-            "persists state can run until this answers.",
+        return _Composition(
+            None,
+            Probe(
+                "pm-ai root", Health.FAILING,
+                f"pm-ai's own directory could not be read or written: {unreadable}",
+                "Check the ownership and permissions of ~/.pm-ai. Nothing that "
+                "persists state can run until this answers.",
+            ),
+            config,
+            registry,
         )
-    return daemon, None
+    # Read by `bootstrap` rather than re-read through `daemon.storage`. Both are
+    # the single reader, so either is legal; reading once is what stops `doctor`
+    # and the daemon from holding two different answers about one file, and it
+    # is also what lets the probe report a first-run config on a machine where
+    # composition never got far enough to build a daemon at all.
+    if config.presence is Presence.UNREADABLE:
+        # Refused rather than defaulted, and the distinction matters more than
+        # it looks: `ArtifactState.unreadable` carries no bytes, so falling
+        # through to `load_config(None)` would boot this machine on defaults
+        # while a `config.toml` it could not open sat beside it — a setting that
+        # reads as configured and has no effect, which is the one failure
+        # `pm_ai.core.config` exists to prevent. An *absent* config is different
+        # and does default: there is nothing there to disagree with.
+        return _Composition(None, config_readable(config), config, registry)
+    try:
+        daemon.config = load_config(config.raw)
+    except ConfigRefused:
+        # The probe rather than a second `Probe(...)` built here. It reads the
+        # same bytes and carries the same loader message, and one of them
+        # phrased differently from the other is how `doctor` and a refusal end
+        # up disagreeing about the same file.
+        return _Composition(None, config_readable(config), config, registry)
+    return _Composition(daemon, None, config, registry)
 
 
-def _config(storage: StorageService) -> Config:
-    """`config.toml`, interpreted — absent and empty both meaning defaults."""
-    return load_config(read_optional(storage, scope=APPLICATION, artifact=CONFIG_ARTIFACT))
-
-
-def _diagnose(keychain: KeychainPort, failure: Probe | None) -> Report:
+def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
     """Every startup probe, plus whatever stopped the daemon being built.
 
     Appended rather than prepended: the probes above it are the causes — an
     incomplete install, an unreachable keychain — and a daemon that could not be
     composed is usually the consequence. An operator reading top-down meets the
     thing to fix first.
+
+    Appended only when `run_all` has not already said it. Since `4d` and `4i`
+    the report carries a probe for each of the two artifacts, and two of
+    `_compose`'s failures *are* those probes — a registry nothing can parse, a
+    config the loader refuses. Printing either one twice would make an operator
+    look for two problems, and reconciling the two copies by hand is how they
+    start to disagree.
     """
-    report = run_all(keychain)
-    return report if failure is None else Report((*report.probes, failure))
+    report = run_all(keychain, config=composed.config, registry=composed.registry)
+    if composed.failure is None or composed.failure.name in {p.name for p in report.probes}:
+        return report
+    return Report((*report.probes, composed.failure))
 
 
 if __name__ == "__main__":  # pragma: no cover - the console script is the surface

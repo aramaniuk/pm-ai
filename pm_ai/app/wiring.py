@@ -33,9 +33,11 @@ from pm_ai.connectors.registry import ConnectorRegistry, install as install_conn
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
+from pm_ai.core.project_registry import ProjectEntry, RegistryRefused, parse_registry
 from pm_ai.core.connector_enrolment import stored_credentials
 from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
+from pm_ai.domain.health import ArtifactState
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
     MASTER_KEY_NAME,
@@ -53,7 +55,18 @@ from pm_ai.skills.registry import SkillRegistry
 from pm_ai.storage.crypto import LazyKeyCrypto, PlaintextCrypto
 from pm_ai.storage.service import StorageService
 
-__all__ = ["Daemon", "MASTER_KEY_NAME", "build"]
+__all__ = [
+    "Bootstrap",
+    "CONFIG_ARTIFACT",
+    "Daemon",
+    "MASTER_KEY_NAME",
+    "REGISTRY_ARTIFACT",
+    "bootstrap",
+    "build",
+]
+
+REGISTRY_ARTIFACT = "projects.toml"
+CONFIG_ARTIFACT = "config.toml"
 
 
 @dataclass
@@ -658,3 +671,100 @@ def _enrolled_configurations(
         if isinstance(decoded, dict):
             entries.append(decoded)
     return tuple(entries)
+
+
+@dataclass(frozen=True, slots=True)
+class Bootstrap:
+    """The two application artifacts `doctor` reports on, read before any daemon.
+
+    One read each, from one `StorageService`, so `doctor` and the daemon cannot
+    end up holding two different answers about the same file.
+    """
+
+    projects: Mapping[str, ProjectEntry]
+    registry: ArtifactState
+    config: ArtifactState
+
+
+def bootstrap(keychain: KeychainPort, *, paths: ScopePaths | None = None) -> Bootstrap:
+    """`projects.toml` and `config.toml`, read before the daemon exists.
+
+    ## Why the read happens here at all
+
+    The registry has to be read *before* the resolver exists — `production()`
+    takes the mapping as an argument (AD-11) — but `StorageService` is the
+    single reader (AD-5) and is constructed *on* a resolver. `config.toml` used
+    to sidestep the circle by being read after `build()` returned; the registry
+    cannot, because `build()` is what needs it.
+
+    So the read happens against a **bootstrap resolver**: `production()` over an
+    empty mapping, which resolves the application scope perfectly well and knows
+    no projects. That costs nothing here — both files are application-scope, and
+    nothing in this function touches a project tree. `pm_ai.app` is the one
+    layer permitted to import both `pm_ai.storage` and `pm_ai.platform`, which
+    is why this lives in `wiring` and not in `entry` beside its caller.
+
+    ## `config.toml` is read here too, and that is the point
+
+    It could be read after `build()`, and was until 2026-09-15. Then `doctor`
+    grew a probe for it and the arrangement produced a lie on the most ordinary
+    machine there is: a first run has no project, so composition stopped before
+    the config was ever read, and the probe reported `FAILING` —
+    "could not reach the file to find out" — about a file that was simply not
+    there yet. Read here, that machine gets `ABSENT` and the command that fixes
+    it. `UNOBTAINABLE` is left for what it actually describes: a run where even
+    this could not happen.
+
+    The cipher is the ordinary one and costs nothing: `LazyKeyCrypto` reaches
+    the keychain when an encrypted artifact is touched, and neither of these is.
+
+    ## A refusal is not an absence
+
+    The mapping is empty in three different situations — no file, an empty file,
+    and a file that would not parse — and only the first two mean "no projects
+    are enrolled". The `ArtifactState` carries the difference to `doctor`, which
+    is the surface that has somewhere to say it. Nothing here raises on a
+    malformed registry: `4c` requires `pm-ai doctor` to survive a machine that
+    is broken, and a registry nobody can parse is exactly that machine.
+    """
+    resolver = paths if paths is not None else ScopePaths.production()
+    storage = StorageService(
+        resolver,
+        now=lambda: datetime.now(timezone.utc),
+        vcs=GitVcs(),
+        crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
+    )
+    registry = _artifact_state(storage, REGISTRY_ARTIFACT)
+    config = _artifact_state(storage, CONFIG_ARTIFACT)
+    if registry.raw is None:
+        return Bootstrap({}, registry, config)
+    try:
+        return Bootstrap(parse_registry(registry.raw), registry, config)
+    except RegistryRefused:
+        # Carried, not raised, and not logged here either: the state holds the
+        # bytes, so `registry_readable` re-reads them and reports the parser's
+        # own message — which names the project or the line, and is the only
+        # form of this an operator can act on.
+        return Bootstrap({}, registry, config)
+
+
+def _artifact_state(storage: StorageService, artifact: str) -> ArtifactState:
+    """One application-scope artifact as the reader found it.
+
+    The distinction `4i` needs and `bytes | None` cannot express: absence is a
+    first run with a command to fix it, while a permission error is a machine
+    with a file it cannot open. Folded together, an operator is told to create a
+    file they already have — and for the registry that advice is destructive,
+    since `projects.toml` is rebuildable from nothing and the command they would
+    run writes over it.
+    """
+    try:
+        raw = storage.read_artifact(scope=DataScope(ScopeKind.APPLICATION), artifact=artifact)
+    except FileNotFoundError:
+        # Unreachable through the real service since `8f` gave `read_artifact`
+        # its `bytes | None` form, and kept for a fake that has not caught up —
+        # the same arrangement, and the same reason, as `entry.read_optional`.
+        return ArtifactState.absent()
+    except OSError as unreadable:
+        return ArtifactState.unreadable(str(unreadable))
+    return ArtifactState.absent() if raw is None else ArtifactState.read(raw)

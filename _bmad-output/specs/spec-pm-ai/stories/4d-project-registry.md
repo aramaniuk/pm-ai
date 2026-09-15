@@ -2,7 +2,7 @@
 title: 'Project onboarding and the registry'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 1
 ---
 
@@ -58,14 +58,14 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/project_registry.py` -- add `parse_registry(raw: bytes | None)`, `render_registry(mapping)`, `DuplicateProject`, `ProjectPathUnusable`, `RegistryMalformed` -- pure over bytes, no filesystem
-- [ ] `pm_ai/app/wiring.py` -- `registered_projects(keychain)`: the bootstrap resolver, the single-reader read, and the parse -- this is the module that may build a `StorageService`, and `4i`'s `ArtifactState` is what it returns alongside the mapping
-- [ ] `pm_ai/app/entry.py` -- `_registered_projects()` delegates to it and `_compose` passes the mapping to `ScopePaths.production()` -- **`entry.py:246` is the `production()` call site, not `wiring.py`**, which names it only in prose
-- [ ] `pm_ai/app/entry.py` -- give two-or-more registered projects its own probe and remedy -- `_select` raises `UnknownProject` into `_compose`'s `ScopeResolutionError` arm, which tells an operator whose projects both resolve to "Re-enrol the repository". Unreachable until this slice fills the registry; `deferred-work.md:420` assigns the choice policy here
-- [ ] `pm_ai/platform/doctor.py` -- add the registry probe, `ABSENT` when empty or missing, naming a project whose path is gone
-- [ ] `tests/architecture/test_static_rules.py` -- widen `test_story_4a_tomllib_is_imported_by_exactly_one_module` to a named allowlist of two modules -- `projects.toml` is TOML and `4a` scoped the rule to one importer
-- [ ] `tests/architecture/test_static_rules.py` -- extend `4a`'s no-filesystem sweep to cover `project_registry.py` -- the same "pure over bytes" guarantee, and `4g` proved a one-directional version of it goes stale
-- [ ] `tests/core/test_project_registry.py` -- one test per matrix row, plus the render/parse round trip
+- [x] `pm_ai/core/project_registry.py` -- add `parse_registry(raw: bytes | None)`, `render_registry(mapping)`, `DuplicateProject`, `ProjectPathUnusable`, `RegistryMalformed` -- pure over bytes, no filesystem
+- [x] `pm_ai/app/wiring.py` -- `bootstrap(keychain)`: the bootstrap resolver, the single-reader read of **both** application artifacts, and the parse -- this is the module that may build a `StorageService`, and `4i`'s `ArtifactState` is what it returns alongside the mapping
+- [x] `pm_ai/app/entry.py` -- `_bootstrap()` delegates to it and `_compose` passes the mapping to `ScopePaths.production()` -- **`entry.py:246` was the `production()` call site, not `wiring.py`**, which named it only in prose
+- [x] `pm_ai/app/entry.py` -- give two-or-more registered projects its own probe and remedy -- `_select` raises `UnknownProject` into `_compose`'s `ScopeResolutionError` arm, which tells an operator whose projects both resolve to "Re-enrol the repository". Unreachable until this slice fills the registry; `deferred-work.md:420` assigns the choice policy here
+- [x] `pm_ai/platform/doctor.py` -- add the registry probe, `ABSENT` when empty or missing, naming a project whose path is gone
+- [x] `tests/architecture/test_static_rules.py` -- widen `test_story_4a_tomllib_is_imported_by_exactly_one_module` to a named allowlist of two modules -- `projects.toml` is TOML and `4a` scoped the rule to one importer
+- [x] `tests/architecture/test_static_rules.py` -- extend `4a`'s no-filesystem sweep to cover `project_registry.py` -- the same "pure over bytes" guarantee, and `4g` proved a one-directional version of it goes stale
+- [x] `tests/core/test_project_registry.py` -- one test per matrix row, plus the render/parse round trip
 
 **Acceptance Criteria:**
 - Given any mapping of ids to absolute paths and aliases, when rendered and parsed back, then the result equals the input — the same drift pair `4g` guards for `config.toml`.
@@ -78,6 +78,11 @@ Added 2026-09-02 by the wave-1 spec review, which found no story owned this. AD-
 - Given `grep -rn "ScopePaths.real\|projects_registry()" pm_ai/`, then there is no match — neither name exists, and both appeared in this spec until 2026-09-03.
 
 ## Spec Change Log
+
+- **2026-09-15, built. Two things changed during execution and are recorded here rather than in a commit message.**
+  **`registered_projects` became `bootstrap`, reading both artifacts instead of one.** The first shape read only `projects.toml` and left `config.toml` to be read after `build()` returned, as it always had been. Run against the real console script, that produced a falsehood on the most ordinary machine there is: a first run has no project, so composition stopped before the config was ever read, and `4i`'s probe reported `FAILING` — "could not reach the file to find out" — about a file that was simply not there yet. Both files are application-scope and the bootstrap `StorageService` can reach either, so it now reads both. A fresh machine reports `ABSENT` twice and names the two commands that fix it, and `UNOBTAINABLE` is left for what it actually describes.
+  **`ArtifactState` and `Presence` live in `pm_ai.domain.health`, not in `doctor.py`.** Defined beside the probes, they broke `.importlinter`'s AD-1 contract: `pm_ai.app.wiring` produces the states, and importing `pm_ai.platform.doctor` reaches `subprocess` through `pm_ai.platform.vcs`. The choice was a third ignored import in that contract or a move, and the move is the same one `pm_ai/domain/health.py` already documents for `Health`, `Probe` and `Report`, for the same kind of reason. `doctor.py` re-exports them, so every existing import resolves to the one object in the process.
+  Also found during execution: an unreadable `config.toml` would have booted the daemon on defaults, because `ArtifactState.unreadable` carries no bytes and `load_config(None)` means "first run". `_compose` now refuses it — an absent config defaults, an unreadable one does not, since a setting that reads as configured while having no effect is the failure `pm_ai.core.config` exists to prevent.
 
 - **2026-09-15, built together with `4i`, and the error vocabulary closed.** The human combined the two slices at the readiness check, because they collide on one file and cannot be parallelised the way the path graph implies: both add a probe, both change `run_all`'s signature, and both must edit the same four assertions in `tests/architecture/test_doctor.py` (`:292-295`, `:313`, `:468`, `:634`, each asserting `len(report.probes) == 5`). `4i`'s spec calls itself "a sixth probe"; built together, the registry probe and the config probe are the sixth and seventh, and `4i` is amended to say so. Combined body exceeds wave 1's 1600-token gate — flagged and accepted rather than re-split, since splitting is what created the collision.
 

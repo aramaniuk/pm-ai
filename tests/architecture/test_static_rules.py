@@ -557,6 +557,10 @@ def test_every_event_entry_in_the_package_satisfies_its_category_schema():
 # accepts the typo, and a typo silently shifts which meetings count as today.
 # What the allowlist still buys here is that the name appears in this list, so
 # the next reader knows the exception was taken on purpose.
+# One reader per TOML file, named rather than counted. `config.py` reads
+# `config.toml` (4a); `project_registry.py` reads `projects.toml` (4d).
+TOML_READERS = frozenset({"pm_ai/core/config.py", "pm_ai/core/project_registry.py"})
+
 CONFIG_IMPORTS_ALLOWED = frozenset(
     {"__future__", "collections", "dataclasses", "math", "tomllib", "zoneinfo"}
 )
@@ -662,13 +666,67 @@ def test_story_4a_the_config_module_neither_reads_nor_writes_a_file():
     )
 
 
+# `project_registry.py`'s allowlist. `tomllib` and `dataclasses` for the same
+# reasons `config.py` has them; `pathlib` because `Path.is_absolute` is the
+# honest way to ask whether a registry entry is absolute, and it manipulates a
+# path without touching one. `collections` for the `Mapping` annotation.
+REGISTRY_IMPORTS_ALLOWED = frozenset(
+    {"__future__", "collections", "dataclasses", "pathlib", "tomllib"}
+)
+
+
+def test_story_4d_the_registry_module_neither_reads_nor_writes_a_file():
+    """`pm_ai.core.project_registry` moves bytes handed to it and opens nothing.
+
+    The same sweep `4a` runs over `config.py`, for the same guarantee and
+    against the same failure. It is a separate test rather than a second module
+    in that one because the two allowlists differ: this module imports `pathlib`
+    and that one must not.
+
+    The reason it is worth having twice: `render_registry` returns the bytes of
+    a `projects.toml` for `4k` to write, and `4k` is a filesystem slice. The
+    tempting edit — "this already knows the path, let it do the write" — is
+    precisely what `1f` did to `crypto.py` and what `4g` nearly did here, and
+    the guard is what makes it fail loudly instead of quietly holding.
+    """
+    modules = [f for f in source_files("core") if f.path.name == "project_registry.py"]
+    assert modules, (
+        f"{PACKAGE_ROOT / 'core' / 'project_registry.py'} is missing — this rule "
+        f"would pass by scanning nothing"
+    )
+    (registry,) = modules
+    violations = [
+        f"{registry.location(node)}  {name}(...)"
+        for _f, node, name in calls([registry])
+        if name.split(".")[-1] in CONFIG_FILE_CALLS
+    ]
+    violations += [
+        f"{registry.rel} imports {module}"
+        for module in sorted(_import_heads(registry) - REGISTRY_IMPORTS_ALLOWED)
+    ]
+    assert not violations, format_violations(
+        violations,
+        "Story 4d: pm_ai.core.project_registry interprets and serializes bytes "
+        "and opens nothing in either direction — `core` is I/O-free, and "
+        "StorageService is the single reader and the single writer. `4k` writes "
+        "what render_registry returns; it does not move the write in here.",
+    )
+
+
 def test_story_4a_tomllib_is_imported_by_exactly_one_module():
-    """One reader of `config.toml`, checked by import node rather than by text.
+    """One reader per TOML file, checked by import node rather than by text.
 
     A substring search for `tomllib` verified "mentioned in exactly one module",
     which is a different claim: any comment naming the parser broke it, and two
     real importers would have compared as an unsorted list whose outcome
     depended on filesystem order.
+
+    Widened from one module to a named pair by story 4d. `projects.toml` is TOML
+    too, and `4a` had scoped this rule to `config.toml`'s reader by counting
+    importers rather than by naming them — so the second legitimate parser would
+    have arrived looking exactly like the violation this test exists to catch.
+    The allowlist is spelled out rather than made a count: a bare `len(...) <= 2`
+    would let any module in the package become the second one.
     """
     importers = {
         f.rel
@@ -683,11 +741,13 @@ def test_story_4a_tomllib_is_imported_by_exactly_one_module():
             and (node.module or "").split(".")[0] == "tomllib"
         )
     }
-    assert importers == {"pm_ai/core/config.py"}, format_violations(
+    assert importers == TOML_READERS, format_violations(
         sorted(importers),
-        "Story 4a: config.toml has one reader. TOML parsed anywhere else is a "
-        "second interpretation of the same file, with its own idea of what the "
-        "accepted keys are.",
+        "Stories 4a and 4d: each TOML file has exactly one reader, and there "
+        "are two TOML files. A third importer is a second interpretation of a "
+        "file that already has one, with its own idea of what the accepted keys "
+        "are. Add to TOML_READERS only alongside a new file, never to let a "
+        "second module read one of these two.",
     )
 
 

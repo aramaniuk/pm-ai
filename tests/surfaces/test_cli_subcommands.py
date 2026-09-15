@@ -23,6 +23,9 @@ from pathlib import Path
 
 import pytest
 
+from pm_ai.core.project_registry import ProjectEntry, render_registry
+from pm_ai.platform.doctor import ArtifactState
+from pm_ai.app.wiring import Bootstrap, bootstrap
 from pm_ai.app import entry
 from pm_ai.connectors import registry as connectors
 from pm_ai.core.config import ACCEPTED_KEYS, Config, ConfigRefused, load_config
@@ -46,6 +49,34 @@ from pm_ai.surfaces.cli.dispatch import (
 )
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
+
+
+
+def enrolled(**projects: Path):
+    """A stand-in for `entry._bootstrap`, in its post-`4d` shape.
+
+    It returns the projects *and* an `ArtifactState` for each of the two
+    artifacts, because a caller has to be able to tell an absent registry from
+    an unreadable one — a stub returning only the mapping would no longer
+    type-check and, worse, would let `doctor` report a first run on a machine
+    whose registry could not be opened.
+
+    `config` is left `ABSENT`: these fixtures redirect `HOME` at a fresh
+    directory, so that is the truth for every test using one, and the rows that
+    care about the config write a real file into it.
+    """
+    entries = {name: ProjectEntry(path=path) for name, path in projects.items()}
+    registry = (
+        ArtifactState.read(render_registry(entries)) if entries else ArtifactState.absent()
+    )
+
+    def read(keychain):
+        # The real bootstrap for `config.toml`, the stub for the registry: the
+        # fixtures write a config into the redirected `HOME` and expect it to be
+        # honoured, and stubbing it flat would make those rows assert nothing.
+        return Bootstrap(entries, registry, bootstrap(keychain).config)
+
+    return read
 
 
 class Keychain:
@@ -140,7 +171,7 @@ def registered(tmp_path, monkeypatch, keychain):
     monkeypatch.setenv("HOME", str(home))
     repository = tmp_path / "repo"
     repository.mkdir()
-    monkeypatch.setattr(entry, "_registered_projects", lambda: {"alpha": repository})
+    monkeypatch.setattr(entry, "_bootstrap", enrolled(alpha=repository))
     return home
 
 
@@ -154,7 +185,7 @@ def unregistered(monkeypatch, keychain):
     daemon — the registry is a property of the process.
     """
     keychain()
-    monkeypatch.setattr(entry, "_registered_projects", dict)
+    monkeypatch.setattr(entry, "_bootstrap", enrolled())
 
 
 @pytest.fixture

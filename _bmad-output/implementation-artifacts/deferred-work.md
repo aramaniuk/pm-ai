@@ -416,8 +416,8 @@ transcript.
   evidence: `dispatch` consults `_HELP_FLAGS` once, before the table lookup. 4c's matrix specifies only the bare `pm-ai --help` form, so this is unspecified rather than wrong — but it becomes user-visible as soon as `4j` adds leaves worth asking about.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
-  summary: Two or more registered projects are reported as "the enrolled project cannot be resolved to a directory", with the remedy "Re-enrol the repository" — wrong for an operator whose projects both resolve fine.
-  evidence: `_select` raises `UnknownProject`, which `_compose` catches in its `ScopeResolutionError` arm. Unreachable today because `_registered_projects()` returns `{}` until `4d`; `4d` owns the choice policy and should give ambiguity its own probe and remedy.
+  summary: **RESOLVED 2026-09-15 in `4d`.** Two or more registered projects were reported as "the enrolled project cannot be resolved to a directory", remedy "Re-enrol the repository" — wrong for an operator whose projects both resolve fine.
+  evidence: `_select` raised `UnknownProject` into `_compose`'s `ScopeResolutionError` arm. Unreachable while `_registered_projects()` returned `{}`, and reachable the moment `4d` filled the registry — so `4d` fixed it: `_select` is replaced by `_ambiguous`, which returns its own probe naming both projects and saying explicitly that nothing is broken and nothing needs re-enrolling. `test_two_registered_projects_are_reported_rather_than_guessed_between` asserts the old wording is *absent* as well as the new one present, because the old one was plausible and that is what let it sit unnoticed.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
   summary: A malformed `config.toml` discards a daemon that composed successfully, so every non-`doctor` subcommand refuses — including the `config show` that would diagnose it.
@@ -427,9 +427,17 @@ transcript.
   summary: `_compose` mutates `daemon.config` after `build()` instead of using `build`'s own `config` parameter, which exists for exactly this decision.
   evidence: `build()` declares `config: Config | None = None` and its docstring says the parameter is there so `4c` decides what an unparseable config does to a `doctor` run. Not trivially fixable: `_config()` reads through `daemon.storage`, which `build()` creates, so the seam needs either a pre-`build` read from `paths` or a frozen `Daemon`. Harmless today only because nothing inside `build` reads `config`.
 
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4d-project-registry.md`
+  summary: There are two TOML basic-string escapers in `pm_ai.core`, and they are byte-identical by intention rather than by construction.
+  evidence: `config.py:_basic_string` (with `_ESCAPES` at `:397-410`) and `project_registry.py:_string` implement the same TOML rules for the same reason — `tomllib` reads and cannot write. Sharing them needs either a private name imported across modules or a third module both import, and the second is an edit to `4a`'s guard: `test_story_4a_the_config_module_neither_reads_nor_writes_a_file` names every module `config.py` may reach, so `CONFIG_IMPORTS_ALLOWED` would have to gain an entry inside `4d`'s slice. Declined there rather than done silently. The risk is bounded — the escape set is fixed by the TOML specification, and both directions are covered by a render-then-parse identity test — but the two copies were *already* written differently once (a `.replace` chain versus a loop), so drift is demonstrated rather than hypothetical.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4d-project-registry.md`
+  summary: `ScopePaths.repository()` returns a path for a repository that has been deleted, and nothing refuses per project.
+  evidence: `4d`'s matrix asked for "refused for that project alone" with `UnknownProject`. Three things made that unbuildable as written: `UnknownProject` is defined at `paths.py:231` in `platform` and `core` may not import it; `paths.py` performs no existence check anywhere, its only filesystem call being one `mkdir` at `:599`; and the row's own first clause already said `doctor` reports it. The probe now does, naming the project. Adding a `stat` to the resolver was considered and declined on 2026-09-15 — it would put filesystem access into a module that has none, and every caller of `repository()` would pay for it. If a refusal is wanted later it belongs to whichever slice gives project selection a policy.
+
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
-  summary: `_compose`'s `OSError` arm blames `~/.pm-ai` for any I/O failure raised anywhere inside `build()` or the config read.
-  evidence: Its own test proves it fires for a `StorageService.read_artifact` permission error; it would fire identically for an unreadable project repository, sending the operator to check the wrong directory's ownership. The fix is to name the operation that failed or narrow the `try`.
+  summary: **NARROWED 2026-09-15 in `4d`, not closed.** `_compose`'s `OSError` arm blames `~/.pm-ai` for any I/O failure raised inside `build()`.
+  evidence: The config and registry reads no longer go through it — both happen in `wiring.bootstrap` and come back as an `ArtifactState`, so a permission error on either file is now reported by its own probe against its own filename. What is left is the original complaint minus that case: an `OSError` from anywhere inside `build()` — an unreadable project repository, say — still sends the operator to check the ownership of the wrong directory. The remaining fix is the one first recorded: name the operation that failed, or narrow the `try`.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4c-cli-entry-point.md`
   summary: `test_doctor_runs_the_real_probes_and_prints_them` runs the real `MacOSKeychainAdapter` against the developer's login keychain with no `HOME` redirect.

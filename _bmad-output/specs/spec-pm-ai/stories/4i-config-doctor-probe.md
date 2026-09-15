@@ -2,7 +2,7 @@
 title: 'doctor reports the config'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
 context: []
 ---
@@ -54,9 +54,9 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/platform/doctor.py` -- add the config probe with its states, and give `run_all` the config input -- the probe interprets bytes it is handed and opens nothing
-- [ ] `tests/architecture/test_doctor.py` -- **update the four assertions a new probe breaks**: the probe count and name set (`:292-295`), `:468`, `:634`, and the healthy-machine case (`:313`), which needs config bytes stood in the way `missing_distributions` already is -- then add the new probe's states
-- [ ] `pm_ai/platform/doctor.py` -- point the keychain `ABSENT` remediation at the command that fixes it, which `1g` deliberately left pending -- and assert the command name, not the bare word `"Enrol"` that `:133` currently matches
+- [x] `pm_ai/platform/doctor.py` -- add the config probe with its states, and give `run_all` the config input -- the probe interprets bytes it is handed and opens nothing
+- [x] `tests/architecture/test_doctor.py` -- **update the four assertions a new probe breaks**: the probe count and name set (`:292-295`), `:468`, `:634`, and the healthy-machine case (`:313`), which needs config bytes stood in the way `missing_distributions` already is -- then add the new probe's states
+- [x] `pm_ai/platform/doctor.py` -- point the keychain `ABSENT` remediation at the command that fixes it, which `1g` deliberately left pending -- and assert the command name, not the bare word `"Enrol"` that `:133` currently matches
 
 **Acceptance Criteria:**
 - Given a `config.toml` the loader refuses, when the probe runs, then the report carries the loader's own message and `run_all` still returns every other probe.
