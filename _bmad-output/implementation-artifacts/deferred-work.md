@@ -134,7 +134,7 @@ and `23a` into sections and scope wall.
 | `22b-goal-writer` | `render_goals`, `pm-ai goal set`, and the `goal_set` entry | 22a, 4c |
 | `23a-dashboard-sections` | `core.rendering`'s four sections, honest gaps | 22a, 11a |
 | `23d-project-render-scope-wall` | `render_project_dashboard` — a separate function whose signature *is* AD-25's wall | 23a |
-| `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 23a, 23d, 33c |
+| `23b-dashboard-pipeline` | `pm-ai dashboard` writing the real file | 4c, 4g, 23a, 23d, 33c |
 
 Four skipped tests stop skipping across the wave: the AD-27 taxonomy and AD-34
 no-minted-ids checks (`8a`, both importing `pm_ai.connectors.registry`), and
