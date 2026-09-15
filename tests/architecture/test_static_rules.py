@@ -137,6 +137,48 @@ def _write_mode(node: ast.Call) -> bool:
     return any(c in _mode_of(node) for c in "wax+")  # no mode at all is a read
 
 
+# `os.open` flags that mean content can be written through the descriptor.
+# `os.O_CREAT` is deliberately not one of them: it makes a *name*, and a
+# descriptor opened `O_RDONLY | O_CREAT` cannot put a byte in it — the same
+# distinction that keeps `mkdir` out of WRITE_CALLS above.
+OS_OPEN_WRITE_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_APPEND", "O_TRUNC"})
+
+
+def _os_open_writes(node: ast.Call) -> bool:
+    """True unless an `os.open` call's flags are unambiguously read-only.
+
+    Added by story 4k, for `pm_ai/platform/claims.py`, which opens a lock file
+    `O_RDONLY | O_CREAT` to hold an `fcntl.flock` on it and never writes a byte
+    through the descriptor.
+
+    Defaults to *true* when the flags cannot be read statically — a variable, a
+    call, anything not a literal `os.O_*` expression. A guard that fell open on
+    an expression it did not understand would be defeated by assigning the flags
+    to a local first, which is the shape of every accidental bypass in this file.
+    """
+    if not node.args:
+        return True
+    names: set[str] = set()
+    literal = True
+    for part in ast.walk(node.args[1]) if len(node.args) > 1 else ():
+        if isinstance(part, ast.Attribute):
+            names.add(part.attr)
+        elif isinstance(part, ast.Name):
+            names.add(part.id)
+        elif not isinstance(part, (ast.BinOp, ast.BitOr, ast.Load, ast.Expr)):
+            literal = False
+    if len(node.args) < 2 or not literal or not names:
+        return True
+    return bool(names & OS_OPEN_WRITE_FLAGS) or not names <= {
+        "os",
+        "O_RDONLY",
+        "O_CREAT",
+        "O_EXCL",
+        "O_CLOEXEC",
+        "O_NOFOLLOW",
+    }
+
+
 def test_ad5_single_writer_owns_all_file_writes():
     """AD-5 — no component outside pm_ai.storage opens a file for writing.
 
@@ -147,6 +189,12 @@ def test_ad5_single_writer_owns_all_file_writes():
     violations = []
     for f, node, name in calls(source_files(*layers)):
         if name == "open" and not _write_mode(node):
+            continue
+        if name == "os.open" and not _os_open_writes(node):
+            # Read-only flags, so nothing can be written through it. The one
+            # caller is the lock file behind `4k`'s exclusive claim: it creates a
+            # name to hold an `fcntl.flock` on, which is no more a write than the
+            # `mkdir` this set already leaves out.
             continue
         if name in WRITE_CALLS or name.endswith(".write_text") or name.endswith(".write_bytes"):
             violations.append(f"{f.location(node)}  {name}(...)")

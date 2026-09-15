@@ -2,7 +2,7 @@
 title: 'pm-ai project add'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
 ---
 
@@ -67,9 +67,14 @@ review_loop_iteration: 0
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/app/entry.py` -- add the onboarding sequence: resolve the path, derive or take the id, create the directory, generate the structure and `.gitignore` from `GITIGNORED`, then the exclusive read-modify-write through `4d`'s renderer
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add `project add` as a leaf on `4c`'s table -- one mapping, no new exit code
-- [ ] `tests/slice/test_project_onboarding.py` -- the matrix against a real temporary root, including the adoption case hashed before and after
+- [x] `pm_ai/app/wiring.py` -- `onboard_project`: resolve the path, derive or take the id, create the directory, generate the structure and `.gitignore` from `GITIGNORED`, then the exclusive read-modify-write through `4d`'s renderer -- **`wiring`, not `entry`**: the sequence needs a `StorageService`, and `entry` builds none
+- [x] `pm_ai/core/project_scaffold.py` -- new; render the rules from `GITIGNORED`, appending only what an existing `.gitignore` is missing -- pure, no filesystem
+- [x] `pm_ai/platform/claims.py` + `pm_ai/domain/claims.py` -- the exclusive claim the `Always` requires and nothing in the codebase had. `fcntl.flock` in `platform` per AD-26; the `ClaimHeld` refusal in `domain`, so the CLI can name it without importing `fcntl`
+- [x] `pm_ai/storage/service.py` -- `read_project_gitignore` and `write_project_gitignore` -- `.gitignore` is declared by no scope tree, so `read_artifact`/`write_artifact` cannot address it and AD-5's sweep covers `app`
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `Command.optional`, then `project add` as a leaf on `4c`'s table -- no new exit code, but the arity check had to become a range
+- [x] `pm_ai/app/entry.py` -- inject the sequence into the `Context`, independent of `daemon`
+- [x] `tests/slice/test_project_onboarding.py` -- the matrix against a real temporary root, including the adoption case hashed before and after
+- [x] `tests/architecture/test_static_rules.py` -- teach AD-5's sweep to read `os.open` flags, so a read-only descriptor is not a write
 
 **Acceptance Criteria:**
 - Given an onboarded project inside a git repository, when a `GITIGNORED` artifact is written, then the write succeeds — which is what proves the generated `.gitignore` is what `_assert_git_excludes` wanted, rather than a file that merely exists.
@@ -80,6 +85,22 @@ review_loop_iteration: 0
 - Given `uv run pm-ai project add <tmp>` then `uv run pm-ai doctor`, then the registry probe reports healthy.
 
 ## Spec Change Log
+
+- **2026-09-15, built. Six things the task list did not anticipate, each found before writing code and one found only by running it.**
+
+  **The Execution list named `entry.py` and the sequence lives in `wiring.py`.** `entry` composes; it builds no `StorageService`, and this sequence needs one to write the registry and the `.gitignore`. `wiring` is the module already permitted to import both `pm_ai.storage` and `pm_ai.platform`. `entry` injects it into the CLI `Context` and nothing else.
+
+  **`pm-ai project add <path> [alias]` was unexpressible on `4c`'s table.** `Command.takes` is exact arity — `len(supplied) != len(leaf.takes)` refuses — and `Command.options` is `--name value`, which is a different thing to type. The frozen matrix specifies a bare positional alias, so `Command.optional` was added and the arity check became a range. Too many words still refuse: an optional positional must not become a hole that swallows a typo'd third argument.
+
+  **`.gitignore` had no writer and no reader.** It belongs to the repository, not to the `.project-ai/` scope inside it, so no scope tree declares it and `resolve()` deliberately cannot address it (`paths.py:540-543`) — while AD-5's static sweep covers `pm_ai.app`, so the sequence could not open it either. `StorageService` gained a typed pair. Then running it produced the bug no review would have: `_replace` asks `is_encrypted`, which **fail-closes to `True` for any path it cannot locate inside a scope**, so the first real `project add` inside a repository wrote an AES-GCM blob over the team's `.gitignore` — or, on a machine with no key, refused with a keychain error while onboarding a plain directory. The write goes through `_publish` directly now, and says why.
+
+  **Nothing in the codebase had an exclusive claim,** which the `Always` requires. Built as `fcntl.flock` on a sibling lock file: a lock *file* alone records that somebody claimed it and nothing releases it when that somebody is killed, so the next run refuses forever against a dead process. `fcntl` is POSIX-only, so the mechanism sits in `pm_ai.platform` per AD-26 and the `ClaimHeld` refusal sits in `pm_ai.domain`, because `pm_ai.surfaces` must name it to map it onto an exit code and importing the platform module would pull `fcntl` into every process that parses a command line.
+
+  **AD-5's single-writer sweep caught the lock file's `os.open`.** It was right to look — `os.open` is in `WRITE_CALLS` precisely because a real write was once smuggled through it — but `O_RDONLY | O_CREAT` cannot put a byte in a file, which is the same distinction that already keeps `mkdir` out of that set. The sweep now reads the flags, defaults to "this is a write" for any expression it cannot read statically, and was re-verified by planting three variants including the assign-the-flags-to-a-local bypass. All three were caught.
+
+  **The Code Map says `PROJECT_TREE` holds "the nine declarations".** It holds eleven. Only the four directory nodes are realised — files are created by their writers, since a resolver that created files would be a second one (AD-5).
+
+  Two observations recorded in `deferred-work.md` rather than acted on: constructing a `StorageService` opens `operational.db` unconditionally, so a read-only `pm-ai doctor` creates a database; and the claim leaves a `projects.toml.lock` in `~/.pm-ai/` that no scope tree declares.
 
 - **2026-09-03, split from `4d` at the sizing gate.** `4d`'s rewrite against the human's onboarding decisions reached 2136 body tokens against wave 1's 1600. `4d` keeps the registry, its reader and its probe — a pure parser testable without a machine; this slice takes the command and everything filesystem-shaped. The same reader-first split `4a`/`4g` used for `config.toml`.
   Carried from the human's decisions of the same day: the argument is a path with an optional alias rather than an id and a repository path (D-1); relative paths resolve and only absolute is stored (Q4); the directory may be absent and is created, an existing structure is adopted with its artefacts intact, and an already-onboarded project is reported rather than refused (Q5); git is optional, so there is no repository check and the review's A3 — the missing `VcsPort` route on `Daemon` — dissolves rather than being implemented (Q1); and structure generation including `.gitignore` is mandatory rather than an `Ask First`, because Q6 put four artifacts into `GITIGNORED` and that set is what `_assert_git_excludes` guards.

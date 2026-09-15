@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pm_ai.app.pipelines import run_dashboard
-from pm_ai.app.wiring import Bootstrap, Daemon, bootstrap, build
+from pm_ai.app.wiring import Bootstrap, Daemon, bootstrap, build, onboard_project
 from pm_ai.connectors.registry import check_health as probe_connectors
 from pm_ai.core.config import Config, ConfigRefused, load_config
 from pm_ai.core.project_registry import ProjectEntry
@@ -109,6 +109,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             # three. The instant comes from `daemon.clock` rather than from a
             # `datetime.now()` here, so the day the dashboard renders and the
             # timestamps storage stamps come off the same clock.
+            # `4k`'s sequence, bound to this process's keychain and nothing
+            # else. Deliberately not a function of `daemon`: this is the command
+            # that makes a daemon possible, so on the machine it exists for
+            # composition has already stopped.
+            onboard=lambda path, alias: onboard_project(keychain, path, alias),
             dashboard=_dashboard(daemon),
             # What stopped the daemon being built, so a refusal can name it.
             # `config.toml` is the case that needs it: `4j`'s matrix requires
