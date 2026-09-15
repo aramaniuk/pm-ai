@@ -2,8 +2,9 @@
 title: 'config.toml gains a writer'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: 'b7ba5a57534c93a709334b3f4b31003a869b4754'
 context: []
 ---
 
@@ -30,7 +31,7 @@ context: []
 
 **Never, added:** comments in a hand-edited file are not preserved across a rewrite. `tomllib` reads and cannot write, round-tripping comments needs a third-party parser this slice refuses, and the generated header says so — the clause was self-answered where it stood.
 
-**Never:** No encryption-shaped key may be emitted under any circumstance — `4a` refuses them on read, and a writer able to produce one would hand the loader a file it must reject. No new TOML dependency: three typed keys are emitted directly, and the closed vocabulary means there is nothing unknown to round-trip. No file I/O in this module. No probe — that is `4i`. No caller — `4h` wires it.
+**Never:** No encryption-shaped key may be emitted under any circumstance — `4a` refuses them on read, and a writer able to produce one would hand the loader a file it must reject. No new TOML dependency: four typed keys are emitted directly, and the closed vocabulary means there is nothing unknown to round-trip. No file I/O in this module. No probe — that is `4i`. No caller — `4h` wires it.
 
 ## I/O & Edge-Case Matrix
 
@@ -51,29 +52,43 @@ context: []
 
 ## Code Map
 
-- `pm_ai/core/config.py:98,165,168` -- `Config`, `ACCEPTED_KEYS` and `load_config`; `render_config` joins them and must agree with all three
-- `pm_ai/core/config.py:123` -- `__post_init__`, which defines "admissible" for the round-trip rule
-- `pm_ai/core/config.py:337,378,397` -- `_number`, `_text`, `_flag`: what the loader accepts, and therefore what a round trip must survive
-- `pm_ai/core/project_registry.py` -- `4d`'s `render_registry`, the sibling pattern; follow its shape
+- `pm_ai/core/config.py:104,317,320` -- `Config`, `ACCEPTED_KEYS` and `load_config`; `render_config` (`:413`) joins them and must agree with all three
+- `pm_ai/core/config.py:226` -- `__post_init__`, which defines "admissible" for the round-trip rule
+- `pm_ai/core/config.py:642,683,702` -- `_number`, `_text`, `_flag`: what the loader accepts, and therefore what a round trip must survive
+- `pm_ai/ports/__init__.py:718` -- `ConfigPort`, the **only** settings interface a surface is typed against, through `DaemonPort.config`. A field added to `Config` and not here is unreachable from `23a`'s renderer and `23b`, and nothing fails until a later slice's mypy run
+- `tests/architecture/test_static_rules.py:560,632` -- `CONFIG_IMPORTS_ALLOWED` and the sweep that this module reads and writes no file. Adding an import here is a deliberate act; `zoneinfo` is the entry that needed the question answered rather than waved through
+- `pm_ai/connectors/graph/calendar.py` -- `zone_of`, the sibling zone lookup. It already separates a typo'd zone from a machine with no timezone database and names the `tzdata` remedy; this slice's refusal follows it
 - `pm_ai/domain/scope_model.py:432` -- `config.toml`: Tier 1, plaintext, not gitignored
-- `pm_ai/domain/storage_tiers.py:163` -- `_APPEND_ONLY_KEYS`, which `config.toml` is absent from, so a write replaces it whole
+- `pm_ai/domain/storage_tiers.py:172` -- `_APPEND_ONLY_KEYS`, which `config.toml` is absent from, so a write replaces it whole
 - `.importlinter:211-219` -- AD-30, why this cannot live in `surfaces`
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/config.py` -- add `display_timezone` to `Config`, its `ZoneInfo` validation to `__post_init__`, and its read to `load_config` -- the fourth key `4a` reserved; `ACCEPTED_KEYS` derives it, so a field without a read is admitted and dropped
-- [ ] `pm_ai/core/config.py` -- add `render_config(Config) -> bytes` with the generated header, omitting any key at its unset default -- one function, agreeing with `ACCEPTED_KEYS` and `__post_init__`
-- [ ] `tests/core/test_config_render.py` -- the matrix, with the round trip driven over every combination of set and unset rather than one example
+- [x] `pm_ai/core/config.py` -- add `display_timezone` to `Config`, its `ZoneInfo` validation to `__post_init__`, and its read to `load_config` -- the fourth key `4a` reserved; `ACCEPTED_KEYS` derives it, so a field without a read is admitted and dropped
+- [x] `pm_ai/core/config.py` -- add `render_config(Config) -> bytes` with the generated header, omitting any key at its unset default -- one function, agreeing with `ACCEPTED_KEYS` and `__post_init__`
+- [x] `tests/core/test_config_render.py` -- the matrix, with the round trip driven over every combination of set and unset rather than one example
+- [x] `pm_ai/ports/__init__.py` -- add the fourth member to `ConfigPort`, and a parity test pinning its members to `fields(Config)` -- found by review; a key `Config` carries and the port does not is unreachable from every surface
+- [x] `tests/architecture/test_static_rules.py` -- allowlist `zoneinfo`, and widen the config sweep from read verbs to writes -- both forced by this slice: the module gains an import that can reach a filesystem, and becomes a writer
 
 **Acceptance Criteria:**
 - Given every combination of the **four** keys set and unset, when rendered and read back, then the result equals the original `Config` — enumerated, because a renderer that drops one key would pass a single-example test.
 - Given any `Config`, then the **set of keys rendered equals the set whose value differs from `Config()`'s**. Round-trip equality alone cannot catch an always-emitted `verbose_logging = false`, because the loader accepts it.
-- Given any `Config`, then every rendered key is a member of `ACCEPTED_KEYS` — the checkable form of "no encryption-shaped key is ever emitted". A direct grep for the encryption family cannot fail, since three fields cannot produce a matching key, and its only realistic outcome is a false positive against this slice's own header.
+- Given any `Config`, then every rendered key is a member of `ACCEPTED_KEYS` — the checkable form of "no encryption-shaped key is ever emitted". A direct grep for the encryption family cannot fail, since four fields cannot produce a matching key, and its only realistic outcome is a false positive against this slice's own header.
 - Given `render_config(Config())`, when the output is read back, then it is `Config()` and the file contains no key — the unset state must survive a write, or a first-run file would be refused by its own loader.
 - Given `pyproject.toml`, then no TOML-writing dependency appears in it.
 
 ## Spec Change Log
+
+- **2026-09-15, one numeral corrected inside the frozen block, on the human's authorisation.** The `Never` clause read "three typed keys are emitted directly" and the vocabulary has been four since 2026-09-03, when this slice was given `display_timezone`. Handled as an UNLOCK in the sense `triage-wave-1-2026-09-03.md` defined — the fix is clear, the text is frozen, the human authorises and the edit is mechanical — rather than as a renegotiation, because nothing about the intent moves: the clause forbids a TOML-writing dependency and its reason is that the vocabulary is closed and small, which four keys satisfy exactly as three did. The whole frozen block was swept for the same drift rather than only the reported line; the two other mentions of three are `4a` closing the vocabulary at three before this key was added, and `AD-3`, both correct as written and left alone.
+
+- **2026-09-15, implemented, and the three-layer review's fourteen fixes applied.** Five were correctness. `render_config` raised `UnicodeEncodeError` rather than `ConfigRefused` for a lone surrogate in `pm_handle` — admissible at construction, so inside this slice's own "round trip or nothing" clause, and reachable rather than theoretical because argv decodes with `surrogateescape` and `4h` sets the handle from the command line. Refused in `__post_init__` rather than escaped, since no TOML string can carry an unpaired surrogate; the predicate asks by encoding rather than by code-point range, because a range check refuses valid astral characters. `Config(verbose_logging=1)` rendered `verbose_logging = 1.0`, a file this module writes and its own loader refuses — the flag lacked the `bool` guard the rate has had all along. The timezone catch missed `OSError`, and its refusal could not tell a typo'd zone from a machine with no timezone database, which `zone_of` already separates; it now does too, and names the remedy.
+
+  **`ConfigPort` is the finding worth carrying forward.** `Config` gained a fourth field and the port kept declaring three — and it is the only settings interface a surface is typed against, so `display_timezone` was unreachable from `23a`'s renderer and `23b`, the two consumers the key was added for, with nothing in the suite failing. It would have surfaced as a mypy error inside the next slice rather than this one. The Code Map named neither the port nor the static-rules sweep, which is why both are added to it above along with two task lines; the omission is recorded here rather than resolved by a re-derivation, because the implementation was coherent and what was missing was an interface restatement.
+
+  Verification gaps closed alongside: the header was pinned only on the empty-file branch, so a renderer emitting it nowhere else passed the whole suite; the dependency ban parsed requirements with chained `split` and was defeated by `~=`, `!=`, a URL, a marker or a capital; and the static sweep still knew only read verbs while this module had become a writer. Every fix was mutation-checked — reverted individually and confirmed to turn the suite red — rather than merely re-run.
+
+  **Left open:** the frozen `Never` clause still reads "three typed keys are emitted directly" and the vocabulary is four. It is inside `<frozen-after-approval>` and awaits the human's authorisation. One packaging question is deferred rather than answered: `pm_ai.core` now needs a platform timezone database and only `pm_ai.connectors` is recorded as needing one.
 
 - **2026-09-07, the second consumer of `display_timezone` changed name.** Consequent on the decision that no future meeting is persisted: the day's schedule is read live from `33b` rather than from `11a`'s `for_day`, so the two citations naming `for_day` as this key's other reader are corrected. Nothing about the key changes — it is still the fourth and last, still reserved to the human, still validated against the zone database, and still read once so a renderer and a day-selection cannot disagree. Only the reader on the far side of that single read is different.
 
@@ -94,3 +109,63 @@ The round-trip rule is the whole design. Two functions that must agree about a f
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: contracts kept, AD-30 among them
 - `uv run mypy` -- expected: clean
+
+## Suggested Review Order
+
+**The writer itself**
+
+- Start here: the round trip and the omit-at-default rule, both walked from `fields(Config)`.
+  [`config.py:413`](../../../../pm_ai/core/config.py#L413)
+
+- Refuses an unrenderable type rather than dropping it, so a future field cannot vanish silently.
+  [`config.py:452`](../../../../pm_ai/core/config.py#L452)
+
+- The escape table, and why a surrogate is refused upstream instead of escaped here.
+  [`config.py:484`](../../../../pm_ai/core/config.py#L484)
+
+**The fourth key, and what admissible now means**
+
+- The key itself; `""` is unset, and a caller needing a day boundary refuses rather than assuming UTC.
+  [`config.py:224`](../../../../pm_ai/core/config.py#L224)
+
+- Three refusals, not one: a typo, a machine with no timezone database, a non-string.
+  [`config.py:155`](../../../../pm_ai/core/config.py#L155)
+
+- Probes `ZoneInfo("UTC")` so a missing database cannot be reported as a typo.
+  [`config.py:135`](../../../../pm_ai/core/config.py#L135)
+
+- Asks by encoding, never by code-point range — a range check refuses valid astral characters.
+  [`config.py:120`](../../../../pm_ai/core/config.py#L120)
+
+- The flag guard the rate has always had; without it the writer emits a file the loader refuses.
+  [`config.py:263`](../../../../pm_ai/core/config.py#L263)
+
+**The interface the review caught**
+
+- The fourth member. Without it the key is unreachable from every surface, and nothing fails.
+  [`ports/__init__.py:748`](../../../../pm_ai/ports/__init__.py#L748)
+
+- Parity pinned by return annotation, so the next added field fails here, not in a later story.
+  [`test_config.py:175`](../../../../tests/core/test_config.py#L175)
+
+**Guards widened because this module changed shape**
+
+- `zoneinfo` allowlisted deliberately — the first entry that can reach a filesystem.
+  [`test_static_rules.py:560`](../../../../tests/architecture/test_static_rules.py#L560)
+
+- The sweep now covers writes too; the module is no longer only a reader.
+  [`test_static_rules.py:632`](../../../../tests/architecture/test_static_rules.py#L632)
+
+**Tests worth reading rather than counting**
+
+- Guards the sweep itself: fails if the fixtures drift from `ACCEPTED_KEYS`.
+  [`test_config_render.py:79`](../../../../tests/core/test_config_render.py#L79)
+
+- Asserts against output on all 16 combinations, not against the constant on the empty one.
+  [`test_config_render.py:182`](../../../../tests/core/test_config_render.py#L182)
+
+- The round-trip claim stated as a property: no admissible `Config` may fail to encode.
+  [`test_config_render.py:363`](../../../../tests/core/test_config_render.py#L363)
+
+- PEP 508 parsing extracted and tested, after chained `split` let four pin styles through.
+  [`test_config_render.py:515`](../../../../tests/core/test_config_render.py#L515)

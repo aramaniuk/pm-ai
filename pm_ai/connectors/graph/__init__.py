@@ -223,7 +223,7 @@ CATEGORIES_KEY = "categories"
 """The keys a Graph enrolment row carries, spelled once.
 
 They live in `connectors/<instance>.json` — application scope, Tier 1,
-gitignored — and **not** in `config.toml`, whose vocabulary is closed at three
+gitignored — and **not** in `config.toml`, whose vocabulary is closed at four
 keys. These are per-machine connector settings: which Entra application this
 laptop signs in through, how much calendar this PM wants read, and which of their
 Outlook categories mean which project. None of that is a fact about pm-ai, and a

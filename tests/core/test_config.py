@@ -43,7 +43,12 @@ def test_empty_returns_defaults():
 
 def test_defaults_are_the_unconfigured_states():
     """Named here so a later change to any default is a deliberate one."""
-    assert Config() == Config(blended_hourly_rate=0.0, pm_handle="", verbose_logging=False)
+    assert Config() == Config(
+        blended_hourly_rate=0.0,
+        pm_handle="",
+        verbose_logging=False,
+        display_timezone="",
+    )
 
 
 # ── Valid ────────────────────────────────────────────────────────────────────
@@ -159,7 +164,39 @@ def test_an_unknown_table_is_refused_by_its_top_level_name():
 def test_the_accepted_set_is_the_dataclass():
     """One place states what the file may say; nothing restates it."""
     assert ACCEPTED_KEYS == {field.name for field in fields(Config)}
-    assert ACCEPTED_KEYS == {"blended_hourly_rate", "pm_handle", "verbose_logging"}
+    assert ACCEPTED_KEYS == {
+        "blended_hourly_rate",
+        "pm_handle",
+        "verbose_logging",
+        "display_timezone",
+    }
+
+
+def test_the_port_declares_every_field_config_carries():
+    """`ConfigPort` is the only settings interface a surface is typed against.
+
+    `pm_ai.ports` may import nothing but `pm_ai.domain`, so the protocol
+    restates `Config`'s fields by hand — and a hand-written restatement of a
+    derived set is the drift pair `ACCEPTED_KEYS` exists to avoid, one layer
+    out. A field declared on the dataclass and omitted from the port is not a
+    type error: it loads, it renders, and it is simply unreachable through
+    `DaemonPort.config`, which is where `23a`'s renderer reads it from.
+    `display_timezone` was in exactly that state when story 4g first added it.
+
+    Read off each property's return annotation rather than off `dir()`, so the
+    types are compared too: a member declared `pm_handle: float` is present by
+    name and wrong in the way that actually reaches a caller.
+    """
+    from typing import get_type_hints
+
+    from pm_ai.ports import ConfigPort
+
+    declared = {
+        name: get_type_hints(member.fget)["return"]
+        for name, member in vars(ConfigPort).items()
+        if isinstance(member, property) and member.fget is not None
+    }
+    assert declared == get_type_hints(Config)
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -344,6 +381,8 @@ def test_a_decode_offset_is_reported_against_the_file_not_the_stripped_buffer():
         pytest.param({"blended_hourly_rate": float("nan")}, id="nan-rate"),
         pytest.param({"blended_hourly_rate": float("inf")}, id="inf-rate"),
         pytest.param({"blended_hourly_rate": True}, id="bool-rate"),
+        pytest.param({"display_timezone": "Europe/Warsav"}, id="typod-zone"),
+        pytest.param({"display_timezone": "/etc/localtime"}, id="zone-as-a-path"),
     ],
 )
 def test_a_nonsense_value_is_refused_at_construction(kwargs: dict):
@@ -371,6 +410,7 @@ ROUND_TRIP = {
     "blended_hourly_rate": (b"blended_hourly_rate = 42.5\n", 42.5),
     "pm_handle": (b'pm_handle = "pm@example.org"\n', "pm@example.org"),
     "verbose_logging": (b"verbose_logging = true\n", True),
+    "display_timezone": (b'display_timezone = "Europe/Warsaw"\n', "Europe/Warsaw"),
 }
 
 

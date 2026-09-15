@@ -459,7 +459,7 @@ def _graph_connector(
 
     They live in `connectors/<instance>.json` — per-machine, gitignored,
     hand-editable — rather than in `config.toml`, whose vocabulary stays closed
-    at three keys: which app asks for a PM's calendar and how much of it to read
+    at four keys: which app asks for a PM's calendar and how much of it to read
     are facts about this machine, not about pm-ai.
 
     **A row missing a setting builds nothing and the missing key is named**, on

@@ -1162,10 +1162,16 @@ def test_the_composed_connector_holds_the_sealed_credential_and_a_wait_that_wait
     )
 
 
-def test_the_config_vocabulary_stays_closed_at_three_keys():
-    """The widths are per-machine connector settings and never `config.toml`'s."""
+def test_the_config_vocabulary_stays_closed_and_holds_no_connector_setting():
+    """The widths are per-machine connector settings and never `config.toml`'s.
+
+    Pinned as the whole set rather than as an absence, so a width key added to
+    `Config` fails here instead of passing a `not in` check that only ever knew
+    the two spellings this file happened to think of. Story 4g added the fourth
+    and last member; the reason it is *four* is stated in `pm_ai.core.config`.
+    """
     assert ACCEPTED_KEYS == frozenset(
-        {"blended_hourly_rate", "pm_handle", "verbose_logging"}
+        {"blended_hourly_rate", "pm_handle", "verbose_logging", "display_timezone"}
     )
 
 
