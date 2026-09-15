@@ -240,30 +240,53 @@ def test_ad25_project_rendering_cannot_open_the_personal_store():
     # `project_scope_datasources`", with `grep` returning no match as an
     # acceptance criterion). So the skip was permanent rather than pending, and
     # AD-25's only runtime check would have read green forever while checking
-    # nothing. `23d` adds the project render whose *signature* is the wall, and
-    # lowers `EXPECTED_SKIPS` by one in the same commit.
-    render_project = getattr(rendering, "render_project_dashboard", None)
-    if render_project is None:
-        pytest.skip(
-            "pm_ai.core.rendering.render_project_dashboard not implemented yet "
-            "(story 23d — the project render, whose signature is the scope wall)"
-        )
+    # nothing. `23d` added the project render whose *signature* is the wall, and
+    # lowered `EXPECTED_SKIPS` by one in the same commit.
+    #
+    # A missing function is a **failure**, never a skip, now that `23d` has
+    # landed. The `getattr`/`pytest.skip` pair this replaced was dead in the one
+    # direction that matters: deleting or renaming `render_project_dashboard`
+    # would have turned AD-25's only runtime check green-by-silence, and
+    # `tests/conftest.py`'s ratchet returns early on any failing or erroring run,
+    # so the vanished skip would not have been reported either. The same lesson
+    # `test_types.py` carries about a missing `mypy` binary.
+    assert hasattr(rendering, "render_project_dashboard"), (
+        "AD-25: `pm_ai.core.rendering.render_project_dashboard` is gone. It is "
+        "the project dashboard's renderer and its signature is the scope wall, "
+        "so its absence is not a story that has not landed yet — story 23d "
+        "shipped it — but the wall itself having been removed or renamed."
+    )
+    render_project = rendering.render_project_dashboard
+
     # The wall asserted as a signature, not as a list of what the render may
     # open: a list needs a test that remembers to check it, and this body's
     # previous form — a substring search over a returned list — passed vacuously
     # whenever that list came back empty. A parameter that does not exist cannot
     # be passed the PM's personal register at all.
-    personal = [
-        name
-        for name in inspect.signature(render_project).parameters
-        if "goal" in name.lower() or "register" in name.lower()
-    ]
+    #
+    # Names **and** annotations. Matching names alone was shown by mutation to
+    # accept `context: GoalRegister`, which is the identical leak wearing a
+    # different label — and a renamed parameter is exactly how a wall gets walked
+    # around by someone who never read this test. `str()` over the annotation
+    # rather than `is GoalRegister`, because `from __future__ import annotations`
+    # makes these strings, and a `GoalRegister | None` or a
+    # `Mapping[str, Goal]` should trip it too.
+    parameters = inspect.signature(render_project).parameters
+    personal = sorted(
+        {
+            name
+            for name, parameter in parameters.items()
+            if "goal" in name.lower()
+            or "register" in name.lower()
+            or "goal" in str(parameter.annotation).lower()
+        }
+    )
     assert not personal, (
         f"AD-25: render_project_dashboard accepts {personal}. All three goal "
         "domains live in the personal `strategic_goals.md`, so a project render "
         "that can be handed a register is one wrong branch away from writing the "
         "PM's career goals into a project artifact. The wall is that the "
-        "parameter does not exist."
+        "parameter does not exist — under any name."
     )
 
 

@@ -39,12 +39,23 @@ import pytest
 # `sqlite_vec`) are imported inside the functions that use them precisely so a
 # missing extra cannot turn a test into a skip that reads as coverage. If this
 # number ever has to rise, the reason belongs in the commit message.
-# Lowered by two in story 8d's commit, from 27: `pm_ai.connectors.registry` now
-# exists, so `test_ad27_connectors_only_emit_core_declared_event_types` and
-# `test_ad34_connectors_do_not_mint_event_ids` run instead of skipping. A delta
-# rather than an absolute on purpose — `23d` lowers it by one as well, and which
-# of the two lands first decides the number, not the work.
-EXPECTED_SKIPS = 25
+# Each story states its own delta, and states it in the past tense once landed.
+# The number below is the sum of them, so a story that has shipped must never
+# read as still owing a subtraction — a future-tense note left standing above a
+# landed one is how the same delta gets applied twice.
+#
+# 27 → 25, story 8d: `pm_ai.connectors.registry` exists, so
+# `test_ad27_connectors_only_emit_core_declared_event_types` and
+# `test_ad34_connectors_do_not_mint_event_ids` run instead of skipping.
+#
+# 25 → 24, story 23d: `pm_ai.core.rendering.render_project_dashboard` exists, so
+# `test_ad25_project_rendering_cannot_open_the_personal_store` runs instead of
+# skipping — AD-25's only runtime check, which had skipped since it was written.
+#
+# Deltas rather than absolutes on purpose: two stories in flight at once would
+# otherwise each hard-code a number that assumes it lands first, and whichever
+# merged second would quietly overwrite the other's subtraction.
+EXPECTED_SKIPS = 24
 
 _VERDICT = pytest.StashKey[str]()
 

@@ -2,8 +2,9 @@
 title: 'The project dashboard is its own renderer'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 1
+baseline_commit: '9789297c9d8d1449c9a43e16f1d4f2a8b9ffbd5e'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -32,7 +33,7 @@ review_loop_iteration: 1
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Project day | two project meetings, project log entries | Time-Critical and Proactive Enablement, both populated | N/A |
-| No project meetings | the calendar answered, with nothing mapped to that project | "No meetings on this project's calendar today" | N/A |
+| No project meetings | the calendar answered, with nothing mapped to that project | `NO_MEETINGS` — "No meetings on the calendar today", the same string the personal render emits | N/A |
 | Calendar unreachable | the fetch failed for a project render | the section says the calendar could not be read; **never** "No meetings on this project's calendar today" | reported, never raised |
 | No project entries | empty project log | Proactive Enablement states no signals in the window | N/A |
 | Proactive Enablement in wave 1 | `MESSAGE_POSTED` arrives with `33d` | states so — knowingly empty, as in `23a` | N/A |
@@ -56,19 +57,21 @@ review_loop_iteration: 1
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/rendering.py` -- add `render_project_dashboard(meetings, entries, now, *, tz)`, reusing `23a`'s section renderers -- no goals parameter, and that absence is the deliverable
-- [ ] `tests/architecture/test_domain_invariants.py:214-227` -- retarget the AD-25 gate: assert through `inspect.signature` that `render_project_dashboard` accepts no goals parameter, and that it is not empty of assertions -- the current body greps `str(s)` over a returned list, which passes vacuously when the list is empty, as its own comment records nearly happening once
-- [ ] `tests/conftest.py` -- lower `EXPECTED_SKIPS` **by one** in this slice's commit -- a delta, because `8d` lowers it by two and the ratchet fails in both directions (`conftest.py:81`)
-- [ ] `tests/core/test_project_rendering.py` -- the matrix, including the byte-identical shared-section case
+- [x] `pm_ai/core/rendering.py` -- add `render_project_dashboard(meetings, entries, now, *, tz)`, reusing `23a`'s section renderers -- no goals parameter, and that absence is the deliverable
+- [x] `tests/architecture/test_domain_invariants.py:214-227` -- retarget the AD-25 gate: assert through `inspect.signature` that `render_project_dashboard` accepts no goals parameter, and that it is not empty of assertions -- the current body greps `str(s)` over a returned list, which passes vacuously when the list is empty, as its own comment records nearly happening once. **Already retargeted in `23a`'s commit**, where creating `pm_ai.core.rendering` would otherwise have turned the skip into an `AttributeError`; this slice supplies the subject and removes the skip
+- [x] `tests/conftest.py` -- lower `EXPECTED_SKIPS` **by one** in this slice's commit -- a delta, because `8d` lowers it by two and the ratchet fails in both directions (`conftest.py:81`) -- 25 to 24
+- [x] `tests/core/test_project_rendering.py` -- the matrix, including the byte-identical shared-section case, plus `tests/core/mypy_fixture_project_render_goals.py` for the negative type assertion
 
 **Acceptance Criteria:**
 - Given `inspect.signature(render_project_dashboard)`, then no parameter accepts a goal register — the wall, asserted as a signature rather than as a list, because a signature cannot drift silently and a list can.
-- Given a fixture passing a goal register to `render_project_dashboard`, when mypy runs on it, then it reports `arg-type` — the same shape `8e` uses, verified there to work under an explicit path argument.
+- Given a fixture passing a goal register to `render_project_dashboard`, when mypy runs on it, then it reports `arg-type` — and, given the fixture of ordinary calls beside it, exit zero. Both halves, because refusals alone read green against annotations that had regressed into refusing everything. **This slice is the first to build the shape.** `8e` describes it and is cited for it here and in the fixture, but is `ready-for-dev` and unbuilt, so nothing was verified there; the shipped precedent is `tests/connectors/test_coverage_honesty.py:911`, which runs mypy on generated callers to pin `save_cursor`'s signature and pairs an accepted call with its refusals.
 - Given the same meetings and entries passed to both renderers, then their Time-Critical sections are byte-identical — asserted, because two dashboards that drift into two formats is what sharing the section renderers prevents.
 - Given the suite, then `test_ad25_project_rendering_cannot_open_the_personal_store` passes rather than skips, and its body would fail if the parameter were added back.
 - Given `grep -rn "project_scope_datasources" pm_ai/`, then there is no match — the approach this slice carried until 2026-09-03 is not built.
 
 ## Spec Change Log
+
+- **2026-09-14, the empty-day sentence is neutral in both files.** This block asked for two things that cannot both hold: that the two renderers *share* their section renderers, and that a project render with an empty calendar say "No meetings on this project's calendar today". A shared `_time_critical` is one input to one output, and the empty-day branch receives an empty sequence from either caller — so the project wording is reachable only by telling the function which dashboard called it, which is the coupling sharing exists to prevent, and which makes the byte-identical criterion false on that one branch. Raised before any code was written; the human settled it by removing the possessive from **both** sides rather than parameterising: `NO_MEETINGS` becomes "No meetings on the calendar today" and both files emit it. The byte-identical constraint and its acceptance criterion therefore stand **unconditionally** — no narrowing to "given meetings" — and the three other branches (failure, all-ended, populated) were already scope-neutral, measured against the shipped renderer at the gate. The constant's change landed in `9789297`, against `23a`'s module — which is this story's own `baseline_commit`, so it is behind the work reviewed here rather than inside it.
 
 - **2026-09-07, the project render reads the calendar too.** Consequent on the decision that no future meeting is persisted: a project's day comes from the live fetch filtered to that scope, not from `for_day` over `meetings/`. The scope wall this slice exists to hold is unaffected — it governs what a project-scope render may *open*, and a live read narrowed to one project opens strictly less than a cross-scope one. The unreachable-calendar row is added for the same reason as in `23a`: with a live read, "no meetings" and "could not ask" stop being the same silence.
 
@@ -81,5 +84,53 @@ review_loop_iteration: 1
 
 **Commands:**
 - `uv run pytest tests/core/test_project_rendering.py tests/architecture/test_domain_invariants.py -q` -- expected: matrix passes and the AD-25 gate passes rather than skips
+- `uv run pytest tests/core/test_rendering_sections.py -q` -- expected: `23a`'s suite and its golden file unchanged. Listed because this slice **rewrites the body of `render_dashboard`**, routing a shipped function through the new `_document` and `_require_tz`; nothing in the two files above would notice a regression there
 - `uv run pytest -q` -- expected: no new failures, `EXPECTED_SKIPS` one lower
-- `uv run mypy` -- expected: clean
+- `uv run mypy` -- expected: clean. The two fixtures under `tests/core/` are invisible to it (`files = ["pm_ai"]`) and are checked by the suite instead, one expected to pass and one to fail
+- `uv run lint-imports` -- expected: `core` imports no I/O client, as in `23a`
+
+## Suggested Review Order
+
+**The wall**
+
+- The deliverable is what this signature lacks: no goals parameter, no register.
+  [`rendering.py:262`](../../../../pm_ai/core/rendering.py#L262)
+
+- Two sections, because those are what project-scope sources support; CAP-9 binds the personal path only.
+  [`rendering.py:128`](../../../../pm_ai/core/rendering.py#L128)
+
+- AD-25's only runtime gate: a missing function now fails loudly rather than skipping.
+  [`test_domain_invariants.py:253`](../../../../tests/architecture/test_domain_invariants.py#L253)
+
+- Matches annotations as well as names — `context: GoalRegister` is the same leak relabelled.
+  [`test_domain_invariants.py:284`](../../../../tests/architecture/test_domain_invariants.py#L284)
+
+**Shared, so the two files cannot drift**
+
+- The heading join, extracted from `23a` — a second copy is how a blank line goes missing.
+  [`rendering.py:310`](../../../../pm_ai/core/rendering.py#L310)
+
+- The timezone refusal, extracted with it; also narrows `tzinfo | None` to `tzinfo`.
+  [`rendering.py:328`](../../../../pm_ai/core/rendering.py#L328)
+
+- Splits on `_document`'s own separator and strips nothing, so "byte-identical" means bytes.
+  [`test_project_rendering.py:143`](../../../../tests/core/test_project_rendering.py#L143)
+
+- Four branches compared: populated, empty day, all-ended, failed fetch.
+  [`test_project_rendering.py:411`](../../../../tests/core/test_project_rendering.py#L411)
+
+**The negative type assertion, and its control**
+
+- A register cannot reach the function: two `arg-type`, one `call-arg`.
+  [`test_project_rendering.py:293`](../../../../tests/core/test_project_rendering.py#L293)
+
+- The control the refusals need — an ordinary call must still type-check.
+  [`test_project_rendering.py:276`](../../../../tests/core/test_project_rendering.py#L276)
+
+**Peripherals**
+
+- The signature asserted directly, beside the architecture gate that also asserts it.
+  [`test_project_rendering.py:213`](../../../../tests/core/test_project_rendering.py#L213)
+
+- Lowered by one as a delta: the AD-25 gate runs instead of skipping.
+  [`conftest.py:58`](../../../../tests/conftest.py#L58)
