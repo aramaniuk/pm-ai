@@ -2,8 +2,9 @@
 title: 'Dashboard pipeline and pm-ai dashboard'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'in-progress'
 review_loop_iteration: 1
+baseline_commit: '37a915092d3c645d192bea57afe87f4e2bbc02df'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -95,15 +96,15 @@ Re-derived against `dd2e537` on 2026-09-15; every address below was bounds-check
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/harvest.py` -- declare `NoCalendarConnector`, `UnreadCalendar` and `PartialCalendar`, the calendar's three further answers
-- [ ] `pm_ai/connectors/graph/calendar.py` -- read `iCalUId` onto `CalendarRow`
-- [ ] `pm_ai/domain/meetings.py`, `pm_ai/connectors/graph/__init__.py` -- carry `ical_uid` onto `Meeting` in memory only, as `tentative` is, and assert it stays out of `_FIELDS`
-- [ ] `pm_ai/core/rendering.py` -- widen both renderers' `meetings` annotation to four members; add the `NoCalendarConnector` branch, which attributes nothing to any connector, and the `PartialCalendar` branch, which lists what arrived and names what did not
-- [ ] `pm_ai/app/pipelines.py` -- add `run_dashboard`: resolve the zone, select **every** calendar connector by `emits()`, read each day live and independently, merge and deduplicate, read goals and the log, render, then write
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- give the table an optional-argument mechanism, then add `dashboard` with `--scope` defaulting to personal
-- [ ] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- the new branch in both dashboards
-- [ ] `tests/slice/test_dashboard_slice.py` -- the matrix end to end against a temporary root
-- [ ] `tests/surfaces/test_cli_dispatch.py` -- the new subcommand, its `--scope` parsing and its refusals
+- [x] `pm_ai/domain/harvest.py` -- declare `NoCalendarConnector`, `UnreadCalendar` and `PartialCalendar`, the calendar's three further answers
+- [x] `pm_ai/connectors/graph/calendar.py` -- read `iCalUId` onto `CalendarRow`
+- [x] `pm_ai/domain/meetings.py`, `pm_ai/connectors/graph/__init__.py` -- carry `ical_uid` onto `Meeting` in memory only, as `tentative` is, and assert it stays out of `_FIELDS`
+- [x] `pm_ai/core/rendering.py` -- widen both renderers' `meetings` annotation to four members; add the `NoCalendarConnector` branch, which attributes nothing to any connector, and the `PartialCalendar` branch, which lists what arrived and names what did not
+- [x] `pm_ai/app/pipelines.py` -- add `run_dashboard`: resolve the zone, select **every** calendar connector by `emits()`, read each day live and independently, merge and deduplicate, read goals and the log, render, then write
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- give the table an optional-argument mechanism, then add `dashboard` with `--scope` defaulting to personal
+- [x] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- the new branch in both dashboards
+- [x] `tests/slice/test_dashboard_slice.py` -- the matrix end to end against a temporary root
+- [x] `tests/surfaces/test_cli_dispatch.py` -- the new subcommand, its `--scope` parsing and its refusals
 
 **Acceptance Criteria:**
 - Given a temporary root with two harvested meetings and a goals file, when `run_dashboard` runs, then `~/.manager-ai/memory/daily_dashboard.md` exists under that root with four headings and the meetings listed in start order.
