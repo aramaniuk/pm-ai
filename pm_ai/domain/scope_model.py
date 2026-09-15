@@ -686,8 +686,29 @@ PEOPLE_TREE: tuple[LayoutNode, ...] = (
 
 
 # ── C. Isolated Project Scopes — `<repository>/.project-ai/` ─────────────────
-# scope-model.md §C, in its order. Committed to version control, with exactly
-# one gitignored subdirectory.
+# scope-model.md §C, in its order. `rules/` and `skills/` are committed; all of
+# `memory/` and `transcripts/` are not.
+#
+# `memory/` became machine-local on 2026-09-15 (story 1n, decided 2026-09-03 —
+# the spec carries the decision date and this file the day it changed).
+# It was committed, and
+# two machines on one repository therefore wrote the same Tier-1 files: both
+# append to `2026-09.md`, `_append_batch` publishes the whole file through
+# `os.replace` so a local append clobbers whatever a pull brought in, the `seen`
+# dedup set is per-machine so the next harvest re-appends a teammate's entries,
+# and sealed segments are declared immutable while a merge rewrites them. Every
+# mechanism that makes Tier 1 trustworthy on one machine is false under a merge,
+# so the artifacts derived from it — Tier 2 and Tier 3 — are rebuilt from a
+# ledger that no longer says what this machine recorded.
+#
+# `memory/` itself follows its children rather than staying a bare structural
+# node: with all four excluded, nothing beneath it is committed, and the
+# generated `.gitignore` (story 4k) carries one rule instead of four. The cost is
+# deliberate — a teammate's events, meetings and commitments never reach this
+# machine, so every project-level aggregation is per-machine. What stays shared
+# is `rules/` and `skills/`: human-authored, hand-edited, and nothing local is
+# derived from them, which is what sharing is for. A future project artifact that
+# genuinely should be shared therefore cannot live under `memory/`.
 
 PROJECT_TREE: tuple[LayoutNode, ...] = (
     Dir(
@@ -707,15 +728,18 @@ PROJECT_TREE: tuple[LayoutNode, ...] = (
     Dir(
         "memory",
         (
-            # Project daily team dashboard.
-            File("daily_dashboard.md", Tier.TRUTH, encrypted=False, gitignored=False),
-            # Spoken commitments & promise tracking.
-            File("commitments_log.md", Tier.TRUTH, encrypted=False, gitignored=False),
+            # Project daily team dashboard. Replaced whole, daily, by each
+            # machine — so two machines sharing it means the later write wins.
+            File("daily_dashboard.md", Tier.TRUTH, encrypted=False, gitignored=True),
+            # Spoken commitments & promise tracking. Append-only, with the same
+            # clobber window as a segment.
+            File("commitments_log.md", Tier.TRUTH, encrypted=False, gitignored=True),
             # Meeting SUMMARIES — the citation root for every extracted fact. A
             # commitment in this scope may cite only a meeting in this scope.
-            Collection("meetings", Tier.TRUTH, encrypted=False, gitignored=False),
-            Collection("event_log", Tier.TRUTH, encrypted=False, gitignored=False),
+            Collection("meetings", Tier.TRUTH, encrypted=False, gitignored=True),
+            Collection("event_log", Tier.TRUTH, encrypted=False, gitignored=True),
         ),
+        gitignored=True,
     ),
     # PROJECT-SPECIFIC SKILLS. As with the personal scope, the `.py` names in
     # `scope-model.md` §C are the team's to choose and are not declared.
@@ -1035,15 +1059,21 @@ FOREIGN_ROOTS: Mapping[str, ScopeKind] = _foreign_roots()
 # mechanism changing. Moving one of these into a second scope's tree is caught by
 # comparing the two.
 #
-# A committed scope holds none of them. `event_log/`, `meetings/`, `transcripts/`
+# No shared scope holds any of them — the project scope in practice, which is
+# the one a second person can read. `event_log/`, `meetings/`, `transcripts/`
 # and `daily_dashboard.md` are absent because they are per-scope by construction:
 # the personal one is personal, the project one was never the PM's. `persona.md`
 # is absent for the same reason — the project scope declares its own.
 #
+# The property is stated as sharing rather than as git, and was reworded that way
+# with story 1n: most of the project scope is machine-local now, and a rule
+# spelled "no committed scope holds it" would read as satisfied by a `.gitignore`
+# line. It is not — a project artifact is the team's whatever git is told.
+#
 # `telemetry/` is `skills/telemetry/`, the personal scope's cross-project
 # harvesters. It is code rather than a record, but it is declared in the
 # sovereign hub and nowhere else, and the property this set is checked against —
-# no committed scope holds it — is exactly the one that must stay true of it.
+# no shared scope holds it — is exactly the one that must stay true of it.
 PERSONAL_SUBJECT_ARTIFACTS: frozenset[str] = frozenset(
     {
         "manager_principles.md",
@@ -1088,6 +1118,47 @@ def _assert_declarations_agree() -> None:
         raise InconsistentModel(
             "a scope kind with no declared tree: "
             f"{sorted(k.value for k in ScopeKind if not SCOPE_TREES.get(k))}"
+        )
+
+    # A node inside a gitignored directory may not answer "no" to git exclusion.
+    #
+    # Git has no way to honour such a declaration: it will not re-include a child
+    # of an excluded directory, so the child's `gitignored=False` is a promise the
+    # repository cannot keep, and the guards that read it would report a write as
+    # committed-and-fine while git ignored the file entirely. The reverse
+    # direction is legal and common — `private/telegram_cache/` is excluded inside
+    # a committed personal tree — so only this one is refused.
+    #
+    # Story 1n (2026-09-15) is what made the rule worth having rather than
+    # obvious: it flipped `memory/` and its four children together, and a later
+    # change that re-shares one child by flipping only that child would be exactly
+    # this contradiction. Asserted here rather than left to the test that asserts
+    # the derived set, because that test is a literal a developer updates in the
+    # same edit that breaks the relation.
+    contradictions: dict[str, list[str]] = {}
+    for kind, tree in SCOPE_TREES.items():
+        walked = list(walk_tree(tree))
+        # Only directories can cover anything, and their keys carry the trailing
+        # slash — so a prefix test cannot confuse `memory/` with a sibling whose
+        # name merely starts the same way.
+        excluded_dirs = {
+            key for key, node in walked if node.is_dir and getattr(node, "gitignored", None)
+        }
+        for key, node in walked:
+            if getattr(node, "gitignored", None) is not False:
+                continue
+            covering = sorted(
+                parent for parent in excluded_dirs if key != parent and key.startswith(parent)
+            )
+            if covering:
+                contradictions.setdefault(kind.value, []).append(f"{key} under {covering}")
+    if contradictions:
+        raise InconsistentModel(
+            f"a node declares gitignored=False inside a gitignored parent: "
+            f"{contradictions}. Git will not re-include a child of an excluded "
+            f"directory, so that declaration is a promise no repository can keep "
+            f"— and the write guard would read it as 'no question to ask' for a "
+            f"file git is already ignoring."
         )
 
     # The three ways an artifact can be accounted for, kept pairwise disjoint so

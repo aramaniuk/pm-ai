@@ -1,14 +1,19 @@
 """Disclosure and cost records (AD-31, AD-17, AD-38).
 
 Two independent reviewers found that pointing AD-31's audit at `event_log.md`
-inverted the rule it was built to serve: `event_log.md` exists per scope, and the
-project scope is git-committed, so a record naming `scopes={personal, project}`
-would be pushed to the employer's repository. The mechanism built to prove
-nothing leaked would have been the leak.
+inverted the rule it was built to serve: `event_log.md` exists per scope, and one
+of those scopes is the team's, so a record naming `scopes={personal, project}`
+would be readable by everyone the project is shared with. The mechanism built to
+prove nothing leaked would have been the leak.
 
 The fix is structural rather than procedural — a `DisclosureRecord` has one home
-by construction, and a record naming personal material cannot be written to a
-committed scope at all.
+by construction, and a record naming personal material cannot be written to the
+project scope at all.
+
+The guards below test that scope relation and not git. They read
+`is_git_committed` until 2026-09-15; story 1n made the project scope's `memory/`
+machine-local, which broke the equivalence, and AD-38's revision removes git from
+the rule rather than choosing between the two readings.
 
 Imports nothing from `pm_ai` except sibling domain modules (AD-30).
 """
@@ -44,7 +49,14 @@ class MalformedDisclosure(ValueError):
 
 
 class CommittedScopeLeak(ValueError):
-    """A record naming personal material was routed to a git-committed scope."""
+    """A record naming personal material was routed to the project scope.
+
+    Named for the condition that first raised it — the project scope was the
+    committed one — and kept under that name after 2026-09-15, when the
+    condition became the scope relation itself. The name is what callers catch
+    and what the ledger's own history spells; renaming it would rewrite the
+    refusal's identity to record a change in why it fires, not in when.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,29 +107,41 @@ def referenced_scopes(record: object) -> tuple[DataScope, ...]:
 def assert_writable(record: object, *, scope: DataScope) -> None:
     """AD-38's general invariant, checked at the write boundary.
 
-    No record written to a git-committed scope may reference personal- or
+    No record written to the **project scope** may reference personal- or
     people-scope material — not by content, not by `source_ref`, not by scope
     name. A cross-scope operation writes its project-visible part to the project
     log and everything else to the application ledger; it never writes one record
     naming both.
 
+    The condition is the scope relation, not git. It read `is_git_committed`
+    until 2026-09-15, which was the same test only while every project artifact
+    was committed; story 1n made the project scope's `memory/` machine-local, and
+    under the per-artifact reading of AD-3 the old condition would have had
+    *zero* subjects here — no record is written to `rules/` or `skills/`, and
+    everything a record does get written to is now gitignored. So the guard would
+    have quietly stopped firing. AD-38's revision removes git from the rule
+    instead: the wall is the scope boundary, not the directory (AD-25).
+
     `people` is included for the same structural reason and a sharper
-    consequence: a direct report's performance objective committed to a
-    repository is readable by that report's peers.
+    consequence: a direct report's performance objective in a project's shared
+    material is readable by that report's peers — and a project ledger reaches
+    them by a teammate's checkout, a backup or an export, none of which is a
+    `.gitignore` rule's business.
     """
     if isinstance(record, DisclosureRecord) and scope != DISCLOSURE_LEDGER_SCOPE:
         raise CommittedScopeLeak(
             f"DisclosureRecord routed to {scope}. Its only home is "
-            f"{DISCLOSURE_LEDGER_PATH} (AD-38) — the project scope is committed."
+            f"{DISCLOSURE_LEDGER_PATH} (AD-38) — a per-scope ledger is readable "
+            f"by whoever the scope is shared with."
         )
-    if not scope.is_git_committed:
+    if not scope.is_project:
         return
     for referenced in referenced_scopes(record):
         if referenced.is_personal or referenced.is_people:
             raise CommittedScopeLeak(
                 f"record references {referenced} and is bound for {scope}, which is "
-                f"git-committed. Split it: project-visible part to the project log, "
-                f"the rest to the application ledger (AD-38)."
+                f"the project scope. Split it: project-visible part to the project "
+                f"log, the rest to the application ledger (AD-38)."
             )
 
 
@@ -132,19 +156,24 @@ def cross_scope_split(record: DisclosureRecord) -> tuple[DisclosureRecord, None]
 
 
 def assert_citation_legal(*, cited: DataScope, into: DataScope) -> None:
-    """AD-38 — a committed record may not cite personal- or people-scope material.
+    """AD-38 — a project record may not cite personal- or people-scope material.
 
     `assert_writable` checks the scope a record *belongs to*; this checks the
     scope a record *points at*. Both are needed, because AD-38 forbids the
     reference "not by content, not by `source_ref`, not by scope name" — and a
-    commitment in a git-committed ledger citing `meeting:<id>` is a reference by
+    commitment in a project ledger citing `meeting:<id>` is a reference by
     source_ref to whatever scope owns that meeting.
+
+    Keyed on the scope relation rather than on git, for the reason
+    `assert_writable` gives: a citation across the wall is illegal whether or not
+    the project directory happens to sit in a repository, and it was the git
+    condition that made a refusal depend on a fact about the filesystem.
     """
-    if into.is_git_committed and (cited.is_personal or cited.is_people):
+    if into.is_project and (cited.is_personal or cited.is_people):
         raise CommittedScopeLeak(
-            f"a record in {into} (git-committed) cannot cite material owned by "
-            f"{cited}. The citation would publish, by reference, exactly what the "
-            f"scope boundary exists to keep out (AD-38)."
+            f"a record in {into} cannot cite material owned by {cited}. The "
+            f"citation would publish, by reference, exactly what the scope "
+            f"boundary exists to keep out (AD-38)."
         )
 
 
@@ -156,7 +185,7 @@ def render_disclosure(record: DisclosureRecord) -> str:
     record a `LedgerCategory` member instead would have created a spelling that
     `append_event_log` accepts into *any* scope, and the leak guard runs only on
     the batch path (`service.py:1209`) — so a disclosure naming personal material
-    could be written into a git-committed project log with nothing refusing it.
+    could be written into the project's log with nothing refusing it.
     That is the leak AD-38 exists to prevent, reintroduced through the vocabulary.
 
     The value encoding is shared with the event log's, so one tokenizer reads

@@ -77,11 +77,31 @@ class DataScope:
         return self.kind is ScopeKind.PEOPLE
 
     @property
-    def is_git_committed(self) -> bool:
-        """AD-38 — project scope lives in the employer's repository.
+    def is_project(self) -> bool:
+        """A project's shared material (AD-4). AD-38's wall stands here.
 
-        This is why disclosure records cannot live in the event ledger: it exists
-        per scope, and one of those scopes is pushed.
+        Replaces `is_git_committed`, retired on 2026-09-15 with story 1n —
+        decided 2026-09-03, which is the date the spec and the spine carry and
+        the only place the two differ. That
+        predicate answered "this scope lives in the employer's repository", and
+        the two guards in `disclosure` read it as though it meant "records here
+        may not name personal or people material". The two stopped being the same
+        claim the moment the project scope's `memory/` became machine-local: most
+        of what a project scope holds is now gitignored, and a predicate saying
+        the whole scope is pushed is a fact nothing in the tree supports.
+
+        AD-38's invariant has no git term (the spine's own revision, dated
+        2026-09-03): no record written
+        to the project scope may reference personal- or people-scope material,
+        whether or not anything is in a repository. That is a scope relation, and
+        this is the predicate that states it. It is also AD-25's own principle —
+        the wall is the scope boundary, not the directory — so keeping git in the
+        rule would have blocked a citation that leaks nothing and left a
+        `.gitignore` as the only thing protecting one that does.
+
+        Whether a *directory* is reachable by git is a separate question with a
+        separate answer: `GITIGNORED` per artifact, and `working_tree` at the
+        write boundary. `pm_ai.storage.service._assert_git_excludes` asks git.
         """
         return self.kind is ScopeKind.PROJECT
 

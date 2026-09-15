@@ -20,8 +20,17 @@ from __future__ import annotations
 import pytest
 
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.scope_model import ENCRYPTION, File, Tier
-from pm_ai.domain.storage_tiers import requires_git_exclusion
+from pm_ai.domain.scope_model import (
+    ENCRYPTION,
+    GITIGNORED,
+    File,
+    Tier,
+    _assert_declarations_agree,
+)
+from pm_ai.domain.storage_tiers import (
+    _assert_code_keys_are_declared,
+    requires_git_exclusion,
+)
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.storage.crypto import is_encrypted, scope_of
 
@@ -105,15 +114,27 @@ def test_one_basename_answers_differently_in_two_scopes(paths):
     `meetings/` motivated the move: it was encrypted under `people/` and
     plaintext in a project, which a basename-keyed table cannot express. The
     2026-08-22 loosening made both plaintext, so encryption no longer
-    demonstrates the need — and the need did not go away with it. `event_log/`
-    is excluded from version control inside the team-member enclave and
-    committed in a project, so the same one-name-two-answers problem holds on
-    the axis that is still asymmetric. Asserted here rather than in the
-    encryption matrix so a future re-tightening does not quietly become the only
-    thing justifying the design.
+    demonstrates the need — and the need did not go away with it.
+
+    The pair being read moved on 2026-09-15 with story 1n, which made the
+    project scope's `memory/` machine-local. `event_log/` used to split
+    people-excluded against project-committed; both are excluded now, and the
+    same one-name-two-answers problem holds against the **personal** scope,
+    whose `memory/` is committed to the PM's own private repository. The
+    asymmetry is what this test is for, not any particular pair, so it is read
+    off wherever it currently lives — and `daily_dashboard.md` is added beside
+    it because one surviving pair is one deletion away from this design going
+    unjustified again.
+
+    Asserted here rather than in the encryption matrix so a future re-tightening
+    of encryption does not quietly become the only thing justifying the design.
     """
     assert requires_git_exclusion(ScopeKind.PEOPLE, "event_log/") is True
-    assert requires_git_exclusion(ScopeKind.PROJECT, "event_log/") is False
+    assert requires_git_exclusion(ScopeKind.PROJECT, "event_log/") is True
+    assert requires_git_exclusion(ScopeKind.PERSONAL, "event_log/") is False
+
+    assert requires_git_exclusion(ScopeKind.PROJECT, "daily_dashboard.md") is True
+    assert requires_git_exclusion(ScopeKind.PERSONAL, "daily_dashboard.md") is False
 
 
 def test_captures_agree_across_every_scope_that_holds_them():
@@ -228,3 +249,143 @@ def test_the_staging_area_sits_inside_the_capture_directory(paths, scope):
         f"{staging} is not inside {captures}; a link across filesystems fails, "
         f"and the directory rule that excludes captures would stop covering it."
     )
+
+
+# ── Which artifacts are excluded, per scope (story 1n, 2026-09-15) ───────────
+
+
+def test_the_project_scope_excludes_all_of_memory():
+    """Story 1n — the whole derived set, as a set.
+
+    A spot-check on one member is what this deliberately is not: the point of
+    the slice is a *derived* answer, and `event_log/` alone would pass while
+    `commitments_log.md` stayed committed. So the set is written out, and both
+    directions fail — a member lost and a member gained.
+
+    `memory/` is here beside its four children rather than instead of them. The
+    parent is what makes story 4k's generated `.gitignore` one rule, and git will
+    not re-include a child of an excluded directory, so the rule has to name
+    `memory/` itself; the children are declared because the write guard asks
+    about the artifact it is about to write.
+
+    A child answering "no" inside an excluded parent is refused outright by
+    `_assert_declarations_agree`, added with this slice — it is an invariant
+    rather than something this set happens to embody, because this set is a
+    literal and a future developer re-shares a child by editing both in one
+    commit. This row asserts the *content*; that guard asserts the *relation*.
+
+    `rules/` and `skills/` are absent, deliberately: they are human-authored,
+    hand-edited, nothing local is derived from them, and they are the whole of
+    what a project still shares.
+    """
+    assert GITIGNORED[ScopeKind.PROJECT] == frozenset(
+        {
+            "memory/",
+            "memory/commitments_log.md",
+            "memory/daily_dashboard.md",
+            "memory/event_log/",
+            "memory/meetings/",
+            "transcripts/",
+            "transcripts/temp/",
+        }
+    )
+
+
+def test_no_scope_but_the_project_excludes_anything_under_memory():
+    """The half of "untouched" that is a property rather than a copy.
+
+    `memory/`, `event_log/` and `meetings/` are spelled in three trees each, so
+    the obvious wrong implementation of story 1n — reaching for the shared node,
+    or setting the flag by basename — flips the **personal** scope's `memory/`
+    along with the project's. That scope is the PM's own sovereign hub, committed
+    to their own private repository on purpose, and nothing about 1n is an
+    argument for excluding it.
+
+    Stated as a relation over the derived answers rather than as a copy of them:
+    the personal hub shares its `memory/`, the two scopes that hold other
+    people's material do not, and which artifacts happen to sit under each is not
+    this test's business. A flip that reached one tree too far fails here without
+    anyone updating a literal.
+    """
+    under_memory = {
+        kind: sorted(k for k in keys if k.startswith("memory/") or k == "memory/")
+        for kind, keys in GITIGNORED.items()
+    }
+    assert under_memory[ScopeKind.PERSONAL] == [], (
+        "the personal scope's memory/ is excluded. It is the PM's own hub, kept "
+        "as a private repository on their own terms, and story 1n is about a "
+        "*project's* memory being rewritten by a teammate's pull."
+    )
+    assert under_memory[ScopeKind.APPLICATION] == [], (
+        "the application scope's memory/ is excluded, and nothing asked for that"
+    )
+    assert under_memory[ScopeKind.PROJECT] and under_memory[ScopeKind.PEOPLE], (
+        "the two scopes whose memory/ must not be shared no longer exclude it"
+    )
+
+
+def test_the_other_three_scopes_exclusion_sets_are_pinned():
+    """A pin on current content — deliberately NOT a proof that nothing changed.
+
+    Said plainly, because the obvious name for this test is a lie: these three
+    literals were read off the model *after* the flip, so a wrong value copied in
+    would pass, and nothing here can tell "unchanged" from "changed and
+    re-copied". Proving absence of change needs the previous values, which no
+    runtime has.
+
+    What it is good for is the next edit rather than this one. A later change that
+    touches a shared node, or widens a helper, now has to come here and say so in
+    the same diff — which is a review surface, not a proof. The property that IS
+    proved lives in the test above, and the guards that make it structural live in
+    `_assert_declarations_agree`.
+    """
+    assert GITIGNORED[ScopeKind.PERSONAL] == frozenset(
+        {
+            "private/",
+            "private/personal_analytics.db",
+            "private/telegram_cache/",
+            "transcripts/",
+            "transcripts/temp/",
+        }
+    )
+    assert GITIGNORED[ScopeKind.PEOPLE] == frozenset(
+        {
+            "memory/",
+            "memory/event_log/",
+            "memory/meetings/",
+            "transcripts/",
+            "transcripts/temp/",
+        }
+    )
+    assert GITIGNORED[ScopeKind.APPLICATION] == frozenset(
+        {
+            "connectors/",
+            "disclosure.md",
+            "private/",
+            "private/commitment_index.db",
+            "private/config.json",
+            "private/event_index.db",
+            "private/operational.db",
+            "private/people/",
+            "private/vector_index/",
+        }
+    )
+
+
+def test_the_exclusion_guards_still_hold_after_the_flip():
+    """`scope_model`'s and `storage_tiers`' own guards, re-run rather than assumed.
+
+    Both run at import, so the suite already cannot start if either fails — which
+    is exactly why they are called again here. "It imported" is not a sentence
+    anyone reads as "every gitignored artifact names a node in the tree that
+    declares it, no node inside an excluded parent claims to be shared, and the
+    three ways an artifact is accounted for stayed pairwise disjoint". A flag flip
+    is the change most likely to break the first two.
+
+    Nothing is re-asserted inline afterwards. An earlier draft restated the
+    stray-key and disjointness checks here in the test's own words, which is the
+    same rule written twice in two places free to drift — and the copy would have
+    been the one a reader trusted.
+    """
+    _assert_code_keys_are_declared()
+    _assert_declarations_agree()

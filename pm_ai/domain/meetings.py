@@ -26,8 +26,8 @@ class Meeting:
     # AD-33/AD-38 — a Meeting belongs to the scope that owns its subject: a team
     # meeting to its project, a 1:1 with a direct report to `people`. This is
     # required rather than defaulted because it decides two things no caller may
-    # guess: where the transcript is written, and whether a git-committed record
-    # is allowed to cite this meeting at all. Meetings were previously filed in
+    # guess: where the transcript is written, and whether a record in the project
+    # scope is allowed to cite this meeting at all. Meetings were previously filed in
     # the personal scope, which made every commitment citing one an AD-38
     # violation by construction.
     scope: DataScope

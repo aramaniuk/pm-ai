@@ -1,8 +1,15 @@
-"""AD-23/AD-38 — a raw capture is refused unless git already excludes it.
+"""AD-23/AD-38 — a declared-excluded write is refused unless git already excludes it.
 
-`transcripts/` is the one gitignored directory inside the one committed scope, so
-what keeps verbatim meeting minutes out of the employer's repository is the state
-of that repository — not a directory boundary, and not the text of a file.
+`transcripts/` sits inside a scope that is shared, so what keeps verbatim meeting
+minutes out of the employer's repository is the state of that repository — not a
+directory boundary, and not the text of a file.
+
+Story 1n (2026-09-15) put the project scope's whole `memory/` under the same
+guard: it is machine-local now, because a `git pull` rewrites Tier 1 underneath
+the Tier-2 and Tier-3 state derived from it. So the rows below are about a
+mechanism with several subjects rather than about captures, and the ones that
+still say `transcripts/` do so because the capture directory is where the
+consequence of getting it wrong is worst, not because it is the only subject.
 
 **These tests run real `git` against real temporary repositories, and that is the
 point.** The first implementation of this guard matched the required rule against
@@ -27,6 +34,7 @@ protect the path the verdict is about.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -81,6 +89,17 @@ ENCLAVE_RULE = ".project-ai/"
 
 BODY = "09:01 alex: the migration slips a week\n"
 NAME = "meet_7a1b.md"
+
+# Every row in this file either runs `git` or asserts what a row that ran `git`
+# produced, which the module docstring above states as the point. Without the
+# binary the calls raise `FileNotFoundError` from inside a fixture — a failure
+# that reads as a broken guard rather than a missing tool. Skipping says which it
+# is. Applied at module level rather than per row precisely because the answer is
+# the same for all of them.
+pytestmark = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="this module asks real git about real repositories; no binary, no answer",
+)
 
 
 # ── A real repository to ask ──────────────────────────────────────────────────
@@ -417,28 +436,234 @@ def test_a_repository_that_has_been_moved_away_permits_the_capture(tmp_path):
     )
 
 
-# ── Rows 9, 10, 11: where the guard does not apply ────────────────────────────
+# ── Rows 9, 10, 11: which artifacts the guard applies to, and which not ──────
+#
+# The old header said "where the guard does not apply". Story 1n put refusals
+# in this section — four project artifacts that used to be exempt now are not —
+# so the section is about the *keying*, both directions of it, rather than about
+# exemption.
 
 
-def test_a_non_capture_artifact_in_the_same_scope_is_unaffected(tmp_path):
+def test_a_non_excluded_artifact_in_a_repository_is_unaffected(tmp_path):
     """Row 10 — the guard is keyed on the artifact, not on the scope.
 
-    `memory/event_log/` is committed *on purpose*: it is Tier-1 truth the team
-    reads. A guard that refused every project-scope write whenever the capture
-    rule was missing would take the daemon offline over a directory nobody asked
-    to exclude.
+    Re-derived 2026-09-15 with story 1n, which flipped the project scope's whole
+    `memory/` to gitignored. This row used to read the project event log inside a
+    repository with no rule and assert the write went through; that artifact is
+    now guarded, and the row below asserts the refusal instead.
+
+    The property itself is unchanged and still needs a subject, so it is read
+    where the asymmetry now lives: the **personal** `memory/event_log/` is
+    committed by declaration, inside a repository Deployment itself tells the PM
+    to keep — and a guard keyed on the scope, or on "is there a repository here",
+    would refuse it forever over a rule nobody asked for. The fake would refuse
+    if it were consulted, so `asked == []` is the assertion that the artifact's
+    own declaration is what ended the question.
     """
     vcs = FakeVcs(verdict=TrackingVerdict(ignored=False))  # would refuse if asked
     fixture = _fixture(tmp_path, gitignore="node_modules/\n", vcs=vcs)
+    # A fake that claims a working tree and no exclusion — the worst answer the
+    # guard could get. Real `git init` would be theatre here: the fake is what
+    # the guard would consult, and the point is that it never does.
+    vcs.root = _scope_repository_root(fixture, PERSONAL)
 
-    fixture.storage.append_event_log(_entry("entry"), scope=PROJECT)
+    fixture.storage.append_event_log(_entry("entry"), scope=PERSONAL)
 
-    segment = fixture.paths.resolve(PROJECT, EVENT_LOG) / f"{NOW:%Y-%m}.md"
+    segment = fixture.paths.resolve(PERSONAL, EVENT_LOG) / f"{NOW:%Y-%m}.md"
     body = mask_ids(segment.read_text(encoding="utf-8"))
     assert body == (
         f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=entry\n"
     )
     assert vcs.asked == [], "git was consulted about an artifact that has no rule"
+    assert vcs.trees_asked == [], (
+        "the working tree was asked about an artifact whose declaration already "
+        "answered — the question costs a subprocess per artifact and the answer "
+        "could not change the outcome"
+    )
+
+
+# ── Story 1n: `memory/` is machine-local, so the guard has four more subjects ─
+#
+# Every row below is parametrized over all four, through the writer each one is
+# actually reached by in production, because they do NOT share a call site:
+# `event_log/` enters at `_writable_dir` (`service.py:860`), `meetings/` and
+# `daily_dashboard.md` at `write_artifact` (`:1123`), and `commitments_log.md`
+# at the `assert_writable` pre-flight (`:1213`) — it is append-only, so
+# `write_artifact` refuses it before the guard and no append path for it exists
+# yet. Proving `event_log/` alone would have proven one of three call sites, and
+# `write_artifact`'s was reached by no refusal row in this file at all: replacing
+# its guard call with `pass` left the whole suite green.
+
+
+def _write_event_log(fixture: Fixture) -> None:
+    fixture.storage.append_event_log(_entry("entry"), scope=PROJECT)
+
+
+def _write_meeting(fixture: Fixture) -> None:
+    fixture.storage.write_artifact(
+        b"# standup\n", scope=PROJECT, artifact="meetings/", name="mtg_01HX.md"
+    )
+
+
+def _write_dashboard(fixture: Fixture) -> None:
+    fixture.storage.write_artifact(b"# today\n", scope=PROJECT, artifact="daily_dashboard.md")
+
+
+def _preflight_commitments(fixture: Fixture) -> None:
+    fixture.storage.assert_writable(scope=PROJECT, artifact="commitments_log.md")
+
+
+MACHINE_LOCAL = [
+    ("event_log/", _write_event_log),
+    ("meetings/", _write_meeting),
+    ("daily_dashboard.md", _write_dashboard),
+    ("commitments_log.md", _preflight_commitments),
+]
+
+
+@pytest.mark.parametrize(
+    ("artifact", "write"), MACHINE_LOCAL, ids=[a.strip("/") for a, _ in MACHINE_LOCAL]
+)
+def test_a_machine_local_project_artifact_is_guarded(tmp_path, artifact, write):
+    """Story 1n — the four that stopped being the team's, refused without a rule.
+
+    They were committed on purpose until 2026-09-15: Tier-1 truth the team reads.
+    They are not, because a `git pull` rewrites them underneath the Tier-2 and
+    Tier-3 state derived from them, and every mechanism that makes a segment
+    trustworthy — single writer, one open segment, sealed immutability, arrival
+    order, a per-machine dedup set — is false under a merge.
+
+    Being gitignored is what makes the write a question for git, and these rows
+    prove the flag reaches the write path rather than only the derived table.
+    Driven against real git: the refusal has to come from the repository's state.
+
+    Both halves of the message are pinned. The rule, because an operator given
+    the capture rule for a dashboard is sent to protect the wrong directory — and
+    the *artifact*, because the message said "holds raw captures" until this
+    slice, which is prose a rule-only assertion cannot see being wrong.
+    """
+    fixture = _fixture(tmp_path, gitignore="node_modules/\n")
+    target = fixture.paths.resolve(PROJECT, artifact)
+
+    with pytest.raises(UnprotectedCaptureDir) as refusal:
+        write(fixture)
+
+    message = str(refusal.value)
+    assert gitignore_rule_for(target, repository=fixture.repository) in message, (
+        "the refusal must name the rule for THIS artifact — these are four "
+        "different paths and the capture rule protects none of them"
+    )
+    assert artifact in message, (
+        f"the refusal does not name {artifact!r}, so an operator cannot tell "
+        f"which write refused"
+    )
+    assert "raw captures" not in message and "transcript" not in message, (
+        f"the refusal calls {artifact!r} a capture: {message!r}. Three of these "
+        f"four are ledgers, and repair advice that misnames the artifact is how "
+        f"an operator edits the wrong rule."
+    )
+    assert not target.exists(), "the refusal created the path it refused to write"
+
+
+@pytest.mark.parametrize(
+    ("artifact", "write"), MACHINE_LOCAL, ids=[a.strip("/") for a, _ in MACHINE_LOCAL]
+)
+def test_one_rule_on_memory_protects_all_four(tmp_path, artifact, write):
+    """The repair prescribed above has to work, and `memory/` is meant to be one rule.
+
+    Story 1n put the exclusion on `memory/` itself as well as on each of its four
+    children, so that story 4k can generate one rule instead of four — git will
+    not re-include a child of an excluded directory, so the parent rule is both
+    sufficient and the only shape that works. These rows are what make that a
+    tested property rather than an intention: one line in `.gitignore`, and all
+    four writes proceed.
+
+    The literal `/.project-ai/memory/` below is **this slice's expectation of 4k,
+    not a fact about it** — 4k is unbuilt, and nothing here can hold it to
+    anything. What this row does guarantee is the half that is in this slice's
+    hands: if the rule 4k eventually emits is this one, the writes it has to
+    permit are permitted. Should 4k choose differently, this is the row that has
+    to be re-derived with it rather than a claim that will silently go stale.
+    """
+    parent = gitignore_rule_for(Path("repo/.project-ai/memory"), repository=Path("repo"))
+    assert parent == "/.project-ai/memory/", (
+        "the rule this slice expects story 4k to generate is not the one being "
+        "written here, so this row no longer tests what it claims"
+    )
+    fixture = _fixture(tmp_path, gitignore=f"{parent}\n")
+
+    write(fixture)  # no refusal is the assertion
+
+    if artifact != "commitments_log.md":  # the pre-flight writes nothing by design
+        assert fixture.paths.resolve(PROJECT, artifact).exists()
+
+
+@pytest.mark.parametrize(
+    ("artifact", "write"), MACHINE_LOCAL, ids=[a.strip("/") for a, _ in MACHINE_LOCAL]
+)
+def test_a_project_outside_any_repository_still_writes(tmp_path, artifact, write):
+    """The one direction story 1n must not break.
+
+    `working_tree` returning `None` is an answer, not an unanswered question: a
+    project directory in no repository has nothing that could commit these files,
+    and refusing there would take the daemon offline for every non-git project —
+    which is now most of what the guard covers, since `memory/` is where the
+    daemon writes on every harvest.
+
+    The premise is asserted first, because `tmp_path` nested inside a repository
+    would have git answering about *that* one.
+    """
+    fixture = _fixture(tmp_path, gitignore=None, init=False)
+    outside = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=fixture.repository, capture_output=True, text=True, check=False,
+    )
+    assert outside.returncode != 0, (
+        f"premise changed: {fixture.repository} is inside a git repository "
+        f"({outside.stdout.strip()}), so this row cannot test 'not a repository'"
+    )
+
+    write(fixture)  # no refusal is the assertion
+
+    if artifact != "commitments_log.md":
+        assert fixture.paths.resolve(PROJECT, artifact).exists()
+
+
+@pytest.mark.parametrize("artifact", ["rules/", "skills/", "persona.md"])
+def test_the_shared_project_artifacts_write_in_a_repository_without_a_rule(
+    tmp_path, artifact
+):
+    """The promise story 1n makes and nothing else asserts.
+
+    "`rules/` and `skills/` stay shared, deliberately" is the slice's central
+    claim, and the shape of its failure is not a leak but a daemon that will not
+    write the team's own files: if the flip had reached one node too far, or if
+    the guard had ever been keyed on the scope rather than the artifact, a project
+    repository with no `.gitignore` rule would refuse them forever, and adding a
+    rule would be the wrong repair because nobody wants these excluded.
+
+    The fake would refuse if it were consulted — it claims a working tree and no
+    exclusion, the worst answer available — so `asked == []` is the assertion that
+    the artifact's own declaration ended the question. Held through the public
+    pre-flight, which is the one entry point every declared artifact has: three of
+    these have no writer of their own (`skills/` holds the team's `.py` files and
+    `rules/` is hand-edited), and a row that could only be written for the
+    artifacts with writers would leave the promise half-covered.
+    """
+    vcs = FakeVcs(verdict=TrackingVerdict(ignored=False))
+    fixture = _fixture(tmp_path, gitignore="node_modules/\n", vcs=vcs)
+    vcs.root = fixture.repository
+
+    fixture.storage.assert_writable(scope=PROJECT, artifact=artifact)
+
+    assert vcs.asked == [], (
+        f"git was consulted about {artifact!r}, which story 1n promises stays "
+        f"shared — a committed artifact has no rule to look for"
+    )
+    assert vcs.trees_asked == [], (
+        f"the working tree was asked about {artifact!r}, whose declaration "
+        f"already answered"
+    )
 
 
 @pytest.mark.parametrize("scope", [PERSONAL, PEOPLE], ids=["personal", "people"])
@@ -446,8 +671,9 @@ def test_a_capture_outside_any_working_tree_is_unaffected(tmp_path, scope):
     """Rows 9 and 11 — no working tree, so nothing can commit it.
 
     Re-derived 2026-08-22. The outcome is unchanged and the *reason* is not. This
-    read `is_git_committed`, so the write proceeded because the scope was not the
-    project one; it now proceeds because git reports no working tree here. The
+    read `is_git_committed` (since retired), so the write proceeded because the
+    scope was not the project one; it now proceeds because git reports no working
+    tree here. The
     old docstring argued that keying on the artifact name alone would refuse
     every personal capture forever, since no `.gitignore` excludes
     `~/.manager-ai/transcripts/` — true, and not an argument against keying on
@@ -470,8 +696,10 @@ def test_a_capture_inside_a_private_repository_is_guarded(tmp_path, scope):
     Deployment tells the PM to keep the sovereign personal scope as a private git
     repository with `private/` gitignored — and `transcripts/` sits at that
     scope's *root*, outside `private/`. So a verbatim coaching transcript was
-    committable, and the guard never even asked, because `is_git_committed` is
-    true for PROJECT alone.
+    committable, and the guard never even asked, because it gated on a
+    scope-kind predicate true for PROJECT alone. (That predicate was
+    `is_git_committed`, retired with story 1n on 2026-09-15 — named here in the
+    past tense because it no longer exists to be read.)
 
     No row in this file covered it: every personal and team-member case was built
     with `init=False`, so the repository-backed case was not wrong here, it was

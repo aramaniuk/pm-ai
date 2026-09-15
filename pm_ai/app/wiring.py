@@ -142,11 +142,13 @@ def build(
     error.
 
     `vcs` is the same arrangement for the other question the writer cannot answer
-    itself: whether git would commit a raw capture. It defaults to the real `git`
-    adapter and is overridable so a test can supply a verdict, because this is
-    also the one module that may import both `pm_ai.storage` and
-    `pm_ai.platform`. A writer built without it refuses every capture into a
-    committed scope, which is the safe direction but not a useful one.
+    itself: whether git would commit what is about to be written. It defaults to
+    the real `git` adapter and is overridable so a test can supply a verdict,
+    because this is also the one module that may import both `pm_ai.storage` and
+    `pm_ai.platform`. A writer built without it refuses every declared-excluded
+    write inside a working tree, which is the safe direction but not a useful
+    one — and since story 1n that includes the project event log, not just
+    captures.
     """
     # Written as three branches rather than an XOR check followed by a ternary,
     # so the exclusivity is what narrows the types instead of something a reader
@@ -267,11 +269,13 @@ def _announce_disabled_encryption(storage: StorageService) -> None:
 
     Into the *application* scope's event log, always. The flag describes the
     daemon's own posture on this machine — application-scope subject matter —
-    and until 2026-08-28 this wrote into the daemon's project scope, whose
-    `event_log/` is committed: the fact that the operator ran with encryption
-    off landed in the employer's repository, the exact misfiling-by-convenience
-    the scope model exists to refuse (and the reason AD-38 homes the disclosure
-    ledger the same way).
+    and until 2026-08-28 this wrote into the daemon's project scope, where the
+    fact that the operator ran with encryption off became part of the team's
+    record — the exact misfiling-by-convenience the scope model exists to refuse
+    (and the reason AD-38 homes the disclosure ledger the same way). That scope's
+    `event_log/` was also committed at the time; story 1n made it machine-local,
+    which narrows the old consequence without touching the reason this writes
+    where it does — the subject matter is the daemon's, not the team's.
     """
     print(
         "WARNING: encryption is disabled by an explicit debug flag. "

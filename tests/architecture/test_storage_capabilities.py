@@ -21,8 +21,10 @@ from pathlib import Path
 
 import pytest
 
+from ledger_fixtures import entry as _entry
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.storage_tiers import (
+    EVENT_LOG,
     NotACollection,
     RESTRICTED_FILE_MODE,
     restricted_mode,
@@ -35,6 +37,7 @@ from pm_ai.storage.service import StorageService
 NOW = datetime(2026, 9, 3, 9, 0, tzinfo=timezone.utc)
 APPLICATION = DataScope(ScopeKind.APPLICATION)
 PERSONAL = DataScope(ScopeKind.PERSONAL)
+PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
 KEY = b"K" * 32
 
 
@@ -354,3 +357,41 @@ def test_a_raw_capture_lands_at_the_declared_restricted_mode(storage):
     """
     written = storage.write_capture("hello world", scope=PERSONAL, name="a.txt")
     assert _mode(written) == RESTRICTED_FILE_MODE
+
+
+def test_the_append_path_does_not_adopt_the_declared_mode(storage):
+    """Measured, because story 1n's change log was about to claim the opposite.
+
+    `restricted_mode` derives from the `gitignored` declaration, so story 1n made
+    it answer `0600` for the project scope's `memory/` — and the obvious sentence
+    to write next, that those four artifacts now land owner-only, is false.
+    `_replace` and `_create_exclusively` adopt `declared_mode`; `_append`
+    (`service.py:880`) opens with a bare `path.open("a")` and takes no mode at
+    all, so a segment lands at the umask.
+
+    The non-adoption predates 1n — people-scope `event_log/` and application
+    `disclosure.md` were already gitignored and already landed this way — so this
+    row pins the behaviour rather than arguing for it. It is written to fail if
+    `_append` ever starts honouring the declaration, which is the point: the day
+    that changes, the claim in the change log has to change with it, and nothing
+    else in the suite would say so.
+
+    The umask is pinned, because the assertion is about what the writer did
+    *not* impose and an ambient 0077 would make the two indistinguishable.
+    """
+    previous = os.umask(0o022)
+    try:
+        storage.append_event_log(_entry("mode"), scope=PROJECT)
+    finally:
+        os.umask(previous)
+
+    segment = storage.paths.resolve(PROJECT, EVENT_LOG) / f"{NOW:%Y-%m}.md"
+    assert restricted_mode(ScopeKind.PROJECT, EVENT_LOG) == RESTRICTED_FILE_MODE, (
+        "the declaration is what makes this row interesting; without it there is "
+        "nothing for the append path to fail to adopt"
+    )
+    assert _mode(segment) == 0o644, (
+        "`_append` has started adopting the declared mode. That is an improvement "
+        "and it makes story 1n's change-log line — the declaration changed, the "
+        "append path does not honour it — out of date: update both together."
+    )

@@ -117,8 +117,8 @@ PERSONAL = DataScope(ScopeKind.PERSONAL)
 Not a fallback that hides a gap: a meeting nobody categorised is the PM's own,
 it belongs in the personal tree, and it still appears on the personal dashboard.
 Dropping it instead would lose the half of the calendar the PM most needs to see,
-and filing it under the project would put a private appointment in the
-employer's repository (AD-38).
+and filing it under the project would put a private appointment in the team's
+record, where AD-38's wall exists to keep it out.
 """
 
 ALL_DAY_MINUTES = 0
