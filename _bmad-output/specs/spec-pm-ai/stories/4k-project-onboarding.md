@@ -86,6 +86,20 @@ review_loop_iteration: 0
 
 ## Spec Change Log
 
+- **2026-09-15, five defects found by review after the slice was committed, all fixed with regression tests that fail against the code as it stood.**
+
+  **An unreadable registry was written over, forgetting every project.** `_artifact_state` reports `UNREADABLE` with no bytes and `parse_registry(None)` means *absent*, so the sequence rendered a registry holding only the new project and `os.replace`d it over the one it could not read. Measured: two projects enrolled, `chmod 000` on `projects.toml`, a third onboarded — exit `0`, and the registry afterwards held only the third. This is the matrix's "Registry unreadable" row, which `4d` wrote for the *reader* and which nothing enforced on the writer.
+
+  **One directory could be onboarded under two ids.** The duplicate check only looked for the same id at a different path, never the same path under a different id. `project add <p>` then `project add <p> payments` both exited `0`; both ids resolve to the same `<repo>/.project-ai`, so they share one event log, one meeting set and one dashboard. Worse, `_compose` then saw two registered projects and refused every subcommand but `doctor` — a one-repository machine bricked by its own onboarding command.
+
+  **A non-UTF-8 `.gitignore` was corrupted.** `render_gitignore` decoded with `errors="replace"` and re-encoded as UTF-8, so a latin-1 rule excluding `café/` came back as `caf\uFFFD/`, matching nothing. It works in bytes now and never decodes: git treats the file as bytes, and so must anything editing one it did not write.
+
+  **`onboard_project`'s `paths` argument did not control the layout.** It was read for its `project_roots` and then discarded — the resolver actually used was rebuilt with `ScopePaths.production()`. Demonstrated the hard way: running the regression test against the unfixed code wrote a registry into the developer's real `~/.pm-ai`. Fixed with `dataclasses.replace`, and the test now redirects `HOME` as a blast shield while still asserting the registry lands in the sandbox.
+
+  **An unreadable `.gitignore` exited `1` with a traceback.** `read_project_gitignore` propagates every `OSError` but absence, by design, and `_project_add` caught only the three refusal families — so it reached `main`'s generic handler. Exit `1` means "pm-ai broke" in the one table that decides these, and a `.gitignore` nobody can open is an ordinary thing to be wrong with a machine. It is a `ProjectPathUnusable` now, exit `3`.
+
+  Four of the five are the same shape: the matrix considered a file absent or well-formed and not the *third* state — present and unopenable. That is the pattern worth carrying into the next slice that reads a file it did not write.
+
 - **2026-09-15, built. Six things the task list did not anticipate, each found before writing code and one found only by running it.**
 
   **The Execution list named `entry.py` and the sequence lives in `wiring.py`.** `entry` composes; it builds no `StorageService`, and this sequence needs one to write the registry and the `.gitignore`. `wiring` is the module already permitted to import both `pm_ai.storage` and `pm_ai.platform`. `entry` injects it into the CLI `Context` and nothing else.

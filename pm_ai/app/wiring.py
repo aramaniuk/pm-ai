@@ -12,7 +12,7 @@ import json
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,9 +45,10 @@ from pm_ai.core.project_scaffold import render_gitignore
 from pm_ai.core.connector_enrolment import stored_credentials
 from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
-from pm_ai.domain.health import ArtifactState
+from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
+from pm_ai.domain.health import ArtifactState, Presence
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.scope_model import PROJECT_TREE
+from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.ports import (
     MASTER_KEY_NAME,
     ConnectorPort,
@@ -849,13 +850,21 @@ def onboard_project(
     repository = _resolved(raw_path)
     project_id = alias if alias is not None else repository.name
     resolver = paths if paths is not None else ScopePaths.production()
+    # `replace` rather than a second `production()` call. Rebuilding the resolver
+    # from scratch here discarded everything `paths` said about the *layout* and
+    # kept only its project map, so a caller that handed in `ScopePaths.rooted()`
+    # — the documented way to get a temporary layout, and the one `bootstrap`
+    # above honours — had its registry written under the real `$HOME` anyway.
+    # Caught in review on 2026-09-15; the tests missed it because they redirect
+    # `HOME` instead of passing a resolver.
+    #
     # Through the resolver rather than `_directory_name` directly: that helper is
     # private to `pm_ai.platform.paths`, and `scope_root` applies exactly the
     # same standard and raises the same `MalformedSubjectId`. Asked against a
     # resolver that knows this project, so an unusable *id* is what refuses here
     # rather than an unregistered one.
-    known = ScopePaths.production(
-        home=None, projects={**_registered_paths(resolver), project_id: repository}
+    known = replace(
+        resolver, project_roots={**resolver.project_roots, project_id: repository}
     )
     scope = DataScope(ScopeKind.PROJECT, project_id)
     known.scope_root(scope)
@@ -867,9 +876,41 @@ def onboard_project(
         crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
     )
     with exclusive(known.project_registry):
-        held = parse_registry(
-            _artifact_state(storage, REGISTRY_ARTIFACT).raw
-        )
+        state = _artifact_state(storage, REGISTRY_ARTIFACT)
+        if state.presence is Presence.UNREADABLE:
+            # The registry exists and could not be opened. `parse_registry(None)`
+            # means *absent*, so falling through would render a registry holding
+            # this project alone and `os.replace` it over the one that could not
+            # be read — and `projects.toml` is Tier 1, rebuildable from nothing,
+            # so every other enrolled project would be gone with the command
+            # reporting success. Measured doing exactly that in review on
+            # 2026-09-15: two projects enrolled, the file chmod 000, and the
+            # registry afterwards held only the third.
+            raise ProjectPathUnusable(
+                f"{known.project_registry} exists and could not be read: "
+                f"{state.detail}. Nothing was onboarded. pm-ai will not write a "
+                f"new registry over one it cannot read — that would forget every "
+                f"project already enrolled, and nothing else records them. Fix "
+                f"the file's permissions and run this again."
+            )
+        held = parse_registry(state.raw)
+        claimed = {e.path: i for i, e in held.items()}
+        registered_as = claimed.get(repository)
+        if registered_as is not None and registered_as != project_id:
+            # Two ids for one repository is not a second project: both resolve to
+            # the same `<repo>/.project-ai`, so they would share one event log,
+            # one meeting set and one dashboard while every `SourceRef` disagreed
+            # about which project owned them — and `_compose` would refuse every
+            # subcommand but `doctor` as an ambiguous registry, on a machine with
+            # exactly one repository.
+            raise DuplicateProject(
+                f"{repository} is already onboarded as {registered_as!r}, so it "
+                f"cannot also be onboarded as {project_id!r}. One directory is "
+                f"one project: both ids would resolve to the same "
+                f"{PROJECT_DIRNAME} tree and pm-ai would then have no way to "
+                f"choose between them. To rename the project, edit its entry in "
+                f"{known.project_registry}."
+            )
         entry = held.get(project_id)
         if entry is not None and entry.path != repository:
             raise DuplicateProject(
@@ -882,8 +923,23 @@ def onboard_project(
             )
         already = entry is not None
         _create(repository)
+        try:
+            existing = storage.read_project_gitignore(project_id)
+        except OSError as unreadable:
+            # `read_project_gitignore` propagates every `OSError` but absence,
+            # deliberately — "cannot open" must not read as "no rules yet". Here
+            # it becomes a refusal rather than reaching `main`'s generic handler,
+            # which exits 1 with a traceback. Exit 1 means "pm-ai broke" in the
+            # one table that decides these, and this is an ordinary thing to be
+            # wrong with a machine.
+            raise ProjectPathUnusable(
+                f"{repository / GITIGNORE_FILENAME} exists and could not be "
+                f"read: {unreadable}. Nothing was onboarded. pm-ai appends its "
+                f"rules to what is already there, so it will not write this "
+                f"file without first reading it."
+            ) from unreadable
         gitignore = storage.write_project_gitignore(
-            project_id, render_gitignore(storage.read_project_gitignore(project_id))
+            project_id, render_gitignore(existing)
         )
         for node in PROJECT_TREE:
             if node.is_dir:
@@ -897,11 +953,6 @@ def onboard_project(
                 ),
             )
     return Onboarded(project_id, repository, gitignore, already)
-
-
-def _registered_paths(resolver: ScopePaths) -> Mapping[str, Path]:
-    """What the resolver already knows, so composing a wider one loses nothing."""
-    return dict(resolver.project_roots)
 
 
 def _resolved(raw_path: str) -> Path:

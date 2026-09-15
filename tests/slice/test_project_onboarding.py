@@ -458,3 +458,136 @@ def test_onboarding_then_doctor_reports_the_registry_healthy(home, tmp_path, cap
 
     printed = capsys.readouterr().out
     assert "1 project(s) enrolled: alpha" in printed
+
+
+# ── The five the 2026-09-15 review found ─────────────────────────────────────
+#
+# Every one of them exited 0, or exited 1, on a machine the operator would have
+# had no reason to distrust. They are grouped so a future reader can see what
+# the matrix above did not cover: four of the five are about a *second* state of
+# a file the matrix only considered absent or well-formed.
+
+
+def test_an_unreadable_registry_is_never_written_over(home, tmp_path):
+    """The worst of the five: every enrolled project, silently forgotten.
+
+    `_artifact_state` reports UNREADABLE with no bytes, and `parse_registry(None)`
+    means *absent* — so the sequence rendered a registry holding only the new
+    project and `os.replace`d it over the one it could not read. `projects.toml`
+    is Tier 1 and rebuildable from nothing, so there was no second copy.
+    """
+    for name in ("alpha", "beta"):
+        (tmp_path / name).mkdir()
+        onboard_project(Keychain(), str(tmp_path / name))
+    registry = home / ".pm-ai" / "projects.toml"
+    before = registry.read_bytes()
+    registry.chmod(0o000)
+    (tmp_path / "gamma").mkdir()
+
+    try:
+        with pytest.raises(ProjectPathUnusable) as refused:
+            onboard_project(Keychain(), str(tmp_path / "gamma"))
+        assert "could not be read" in str(refused.value)
+    finally:
+        registry.chmod(0o600)
+
+    assert registry.read_bytes() == before
+    assert set(registry_of(home)) == {"alpha", "beta"}
+
+
+def test_one_directory_cannot_be_onboarded_under_two_ids(home, tmp_path):
+    """Both ids resolve to the same `.project-ai`, so they are not two projects.
+
+    They would share one event log, one meeting set and one dashboard while every
+    `SourceRef` disagreed about which project owned them — and `_compose` would
+    then refuse every subcommand but `doctor` as an ambiguous registry, on a
+    machine with exactly one repository.
+    """
+    repository = tmp_path / "alpha"
+    repository.mkdir()
+    onboard_project(Keychain(), str(repository))
+
+    with pytest.raises(DuplicateProject) as refused:
+        onboard_project(Keychain(), str(repository), "payments")
+
+    assert "alpha" in str(refused.value)
+    assert set(registry_of(home)) == {"alpha"}
+
+
+def test_the_cli_stays_usable_after_a_repeated_onboarding_with_an_alias(
+    home, tmp_path, capsys
+):
+    """The consequence of the row above, asserted where an operator would meet it."""
+    repository = tmp_path / "alpha"
+    repository.mkdir()
+    entry.main(["project", "add", str(repository)])
+
+    assert entry.main(["project", "add", str(repository), "payments"]) == EXIT_REFUSAL
+    capsys.readouterr()
+
+    entry.main(["doctor"])
+    assert "1 project(s) enrolled: alpha" in capsys.readouterr().out
+
+
+def test_a_gitignore_that_is_not_utf8_survives_byte_for_byte(home, tmp_path):
+    """The file belongs to the team and git treats it as bytes.
+
+    Decoded with `errors="replace"` and re-encoded, a latin-1 rule excluding
+    `café/` came back as `caf\\uFFFD/`, which matches nothing — so onboarding
+    silently un-ignored whatever that rule protected.
+    """
+    repository = tmp_path / "alpha"
+    repository.mkdir()
+    original = "café/\nbuild/\n".encode("latin-1")
+    (repository / ".gitignore").write_bytes(original)
+
+    onboard_project(Keychain(), str(repository))
+
+    written = (repository / ".gitignore").read_bytes()
+    assert written.startswith(original), "the team's own rules were rewritten"
+    for rule in project_rules():
+        assert rule.encode() in written
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_an_unreadable_gitignore_is_a_refusal_and_not_a_traceback(home, tmp_path, capsys):
+    """Exit 1 means "pm-ai broke" in the one table that decides these, and a
+    `.gitignore` nobody can open is an ordinary thing to be wrong with a machine.
+    """
+    repository = tmp_path / "alpha"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("node_modules/\n")
+    (repository / ".gitignore").chmod(0o000)
+
+    try:
+        assert entry.main(["project", "add", str(repository)]) == EXIT_REFUSAL
+        assert "Traceback" not in capsys.readouterr().err
+    finally:
+        (repository / ".gitignore").chmod(0o600)
+
+
+def test_the_paths_argument_decides_the_layout_it_is_given(home, tmp_path):
+    """`paths=` was read for its project map and discarded for everything else.
+
+    A caller handing in `ScopePaths.rooted(...)` — the documented way to get a
+    temporary layout, and the one `bootstrap` honours — had its registry written
+    under the real `$HOME` regardless.
+
+    The `home` fixture is here as a blast shield, not as the subject: this test
+    ran once against the unfixed code without one and wrote a registry into the
+    developer's actual `~/.pm-ai`, which is the bug, demonstrated the hard way.
+    The assertion is that the registry lands in the *sandbox* and that the
+    redirected home stays empty — which fails just as loudly, and cannot escape.
+    """
+    sandbox = tmp_path / "sandbox"
+    repository = tmp_path / "alpha"
+    repository.mkdir()
+
+    onboard_project(Keychain(), str(repository), paths=ScopePaths.rooted(sandbox))
+
+    written = list(sandbox.rglob("projects.toml"))
+    assert written, f"nothing was written under the resolver it was given: {sandbox}"
+    assert "alpha" in parse_registry(written[0].read_bytes())
+    assert not (home / ".pm-ai" / "projects.toml").exists(), (
+        "the registry went to $HOME instead of the resolver it was handed"
+    )

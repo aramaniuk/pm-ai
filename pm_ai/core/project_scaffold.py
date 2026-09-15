@@ -71,17 +71,28 @@ def render_gitignore(existing: bytes | None) -> bytes:
     that and asking it is `_assert_git_excludes`'s job, not this module's. A
     duplicate rule in a `.gitignore` is inert; a missing one is a committed
     transcript.
+
+    Everything here is bytes. The rules pm-ai adds are ASCII, but the file it
+    adds them to belongs to somebody else and may be in any encoding at all —
+    see the comment in the body.
     """
-    text = "" if existing is None else existing.decode("utf-8", errors="replace")
-    present = {line.strip() for line in text.splitlines()}
-    missing = [rule for rule in project_rules() if rule not in present]
+    held = b"" if existing is None else existing
+    # Compared and concatenated as *bytes*, never decoded. Decoding with
+    # `errors="replace"` and re-encoding as UTF-8 rewrote every byte that was not
+    # valid UTF-8: a latin-1 `.gitignore` excluding `café/` came back excluding
+    # `caf\uFFFD/`, which matches nothing — so onboarding silently un-ignored
+    # whatever that rule protected, in a file the team owns. Caught in review on
+    # 2026-09-15. `.gitignore` has no declared encoding; git treats it as bytes,
+    # and so must anything that edits one it did not write.
+    present = {line.strip() for line in held.splitlines()}
+    missing = [rule for rule in project_rules() if rule.encode("utf-8") not in present]
     if not missing:
-        return b"" if existing is None else existing
+        return held
     # A blank line before the block only when there is something to separate it
     # from, and a trailing newline on a file that did not end with one — an
     # appended rule on the same line as the last existing one would silently
     # change what that line means.
-    prefix = "" if not text else ("" if text.endswith("\n") else "\n")
-    separator = "" if not text else "\n"
-    block = "\n".join([HEADER, *missing]) + "\n"
-    return (text + prefix + separator + block).encode("utf-8")
+    prefix = b"" if not held else (b"" if held.endswith(b"\n") else b"\n")
+    separator = b"" if not held else b"\n"
+    block = "\n".join([HEADER, *missing]).encode("utf-8") + b"\n"
+    return held + prefix + separator + block
