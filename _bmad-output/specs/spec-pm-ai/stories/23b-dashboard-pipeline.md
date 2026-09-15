@@ -2,7 +2,7 @@
 title: 'Dashboard pipeline and pm-ai dashboard'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 1
 baseline_commit: '37a915092d3c645d192bea57afe87f4e2bbc02df'
 ---
@@ -173,3 +173,91 @@ The master-key row exists because the enclave is easy to over-apply. `daily_dash
 - `uv run pm-ai dashboard` -- expected: file written at the declared path, exit zero
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: contracts kept
+
+## Suggested Review Order
+
+**The pipeline — start here**
+
+- The whole slice in one function: read the zone, read every calendar, render, write once.
+  [`pipelines.py:241`](../../../../pm_ai/app/pipelines.py#L241)
+
+- The zone is resolved before any read, so an unset one costs no fetch.
+  [`pipelines.py:361`](../../../../pm_ai/app/pipelines.py#L361)
+
+**The calendar's four answers**
+
+- Connectors selected by declared capability, not vendor name; merges every answer.
+  [`pipelines.py:383`](../../../../pm_ai/app/pipelines.py#L383)
+
+- The union the renderer branches on — the type that makes the four facts distinct.
+  [`rendering.py:109`](../../../../pm_ai/core/rendering.py#L109)
+
+- Nothing enrolled can answer: its own value, never a failure attributed to a connector.
+  [`harvest.py:178`](../../../../pm_ai/domain/harvest.py#L178)
+
+- A day read in part, carrying both the meetings and who could not answer.
+  [`harvest.py:208`](../../../../pm_ai/domain/harvest.py#L208)
+
+- One connector's breach of the reports-never-raises contract costs only its own rows.
+  [`pipelines.py:464`](../../../../pm_ai/app/pipelines.py#L464)
+
+- Every calendar failed: one reason passes verbatim, many are joined, no hint invented.
+  [`pipelines.py:495`](../../../../pm_ai/app/pipelines.py#L495)
+
+**Identity, and what must never be merged**
+
+- Matched on uid **and** start, so an unmeasured series rule cannot drop a meeting.
+  [`pipelines.py:572`](../../../../pm_ai/app/pipelines.py#L572)
+
+- The key that survives two tenants, read off the wire for the first time.
+  [`calendar.py:1019`](../../../../pm_ai/connectors/graph/calendar.py#L1019)
+
+- It rides `Meeting` in memory only, on `tentative`'s precedent.
+  [`meetings.py:65`](../../../../pm_ai/domain/meetings.py#L65)
+
+- The record grammar clears it, so `11a`'s round-trip claim stays true.
+  [`meeting_records.py:313`](../../../../pm_ai/core/meeting_records.py#L313)
+
+**Which day, and whose**
+
+- Midnight computed on the wall clock, so a DST day is 23 or 25 hours.
+  [`pipelines.py:517`](../../../../pm_ai/app/pipelines.py#L517)
+
+- Overlap, not "starts today" — last night's meeting still running is on the page.
+  [`pipelines.py:533`](../../../../pm_ai/app/pipelines.py#L533)
+
+- AD-38's wall is one-directional, because the leak is.
+  [`pipelines.py:553`](../../../../pm_ai/app/pipelines.py#L553)
+
+**Rendering the answers**
+
+- The shared section: three branches, none of them claiming an unmeasured day.
+  [`rendering.py:384`](../../../../pm_ai/core/rendering.py#L384)
+
+- The sequence path extracted, so a partial day renders its arrived half identically.
+  [`rendering.py:451`](../../../../pm_ai/core/rendering.py#L451)
+
+**The surface**
+
+- The table's first optional argument — the mechanism lands with the command.
+  [`dispatch.py:804`](../../../../pm_ai/surfaces/cli/dispatch.py#L804)
+
+- `dashboard` itself, and the refusals it maps to `4c`'s existing codes.
+  [`dispatch.py:574`](../../../../pm_ai/surfaces/cli/dispatch.py#L574)
+
+- The pipeline injected across the `app`→`surfaces` boundary.
+  [`entry.py:131`](../../../../pm_ai/app/entry.py#L131)
+
+- One clock for the render and for storage's stamps.
+  [`wiring.py:95`](../../../../pm_ai/app/wiring.py#L95)
+
+**Peripherals**
+
+- The matrix and the acceptance criteria, end to end against a temporary root.
+  [`test_dashboard_slice.py:1`](../../../../tests/slice/test_dashboard_slice.py#L1)
+
+- The uid's whole path, payload to record bytes — the gap the review found.
+  [`test_graph_calendar_mapping.py:1`](../../../../tests/connectors/test_graph_calendar_mapping.py#L1)
+
+- `--scope` parsing, the refusals, and the real closure end to end.
+  [`test_cli_dispatch.py:1`](../../../../tests/surfaces/test_cli_dispatch.py#L1)
