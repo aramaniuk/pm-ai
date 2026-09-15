@@ -15,7 +15,7 @@ rather than the concrete service.
 
 `put` writes to `meeting.scope` and never to a scope it was handed
 (AD-33/AD-38). `Meeting.scope` is required rather than defaulted precisely
-because it decides where the record goes and whether a git-committed scope may
+because it decides where the record goes and whether the project scope may
 cite it, so the accessor honours the field and never guesses. `get` and
 `for_day` take a scope explicitly, because there is no `Meeting` to ask.
 
@@ -798,7 +798,7 @@ def _parse_scope(value: str, *, source: str) -> DataScope:
     except ValueError as unparseable:
         raise MalformedMeeting(
             f"{source}: scope={value!r} is not a scope. It decides which tree "
-            f"holds the record and whether a git-committed artifact may cite it, "
+            f"holds the record and whether a project record may cite it, "
             f"so it is not a field to guess at."
         ) from unparseable
     return _assert_records_meetings(parsed, where=f"{source}: scope")

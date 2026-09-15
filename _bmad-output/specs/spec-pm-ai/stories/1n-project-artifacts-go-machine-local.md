@@ -2,8 +2,9 @@
 title: 'Project artifacts go machine-local'
 type: 'refactor'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: 'bf12f27'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -49,19 +50,20 @@ review_loop_iteration: 0
 - `pm_ai/domain/scope_model.py:PROJECT_TREE` -- the five declarations that flip; `memory/`'s children are `daily_dashboard.md`, `commitments_log.md`, `meetings` and `event_log`
 - `pm_ai/domain/scope_model.py:994` -- `GITIGNORED = _answering_yes(EXCLUSION)`, the derivation; nothing else needs touching
 - **`pm_ai/domain/scope_model.py:PEOPLE_TREE` -- the precedent, already shipped.** `GITIGNORED[PEOPLE]` is exactly `memory/`, `memory/event_log/`, `memory/meetings/`, `transcripts/` — a `Dir` plus children, all Tier 1. So this shape is established rather than invented, and Tier 1 being gitignored is already normal: `disclosure.md` and `connectors/` both are
-- `pm_ai/storage/service.py:697-717` -- `_assert_git_excludes`, which begins guarding four more artifacts
-- `pm_ai/domain/storage_tiers.py:315-321` -- the guard that every gitignored artifact names a node in its scope
+- `pm_ai/storage/service.py:727` -- `_assert_git_excludes`, which begins guarding four more artifacts; called at `:724` and `:1113`, and its own docstring at `:734` already records `is_git_committed` being the wrong gate here
+- `pm_ai/domain/storage_tiers.py:400-416` -- `_assert_code_keys_are_declared`, whose second half (`:411-415`) is the guard that every gitignored artifact names a node in its scope
+- `pm_ai/domain/scope_model.py:1093-1110` -- the pairwise-disjointness guard over `GITIGNORED`, `RETENTION_MANAGED` and `DIAGNOSTIC_ONLY`. **The frozen matrix row attributes this to `storage_tiers.py:315-321`, which is wrong on both counts** — that file holds the names-a-node half, at the lines above, and disjointness lives here. The row's substance is right and both guards must survive the flip; only its citation drifted, so it is corrected here rather than unlocked
 - `tests/architecture/test_capture_guard.py` -- the existing coverage of this mechanism, whose fixtures decide how much moves
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/scope_model.py` -- flip `gitignored` to `True` on the project tree's `memory/`, `daily_dashboard.md`, `commitments_log.md`, `meetings` and `event_log` -- five declarations, nothing else
-- [ ] `pm_ai/domain/identity.py` -- add `is_project` beside `is_personal` and `is_people`; retire `is_git_committed` -- it has no caller once the guards below change, and its docstring asserts a fact nothing checks
-- [ ] `pm_ai/domain/disclosure.py:113,143` -- both guards test the scope relation instead of git -- AD-38's invariant has no git term, and each half-answer is wrong on its own: keeping git blocks a citation that leaks nothing, dropping it leaves a `.gitignore` as the only protection
-- [ ] `tests/architecture/test_domain_invariants.py:739-741`, `tests/slice/test_r4_gate_fixes.py:244` -- re-point the four assertions that read `is_git_committed` directly
-- [ ] `tests/architecture/test_capture_guard.py` -- update any case that writes a now-guarded project artifact inside a repository without the rule -- the guard's reach grows, and a test that passed by writing an unguarded artifact will now refuse
-- [ ] `tests/architecture/test_encryption_policy.py` or its scope-model sibling -- assert the derived `GITIGNORED[PROJECT]` set explicitly, and that the other three trees are unchanged
+- [x] `pm_ai/domain/scope_model.py` -- flip `gitignored` to `True` on the project tree's `memory/`, `daily_dashboard.md`, `commitments_log.md`, `meetings` and `event_log` -- five declarations, nothing else
+- [x] `pm_ai/domain/identity.py` -- add `is_project` beside `is_personal` and `is_people`; retire `is_git_committed` -- it has no caller once the guards below change, and its docstring asserts a fact nothing checks
+- [x] `pm_ai/domain/disclosure.py:113,143` -- both guards test the scope relation instead of git -- AD-38's invariant has no git term, and each half-answer is wrong on its own: keeping git blocks a citation that leaks nothing, dropping it leaves a `.gitignore` as the only protection
+- [x] `tests/architecture/test_domain_invariants.py:739-741`, `tests/slice/test_r4_gate_fixes.py:244` -- re-point the four assertions that read `is_git_committed` directly
+- [x] `tests/architecture/test_capture_guard.py` -- update any case that writes a now-guarded project artifact inside a repository without the rule -- the guard's reach grows, and a test that passed by writing an unguarded artifact will now refuse
+- [x] `tests/architecture/test_encryption_policy.py` or its scope-model sibling -- assert the derived `GITIGNORED[PROJECT]` set explicitly, and that the other three trees are unchanged
 
 **Acceptance Criteria:**
 - Given `GITIGNORED[ScopeKind.PROJECT]`, then it holds `memory/`, `memory/event_log/`, `memory/commitments_log.md`, `memory/daily_dashboard.md`, `memory/meetings/`, `transcripts/` and `transcripts/temp/` — asserted as a set, because the point of the slice is a derived answer and a spot-check on one member would pass while another stayed committed.
@@ -73,6 +75,10 @@ review_loop_iteration: 0
 - Given the three exclusion sets, then they stay pairwise disjoint and every gitignored artifact still names a node — `storage_tiers.py`'s own guards, which a flag flip must not break.
 
 ## Spec Change Log
+
+- **2026-09-15, one derived consequence the spec did not name — and the half of it that does not reach disk.** `restricted_mode` (`storage_tiers.py`) reads `GITIGNORED` — "an artifact declared *must never enter version control* is one whose content is this machine's own business" — so after the flip it answers `0600` for all four artifacts where it answered `None` before. That is the declaration, and nothing was written to produce it: it is the "the flags derive everything else" rule the Boundaries section states, which is why it is recorded rather than reversed.
+  **It does not follow that the files land at `0600`.** `_replace` and `_create_exclusively` adopt `declared_mode`; `_append` (`service.py:880`) takes no mode and opens with a bare `path.open("a")`, so an event-log segment still lands at the operator's umask. The first draft of this entry claimed otherwise, which is why `test_the_append_path_does_not_adopt_the_declared_mode` now measures it: the fact is pinned by a `stat`, in both directions, rather than asserted by a sentence.
+  The non-adoption is **not** this slice's to fix and is deliberately left: it predates the flip — people-scope `event_log/` and application `disclosure.md` were already gitignored and already landed at the umask — so changing `_append` here would be a separate behaviour change riding on a flag flip. Deferred, with the measuring test as the thing that will notice when it lands.
 
 - **2026-09-03, gained the guard correction after the architecture gate.** Amending AD-3 and AD-38 for Q6 ran the spine's adversarial reviewer, which found that "git-committed scope" had become two non-substitutable predicates: `is_git_committed` is scope-kind and gates both cross-scope guards, while AD-3's amendment established a per-artifact reading under which AD-38's invariant had *zero subjects* in the project scope — no record is written to `rules/` or `skills/`. Two builders each obeying the letter would produce diverging ledgers, and one leaks.
   The human closed it by removing git from the rule rather than choosing a predicate: no personal- or people-scope material may be cited by a record in project scope, unconditionally. That is AD-25's own already-adopted principle — "The wall is the scope boundary, not the directory" — and the second correction of one conflation, since `service.py:704-705` records `is_git_committed` being the wrong gate for the capture guard and the fix was never propagated. The guards and the retirement of `is_git_committed` land here because this is the slice that breaks the equivalence they relied on.
@@ -88,3 +94,48 @@ review_loop_iteration: 0
 - `uv run pytest tests/architecture -q` -- expected: the capture guard, the scope-model invariants and the exclusion-set guards all pass
 - `uv run pytest -q` -- expected: no new failures
 - `uv run python -c "from pm_ai.domain.scope_model import GITIGNORED; from pm_ai.domain.identity import ScopeKind; print(sorted(GITIGNORED[ScopeKind.PROJECT]))"` -- expected: the seven keys the first criterion names
+
+## Suggested Review Order
+
+**The flip itself**
+
+- Start here: the five declarations, and the comment recording why `rules/` and `skills/` stay.
+  [`scope_model.py:733`](../../../../pm_ai/domain/scope_model.py#L733)
+
+- The parent/child relation is now an invariant, not a set a future edit updates alongside the break.
+  [`scope_model.py:1091`](../../../../pm_ai/domain/scope_model.py#L1091)
+
+**The wall stops asking git**
+
+- AD-38's invariant has no git term; the guard now tests the scope relation unconditionally.
+  [`disclosure.py:158`](../../../../pm_ai/domain/disclosure.py#L158)
+
+- The ledger-write half of the same correction.
+  [`disclosure.py:107`](../../../../pm_ai/domain/disclosure.py#L107)
+
+- `is_project` replaces `is_git_committed`, which asserted a fact nothing checked.
+  [`identity.py:80`](../../../../pm_ai/domain/identity.py#L80)
+
+**What the operator now reads**
+
+- Three refusals generalised: these fire for a dashboard and a ledger, not only a transcript.
+  [`storage_tiers.py:328`](../../../../pm_ai/domain/storage_tiers.py#L328)
+
+- The predicate whose reach grew; the guard's logic did not change, only its subjects.
+  [`storage_tiers.py:151`](../../../../pm_ai/domain/storage_tiers.py#L151)
+
+**The claim that was measured rather than asserted**
+
+- `restricted_mode` now says `0600` and `_append` does not honour it — pinned by a `stat`, both directions.
+  [`test_storage_capabilities.py:362`](../../../../tests/architecture/test_storage_capabilities.py#L362)
+
+**Coverage the review found missing**
+
+- All four flipped artifacts, each through the writer it is actually reached by.
+  [`test_capture_guard.py:487`](../../../../tests/architecture/test_capture_guard.py#L487)
+
+- The story's central promise, restored: the shared artifacts still write without a rule.
+  [`test_capture_guard.py:633`](../../../../tests/architecture/test_capture_guard.py#L633)
+
+- The derived property, split from the pinned snapshot beside it that cannot prove "unchanged".
+  [`test_encryption_policy.py:294`](../../../../tests/architecture/test_encryption_policy.py#L294)

@@ -545,7 +545,21 @@ def test_every_event_entry_in_the_package_satisfies_its_category_schema():
 # the builtin `open` (caught below) or an import, so pinning the imports is what
 # closes the shape rather than the spelling. Adding a name here is a deliberate
 # act; the question to answer first is whether it can reach the filesystem.
-CONFIG_IMPORTS_ALLOWED = frozenset({"__future__", "collections", "dataclasses", "math", "tomllib"})
+#
+# `zoneinfo` was added by story 4g, and it is the one entry that needed the
+# question answered rather than waved through. `ZoneInfo(key)` does consult the
+# platform's timezone database, which lives on disk — so this is not an import
+# that provably cannot touch a filesystem. It is admitted anyway, deliberately:
+# the rule exists so that `config.toml` has exactly one reader and that reader
+# is `StorageService`, and the tz database is not an artifact of this
+# application at any scope, is read-only, and is the only way to answer "is
+# `Europe/Warsav` a zone". There is no in-process substitute — a shape check
+# accepts the typo, and a typo silently shifts which meetings count as today.
+# What the allowlist still buys here is that the name appears in this list, so
+# the next reader knows the exception was taken on purpose.
+CONFIG_IMPORTS_ALLOWED = frozenset(
+    {"__future__", "collections", "dataclasses", "math", "tomllib", "zoneinfo"}
+)
 
 # Belt to the allowlist's braces: the builtin needs no import, and a read verb on
 # an object obtained some other way should still be loud.
@@ -569,6 +583,39 @@ READ_CALLS = frozenset({
     "rglob",
 })
 
+# The other half, added by story 4g. `pm_ai.core.config` became a *writer* that
+# day — `render_config` returns bytes for a caller to write — and every word of
+# the guarantee above was suddenly asserted in one direction only: a
+# `Path(...).write_bytes(rendered)` inside this module would have passed a set
+# of read verbs without a murmur. The allowlist is what really closes the shape
+# (there is no writing a file without an import or the `open` builtin, which is
+# in `READ_CALLS`), and these are the same belt for the same braces.
+#
+# Named `CONFIG_WRITE_CALLS` rather than `WRITE_CALLS`: this module already has
+# a `WRITE_CALLS` — the single-writer guard's, at the top of the file — and a
+# second binding of that name would silently rebind it for the two tests that
+# read it, replacing the single-writer verb set with this one.
+CONFIG_WRITE_CALLS = frozenset({
+    "write",
+    "write_text",
+    "write_bytes",
+    "writelines",
+    "mkdir",
+    "makedirs",
+    "replace",
+    "rename",
+    "unlink",
+    "dump",
+    "dumps",
+})
+
+# `replace` and `write` are ordinary method names elsewhere in Python —
+# `str.replace` above all — so this set would be too blunt for a package-wide
+# sweep. It is applied to one 600-line module whose entire job is returning
+# values, where a false positive is a thirty-second read and a false negative is
+# the guarantee in its docstring being untrue.
+CONFIG_FILE_CALLS = READ_CALLS | CONFIG_WRITE_CALLS
+
 
 def _import_heads(source) -> set[str]:
     """Top-level module of every import in one file, relative imports included."""
@@ -582,8 +629,14 @@ def _import_heads(source) -> set[str]:
     return heads
 
 
-def test_story_4a_the_config_loader_reads_no_file():
-    """`pm_ai.core.config` parses bytes handed to it and reaches no filesystem."""
+def test_story_4a_the_config_module_neither_reads_nor_writes_a_file():
+    """`pm_ai.core.config` moves bytes handed to it and reaches no filesystem.
+
+    Widened from "reads no file" by story 4g, which made this module a writer:
+    `render_config` returns the bytes of a `config.toml` for a caller to write,
+    and until the write verbs joined the sweep the guarantee was checked in one
+    direction while the module worked in two.
+    """
     modules = [f for f in source_files("core") if f.path.name == "config.py"]
     assert modules, (
         f"{PACKAGE_ROOT / 'core' / 'config.py'} is missing — this rule would "
@@ -593,7 +646,7 @@ def test_story_4a_the_config_loader_reads_no_file():
     violations = [
         f"{config.location(node)}  {name}(...)"
         for _f, node, name in calls([config])
-        if name.split(".")[-1] in READ_CALLS
+        if name.split(".")[-1] in CONFIG_FILE_CALLS
     ]
     violations += [
         f"{config.rel} imports {module}"
@@ -601,10 +654,11 @@ def test_story_4a_the_config_loader_reads_no_file():
     ]
     assert not violations, format_violations(
         violations,
-        "Story 4a: pm_ai.core.config interprets bytes and opens nothing — `core` "
-        "is I/O-free and StorageService.read_artifact is the single reader. If an "
+        "Stories 4a and 4g: pm_ai.core.config interprets and serializes bytes "
+        "and opens nothing in either direction — `core` is I/O-free, and "
+        "StorageService is the single reader and the single writer. If an "
         "import here is genuinely needed, add it to CONFIG_IMPORTS_ALLOWED after "
-        "establishing it cannot reach the filesystem.",
+        "establishing what it can reach on the filesystem.",
     )
 
 

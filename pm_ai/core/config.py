@@ -1,20 +1,21 @@
-"""`~/.pm-ai/config.toml`, interpreted — the only reader of that file.
+"""`~/.pm-ai/config.toml`, interpreted and written — the only module that does either.
 
 `config.toml` was declared as an application-scope Tier-1 artifact
 (`scope_model.py:432`) and read by nothing: a promise the layout made and the
-code did not keep. This module is the reader.
+code did not keep. This module is the reader, and since story 4g the writer.
 
-**It parses bytes and never opens a file.** That is structural rather than a
-promise — `load_config` takes `bytes | None` and there is nothing here to open.
-`core` is I/O-free by contract and `StorageService.read_artifact` is already the
-single reader, so the caller reads and this module interprets. Worth stating
-because no *inherited* gate would catch a file read here: the single-writer AST
-sweep exempts read-mode opens, the import contracts list only network and
-database clients, and the file-I/O rule is scoped to `pm_ai.storage`. So this
-module has one of its own —
-`test_static_rules.py::test_story_4a_the_config_loader_reads_no_file`
-allowlists what it may import, which is why adding an import here is a
-deliberate act rather than an ordinary one.
+**It moves bytes and never opens a file, in either direction.** That is
+structural rather than a promise — `load_config` takes `bytes | None`,
+`render_config` returns `bytes`, and there is nothing here to open. `core` is
+I/O-free by contract and `StorageService` is already the single reader and the
+single writer, so the caller does the I/O and this module interprets and
+serializes. Worth stating because no *inherited* gate would catch a file access
+here: the single-writer AST sweep exempts read-mode opens, the import contracts
+list only network and database clients, and the file-I/O rule is scoped to
+`pm_ai.storage`. So this module has one of its own —
+`test_static_rules.py::test_story_4a_the_config_module_neither_reads_nor_writes_a_file`
+allowlists what it may import and names the read *and* write verbs, which is
+why adding an import here is a deliberate act rather than an ordinary one.
 
 Two refusals shape everything below.
 
@@ -29,11 +30,30 @@ architecture forbids, and answering that with "unknown key" would be a shrug.
 
 **An unknown key is refused, not ignored.** TOML readers usually ignore extras,
 which is how `verbose_loging = true` reads as configured forever. The accepted
-vocabulary is three keys, so a closed set costs nothing.
+vocabulary is four keys, so a closed set costs nothing.
 
 Absent and empty are both ordinary first-run states returning defaults — a
-missing optional config is not a failure. There is no write path: this file is
-hand-edited (AD-3).
+missing optional config is not a failure.
+
+**`render_config` is the mirror of `load_config`, and neither opens a file.**
+The renderer returns bytes and something above it writes them, exactly as the
+loader takes bytes and opens nothing: `core` is I/O-free by contract, and a
+second surface (Telegram, story 5) reaches adapters only through core (AD-30),
+so serialization cannot live on either surface. Hand-editing stays supported —
+AD-3's Tier-1 promise is that the file *can* be hand-edited, not that only a
+human may write it — but a rewrite replaces the file whole (`config.toml` is
+absent from `storage_tiers._APPEND_ONLY_KEYS`), so **comments in a hand-edited
+file are not preserved**. `tomllib` reads and cannot write, round-tripping
+comments needs a third-party parser this module refuses to add, and the
+generated header says so in the file itself.
+
+Two rules hold the pair together. `load_config(render_config(c)) == c` for
+every admissible `Config` — a renderer and a parser are the classic drift pair,
+which is why `ACCEPTED_KEYS` is derived from the dataclass rather than written
+out twice. And **a key at its unset default is omitted, never emitted**: that
+is policy rather than something the loader forces, because `_flag` accepts
+`verbose_logging = false` quite happily, so only the renderer stands between an
+operator and a file stating a setting they expect an effect from.
 """
 
 from __future__ import annotations
@@ -42,13 +62,16 @@ import math
 import tomllib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 __all__ = [
     "ACCEPTED_KEYS",
     "ENCRYPTION_KEY_FAMILY",
+    "HEADER",
     "Config",
     "ConfigRefused",
     "load_config",
+    "render_config",
 ]
 
 # The environment variable's name is spelled out in the refusal message below,
@@ -69,7 +92,7 @@ ENCRYPTION_KEY_FAMILY = frozenset({"encrypt", "cipher", "crypto", "plaintext"})
 
 _BOM = b"\xef\xbb\xbf"
 
-# `config.toml`'s vocabulary is three flat scalars, so anything nested is
+# `config.toml`'s vocabulary is four flat scalars, so anything nested is
 # refused by the sweeps below anyway — but only if the walk survives long enough
 # to say so. `a.a.a…b = 1` is legal TOML that `tomllib` accepts up to 1000
 # dotted parts, and walking that recursed until Python gave up: a
@@ -92,6 +115,80 @@ class ConfigRefused(ValueError):
     A `ValueError`, so a caller that catches one catches these too; `4c` maps it
     to a refusal exit code.
     """
+
+
+def _has_surrogates(value: str) -> bool:
+    """Whether `value` holds an unpaired surrogate, and so has no UTF-8 encoding.
+
+    Asked by encoding rather than by code-point range, because the range is the
+    easy half to get wrong: a valid astral character such as U+1F600 is a
+    *pair* of surrogates in UTF-16 and a perfectly encodable single code point
+    in Python, and a range check written from memory refuses it.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+def _timezone_database_available() -> bool:
+    """Whether this machine can resolve any IANA zone at all.
+
+    Probed with `UTC`, which every timezone database holds, so a `False` here
+    means the database is missing rather than that one name is wrong. It is the
+    difference between two refusals an operator acts on completely differently:
+    "install `tzdata`" and "you typed the zone wrong". `tzdata` is a `runtime`
+    extra rather than a default dependency, so the first is an ordinary state
+    on a base install and not an exotic one.
+
+    Every exception is one fact — the database is unusable — which is the same
+    judgement `connectors.graph.calendar.zone_of` makes at its own lookup.
+    """
+    try:
+        ZoneInfo("UTC")
+    except Exception:  # noqa: BLE001 — any failure here means the same thing
+        return False
+    return True
+
+
+def _refuse_zone(value: object, cause: Exception) -> ConfigRefused:
+    """The refusal for a `display_timezone` `ZoneInfo` would not accept.
+
+    Three different failures wear the same exception, and the remedy differs
+    for each, so the message is chosen rather than templated:
+
+    - a non-string, which is an argument of the wrong type and not a zone at
+      all — saying the database "does not hold" it would be false;
+    - a name no database resolves *on a machine that has one*, which is a typo;
+    - anything at all *on a machine with no timezone database*, where the
+      advice "use an IANA zone name such as `Europe/Warsaw`" is already
+      satisfied and useless. `tzdata` is a `runtime` extra, so this is the
+      ordinary state of a base install.
+    """
+    if isinstance(cause, TypeError):
+        return ConfigRefused(
+            f"display_timezone must be a string naming an IANA zone, but it was "
+            f"given {_type_name(value)} ({value!r}). Omit the key to leave it "
+            f"unset."
+        )
+    if not _timezone_database_available():
+        return ConfigRefused(
+            f"display_timezone is {value!r}, and this machine has no timezone "
+            f"database to resolve it against — `UTC` does not resolve either, so "
+            f"this is a missing database rather than a wrong name. Install the "
+            f"`tzdata` extra (`uv sync --extra runtime`). Refused rather than "
+            f"assumed: a zone that cannot be resolved cannot decide which "
+            f"meetings count as today."
+        )
+    return ConfigRefused(
+        f"display_timezone is {value!r}, which this machine's timezone database "
+        f"does not hold ({type(cause).__name__}). It must be an IANA zone name "
+        f"such as `Europe/Warsaw` — the database is present and does not have "
+        f"this one, so it is a name rather than a missing install. A typo here "
+        f"does not fail, it silently shifts which meetings count as today. Omit "
+        f"the key to leave it unset."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +216,12 @@ class Config:
     # sanctions for this file, in the same breath as refusing the encryption
     # toggle: "Verbose logging may live there; encryption may not."
     verbose_logging: bool = False
+    # The fourth and last key, reserved to the human by `4a` and answered on
+    # 2026-09-03. `23a`'s renderer and the live read that selects the day both
+    # take a timezone, and nothing in wave 1 supplied one. `""` is the unset
+    # state: a caller needing a day boundary refuses rather than assuming UTC,
+    # because assuming is how a meeting lands on the wrong day silently.
+    display_timezone: str = ""
 
     def __post_init__(self) -> None:
         """Refuse a value no `Config` may hold, however it was constructed.
@@ -152,6 +255,19 @@ class Config:
                 f"non-finite rate would propagate into every cost this daemon "
                 f"reports and look like a measurement."
             )
+        # The mirror of the rate's `bool` guard above, and missing until story
+        # 4g gave the class a renderer. `Config(verbose_logging=1)` constructed
+        # happily and rendered `verbose_logging = 1.0` — a file pm-ai wrote and
+        # its own `_flag` then refused, which is the drift the round-trip rule
+        # exists to make impossible. A flag is a boolean or it is not a flag.
+        if not isinstance(self.verbose_logging, bool):
+            raise ConfigRefused(
+                f"verbose_logging is {self.verbose_logging!r}, which is not a "
+                f"boolean. `1` and `\"true\"` are refused rather than "
+                f"interpreted here for the same reason `_flag` refuses them in "
+                f"the file: TOML has a real boolean type, and a stand-in is an "
+                f"author guessing."
+            )
         if self.pm_handle and not self.pm_handle.strip():
             raise ConfigRefused(
                 f"pm_handle is {self.pm_handle!r} — whitespace, which is neither "
@@ -160,6 +276,42 @@ class Config:
                 f"whitespace, which would hand that speaker the PM's execution "
                 f"authority (AD-32)."
             )
+        # A lone surrogate has no UTF-8 encoding, so a handle carrying one
+        # could be *held* by a `Config` and never written to `config.toml` —
+        # `render_config`'s final `.encode("utf-8")` raised `UnicodeEncodeError`
+        # out of a module that promises `ConfigRefused` and nothing else.
+        # Refused here rather than escaped there, because escaping is not
+        # available: no TOML string can carry an unpaired surrogate, so the
+        # round-trip rule holds only if such a handle is inadmissible.
+        #
+        # Not a theoretical input. POSIX argv is decoded with `surrogateescape`,
+        # so any byte sequence the shell hands `pm-ai` that is not valid UTF-8
+        # arrives as surrogates, and `4h` sets `pm_handle` from the command line.
+        if _has_surrogates(self.pm_handle):
+            raise ConfigRefused(
+                f"pm_handle is {self.pm_handle!r}, which contains an unpaired "
+                f"surrogate and therefore has no UTF-8 encoding — config.toml "
+                f"could not be written with it at all. This is what a command "
+                f"line argument looks like when the bytes the shell passed were "
+                f"not valid UTF-8; re-enter the handle."
+            )
+        if self.display_timezone:
+            # Validated against the zone database rather than by shape. A
+            # typo'd zone is not a syntax error — it is a silent shift in which
+            # meetings count as today, in whichever query selects the day.
+            #
+            # `ZoneInfoNotFoundError` is a `KeyError`, **not** a `ValueError`,
+            # so a bare `except ValueError` here would let `Europe/Warsav`
+            # through; it is named deliberately. `ValueError` covers the keys
+            # `zoneinfo` rejects before it looks anything up (an absolute path,
+            # `..`, an unnormalized key), `TypeError` the non-string a direct
+            # construction can pass, and `OSError` a database file this machine
+            # has but cannot read or cannot parse. All four are the same fact to
+            # a caller, and every way in must leave with `ConfigRefused`.
+            try:
+                ZoneInfo(self.display_timezone)
+            except (ZoneInfoNotFoundError, ValueError, TypeError, OSError) as unknown:
+                raise _refuse_zone(self.display_timezone, unknown) from unknown
 
 
 ACCEPTED_KEYS = frozenset(field.name for field in fields(Config))
@@ -189,6 +341,7 @@ def load_config(raw: bytes | None) -> Config:
     rate = supplied.get("blended_hourly_rate")
     handle = supplied.get("pm_handle")
     verbose = supplied.get("verbose_logging")
+    zone = supplied.get("display_timezone")
     return Config(
         blended_hourly_rate=(
             defaults.blended_hourly_rate
@@ -201,7 +354,159 @@ def load_config(raw: bytes | None) -> Config:
             if verbose is None
             else _flag("verbose_logging", verbose)
         ),
+        display_timezone=(
+            defaults.display_timezone
+            if zone is None
+            # A string first, so `display_timezone = 5` reports the type rather
+            # than the zone database's opinion of it; `__post_init__` then does
+            # the lookup, so the class holds the rule and not only the loader.
+            else _text("display_timezone", zone)
+        ),
     )
+
+
+HEADER = """\
+# config.toml — pm-ai's daemon settings and global defaults.
+#
+# Written by the `pm-ai` command line, which is the primary channel: it rewrites
+# this file whole, every time. Hand-editing is supported and read back exactly
+# as written — but **comments are not preserved**. The next write replaces the
+# file and only this header survives it: pm-ai's TOML reader cannot write, and
+# no comment-preserving parser is a dependency of this project.
+#
+# A setting left at its default is omitted rather than written out, so a file
+# holding nothing but this header is a valid and fully unconfigured one.
+"""
+"""The generated preamble every rendered `config.toml` opens with.
+
+Comments only, so it contributes no key: the file this module renders for a
+`Config()` parses back to `Config()`, which is what makes a first-run write
+readable by its own loader.
+
+Deliberately names no setting. Every word here is a word `_refuse_encryption`
+would have to sweep past if the header ever grew a key list, and the point of
+the vocabulary being derived from the dataclass is that no second copy of it
+exists to drift — `pm-ai config show` prints the live one.
+"""
+
+# TOML basic-string escapes, verbatim from the specification's table. `\b` and
+# `\f` are in it and are easy to forget: `Config.__post_init__` admits any
+# non-blank handle, so a control character in one is admissible input, and an
+# unescaped one produces a file the loader on the other side of this module
+# cannot parse.
+_ESCAPES = {
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+    '"': '\\"',
+    "\\": "\\\\",
+}
+
+# U+007F is a control character TOML forbids raw in a basic string, and it has
+# no short escape — it reaches the file as the six characters `\u007F` or
+# not at all.
+_DELETE = "\x7f"
+
+
+def render_config(config: Config) -> bytes:
+    """`config.toml`'s bytes for a `Config`, for a caller that will write them.
+
+    Returns bytes and opens nothing, the mirror of `load_config`. The caller
+    writes them through `StorageService`, which replaces the file whole.
+
+    Two guarantees, and everything here exists to keep them:
+
+    **Round trip.** `load_config(render_config(c)) == c` for every admissible
+    `Config`. The keys are walked from `fields(Config)` — the same derivation
+    `ACCEPTED_KEYS` uses — so a field added to the dataclass is emitted without
+    anything here being edited, and cannot become a key the loader refuses as
+    unknown.
+
+    **A key at its unset default is omitted.** Compared against `Config()`'s own
+    field defaults, which is the definition `pm-ai config show` already uses for
+    the word. For the rate and the handle the loader would refuse the explicit
+    unset value anyway; for `verbose_logging` it would not — `false` is a
+    perfectly acceptable flag — so this rule is the only thing that keeps a
+    first-run file from stating a setting nobody chose.
+
+    Values are emitted at their declared TOML types: a flag as `true`/`false`
+    and never `1` or `"true"`, a rate through `repr(float(...))` so an integral
+    `85.0` reads back as a float rather than an int, and a string as a basic
+    string with every escape the specification requires.
+    """
+    defaults = Config()
+    body = [
+        f"{field.name} = {_literal(field.name, getattr(config, field.name))}"
+        for field in fields(Config)
+        if getattr(config, field.name) != getattr(defaults, field.name)
+    ]
+    # A fully unset `Config` renders the header and nothing else — not the
+    # header plus a stray blank line — so the first-run file is byte-for-byte
+    # the preamble and the "no keys" claim is visible in the bytes.
+    document = HEADER if not body else f"{HEADER}\n" + "\n".join(body) + "\n"
+    return document.encode("utf-8")
+
+
+def _literal(key: str, value: object) -> str:
+    """One `Config` value as the TOML literal its loader accepts back.
+
+    `bool` is tested before the numbers for the reason it is everywhere else in
+    this module: `True` is an `int`, and reaching the numeric arm would write
+    `1.0` where the file must say `true`.
+
+    An `int` is widened rather than emitted as one. `_number` widens on the way
+    in, but `Config(blended_hourly_rate=85)` is constructible directly and
+    equals `Config(blended_hourly_rate=85.0)`, so the two must render the same
+    bytes or the round trip holds for one and not the other.
+
+    The final refusal is unreachable today and is the point: a field added to
+    `Config` at a type this function does not know would otherwise be dropped
+    silently, which is the same "reads as configured while having no effect"
+    failure the closed vocabulary exists to prevent, arriving from the writing
+    side instead of the reading one.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(float(value))
+    if isinstance(value, str):
+        return _basic_string(value)
+    raise ConfigRefused(
+        f"`{key}` holds {_type_name(value)}, which config.toml has no way to "
+        f"write. Every accepted key is a string, a number or a boolean; a field "
+        f"added at another type needs a literal here before it can be rendered, "
+        f"or it would be omitted from the file and read back as unset."
+    )
+
+
+def _basic_string(value: str) -> str:
+    """A TOML basic string: quoted, with every character the format forbids escaped.
+
+    Written out rather than borrowed from `json.dumps`. The escapes overlap
+    almost entirely, but JSON's encoder escapes every non-ASCII character by
+    default, and a handle spelled back as `\\u00e9` in a file whose whole promise
+    is that a human can edit it is a worse file for no gain.
+
+    U+007F earns its own branch: `tomllib` refuses it raw — `Illegal character
+    '\\x7f'` — and it is the one control character with no short escape.
+
+    Everything else passes through as itself, U+0080 and above included: the
+    file is UTF-8 and a `\\u` escape of a legal character only makes it harder
+    to hand-edit, which is a promise this file keeps.
+    """
+    out = ['"']
+    for character in value:
+        escape = _ESCAPES.get(character)
+        if escape is not None:
+            out.append(escape)
+        elif character < " " or character == _DELETE:
+            out.append(f"\\u{ord(character):04X}")
+        else:
+            out.append(character)
+    out.append('"')
+    return "".join(out)
 
 
 def _decode(raw: bytes) -> str:

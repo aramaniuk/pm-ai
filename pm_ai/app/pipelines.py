@@ -96,7 +96,8 @@ def _persist_by_scope(
     AD-38's write guard reads it: a personal meeting harvested by a
     project-scoped daemon is a `CommittedScopeLeak` the moment it is offered to
     the project's log, and it is *right* that it is — a private appointment in
-    the employer's repository is the leak the scope model exists to refuse. Story
+    the team's ledger is the leak the scope model exists to refuse, whether or
+    not that ledger is one git would carry (AD-38, revised 2026-09-03). Story
     33c is the first connector to emit events in more than one scope; before it,
     every event carried the daemon's own and this grouping produced exactly the
     single call it replaced.
@@ -138,7 +139,7 @@ def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: s
     below is permitted to do (AD-30).
     """
     # AD-38 — check the citation direction BEFORE extracting anything. A meeting
-    # owned by `personal` or `people` cannot be cited from a git-committed scope,
+    # owned by `personal` or `people` cannot be cited from the project scope,
     # and every extraction below will cite this meeting (AD-33).
     assert_citation_legal(cited=meeting.scope, into=daemon.scope)
     results = extract(transcript, meeting, pm_handle=daemon.pm_handle, provider=provider)

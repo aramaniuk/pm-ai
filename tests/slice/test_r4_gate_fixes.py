@@ -229,19 +229,26 @@ def test_ad38_guard_fires_on_a_normalized_event(daemon):
         daemon.storage.persist_events((personal,), scope=PROJECT)
 
 
-def test_people_scope_may_not_reach_a_committed_scope(daemon):
-    """AD-4/AD-38 — a report's record in a repo is readable by that report's peers."""
+def test_people_scope_may_not_reach_the_project_scope(daemon):
+    """AD-4/AD-38 — a report's record in the team's ledger is readable by peers.
+
+    Renamed with story 1n, which made the project scope's `memory/`
+    machine-local: "a repo" was the old reason and is no longer the condition.
+    The consequence did not soften — a teammate's checkout, a backup or an
+    export each reach a project ledger, and none is a `.gitignore` rule's
+    business.
+    """
     people = _commit_event("3b7e02", DataScope(ScopeKind.PEOPLE, person_id="alex"))
     with pytest.raises(CommittedScopeLeak):
         daemon.storage.persist_events((people,), scope=PROJECT)
 
 
-def test_people_is_not_personal_and_is_not_committed():
+def test_people_is_not_personal_and_is_not_a_project():
     """AD-4 — the two properties the HR rule turns on."""
     people = DataScope(ScopeKind.PEOPLE, person_id="alex")
     assert people.is_people
     assert not people.is_personal, "AD-31 must not forbid the HR sync UJ-4 requires"
-    assert not people.is_git_committed
+    assert not people.is_project
     with pytest.raises(ValueError):
         DataScope(ScopeKind.PEOPLE)  # whose record is it?
 
@@ -411,12 +418,16 @@ def test_captures_refuse_to_write_without_a_gitignore_rule():
     # Which artifacts need the guard is no longer this function's decision, and
     # as of 2026-08-22 it is no longer a global one either: `requires_git_exclusion`
     # answers per scope, because `event_log/` sits inside the gitignored
-    # team-member enclave and is committed to the repository in a project. A
-    # basename-keyed set could not hold both answers.
+    # team-member enclave and was committed to the repository in a project. Story
+    # 1n (2026-09-15) made the project one machine-local too, so the pair that
+    # shows a basename-keyed set could not hold both answers is now the personal
+    # scope against the other two — the personal `memory/` is committed to the
+    # PM's own private repository.
     from pm_ai.domain.identity import ScopeKind
     from pm_ai.domain.storage_tiers import requires_git_exclusion
 
     assert requires_git_exclusion(ScopeKind.PEOPLE, "event_log/")
-    assert not requires_git_exclusion(ScopeKind.PROJECT, "event_log/")
+    assert requires_git_exclusion(ScopeKind.PROJECT, "event_log/")
+    assert not requires_git_exclusion(ScopeKind.PERSONAL, "event_log/")
     assert requires_git_exclusion(ScopeKind.PROJECT, "transcripts/")
     assert not requires_git_exclusion(ScopeKind.APPLICATION, "config.toml")

@@ -17,6 +17,8 @@ rather than reading as an assurance this file cannot give.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -34,11 +36,13 @@ from pm_ai.domain.disclosure import CommittedScopeLeak
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.transcripts import Transcript, TranscriptSource, Utterance
+from pm_ai.platform.paths import ScopePaths
 
 NOW = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
 PM = "andrei@example.com"
 PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
 PERSONAL = DataScope(ScopeKind.PERSONAL)
+PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="alex")
 
 MEETING = Meeting(
     meeting_id="mtg_01HX",
@@ -224,6 +228,68 @@ def test_a_personal_meeting_is_refused_before_any_file_is_written(tmp_path):
         assert not directory.exists() or not list(directory.iterdir())
     with pytest.raises(MeetingNotFound):
         _daemon(tmp_path).meetings.get("mtg_own", scope=PERSONAL)
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="the `in-a-repo` row needs a real repository, and the `no-repo` row "
+    "needs git to confirm there is not one",
+)
+@pytest.mark.parametrize("repository", [True, False], ids=["in-a-repo", "no-repo"])
+def test_a_people_meeting_is_refused_with_or_without_a_repository(tmp_path, repository):
+    """AD-38 — the wall is the scope boundary, not the directory (story 1n).
+
+    Both conditions, because the guard read `is_git_committed` until 2026-09-15
+    and that predicate answered "PROJECT" without ever looking at a filesystem —
+    so the non-repository case passed for a reason that was about to become the
+    common one. Story 1n makes the project scope's `memory/` machine-local, which
+    is what broke the equivalence; a project directory outside any repository is
+    an ordinary configuration now, and a citation across the wall has to be
+    refused there too.
+
+    A direct report's 1:1 is the sharper subject than the PM's own coaching
+    session: the record a project citation would expose is readable by that
+    report's peers.
+    """
+    root = ScopePaths.rooted(tmp_path).repository("alpha")
+    root.mkdir(parents=True, exist_ok=True)
+    if repository:
+        subprocess.run(
+            ["git", "init", "-q", "--initial-branch=main", "."],
+            cwd=root, capture_output=True, text=True, check=True,
+        )
+    assert _is_a_working_tree(root) is repository, (
+        "the premise did not hold, so this row does not test the condition it names"
+    )
+    daemon = _daemon(tmp_path)
+    people = Meeting(
+        meeting_id="mtg_alex_1on1",
+        title="1:1 with Alex",
+        start=NOW,
+        duration_minutes=30,
+        attendees=(Actor("actor_alex"),),
+        scope=PEOPLE,
+    )
+
+    with pytest.raises(CommittedScopeLeak):
+        run_transcript_ingestion(daemon, _transcript(people), people)
+
+    for scope in (PROJECT, PEOPLE):
+        directory = daemon.storage.paths.resolve(scope, "meetings/")
+        assert not directory.exists() or not list(directory.iterdir())
+
+
+def _is_a_working_tree(root: Path) -> bool:
+    """Asked of git rather than of this test's own setup.
+
+    A `.git` this test created is not the same fact as git agreeing this is
+    inside a working tree, and the `no-repo` row is only meaningful if the
+    temporary directory is not itself nested inside one.
+    """
+    return subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=root, capture_output=True, text=True, check=False,
+    ).returncode == 0
 
 
 def test_the_wiring_holds_an_accessor_and_no_dict(tmp_path):

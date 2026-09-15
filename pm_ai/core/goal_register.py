@@ -5,7 +5,7 @@
 `register: dict[str, Goal]`. Nothing built that register. `strategic_goals.md`
 is declared Tier-1 in exactly one tree — the personal one
 (`scope_model.py:544`) — and is a member of `PERSONAL_SUBJECT_ARTIFACTS`
-(`:1052`) precisely so that no committed scope may hold it (`:1044-1047`), but
+(`:1052`) precisely so that no shared scope may hold it (`:1044-1047`), but
 it had no reader.
 
 And the consequence was not a degraded tag. `resolve` returns `UNALIGNED` only
@@ -268,7 +268,7 @@ def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
 
     `scope` is required and comes from the caller, never from the file.
     `Goal.scope` is required for the same reason (`goals.py:49`): it is the
-    field that decides whether a git-committed scope may hold this data, and a
+    field that decides whether the project scope may hold this data, and a
     parser that defaulted it would be a parser taking a decision that is not
     its — the AD-38 hole the required field closed. Which scopes may hold this
     file is the scope model's question (`PERSONAL_SUBJECT_ARTIFACTS`), not this

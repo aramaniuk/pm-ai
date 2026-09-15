@@ -117,8 +117,8 @@ PERSONAL = DataScope(ScopeKind.PERSONAL)
 Not a fallback that hides a gap: a meeting nobody categorised is the PM's own,
 it belongs in the personal tree, and it still appears on the personal dashboard.
 Dropping it instead would lose the half of the calendar the PM most needs to see,
-and filing it under the project would put a private appointment in the
-employer's repository (AD-38).
+and filing it under the project would put a private appointment in the team's
+record, where AD-38's wall exists to keep it out.
 """
 
 ALL_DAY_MINUTES = 0
@@ -223,7 +223,7 @@ CATEGORIES_KEY = "categories"
 """The keys a Graph enrolment row carries, spelled once.
 
 They live in `connectors/<instance>.json` — application scope, Tier 1,
-gitignored — and **not** in `config.toml`, whose vocabulary is closed at three
+gitignored — and **not** in `config.toml`, whose vocabulary is closed at four
 keys. These are per-machine connector settings: which Entra application this
 laptop signs in through, how much calendar this PM wants read, and which of their
 Outlook categories mean which project. None of that is a fact about pm-ai, and a

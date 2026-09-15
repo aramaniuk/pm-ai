@@ -390,7 +390,9 @@ def test_every_field_config_carries_is_printed(registered, capsys):
     """The row set is derived from `Config`, so a field added later cannot go unshown.
 
     A hand-written list of three keys would still print three after `Config`
-    grew a fourth, and the missing setting would read as one that does not exist.
+    grew a fourth, and the missing setting would read as one that does not
+    exist. It did grow one — `display_timezone`, story 4g — and this test is
+    why nothing here had to be edited for it.
     """
     from dataclasses import fields
 

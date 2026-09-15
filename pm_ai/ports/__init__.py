@@ -725,6 +725,14 @@ class ConfigPort(Protocol):
 
     Read-only members, deliberately: `Config` is frozen, and a protocol
     declaring settable attributes would claim a surface may write one.
+
+    **One member per field of `Config`, and the parity is tested.** A field
+    added to the dataclass and not declared here is not a type error anywhere —
+    it is simply unreachable through the only settings interface a surface is
+    typed against, so the setting exists, loads, renders, and cannot be read by
+    the code that needs it. `display_timezone` spent story 4g in exactly that
+    state. `tests/core/test_config.py::test_the_port_declares_every_field_config_carries`
+    is what fails now instead of a future story's mypy run.
     """
 
     @property
@@ -735,6 +743,9 @@ class ConfigPort(Protocol):
 
     @property
     def verbose_logging(self) -> bool: ...
+
+    @property
+    def display_timezone(self) -> str: ...
 
 
 @runtime_checkable

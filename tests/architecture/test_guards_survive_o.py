@@ -54,6 +54,25 @@ CASES = {
         " m.ADDRESS[second]['clash.md'] = dataclasses.replace("
         "     sample, key='clash.md', relative=pathlib.Path('b/clash.md'))",
     ),
+    "a_shared_child_inside_an_excluded_parent": (
+        "pm_ai.domain.scope_model",
+        "_assert_declarations_agree",
+        # Story 1n excluded the project scope's `memory/` together with its four
+        # children. Re-sharing one child by flipping only that child is the
+        # obvious next edit and the one git cannot honour: it will not re-include
+        # a child of an excluded directory. Doctored off the real tree rather than
+        # built from scratch, so the case cannot rot when `memory/` gains a
+        # member.
+        "from pm_ai.domain.identity import ScopeKind as K;"
+        " tree = m.SCOPE_TREES[K.PROJECT];"
+        " memory = next(n for n in tree if n.name == 'memory');"
+        " shared = tuple("
+        "     m.Collection('event_log', m.Tier.TRUTH, encrypted=False, gitignored=False)"
+        "     if c.name == 'event_log' else c for c in memory.children);"
+        " m.SCOPE_TREES = {**m.SCOPE_TREES, K.PROJECT: tuple("
+        "     m.Dir('memory', shared, gitignored=True) if n.name == 'memory' else n"
+        "     for n in tree)}",
+    ),
     "a_personal_artifact_with_no_path": (
         "pm_ai.domain.scope_model",
         "_assert_declarations_agree",

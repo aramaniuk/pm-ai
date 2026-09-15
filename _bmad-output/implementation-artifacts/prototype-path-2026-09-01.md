@@ -326,6 +326,7 @@ flowchart LR
     s23a --> s23b
     s23d --> s23b
     s33c --> s23b
+    s4g --> s23b
     s23b --> done
 
     classDef crit fill:#664d03,stroke:#413003,color:#ffffff
@@ -337,11 +338,20 @@ flowchart LR
 ```
 
 Derived from the dependency table in `deferred-work.md`, not drawn by hand, and
-cross-checked both ways: 25 slices, **35 dependency edges** in the table and the
-same 35 in the diagram, no edge in one and absent from the other, acyclic. The
-count has moved four times on 2026-09-03 as the wave's specs were amended
-against the second review and split at the sizing gate; it is re-derived from the
+cross-checked both ways: 25 slices, **36 dependency edges** in the table and the
+same 36 in the diagram, no edge in one and absent from the other, acyclic. The
+count has moved five times — four on 2026-09-03 as the wave's specs were amended
+against the second review and split at the sizing gate, and once on 2026-09-15
+when `4g → 23b` was found missing; it is re-derived from the
 table each time rather than adjusted by hand.
+
+**The fifth move is the interesting one, because nothing was split to cause it.**
+`display_timezone` was assigned to `4g` on 2026-09-03 and question 5 below records
+in as many words that "`23b` reads it once and passes it to both consumers" — an
+edge stated in prose, in a decision, and entered in neither the table nor this
+graph. It survived two multi-lens reviews and eleven merged slices because every
+re-derivation re-read the table, and the table was where the omission was. A
+dependency recorded only in a decision's prose is not recorded.
 
 Amber is the critical path, **seven slices**:
 `4a → 4c → 8b → 33a → 33b → 33c → 23b`. It runs through the CLI rather than the

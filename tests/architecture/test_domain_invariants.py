@@ -797,8 +797,14 @@ def test_ad38_disclosure_records_cannot_reach_a_committed_scope():
     d.assert_writable(rec, scope=disc.DISCLOSURE_LEDGER_SCOPE)  # its one home
 
 
-def test_ad38_no_committed_record_may_reference_personal_scope():
-    """AD-38's general invariant, not just the disclosure special case."""
+def test_ad38_no_project_record_may_reference_personal_scope():
+    """AD-38's general invariant, not just the disclosure special case.
+
+    Renamed with story 1n: the invariant is about the project scope, not about
+    what git carries. Most of that scope is machine-local now, and a name saying
+    "committed" would send a reader looking for a repository condition the guard
+    no longer has.
+    """
     d = mod("pm_ai.domain")
 
     class _Entry:
@@ -809,12 +815,25 @@ def test_ad38_no_committed_record_may_reference_personal_scope():
     d.assert_writable(_Entry(), scope=d.DataScope(d.ScopeKind.PERSONAL))
 
 
-def test_ad38_project_scope_is_the_only_committed_scope():
-    """The property the whole rule rests on."""
+def test_ad38_the_project_scope_is_the_one_the_wall_protects():
+    """The property the whole rule rests on.
+
+    Read `is_git_committed` until 2026-09-15. Same three answers, different
+    claim: the predicate no longer asserts that this scope is pushed to the
+    employer — story 1n made its `memory/` machine-local — it names the scope
+    whose records may not reach across the wall, which is what AD-38 forbids
+    with or without a repository.
+    """
     d = mod("pm_ai.domain")
-    assert d.DataScope(d.ScopeKind.PROJECT, "alpha").is_git_committed is True
-    assert d.DataScope(d.ScopeKind.PERSONAL).is_git_committed is False
-    assert d.DataScope(d.ScopeKind.APPLICATION).is_git_committed is False
+    assert d.DataScope(d.ScopeKind.PROJECT, "alpha").is_project is True
+    assert d.DataScope(d.ScopeKind.PERSONAL).is_project is False
+    assert d.DataScope(d.ScopeKind.APPLICATION).is_project is False
+    assert d.DataScope(d.ScopeKind.PEOPLE, person_id="alex").is_project is False
+    assert not hasattr(d.DataScope(d.ScopeKind.PROJECT, "alpha"), "is_git_committed"), (
+        "`is_git_committed` is retired: it asserted that the project scope lives "
+        "in the employer's repository, which most of that scope no longer does, "
+        "and a claim with no consumer is one nobody can check"
+    )
 
 
 def test_ad3_reindex_cannot_reach_tier_2():

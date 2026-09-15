@@ -14,9 +14,10 @@ This module keeps what operates on that model rather than restating it:
 
 - `assert_reindex_safe` — the Tier-3-only guarantee `pm-ai reindex` owes AD-3.
 - `assert_capture_dir_untracked` and `requires_git_exclusion` — the check
-  `pm_ai.storage.service` runs before writing a raw capture into a committed
-  scope. Its input is git's own verdict, obtained through `pm_ai.ports.VcsPort`,
-  because only git can say what git tracks.
+  `pm_ai.storage.service` runs before writing a declared-machine-local artifact
+  inside a working tree: raw captures in every scope, and since story 1n the
+  project scope's whole `memory/` too. Its input is git's own verdict, obtained
+  through `pm_ai.ports.VcsPort`, because only git can say what git tracks.
 - `assert_capture_dir_ignored` — the same question asked of `.gitignore` text
   alone. Kept, and no longer the authority: a negation line, a parent-directory
   exclude, and a directory already in the index each make it disagree with git,
@@ -114,12 +115,17 @@ CAPTURES = "transcripts/"
 CAPTURE_STAGING = "temp/"
 
 
-# `transcripts/` sits INSIDE a committed scope, so its exclusion from git is a
-# `.gitignore` rule rather than a directory boundary. A rule can go missing; a
-# directory boundary cannot. The daemon therefore verifies the rule before it
-# writes a capture, because the failure mode is publishing verbatim meeting
+# `transcripts/` sits INSIDE the team's working tree — `.project-ai/` is a
+# directory in the repository, whatever git is told to ignore within it — so its
+# exclusion is a `.gitignore` rule rather than a directory boundary. A rule can
+# go missing; a directory boundary cannot. The daemon therefore verifies the
+# rule before it writes, because the failure mode is publishing verbatim meeting
 # transcripts to the employer's repository — the same class of leak AD-38 exists
 # to prevent, arriving by omission instead of by routing.
+#
+# Story 1n (2026-09-15) added the project scope's whole `memory/` to the set
+# this paragraph is about: a rule, not a boundary, is what keeps a machine-local
+# ledger out of the repository it is written inside.
 def _qualified(scope_kind: ScopeKind, artifact: str) -> str:
     """The tree-qualified spelling of `artifact`, or the string unchanged.
 
@@ -148,10 +154,12 @@ def requires_git_exclusion(scope_kind: ScopeKind, artifact: str) -> bool:
     Replaces the module-level `GITIGNORE_REQUIRED` table, which was keyed on
     the artifact basename alone and therefore global. That held only while the
     set had one member: `transcripts/` wants the same answer in all three scopes
-    that declare it. `event_log/` does not — it is inside the gitignored
-    team-member enclave and committed to the repository in a project — so a
-    basename-keyed set had the same defect the encryption axis exposed, one
-    artifact away from mattering.
+    that declare it. `event_log/` does not — it is excluded inside the
+    team-member enclave and inside a project, and committed in the PM's own
+    sovereign hub — so a basename-keyed set had the same defect the encryption
+    axis exposed, one artifact away from mattering. (The project half of that
+    split flipped with story 1n; the asymmetry the design exists for did not go
+    away with it, it moved.)
 
     The answer is declared on the node, per tree, and derived into `GITIGNORED`,
     which is keyed on qualified relative keys — hence `_qualified` first, so
@@ -304,13 +312,31 @@ def gitignore_rule_for(target: Path, *, repository: Path) -> str:
 
 
 class UnprotectedCaptureDir(RuntimeError):
-    """A capture directory is not excluded from version control."""
+    """A declared-machine-local artifact is not excluded from version control.
+
+    Named for its first and worst subject — a directory of verbatim captures —
+    and kept under that name after story 1n (2026-09-15) widened it to the
+    project scope's `memory/`, which is a ledger rather than a capture. The name
+    is what callers catch and what every refusal row in the suite names;
+    renaming it would rewrite the refusal's identity to record a change in what
+    it covers, not in what it means. The messages carry the artifact, so an
+    operator reading one is told which artifact refused rather than inferring it
+    from the type.
+    """
 
 
 def assert_capture_dir_untracked(
     artifact: str, verdict: TrackingVerdict, *, rule: str, gitignore: str
 ) -> None:
-    """Refuse to write a raw capture git would carry into a commit.
+    """Refuse to write a declared-machine-local artifact git would commit.
+
+    Raw captures were the only subject until story 1n (2026-09-15) made the
+    project scope's `memory/` machine-local, so `event_log/`, `meetings/`,
+    `commitments_log.md` and `daily_dashboard.md` now reach these two messages
+    too. Neither says "transcript" any more, and neither says the scope is
+    committed — that was the claim 1n falsified. What both still name is the
+    artifact and the repair, which is the whole reason an operator can act on
+    them.
 
     `verdict` is git's own answer, from `pm_ai.ports.VcsPort`. This function
     turns it into the refusal and the instruction that repairs it, which is the
@@ -334,19 +360,19 @@ def assert_capture_dir_untracked(
         return
     if verdict.tracked:
         raise UnprotectedCaptureDir(
-            f"{artifact} holds raw captures and git already tracks "
+            f"{artifact} is declared machine-local and git already tracks "
             f"{len(verdict.tracked)} file(s) under it, including "
             f"{verdict.tracked[0]!r}. A .gitignore rule does not untrack what is "
             f"already in the index: run `git rm -r --cached` on that directory "
-            f"and commit the removal first. Refusing to write — a verbatim "
-            f"transcript in the team's repository is not recoverable."
+            f"and commit the removal first. Refusing to write — what lands in a "
+            f"repository cannot be taken back out of its history."
         )
     raise UnprotectedCaptureDir(
-        f"{artifact} holds raw captures and lives inside a committed scope, but "
-        f"git does not exclude it. Add {rule!r} to {gitignore}, and check for a "
-        f"later negation line (`!{rule}`) — that re-includes the directory an "
-        f"earlier rule excluded. Refusing to write: a verbatim transcript in the "
-        f"team's repository is not recoverable."
+        f"{artifact} is declared machine-local, but git does not exclude it. Add "
+        f"{rule!r} to {gitignore}, and check for a later negation line "
+        f"(`!{rule}`) — that re-includes the directory an earlier rule excluded. "
+        f"Refusing to write: what lands in a repository cannot be taken back out "
+        f"of its history."
     )
 
 
@@ -366,9 +392,9 @@ def assert_capture_dir_ignored(artifact: str, gitignore_text: str, *, rule: str)
     lines = {ln.strip().rstrip("/") for ln in gitignore_text.splitlines() if ln.strip()}
     if rule.rstrip("/") not in lines and rule.lstrip("/").rstrip("/") not in lines:
         raise UnprotectedCaptureDir(
-            f"{artifact} holds raw captures and lives inside a committed scope, but "
-            f"{rule!r} is not in .gitignore. Refusing to write: a verbatim transcript "
-            f"in the team's repository is not recoverable."
+            f"{artifact} is declared machine-local and sits inside a working "
+            f"tree, but {rule!r} is not in .gitignore. Refusing to write: what "
+            f"lands in a repository cannot be taken back out of its history."
         )
 
 

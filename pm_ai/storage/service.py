@@ -12,10 +12,12 @@ last of which turns AD-34's "re-harvesting is idempotent" into a promise that
 holds only within one process lifetime.
 
 Raw captures are neither tier and are written here anyway. `transcripts/` sits
-inside the one scope that is committed to the employer's repository, so whether
-git would publish a capture is a question about that repository rather than about
-a directory boundary — and being the single writer is what makes this the one
-place it can be asked before anything is on disk.
+inside the team's working tree, so whether git would publish a capture is a
+question about that repository rather than about a directory boundary — and
+being the single writer is what makes this the one place it can be asked before
+anything is on disk. Since story 1n the project scope's `memory/` is asked the
+same question, for the same reason: it is machine-local by declaration and it
+lives inside a repository.
 
 Asked of git, through `VcsPort`. `.importlinter` forbids `subprocess` here, which
 is not an obstacle but the design: this module states the policy — refuse unless
@@ -725,7 +727,16 @@ class StorageService:
         return self._paths.resolve(scope, artifact, create=True)
 
     def _assert_git_excludes(self, scope: DataScope, artifact: str) -> None:
-        """Refuse a raw capture that git would carry into a commit (AD-23, AD-43).
+        """Refuse a write that git would carry into a commit (AD-23, AD-43).
+
+        Raw captures were the whole subject until story 1n (2026-09-15) flipped
+        the project scope's `memory/` — its event log, meeting summaries,
+        commitments and dashboard — to gitignored, because a `git pull` rewrites
+        Tier 1 underneath everything derived from it. So this now guards the
+        ledger the daemon appends to on every harvest, not just the directory a
+        transcript lands in. Nothing about the mechanism changed: the artifact's
+        own declaration decides, which is why the reach could grow without a line
+        here moving.
 
         One condition gates the question, and it is the scope model's:
         `GITIGNORED` names, per scope, the artifacts whose exclusion rests on a
@@ -800,9 +811,10 @@ class StorageService:
             raise UnprotectedCaptureDir(
                 f"refusing to write {artifact} into {scope}: {marker} exists, so "
                 f"a repository is present, but git could not be consulted about "
-                f"it ({unanswered}). A capture written here may be committed and "
-                f"a verbatim transcript in a repository is not recoverable. "
-                f"Install git, or put it on the daemon's PATH."
+                f"it ({unanswered}). What is written here may be committed, and "
+                f"neither a verbatim transcript nor a machine-local ledger is "
+                f"recoverable once it is in a repository. Install git, or put it "
+                f"on the daemon's PATH."
             ) from unanswered
         if repository is None:
             self._git_checked.add(seen)
@@ -1306,10 +1318,10 @@ class StorageService:
         `scope` exists so the refusal is reachable, not so a caller can choose:
         the record's only home is the application scope, and omitting it takes
         that. `assert_writable` is what enforces it — a `DisclosureRecord` routed
-        anywhere else raises `CommittedScopeLeak`, because the project scope is
-        git-committed and a record naming personal material would be pushed to
-        the employer's repository. The mechanism built to prove nothing leaked
-        would have been the leak.
+        anywhere else raises `CommittedScopeLeak`, because a per-scope ledger is
+        readable by whoever that scope is shared with — and a record naming
+        personal material in the project's log reaches the team. The mechanism
+        built to prove nothing leaked would have been the leak.
 
         Both refusals run before the directory is resolved with `create`, so a
         refused write leaves neither a file nor a directory behind.
@@ -1371,7 +1383,7 @@ class StorageService:
             )
         return text.decode("utf-8")
 
-    # ── Raw captures: outside the tier model, inside a committed scope ───────
+    # ── Raw captures: outside the tier model, inside a working tree ──────────
     # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on
     # one (AD-33), which is why `RETENTION_MANAGED` holds them instead of
     # `ARTIFACT_TIER`. They still pass through the single writer, because asking
