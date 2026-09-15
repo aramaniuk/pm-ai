@@ -40,7 +40,12 @@ from pm_ai.core.rendering import (
 )
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import ObservedEventType
-from pm_ai.domain.harvest import HarvestFailure
+from pm_ai.domain.harvest import (
+    HarvestFailure,
+    NoCalendarConnector,
+    PartialCalendar,
+    UnreadCalendar,
+)
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 
@@ -385,6 +390,65 @@ def test_an_unreachable_calendar_never_claims_an_empty_day():
     assert "token expired" in body
     assert NO_MEETINGS not in body
     assert "No meetings on this project's calendar today" not in body
+
+
+def test_no_enrolled_calendar_reads_the_same_here_as_in_the_personal_file():
+    """`23b`'s third state, through the section both dashboards share.
+
+    The assertion that matters is the negative one: `_retry_advice` is never
+    reached, so the project file makes no claim about a connector nobody
+    enrolled either. The positive half — that the two files say the *same*
+    thing — is what sharing `_time_critical` is for.
+    """
+    body = sections(render(meetings=NoCalendarConnector()))["Time-Critical Activities"]
+    assert "No calendar is enrolled" in body
+    assert "the connector reports" not in body.casefold()
+    assert NO_MEETINGS not in body
+
+
+def test_a_partly_read_project_day_lists_what_arrived_and_names_what_did_not():
+    """`23b`'s fourth state — two tenants, one of them unreadable."""
+    body = sections(
+        render(
+            meetings=PartialCalendar(
+                meetings=PROJECT_MEETINGS,
+                unread=(
+                    UnreadCalendar(
+                        instance="graph:contoso",
+                        failure=HarvestFailure(reason="token expired", retryable=False),
+                    ),
+                ),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert "Alpha Architecture Review" in body
+    assert "graph:contoso" in body
+    assert "token expired" in body
+    assert NO_MEETINGS not in body
+
+
+def test_the_two_new_states_render_byte_identically_in_both_files():
+    """The shared-section guarantee, extended to `23b`'s two new members.
+
+    `_time_critical` is one function serving two dashboards, and the reason the
+    third and fourth states were affordable at all is that they are one branch
+    each in it. A copy that drifted would show up here first.
+    """
+    partial = PartialCalendar(
+        meetings=PROJECT_MEETINGS,
+        unread=(
+            UnreadCalendar(
+                instance="graph:contoso",
+                failure=HarvestFailure(reason="token expired", retryable=False),
+            ),
+        ),
+    )
+    for answer in (NoCalendarConnector(), partial):
+        here = sections(render(meetings=answer))["Time-Critical Activities"]
+        there = render_dashboard(
+            answer, PROJECT_ENTRIES, parse_goals(None, scope=PERSONAL), NOW, tz=DISPLAY
+        )
+        assert here == sections(there)["Time-Critical Activities"]
 
 
 def test_an_empty_project_log_names_the_window():

@@ -47,6 +47,22 @@ class Meeting:
     # `parse_record` constructs a `Meeting` without it, and a held meeting has no
     # tentative answer to have lost.
     tentative: bool = False
+    # Carried in memory and written to no file, on `tentative`'s precedent above
+    # and for a different reason (story 23b, 2026-09-15).
+    #
+    # `meeting_id` is the provider's per-mailbox event id, so the same meeting
+    # cross-invited to two tenants arrives twice under two different ids and
+    # matching on it deduplicates nothing in the only case that motivates
+    # deduplication. `iCalUId` is the identifier that survives the crossing, and
+    # this is where it rides — from the connector that read it to the surface
+    # that merges two calendars into one day.
+    #
+    # Nowhere near a file: `meeting_records._FIELDS` has no key for it, so the
+    # record grammar is unchanged and every golden still holds. `None` by
+    # default because that is what a record read back off disk knows, and
+    # because absence has to stay absent — two meetings that both lack it are
+    # not the same meeting, and a `""` default would make them look it.
+    ical_uid: str | None = None
 
     @property
     def source_ref(self) -> SourceRef:

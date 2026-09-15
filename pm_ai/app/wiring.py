@@ -85,6 +85,16 @@ class Daemon:
     # `config` because that field carries a default: a non-default field after a
     # defaulted one raises `TypeError` at class creation.
     keychain: KeychainPort
+    # The clock the whole daemon was built with, held rather than re-read. A
+    # pipeline that needs an instant — `23b`'s render takes one — would otherwise
+    # compose a second `datetime.now()` in whatever layer happened to call it,
+    # and a process with two clocks is the thing AD-5's single writer exists to
+    # avoid: the storage service stamps from this one, so a dashboard whose
+    # `now` came from anywhere else could date a file against a clock nothing
+    # else in the process reads.
+    clock: Callable[[], datetime] = field(
+        default_factory=lambda: lambda: datetime.now(timezone.utc)
+    )
     # Every setting `config.toml` carries, held once. Defaults when the caller
     # supplied none, which is a first run rather than an error.
     config: Config = field(default_factory=Config)
@@ -235,6 +245,9 @@ def build(
         meetings=MeetingRecords(storage),
         scope=scope,
         keychain=custody,
+        # The same callable the single writer stamps from, so nothing downstream
+        # has to build a second one.
+        clock=clock,
         config=config if config is not None else Config(),
     )
 

@@ -652,6 +652,20 @@ class CalendarRow:
     event_id: str
     start: datetime
     end: datetime
+    ical_uid: str | None = None
+    """Graph's `iCalUId`, the one identifier that survives crossing a tenant.
+
+    `event_id` is `id`, which Graph mints **per mailbox**: the same meeting
+    cross-invited to two tenants arrives under two different ones, so a surface
+    reading two calendars and matching on `id` would list that meeting twice.
+    `iCalUId` is the organiser's iCalendar identifier and is the same string in
+    both mailboxes, which is what makes it the key story `23b` deduplicates on.
+
+    Optional because it is genuinely absent sometimes — a row Graph answers
+    without it, or a `$select` narrower than this one — and absence must stay
+    absent: matching two rows that both lack it would match everything to
+    everything.
+    """
     subject: str | None = None
     is_all_day: bool = False
     is_cancelled: bool = False
@@ -998,6 +1012,11 @@ class GraphCalendarFetch:
             event_id=event_id,
             start=start,
             end=end,
+            # Read here rather than re-derived later: the raw payload is gone by
+            # the time anything downstream needs it, and this is the only field
+            # on the row that is stable across the two mailboxes a
+            # cross-tenant invitation lands in.
+            ical_uid=_text(raw.get("iCalUId")),
             subject=_text(raw.get("subject")),
             is_all_day=bool(raw.get("isAllDay")),
             is_cancelled=bool(raw.get("isCancelled")),

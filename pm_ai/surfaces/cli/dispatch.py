@@ -39,11 +39,16 @@ import getpass
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pm_ai.core.config import Config
+from pm_ai.core.config import Config, ConfigRefused
 from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
+from pm_ai.core.goal_register import MalformedGoals
+from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report
+from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.core.connector_enrolment import (
     MalformedInstanceName,
     OrphanedCredential,
@@ -134,6 +139,22 @@ class HealthReport(Protocol):
 
 
 
+def _no_dashboard(scope: DataScope) -> Path:
+    """The `Context` default: no pipeline was injected, so nothing may render.
+
+    `23b`'s `run_dashboard` lives in `pm_ai.app`, which sits *above* this package
+    in the enforced layer stack, so the CLI cannot reach it and has to be handed
+    it — the same arrangement `probe_connectors` and `probe_credential` are in.
+    The default refuses rather than returning a path, because a command that
+    printed a filename without writing one is worse than a command that fails.
+    """
+    raise Refusal(
+        f"no dashboard pipeline was supplied to the CLI, so the {scope} "
+        f"dashboard cannot be rendered. That is a wiring fault in pm-ai rather "
+        f"than anything about this machine's configuration."
+    )
+
+
 def _no_probe(system: str, credential: str) -> str:
     """The `Context` default: no probe was injected, so nothing may be enrolled."""
     raise UnknownConnectorSystem(
@@ -181,6 +202,27 @@ class Context:
     `pm-ai connector add gitlab alpha` could not have been written. The arity is
     declared on the table rather than parsed by each handler, so a leaf cannot
     disagree with the usage line printed for it.
+    """
+
+    options: Mapping[str, str] = field(default_factory=dict)
+    """The `--name value` pairs this invocation carried, keyed by option name.
+
+    Only the options `Command.options` declares can be in here: `dispatch`
+    refuses an unknown one with usage rather than passing it through, so a
+    handler reading `options["scope"]` cannot be reading a word the table never
+    promised. Absent means the operator did not say, which is a handler's cue to
+    use its own default — never an empty string.
+    """
+
+    dashboard: Callable[[DataScope], Path] = _no_dashboard
+    """Renders and writes one scope's `daily_dashboard.md`, returning its path.
+
+    `23b`'s pipeline, injected for `probe_connectors`' reason: it reaches a
+    connector, the scope model and the single writer at once, which only
+    `pm_ai.app` may do. Refusals travel out as the exceptions `pm_ai.core` and
+    `pm_ai.domain` already declare — a config with no display zone, a malformed
+    goals file, a corrupt event-log segment, an undeclared scope — so the CLI
+    maps them onto an exit code without naming anything above it.
     """
 
     probe_credential: CredentialProbePort = _no_probe
@@ -247,6 +289,22 @@ class Command:
     Declared rather than inferred so the refusal and the usage text cannot
     disagree, and so a leaf that takes none keeps refusing trailing words — the
     behaviour 4j added, which silently dropping `rest` would have undone.
+    """
+
+    options: tuple[str, ...] = ()
+    """The long options this command accepts, each `--name <value>` and optional.
+
+    The mechanism `23b` added, because `dashboard` is the first command to take
+    an argument it can also be run without. `takes` above could not express it:
+    it is positional and required, and the top-level branch in `dispatch`
+    refused *every* trailing word for a command with a `run`.
+
+    Declared on the table for `takes`' reason — one place decides what a command
+    accepts, so the refusal and the usage line cannot disagree — and closed, so
+    an option nobody declared is a usage error rather than a word that vanishes.
+    Every one of them takes a value; there are no flags here, because a flag
+    that is absent and a flag that is false are the same word on a command line
+    and no command in this table needs to tell them apart.
     """
 
 
@@ -470,7 +528,97 @@ def _connector_check(context: Context) -> int:
     return EXIT_OK if report.healthy else EXIT_UNHEALTHY
 
 
+SCOPE_ARGUMENT = "scope"
+"""The one option in the table, named once so the handler and the row agree."""
+
+_SCOPE_KINDS: Mapping[str, ScopeKind] = {kind.value: kind for kind in ScopeKind}
+"""Every scope word `--scope` can *parse*, which is deliberately more than it
+can *act on*.
+
+`people:bob` and `application` parse here and are refused a line later by the
+pipeline, naming the two trees that declare a dashboard. The two answers are
+different facts and get different exit codes: `alpha` is a command line pm-ai
+cannot read (usage, `2`), and `people:bob` is one it read and declined (`3`).
+Collapsing them would tell an operator who named a real scope that they had
+mistyped.
+"""
+
+
+def _scope(text: str | None) -> DataScope | None:
+    """`--scope`'s word as a scope, or `None` when it is not one.
+
+    `None` in, personal out: CAP-9 names `~/.manager-ai/memory/daily_dashboard.md`
+    by path, so the PM's own is what the command renders when nobody said.
+
+    `None` out is the unparseable case and never a refusal — `project:` with no
+    id and `alpha` with no kind are both command lines this CLI cannot read, and
+    `DataScope`'s own constructor is what decides the rest (a project id is
+    required, a personal scope may not carry one).
+    """
+    if text is None:
+        return DataScope(ScopeKind.PERSONAL)
+    word, separator, subject = text.partition(":")
+    kind = _SCOPE_KINDS.get(word)
+    if kind is None:
+        return None
+    if kind is ScopeKind.PROJECT:
+        return DataScope(kind, project_id=subject) if subject else None
+    if kind is ScopeKind.PEOPLE:
+        return DataScope(kind, person_id=subject) if subject else None
+    # `personal:anything` is not a scope with a subject — it is a word with a
+    # colon in it, and reading it as bare `personal` would silently discard
+    # whatever the operator thought they were naming.
+    return None if separator else DataScope(kind)
+
+
+def _dashboard(context: Context) -> int:
+    """Story 23b's render, run once and exited — no scheduler, ever (AD-7).
+
+    Three outcomes, and the split is the whole reason this handler exists rather
+    than a bare call. An unreadable `--scope` is a usage error, because nothing
+    was asked of the daemon. Everything the pipeline declines — an unset display
+    zone, a goals file with a duplicate id, a corrupt event-log segment, a scope
+    whose tree declares no dashboard — is a refusal carrying its own sentence,
+    passed through **verbatim**: those messages name the offending key, id or
+    segment, and a paraphrase here would drop the one detail that makes them
+    actionable.
+
+    A calendar that could not be read is **neither**. It exits zero with the file
+    written, because a day whose calendar went dark is a dashboard that says so —
+    not a failed command. That decision lives in the renderer, and this handler's
+    part in it is not to have an `except` for it.
+    """
+    requested = context.options.get(SCOPE_ARGUMENT)
+    scope = _scope(requested)
+    if scope is None:
+        print(
+            f"pm-ai: `--{SCOPE_ARGUMENT} {requested}` is not a scope. Write "
+            f"`personal`, or `project:<id>` naming an enrolled project.\n",
+            file=sys.stderr,
+        )
+        print(usage(), file=sys.stderr)
+        return EXIT_USAGE
+    context.require_daemon()
+    try:
+        written = context.dashboard(scope)
+    except (
+        ConfigRefused,
+        MalformedGoals,
+        MalformedEntry,
+        UnknownCategory,
+        ScopeResolutionError,
+    ) as refused:
+        raise Refusal(str(refused)) from refused
+    print(f"the {scope} dashboard is written: {written}")
+    return EXIT_OK
+
+
 TABLE: Mapping[str, Command] = {
+    "dashboard": Command(
+        "render this scope's daily_dashboard.md, once",
+        _dashboard,
+        options=(SCOPE_ARGUMENT,),
+    ),
     "doctor": Command("check this machine and report what is wrong with it", _doctor),
     # The three groups, each with the one leaf `4j` hung on it. They were in the
     # table from `4c` with no leaves, so the shape of the CLI was settled in one
@@ -503,6 +651,19 @@ TABLE: Mapping[str, Command] = {
 _HELP_FLAGS = frozenset({"-h", "--help", "help"})
 
 
+def _spelled(name: str, command: Command) -> str:
+    """One command's name with what it takes, as an operator would type it.
+
+    Required positionals in angle brackets and optional options in square ones,
+    which is the convention every other CLI on the machine uses. Composed from
+    `takes` and `options` rather than written out beside the summary, so a row
+    that gains an argument cannot keep an old usage line.
+    """
+    required = "".join(f" <{argument}>" for argument in command.takes)
+    optional = "".join(f" [--{option} <{option}>]" for option in command.options)
+    return f"{name}{required}{optional}"
+
+
 def usage(*, group: str | None = None) -> str:
     """The whole table, or one group's leaves.
 
@@ -511,7 +672,12 @@ def usage(*, group: str | None = None) -> str:
     """
     if group is None:
         lines = ["usage: pm-ai <command> [<subcommand>]", "", "commands:"]
-        lines += [f"  {name:<10} {command.summary}" for name, command in TABLE.items()]
+        spelled = {name: _spelled(name, command) for name, command in TABLE.items()}
+        width = max(len(text) for text in spelled.values())
+        lines += [
+            f"  {spelled[name]:<{width}}  {command.summary}"
+            for name, command in TABLE.items()
+        ]
         return "\n".join(lines)
     command = TABLE.get(group)
     if command is None:
@@ -524,8 +690,7 @@ def usage(*, group: str | None = None) -> str:
         lines.append(f"  no `pm-ai {group}` subcommand is implemented yet.")
     else:
         spelled = {
-            name: name + "".join(f" <{argument}>" for argument in leaf.takes)
-            for name, leaf in command.leaves.items()
+            name: _spelled(name, leaf) for name, leaf in command.leaves.items()
         }
         width = max(len(text) for text in spelled.values())
         lines += [
@@ -542,6 +707,7 @@ def dispatch(
     diagnose: Callable[[], HealthReport],
     probe_connectors: Callable[[], Report],
     probe_credential: CredentialProbePort = _no_probe,
+    dashboard: Callable[[DataScope], Path] = _no_dashboard,
     unavailable: str | None = None,
 ) -> int:
     """Run what `argv` names, and return the exit code the table gives it.
@@ -561,6 +727,7 @@ def dispatch(
         diagnose=diagnose,
         probe_connectors=probe_connectors,
         probe_credential=probe_credential,
+        dashboard=dashboard,
         unavailable=unavailable,
     )
     if not argv:
@@ -596,11 +763,21 @@ def dispatch(
             f"both shadows every leaf it has."
         )
     if command.run is not None:
-        if rest:
+        if rest and not command.options:
             print(f"pm-ai: `{name}` takes no arguments\n", file=sys.stderr)
             print(usage(), file=sys.stderr)
             return EXIT_USAGE
-        return _run(command.run, context)
+        # `23b`'s mechanism, and it narrows rather than relaxes the rule above:
+        # a command declaring no options still refuses every trailing word, and
+        # one that declares some refuses every word that is not one of them. The
+        # flag an operator invented to be careful with must never be the thing
+        # that silently vanishes.
+        named, misread = _options(rest, allowed=command.options)
+        if misread is not None:
+            print(f"pm-ai: `{name}` {misread}\n", file=sys.stderr)
+            print(usage(), file=sys.stderr)
+            return EXIT_USAGE
+        return _run(command.run, replace(context, options=named))
     leaf = command.leaves.get(rest[0]) if rest else None
     if leaf is None or leaf.run is None:
         print(usage(group=name), file=sys.stderr)
@@ -622,6 +799,45 @@ def dispatch(
         print(usage(group=name), file=sys.stderr)
         return EXIT_USAGE
     return _run(leaf.run, replace(context, arguments=supplied))
+
+
+def _options(
+    words: Sequence[str], *, allowed: tuple[str, ...]
+) -> tuple[Mapping[str, str], str | None]:
+    """`--name value` and `--name=value` pairs, or the sentence refusing them.
+
+    Hand-rolled for `dispatch`'s own reason: `argparse` answers a parse error by
+    raising `SystemExit` from inside the parse, which is the control flow an
+    explicitly-passed `argv` exists to avoid.
+
+    A refusal is returned rather than raised because it is a *usage* error, and
+    usage errors exit `2` while `Refusal` exits `3`. The four it can name are the
+    four ways a command line goes wrong here, and each says which word was the
+    problem: a bare positional, an option nobody declared, one given twice, and
+    one with nothing after it.
+    """
+    parsed: dict[str, str] = {}
+    remaining = list(words)
+    while remaining:
+        word = remaining.pop(0)
+        if not word.startswith("--"):
+            return {}, f"takes options, not `{word}`"
+        option, assigned, inline = word[2:].partition("=")
+        if option not in allowed:
+            spelled = ", ".join(f"--{name}" for name in allowed)
+            return {}, f"has no `--{option}` option; it takes {spelled}"
+        if option in parsed:
+            # Not "last one wins": two values for one option is an operator who
+            # believes something other than what would happen, and picking one
+            # silently is how they go on believing it.
+            return {}, f"was given `--{option}` twice"
+        if assigned:
+            parsed[option] = inline
+            continue
+        if not remaining:
+            return {}, f"was given `--{option}` with no value after it"
+        parsed[option] = remaining.pop(0)
+    return parsed, None
 
 
 def _run(handler: Callable[[Context], int], context: Context) -> int:
