@@ -2,8 +2,9 @@
 title: 'Payloads declare their untrusted text'
 type: 'feature'
 created: '2026-09-02'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 1
+baseline_commit: 'cf075c8582ba9cb42b19acdde33df52c42b74127'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -59,8 +60,8 @@ Split from the original `8c` on 2026-09-02 at the sizing gate: declaring untrust
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/events.py` -- declare each payload class's untrusted text fields, add `MissingSanitizableDeclaration`, and refuse at import from an `if` when a class lacks a declaration, names a field it does not have, or declares a non-text field
-- [ ] `tests/domain/test_sanitizable_declarations.py` -- the matrix, plus the `-O` subprocess case
+- [x] `pm_ai/domain/events.py` -- declare each payload class's untrusted text fields, add `MissingSanitizableDeclaration`, and refuse at import from an `if` when a class lacks a declaration, names a field it does not have, or declares a non-text field
+- [x] `tests/domain/test_sanitizable_declarations.py` -- the matrix, plus the `-O` subprocess case
 
 **Acceptance Criteria:**
 - Given a payload class added to `PAYLOAD_FOR` without a declaration, when the module is imported, then it is refused — **including under `python -O`**, run as a subprocess the way story 1l's guards are.
@@ -93,3 +94,44 @@ Requiring an explicit "trusted" record for a `str` field rather than allowing si
 - `uv run pytest tests/domain/test_sanitizable_declarations.py -q` -- expected: all matrix rows pass
 - `uv run pytest tests/architecture/test_guards_survive_o.py -q` -- expected: passes; no `assert` introduced
 - `uv run pytest -q` -- expected: no new failures
+
+## Suggested Review Order
+
+**The declaration itself**
+
+- The registry that replaces the guess — read the split rule in its docstring first.
+  [`events.py:195`](../../../../pm_ai/domain/events.py#L195)
+
+- The other half: every remaining `str` field, each with why it is not prose.
+  [`events.py:233`](../../../../pm_ai/domain/events.py#L233)
+
+- Why the two records exist and what separates them, ahead of either.
+  [`events.py:154`](../../../../pm_ai/domain/events.py#L154)
+
+**The guard**
+
+- Enumerates fields, not classes — the one decision the whole slice turns on.
+  [`events.py:298`](../../../../pm_ai/domain/events.py#L298)
+
+- Resolves annotations rather than matching their text, which `__future__` made meaningless.
+  [`events.py:282`](../../../../pm_ai/domain/events.py#L282)
+
+- A typed raise from an `if`, so `python -O` cannot strip it.
+  [`events.py:173`](../../../../pm_ai/domain/events.py#L173)
+
+- The call that makes it a load-time refusal rather than a checker.
+  [`events.py:404`](../../../../pm_ai/domain/events.py#L404)
+
+**Tests**
+
+- Observes the module body, not the function — fails if that call is removed.
+  [`test_sanitizable_declarations.py:461`](../../../../tests/domain/test_sanitizable_declarations.py#L461)
+
+- The cheap AST complement: the guard is invoked at top level.
+  [`test_sanitizable_declarations.py:512`](../../../../tests/domain/test_sanitizable_declarations.py#L512)
+
+- The completeness property, per field, parametrized over all eight payloads.
+  [`test_sanitizable_declarations.py:123`](../../../../tests/domain/test_sanitizable_declarations.py#L123)
+
+- The failure a class-level check cannot see: prose under an empty tuple.
+  [`test_sanitizable_declarations.py:273`](../../../../tests/domain/test_sanitizable_declarations.py#L273)
