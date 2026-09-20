@@ -2,7 +2,7 @@
 title: 'Sanitization normalises before it matches'
 type: 'feature'
 created: '2026-09-20'
-status: 'draft'
+status: 'ready-for-dev'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/stories/8e-sanitization-binds-at-the-boundary.md'

@@ -2,7 +2,7 @@
 title: 'The filter measures itself'
 type: 'feature'
 created: '2026-09-20'
-status: 'draft'
+status: 'ready-for-dev'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/stories/8g-sanitization-normalises-before-matching.md'
