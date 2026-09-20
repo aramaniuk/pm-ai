@@ -334,6 +334,31 @@
     credential - which reads as a working connector silently harvesting nothing.
     Every write goes through StorageService.write_artifact; the declaration
     decides whether it is sealed, never the caller.
+    ADDED 2026-09-20 as 8g and 8h, after the 8c review asked where the
+    injection vocabulary came from. _INJECTION matches literal spellings against
+    raw bytes, so each pattern covers exactly one way of writing a phrase:
+    measured against the PRD's own example sentence, hyphens, a zero-width
+    space, fullwidth characters, dots and a soft hyphen each pass through
+    untouched, with no rewording at all. Widening the word list cannot close
+    that; folding the text before matching closes all five with the four
+    patterns already there.
+    SPLIT 2026-09-20 at drafting, after a multi-lens review: the single spec
+    measured 2,382 words, the largest in the repo, and held two independently
+    shippable goals. 8g owns the seven-step fold, the span rules for a
+    projection that is not length-preserving, and the carrier checks that must
+    run BEFORE folding erases them; it asserts named cases. 8h turns those cases
+    into rates over a versioned corpus, fingerprints the rule so a change cannot
+    outrun its version, and bounds the cost per mix. 8h depends on 8g, not the
+    reverse. Both land AFTER 8e, which moves the module into pm_ai.domain, and
+    neither changes where sanitization is applied (8e) nor which fields are
+    untrusted (8c).
+    The review's load-bearing finding: folding all punctuation alike CREATES a
+    false positive the raw matcher does not have, so step 6 treats a terminator
+    followed by whitespace as a sentence barrier. Three things are deliberately
+    NOT in either and are recorded in deferred-work: deriving additional
+    phrasings from a corpus, the chat-template markers that turned out to be
+    vocabulary rather than carriers, and a local classification model, which the
+    human named as the next step for this feature once models/ exists.
 - id: "9"
   title: Passive telemetry radar
   spec_checkpoint: true
