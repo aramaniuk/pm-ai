@@ -1,35 +1,19 @@
-"""Pre-parsing sanitization (AD-12, AD-29).
+"""Re-export of `pm_ai.domain.sanitize` (AD-12, AD-29).
 
-Non-destructive by construction: `Sanitized` holds both the untouched raw and
-the derived copy, so a caller cannot accidentally overwrite the evidence a
-citation resolves against.
+The type, the pattern and `sanitize()` moved into `pm_ai.domain` in story 8e:
+`ModelPort` must name `Sanitized` for an unsanitized prompt to be a construction
+error, and `pm_ai.ports` may import nothing but `pm_ai.domain`
+(`.importlinter`'s `ports-depend-only-on-domain`). `Sanitized.__post_init__`
+then needed the pattern, and `domain-imports-nothing` forbids reaching back into
+`core` for it — so both travelled together.
+
+This module stays so the path callers already import from keeps resolving. It
+adds nothing: there is one definition of `sanitize`, in `pm_ai.domain.sanitize`,
+and this re-binds the same objects.
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from pm_ai.domain.sanitize import REDACTION, ForgedSanitization, Sanitized, sanitize
 
-_INJECTION = re.compile(
-    r"(ignore\s+(all\s+)?previous\s+instructions?"
-    r"|disregard\s+(the\s+)?above"
-    r"|system\s*:\s*you\s+are"
-    r"|<\s*/?\s*(system|instructions?)\s*>)",
-    re.IGNORECASE,
-)
-
-
-@dataclass(frozen=True, slots=True)
-class Sanitized:
-    """AD-29 — the raw is retained; only `for_model` is ever put in a prompt."""
-
-    raw: str
-    for_model: str
-
-    @property
-    def was_modified(self) -> bool:
-        return self.raw != self.for_model
-
-
-def sanitize(raw: str) -> Sanitized:
-    return Sanitized(raw=raw, for_model=_INJECTION.sub("[redacted-injection]", raw))
+__all__ = ["REDACTION", "ForgedSanitization", "Sanitized", "sanitize"]

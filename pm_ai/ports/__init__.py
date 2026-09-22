@@ -7,7 +7,7 @@ say what it returns. Adapters implement these; core depends on them.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -24,6 +24,8 @@ from pm_ai.domain.harvest import (
 from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow
+from pm_ai.domain.sanitize import Sanitized
+from pm_ai.domain.task_classes import TaskClass
 from pm_ai.domain.vcs import TrackingVerdict
 
 
@@ -712,6 +714,94 @@ class SkillPort(Protocol):
 
     def execute(self, target: TargetRef, payload: dict) -> str:
         """Perform the mutation, return the external id it produced."""
+
+
+@runtime_checkable
+class ModelPort(Protocol):
+    """AD-12's consumer clause and AD-15's declared task class, at one boundary.
+
+    AD-12 asks for sanitization "at the consumer, not only at the producer",
+    through a port that "accepts only that type for externally-sourced text".
+    Until story 8e neither half existed: `pipelines.run_harvest` called
+    `sanitize(...)` and discarded the result under a comment claiming the
+    protection, and nothing in `pm_ai/` named `Sanitized` at all. A producer-side
+    rule is one forgotten call site away from being false, which is exactly what
+    that line was.
+
+    **`external` is `Sanitized`, never `str`.** That is the whole mechanism:
+    omitting sanitization stops being a review catch and becomes a type error at
+    the only door a prompt can leave by. It works because `Sanitized` cannot be
+    forged — `__post_init__` requires `for_model` to be a fixed point of the
+    sanitizer, so `Sanitized(raw=t, for_model=t)` over provider prose raises.
+
+    **Fragments, never a pre-joined string.** A port taking one assembled
+    `prompt: str` would be defeated by the ordinary way prompts are written:
+    interpolating `for_model` into a template yields a plain `str`, and the port
+    would have to accept it. Keeping the two sources apart in the signature is
+    what stops the type being flattened away one line before the call. The same
+    flattening is why the transcript path is *not* covered here — `Extraction`
+    declares `raw: str` and `for_model: str`, splitting the pair at its first
+    hop, and making it carry `Sanitized` belongs to story `11b`.
+
+    Internally-sourced text may be `str`: `instructions` is prose pm-ai wrote
+    about itself, and there is no outside author to distrust.
+
+    **That is also one bound on what this port can promise.** `complete(
+    instructions=f"Summarise: {provider_text}", external=())` type-checks, and
+    no signature can refuse it while internal prose stays a `str`. The
+    chokepoint makes the honest call easy and the omission loud; it does not
+    make the dishonest one impossible. Closing it would take a distinct type for
+    internal prose, which is a different design from the one approved here.
+
+    **The second bound: this signature cannot feed the disclosure ledger.**
+    AD-31 requires a frontier call to record its scope provenance — contributing
+    scopes, task class, model, token counts, destination — and AD-38 governs
+    where that record may be written. `-> str` carries none of it: no model, no
+    usage, no destination, and no per-fragment scope, because `Sanitized` holds
+    two strings and not the `DataScope` each fragment came from. So a conforming
+    frontier call cannot be *made* through this port as it stands. That is not
+    an oversight to be found later — it is the part story 7 has to add when it
+    brings the router and the adapters, and widening `complete` is expected work
+    rather than a regression against this slice. Recorded here so the port's
+    shape is read as unfinished in a known place rather than as complete.
+
+    **`task_class` is required, and typed.** AD-15's invariant row makes "a call
+    without a declared task class" a defect, and its Rule routes by "task class
+    declared at the call site" — so the declaration belongs in the signature,
+    where omitting it is the same kind of construction error as omitting
+    sanitization. Keyword-only and un-defaulted: a default would answer for the
+    caller, which is the one thing a call site declaring its own purpose must
+    not have done for it. `TaskClass` rather than `str` so a misspelling is
+    caught here rather than by whichever router first fails to match it. The
+    vocabulary is open — see `pm_ai.domain.task_classes`.
+
+    **No adapter, no router, no egress split.** AD-15's other clauses — which
+    classes may leave the machine, which model tier serves each, and the router
+    that reads both — are story 7's, wired "behind the model port". This
+    declares the port and the vocabulary and stops: the shape story 1d used for
+    `KeychainPort`, custody first and cipher later, with a stronger reason — the
+    port exists to refuse a call that does not exist yet, which is the cheapest
+    moment to declare it. Nothing can already be bypassing it.
+    """
+
+    def complete(
+        self,
+        *,
+        task_class: TaskClass,
+        instructions: str,
+        external: Sequence[Sanitized],
+    ) -> str:
+        """Run `instructions` over `external` as `task_class`, and return the answer.
+
+        Implementations put `fragment.for_model` in the prompt and never
+        `fragment.raw` — the raw travels so a citation the answer carries can be
+        resolved against the evidence (AD-29), not so it can be sent.
+
+        What an implementation does with `task_class` is not settled here. It is
+        carried because AD-15 requires the caller to declare it; reading it to
+        choose a model, or to decide whether the call may leave the machine, is
+        story 7's router.
+        """
 
 
 @runtime_checkable

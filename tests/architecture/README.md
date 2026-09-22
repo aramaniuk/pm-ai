@@ -51,6 +51,7 @@ Both are fixed and both now have their own regressions in
 | Meta-checks | The AST helpers themselves — mode detection, alias resolution | `test_enforcement_meta.py` |
 | Layout resolution | Where each scope's artifacts live, what may not live there, and what a subject id may be | `test_paths.py` |
 | Write-time refusals | Writes that must not happen — a raw capture into a directory git would commit, asked of real `git` in real repositories | `test_capture_guard.py` |
+| Type contracts | Omissions a test cannot reach — a call that skips sanitization or its task class, refused by mypy over a fixture built to be wrong | `test_sanitize_boundary.py`, `fixtures/model_port_misuse.py` |
 
 ## AD coverage
 
@@ -67,9 +68,10 @@ Both are fixed and both now have their own regressions in
 | AD-8 | `test_ad8_loopback_api_rejects_unauthenticated_requests` | |
 | AD-9 | `test_ad9_connectors_own_no_scheduling`, `test_ad9_cursor_is_opaque_to_the_core` | |
 | AD-11 | `test_ad11_no_filesystem_discovery_of_projects`, `test_an_unregistered_project_is_an_error_not_a_guess`, `test_registry_repository_paths_are_expanded_and_absolute` | The AST check forbids scanning for `.project-ai`; the resolver has no way to *invent* a repository path, so an unregistered project raises instead of resolving |
+| AD-12 | `test_sanitize_boundary.py` — the whole file | Was listed as not mechanically enforced until 2026-09-22, on the grounds that "the pipeline enforces it centrally". Both halves were false: the pipeline's one call **discarded its result**, and AD-12's own second clause asks for the guard at the consumer anyway. Story `8e` deleted the no-op and put it on `ModelPort`, which accepts `Sanitized` and never `str`. `__post_init__` refuses a forged pair at runtime; subclassing is refused by **mypy only** — `@final` is a static claim, so at runtime a subclass still constructs and still satisfies `isinstance`. **Nothing in `pm_ai/` implements or calls `ModelPort` yet**, so no production path currently crosses the enforced boundary: the guard is in place before the first caller, which is why it could be, and the adapters arrive with story 7. Read this row as "the contract is enforced for anyone who writes the call", not "every path handling provider text is covered" — the transcript path is the one that is not, and it is `11b`'s |
 | AD-13 | `test_ad13_features_cannot_implement_their_own_proposal_expiry` | |
 | AD-14 | `test_ad14_proposal_and_commitment_lifecycles_stay_distinct` | |
-| AD-15 | `model-clients-confined`, `test_ad15_*` | Local-only classes; frontier tiering |
+| AD-15 | `model-clients-confined`, `test_the_port_requires_a_typed_task_class`, `test_ad15_*` | Two clauses, and only one of them runs. The **declaration** clause — "always via `ModelPort` with an explicit `task_class` argument; a call without a declared task class is a defect" — is enforced now: the argument is required, keyword-only and typed `TaskClass`, and omitting it reports `call-arg`. The **routing** clauses, local-only classes and frontier tiering, are the `test_ad15_*` pair, and both still **skip** on `pm_ai.models.router`, which story 7 creates. The vocabulary is deliberately open — see `pm_ai/domain/task_classes.py` |
 | AD-16 | `no-builtin-tool-agent` | Blocks the Claude Agent SDK and friends |
 | AD-17 | `test_ad17_budget_breach_warns_but_never_degrades` | |
 | AD-20 | `test_ad20_idempotency_keys_are_deterministic`, `test_ad20_mutating_jobs_require_a_key` | |
@@ -106,8 +108,17 @@ compliant:
   layout tables is therefore a review point, not a mechanical step.
 - **AD-10** (connector instances per project) — shape is testable, correct
   per-project cursor isolation needs an integration environment.
-- **AD-12** (sanitize every inbound payload) — the pipeline enforces it
-  centrally; a new ingestion path that bypasses the pipeline is a review catch.
+- **AD-12's two remaining halves.** The row above is the enforced part; these
+  are not. (a) *What a caller puts in `instructions`* — the `external` fragments
+  are typed, so a raw provider string cannot be passed as one, but `instructions`
+  is a `str` because it carries prose pm-ai wrote about itself, so
+  `complete(instructions=f"Summarise: {provider_text}", external=())`
+  type-checks and no signature can refuse it. Closing it needs a distinct type
+  for internal prose. (b) *The transcript path* — `Extraction` flattens
+  `Sanitized` into two bare `str` fields and builds its `detail` dict from the
+  raw utterance, so nothing types that route end to end. `11b` owns it, and
+  `test_the_transcript_path_is_a_named_limit_rather_than_a_covered_one` fails
+  when it lands.
 - **AD-18** (skill allowlist) — enforced at runtime by the registry; the
   *contents* of the allowlist are a human decision.
 - **AD-19** (bounded worker pool) — needs load testing, not a unit test.
@@ -131,6 +142,32 @@ the spine. Fixed:
 Note also that AST checks pass **vacuously** against an empty package — a green
 run on a skeleton proves nothing. Treat "zero skips" as the real gate, and treat
 a stubbed module as a skip in disguise.
+
+## Enforcement-layer corrections (2026-09-22)
+
+- **AD-12 was listed above as "not mechanically enforced", with a reason that
+  was itself the defect.** "The pipeline enforces it centrally" described a call
+  whose return value was discarded, under a comment asserting the protection.
+  This is the failure mode the coverage table's own warning is about, one level
+  further out: not a check that skips, but an AD recorded as needing no check
+  because of a mechanism that was not doing anything. Story `8e` replaced both
+  the mechanism and the row.
+- **Two guards in the new file were stricter than their intent**, found by the
+  same review that landed them. A substring scan of the single writer for
+  `for_model` would have failed on a comment explaining why the writer holds
+  none; it now reads identifiers off the AST. And a ban on the word
+  `sanitiz` in `pipelines.py` would have rejected "no sanitization here — the
+  guard is `ModelPort`", which is the comment a reader most needs; the rule is
+  now that a sentence naming sanitization must disclaim it. A check that forbids
+  the truthful note along with the false one teaches people to write nothing.
+- **A third narrowing, from the round-two review, and the pattern is the point.**
+  The same file forbade `pipelines.py` from calling `sanitize` *at all* — which
+  would have rejected `model.complete(..., external=[sanitize(field)])`, the
+  AD-12-conforming call this story exists to make writable, in the one layer
+  permitted to touch a connector, the core and storage at once. It now forbids a
+  result nothing reads. Three narrowings in one story: a guard written against
+  the **word** catches the defect and its fix together, and the second is the
+  one nobody notices until a later story is blocked by a green suite.
 
 ## Why these five come first
 

@@ -7,6 +7,19 @@ These types exist because two independent reviewer runs found the same root
 cause: words shared across components without a type behind them. Prose rules
 did not fix it; a malformed reference is now a construction error rather than a
 review comment.
+
+**This aggregate is not exhaustive, and two modules are deliberately outside
+it.** `pm_ai.domain.sanitize` (`Sanitized`, `sanitize`, `REDACTION`,
+`ForgedSanitization`) and `pm_ai.domain.task_classes` (`TaskClass`) are imported
+through their own module paths, the way `pm_ai.ports` names `TrackingVerdict`
+and `CoverageWindow`. Not an omission: `__all__` below already lists eight names
+this namespace does not have — `EventEntry`, `MAX_ENTRY_LENGTH`,
+`MalformedEntry`, `SELF_ACTION_FIELDS`, `WRITER_OWNED_FIELDS`, `render_entry`,
+`render_value`, `scan_fields` — so `from pm_ai.domain import *` raises today.
+Story 8e reached that drift while deciding whether to join, and declined rather
+than adding a ninth entry to a list nothing keeps honest. Repairing the
+aggregate is its own piece of work; until then the module path is the reliable
+import and the one new code should use.
 """
 
 from pm_ai.domain.clocks import (

@@ -152,12 +152,25 @@ PAYLOAD_FOR: dict[ObservedEventType, type] = {
 
 
 # ── Which payload text came from outside ─────────────────────────────────────
-# The boundary sanitizes before anything reaches a prompt (AD-12), and it still
-# guesses: `pipelines.py` reads `getattr(event.payload, "message", "")`, a field
-# name only `CommitPayload` has, so every other payload sanitizes the empty
-# string. Story `8e` is where the boundary stops guessing and reads these
-# records instead; what lives here is the declaration it will read, because a
-# pipeline cannot know which fields came from a provider and the payload can.
+# Sanitization happens before anything reaches a prompt (AD-12). It used to be
+# attempted in `pipelines.py`, which guessed: it read `getattr(event.payload,
+# "message", "")` — a field name only `CommitPayload` has, so every other
+# payload sanitized the empty string — and then discarded the result. Story `8e`
+# deleted that line and put the guard at the consumer, where
+# `pm_ai.ports.ModelPort` accepts `Sanitized` and never `str`.
+#
+# One producer-side pass survives, in `core/extraction.py`, and it survives
+# deliberately: it *uses* its result, which the deleted line did not. It is not
+# the guard either — the transcript path flattens `Sanitized` into two bare
+# `str` fields one hop later, so nothing types it end to end, and story `11b`
+# owns that. "Moved to the consumer" describes where AD-12 is *enforced*, not a
+# claim that every call to `sanitize()` was removed.
+#
+# These records are
+# what a caller gathering text for a prompt reads to know which fields to put
+# through `sanitize()`, because a pipeline cannot know which fields came from a
+# provider and the payload can. Nothing reads them yet: `8e` declared the port
+# and stopped, and the first caller arrives with story 7's adapters.
 #
 # What separates the two records is *who authored the string*, not who
 # transmitted it — every field below is provider-supplied:

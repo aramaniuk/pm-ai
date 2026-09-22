@@ -1,7 +1,19 @@
-"""The ingestion pipeline: harvest → sanitize → normalize → persist.
+"""The ingestion pipeline: harvest → attribute → normalize → persist.
 
 Lives in `app` because it must touch a connector, the core, and storage — which
 no other layer is permitted to do (AD-30).
+
+**No sanitization step, deliberately (story 8e).** One stood here — a
+`sanitize(...)` call whose return value was discarded, under a comment claiming
+AD-12 was enforced. AD-12 asks for the guard "at the consumer, not only at the
+producer", and a producer-side pass is one forgotten call site away from being
+false. It is `pm_ai.ports.ModelPort` that enforces it now, by accepting
+`Sanitized` and never `str` for externally-sourced text.
+
+Nothing was lost by dropping the step, and nothing here needs to replace it:
+`sanitize` is a pure function, AD-29 guarantees the raw it reads is retained,
+and so the derived copy is rebuilt at the consumer — not on this path, and not
+on the write path, which therefore carries no second copy of anything.
 """
 
 from __future__ import annotations
@@ -23,7 +35,6 @@ from pm_ai.core.rendering import (
     render_dashboard,
     render_project_dashboard,
 )
-from pm_ai.core.sanitize import sanitize
 from pm_ai.domain.disclosure import assert_citation_legal
 from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.identity import DataScope, ScopeKind, TargetRef
@@ -60,10 +71,6 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     cursor = daemon.storage.load_cursor(instance)  # scheduler owns the cursor (AD-9)
 
     result = connector.harvest(cursor)
-
-    # AD-12 — sanitization at the boundary, uniformly, outside the connector.
-    for event in result.events:
-        sanitize(getattr(event.payload, "message", "") or "")
 
     # AD-36 — the match step. Connectors emit `unknown`; this is the only layer
     # that can see the executed-mutation ledger, so this is where provenance is

@@ -2,8 +2,9 @@
 title: 'Sanitization binds at the model boundary'
 type: 'bugfix'
 created: '2026-09-02'
-status: 'ready-for-dev'
-review_loop_iteration: 0
+status: 'done'
+review_loop_iteration: 1
+baseline_commit: '7c5e0212986b0dda79fd40a851c6c25cb5c924c0'
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
@@ -23,16 +24,17 @@ Found 2026-09-01 while verifying the prototype-path spec's own claims. Split fro
 **Always:**
 - **Non-destructive, per AD-29.** The raw is retained and `for_model` derived. A citation resolves against the raw; only `for_model` may enter a prompt. Overwriting the raw destroys the evidence a citation exists to reach.
 - **The guard is a type at the chokepoint, not a convention at the producer.** Omitting sanitization must be a construction error at the one boundary every model call passes, which is what AD-12's consumer clause asks for and what a comment above a discarded call cannot deliver.
-- **`Sanitized` cannot be forged, or the type guarantees nothing.** It is a public frozen dataclass with two `str` fields and no validation (`core/sanitize.py:22-31`), so `Sanitized(raw=t, for_model=t)` type-checks while bypassing `sanitize()` entirely — the only construction error today is a bare `str`. `__post_init__` therefore requires `for_model` to be a **fixed point of the sanitizer**: `_INJECTION.sub` leaves it unchanged. Not that it equals `sanitize(raw).for_model`, which would reject `pipelines.py:70`'s legitimate `ex.for_model[:80]` truncation. Forging a *clean* `for_model` stays possible and is harmless: clean text is all a model was ever going to receive.
-- **`sanitize()` and its pattern follow the type into `pm_ai.domain`.** Forced by the clause above: `__post_init__` needs `_INJECTION`, and `AD-30 — pm_ai.domain imports nothing from pm_ai` (`.importlinter:163-166`) means the pattern cannot stay in `core`. `pm_ai.core.sanitize` becomes a re-export or its callers re-point.
+- **`Sanitized` cannot be forged, or the type guarantees nothing.** It is a public frozen dataclass with two `str` fields and no validation (`core/sanitize.py:22-31`), so `Sanitized(raw=t, for_model=t)` type-checks while bypassing `sanitize()` entirely — the only construction error today is a bare `str`. `__post_init__` therefore requires `for_model` to be a **fixed point of the sanitizer**: `_INJECTION.sub` leaves it unchanged. Not that it equals `sanitize(raw).for_model`, which would refuse every honest derivation a caller makes from an already-clean string — truncation among them, which cannot smuggle an injection back in because the pattern is unanchored, so any match in a prefix is a match in the whole. **Subclassing is the second bypass and is closed too:** a subclass overriding `__post_init__` satisfies `Sequence[Sanitized]`, so the type is `@final`. Forging a *clean* `for_model` stays possible and is harmless: clean text is all a model was ever going to receive.
+- **`sanitize()` and its pattern follow the type into `pm_ai.domain`.** Forced by the clause above: `__post_init__` needs `_INJECTION`, and `AD-30 — pm_ai.domain imports nothing from pm_ai` (`.importlinter:177-190`) means the pattern cannot stay in `core`. `pm_ai.core.sanitize` becomes a re-export or its callers re-point.
 - **Nothing is persisted, and the Tier-1 entry grammar does not change.** `sanitize` is pure over a raw that AD-29 guarantees is retained, so the derived copy is reconstructible at the point of use and needs no home on a segment line. Deliberate: a `for_model` field on every line would widen the entry grammar, and AD-27's versioning clause is unmet — 2c withdrew `GRAMMAR_VERSION` as a constant written nowhere and read nowhere, and the design choice behind it is unmade. Persisting inherits that decision; deriving does not need it. The audit record AD-31 requires is scope provenance in the disclosure ledger — contributing scopes, task class, model, token counts, destination — not the sanitized text.
+- **`task_class` is declared at the call site, and the vocabulary is open.** AD-15's invariant table says model calls go "always via `ModelPort` with an explicit `task_class` argument; a call without a declared task class is a defect", and AD-15's Rule routes by "task class declared at the call site". So the argument is required and typed, and omitting it is a construction error at the same boundary the `Sanitized` guard uses. **The names AD-15 lists today are the vocabulary's current contents, not a closed set:** adding a class in a later story is expected, and no artifact may call such an addition a violation. Renegotiated by the human on 2026-09-22 — see the change log.
 - **Only declared fields are untrusted.** The field names live in `8c`'s declarations; a caller gathering text for a prompt reads them, and this slice names none.
 
 **Ask First:** Nothing. Whether `sanitize()` follows its type into `pm_ai.domain` was decided on 2026-09-03: it must, because `__post_init__` needs the pattern and domain may import nothing from `pm_ai`.
 
 **Scoped out, with a named limit:** the transcript path is **not** covered by the chokepoint, contrary to this spec's 2026-09-02 change log. `Extraction` declares `raw: str` and `for_model: str` (`extraction.py:22-30`), so the one path that already sanitizes flattens the pair at its first hop, and `pipelines.py:63` sends `ex.detail['rest']` — a dict value derived from raw utterance text — outbound with no type to stop it. Making `Extraction` carry `Sanitized` is `11b`'s, and its spec must say so.
 
-**Never:** No change to `sanitize()`'s behaviour or to `8c`'s declarations. No connector changes — AD-12 puts this outside the connector deliberately. **No adapter, no routing table, no task-class enumeration:** AD-15's router and its local and frontier adapters belong to story 7, which wires them "behind the model port". This slice declares the port and stops. No new field on any Tier-1 entry.
+**Never:** No change to `sanitize()`'s behaviour or to `8c`'s declarations. No connector changes — AD-12 puts this outside the connector deliberately. **No adapter and no routing table:** AD-15's router, its local and frontier adapters, and the class-to-model tier mapping belong to story 7, which wires them "behind the model port". **Which classes may leave the machine is story 7's as well** — this slice names the classes, requires one at the call site, and stops. No new field on any Tier-1 entry.
 
 ## I/O & Edge-Case Matrix
 
@@ -41,33 +43,40 @@ Found 2026-09-01 while verifying the prototype-path spec's own claims. Split fro
 | Bare `str` where external text is expected | a caller passes raw provider text to `ModelPort` | does not type-check — the omission is a construction error | `arg-type`, asserted by running mypy on a fixture as a subprocess |
 | `Sanitized` passed | the derived copy | accepted | N/A |
 | Forged pair | `Sanitized(raw=t, for_model=t)` where `t` carries an injection | refused at construction — `for_model` is not a fixed point of the sanitizer | `ValueError` from `__post_init__` |
-| Truncated pair | `Sanitized(raw=t, for_model=sanitize(t).for_model[:80])` | accepted — truncation is legitimate and `pipelines.py:70` already does it | N/A |
+| Truncated pair | `Sanitized(raw=t, for_model=sanitize(t).for_model[:80])` | accepted — a derivation from an already-clean string, which the fixed-point rule permits and equality would refuse | N/A |
+| Forged by subclassing | a subclass of `Sanitized` overriding `__post_init__` with a no-op | refused statically — the type is `@final`; at runtime the subclass still constructs, and the guarantee is stated as static-only | `misc` from mypy |
 | Clean text forged | `Sanitized(raw="anything", for_model="harmless")` | accepted; harmless, because clean text is all the model would get | N/A |
 | Prompt assembled from fragments | internal instructions plus external text | the port takes fragments, never a pre-joined `str` — interpolating `for_model` into a template yields a plain `str` the port would then have to accept | does not type-check |
 | Clean text | no pattern match | `for_model` equals raw; `was_modified` is false (`sanitize.py:30`) | N/A |
 | Internally-sourced text | a prompt fragment pm-ai wrote itself | may be `str`; the discipline is scoped to externally-sourced text | N/A |
 | The retired no-op | `pipelines.py:26-28` | gone, and the comment that claimed it worked gone with it | N/A |
 | Tier-1 entry format | any harvested event | byte-identical to today: no `for_model` field, no grammar change | N/A |
+| Call omitting the task class | a caller invokes `ModelPort.complete` with no `task_class` | does not type-check — AD-15 calls an undeclared task class a defect | `call-arg`, from the same mypy fixture |
+| A class the vocabulary does not have yet | a later story needs a class AD-15 never listed | it is added to `TaskClass` and nothing refuses it; the vocabulary is open by declaration | N/A |
+| Which classes may leave the machine | any task class | not decided here — no local/frontier split, no tier mapping, no router | N/A |
 
 </frozen-after-approval>
 
 ## Code Map
 
 - `pm_ai/app/pipelines.py:26-28` -- the discarded call and its false comment, deleted here
-- `pm_ai/core/sanitize.py:22-30,34` -- `Sanitized`, which moves; `sanitize()` and the pattern, which stay
+- `pm_ai/core/sanitize.py:22-30,34` -- `Sanitized`, `sanitize()` and the pattern, all three of which move; what stays here is a re-export
 - `pm_ai/ports/__init__.py:1-6` -- the docstring stating `ports` imports nothing but `pm_ai.domain`, which is *why* the type must move; `StoragePort:286` is the shape to follow
-- `.importlinter:211-219` -- AD-30, the contract that fails if `ports` reaches `core`
+- `.importlinter:234-247` -- AD-30 `ports-depend-only-on-domain`, the contract that fails if `ports` reaches `core`; `domain-imports-nothing` is at `:177-190`
 - `tests/architecture/test_types.py` -- mypy already runs as a subprocess inside pytest (story 1k); the precedent this slice's negative type test follows
 - `pm_ai/domain/events.py` -- `8c`'s declarations, read by callers rather than by this slice
+- `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md:240,679` -- AD-15's Rule and the invariant table row that makes `task_class` mandatory on every model call
+- `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/reviews/review-implementer.md:133` -- F29/F30, the review that already found AD-15's list incomplete; the reason the vocabulary is declared open rather than closed
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/sanitize.py` -- move `Sanitized`, `sanitize()` and `_INJECTION` here from `pm_ai.core.sanitize`, and add the `__post_init__` fixed-point check -- `ports` may import only `domain` (`.importlinter:211-219`) and `domain` may import nothing from `pm_ai`, so the type and its pattern move together or `__post_init__` cannot be written
-- [ ] `pm_ai/core/sanitize.py` -- re-export, or re-point its callers -- `extraction.py:36` and `pipelines.py:28` import from here today
-- [ ] `pm_ai/ports/__init__.py` -- declare `ModelPort`, externally-sourced text typed `Sanitized` and never `str`; no adapters, no routing
-- [ ] `pm_ai/app/pipelines.py` -- delete the no-op and the comment claiming it sanitized
-- [ ] `tests/architecture/test_sanitize_boundary.py` -- the matrix, plus the negative type test: a fixture calling `ModelPort` with a `str`, mypy run on it as a subprocess, asserting `arg-type`
+- [x] `pm_ai/domain/sanitize.py` -- move `Sanitized`, `sanitize()` and `_INJECTION` here from `pm_ai.core.sanitize`, and add the `__post_init__` fixed-point check -- `ports` may import only `domain` (`.importlinter:234-247`) and `domain` may import nothing from `pm_ai`, so the type and its pattern move together or `__post_init__` cannot be written
+- [x] `pm_ai/core/sanitize.py` -- re-export, or re-point its callers -- `extraction.py:36` and `pipelines.py:28` import from here today
+- [x] `pm_ai/domain/task_classes.py` -- declare `TaskClass` with AD-15's ten names, documented as open for extension -- `ports` may import only `domain`, the same constraint that moved `Sanitized`
+- [x] `pm_ai/ports/__init__.py` -- declare `ModelPort`: `task_class` required, externally-sourced text typed `Sanitized` and never `str`; no adapters, no routing, no egress split
+- [x] `pm_ai/app/pipelines.py` -- delete the no-op and the comment claiming it sanitized
+- [x] `tests/architecture/test_sanitize_boundary.py` -- the matrix, plus the negative type test: a fixture calling `ModelPort` with a `str` and one omitting `task_class`, mypy run on it as a subprocess, asserting `arg-type` and `call-arg`
 
 **Acceptance Criteria:**
 - Given `Sanitized(raw=t, for_model=t)` where `t` contains an injection pattern, then construction is refused — the assertion that makes "unable to reach a model by construction" true, since a nominal type is bypassed by one keyword argument.
@@ -76,8 +85,25 @@ Found 2026-09-01 while verifying the prototype-path spec's own claims. Split fro
 - Given `uv run lint-imports`, then AD-30 holds with `ModelPort` naming `Sanitized` — which is what moving the type buys.
 - Given a harvested event carrying an injection pattern, then the Tier-1 entry written for it is byte-identical to today's: no `for_model` field, no grammar change.
 - Given `grep -rn "Sanitized" pm_ai/`, then `pm_ai.ports` is among the matches — the type has a consumer for the first time.
+- Given a fixture calling `ModelPort.complete` without `task_class`, when mypy runs on it, then it reports `call-arg` — AD-15's "a call without a declared task class is a defect", made a construction error rather than a review catch.
+- Given `TaskClass`, then it carries AD-15's ten names and no artifact in this slice describes the set as closed — adding a member in a later story is an ordinary act, not a violation.
+- Given this slice, then nothing declares which classes may leave the machine: no local/frontier split, no tier mapping, no router. Story 7 owns that, and this slice's tests assert its absence rather than assuming it.
 
 ## Spec Change Log
+
+- **2026-09-22, three corrections inside the frozen block, authorised by the human.** No decision changed; the evidence offered for one did.
+  **The truncation example was not real.** The fixed-point rule was justified by saying equality with `sanitize(raw).for_model` "would reject `pipelines.py:70`'s legitimate `ex.for_model[:80]` truncation". It could not have. `Extraction.for_model` is a bare `str` and the slice is assigned to `Proposal.summary` as a plain `str`, so no `Sanitized` is constructed at that call site and no constructor guard ever sees it. Two review lenses found this independently. The rule survives on its own terms — it permits every honest derivation from an already-clean string, and truncation cannot smuggle an injection back in because the pattern is unanchored — and the fictional call site is gone from the bullet, the matrix row, and the two docstrings that repeated it.
+  **A citation pointed at the wrong contract.** `.importlinter:163-166` was given for `domain-imports-nothing`, which is at `:177-190`; line 163 is the unrelated *surfaces* AD-30 contract. The two equivalents outside the frozen block were wrong in a different way (`:211-219` for `ports-depend-only-on-domain`, which is at `:234-247`) and are corrected too.
+  **The matrix gained the subclass-forgery row.** `Sanitized(raw=t, for_model=t)` was named as the forgery the guard closes, but a subclass overriding `__post_init__` satisfies `Sequence[Sanitized]` just as well — verified by experiment, not argued. The type is now `@final`, and the row records what that does and does not buy: mypy refuses the subclass, while at runtime it still constructs. Stating it as a static-only guarantee is deliberate, because the `README` had been claiming more.
+
+- **2026-09-22, frozen intent renegotiated by the human: the port carries a task class, and the vocabulary is open.**
+  The review of the first implementation found the shipped port — `complete(*, instructions, external)` — in direct conflict with the spine. AD-15's invariant table states that model calls go "always via `ModelPort` with an explicit `task_class` argument; a call without a declared task class is a defect", and AD-15's Rule routes by "task class declared at the call site". The port as built had nowhere to declare it, so no AD-15-conforming call could be written against it.
+  **The conflict was not resolvable by reading the old `Never` harder.** It forbade "no adapter, no routing table, no task-class enumeration", which fences off three objects while AD-15 mandates a fourth — the argument. But an argument needs a type, and the only honest type is the enumeration, which was the forbidden object. Three readings were possible (enum now, bare `str` now, nothing until story 7), so intent could not be inferred and the question went to the human.
+  **Why the old clause existed, recorded so the amendment is not read as an oversight being reversed.** It was written on 2026-09-03 in the same commit that retargeted this slice from persistence to consumer-side enforcement — the commit that observed "no `ModelPort` exists anywhere in pm_ai/, no story or wave slice mentions one". It was a fence around a brand-new architectural surface, reinforced by the wave's sizing gate and by the prototype path's decision 2, under which `models` stays empty and no model is in the path at all.
+  **What the human decided.** The vocabulary is **not frozen**: classes for both the local and the frontier model are expected to emerge during further development, and adding one later must be possible and ordinary. Classifying the activity is kept, closure is refused. The slice declares `TaskClass` with AD-15's ten names and requires one at the call site; **which classes may leave the machine is story 7's**, with the router — names only here.
+  **Evidence that closure would have been wrong**, beyond preference: the architecture's own implementer review (F29) already walked FR-06, FR-07 and FR-25 and found "none of those is any of the ten", and (F30) that `extraction` is local-only forever with no escalation seam against SM-7's precision target. A closed set would have frozen a vocabulary a prior review had already shown to be incomplete.
+  KEEP, carried through the amendment unchanged: the fixed-point `__post_init__` and its truncation argument; the fragments-not-a-joined-string signature; the AST checks over `run_harvest` rather than a grep; the marker-driven mypy fixture, which extends to `call-arg` by adding a row rather than editing the test; and the byte-identical Tier-1 assertion pinned against a literal.
+
 
 - **2026-09-03, amended against the second multi-lens review — its central claim was false.**
   **`Sanitized` was forgeable** (B1, found by two lenses). A public frozen dataclass with two `str` fields and no validation, so `Sanitized(raw=t, for_model=t)` type-checks while bypassing `sanitize()` entirely: "unable to reach a model **by construction**" held only against a bare `str`, and the port's whole purpose was defeated by one keyword argument. `__post_init__` now requires `for_model` to be a fixed point of the sanitizer — decision D-6 — which permits the existing `[:80]` truncation and refuses the forgery. That in turn forces `sanitize()` and `_INJECTION` into `domain` with the type, since `domain` may import nothing from `pm_ai`; the slice's open `Ask First` is answered by that, not by preference.
@@ -106,3 +132,42 @@ Declaring a port with no adapter is the shape story 1d used for `KeychainPort`: 
 - `uv run lint-imports` -- expected: 12 contracts kept, AD-30 among them
 - `uv run mypy` -- expected: clean
 - `uv run pytest -q` -- expected: no new failures
+
+## Suggested Review Order
+
+**The guard, and why it holds**
+
+- The port every model call must pass; read the signature first, the docstring's two named limits second.
+  [`ports/__init__.py:787`](../../../../pm_ai/ports/__init__.py#L787)
+- What makes the type worth having: `for_model` must be a fixed point of the sanitizer, so a forged pair raises.
+  [`sanitize.py:121`](../../../../pm_ai/domain/sanitize.py#L121)
+- `@final` closes the second bypass — a subclass with a no-op `__post_init__` satisfied `Sequence[Sanitized]`.
+  [`sanitize.py:84`](../../../../pm_ai/domain/sanitize.py#L84)
+- One definition of the substitution, so story 8g cannot change the producer and leave the guard behind.
+  [`sanitize.py:53`](../../../../pm_ai/domain/sanitize.py#L53)
+
+**The vocabulary, and its openness**
+
+- Ten names, alphabetical so no ordering encodes AD-15's local/frontier split; open for extension by decision.
+  [`task_classes.py:55`](../../../../pm_ai/domain/task_classes.py#L55)
+
+**The defect this story fixes**
+
+- The discarded `sanitize()` call and its false AD-12 comment are gone; the docstring says where the guard went.
+  [`pipelines.py:69`](../../../../pm_ai/app/pipelines.py#L69)
+
+**How the refusals are proved rather than asserted**
+
+- Omitting sanitization: mypy reports `arg-type` on a fixture built to be wrong.
+  [`model_port_misuse.py:51`](../../../../tests/architecture/fixtures/model_port_misuse.py#L51)
+- Omitting the task class: `call-arg`, which is AD-15's "a call without a declared task class is a defect".
+  [`model_port_misuse.py:85`](../../../../tests/architecture/fixtures/model_port_misuse.py#L85)
+- The 48 tests behind the matrix, including the AST checks that a grep would miss.
+  [`test_sanitize_boundary.py:1`](../../../../tests/architecture/test_sanitize_boundary.py#L1)
+
+**Peripherals**
+
+- AD-12 moves out of "not mechanically enforced", with the half that still is not recorded honestly.
+  [`README.md:71`](../../../../tests/architecture/README.md#L71)
+- The re-export that kept every existing caller resolving.
+  [`core/sanitize.py:1`](../../../../pm_ai/core/sanitize.py#L1)
