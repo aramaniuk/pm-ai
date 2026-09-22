@@ -2,13 +2,15 @@
 
 Spec: `_bmad-output/specs/spec-pm-ai/stories/8c-payloads-declare-untrusted-text.md`.
 
-The boundary still guesses — `pipelines.py` reads `getattr(event.payload,
+The boundary used to guess — `pipelines.py` read `getattr(event.payload,
 "message", "")`, a field name only `CommitPayload` has, so every other payload
-sanitizes the empty string. Story `8e` is what retires that line; this slice
-supplies the declaration it will read, and these tests hold the three properties
-that make it worth reading: the declaration is complete *per field*, the guard
-that says so runs in the module body rather than only when a test calls it, and
-it survives `python -O`, where `assert` statements do not exist.
+sanitized the empty string, and the result was discarded anyway. Story `8e`
+retired that line and put the guard at the consumer
+(`tests/architecture/test_sanitize_boundary.py`); this slice supplies the
+declaration a prompt-assembling caller reads, and these tests hold the three
+properties that make it worth reading: the declaration is complete *per field*,
+the guard that says so runs in the module body rather than only when a test
+calls it, and it survives `python -O`, where `assert` statements do not exist.
 
 The completeness tests are written over fields rather than classes on purpose. A
 class-level check passes for a class that declares an empty tuple while carrying

@@ -33,7 +33,20 @@ class Extraction:
 def extract(transcript: Transcript, meeting: Meeting, *, pm_handle: str, provider: str) -> list[Extraction]:
     out: list[Extraction] = []
     for u in transcript.utterances:
-        clean = sanitize(u.text)  # AD-12 — at the boundary, uniformly
+        # **A producer-side pass, kept on purpose, and not the AD-12 guard.**
+        # Story 8e deleted the one in `pipelines.py` because it discarded its
+        # result and protected nothing; this one is used, so it is worth having
+        # — but it is not what makes AD-12 binding either, and reading it that
+        # way is the mistake the deleted line existed to demonstrate. The guard
+        # is `pm_ai.ports.ModelPort`, which accepts `Sanitized` and never `str`.
+        #
+        # This path does not reach it. `Extraction` below flattens the pair into
+        # two bare `str` fields, and `detail` is built from `u.text` rather than
+        # from `clean`, so raw utterance text leaves through
+        # `pipelines.py`'s `payload={"comment": ex.detail["rest"]}` with no type
+        # in the way. Story `11b` owns retyping the carrier; until it lands this
+        # call is a courtesy, not a boundary.
+        clean = sanitize(u.text)
 
         if m := _EXPLICIT.search(u.text):
             verb = m["verb"].lower()
