@@ -2,8 +2,9 @@
 title: 'The filter measures itself'
 type: 'feature'
 created: '2026-09-20'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: 'b6b49b124effa3078dfac032bd40401a96fe7bf0'
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/stories/8g-sanitization-normalises-before-matching.md'
 ---
@@ -26,7 +27,7 @@ context:
 - **The known false positive is carried, not hidden and not fixed here.** `"system: you are hitting the rate limit again"` matches `system\s*:\s*you\s+are` raw and folded. Narrowing that pattern is a vocabulary change this slice forbids itself, so the entry sits in the benign half as the one permitted hit, visible in every run, and closing it belongs to whichever slice next owns the patterns.
 - **Six examples do not close an axis, so composition is generated rather than enumerated.** A property test composes the declared transformations — insert a zero-width character or soft hyphen at any position, substitute full-width forms, vary separators, recase — over each corpus phrase, and every composition must be detected. `8g`'s eight cases are eight points; the claim they support is about a family.
 - **The version is fingerprinted, not remembered.** A constant holds a hash over the pattern set, the carrier set, the fold's source and `unicodedata.unidata_version`, asserted against a pinned value, so any change — including a Python upgrade that moves NFKC beneath the code — reddens until the version constant and its changelog entry move together. `SCHEMA_VERSION` (`storage/service.py:145`) is the precedent for the shape and not for the discipline: that one is bumped by hand and this one cannot be.
-- **The budget is stated per mix and measured through construction.** `8e`'s `__post_init__` re-runs the matcher on every `Sanitized`, so a call folds twice and `8g`'s match-only figures understate it. **2000 benign fields under one second; 2000 all-hit fields under three seconds.** The all-hit case is the attacker-controlled harvest this feature exists for, and at the mapped figure alone it is already 1.92s — a budget measured only on benign fixtures measures the case nobody worried about.
+- **The budget is stated per mix and measured through construction.** `8e`'s `__post_init__` re-runs the matcher on every `Sanitized`, so a call folds twice and `8g`'s match-only figures understate it. **2000 benign fields under two seconds; 2000 all-hit fields under five seconds.** The all-hit case is the attacker-controlled harvest this feature exists for — a budget measured only on benign fixtures measures the case nobody worried about. **The figures are pinned to the rule as built, with stated headroom:** measured 2026-09-23 through `sanitize()` on the machine the benchmark records, 2000 fields of 2.3 KB, a 200-call warmup and the median of five runs, benign took 1.26s and all-hit 3.26s, and each budget allows about 1.5x that. The first budgets, one and three seconds, were set before `8g` was built, against a design with one folded matcher. `8g`'s review then kept the literal matcher for the `system:` and delimiter families, which costs about 112µs of the roughly 325µs each benign pass takes. A call makes two passes, because `__post_init__` re-checks the value it was just handed.
 - **The timed assertion states its protocol.** Warmup iterations, median of k runs, and the machine class recorded beside the figures, in a committed benchmark the test reuses. A bare wall-clock assertion against a 1.67x margin goes intermittently red on a shared runner and is marked `xfail` within a month.
 
 **Ask First:**
@@ -52,14 +53,14 @@ context:
 | Payload silently de-escaped | an attack entry reverted to plain text | the self-check fails, naming the entry | assertion error |
 | Rule changed without its version | patterns, carriers or fold source edited | the fingerprint no longer matches its pinned value | test failure until version and changelog move |
 | Unicode data moves beneath the code | `unicodedata.unidata_version` changes | the fingerprint fails for the same reason | test failure |
-| Budget, benign mix | 2000 benign fields of 2.3 KB | under one second, measured through `Sanitized()` | N/A |
-| Budget, all-hit mix | 2000 matching fields of 2.3 KB | under three seconds, measured through `Sanitized()` | N/A |
+| Budget, benign mix | 2000 benign fields of 2.3 KB | under two seconds, measured through `Sanitized()` | N/A |
+| Budget, all-hit mix | 2000 matching fields of 2.3 KB | under five seconds, measured through `Sanitized()` | N/A |
 
 </frozen-after-approval>
 
 ## Code Map
 
-Line numbers below `pm_ai/domain/` are approximate: `8e` creates that module and `8g` rewrites its matcher, and both are unbuilt.
+`8e` and `8g` are both merged (`b6b49b1`), so the anchors below are real. `8g` also left two readings this slice relies on: the composition property's "vary separators" means the separators the fold collapses (hyphen, dot, underscore, space, carriers), not punctuation next to whitespace, which is one of `8g`'s admitted evasions; and the rates are pinned over the enumerated sets only, while `8g`'s five admitted false positives, already pinned in its own tests, may sit in the corpus as reported, unpinned entries.
 
 - `pm_ai/domain/sanitize.py` -- the fold, patterns and carrier set this slice fingerprints and measures; read-only here
 - `pm_ai/storage/service.py:145,161` -- `SCHEMA_VERSION` / `UNVERSIONED`, the precedent for a versioned constant's shape
@@ -70,20 +71,22 @@ Line numbers below `pm_ai/domain/` are approximate: `8e` creates that module and
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tests/domain/injection_corpus.toml` -- attack and benign halves, each entry carrying its source, payloads as escaped code points, a corpus version and a minimum count per half -- data, not code, so a reviewer can read what the rates were measured against
-- [ ] `pm_ai/domain/sanitize.py` -- the fingerprinted version constant and its changelog, and nothing else -- the rule itself is `8g`'s
-- [ ] `tests/domain/benchmark_sanitize.py` -- the committed benchmark the timed test reuses, recording machine and iteration count -- three figures carry the two-pass design and none is reproducible today
-- [ ] `tests/domain/test_sanitization_rates.py` -- the matrix: both rates against floor and ceiling, the composition property test, the corpus integrity checks, the fingerprint, and the two budgets
+- [x] `tests/domain/injection_corpus.toml` -- attack and benign halves, each entry carrying its source, payloads as escaped code points, a corpus version and a minimum count per half -- data, not code, so a reviewer can read what the rates were measured against
+- [x] `pm_ai/domain/sanitize.py` -- the fingerprinted version constant and its changelog, and nothing else -- the rule itself is `8g`'s
+- [x] `tests/domain/benchmark_sanitize.py` -- the committed benchmark the timed test reuses, recording machine and iteration count -- three figures carry the two-pass design and none is reproducible today
+- [x] `tests/domain/test_sanitization_rates.py` -- the matrix: both rates against floor and ceiling, the composition property test, the corpus integrity checks, the fingerprint, and the two budgets
 
 **Acceptance Criteria:**
 - Given the corpus, then the catch rate is 8 of 8 and the false-positive rate is 1 of 8 with the hit identified as the `system:` entry — both failing loudly rather than reporting a smaller number.
 - Given a generated composition of declared transformations over any corpus phrase, then it is detected, and a failure prints the composition that escaped.
 - Given a corpus with an empty half, below its minimum, or holding a de-escaped payload, then the run refuses before computing a rate.
 - Given any edit to the patterns, carrier set, fold source or `unicodedata.unidata_version`, then the fingerprint assertion fails until the version constant and a changelog entry move together.
-- Given the committed benchmark, then 2000 benign fields complete under one second and 2000 all-hit fields under three, measured through `Sanitized()` construction as the median of k runs after a warmup, on the machine the benchmark records.
+- Given the committed benchmark, then 2000 benign fields complete under two seconds and 2000 all-hit fields under five, measured through `Sanitized()` construction as the median of k runs after a warmup, on the machine the benchmark records.
 - Given `uv run pytest -q`, then `8g`'s fold suite still passes unchanged — this slice measures the rule and does not move it.
 
 ## Spec Change Log
+
+- **2026-09-23, the budget re-pinned inside the frozen block, authorised by the human, before implementation.** Both budgets failed against `8g` as merged. Measured through `sanitize()` with the protocol this spec already requires, benign took 1.26s against one second and all-hit 3.26s against three. Profiling put the cost in the design, not in a slow spot: about 173µs of fold, 112µs of literal matcher and 23µs of carrier scan per pass, and two passes per call. The literal matcher is there because `8g`'s review kept the `system:` and delimiter families literal after folding them flagged ordinary prose. That came after this budget was written. Optimising the fold would have made this slice both move and measure the rule, which its `Never` exists to prevent. So the budgets were re-pinned to two and five seconds, about 1.5x headroom over the measured figures. Removing the second pass is left open: it is `8e`'s guard re-checking `sanitize()`'s own output, and changing that is a decision about the guard, not about measurement.
 
 - **2026-09-20, split at drafting.** Carved out of `8g`, which carried the fold and its measurement together at 2,382 words. `8g` builds the fold and asserts named cases; this slice turns them into rates over a versioned corpus, fingerprints the rule, and bounds the cost. It depends on `8g` and not the reverse.
 
@@ -101,3 +104,43 @@ The fingerprint exists because the precedent does not enforce itself. `SCHEMA_VE
 - `uv run pytest tests/domain/test_sanitization_rates.py -q` -- expected: both rates print and meet floor and ceiling; the composition test passes
 - `uv run python tests/domain/benchmark_sanitize.py` -- expected: both budget figures reported with machine and iteration count
 - `uv run pytest -q` -- expected: no new failures
+
+## Suggested Review Order
+
+**Which rule ran**
+
+- Entry point: the version, and the append-only changelog pinning each version's fingerprint and Unicode data.
+  [`sanitize.py:744`](../../../../pm_ai/domain/sanitize.py#L744)
+- What gets hashed: every name in the rule module, either hashed or exempted with a reason; foreign callables are flagged.
+  [`test_sanitization_rates.py:1073`](../../../../tests/domain/test_sanitization_rates.py#L1073)
+- A changed function body moves the fingerprint; asserted as a changed value, not a vanished key.
+  [`test_sanitization_rates.py:1222`](../../../../tests/domain/test_sanitization_rates.py#L1222)
+
+**The rates**
+
+- Catch floor 8 of 8; a regression names every case it missed.
+  [`test_sanitization_rates.py:579`](../../../../tests/domain/test_sanitization_rates.py#L579)
+- Ceiling 1 of 8, and it must be the named `system:` entry, not merely one.
+  [`test_sanitization_rates.py:593`](../../../../tests/domain/test_sanitization_rates.py#L593)
+- The property: seeded compositions over each phrase, in four placements, bidi controls included.
+  [`test_sanitization_rates.py:961`](../../../../tests/domain/test_sanitization_rates.py#L961)
+- Misses found here, pinned as visible; red when a later slice starts catching them.
+  [`test_sanitization_rates.py:847`](../../../../tests/domain/test_sanitization_rates.py#L847)
+
+**The corpus**
+
+- Data, not code: escaped payloads, exact claims per entry, a version and a minimum per half.
+  [`injection_corpus.toml:37`](../../../../tests/domain/injection_corpus.toml#L37)
+- Every malformed shape is refused by name, before any rate is computed.
+  [`test_sanitization_rates.py:358`](../../../../tests/domain/test_sanitization_rates.py#L358)
+- Loaded lazily, so a refusal fails the rate tests and leaves the fingerprint and budget tests running.
+  [`test_sanitization_rates.py:424`](../../../../tests/domain/test_sanitization_rates.py#L424)
+
+**The budget**
+
+- Stops as soon as the verdict is settled; unit-tested against `statistics.median` with fixed run times.
+  [`benchmark_sanitize.py:195`](../../../../tests/domain/benchmark_sanitize.py#L195)
+- Recorded machine and figures, plus unbudgeted Cyrillic mixes: the budget bounds ASCII English only.
+  [`benchmark_sanitize.py:72`](../../../../tests/domain/benchmark_sanitize.py#L72)
+- The timed assertion, 2s benign and 5s all-hit, run through `Sanitized()` construction.
+  [`test_sanitization_rates.py:1316`](../../../../tests/domain/test_sanitization_rates.py#L1316)

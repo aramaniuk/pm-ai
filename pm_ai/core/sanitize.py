@@ -16,16 +16,22 @@ from __future__ import annotations
 
 from pm_ai.domain.sanitize import (
     REDACTION,
+    RULE_CHANGELOG,
+    RULE_VERSION,
     FoldDisagreement,
     ForgedSanitization,
+    RuleChange,
     Sanitized,
     sanitize,
 )
 
 __all__ = [
     "REDACTION",
+    "RULE_CHANGELOG",
+    "RULE_VERSION",
     "FoldDisagreement",
     "ForgedSanitization",
+    "RuleChange",
     "Sanitized",
     "sanitize",
 ]

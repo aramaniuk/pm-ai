@@ -35,8 +35,11 @@ from dataclasses import dataclass
 
 __all__ = [
     "REDACTION",
+    "RULE_CHANGELOG",
+    "RULE_VERSION",
     "FoldDisagreement",
     "ForgedSanitization",
+    "RuleChange",
     "Sanitized",
     "sanitize",
 ]
@@ -716,3 +719,74 @@ def sanitize(raw: str) -> Sanitized:
     what matches, not to be sent anywhere.
     """
     return Sanitized(raw=raw, for_model=_redact(raw))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Which rule ran (story 8h)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class RuleChange(typing.NamedTuple):
+    """One entry in `RULE_CHANGELOG`: a version of the rule and what it hashed to.
+
+    `unidata_version` is recorded beside the fingerprint because it is one of
+    the fingerprint's inputs, and the one most likely to move without anyone
+    editing this module: a different Python can ship different Unicode data.
+    """
+
+    version: int
+    date: str
+    fingerprint: str
+    unidata_version: str
+    change: str
+
+
+RULE_VERSION = 1
+"""The name of the rule `sanitize()` applies.
+
+**It names the rule. It does not link any output to it.** Nothing records which
+version cleaned a given text, so this constant cannot answer "which rule did
+this prompt pass?" on its own. That needs the disclosure-ledger field the
+spec's Ask First deferred, below. What the constant does guarantee is that the
+name is honest: the rule cannot change while the name stays the same.
+
+**Fingerprinted, not remembered.** `SCHEMA_VERSION` in `pm_ai.storage.service`
+has the same shape and a different discipline: a human bumps it, and a missing
+migration makes forgetting loud. Nothing here would be loud. A widened pattern
+with a stale version gives correct-looking output and an audit trail that
+quietly names the wrong rule. So
+`tests/domain/test_sanitization_rates.py` hashes the rule and compares the
+hash with the latest `RULE_CHANGELOG` entry. The hash covers the patterns, the
+carrier sets, the source of every function that decides `for_model`, and
+`unicodedata.unidata_version`, because NFKC, casefolding, `\\w` and `\\s` all
+read the Unicode data. Any change to those, including a Python upgrade that
+moves the Unicode data under unchanged code, fails that test until this
+constant and a new changelog entry move together.
+
+A module constant only. The disclosure ledger does not record it: that would
+widen the Tier-1 entry grammar, which story 8e declined to do, and the spec
+defers the question to the slice that settles that grammar.
+"""
+
+RULE_CHANGELOG: tuple[RuleChange, ...] = (
+    RuleChange(
+        version=1,
+        date="2026-09-23",
+        fingerprint="sha256:51e386406ea9c0cf31674efc45503d706715a0d89f5f5f28387570acbe633e13",
+        unidata_version="16.0.0",
+        change=(
+            "First fingerprint, taken by story 8h over the rule as 8e and 8g "
+            "left it at b6b49b1. It covers the literal matcher over "
+            "carrier-stripped text for all four families, the folded matcher "
+            "for the ignore and disregard families, the seven-step fold with "
+            "step 6's closing-punctuation clause, and the split into "
+            "unconditional and contextual carriers. Unicode data 16.0.0. The "
+            "rule itself did not change."
+        ),
+    ),
+)
+"""Every version of the rule, oldest first. Append only.
+
+The test pins each past entry, so a fingerprint rewritten in place fails as
+surely as a rule changed without one.
+"""
