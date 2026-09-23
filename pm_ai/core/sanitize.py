@@ -14,6 +14,18 @@ and this re-binds the same objects.
 
 from __future__ import annotations
 
-from pm_ai.domain.sanitize import REDACTION, ForgedSanitization, Sanitized, sanitize
+from pm_ai.domain.sanitize import (
+    REDACTION,
+    FoldDisagreement,
+    ForgedSanitization,
+    Sanitized,
+    sanitize,
+)
 
-__all__ = ["REDACTION", "ForgedSanitization", "Sanitized", "sanitize"]
+__all__ = [
+    "REDACTION",
+    "FoldDisagreement",
+    "ForgedSanitization",
+    "Sanitized",
+    "sanitize",
+]
