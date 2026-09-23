@@ -44,7 +44,14 @@ from typing import Protocol, runtime_checkable
 
 from pm_ai.core.config import Config, ConfigRefused, load_config, render_config
 from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
-from pm_ai.core.goal_register import MalformedGoals
+from pm_ai.core.goal_register import (
+    GOALS_SCOPE,
+    GoalRegister,
+    GoalUnrecorded,
+    MalformedGoals,
+    declare_goal,
+)
+from pm_ai.domain.goals import Goal
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report
 from pm_ai.core.project_registry import RegistryRefused
@@ -78,6 +85,8 @@ __all__ = [
     "Command",
     "Context",
     "FirstRun",
+    "GoalBook",
+    "GoalOutcome",
     "HealthReport",
     "Refusal",
     "TABLE",
@@ -193,6 +202,36 @@ class FirstRun(Protocol):
     def diagnose(self) -> HealthReport:
         """`1g`'s probes, run against the machine as it is now."""
         ...
+
+
+@runtime_checkable
+class GoalBook(Protocol):
+    """What `pm-ai goal set` needs, handed in by the composition root (story 22b).
+
+    `pm_ai.app.entry.GoalBook` is the real one. Named structurally because the
+    read, the write and the event-log entry all go through storage, which
+    `surfaces` may not reach (AD-30).
+    """
+
+    def read(self) -> GoalRegister:
+        """`strategic_goals.md` as it is now; `MalformedGoals` if unreadable."""
+        ...
+
+    def set(self, goal: Goal) -> GoalOutcome:
+        """Merge, write and record one goal; `MalformedGoals` leaves the file be."""
+        ...
+
+
+@runtime_checkable
+class GoalOutcome(Protocol):
+    """What `GoalBook.set` did — `pm_ai.app.entry.GoalWritten`, named by shape."""
+
+    @property
+    def path(self) -> Path | None: ...
+    @property
+    def revised(self) -> bool: ...
+    @property
+    def changed(self) -> bool: ...
 
 
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
@@ -324,6 +363,9 @@ class Context:
     setup that reported success without enrolling or writing anything would
     leave an operator believing the machine was ready.
     """
+
+    goals: GoalBook | None = None
+    """`strategic_goals.md`'s reader and writer. `None` refuses `goal set`."""
 
     unavailable: str | None = None
     """Why there is no daemon, in the composition root's own words.
@@ -1055,6 +1097,91 @@ def _setup(context: Context) -> int:
     return EXIT_OK if report.healthy else EXIT_UNHEALTHY
 
 
+# ── `pm-ai goal set` (story 22b) ─────────────────────────────────────────────
+
+
+def _goal_prompt(question: str, default: str | None) -> str:
+    """One answer, the default for an empty one, or a refusal if input stops."""
+    prompt = f"{question} [{default}]: " if default else f"{question}: "
+    try:
+        answer = input(prompt)
+    except UnicodeDecodeError:
+        raise Refusal(
+            "that answer was not valid text in this terminal's encoding, so "
+            "nothing was written."
+        ) from None
+    except (EOFError, KeyboardInterrupt) as closed:
+        raise Refusal(
+            "goal set was interrupted at a prompt, so nothing was written."
+        ) from closed
+    return answer if answer.strip() or default is None else default
+
+
+def _goal_set(context: Context) -> int:
+    """`pm-ai goal set` — ask for one goal, then hand it to `22b`'s writer.
+
+    Four questions: the id, then the domain, horizon and title, each offering
+    the goal's current value when the id is already set, so a revision is four
+    presses of Enter and the one word that changed. Nothing is decided here —
+    the closed vocabularies and the id charset are `declare_goal`'s, the merge
+    is `set_goal`'s — and every refusal is passed through verbatim.
+
+    The file is read before the first prompt, so a `strategic_goals.md` the
+    parser refuses is refused before anything is asked, and is not written.
+    """
+    if sys.stdin is None or not sys.stdin.isatty():
+        raise Refusal(
+            "goal set asks questions and can only run at a terminal. stdin is "
+            "not a TTY here — a pipe, a cron job or a CI step — so nothing was "
+            "asked and nothing was written."
+        )
+    context.require_daemon()
+    goals = context.goals
+    if goals is None:
+        raise Refusal(
+            "no goal writer was supplied to the CLI, so nothing was written. "
+            "This is a wiring fault in pm-ai, not something wrong with the goal."
+        )
+    try:
+        register = goals.read()
+        goal_id = _goal_prompt("goal id, e.g. g_payments_latency", None).strip()
+        current = register.get(goal_id)
+        domain = _goal_prompt(
+            "domain (project, team or personal)",
+            None if current is None else current.domain.value,
+        )
+        horizon = _goal_prompt(
+            "horizon (short, medium or long)",
+            None if current is None else current.horizon.value,
+        )
+        title = _goal_prompt("title", None if current is None else current.title)
+        goal = declare_goal(
+            goal_id=goal_id,
+            domain=domain,
+            horizon=horizon,
+            title=title,
+            scope=GOALS_SCOPE,
+        )
+        outcome = goals.set(goal)
+    except (MalformedGoals, GoalUnrecorded) as refused:
+        # `GoalUnrecorded` is the one refusal after which the file *has*
+        # changed, and its own sentence says so; it is passed on unedited.
+        raise Refusal(str(refused)) from refused
+    except (OSError, ArtifactBusy) as unwritable:
+        raise Refusal(
+            f"strategic_goals.md could not be written, so nothing changed: "
+            f"{unwritable}"
+        ) from unwritable
+    if not outcome.changed:
+        print(f"{goal.goal_id} is unchanged; nothing was written or recorded.")
+        return EXIT_OK
+    # The verb from the read `set` merged onto, not from `register` above: the
+    # file may have gained this id while the prompts were open.
+    verb = "revised" if outcome.revised else "set"
+    print(f"{goal.goal_id} is {verb} in {outcome.path}")
+    return EXIT_OK
+
+
 TABLE: Mapping[str, Command] = {
     "dashboard": Command(
         "render this scope's daily_dashboard.md, once",
@@ -1091,6 +1218,12 @@ TABLE: Mapping[str, Command] = {
                 takes=("path",),
                 optional=("alias",),
             ),
+        },
+    ),
+    "goal": Command(
+        "the strategic goals every recommendation is aligned to",
+        leaves={
+            "set": Command("create or revise one goal in strategic_goals.md", _goal_set),
         },
     ),
     "connector": Command(
@@ -1169,6 +1302,7 @@ def dispatch(
     onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     first_run: FirstRun | None = None,
+    goals: GoalBook | None = None,
     unavailable: str | None = None,
 ) -> int:
     """Run what `argv` names, and return the exit code the table gives it.
@@ -1191,6 +1325,7 @@ def dispatch(
         onboard=onboard,
         dashboard=dashboard,
         first_run=first_run,
+        goals=goals,
         unavailable=unavailable,
     )
     if not argv:

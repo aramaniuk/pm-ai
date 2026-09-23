@@ -105,10 +105,13 @@ widens `UnresolvedGoal`.
 ## What this module does not do
 
 No ranking, no tagging, no recommendation handling — `goals.py` holds all of it
-and is unchanged. No writer and no command (`22b`). No write path at all: this
-file is authored by hand (AD-3) and pm-ai does not edit it. And no goal
-invention — an absent file yields an absent register, a state the renderer
-states rather than one the parser papers over.
+and is unchanged. No write: `render_goals` and `set_goal` (story `22b`) return
+bytes and the composition root writes them, the mirror of `parse_goals` taking
+bytes and opening nothing. Goals are normally *set* — `pm-ai goal set` today, a
+1:1 or a Telegram voice command later — and hand-editing stays supported (AD-3),
+which is why `set_goal` edits the PM's lines in place rather than regenerating
+the file. No deletion. And no goal invention — an absent file yields an absent
+register, a state the renderer states rather than one the parser papers over.
 """
 
 from __future__ import annotations
@@ -119,19 +122,33 @@ from types import MappingProxyType
 from typing import NamedTuple
 
 from pm_ai.domain.goals import Goal, GoalDomain, GoalHorizon
-from pm_ai.domain.identity import DataScope, MalformedReference, SourceRef
+from pm_ai.domain.identity import DataScope, MalformedReference, ScopeKind, SourceRef
 
 __all__ = [
     "ARTIFACT",
     "DOMAIN_SPELLINGS",
     "GOAL_ID",
+    "GOALS_SCOPE",
+    "HEADER",
     "HORIZON_SPELLINGS",
+    "ID_CHARSET",
     "GoalRegister",
+    "GoalUnrecorded",
     "MalformedGoals",
+    "declare_goal",
     "parse_goals",
+    "render_goals",
+    "set_goal",
 ]
 
 ARTIFACT = "strategic_goals.md"
+
+GOALS_SCOPE = DataScope(ScopeKind.PERSONAL)
+"""The one scope whose tree declares `strategic_goals.md`.
+
+Named here, beside the artifact, so the composition root and the CLI read the
+same value rather than each building their own.
+"""
 
 _BOM = b"\xef\xbb\xbf"
 
@@ -164,7 +181,12 @@ HORIZON_SPELLINGS: Mapping[str, GoalHorizon] = MappingProxyType(
 # happily — a citation with a space in it, unparseable by anything that splits
 # on whitespace. This is the gate that actually rejects it. Case is *not*
 # folded: an id is a citation key, not a closed vocabulary.
-GOAL_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+#
+# Anchored with `\Z`, not `$`: `$` also matches before a trailing newline, so
+# `GOAL_ID.match("g_a\n")` succeeded and a `Goal` built with that id reached the
+# writer and split its own line in two. The parser never hands it a newline —
+# it splits lines first — so for the parser the two anchors are the same rule.
+GOAL_ID = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 
 # ATX headings only, at any level, with markdown's three-space indent allowance
 # and its optional closing hashes. A `#` title and a `###` subsection both name
@@ -207,6 +229,15 @@ _HORIZON_FIRST = re.compile(r"^\((?P<horizon>[^)]*)\)")
 
 _SHAPE = "- [id] (horizon) Title"
 
+ID_CHARSET = (
+    "A goal is cited as `goal:<id>`, so an id may hold letters, digits, `_`, "
+    "`-` and `.` only, and must start with a letter, a digit or `_`. A space "
+    "would break any reader that splits a citation on whitespace and a colon "
+    "would break the reference grammar itself (AD-34)."
+)
+"""The charset `GOAL_ID` enforces, in words — one sentence for the parser's
+refusal and the writer's, so the two cannot describe different rules."""
+
 
 class MalformedGoals(ValueError):
     """`strategic_goals.md` cannot be read as written.
@@ -215,6 +246,15 @@ class MalformedGoals(ValueError):
     citation names a goal the register does not hold. A goal that failed to
     parse and a goal that was never written are different facts, and this
     exception does not widen that one's meaning to cover them both.
+    """
+
+
+class GoalUnrecorded(Exception):
+    """A goal was written into the file and its `goal_set` entry was not.
+
+    Not a `MalformedGoals`: nothing about the goal or the file was wrong, and
+    the file *changed*. Raised by whatever writes the file and then the event
+    log, so a surface can say exactly that instead of "could not be written".
     """
 
 
@@ -259,6 +299,18 @@ class _Fence(NamedTuple):
     line: str
 
 
+class _Layout(NamedTuple):
+    """Where the parser found what it read, for the one caller that edits in place.
+
+    `goals` maps each id to the 1-based number of its line; `headings` lists every
+    heading naming a domain, by number, in file order. `set_goal` needs both to
+    change one line of a hand-edited file without regenerating the rest.
+    """
+
+    goals: dict[str, int]
+    headings: list[tuple[int, GoalDomain]]
+
+
 def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
     """Interpret `strategic_goals.md`'s bytes into a register.
 
@@ -276,10 +328,16 @@ def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
 
     Raises `MalformedGoals` — and nothing else — for anything it cannot read.
     """
+    return _scan(raw, scope=scope)[0]
+
+
+def _scan(raw: bytes | None, *, scope: DataScope) -> tuple[GoalRegister, _Layout]:
+    """`parse_goals`, plus where each goal and each domain heading sat."""
     if raw is None:
-        return GoalRegister(present=False)
+        return GoalRegister(present=False), _Layout({}, [])
     goals: dict[str, Goal] = {}
     lines: dict[str, int] = {}
+    headings: list[tuple[int, GoalDomain]] = []
     domain: GoalDomain | None = None
     domain_level = 0
     goal_indent: int | None = None
@@ -307,6 +365,7 @@ def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
             named = DOMAIN_SPELLINGS.get(_fold(heading["text"]))
             if named is not None:
                 domain, domain_level = named, len(heading["hashes"])
+                headings.append((number, named))
             elif len(heading["hashes"]) <= domain_level:
                 domain = None
             goal_indent = None
@@ -374,7 +433,7 @@ def parse_goals(raw: bytes | None, *, scope: DataScope) -> GoalRegister:
                 f"close it and a shorter run does not either.",
             )
         )
-    return GoalRegister(goals, present=True)
+    return GoalRegister(goals, present=True), _Layout(lines, headings)
 
 
 def _closes(run: str, fence: _Fence) -> bool:
@@ -457,12 +516,8 @@ def _goal(
             _at(
                 number,
                 line,
-                f"has the id {goal_id!r}, which is not citation-safe. A goal is "
-                f"cited as `goal:<id>`, so an id may hold letters, digits, `_`, "
-                f"`-` and `.` only, and must start with a letter, a digit or "
-                f"`_`. A space would break any reader that splits a citation on "
-                f"whitespace and a colon would break the reference grammar "
-                f"itself (AD-34).",
+                f"has the id {goal_id!r}, which is not citation-safe. "
+                f"{ID_CHARSET}",
             )
         )
     try:
@@ -582,3 +637,353 @@ def _listed(spellings: Iterable[str]) -> str:
 
 def _at(number: int, line: str, message: str) -> str:
     return f"{ARTIFACT} line {number}, {line.strip()!r}: {message}"
+
+
+# ── The writer (story 22b) ───────────────────────────────────────────────────
+#
+# `parse_goals`'s other half, and it follows `4g`'s split for `config.toml`: this
+# returns bytes and something above it writes them. Two entry points, because
+# there are two situations. `render_goals` produces a whole file from a register
+# — the first goal on a machine, and the drift pair the round-trip tests hold
+# against the parser. `set_goal` changes one goal in a file that already exists,
+# and it edits that file's lines rather than regenerating them: a renderer that
+# re-rendered from the parsed model would pass every round-trip test while
+# discarding the PM's comments, prose and section order, because the model
+# carries none of them.
+#
+# Titles are written verbatim, never escaped. The grammar reads everything after
+# `(horizon)` as the title and unescapes nothing, so `[`, `]`, `(`, `)` and `|`
+# already survive untouched — and an escape the parser does not undo would be a
+# title that changes every time it is written.
+
+HEADER = """\
+# Strategic goals
+
+pm-ai reads this file to tag every recommendation with the goal it serves.
+`pm-ai goal set` writes it, and it stays yours to edit by hand. One goal per
+line, under the heading of its domain — Project, Team or Personal:
+
+```markdown
+## Project
+
+- [g_payments_latency] (medium) Cut payment latency below 200ms
+```
+
+The id in square brackets is what a recommendation cites: letters, digits,
+`_`, `-` and `.`, starting with a letter, a digit or `_`. The horizon in round
+brackets is `short`, `medium` or `long`. Everything after it is the title, kept
+exactly as written, on one line. Order carries no meaning, and anything outside
+the three domain headings is read as notes.
+"""
+"""The self-documenting top of a file pm-ai creates.
+
+The worked example sits in a fenced block, which `parse_goals` skips whole, so
+the file can show its own grammar without the example becoming a goal. The
+tests parse the fenced block on its own as well: a format that documents itself
+with an example that does not parse is worse than one that does not document
+itself at all.
+"""
+
+# What a title may not carry, because an editor would show it as a line break
+# and the grammar is one goal per line. Wider than the parser's own split, which
+# breaks on `\n` alone: a title holding `\u2028` would parse back, but a PM
+# opening the file would see a goal cut in two and "fix" it.
+_LINE_BREAKS = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def declare_goal(
+    *, goal_id: str, domain: str, horizon: str, title: str, scope: DataScope
+) -> Goal:
+    """A goal from the words a surface collected, or `MalformedGoals` naming why.
+
+    The domain and the horizon are read against the same closed spellings the
+    parser accepts — cased and padded forms included, since a PM typing `Team`
+    at a prompt is typing what the heading says. The title is stripped, because
+    the parser strips it and a padded title could never read back as written.
+    """
+    domain_word = _token(domain)
+    named = DOMAIN_SPELLINGS.get(domain_word)
+    if named is None:
+        raise MalformedGoals(
+            f"{domain.strip()!r} is not a goal domain. The set is closed: "
+            f"{_listed(sorted(DOMAIN_SPELLINGS))}."
+        )
+    when = HORIZON_SPELLINGS.get(_token(horizon))
+    if when is None:
+        raise MalformedGoals(
+            f"{horizon.strip()!r} is not a goal horizon. The set is closed: "
+            f"{_horizons()}."
+        )
+    goal = Goal(
+        goal_id=goal_id.strip(),
+        title=title.strip(),
+        domain=named,
+        horizon=when,
+        scope=scope,
+    )
+    _admissible(goal)
+    return goal
+
+
+def render_goals(register: Mapping[str, Goal]) -> bytes:
+    """A whole `strategic_goals.md` for `register`: the header, then each domain.
+
+    Domains appear in `GoalDomain` order and only when they hold a goal; goals
+    within one appear in the register's order. `parse_goals` of the result, with
+    the goals' own scope, equals `register` — titles byte for byte.
+
+    Raises `MalformedGoals` for a goal the grammar cannot carry, rather than
+    writing a file the next read would refuse.
+    """
+    for key, goal in register.items():
+        _admissible(goal)
+        if key != goal.goal_id:
+            raise MalformedGoals(
+                f"the register holds {goal.goal_id!r} under the key {key!r}. A "
+                f"citation resolves by id, so the two must agree."
+            )
+    sections: list[str] = []
+    for domain in GoalDomain:
+        members = [goal for goal in register.values() if goal.domain is domain]
+        if not members:
+            continue
+        body = "".join(_goal_line(goal) + "\n" for goal in members)
+        sections.append(f"## {domain.value.capitalize()}\n\n{body}")
+    return "\n".join([HEADER, *sections]).encode("utf-8")
+
+
+def set_goal(raw: bytes | None, goal: Goal) -> bytes:
+    """`raw` with `goal` set in it — added if new, its line replaced if not.
+
+    Every line the change does not touch is kept byte for byte: prose, comments,
+    section order, list markers, line endings and a BOM. What changes:
+
+    * a new goal goes after the last goal of its domain, or directly under that
+      domain's heading when it has none, or into a new `## <Domain>` section
+      appended at the end when the file has no heading for it;
+    * a revised goal's line is rewritten in place, keeping its indent, its
+      marker and — if the horizon did not change — the horizon spelling the PM
+      used; an unchanged goal leaves the file byte-identical;
+    * a goal whose domain changed moves, with the detail lines indented beneath
+      it, to where a new goal of that domain would go.
+
+    An absent file, or one holding nothing but whitespace, becomes
+    `render_goals` of the one goal, header included.
+
+    `raw` is parsed first, and a file `parse_goals` refuses is refused here with
+    the parser's own message and nothing is produced — so a caller that writes
+    only what this returns cannot overwrite a file the PM broke. The result is
+    parsed again before it is returned, and must hold exactly the old register
+    with `goal` set; anything else is refused rather than handed to a writer.
+    """
+    _admissible(goal)
+    register, layout = _scan(raw, scope=goal.scope)
+    expected = dict(register)
+    expected[goal.goal_id] = goal
+    # Decoded before stripping: `bytes.strip` knows ASCII whitespace only, so a
+    # file holding a BOM or a no-break space took the edit path and never
+    # gained the header.
+    text = None if raw is None else _decode(raw)
+    if text is None or not text.strip():
+        return _read_back(render_goals({goal.goal_id: goal}), goal, expected)
+    bom = raw is not None and raw.startswith(_BOM)
+    lines = text.split("\n")
+    existing = register.get(goal.goal_id)
+    if existing is None:
+        lines = _insert(lines, layout, register, goal)
+    elif existing.domain is goal.domain:
+        index = layout.goals[goal.goal_id] - 1
+        lines[index] = _revised(lines[index], existing, goal)
+    else:
+        index = layout.goals[goal.goal_id] - 1
+        end = _block_end(lines, index)
+        details = lines[index + 1 : end]
+        remaining = lines[:index] + lines[end:]
+        left, moved = _scan("\n".join(remaining).encode("utf-8"), scope=goal.scope)
+        lines = _insert(remaining, moved, left, goal, details=details)
+    out = (_BOM if bom else b"") + "\n".join(lines).encode("utf-8")
+    return _read_back(out, goal, expected)
+
+
+def _read_back(out: bytes, goal: Goal, expected: dict[str, Goal]) -> bytes:
+    """`out`, if it parses as exactly `expected`; refused otherwise."""
+    written = _scan(out, scope=goal.scope)[0]
+    if dict(written) != expected:
+        raise MalformedGoals(
+            f"setting {goal.goal_id!r} would not read back as the register it "
+            f"was meant to produce, so nothing was produced. The file's layout "
+            f"is one this writer cannot place a goal in safely; add the line "
+            f"`{_goal_line(goal)}` by hand under its `## "
+            f"{goal.domain.value.capitalize()}` heading."
+        )
+    return out
+
+
+def _admissible(goal: Goal) -> None:
+    """Refuse a goal the grammar could not carry back exactly as it is."""
+    if not isinstance(goal.domain, GoalDomain):
+        raise MalformedGoals(
+            f"{goal.goal_id!r} has the domain {goal.domain!r}. The set is closed: "
+            f"{_listed(domain.value for domain in GoalDomain)}."
+        )
+    if not isinstance(goal.horizon, GoalHorizon):
+        raise MalformedGoals(
+            f"{goal.goal_id!r} has the horizon {goal.horizon!r}. The set is "
+            f"closed: {_listed(horizon.value for horizon in GoalHorizon)}."
+        )
+    if GOAL_ID.match(goal.goal_id) is None:
+        raise MalformedGoals(f"{goal.goal_id!r} is not a goal id. {ID_CHARSET}")
+    try:
+        SourceRef.parse(f"goal:{goal.goal_id}")
+    except MalformedReference as exc:
+        raise MalformedGoals(
+            f"{goal.goal_id!r} is not a citable reference: {exc}"
+        ) from exc
+    broken = sorted({repr(character) for character in goal.title if character in _LINE_BREAKS})
+    if broken:
+        raise MalformedGoals(
+            f"the title of {goal.goal_id!r} carries a line break "
+            f"({', '.join(broken)}). The grammar is one goal per line, so a "
+            f"title that spans two would be read back as a goal and a note — or "
+            f"refused. Join it into one line."
+        )
+    if not goal.title.strip():
+        raise MalformedGoals(
+            f"{goal.goal_id!r} has no title. The title is the only part of a "
+            f"goal a PM reads on a dashboard."
+        )
+    if goal.title != goal.title.strip():
+        raise MalformedGoals(
+            f"the title of {goal.goal_id!r} starts or ends with whitespace, "
+            f"which the parser strips — it would not read back as written."
+        )
+
+
+def _goal_line(goal: Goal, *, marker: str = "- ", horizon: str | None = None) -> str:
+    spelled = goal.horizon.value if horizon is None else horizon
+    return f"{marker}[{goal.goal_id}] ({spelled}) {goal.title}"
+
+
+def _prefix(line: str) -> str:
+    """Everything before a goal line's `[id]`: its indent and its list marker."""
+    body = line.removesuffix("\r")
+    return body[: body.index("[")]
+
+
+def _eol(line: str) -> str:
+    return "\r" if line.endswith("\r") else ""
+
+
+def _revised(line: str, existing: Goal, goal: Goal) -> str:
+    """One goal line rewritten, or left alone if nothing it says changed."""
+    if existing == goal:
+        return line
+    horizon: str | None = None
+    match = _GOAL.match(line.removesuffix("\r")[len(_prefix(line)) :])
+    if match is not None and existing.horizon is goal.horizon:
+        horizon = match["horizon"].strip()
+    return _goal_line(goal, marker=_prefix(line), horizon=horizon) + _eol(line)
+
+
+def _indent(line: str) -> int:
+    """Leading columns, a tab advancing to the next multiple of four.
+
+    Markdown's tab stop. It matters because the parser reads no tab-led line as
+    a goal or a heading — `_ITEM` and `_BARE` allow up to three spaces and
+    nothing else — so a tab-indented line under a goal is that goal's detail,
+    and counting it as column zero cut the goal's block short.
+    """
+    expanded = line.expandtabs(4)
+    return len(expanded) - len(expanded.lstrip(" "))
+
+
+_ORDERED = re.compile(r"^(?P<indent> *)(?P<number>\d{1,9})(?P<delimiter>[.)])\s*$")
+
+
+def _next_marker(prefix: str) -> str:
+    """The marker a line joining the list `prefix` belongs to should carry.
+
+    The same bullet for a bulleted list; the next number with the same `.` or
+    `)` for an ordered one, because a `-` after `2.` starts a second list; and
+    `- ` for a bare goal line, which has no list to join.
+    """
+    ordered = _ORDERED.match(prefix)
+    if ordered is not None:
+        number = int(ordered["number"]) + 1
+        return f"{ordered['indent']}{number}{ordered['delimiter']} "
+    indent = prefix[: len(prefix) - len(prefix.lstrip(" "))]
+    bullet = prefix.strip()
+    return indent + (bullet if bullet in {"-", "*", "+"} else "-") + " "
+
+
+def _block_end(lines: list[str], index: int) -> int:
+    """One past the last line belonging to the goal on `lines[index]`.
+
+    Its detail lines are the ones indented past it, blank lines between them
+    included; a trailing blank run is not the goal's and is left where it is.
+    A heading or a fence ends the block whatever its indent.
+    """
+    own = _indent(lines[index])
+    end = index + 1
+    cursor = index + 1
+    while cursor < len(lines):
+        text = lines[cursor].removesuffix("\r")
+        if not text.strip():
+            cursor += 1
+            continue
+        if (
+            _indent(text) <= own
+            or _HEADING.match(text) is not None
+            or _FENCE_OPEN.match(text) is not None
+        ):
+            break
+        cursor += 1
+        end = cursor
+    return end
+
+
+def _insert(
+    lines: list[str],
+    layout: _Layout,
+    register: Mapping[str, Goal],
+    goal: Goal,
+    *,
+    details: list[str] | None = None,
+) -> list[str]:
+    """`lines` with a goal line placed in its domain, `details` right below it."""
+    below = list(details or ())
+    same = [
+        number
+        for goal_id, number in layout.goals.items()
+        if register[goal_id].domain is goal.domain
+    ]
+    if same:
+        anchor = max(same) - 1
+        marker = _next_marker(_prefix(lines[anchor]))
+        at = _block_end(lines, anchor)
+        line = _goal_line(goal, marker=marker) + _eol(lines[anchor])
+        return [*lines[:at], line, *below, *lines[at:]]
+    heading = next(
+        (number for number, domain in layout.headings if domain is goal.domain), None
+    )
+    if heading is not None:
+        at = heading  # the line after the heading, 0-based
+        eol = _eol(lines[heading - 1])
+        if at < len(lines) and not lines[at].removesuffix("\r").strip() and at + 1 < len(lines):
+            at += 1
+        return [*lines[:at], _goal_line(goal) + eol, *below, *lines[at:]]
+    eol = _eol(lines[0])
+    tail = list(lines)
+    if tail and tail[-1] == "":
+        tail.pop()  # the file ended in a newline; it is restored below
+    if tail and tail[-1].removesuffix("\r").strip():
+        tail.append(eol)
+    return [
+        *tail,
+        f"## {goal.domain.value.capitalize()}{eol}",
+        eol,
+        _goal_line(goal) + eol,
+        *below,
+        "",
+    ]
+
