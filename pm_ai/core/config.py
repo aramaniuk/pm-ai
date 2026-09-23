@@ -286,7 +286,9 @@ class Config:
         #
         # Not a theoretical input. POSIX argv is decoded with `surrogateescape`,
         # so any byte sequence the shell hands `pm-ai` that is not valid UTF-8
-        # arrives as surrogates, and `4h` sets `pm_handle` from the command line.
+        # arrives as surrogates. `4h` reads `pm_handle` from a terminal prompt,
+        # and a stdin decoded with `surrogateescape` delivers such bytes the
+        # same way.
         if _has_surrogates(self.pm_handle):
             raise ConfigRefused(
                 f"pm_handle is {self.pm_handle!r}, which contains an unpaired "

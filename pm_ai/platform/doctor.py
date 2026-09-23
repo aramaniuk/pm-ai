@@ -233,9 +233,9 @@ def keychain_reachable(keychain: KeychainPort, key_name: str = MASTER_KEY_NAME) 
             name,
             Health.ABSENT,
             f"the keychain is reachable and holds no key named {key_name!r}",
-            "Enrol the master key before running pm-ai. The key is configured as "
-            "a setup step, never minted by the daemon: a new key makes every "
-            "previously sealed artifact unreadable.",
+            "Enrol the master key by running `pm-ai setup`. The key is "
+            "configured as a setup step, never minted by the daemon: a new key "
+            "makes every previously sealed artifact unreadable.",
         )
     except KeychainBackendMissing as absent:
         # Split from the refusal below on 2026-08-26, to the same bar the git

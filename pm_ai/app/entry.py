@@ -39,7 +39,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pm_ai.app.pipelines import run_dashboard
-from pm_ai.app.wiring import Bootstrap, Daemon, bootstrap, build, onboard_project
+from pm_ai.app.wiring import (
+    Bootstrap,
+    Daemon,
+    application_storage,
+    bootstrap,
+    build,
+    onboard_project,
+)
 from pm_ai.connectors.registry import check_health as probe_connectors
 from pm_ai.core.config import Config, ConfigRefused, load_config
 from pm_ai.core.project_registry import ProjectEntry
@@ -115,6 +122,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             # composition has already stopped.
             onboard=lambda path, alias: onboard_project(keychain, path, alias),
             dashboard=_dashboard(daemon),
+            # `4h`'s setup: this process's keychain, the single reader and
+            # writer for `config.toml`, and probes that re-read the machine.
+            first_run=_FirstRun(keychain),
             # What stopped the daemon being built, so a refusal can name it.
             # `config.toml` is the case that needs it: `4j`'s matrix requires
             # `pm-ai config show` to report the loader's own message, and this
@@ -171,6 +181,64 @@ def _dashboard(daemon: Daemon | None) -> Callable[[DataScope], Path]:
     # whose day boundary came from a second read would be dated against a clock
     # nothing else in the process consults (AD-5).
     return lambda scope: run_dashboard(daemon, scope=scope, now=daemon.clock())
+
+
+class _FirstRun:
+    """`pm-ai setup`'s reach into storage and the probes, bound to one keychain.
+
+    The CLI names this shape structurally (`dispatch.FirstRun`) because it may
+    reach neither `pm_ai.storage` nor `pm_ai.platform`. Every call builds what
+    it needs when it is made rather than at construction, so a `pm-ai doctor`
+    run pays nothing for a command it did not ask for.
+
+    The writer is `application_storage`'s rather than `daemon.storage`, because
+    on the machine `setup` exists for there is no daemon: composition stopped
+    at "no project enrolled", which is what step 2 fixes.
+    """
+
+    def __init__(self, keychain: KeychainPort) -> None:
+        self._keychain = keychain
+
+    @property
+    def keychain(self) -> KeychainPort:
+        return self._keychain
+
+    def read_config(self) -> bytes | None:
+        """The pre-write read: absence is `None`, anything else unreadable raises."""
+        return read_optional(
+            application_storage(self._keychain), scope=APPLICATION, artifact=CONFIG_ARTIFACT
+        )
+
+    def write_config(self, payload: bytes, *, expected: bytes | None) -> Path:
+        """`render_config`'s bytes through the single writer, if nothing moved.
+
+        Read again immediately before the write and compared with what setup
+        read when it started. Between the two there were prompts, and a file
+        that somebody edited or another run wrote meanwhile is refused rather
+        than replaced — setup refuses rather than overwrites, and a second
+        writer's config is not setup's to discard.
+        """
+        storage = application_storage(self._keychain)
+        now = read_optional(storage, scope=APPLICATION, artifact=CONFIG_ARTIFACT)
+        if now != expected:
+            raise ConfigRefused(
+                "config.toml changed while setup was asking its questions, so "
+                "nothing was written over it. Run `pm-ai setup` again: it reads "
+                "the file as it is now."
+            )
+        return storage.write_artifact(payload, scope=APPLICATION, artifact=CONFIG_ARTIFACT)
+
+    def diagnose(self) -> Report:
+        """`1g`'s probes over a fresh read of both artifacts.
+
+        Fresh, because the states `main` read at startup describe the machine
+        before setup changed it. `run_all` alone and not `_diagnose`: the
+        composition-failure probe answers "can one daemon be built", and a
+        second registered project — an ordinary setup outcome — would make
+        that `FAILING` for a reason no setup step can fix.
+        """
+        read = bootstrap(self._keychain)
+        return run_all(self._keychain, config=read.config, registry=read.registry)
 
 
 def read_optional(

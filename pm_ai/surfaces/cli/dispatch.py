@@ -42,7 +42,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pm_ai.core.config import Config, ConfigRefused
+from pm_ai.core.config import Config, ConfigRefused, load_config, render_config
 from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
 from pm_ai.core.goal_register import MalformedGoals
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
@@ -61,6 +61,7 @@ from pm_ai.ports import (
     CredentialProbePort,
     DaemonPort,
     DuplicateConnector,
+    KeychainPort,
     KeychainUnavailable,
     KeyNotFound,
     ProbeFailed,
@@ -76,6 +77,7 @@ __all__ = [
     "EXIT_USAGE",
     "Command",
     "Context",
+    "FirstRun",
     "HealthReport",
     "Refusal",
     "TABLE",
@@ -158,6 +160,39 @@ class OnboardOutcome(Protocol):
     def gitignore(self) -> Path: ...
     @property
     def already_registered(self) -> bool: ...
+
+
+@runtime_checkable
+class FirstRun(Protocol):
+    """What `pm-ai setup` needs beyond `onboard`, handed in by the composition root.
+
+    A value rather than a daemon, because the machine `setup` exists for has
+    none: composition stops at "no project enrolled" until the second step here
+    has run. The keychain is this process's, the config reads and writes go
+    through the single reader and writer (AD-5) — which `surfaces` may not
+    reach, so `pm_ai.app.entry` binds them — and `diagnose` re-reads the machine
+    rather than reporting what it looked like before setup changed it.
+    """
+
+    @property
+    def keychain(self) -> KeychainPort: ...
+
+    def read_config(self) -> bytes | None:
+        """`config.toml`'s bytes, `None` when absent; `OSError` when unreadable."""
+        ...
+
+    def write_config(self, payload: bytes, *, expected: bytes | None) -> Path:
+        """Replace `config.toml` with `payload`, refusing if it is not `expected`.
+
+        `expected` is what `read_config` returned at the start of the run, so a
+        file that changed underneath setup is refused (`ConfigRefused`) rather
+        than written over.
+        """
+        ...
+
+    def diagnose(self) -> HealthReport:
+        """`1g`'s probes, run against the machine as it is now."""
+        ...
 
 
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
@@ -280,6 +315,14 @@ class Context:
     rather than passing — a probe that answered "fine" without asking would seal
     an unchecked credential, which is the failure 8b's whole ordering exists to
     prevent.
+    """
+
+    first_run: FirstRun | None = None
+    """`pm-ai setup`'s keychain, config reader and writer, and fresh probes.
+
+    `None` refuses `setup` as a wiring fault, for `_no_onboarding`'s reason: a
+    setup that reported success without enrolling or writing anything would
+    leave an operator believing the machine was ready.
     """
 
     unavailable: str | None = None
@@ -707,6 +750,311 @@ def _project_add(context: Context) -> int:
     return EXIT_OK
 
 
+# ── `pm-ai setup` (story 4h) ─────────────────────────────────────────────────
+
+SETUP_ATTEMPTS = 3
+"""How many answers one question gets before setup refuses.
+
+Bounded because an unbounded re-prompt is a loop an operator can only leave
+with Ctrl-C, and a mandatory question with no way out but an interrupt reads
+as a hang. Three is enough to fix a typo twice.
+"""
+
+
+class _Inadmissible(Exception):
+    """An answer setup cannot use, carrying the sentence that says why.
+
+    Local and private: it never leaves `_answer`, which turns it into a
+    re-prompt, and after the last attempt into a `Refusal`.
+    """
+
+
+def _ask(prompt: str) -> str:
+    """One line from the operator, or a refusal when they stop answering.
+
+    `EOFError` is Ctrl-D, or a terminal that went away, and `KeyboardInterrupt`
+    is Ctrl-C. Both are an interruption rather than an answer, and the steps
+    before it stay done — which is what makes re-running `setup` continue from
+    where this one stopped. Ctrl-C is caught here rather than left to
+    `entry.main`'s generic "interrupted", which cannot say what stayed done.
+    """
+    try:
+        return input(prompt)
+    except UnicodeDecodeError:
+        # Bytes the terminal sent that are not valid in its own encoding. An
+        # answer that cannot be read, so it is asked again — never a traceback
+        # after the key and the project are already done.
+        raise _Inadmissible(
+            "that answer was not valid text in this terminal's encoding."
+        ) from None
+    except (EOFError, KeyboardInterrupt) as closed:
+        raise Refusal(
+            "setup was interrupted at a prompt. Every step it reported done "
+            "stays done; run `pm-ai setup` again to continue from here."
+        ) from closed
+
+
+def _answer[T](
+    question: str, interpret: Callable[[str], T], *, step: str, default: str | None = None
+) -> T:
+    """Ask until `interpret` accepts an answer, at most `SETUP_ATTEMPTS` times.
+
+    `interpret` raises `_Inadmissible` or `ConfigRefused` for an answer it will
+    not take, and both are printed and asked again. `ConfigRefused` is the one
+    that matters: `Config.__post_init__` is where a whitespace handle or a
+    negative rate is refused, and letting it escape here would be a traceback
+    after the key and the project are already done.
+    """
+    prompt = f"{question} [{default}]: " if default else f"{question}: "
+    for _ in range(SETUP_ATTEMPTS):
+        try:
+            return interpret(_ask(prompt))
+        except (_Inadmissible, ConfigRefused) as refused:
+            print(f"  {refused}", file=sys.stderr)
+    raise Refusal(
+        f"setup stopped at {step}: no admissible answer to {question!r} after "
+        f"{SETUP_ATTEMPTS} attempts. Every earlier step stays done; run "
+        f"`pm-ai setup` again to continue from here."
+    )
+
+
+def _setup_key(first_run: FirstRun) -> None:
+    """Step 1: the master key — `4b`'s `enrol`, and an enrolled key is done.
+
+    First because every encrypted write refuses without it. `KeyAlreadyEnrolled`
+    is a completed step here and not the refusal `pm-ai key enrol` makes of it:
+    the operator asked for a ready machine, not for a new key, and one is
+    there. Nothing replaces it — `enrol` never does.
+    """
+    print("[1/3] master key — first, because every encrypted write refuses without it")
+    try:
+        name = enrol(first_run.keychain)
+    except KeyAlreadyEnrolled:
+        print("      already enrolled; the keychain was not written.")
+        return
+    except KeychainUnavailable as unreachable:
+        raise Refusal(
+            f"setup stopped at step 1 (master key) and nothing after it ran: "
+            f"{unreachable}"
+        ) from unreachable
+    print(f"      a master key is enrolled under {name!r}; no command prints it.")
+
+
+def _project_answer(raw: str) -> str:
+    path = raw.strip()
+    if not path:
+        raise _Inadmissible(
+            "a project path is required: pm-ai acts only on projects it was "
+            "given, and none can be resolved without one."
+        )
+    return path
+
+
+def _setup_project(context: Context) -> None:
+    """Step 2: one project — `4k`'s `onboard`, and a registered one is done.
+
+    Second because nothing resolves a project path until the registry names
+    one. A changed path for an id already registered is `4d`'s refusal and
+    ends setup here: relocating a tree is a migration, not a setup step.
+    """
+    print("[2/3] project — second, because no path resolves until one is registered")
+    path = _answer("project directory", _project_answer, step="step 2 (project)")
+    alias = _answer(
+        "project id (empty to use the directory's name)",
+        lambda raw: raw.strip() or None,
+        step="step 2 (project)",
+    )
+    try:
+        outcome = context.onboard(path, alias)
+    except (ScopeResolutionError, RegistryRefused, ClaimHeld) as refused:
+        raise Refusal(
+            f"setup stopped at step 2 (project); step 1 stays done: {refused}"
+        ) from refused
+    except OSError as unwritable:
+        raise Refusal(
+            f"setup stopped at step 2 (project); step 1 stays done. The "
+            f"registry could not be written: {unwritable}"
+        ) from unwritable
+    if outcome.already_registered:
+        print(
+            f"      {outcome.project_id} is already registered at "
+            f"{outcome.repository}; nothing changed."
+        )
+    else:
+        print(f"      {outcome.project_id} is registered at {outcome.repository}")
+
+
+def _handle(current: Config) -> Callable[[str], Config]:
+    def interpret(raw: str) -> Config:
+        # Stripped unless that leaves nothing: an all-whitespace answer reaches
+        # `Config` as typed, so its own refusal names it, rather than being
+        # folded into the empty answer and reported as missing.
+        handle = raw.strip() or raw
+        if not handle:
+            raise _Inadmissible(
+                "pm_handle is required. An unset handle matches no speaker, so "
+                "nothing spoken to pm-ai would ever be attributed to the PM."
+            )
+        return replace(current, pm_handle=handle)
+
+    return interpret
+
+
+def _rate(current: Config) -> Callable[[str], Config]:
+    def interpret(raw: str) -> Config:
+        text = raw.strip()
+        if not text:
+            return current
+        try:
+            rate = float(text)
+        except ValueError:
+            raise _Inadmissible(
+                f"{text!r} is not a number. blended_hourly_rate is a cost per "
+                f"attendee-hour; leave it empty to keep it unset."
+            ) from None
+        return replace(current, blended_hourly_rate=rate)
+
+    return interpret
+
+
+def _zone(current: Config) -> Callable[[str], Config]:
+    def interpret(raw: str) -> Config:
+        text = raw.strip()
+        return current if not text else replace(current, display_timezone=text)
+
+    return interpret
+
+
+_YES = frozenset({"y", "yes"})
+_NO = frozenset({"n", "no"})
+
+
+def _verbose(current: Config) -> Callable[[str], Config]:
+    def interpret(raw: str) -> Config:
+        text = raw.strip().lower()
+        if not text:
+            return current
+        if text in _YES or text in _NO:
+            return replace(current, verbose_logging=text in _YES)
+        raise _Inadmissible(f"{raw.strip()!r} is not y or n.")
+
+    return interpret
+
+
+def _empty_means(has_default: bool) -> str:
+    """What an empty answer does, which depends on whether a value exists."""
+    return "empty to keep it" if has_default else "empty to leave unset"
+
+
+def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) -> None:
+    """Step 3: `config.toml` — asked for, rendered by `4g`, written once.
+
+    Last because it is the only step whose absence is survivable: a machine
+    with no handle runs and attributes nothing to the PM. A config that already
+    parses and names a handle is a completed step, as an enrolled key is, and
+    nothing is asked or written. Otherwise every question is `4a`'s closed
+    vocabulary and nothing else; each answer is a `Config` before it is
+    accepted, so `__post_init__` refuses it at the prompt that asked.
+    """
+    print("[3/3] config.toml — last, because it is the only step a machine survives without")
+    if current.pm_handle:
+        print(f"      already configured (pm_handle is {current.pm_handle}); nothing was written.")
+        return
+    step = "step 3 (config.toml)"
+    settled = _answer("pm_handle (who is the PM)", _handle(current), step=step)
+    # `0.0` is the rate's unset state, not a value: `config.toml` refuses an
+    # explicit zero, so a rate that reads back as `0.0` was never set, and
+    # offering it as a default to keep would describe a setting nobody chose.
+    rate = settled.blended_hourly_rate
+    settled = _answer(
+        f"blended_hourly_rate ({_empty_means(bool(rate))})",
+        _rate(settled),
+        step=step,
+        default=repr(rate) if rate else None,
+    )
+    zone = settled.display_timezone
+    settled = _answer(
+        f"display_timezone, e.g. Europe/Warsaw ({_empty_means(bool(zone))})",
+        _zone(settled),
+        step=step,
+        default=zone or None,
+    )
+    settled = _answer(
+        "verbose_logging (y/n)",
+        _verbose(settled),
+        step=step,
+        default="y" if settled.verbose_logging else "n",
+    )
+    try:
+        written = first_run.write_config(render_config(settled), expected=existing)
+    except ConfigRefused as refused:
+        raise Refusal(
+            f"setup stopped at {step}; steps 1 and 2 stay done: {refused}"
+        ) from refused
+    except (OSError, ArtifactBusy) as unwritable:
+        raise Refusal(
+            f"setup stopped at {step}; steps 1 and 2 stay done. config.toml "
+            f"could not be written: {unwritable}"
+        ) from unwritable
+    print(f"      written to {written}")
+
+
+def _setup(context: Context) -> int:
+    """`pm-ai setup` — key, project, config, then `1g`'s probes (story 4h).
+
+    Nothing here is reimplemented: `4b` enrols, `4k` registers, `4g` renders.
+    This owns the order, the prompts, and the claim at the end — which is the
+    probe report and not "the steps succeeded", because every step can succeed
+    on a machine that is still not ready.
+
+    Two checks precede every write, keychain included. The TTY check, because a
+    key minted before a non-interactive refusal is a write nobody asked for.
+    And the read of any existing `config.toml`, because a file 4a refuses has
+    to be refused before anything else happens, and left exactly as it is.
+    """
+    # `sys.stdin` is `None` in a detached process — no descriptor 0 at all —
+    # which is the same fact as a pipe for this purpose, and must not reach
+    # `main` as an `AttributeError` and exit 1.
+    if sys.stdin is None or not sys.stdin.isatty():
+        raise Refusal(
+            "setup asks questions and can only run at a terminal. stdin is not a "
+            "TTY here — a pipe, a cron job or a CI step — so nothing was done: "
+            "no key was enrolled and no file was written. Run `pm-ai setup` "
+            "from an interactive shell."
+        )
+    first_run = context.first_run
+    if first_run is None:
+        raise Refusal(
+            "no setup sequence was supplied to the CLI, so nothing was done. "
+            "This is a wiring fault in pm-ai, not something wrong with this "
+            "machine."
+        )
+    try:
+        existing = first_run.read_config()
+    except OSError as unreadable:
+        raise Refusal(
+            f"config.toml exists and could not be read, so setup did nothing: "
+            f"{unreadable}. It is not written over — fix its permissions and "
+            f"run `pm-ai setup` again."
+        ) from unreadable
+    try:
+        current = load_config(existing)
+    except ConfigRefused as refused:
+        raise Refusal(
+            f"config.toml says something pm-ai will not act on, so setup did "
+            f"nothing and left the file as it is: {refused}"
+        ) from refused
+
+    _setup_key(first_run)
+    _setup_project(context)
+    _setup_config(first_run, existing, current)
+
+    print()
+    report = first_run.diagnose()
+    print(report)
+    return EXIT_OK if report.healthy else EXIT_UNHEALTHY
+
+
 TABLE: Mapping[str, Command] = {
     "dashboard": Command(
         "render this scope's daily_dashboard.md, once",
@@ -714,6 +1062,11 @@ TABLE: Mapping[str, Command] = {
         options=(SCOPE_ARGUMENT,),
     ),
     "doctor": Command("check this machine and report what is wrong with it", _doctor),
+    # `4h`: the one command that sequences the three below it on a new machine.
+    "setup": Command(
+        "first run: enrol the key, register a project, write config.toml, then probe",
+        _setup,
+    ),
     # The three groups, each with the one leaf `4j` hung on it. They were in the
     # table from `4c` with no leaves, so the shape of the CLI was settled in one
     # place and this slice added mappings rather than inventing a second table.
@@ -815,6 +1168,7 @@ def dispatch(
     probe_credential: CredentialProbePort = _no_probe,
     onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
+    first_run: FirstRun | None = None,
     unavailable: str | None = None,
 ) -> int:
     """Run what `argv` names, and return the exit code the table gives it.
@@ -836,6 +1190,7 @@ def dispatch(
         probe_credential=probe_credential,
         onboard=onboard,
         dashboard=dashboard,
+        first_run=first_run,
         unavailable=unavailable,
     )
     if not argv:
