@@ -72,6 +72,7 @@ __all__ = [
     "Daemon",
     "MASTER_KEY_NAME",
     "REGISTRY_ARTIFACT",
+    "application_storage",
     "bootstrap",
     "build",
     "onboard_project",
@@ -740,13 +741,7 @@ def bootstrap(keychain: KeychainPort, *, paths: ScopePaths | None = None) -> Boo
     malformed registry: `4c` requires `pm-ai doctor` to survive a machine that
     is broken, and a registry nobody can parse is exactly that machine.
     """
-    resolver = paths if paths is not None else ScopePaths.production()
-    storage = StorageService(
-        resolver,
-        now=lambda: datetime.now(timezone.utc),
-        vcs=GitVcs(),
-        crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
-    )
+    storage = application_storage(keychain, paths=paths)
     registry = _artifact_state(storage, REGISTRY_ARTIFACT)
     config = _artifact_state(storage, CONFIG_ARTIFACT)
     if registry.raw is None:
@@ -759,6 +754,27 @@ def bootstrap(keychain: KeychainPort, *, paths: ScopePaths | None = None) -> Boo
         # own message — which names the project or the line, and is the only
         # form of this an operator can act on.
         return Bootstrap({}, registry, config)
+
+
+def application_storage(
+    keychain: KeychainPort, *, paths: ScopePaths | None = None
+) -> StorageService:
+    """The single reader and writer over a resolver that knows no project.
+
+    `bootstrap`'s writer, made public for `4h`: `pm-ai setup` writes
+    `config.toml` on a machine where no daemon exists yet — composition stops
+    at "no project enrolled" until the step before it has run — so the write
+    cannot go through `daemon.storage`. Both artifacts it serves are
+    application-scope, which a resolver over an empty project map resolves
+    perfectly well.
+    """
+    resolver = paths if paths is not None else ScopePaths.production()
+    return StorageService(
+        resolver,
+        now=lambda: datetime.now(timezone.utc),
+        vcs=GitVcs(),
+        crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
+    )
 
 
 def _artifact_state(storage: StorageService, artifact: str) -> ArtifactState:

@@ -2,7 +2,8 @@
 title: 'First-run setup'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '422befcf339e9e4e4bbb1cc838a0da6535ee1d6a'
 review_loop_iteration: 0
 context: []
 ---
@@ -67,10 +68,10 @@ context: []
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add `setup`: **check TTY**, enrol, register, prompt, write, report -- one ordered sequence, each step idempotent and each refusal naming its step; the TTY check precedes enrolment so a refusal leaves the keychain untouched
-- [ ] `pm_ai/app/entry.py` -- route `render_config`'s bytes to `write_artifact`, and read the existing file first so a malformed one is refused before anything is written
-- [ ] `pm_ai/platform/doctor.py` -- retarget the keychain `ABSENT` remediation at `pm-ai setup`, which `1g` left pending a command to name
-- [ ] `tests/slice/test_first_run.py` -- a clean temporary root driven to all-probes-green with scripted answers, plus the matrix
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- add `setup`: **check TTY**, enrol, register, prompt, write, report -- one ordered sequence, each step idempotent and each refusal naming its step; the TTY check precedes enrolment so a refusal leaves the keychain untouched
+- [x] `pm_ai/app/entry.py` -- route `render_config`'s bytes to `write_artifact`, and read the existing file first so a malformed one is refused before anything is written
+- [x] `pm_ai/platform/doctor.py` -- retarget the keychain `ABSENT` remediation at `pm-ai setup`, which `1g` left pending a command to name
+- [x] `tests/slice/test_first_run.py` -- a clean temporary root driven to all-probes-green with scripted answers, plus the matrix
 
 **Acceptance Criteria:**
 - Given a clean temporary root, when `setup` runs with scripted answers, then the **keychain, registry and config probes** report healthy — those three by name, not `report.healthy`, because `packages_installed()` is FAILING by design in this repo (`test_doctor.py:305-317` records why) and an all-green verdict is unreachable without standing the distributions in.
@@ -107,3 +108,57 @@ Config is deliberately last. A machine with no key refuses encrypted writes and 
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: contracts kept, AD-30 among them
 - `uv run mypy` -- expected: clean
+
+## Suggested Review Order
+
+**The sequence and its order**
+
+- Entry point: TTY check, config pre-read, then key → project → config → probes.
+  [`dispatch.py:1002`](../../../../pm_ai/surfaces/cli/dispatch.py#L1002)
+
+- Step zero: no terminal (or no stdin) refuses before the keychain is touched.
+  [`dispatch.py:1018`](../../../../pm_ai/surfaces/cli/dispatch.py#L1018)
+
+- Closing claim is the probe report, not the steps' success.
+  [`dispatch.py:1053`](../../../../pm_ai/surfaces/cli/dispatch.py#L1053)
+
+**Idempotent steps**
+
+- `KeyAlreadyEnrolled` reads as done; nothing replaces a key.
+  [`dispatch.py:821`](../../../../pm_ai/surfaces/cli/dispatch.py#L821)
+
+- A moved path for a registered id ends setup at step 2.
+  [`dispatch.py:853`](../../../../pm_ai/surfaces/cli/dispatch.py#L853)
+
+- A config naming a handle is done; otherwise only `4a`'s vocabulary is asked.
+  [`dispatch.py:949`](../../../../pm_ai/surfaces/cli/dispatch.py#L949)
+
+**Prompts that cannot escape as tracebacks**
+
+- Bounded re-ask; `ConfigRefused` from `__post_init__` becomes a re-prompt.
+  [`dispatch.py:797`](../../../../pm_ai/surfaces/cli/dispatch.py#L797)
+
+- EOF and Ctrl-C become a refusal saying earlier steps stay done.
+  [`dispatch.py:772`](../../../../pm_ai/surfaces/cli/dispatch.py#L772)
+
+**The write, across the layer boundary**
+
+- Composition root binds keychain, single writer and fresh probes for `surfaces`.
+  [`entry.py:186`](../../../../pm_ai/app/entry.py#L186)
+
+- Re-read before write: a config changed during the prompts is refused.
+  [`entry.py:212`](../../../../pm_ai/app/entry.py#L212)
+
+- Probes omit the composition probe, so a second project still exits `0`.
+  [`entry.py:231`](../../../../pm_ai/app/entry.py#L231)
+
+- `bootstrap`'s storage extracted, since setup runs where no daemon exists.
+  [`wiring.py:759`](../../../../pm_ai/app/wiring.py#L759)
+
+**Peripherals**
+
+- Absent-key remediation now names `pm-ai setup`.
+  [`doctor.py:236`](../../../../pm_ai/platform/doctor.py#L236)
+
+- Matrix driven through `entry.main` with a recording fake keychain.
+  [`test_first_run.py:196`](../../../../tests/slice/test_first_run.py#L196)
