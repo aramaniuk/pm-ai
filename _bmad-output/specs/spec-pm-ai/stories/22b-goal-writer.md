@@ -2,7 +2,8 @@
 title: 'Goals are set, not typed'
 type: 'feature'
 created: '2026-09-03'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '2083a6e0039846c7275d316a9aa8b565f7a7722a'
 review_loop_iteration: 0
 ---
 
@@ -61,11 +62,11 @@ review_loop_iteration: 0
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/goal_register.py` -- add `render_goals(register) -> bytes` with the header example, preserving titles verbatim and refusing values outside the closed vocabularies
-- [ ] `pm_ai/domain/event_entries.py` -- add `goal_set` to `SelfActionType` and its typed payload to that enumeration's registry -- `2c`'s guards must hold: disjoint value sets, and no member declarable by a connector
-- [ ] `pm_ai/app/entry.py` -- read, merge, render, write through `write_artifact`, then append the entry -- `core` opens nothing and `surfaces` may not reach storage
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- add `goal set` as a leaf on `4c`'s table
-- [ ] `tests/core/test_goal_render.py`, `tests/slice/test_goal_setting.py` -- the matrix, and the hand-edit-survives case against a real temporary root
+- [x] `pm_ai/core/goal_register.py` -- add `render_goals(register) -> bytes` with the header example, preserving titles verbatim and refusing values outside the closed vocabularies
+- [x] `pm_ai/domain/event_entries.py` -- add `goal_set` to `SelfActionType` and its typed payload to that enumeration's registry -- `2c`'s guards must hold: disjoint value sets, and no member declarable by a connector
+- [x] `pm_ai/app/entry.py` -- read, merge, render, write through `write_artifact`, then append the entry -- `core` opens nothing and `surfaces` may not reach storage
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- add `goal set` as a leaf on `4c`'s table
+- [x] `tests/core/test_goal_render.py`, `tests/slice/test_goal_setting.py` -- the matrix, and the hand-edit-survives case against a real temporary root
 
 **Acceptance Criteria:**
 - Given a register with titles containing Markdown punctuation, when rendered and parsed back, then every title is byte-identical — the drift pair, and the reason this round trip is harder than `4g`'s: prose, not three typed keys.
@@ -86,3 +87,54 @@ review_loop_iteration: 0
 - `uv run pytest -q` -- expected: no new failures
 - `uv run lint-imports` -- expected: contracts kept, AD-30 among them
 - `uv run mypy` -- expected: clean
+
+## Suggested Review Order
+
+**Editing the PM's file, not regenerating it**
+
+- Entry point: parse first, edit line by line, then prove the edit reads back.
+  [`goal_register.py:755`](../../../../pm_ai/core/goal_register.py#L755)
+
+- A revision rewrites one line, keeping indent, marker and line ending.
+  [`goal_register.py:877`](../../../../pm_ai/core/goal_register.py#L877)
+
+- Placement: after the domain's last goal, continuing an ordered list's numbering.
+  [`goal_register.py:945`](../../../../pm_ai/core/goal_register.py#L945)
+
+- A goal's detail block, tabs counted as indentation to match the parser.
+  [`goal_register.py:919`](../../../../pm_ai/core/goal_register.py#L919)
+
+- Fresh file: header with a worked example the parser itself accepts.
+  [`goal_register.py:728`](../../../../pm_ai/core/goal_register.py#L728)
+
+**Admissibility**
+
+- `\Z` anchor: `$` let an id with a trailing newline through.
+  [`goal_register.py:189`](../../../../pm_ai/core/goal_register.py#L189)
+
+- Typed answers become a `Goal` against the closed vocabularies.
+  [`goal_register.py:694`](../../../../pm_ai/core/goal_register.py#L694)
+
+**The write and the log entry**
+
+- Entry validated before the write; an append failure after it is `GoalUnrecorded`.
+  [`entry.py:303`](../../../../pm_ai/app/entry.py#L303)
+
+- `goal_set` on `SelfActionType`, so a second revision is not deduped away.
+  [`event_entries.py:98`](../../../../pm_ai/domain/event_entries.py#L98)
+
+**CLI surface**
+
+- TTY check, malformed file refused before any prompt, unchanged goal is a no-op.
+  [`dispatch.py:1120`](../../../../pm_ai/surfaces/cli/dispatch.py#L1120)
+
+- The composition root hands the CLI a writer bound to the daemon's storage.
+  [`entry.py:148`](../../../../pm_ai/app/entry.py#L148)
+
+**Peripherals**
+
+- Round trips over tricky titles and line-diffed hand-edit cases, no filesystem.
+  [`test_goal_render.py:90`](../../../../tests/core/test_goal_render.py#L90)
+
+- Real temporary root: hand-edited file survives, two sets give two entries.
+  [`test_goal_setting.py:166`](../../../../tests/slice/test_goal_setting.py#L166)

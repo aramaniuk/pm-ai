@@ -90,6 +90,12 @@ class SelfActionType(Enum):
     # referent and is not one for this purpose: AD-36 makes pm-ai's own writes
     # never evidence, so the record is about the act, not about its effect.
     SKILL_INVOKED = "skill_invoked"
+    # A goal written into `strategic_goals.md` — created or revised, one member
+    # for both, since setting is setting and no CAP-10 aggregate tells them
+    # apart. Here rather than on `ObservedEventType` because that envelope needs
+    # a `SourceRef` and `persist_events` dedups on the key derived from it: the
+    # second revision of one goal would share the first's key and vanish.
+    GOAL_SET = "goal_set"
 
 
 SELF_ACTION_FIELDS: dict[SelfActionType, tuple[str, ...]] = {
@@ -101,6 +107,11 @@ SELF_ACTION_FIELDS: dict[SelfActionType, tuple[str, ...]] = {
     # AD-1's one entry per invocation. The skill's name is the *actor*, so it is
     # not repeated here — a schema declares fields, and the actor is not one.
     SelfActionType.SKILL_INVOKED: ("target", "external_id", "idempotency_key"),
+    # The goal as it now reads, whole — its id, domain, horizon and title, since
+    # a revision is only legible against the one before it if every entry
+    # carries all four — plus the surface that set it, since the CLI is the
+    # first of several (story 22b).
+    SelfActionType.GOAL_SET: ("goal_id", "domain", "horizon", "title", "channel"),
 }
 """What each pm-ai action must record, by field name.
 
