@@ -18,6 +18,14 @@ appended to the report rather than a traceback out of a command that exists to
 survive exactly this. Nothing here loads `config.toml` before deciding what to
 run, which is what keeps a broken config from hiding a broken machine.
 
+A fourth outcome leaves no daemon either and is **not** one of those three, so
+it produces no probe: several projects are enrolled and nothing chose between
+them (story 4l). That is a refusal at dispatch, carried on
+`_Composition.undecided`, and `doctor` reports it as the non-fault it is — a
+report line naming which project this invocation binds to, or saying that the
+working directory names none. Reporting it as a failure is how `doctor` and
+`setup` came to disagree about a machine with nothing wrong with it.
+
 ## Why this module may import `pm_ai.platform.doctor`
 
 `.importlinter` forbids `pm_ai.app -> subprocess` even through an intermediary,
@@ -81,7 +89,7 @@ from pm_ai.platform.doctor import (
     run_all,
 )
 from pm_ai.platform.keychain import MacOSKeychainAdapter
-from pm_ai.platform.paths import ScopePaths, UnknownProject
+from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import ArtifactBusy, KeychainPort, StoragePort
 from pm_ai.storage.service import StorageService
 from pm_ai.surfaces.cli.dispatch import EXIT_REFUSAL, EXIT_UNEXPECTED, dispatch
@@ -151,6 +159,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             # `pm-ai config show` to report the loader's own message, and this
             # probe's detail is the only place it survives.
             unavailable=None if failure is None else failure.detail,
+            # `4l`'s refusal, which is not a fault and must not be dressed as
+            # one: several projects are enrolled, the working directory is
+            # inside none of them, and pm-ai declines to pick. Carried
+            # separately from `unavailable` because that field's sentence sends
+            # the operator to `pm-ai doctor` — which, on this machine, correctly
+            # reports nothing wrong.
+            undecided=composed.undecided,
         )
     except SystemExit as requested:
         code = requested.code
@@ -407,30 +422,215 @@ def _bootstrap(keychain: KeychainPort) -> Bootstrap:
     return bootstrap(keychain)
 
 
-def _ambiguous(projects: Mapping[str, ProjectEntry]) -> Probe:
-    """Two or more enrolled projects, reported as what it is.
+@dataclass(frozen=True, slots=True)
+class _Selection:
+    """Which project this invocation is about, or why nothing chose one.
 
-    Its own probe since `4d`, and the slice that made the state reachable is the
-    slice that had to fix it. `_select` raises `UnknownProject`, which
-    `_compose` catches in its `ScopeResolutionError` arm and reports as "the
-    enrolled project cannot be resolved to a directory", remedy "Re-enrol the
-    repository" — wrong in every word for an operator whose projects both
-    resolve perfectly well. It was unreachable only because the registry was
-    always empty, which stopped being true here.
-
-    Choosing between them — a flag, the working directory, a default in
-    `config.toml` — is still not this module's policy to invent. What changed is
-    that refusing now says so.
+    A value rather than `str | None`, because `None` was answering three
+    different questions with one silence: outside every enrolled project, two
+    ids sharing one directory, and a working directory that cannot be read. All
+    three produced the one sentence "this command was not run inside any
+    enrolled project", which is false of the second — the operator is standing
+    *inside* a project — and says nothing at all about the third. Each refusal
+    is now composed where its cause is known.
     """
-    return Probe(
-        "project",
-        Health.FAILING,
-        f"{len(projects)} projects are registered and pm-ai has no way to "
-        f"choose between them yet: {', '.join(sorted(projects))}",
-        "Nothing is broken and nothing needs re-enrolling — every one of these "
-        "resolves. pm-ai has no project selection yet, so until it does, one "
-        "enrolled project is the supported arrangement. `pm-ai doctor` keeps "
-        "working meanwhile.",
+
+    project_id: str | None
+    refusal: str | None
+
+    @classmethod
+    def acting(cls, project_id: str) -> _Selection:
+        return cls(project_id, None)
+
+    @classmethod
+    def undecided(cls, refusal: str) -> _Selection:
+        return cls(None, refusal)
+
+
+def _acting_project(projects: Mapping[str, ProjectEntry]) -> _Selection:
+    """Which project this invocation is about, or a refusal naming why not.
+
+    AD-11: "the CLI, when run inside a registered repository, binds to that
+    project scope". That was the rule from the start and had never been
+    implemented — `_ambiguous` stood here until `4l` and refused to assemble at
+    all, which made a second enrolled project a `FAILING` probe on a machine
+    where nothing was wrong.
+
+    **One enrolled project answers from anywhere.** Nobody with a single project
+    has to stand anywhere in particular, and asking them to would be this slice
+    taxing every existing installation for a choice that does not exist on it.
+
+    **By folder containment, and deliberately not by asking git.** A project is
+    onboarded at a directory and is not required to be a repository —
+    `onboard_project` runs no `git init` and checks for no working tree — so
+    `working_tree` would answer `None` for a perfectly good project and refuse
+    the command from inside it.
+
+    **Innermost wins.** One project's directory may sit inside another's, and
+    the nearest enclosing one is the project the operator is standing in; the
+    outer one is merely an ancestor. Two enclosing projects at the *same*
+    directory is not a depth to break — it is one directory under two ids, which
+    `onboard_project` refuses to create — so it is refused here too rather than
+    settled alphabetically.
+
+    Nothing here is ever a guess, and every refusal names its own cause.
+    """
+    if len(projects) == 1:
+        (only,) = projects
+        return _Selection.acting(only)
+    try:
+        # Resolved, because the registry's paths are (`_resolved` at onboarding)
+        # and a shell's `cwd` may reach the same directory through a symlink —
+        # `/tmp` on macOS being the everyday one.
+        here = Path.cwd().resolve()
+    except OSError as unreadable:
+        # A deleted or unreadable working directory. Its own refusal, because
+        # "run this from inside a project" is advice the operator cannot act on
+        # without first being told that the directory they are in is gone — and
+        # an unstated cause is one they will hunt for in the registry.
+        return _Selection.undecided(_no_working_directory(projects, unreadable))
+    matched = {
+        project_id: root
+        for project_id, root in (
+            (project_id, _folder(entry.path)) for project_id, entry in projects.items()
+        )
+        if root is not None and here.is_relative_to(root)
+    }
+    if not matched:
+        return _Selection.undecided(_outside_every_project(projects, here))
+    innermost = max(len(root.parts) for root in matched.values())
+    named = sorted(
+        project_id
+        for project_id, root in matched.items()
+        if len(root.parts) == innermost
+    )
+    if len(named) == 1:
+        return _Selection.acting(named[0])
+    # Two ids at one directory. Every enclosing folder is an ancestor of the
+    # same path and therefore totally ordered by prefix, so equal depth means
+    # equal directory — a hand-edited registry, since `project add` refuses it.
+    return _Selection.undecided(_one_directory_two_ids(named, matched[named[0]]))
+
+
+def _folder(path: Path) -> Path | None:
+    """One enrolled path, normalised for comparison; `None` if it cannot be.
+
+    `resolve()` is not strict, so a registry naming a directory that has since
+    moved away still answers — it simply contains no working directory, and the
+    registry probe is what reports it as needing attention. `OSError` is a
+    symlink loop or an unreadable parent, which is "this one cannot be matched"
+    rather than a reason to stop matching the others.
+    """
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _enrolled_list(projects: Mapping[str, ProjectEntry]) -> str:
+    """Every enrolled project by id and directory, in one clause.
+
+    A refusal that says "pm-ai will not choose" and then does not say what the
+    choices are has moved the guesswork to the operator rather than resolved it
+    — and the directory is the actionable half, since every remedy here is to
+    stand in one of them.
+    """
+    return ", ".join(f"{pid} ({projects[pid].path})" for pid in sorted(projects))
+
+
+def _no_selection_is_a_fault() -> str:
+    """The clause every one of these refusals ends on, spelled once.
+
+    None of the three is a broken machine, and an operator who reads a refusal
+    and then runs `pm-ai doctor` must not find the two describing different
+    worlds — the disagreement this slice exists to end. Deliberately narrower
+    than "doctor will say this machine is healthy", which is a verdict about the
+    rest of the machine that nothing here measured.
+    """
+    return (
+        "Every one of these projects is enrolled and watched, and none of this "
+        "is a fault — `pm-ai doctor` reports it as a note and not a failure. "
+        "There is no way to name a project on the command line yet, and writing "
+        "to the wrong one is worse than not writing."
+    )
+
+
+def _outside_every_project(projects: Mapping[str, ProjectEntry], here: Path) -> str:
+    """The refusal for a command run outside every enrolled project.
+
+    **Not a probe, and that is the whole point of where it lives.** Until `4l`
+    this state was `Probe("project", FAILING, ...)`, which `doctor` appended to
+    its report and `setup` did not — so the two commands disagreed about the
+    same machine, one exiting 0 and the other 4. Nothing here is broken: every
+    project resolves, and what is missing is a decision only the operator can
+    make. A refusal is where a deliberate no belongs; a probe is where a fault
+    does.
+
+    **A registry path that cannot be resolved is named rather than dropped.**
+    `_folder` returns `None` for a symlink loop or an unreadable parent, and
+    such an entry silently matches nothing — so an operator standing inside that
+    very project would be told they were inside none, with no hint that their
+    own entry is the reason. The others still work, which is why this is a
+    sentence in the refusal rather than a failure of composition.
+    """
+    unresolvable = sorted(
+        pid for pid, entry in projects.items() if _folder(entry.path) is None
+    )
+    named = (
+        ""
+        if not unresolvable
+        else (
+            f" pm-ai could not resolve the registered directory of "
+            f"{', '.join(unresolvable)}, so that entry matched nothing here — if "
+            f"you are standing inside one of those, its path in projects.toml is "
+            f"what to fix."
+        )
+    )
+    return (
+        f"this command was run in {here}, which is inside none of the "
+        f"{len(projects)} enrolled projects, so pm-ai will not choose one for "
+        f"you: {_enrolled_list(projects)}. Run it again from inside the "
+        f"project's own directory — a sub-directory of it counts.{named} "
+        f"{_no_selection_is_a_fault()}"
+    )
+
+
+def _one_directory_two_ids(named: Sequence[str], directory: Path) -> str:
+    """The refusal for two enrolled ids sharing the directory the operator is in.
+
+    Its own sentence since the 4l review, because the general one was false
+    here: it opened "this command was not run inside any enrolled project" and
+    told an operator standing *inside* two of them to go and stand inside one.
+    The remedy is in `projects.toml`, not in the shell.
+    """
+    return (
+        f"{directory} is registered under {len(named)} project ids at once — "
+        f"{', '.join(named)} — so standing in it does not say which project "
+        f"this command is about. `pm-ai project add` refuses to create that, so "
+        f"it is a hand-edit: remove or re-point the duplicate entry in "
+        f"projects.toml. Picking between them by name would be pm-ai deciding "
+        f"which project a write belongs to, and writing to the wrong one is "
+        f"worse than not writing."
+    )
+
+
+def _no_working_directory(
+    projects: Mapping[str, ProjectEntry], unreadable: OSError
+) -> str:
+    """The refusal for a working directory that cannot be read at all.
+
+    Deleted under a running shell, or on an unmounted volume. Its own sentence
+    because the cause is invisible from the general one: an operator told to
+    "run it from inside a project" would look at `projects.toml`, where nothing
+    is wrong, rather than at the directory they are standing in.
+    """
+    return (
+        f"pm-ai could not read this process's working directory, so it cannot "
+        f"tell which project this command is about: {unreadable}. That "
+        f"directory has usually been deleted or unmounted under the shell — "
+        f"`cd` somewhere that exists, inside one of the {len(projects)} "
+        f"enrolled projects: {_enrolled_list(projects)}. "
+        f"{_no_selection_is_a_fault()}"
     )
 
 
@@ -449,16 +649,33 @@ class _Composition:
     failure: Probe | None
     config: ArtifactState
     registry: ArtifactState
+    undecided: str | None = None
+    """Why no project was selected, when nothing failed (story 4l).
+
+    Separate from `failure` because it is not one: several projects are
+    enrolled, they all resolve, and the working directory is inside none of
+    them. `_diagnose` appends `failure` to the report and must not append this —
+    `doctor` reporting a fault here is precisely how `doctor` and `setup` came
+    to disagree about a machine with nothing wrong with it.
+    """
 
 
 def _compose(keychain: KeychainPort) -> _Composition:
     """The daemon, or the one probe that explains why there isn't one.
 
     Never raises for a reason an operator can act on. The four that reach here
-    — an unreadable or unparseable registry, no project enrolled, more than one
-    enrolled, a root that will not answer, a `config.toml` that will not parse —
-    are reported rather than propagated, because the command most likely to be
-    running is the one asking what is wrong.
+    — an unreadable or unparseable registry, no project enrolled, a root that
+    will not answer, a `config.toml` that will not parse — are reported rather
+    than propagated, because the command most likely to be running is the one
+    asking what is wrong.
+
+    A fifth outcome is not a failure at all and is carried separately:
+    several projects enrolled and a working directory inside none of them. That
+    was the `len(projects) > 1` refusal until `4l`, which assembled against one
+    project and gave up on two — so the second project's work was never looked
+    at, and the state was reported as a fault. Every enrolled project is watched
+    now, and what the working directory decides is only which project the
+    *command* is about.
 
     `config.toml` is read *after* the daemon exists rather than before, because
     `StorageService` is the single reader (AD-5) and there is no other legal way
@@ -478,14 +695,29 @@ def _compose(keychain: KeychainPort) -> _Composition:
         # second probe here could, because it is holding the bytes. Returned as
         # the failure so a refusal from `dispatch` can name the same reason.
         return _Composition(None, registry_readable(registry), config, registry)
-    if len(projects) > 1:
-        return _Composition(None, _ambiguous(projects), config, registry)
-    (project_id,) = projects
+    selected = _acting_project(projects)
+    project_id = selected.project_id
+    if project_id is None:
+        # Several enrolled and nothing chose between them. No daemon, and no
+        # probe either: a command that has nowhere to act is refused, and there
+        # is nothing here for `doctor` to fix. `selected.refusal` names which of
+        # the three reasons this was.
+        return _Composition(
+            None, None, config, registry, undecided=selected.refusal
+        )
     try:
         paths = ScopePaths.production(
             projects={pid: entry.path for pid, entry in projects.items()}
         )
-        daemon = build(None, project_id, paths=paths, keychain=keychain)
+        # Every enrolled project is watched (AD-10); `project_id` is only which
+        # one this command acts in. The resolver was already handed all of them.
+        daemon = build(
+            None,
+            project_id,
+            watched=sorted(projects),
+            paths=paths,
+            keychain=keychain,
+        )
     except ScopeResolutionError as unresolvable:
         return _Composition(
             None,
@@ -549,11 +781,56 @@ def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
     config the loader refuses. Printing either one twice would make an operator
     look for two problems, and reconciling the two copies by hand is how they
     start to disagree.
+
+    Since the `4l` review the report also carries `_selection_probe`, which says
+    which project *this invocation* binds to. Without it `doctor` reported a
+    healthy machine on which the very next command would refuse, and the
+    operator had nothing on the page connecting the two.
     """
     report = run_all(keychain, config=composed.config, registry=composed.registry)
-    if composed.failure is None or composed.failure.name in {p.name for p in report.probes}:
-        return report
-    return Report((*report.probes, composed.failure))
+    probes = report.probes
+    selection = _selection_probe(composed)
+    if selection is not None:
+        probes = (*probes, selection)
+    if composed.failure is None or composed.failure.name in {p.name for p in probes}:
+        return Report(probes)
+    return Report((*probes, composed.failure))
+
+
+SELECTION_PROBE = "project selection"
+"""The probe naming which project this invocation acts in (story 4l)."""
+
+
+def _selection_probe(composed: _Composition) -> Probe | None:
+    """Which project this command bound to, or that the directory chose none.
+
+    **Always `OK`, in both states, and that is deliberate rather than lenient.**
+    `Report.healthy` is "every probe is `OK`", so any other value would make the
+    working directory decide `doctor`'s exit code — and since `setup` reports
+    through `run_all` alone, the two commands would disagree again for a new
+    reason. Ambiguity is a refusal, not a fault; this line exists so the
+    operator can *see* the refusal coming, not to grade the machine.
+
+    `None` when no project is enrolled at all: the registry probe already says
+    so, and a second line about selecting between nothing is noise on the one
+    machine where the report is most read.
+    """
+    if composed.daemon is not None:
+        project_id = composed.daemon.scope.project_id
+        return Probe(
+            SELECTION_PROBE,
+            Health.OK,
+            f"this command acts in {project_id}, chosen by the working directory",
+            "",
+        )
+    if composed.undecided is None:
+        return None
+    return Probe(
+        SELECTION_PROBE,
+        Health.OK,
+        "no project is selected here, so every command but this one is refused",
+        composed.undecided,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - the console script is the surface

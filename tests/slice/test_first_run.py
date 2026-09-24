@@ -326,6 +326,49 @@ def test_a_new_project_id_on_a_second_run_joins_the_registry_additively(
     assert config_path(home).read_bytes() == config_before
 
 
+def test_setup_and_doctor_agree_on_a_machine_with_two_projects(
+    home, tmp_path, keychain, operator, installed, capsys
+):
+    """Story 4l — the disagreement that revealed the bug, asserted from both sides.
+
+    Measured on 2026-09-24: with two projects registered, `setup` reported
+    healthy and exited 0 while `doctor` reported `FAILING` and exited 4, because
+    `setup` calls `run_all()` and `doctor` calls `_diagnose()`, which appended
+    the composition failure — and composition failed for no reason other than a
+    second project being enrolled.
+
+    Both commands are run, rather than one being run and the other reasoned
+    about. The exit codes are compared *and* both are pinned to `EXIT_OK`: two
+    commands that agree on 4 would satisfy a comparison alone, which is the
+    weaker claim and not the one this row makes.
+
+    The working directory is this repository, which is enrolled as neither
+    project — so this is also the machine where no command can act, and it is
+    still not a machine with anything wrong with it.
+    """
+    operator.script(*answers_for(tmp_path / "alpha"))
+    assert setup() == EXIT_OK
+    operator.script(str(tmp_path / "beta"), "")
+    assert setup() == EXIT_OK
+    assert set(registry_of(home)) == {"alpha", "beta"}
+    capsys.readouterr()
+
+    operator.script(str(tmp_path / "alpha"), "")
+    from_setup = setup()
+    setup_said = capsys.readouterr().out
+
+    from_doctor = entry.main(["doctor"])
+    doctor_said = capsys.readouterr().out
+
+    assert from_setup == from_doctor == EXIT_OK
+    for said in (setup_said, doctor_said):
+        assert "NOT healthy" not in said
+        assert Health.FAILING.value not in said
+    # And the second project is not mentioned as a problem by either of them.
+    assert "no way to choose" not in setup_said + doctor_said
+    assert "2 project(s) enrolled: alpha, beta" in doctor_said
+
+
 # ── Refusals ─────────────────────────────────────────────────────────────────
 
 

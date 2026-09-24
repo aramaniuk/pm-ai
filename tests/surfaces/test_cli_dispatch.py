@@ -280,17 +280,25 @@ def test_doctor_survives_an_unregistered_machine(probes, capsys):
     assert "no project is enrolled" in printed
 
 
-def test_two_registered_projects_are_reported_rather_than_guessed_between(
+def test_two_registered_projects_are_not_a_fault_of_any_kind(
     tmp_path, monkeypatch, probes, capsys
 ):
-    """Choosing between enrolled projects belongs to the slice that owns the registry.
+    """`doctor` on a two-project machine reports nothing wrong, because nothing is.
 
-    The *message* became this slice's business on 2026-09-15. Until `4d` filled
-    the registry this path was unreachable, and it reported ambiguity as "the
-    enrolled project cannot be resolved to a directory", remedy "Re-enrol the
-    repository" — wrong in every word for an operator whose two projects both
-    resolve. Asserted against the old wording as well as the new, because the
-    old one was *plausible* and that is what let it sit there.
+    Three wordings have stood here and the first two were both *plausible*,
+    which is what let each of them sit. Before `4d` this reported "the enrolled
+    project cannot be resolved to a directory", remedy "Re-enrol the repository"
+    — wrong in every word for an operator whose two projects both resolve. `4d`
+    replaced it with "pm-ai has no way to choose between them yet", which was
+    true of the code and false of the architecture: AD-10 watches every
+    registered project and AD-11 had already chosen the working directory.
+    Since `4l` both projects are watched and there is no probe here at all, so
+    every one of those sentences is asserted absent.
+
+    The working directory is this repository, which is neither of them — so a
+    *command* still has nothing to act in, and that is a refusal at dispatch
+    rather than a fault in a report. `tests/slice/test_every_enrolled_project.py`
+    holds that row.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
@@ -298,10 +306,10 @@ def test_two_registered_projects_are_reported_rather_than_guessed_between(
         "_bootstrap",
         enrolled(alpha=tmp_path / "a", beta=tmp_path / "b"),
     )
-    assert entry.main(["doctor"]) == EXIT_UNHEALTHY
+    assert entry.main(["doctor"]) == EXIT_OK
     printed = capsys.readouterr().out
-    assert "2 projects are registered" in printed
-    assert "alpha" in printed and "beta" in printed
+    assert "pm-ai is healthy." in printed
+    assert "no way to choose" not in printed
     assert "cannot be resolved" not in printed
     assert "Re-enrol" not in printed
 
