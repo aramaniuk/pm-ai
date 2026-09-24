@@ -401,8 +401,12 @@ class GitLabConnectorAdapter:
 
         Three things are only ever derived from pages that came back:
 
-        - the coverage window exists at all (rows arrived, and at least one of
-          them can be placed in time);
+        - the coverage window exists at all (a page came back, and either it
+          held nothing at all or at least one of its rows can be placed in
+          time). The empty half is `8i`'s repair: a provider answering "nothing
+          here" is a check that happened, and refusing it a window left a quiet
+          project permanently uncovered — the one place a broken promise is
+          most likely and the one place it could never be reported;
         - its `start` is this connector's clock at the instant the first page
           returned, and its `end` the clock when fetching stopped — never
           `now() - some_interval`, which is what the deleted four-hour window
@@ -602,13 +606,38 @@ class GitLabConnectorAdapter:
                 kept.append(row)
         events = tuple(mapped)
 
+        # Decided before the window, because the window now reads it. `EMPTY` is
+        # "a page came back, nothing in it needed mapping, and nothing went
+        # wrong" — a check that was performed, and `8i` exists because it
+        # recorded none: a quiet project accumulated no coverage, AD-35's
+        # fail-closed reading was never armed over it, and a promise nobody kept
+        # there could never be reported broken. Both bounds were already
+        # measured; only the claim was missing.
+        #
+        # `HarvestOutcome.of` rather than three branches here and three more in
+        # `graph`, because this condition now has two consumers instead of one
+        # and the two connectors had spelled it differently. The `failed` half is
+        # not decoration: page one can come back empty and page two fail, and
+        # that run did *not* complete — coverage over it is refused by
+        # `HarvestResult.__post_init__`, out of a method whose contract is that
+        # it reports rather than raises.
+        outcome = HarvestOutcome.of(
+            mapped=bool(events), refused=bool(refusals), failed=failure is not None
+        )
+
         coverage: CoverageWindow | None = None
-        # `events`, not `rows`: a page whose every row was refused reached the
-        # provider but yielded nothing readable, and coverage over it would let
-        # a mapping defect read as a kept-or-broken promise. See
-        # `HarvestResult.__post_init__`, which refuses that combination.
+        # Rows that arrived must be placed in time; rows that never arrived need
+        # not be. A page whose every row was refused reached the provider and
+        # yielded nothing readable, and coverage over it would let a mapping
+        # defect read as a kept-or-broken promise — so the predicate reads
+        # `kept`, and `_bounded_by_a_credible_clock([])` is `False`. That `False`
+        # is exactly what used to speak for the empty case too, which is how a
+        # check that found nothing lost its proof of having looked.
         if (
-            events
+            (
+                outcome is HarvestOutcome.EMPTY
+                or self._bounded_by_a_credible_clock(kept, now=finished_at)
+            )
             and reached_at is not None
             # This machine's clock, not the provider's: an NTP correction or a
             # laptop waking mid-harvest steps it backwards, and the pair would
@@ -617,7 +646,6 @@ class GitLabConnectorAdapter:
             # coverage claimed instead: the fetch happened and there is no
             # honest interval to say it happened in.
             and finished_at >= reached_at
-            and self._bounded_by_a_credible_clock(kept, now=finished_at)
         ):
             coverage = CoverageWindow(
                 # Keyed on `instance`, which is what `save_cursor` stores the
@@ -627,17 +655,11 @@ class GitLabConnectorAdapter:
                 end=finished_at,
             )
 
-        if failure is not None:
-            outcome = HarvestOutcome.FAILED
-        elif events or refusals:
-            # Refusals count as having harvested: rows arrived. A page whose
-            # every row was refused and a provider with nothing in it both
-            # produce no events, and `refusals` is what tells them apart —
-            # which is also why `__post_init__` refuses EMPTY beside a refusal.
-            outcome = HarvestOutcome.HARVESTED
-        else:
-            outcome = HarvestOutcome.EMPTY
-
+        # Refusals count as having harvested: rows arrived. A page whose every
+        # row was refused and a provider with nothing in it both produce no
+        # events, and `refusals` is what tells them apart — which is also why
+        # `__post_init__` refuses EMPTY beside a refusal, and why `EMPTY` above
+        # is safe to read as "the provider answered and there was nothing here".
         return HarvestResult(
             events=events,
             # `since` itself when nothing was walked, so "the cursor did not

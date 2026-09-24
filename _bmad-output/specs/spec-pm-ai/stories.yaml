@@ -359,6 +359,16 @@
     phrasings from a corpus, the chat-template markers that turned out to be
     vocabulary rather than carriers, and a local classification model, which the
     human named as the next step for this feature once models/ exists.
+    ADDED 2026-09-24 as 8i, after the architecture re-run traced a defect the
+    spine had just been amended to describe. pm-ai only records that it checked
+    a provider when the check found something, so on a quiet project it has no
+    proof it ever looked - and "this promise was broken" is unreachable while
+    "kept" stays reachable. It can only ever deliver good news. The earlier fix
+    that caused this required rows as proof of having checked; rows are a stand
+    in, and the two come apart exactly when the provider answers "nothing here",
+    which is the ordinary case on a quiet project. 8i records the check whenever
+    it happened. Nothing reads these records yet - that is story 16 - so this
+    makes its input honest before it is built on.
 - id: "9"
   title: Passive telemetry radar
   spec_checkpoint: true

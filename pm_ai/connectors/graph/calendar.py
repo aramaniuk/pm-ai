@@ -64,7 +64,11 @@ from zoneinfo import ZoneInfo
 from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable
 from pm_ai.connectors.graph.client import GraphCallFailed, GraphClient
 from pm_ai.domain.clocks import ImplausibleTimestamp, validate_occurred_at
-from pm_ai.domain.harvest import UNCLASSIFIED_FAULT_IS_RETRYABLE, HarvestFailure
+from pm_ai.domain.harvest import (
+    UNCLASSIFIED_FAULT_IS_RETRYABLE,
+    HarvestFailure,
+    HarvestOutcome,
+)
 from pm_ai.domain.lifecycle import CoverageWindow
 
 __all__ = [
@@ -761,10 +765,15 @@ class CalendarFetch:
     coverage: CoverageWindow | None = None
     """This machine's clock across the fetch, or `None` when nothing was earned.
 
-    `None` for a window that came back empty: coverage is evidence a fetch
-    reached something, and a window over a fetch that returned no rows is a
-    claim tied to the clock and to nothing else (`harvest.py:144-150` refuses
-    exactly that pairing).
+    Set for a window that came back empty, as of `8i`: a calendar that answered
+    "nothing in that range" was really asked, and the bounds are this machine's
+    clock either side of the request rather than anything a row said. Withholding
+    it meant a quiet calendar recorded no coverage at all, which is the one state
+    AD-35's fail-closed reading can never be armed over.
+
+    `None` when the walk did not complete — a failure, or a page whose body could
+    not be read, both of which file evidence of their own that somebody must
+    look.
 
     `None` too when rows came back and not one of them could be placed in time
     — `8a`'s second matrix row, which this connector used to ignore. Something
@@ -818,11 +827,13 @@ class GraphCalendarFetch:
 
         Three things are derived only from what came back:
 
-        - **coverage exists at all** when rows arrived *and at least one of them
-          can be placed in time* — the same rule `gitlab.py`'s
-          `_bounded_by_a_credible_clock` applies, because both connectors write
-          the same `CoverageWindow | None` slot and `8a`'s matrix answers the
-          question once for both: rows with no usable clock claim no coverage.
+        - **coverage exists at all** when the walk completed and either nothing
+          came back at all or at least one row that did can be placed in time —
+          the same rule `gitlab.py`'s `_bounded_by_a_credible_clock` applies,
+          because both connectors write the same `CoverageWindow | None` slot
+          and the matrix answers the question once for both: rows with no usable
+          clock claim no coverage (`8a`), and a calendar that answered with
+          nothing claims its window (`8i`).
           The requested range decides *whether* it was earned; its bounds are
           this machine's clock from the instant the first page returned to the
           instant the walk stopped.
@@ -921,6 +932,27 @@ class GraphCalendarFetch:
                 walked_through = span.end
 
         finished = self.now()
+        # The calendar answered and held nothing, and nothing went wrong — an
+        # ordinary quiet week. `8i`: that is a check that was performed, and the
+        # bounds for it are already in hand, so withholding the window left a
+        # quiet calendar accumulating no coverage and AD-35's fail-closed
+        # reading never armed over it.
+        #
+        # Asked of `HarvestOutcome` although a `CalendarFetch` has no outcome of
+        # its own, and that is the point: this is the same condition GitLab
+        # applies, and the two connectors fill the same `CoverageWindow | None`
+        # slot. Spelled locally, the two drifted — `not rows and failure is
+        # None` there against `not rows and not refusals and failure is None`
+        # here, which agree only by accident of GitLab's refusals being a subset
+        # of its rows. `refused` is not redundant on this side: a 200 with no
+        # `value` array files a refusal and *no* row, and `_read` already says
+        # such a page "is not counted as evidence of an empty calendar".
+        answered_with_nothing = (
+            HarvestOutcome.of(
+                mapped=bool(rows), refused=bool(refusals), failed=failure is not None
+            )
+            is HarvestOutcome.EMPTY
+        )
         coverage = (
             CoverageWindow(connector_instance=self.instance, start=reached_at, end=finished)
             # `finished >= reached_at` is the third condition, and it is about
@@ -933,7 +965,10 @@ class GraphCalendarFetch:
             # and there is no honest interval to say it happened in.
             if reached_at is not None
             and finished >= reached_at
-            and _any_credible_clock(rows)
+            # Asked of rows only when there are rows. `_any_credible_clock(())`
+            # is `False`, and letting it answer for a fetch that returned none
+            # is how a completed check lost its proof of having happened.
+            and (answered_with_nothing or _any_credible_clock(rows))
             else None
         )
         return CalendarFetch(

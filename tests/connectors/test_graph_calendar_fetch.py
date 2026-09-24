@@ -334,19 +334,26 @@ def test_every_page_is_followed_and_one_coverage_window_spans_all_of_them():
 # ── Empty window ─────────────────────────────────────────────────────────────
 
 
-def test_an_empty_window_claims_no_coverage():
-    """Matrix + acceptance: ran and learned nothing, and says so.
+def test_an_empty_window_is_a_check_that_happened_and_is_recorded():
+    """Matrix + acceptance: ran, learned nothing, and says it ran.
 
-    `harvest.py:144-150` refuses coverage on a harvest with no rows outright,
-    so a fetch that claimed one here could not be turned into a `HarvestResult`
-    at all — but the reason it must not is AD-35's: a window over an empty
-    answer is a claim tied to the clock and to nothing else.
+    Inverted by `8i`. `pages == 1` was always the giveaway: the provider *did*
+    answer, and the two bounds are this machine's clock either side of the
+    request — nothing here was ever lifted off a row, so there was never a row
+    to require. Withholding the window meant a quiet calendar recorded no
+    coverage at all, and AD-35's fail-closed reading, which is what makes a
+    broken promise reportable, could never arm over it.
     """
-    fetch, _, _, _, _ = _fetcher(_page())
+    fetch, _, clock, _, _ = _fetcher(_page())
     result = fetch.fetch()
 
     assert result.rows == ()
-    assert result.coverage is None
+    assert result.coverage is not None, "an empty answer is still an answer"
+    assert result.coverage.start == BASE + TICK, "the instant the one page came back"
+    assert result.coverage.end == BASE + TICK == clock.at, (
+        "and the instant the walk stopped — one reading either side of a request "
+        "that took no longer, never an interval computed from the clock"
+    )
     assert result.failure is None
     assert result.pages == 1, "the provider did answer — that is not the same as no attempt"
     assert result.walked_through == result.window.end
@@ -1279,7 +1286,12 @@ def test_a_page_with_no_value_array_is_recorded_rather_than_silently_empty():
         "makes the unreadable page evidence of an empty calendar for good"
     )
     assert result.walked_through is None, "nothing was walked to completion"
-    assert result.coverage is None, "and no row arrived, so nothing was covered"
+    assert result.coverage is None, (
+        "and the refusal is why. Since 8i, a page that arrives holding nothing "
+        "earns its window — so 'no row arrived' cannot be the reason here. This "
+        "page was not read at all, and pm-ai's own failure to read a page is "
+        "never evidence that a calendar was empty"
+    )
 
 
 def test_a_span_pm_ai_could_not_read_holds_the_cursor_back_past_later_spans_too():
