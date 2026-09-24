@@ -378,6 +378,33 @@ class Context:
     the offending key.
     """
 
+    undecided: str | None = None
+    """Why no project was selected, on a machine where nothing is wrong.
+
+    Several projects are enrolled and the working directory is inside none of
+    them, so pm-ai declined to choose (story 4l). Distinct from `unavailable`
+    because the two refusals need different sentences: that one sends the
+    operator to `pm-ai doctor`, and here `doctor` will correctly report a
+    healthy machine. Passed through verbatim — the composition root is the layer
+    that knows the projects, and this layer may not import the registry.
+    """
+
+    def require_selection(self) -> None:
+        """Refuse when no project was selected; do nothing when one was.
+
+        Separate from `require_daemon` because one command needs this check and
+        *not* that one: `connector check` is deliberately independent of the
+        daemon, since an empty registry is an ordinary first run — but the
+        registry is populated by composition, so on an undecided machine it read
+        an empty registry and reported a first run. An answer about the machine
+        where a refusal was intended.
+        """
+        if self.undecided:
+            # Raised whole rather than wrapped: it already says what is enrolled
+            # and what to do, and prefixing "pm-ai could not build a daemon"
+            # would report a deliberate no as a broken machine.
+            raise Refusal(self.undecided)
+
     def require_daemon(self) -> DaemonPort:
         """The daemon, or a refusal naming what is missing.
 
@@ -386,6 +413,8 @@ class Context:
         on. `doctor` is the command that works regardless, and it does not call
         this.
         """
+        # First, because it is the one case where there is nothing to diagnose.
+        self.require_selection()
         if self.daemon is None:
             # The reason goes last and unedited. It is the composition root's
             # sentence — for a refused `config.toml`, the loader's own — and
@@ -650,7 +679,15 @@ def _connector_check(context: Context) -> int:
     *is* registered and answers `ABSENT` is a different state and exits `4`:
     setup is incomplete, harvests are being skipped, and `Health.ABSENT` is
     expressly not a pass.
+
+    **The undecided machine is refused before any of that**, since the `4l`
+    review. This handler is deliberately independent of the daemon — an empty
+    registry is a first run — but `build()` is what populates the registry, so
+    on a machine where no project was selected the "nothing is registered"
+    sentence above is not a first run at all: it is this command answering a
+    question about the machine when the honest answer was a refusal.
     """
+    context.require_selection()
     report = context.probe_connectors()
     if not report.probes:
         print(
@@ -1304,6 +1341,7 @@ def dispatch(
     first_run: FirstRun | None = None,
     goals: GoalBook | None = None,
     unavailable: str | None = None,
+    undecided: str | None = None,
 ) -> int:
     """Run what `argv` names, and return the exit code the table gives it.
 
@@ -1327,6 +1365,7 @@ def dispatch(
         first_run=first_run,
         goals=goals,
         unavailable=unavailable,
+        undecided=undecided,
     )
     if not argv:
         # A bare `pm-ai` will open a REPL (CAP-18) and that is `4e`. Until then

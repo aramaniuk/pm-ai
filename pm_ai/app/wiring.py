@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +105,15 @@ class Daemon:
     # each meeting itself declares.
     meetings: MeetingRecords
     scope: DataScope
+    """The project **this command is about** — not the set the daemon watches.
+
+    One value used to answer both questions, and that is what made a second
+    enrolled project a composition failure (story 4l). They are different
+    questions with different answers: every enrolled project is watched (AD-10),
+    while a command acts in exactly one of them — the project whose directory
+    contains the working directory (AD-11). `watched` below carries the other
+    half, so neither has to be re-derived from the other.
+    """
     # Custody of the master key, held rather than reconstructed. `pm_ai.surfaces`
     # may not import `keyring` (`.importlinter`'s `os-behind-platform`), so a CLI
     # asked to enrol a key has no legal way to build an adapter — it has to be
@@ -112,6 +121,21 @@ class Daemon:
     # `config` because that field carries a default: a non-default field after a
     # defaulted one raises `TypeError` at class creation.
     keychain: KeychainPort
+    watched: tuple[str, ...]
+    """Every project this daemon watches, `scope`'s project among them (AD-10).
+
+    Held rather than re-derived from `connectors`, because a connector instance
+    is named after what it covers and not every connector family is keyed by
+    project — deriving the set back out of the keys would be reading a decision
+    out of a string.
+
+    **Required, and `__post_init__` enforces the invariant the sentence above
+    states.** It carried a `()` default until the `4l` review, which let a
+    direct construction produce a daemon acting in a project it did not
+    watch — the exact pair of values this field exists to keep consistent — and
+    a `tuple` annotation rather than `Sequence` so a bare `"alpha"` cannot be
+    accepted as five single-character projects.
+    """
     # The clock the whole daemon was built with, held rather than re-read. A
     # pipeline that needs an instant — `23b`'s render takes one — would otherwise
     # compose a second `datetime.now()` in whatever layer happened to call it,
@@ -125,6 +149,31 @@ class Daemon:
     # Every setting `config.toml` carries, held once. Defaults when the caller
     # supplied none, which is a first run rather than an error.
     config: Config = field(default_factory=Config)
+
+    def __post_init__(self) -> None:
+        """Refuse a daemon whose acting project is not one it watches.
+
+        Two fields that must agree, checked where they are set rather than
+        where they are read: a `scope` outside `watched` writes into a project
+        whose telemetry nothing collects, and that is invisible until somebody
+        goes looking for a harvest that never ran. A bare string is refused by
+        name because `"alpha"` is a perfectly good `Sequence[str]` of five
+        one-character ids, which would pass every later check.
+        """
+        if isinstance(self.watched, str):
+            raise TypeError(
+                f"Daemon.watched is every project this daemon watches, not one "
+                f"project's name: {self.watched!r} is a string, and a string of "
+                f"ids is a sequence of its characters. Pass a tuple, e.g. "
+                f"({self.watched!r},)."
+            )
+        if self.scope.kind is ScopeKind.PROJECT and self.scope.project_id not in self.watched:
+            raise ValueError(
+                f"this daemon acts in {self.scope.project_id!r} and watches "
+                f"{sorted(self.watched)}, which does not include it. A command "
+                f"acting in a project nothing watches writes where no harvest "
+                f"ever runs."
+            )
 
     @property
     def pm_handle(self) -> str:
@@ -143,6 +192,7 @@ def build(
     root: Path | None,
     project: str,
     *,
+    watched: Sequence[str] | None = None,
     paths: ScopePaths | None = None,
     now: Callable[[], datetime] | None = None,
     vcs: VcsPort | None = None,
@@ -155,6 +205,26 @@ def build(
     This is the one module that may import both `pm_ai.storage` and
     `pm_ai.platform` — they are independent siblings everywhere else — so the
     path resolver is built here and handed to the single writer.
+
+    ## `project` and `watched` answer two different questions
+
+    `project` is the project **this command is about**: it becomes
+    `Daemon.scope`, which is where a command writes and what AD-38's citation
+    guard reads. `watched` is **every project pm-ai watches** — AD-10 gives each
+    registered project independently-scheduled harvesting, so a connector
+    instance is constructed for each, with its own scope and therefore its own
+    cursor.
+
+    Until story 4l one argument answered both, and the consequence was not a
+    narrow one: `entry._compose` refused to assemble at all when a second
+    project was enrolled, and reported that refusal as a `FAILING` probe — a
+    machine in the arrangement the architecture describes, told it was broken.
+
+    `watched` defaults to `(project,)`, which is exactly the daemon this
+    function built before the argument existed. It is a `Sequence` rather than a
+    set because a caller has a registry in hand, not a set; duplicates and order
+    are normalised here so two callers cannot produce two different daemons from
+    the same registry.
 
     Exactly one of `root` and `paths`:
 
@@ -204,11 +274,15 @@ def build(
         )
     clock = now or (lambda: datetime.now(timezone.utc))
     scope = DataScope(ScopeKind.PROJECT, project)
-    # Eagerly, because every refusal below is about this scope and nothing else
-    # resolves it until the first Tier-1 write: an id that cannot be a directory
-    # name, or a project no registry knows, would otherwise surface mid-harvest
-    # with a batch already in hand.
-    resolver.scope_root(scope)
+    spans = _watched(project, watched)
+    # Eagerly, because nothing else resolves these until the first Tier-1 write:
+    # an id that cannot be a directory name, or a project no registry knows,
+    # would otherwise surface mid-harvest with a batch already in hand. Every
+    # watched project and not only the acting one, since 4l — a connector is
+    # constructed for each below, and a resolver that will not answer for one of
+    # them is a fact to meet here rather than on its first harvest.
+    for watched_scope in spans.values():
+        resolver.scope_root(watched_scope)
     # The cipher is chosen before storage, because storage performs every
     # encrypted read and write and therefore holds it. The *announcement* of a
     # disabled cipher needs storage, so it happens after — splitting the two is
@@ -229,9 +303,23 @@ def build(
         _announce_disabled_encryption(storage)
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
-    connectors: dict[str, ConnectorPort] = {
-        f"gitlab:{project}": GitLabConnectorAdapter(project=project, scope=scope, now=clock)
-    }
+    # One built-in per **watched** project, each bound to its own scope. AD-10
+    # gives every registered project independently-scheduled harvesting, and the
+    # instance name is what `save_cursor` keys on — so a per-project instance is
+    # also what keeps each project's place in the queue its own, rather than one
+    # cursor advancing for whichever project happened to be asked.
+    #
+    # Keyed by `adapter.instance` rather than by an f-string spelled here: the
+    # adapter already owns the `gitlab:<project>` form, and a second copy of it
+    # is what makes a registry key, a coverage window and a probe row drift.
+    connectors: dict[str, ConnectorPort] = {}
+    builtin_scopes: dict[str, DataScope] = {}
+    for watched_id, watched_scope in spans.items():
+        builtin = GitLabConnectorAdapter(
+            project=watched_id, scope=watched_scope, now=clock
+        )
+        connectors[builtin.instance] = builtin
+        builtin_scopes[builtin.instance] = watched_scope
     # The daemon holds the instances; `pm_ai.connectors.registry` enumerates
     # them. Two structures rather than one because the architecture gates and
     # `pm-ai connector check` have to ask "for every connector, ..." from
@@ -254,7 +342,11 @@ def build(
     # connector the operator had just enrolled went on reporting ABSENT and the
     # remedy printed was the one they had already followed.
     for instance, enrolled in _enrolled_connectors(
-        storage, scope=scope, clock=clock, registered=_registrar(resolver)
+        storage,
+        scope=scope,
+        scopes=builtin_scopes,
+        clock=clock,
+        registered=_registrar(resolver),
     ):
         connectors[instance] = enrolled
     enumerable = ConnectorRegistry()
@@ -272,11 +364,45 @@ def build(
         meetings=MeetingRecords(storage),
         scope=scope,
         keychain=custody,
+        watched=tuple(spans),
         # The same callable the single writer stamps from, so nothing downstream
         # has to build a second one.
         clock=clock,
         config=config if config is not None else Config(),
     )
+
+
+def _watched(
+    project: str, watched: Sequence[str] | None
+) -> dict[str, DataScope]:
+    """Every project this daemon watches, as ids mapped to their scopes.
+
+    Sorted and de-duplicated, so the same registry always produces the same
+    daemon: the connector dict's iteration order reaches `pm-ai connector check`
+    and the dashboard's merge order, and a set would have made both depend on
+    hash ordering.
+
+    **The acting project is always among them**, whatever the caller passed. A
+    daemon that acted in a project it did not watch would write into a scope
+    whose telemetry nothing collects, and the caller with the registry in hand
+    is not always the caller that chose the working directory.
+
+    `None` means "just this one", which is the daemon `build()` produced before
+    the argument existed. A bare **string** is refused rather than accepted:
+    `watched="alpha"` is a valid `Sequence[str]` whose elements are five
+    one-character project ids, and every check downstream would pass.
+    """
+    if isinstance(watched, str):
+        raise TypeError(
+            f"build(watched=...) is every project to watch, not one project's "
+            f"name: {watched!r} is a string, and a string of ids is a sequence "
+            f"of its characters. Pass a tuple, e.g. ({watched!r},)."
+        )
+    ids = (project,) if watched is None else (project, *watched)
+    return {
+        project_id: DataScope(ScopeKind.PROJECT, project_id)
+        for project_id in sorted(set(ids))
+    }
 
 
 def _choose_crypto(keychain: KeychainPort, *, encryption_disabled: bool) -> CryptoPort:
@@ -376,6 +502,7 @@ def _enrolled_connectors(
     storage: StorageService,
     *,
     scope: DataScope,
+    scopes: Mapping[str, DataScope],
     clock: Callable[[], datetime],
     registered: Callable[[str], bool],
 ) -> tuple[tuple[str, ConnectorPort], ...]:
@@ -411,6 +538,16 @@ def _enrolled_connectors(
     A sealed-store read is not a resource fetch, which is what keeps this inside
     `33a`'s boundaries: no provider is contacted here, and the adapter is handed
     a string.
+
+    **`scopes` is which scope an enrolled row writes into.** An enrolment keyed
+    `gitlab:<project>` is the ordinary case rather than a corner — `gitlab.py`'s
+    own remediation tells the operator to type exactly that name — so it
+    replaces the built-in for that project and must inherit the project's scope,
+    not the acting command's. Without it, a credentialled connector enrolled for
+    `beta` would file `beta`'s commits into whichever project the operator
+    happened to be standing in. `_enrolment_scope` decides, and a row it cannot
+    place on a multi-project machine is **skipped and said out loud** rather
+    than defaulted.
     """
     # Fetched on first need, not up front. Opening the sealed store costs a
     # master-key fetch from the keychain, and a machine with no connectors
@@ -467,18 +604,81 @@ def _enrolled_connectors(
         if credentials is None:
             credentials = _stored_credentials(storage)
         held = _credential_for(credentials.get(instance), system=system)
+        filed = _enrolment_scope(instance, scopes=scopes, acting=scope)
+        if filed is None:
+            continue
         try:
             built.append(
                 (
                     instance,
                     GitLabConnectorAdapter(
-                        project=project, scope=scope, now=clock, credential=held
+                        project=project,
+                        scope=filed,
+                        now=clock,
+                        credential=held,
                     ),
                 )
             )
         except Exception:
             continue
     return tuple(built)
+
+
+def _enrolment_scope(
+    instance: str, *, scopes: Mapping[str, DataScope], acting: DataScope
+) -> DataScope | None:
+    """Which project's tree one enrolled connector files into, or `None` to skip it.
+
+    Three answers, and the third is the one the `4l` review asked for:
+
+    - **The row replaces a built-in.** `scopes` is keyed by built-in instance
+      name (`gitlab:<enrolled-id>`), and the enrolment that collides with one is
+      the documented ordinary case, so it inherits that project's scope.
+    - **Exactly one project is watched.** There is nothing to be ambiguous
+      *between*, and the acting scope is that project's — so a row named
+      anything at all (`gitlab:acme/web`, a provider path rather than a pm-ai
+      id) files where it always did. Single-project machines are every machine
+      that exists today, and skipping their connectors would be this slice
+      breaking them to close a leak they cannot have.
+    - **Neither.** Several projects are watched and the row's name matches no
+      enrolled id — a renamed project, a removed one, or a provider-shaped
+      instance. Defaulting to the acting command's scope is precisely the leak
+      `scopes` exists to close, only reached by a different route: the row would
+      file into whichever project the operator happened to be standing in, and
+      differently on the next invocation. Refused, and said out loud, because a
+      connector that silently vanishes is indistinguishable from one that was
+      never enrolled.
+
+    The row's own `project` key is deliberately **not** consulted: for GitLab it
+    holds the *provider's* path (`group/project`), not a pm-ai project id, and
+    reading a pm-ai id out of it is the same mistake in a new place.
+    """
+    placed = scopes.get(instance)
+    if placed is not None:
+        return placed
+    if len(scopes) <= 1:
+        return acting
+    _unplaced(
+        instance,
+        f"it is not one of the enrolled projects' connectors "
+        f"({', '.join(sorted(scopes))}), and this machine watches "
+        f"{len(scopes)} projects — so nothing says which project's tree its "
+        f"harvest belongs in. Re-enrol it under the instance name of the "
+        f"project it covers, or remove the row.",
+    )
+    return None
+
+
+def _unplaced(instance: str, reason: str) -> None:
+    """Say why an enrolled connector was not built, for `_unbuilt`'s reason.
+
+    stderr and nothing else: the daemon has not composed yet, so there is no
+    event log to write into.
+    """
+    print(
+        f"WARNING: the enrolled connector {instance!r} was not built — {reason}",
+        file=sys.stderr,
+    )
 
 
 def _graph_connector(
