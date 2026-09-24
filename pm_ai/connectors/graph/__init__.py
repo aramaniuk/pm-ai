@@ -737,12 +737,9 @@ class GraphConnector:
                 live.append(meeting)
 
         mapped = bool(events or records or live)
-        if fetched.failure is not None:
-            outcome = HarvestOutcome.FAILED
-        elif mapped or refusals:
-            outcome = HarvestOutcome.HARVESTED
-        else:
-            outcome = HarvestOutcome.EMPTY
+        outcome = HarvestOutcome.of(
+            mapped=mapped, refused=bool(refusals), failed=fetched.failure is not None
+        )
 
         return HarvestResult(
             events=tuple(events),
@@ -752,7 +749,17 @@ class GraphConnector:
                 else since
             ),
             outcome=outcome,
-            coverage=fetched.coverage if mapped else None,
+            # Two ways a window is earned, and they are the two `HarvestResult`
+            # admits: something was mapped, or the fetch completed and the
+            # calendar held nothing for us — `8i`, without which a quiet
+            # calendar recorded no coverage ever and no promise against it could
+            # be reported broken. Spelled against `outcome`, which is
+            # `HarvestOutcome.of`'s answer here, in `gitlab.harvest` and in
+            # `GraphCalendarFetch.fetch`, so the three cannot drift: a FAILED
+            # walk whose every row we filtered out keeps claiming nothing.
+            coverage=(
+                fetched.coverage if mapped or outcome is HarvestOutcome.EMPTY else None
+            ),
             failure=fetched.failure,
             refusals=tuple(refusals),
             records=tuple(records),

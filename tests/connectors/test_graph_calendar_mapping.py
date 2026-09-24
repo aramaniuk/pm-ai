@@ -64,6 +64,7 @@ from pm_ai.domain.events import ObservedEventType, Provenance
 from pm_ai.domain.harvest import Cursor, HarvestOutcome
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import UNRESOLVED_ACTOR, DataScope, ScopeKind
+from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import ConnectorPort
@@ -328,9 +329,20 @@ def test_a_cancelled_upcoming_row_is_neither_returned_nor_written():
     assert result.records == () and result.live == () and result.events == ()
     assert result.outcome is HarvestOutcome.EMPTY, (
         "nothing was mapped and nothing was refused, so this run learned no "
-        "meeting — and EMPTY is what withholds the coverage claim below."
+        "meeting."
     )
-    assert result.coverage is None
+    # And it still earned its window (`8i`). The row came back, was read, and was
+    # suppressed on purpose — which is not one of the three things that count as
+    # not having checked: the fetch did not fail, the row's clock was readable,
+    # and nothing was refused. A calendar holding only cancelled meetings is a
+    # calendar pm-ai looked at.
+    #
+    # Both bounds named against this file's frozen clock, because `is not None`
+    # is satisfied by a fabricated window too — which is the whole defect 8a was
+    # written over, and the reason its rows name instants rather than assert
+    # presence. The fetch begins and ends inside one reading here, so the honest
+    # window is the instant `NOW`.
+    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW)
 
 
 def test_a_row_cancelled_after_it_ended_keeps_its_record():

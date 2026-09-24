@@ -79,12 +79,48 @@ class HarvestOutcome(Enum):
     """The provider answered and there was nothing new — an empty `200`.
 
     Distinct from `FAILED` because it is evidence: we looked. Distinct from
-    `HARVESTED` because nothing came back to bound a window with, so this
-    outcome never carries coverage.
+    `HARVESTED` because nothing came back to *map* — and only that. It carries
+    coverage exactly as `HARVESTED` does.
+
+    This docstring used to end "nothing came back to bound a window with, so
+    this outcome never carries coverage", and that sentence was the bug written
+    down (`8i`). A window's bounds are this connector's own clock either side of
+    the request; no row ever supplied one. So a fetch that reached the provider
+    and was told "nothing here" has both bounds in hand and had been throwing
+    them away — and since every harvest of a quiet project is EMPTY, such a
+    project accumulated no coverage at all, AD-35's fail-closed reading was
+    never armed over it, and `BROKEN` was unreachable there forever. A verifier
+    that can only ever deliver good news looks exactly like a team that keeps
+    every promise.
     """
 
     FAILED = "failed"
     """The fetch could not be completed. Always accompanied by a `failure`."""
+
+    @classmethod
+    def of(cls, *, mapped: bool, refused: bool, failed: bool) -> HarvestOutcome:
+        """The one place a run's three facts become its outcome.
+
+        Every connector had this same three-branch `if`, and `8i` gave the
+        answer a second consumer: `EMPTY` is now exactly the condition under
+        which a run with nothing to show still earned its coverage window. Two
+        copies of a rule with two consumers each is how the same fetch comes to
+        be `EMPTY` in one connector and not in another — GitLab spelled it "no
+        rows and no failure", Graph "no rows, no refusals and no failure", and
+        those agree only because GitLab's refusals are a subset of its rows.
+        The day GitLab filters a row the way Graph filters a cancelled meeting,
+        they part, and the symptom is a withheld coverage window rather than
+        anything that looks like a bug.
+
+        `failed` wins over everything, because a partial walk is real: page one
+        answered, page two did not, and the run is `FAILED` while still
+        carrying page one's events and page one's window.
+        """
+        if failed:
+            return cls.FAILED
+        if mapped or refused:
+            return cls.HARVESTED
+        return cls.EMPTY
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,10 +276,22 @@ class HarvestResult:
     a connector that learned nothing has an honest way to say so, and no way to
     stay silent about which of the three things happened.
 
-    `__post_init__` refuses the combinations that would make the outcome a
-    decoration over the other fields — `FAILED` with no failure, `EMPTY` with
-    events, and above all coverage claimed by a fetch that returned no rows,
-    which is the fabrication this story exists to delete.
+    `__post_init__` refuses every combination that would make the outcome a
+    decoration over the other fields, and the list is worth reading in full
+    now that `EMPTY` is the outcome that may carry a window:
+
+    - `FAILED` without a failure, or a failure under any other outcome;
+    - `HARVESTED` with nothing at all to show for it;
+    - `EMPTY` with events, with refusals, or with records or live meetings —
+      four separate refusals, because each is a different way of saying the
+      run *did* learn something while wearing the value AD-35 reads as "the
+      provider answered and there was nothing there";
+    - coverage claimed by a fetch that mapped nothing *and did not complete
+      cleanly*, which is the fabrication `8a` deleted.
+
+    `EMPTY` is exempt from that last one, because it is the one outcome that
+    means the request finished and the answer was "nothing here" (`8i`) — and
+    the three refusals above it are what make that true rather than assumed.
     """
 
     events: tuple[NormalizedEvent, ...]
@@ -345,12 +393,32 @@ class HarvestResult:
         # 33c's connector maps a window of upcoming meetings to `live` and emits
         # no event at all, and a window that reached the provider and came back
         # full of them has earned its coverage exactly as a page of commits has.
-        if self.coverage is not None and not self.events and not self.records and not self.live:
+        #
+        # EMPTY is exempt, and that exemption is the whole of `8i`. Rows are not
+        # what a window is made of — its bounds are the connector's own clock
+        # either side of the request — and EMPTY is *reachable only when a
+        # request completed and pm-ai refused nothing in it*: a connector that
+        # could not reach the provider reports FAILED, and anything it could not
+        # read files a refusal, which makes the run HARVESTED. So "the provider
+        # answered and there was nothing there" is the one no-rows case that
+        # really did look, and the two below are the ones that did not.
+        if (
+            self.coverage is not None
+            and self.outcome is not HarvestOutcome.EMPTY
+            and not self.events
+            and not self.records
+            and not self.live
+        ):
             raise ValueError(
-                "coverage claimed by a harvest that returned no rows. Coverage "
-                "is evidence a fetch reached something (AD-35); a window over a "
-                "fetch that came back empty is a four-hour claim tied to the "
-                "clock and to nothing else."
+                f"coverage claimed by an outcome={self.outcome.value} harvest "
+                f"that mapped nothing. Coverage is evidence pm-ai looked "
+                f"(AD-35), and neither of the two outcomes that can reach here "
+                f"is proof of that: FAILED means the fetch did not complete, and "
+                f"HARVESTED with nothing mapped means every readable thing it "
+                f"got was refused — pm-ai's own defect, not a quiet provider. "
+                f"The refusal may be a row it could not parse or a whole page "
+                f"with no rows in it to parse; either way the silence is ours. "
+                f"EMPTY is the outcome that may carry a window over no rows."
             )
         # Refused rows deliberately do **not** earn coverage, though they do
         # make the outcome HARVESTED. Coverage arms AD-35's fail-closed reading

@@ -1,4 +1,4 @@
-"""Story 8a — the coverage-honesty matrix, row by row.
+"""Stories 8a and 8i — the coverage-honesty matrix, row by row.
 
 The defect this file exists over: `GitLabConnectorAdapter.harvest` built its
 `CoverageWindow` as `now() - 4h` to `now()`, unconditionally, because
@@ -7,7 +7,18 @@ therefore recorded four hours of harvest coverage, and AD-35's fail-closed guard
 reads a covered window as "absence of evidence is evidence of absence" — the one
 reading that may fire an irreversible nudge.
 
-Two properties carry most of the weight here, and both are asserted positively
+**8a's repair overshot, and 8i corrected it** — which inverted this file's
+central row, so the two stories are read together here rather than one of them
+being quietly overwritten. 8a required that *something came back* as the proof a
+fetch had happened. That is a stand-in for the real fact, and the two come apart
+in exactly one case: the provider answering "nothing here", which is the
+ordinary case on a quiet project. So no window was ever recorded there, AD-35's
+guard was never armed, and `BROKEN` was unreachable — a verifier that could only
+deliver good news. 8i records the window whenever the check completed, and keeps
+8a's three exclusions for the runs that did not check: a failed fetch, rows with
+no clock pm-ai can trust, and rows it refused wholesale.
+
+Three properties carry most of the weight here, and all are asserted positively
 rather than by absence:
 
 **A window's bounds are measured, not computed.** Asserting only that no window
@@ -23,6 +34,12 @@ asserts three things in one return value. And "ran and failed" used to persist a
 the absence of a coverage window — indistinguishable, after a restart, from "ran
 and learned nothing" — which left `evaluate_commitment`'s required
 `harvest_failed` with no source at all.
+
+**A window says pm-ai looked, not that pm-ai was running.** The 8i rows assert
+both directions: an instant inside a recorded check is covered, and an instant
+*between* two of them is not. Checks are discrete, the gaps between them are
+real, and a fold that let adjacent windows merge would hand `BROKEN` the seconds
+nobody watched.
 """
 
 from __future__ import annotations
@@ -37,9 +54,15 @@ import pytest
 from pm_ai.app.pipelines import run_harvest
 from pm_ai.app.wiring import build
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter, Page, PageUnavailable
-from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestOutcome, HarvestResult
+from pm_ai.domain.harvest import (
+    Cursor,
+    HarvestFailure,
+    HarvestOutcome,
+    HarvestResult,
+    RowRefusal,
+)
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.lifecycle import CoverageWindow
+from pm_ai.domain.lifecycle import CommitmentState, CoverageWindow, evaluate_commitment
 from pm_ai.domain.meetings import Meeting
 from pm_ai.storage.service import CoverageInstanceMismatch
 
@@ -520,22 +543,143 @@ def test_a_page_whose_every_row_is_refused_is_harvested_not_empty():
 # ── Rows that returned nothing ───────────────────────────────────────────────
 
 
-def test_an_empty_200_is_ran_and_learned_nothing(tmp_path):
-    """Row: *provider returns empty 200* — no rows, no error, and no coverage.
+def test_an_empty_200_is_ran_and_learned_nothing_and_says_it_ran(tmp_path):
+    """Row: *provider returns empty 200* — no rows, no error, **and a window**.
 
-    The row the fabricated window got most wrong: a provider that declined
-    politely recorded four hours of coverage, and nothing anywhere disagreed.
+    Inverted by `8i`, and the inversion is the story. `8a` required that
+    *something came back* as the proof a fetch had happened, which is right
+    almost everywhere and wrong in exactly one case: the provider answering
+    "nothing here", which is the ordinary answer on a quiet project. So the
+    guard failed precisely where it mattered — a quiet project accumulated no
+    coverage, AD-35's fail-closed reading was never armed over it, and `BROKEN`
+    was unreachable there permanently.
+
+    What the earlier row was really defending is asserted below rather than
+    dropped: the bounds are the two clock readings this fetch actually took,
+    one tick apart, and not `now() - 4h` to `now()`. A fabricated window and a
+    measured one are told apart by their *provenance*, which is what the
+    `Ticking` clock makes visible — not by whether any row came back.
     """
-    result = connector(_fake_api=[]).harvest(Cursor())
+    clock = Ticking()
+    result = connector(now=clock, _fake_api=[]).harvest(Cursor())
     assert result.outcome is HarvestOutcome.EMPTY
     assert result.events == ()
-    assert result.coverage is None
     assert result.failure is None
+    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW + TICK), (
+        "the window is the two readings either side of the request"
+    )
+    assert clock.readings == [NOW, NOW + TICK], (
+        "and those are the only two readings the fetch took"
+    )
 
-    wired = daemon(tmp_path, rows=[])
+    ticking = Ticking()
+    wired = daemon(tmp_path, rows=[], now=ticking)
     run_harvest(wired, INSTANCE)
-    assert wired.storage.coverage_windows(INSTANCE) == [], (
-        "a provider that answered with nothing covered nothing"
+    assert wired.storage.coverage_windows(INSTANCE) == [(NOW, NOW + TICK)], (
+        "a provider that answered with nothing was still asked, and the record "
+        "of having asked survives the write"
+    )
+
+
+def test_a_quiet_project_accumulates_the_coverage_that_makes_broken_reachable(tmp_path):
+    """Many checks, all finding nothing — and each one leaves a record.
+
+    The property the bug removed, asserted on the far side of storage because
+    that is where story 16's sweeper will read it. Every one of these harvests
+    is EMPTY, so before `8i` this loop stored nothing at all and
+    `evaluate_commitment`'s `covered` could only ever be `False` here: a quiet
+    project could report `FULFILLED` and never `BROKEN`, which is a verifier
+    that only delivers good news.
+
+    The fold is written out rather than imported: the reader that decides a
+    promise is broken is story 16 and is not built. What this pins is its
+    input — a due instant that falls inside one of the recorded checks is
+    enclosed by a window, and the verdict that follows is then reachable.
+
+    **What this does not prove.** `Ticking` steps a second per reading, so
+    consecutive windows here abut and a due instant lands inside one. Real
+    windows are the milliseconds a request took, hours apart, and a due
+    instant will almost always fall in a gap — which the negative case below
+    pins deliberately. Deciding that a whole *period* was watched therefore
+    needs a union with a gap tolerance, which `lifecycle.py` already says and
+    story 16 owns. Read this as: the evidence now exists and carries honest
+    bounds. It is what makes `BROKEN` representable, not what makes it
+    reachable.
+    """
+    ticking = Ticking()
+    wired = daemon(tmp_path, rows=[], now=ticking)
+    for _ in range(3):
+        run_harvest(wired, INSTANCE)
+
+    windows = wired.storage.coverage_windows(INSTANCE)
+    assert windows == [
+        (NOW, NOW + TICK),
+        (NOW + 2 * TICK, NOW + 3 * TICK),
+        (NOW + 4 * TICK, NOW + 5 * TICK),
+    ], "three checks that found nothing are three records of having checked"
+
+    def covers(instant: datetime) -> bool:
+        return any(start <= instant <= end for start, end in windows)
+
+    def verdict(instant: datetime) -> CommitmentState:
+        return evaluate_commitment(
+            overdue=True,
+            evidence_admissible=False,
+            covered=covers(instant),
+            harvest_failed=False,
+        )
+
+    inside = NOW + 2 * TICK
+    assert covers(inside), "the instant a T-dated event would have arrived in is checked"
+    assert verdict(inside) is CommitmentState.BROKEN, (
+        "which is the whole point: on a quiet project, BROKEN is reachable at all"
+    )
+
+    # The other half, and the half that must not move. Checks are discrete: the
+    # second between two of them is a second nobody looked, and a reading that
+    # let adjacent windows merge across it would make a laptop that was closed
+    # between two harvests indistinguishable from a promise nobody kept. FR-26
+    # nudges are irreversible, so this gap fails closed.
+    between = NOW + TICK + timedelta(milliseconds=500)
+    assert not covers(between), "an instant between two checks is not a checked instant"
+    assert verdict(between) is CommitmentState.UNKNOWN, (
+        "8i widens what counts as having looked; it does not widen when"
+    )
+
+
+def test_an_empty_first_page_and_a_failed_second_claims_nothing_and_still_returns():
+    """The conjunct that keeps `8i` from turning a partial walk into a crash.
+
+    `EMPTY` is what earns a window over no rows, and `EMPTY` requires that
+    nothing failed. Drop that requirement and this fetch builds `FAILED` +
+    coverage + nothing mapped, which `HarvestResult.__post_init__` refuses with
+    a `ValueError` — raised from `harvest`, which the port documents as
+    reporting rather than raising, and which `run_harvest` calls with no
+    `except`. A harvest that reported a provider outage would take the process
+    down instead.
+
+    Written with its own transport because `paging(fails_at=...)` cannot express
+    it: every existing call site passes zero pages, so the *first* fetch raises,
+    `reached_at` stays `None`, and no window is in the running at all. The shape
+    that reaches the conjunct needs a page that answers, holds nothing, and
+    points at another.
+    """
+
+    def empty_then_gone(offset: int) -> Page:
+        if offset == 0:
+            return Page(rows=(), next_offset=1)
+        raise PageUnavailable("the provider went away", retryable=True)
+
+    result = connector(now=Ticking(), fetch_page=empty_then_gone).harvest(Cursor())
+
+    assert result.outcome is HarvestOutcome.FAILED
+    assert result.events == ()
+    assert result.failure is not None
+    assert "went away" in result.failure.reason
+    assert result.coverage is None, (
+        "the first page answered with nothing, but the walk did not finish — "
+        "'I looked and there was nothing' is a claim only a completed check "
+        "may make"
     )
 
 
@@ -695,7 +839,12 @@ def test_a_failed_harvest_is_still_a_failure_after_a_restart(tmp_path):
     assert again.storage.harvest_failure(INSTANCE) is None, (
         "a repaired connector must stop reading as broken, or ERROR is permanent"
     )
-    assert again.storage.coverage_windows(INSTANCE) == []
+    # And the repaired run left a window behind, where it used to leave nothing
+    # (`8i`). Under the frozen clock this build is handed, the fetch begins and
+    # ends inside one reading — a real instant, and the shape half this file
+    # asserts. The two silences stay distinguishable: the failed run above wrote
+    # a failure and no window, this one a window and no failure.
+    assert again.storage.coverage_windows(INSTANCE) == [(NOW, NOW)]
 
 
 def test_a_stored_failure_says_when_it_was_recorded(tmp_path):
@@ -839,8 +988,20 @@ def test_a_refused_window_leaves_no_cursor_advance_for_a_later_commit_to_promote
         ({"outcome": HarvestOutcome.FAILED}, "disagree"),
         ({"outcome": HarvestOutcome.HARVESTED}, "no events"),
         (
-            {"outcome": HarvestOutcome.EMPTY, "coverage": CoverageWindow(INSTANCE, NOW, NOW)},
-            "returned no rows",
+            {
+                "outcome": HarvestOutcome.FAILED,
+                "failure": HarvestFailure(reason="could not look", retryable=True),
+                "coverage": CoverageWindow(INSTANCE, NOW, NOW),
+            },
+            "mapped nothing",
+        ),
+        (
+            {
+                "outcome": HarvestOutcome.HARVESTED,
+                "refusals": (RowRefusal(identifier="9f2a1c", reason="no clock"),),
+                "coverage": CoverageWindow(INSTANCE, NOW, NOW),
+            },
+            "mapped nothing",
         ),
         (
             {"outcome": HarvestOutcome.EMPTY, "records": (MEETING,)},
@@ -855,9 +1016,19 @@ def test_a_refused_window_leaves_no_cursor_advance_for_a_later_commit_to_promote
 def test_harvest_result_refuses_an_outcome_its_fields_contradict(kwargs, complaint):
     """The outcome is not a decoration over the other fields.
 
-    Chiefly the third row: coverage claimed by a harvest that returned no rows is
-    the fabrication this story deletes, and a type that accepts it leaves the
-    next connector free to reintroduce it.
+    Chiefly the middle two rows: coverage claimed by a harvest that returned no
+    rows **and did not complete** is the fabrication `8a` deleted, and a type
+    that accepts it leaves the next connector free to reintroduce it. The two
+    that can reach the rule are the two that are not proof of having looked — a
+    FAILED fetch, which could not look, and a HARVESTED one holding only
+    refusals, which looked and could read none of what it got, which is pm-ai's
+    own defect rather than a quiet project.
+
+    `EMPTY` with a window is deliberately **not** here: it was, until `8i`
+    found that it was the case the guard got wrong. It is the outcome reached
+    only by a request that completed and was told "nothing here", so it is the
+    one no-rows case that really did check, and a quiet project's whole
+    coverage is made of it.
 
     The last two rows are story 33c's carriers. `records` and `live` are the
     other two ways a harvest can hold evidence, and EMPTY is the value AD-35's
