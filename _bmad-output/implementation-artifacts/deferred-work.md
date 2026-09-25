@@ -834,11 +834,11 @@ transcript.
 ## Surfaced by the one-Python slice (1o), 2026-09-25
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1o-one-python-and-honest-notes.md`
-  summary: `ARCHITECTURE-SPINE.md` still states the old Python version twice — the stack table's Python row ("3.13 (3.14 is the upgrade path)", line 711) and the `watchdog` row ("against this project's ≥3.13", line 721); the project now requires exactly 3.14 (`.python-version`, `requires-python = ">=3.14,<3.15"`, mypy `python_version = "3.14"`), so both need a re-derive.
+  summary: **RESOLVED 2026-09-25 in the architecture update run** — `ARCHITECTURE-SPINE.md` still states the old Python version twice — the stack table's Python row ("3.13 (3.14 is the upgrade path)", line 711) and the `watchdog` row ("against this project's ≥3.13", line 721); the project now requires exactly 3.14 (`.python-version`, `requires-python = ">=3.14,<3.15"`, mypy `python_version = "3.14"`), so both need a re-derive.
   evidence: Story 1o made 3.14 the one supported version because the prompt-injection filter's recorded fingerprint includes Python's Unicode tables — measured 2026-09-25, 3.13 ships Unicode 15.1.0 and 3.14 ships 16.0.0, and `test_the_rule_fingerprint_matches_its_version` fails under 3.13. The architecture document is skill-rendered, so it is recorded here for a re-derive rather than hand-edited.
 
 ## Surfaced by the encryption-off slice (1p), 2026-09-25
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-6)
-  summary: AD-6's rule "when off, the daemon emits a CLI banner and an `event_log/` entry" needs restating in the next architecture pass: the banner is still printed on every command, but the event-log entry is now written once per writer, just before its first protected file is written in plain text — not at start.
+  summary: **RESOLVED 2026-09-25 in the architecture update run** — AD-6's rule "when off, the daemon emits a CLI banner and an `event_log/` entry" needs restating in the next architecture pass: the banner is still printed on every command, but the event-log entry is now written once per writer, just before its first protected file is written in plain text — not at start.
   evidence: Story 1p moved the entry (`pm_ai/app/wiring.py`, `_RecordedPlaintext` bound by `_writer`), because at start it added a line to the never-trimmed application event log on every `--help`, mistyped command and `doctor`. The architecture document is skill-rendered, and the architecture pass was deferred on 2026-09-25, so it is recorded here rather than hand-edited.
