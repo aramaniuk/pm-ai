@@ -246,6 +246,15 @@ def evaluate_commitment(
     `now() - 4h` to `now()`, so an empty `200` armed `covered` with evidence
     nothing had gathered. It is optional now, and its absence is a real answer.
 
+    The defect was the fabrication, not the empty answer. Since `8i` an empty
+    `200` does carry a window — the connector's own clock read either side of
+    the request it actually made — because asking and being told "nothing
+    here" is having looked, and that window is legitimate evidence for
+    `covered`. The window is absent when the request failed, nothing that came
+    back had a readable time, everything that came back was rejected as
+    unreadable, or this machine's clock stepped backwards during the request,
+    leaving no honest interval — each of which means "did not check".
+
     Order matters. `covered` is consulted before `harvest_failed`: if the window
     *was* harvested, absence of evidence within it is real evidence of absence,
     and a connector that broke afterwards does not retract that. `ERROR`

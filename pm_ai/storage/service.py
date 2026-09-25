@@ -1652,9 +1652,14 @@ class StorageService:
         It was `object`, read through three `getattr` calls, which meant "accepts
         an absent window explicitly" was aspirational: any object at all was
         accepted, a misspelled attribute silently became "no coverage", and mypy
-        could not see a caller passing the wrong thing. Absence is the ordinary
-        answer now — a provider that returned an empty `200` covered nothing —
-        so the type says so.
+        could not see a caller passing the wrong thing. Absence is an ordinary
+        answer, so the type says so — but it means "did not check", not "found
+        nothing". Since `8i` a provider that answered an empty `200` *did*
+        check, and arrives here with the window measured by the connector's own
+        clock either side of that request. `None` arrives when the request
+        failed, nothing that came back had a readable time, everything that
+        came back was rejected as unreadable, or this machine's clock stepped
+        backwards during the request, leaving no honest interval to record.
 
         `failure=None` records "the last attempt did not fail", and that is a
         write rather than a no-op: a failure that outlived its repair reads as

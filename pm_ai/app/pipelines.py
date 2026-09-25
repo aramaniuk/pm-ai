@@ -121,9 +121,14 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # advanced past events nobody stored.
     persisted = _persist_by_scope(daemon, attributed)
     # AD-35 — `result.coverage` is `CoverageWindow | None` and `None` is passed
-    # through as itself. A harvest that learned nothing records no window: the
-    # connector used to fabricate one from the clock to satisfy a mandatory
-    # field, and the fail-closed guard read that fabrication as evidence.
+    # through as itself. A harvest that asked and got an empty answer *does*
+    # record a window (`8i`): the connector's own clock readings either side of
+    # the request it made. `None` means it did not check — the request failed,
+    # nothing that came back had a readable time, everything that came back was
+    # rejected as unreadable, or this machine's clock stepped backwards during
+    # the request, leaving no honest interval to record. What is gone is the
+    # window the connector used to fabricate from the clock alone to satisfy a
+    # mandatory field, which the fail-closed guard read as evidence.
     #
     # `result.failure` travels with it, in the same write, so "ran and failed"
     # survives the process as something other than the absence of coverage.
