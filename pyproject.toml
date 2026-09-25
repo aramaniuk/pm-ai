@@ -2,7 +2,7 @@
 name = "pm-ai"
 version = "0.1.0"
 description = "Local-first AI PM assistant — daemon, CLI, Telegram bridge, connectors, MCP skills"
-requires-python = ">=3.13"
+requires-python = ">=3.14,<3.15"
 
 # Runtime dependencies are declared under [project.optional-dependencies] rather
 # than here, deliberately: the architecture suite must be runnable before the
@@ -124,7 +124,7 @@ pythonpath = ["tests/architecture"]
 # defect.
 [tool.mypy]
 files = ["pm_ai"]
-python_version = "3.13"
+python_version = "3.14"
 # The optional runtime extras are not installed in this environment on purpose —
 # `keyring`, `msal` and `sqlite_vec` are imported inside the functions that
 # use them so a missing extra cannot become a skipped test that reads as

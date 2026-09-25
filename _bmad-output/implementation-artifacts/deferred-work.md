@@ -810,7 +810,7 @@ transcript.
 ## Surfaced by the 4l review (2026-09-24), belonging to 8i
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8i-coverage-earned-by-an-empty-fetch.md`
-  summary: Three docstrings still describe the behaviour 8i inverted — `storage/service.py`'s `save_cursor` ("a provider that returned an empty `200` covered nothing"), `app/pipelines.py` ("a harvest that learned nothing records no window"), and `domain/lifecycle.py`, which still narrates an empty `200` arming `covered` as the defect without distinguishing the fabricated window from the measured one that is now legitimate.
+  summary: **RESOLVED 2026-09-25 in `1o`** for the three docstrings; the `SPEC.md` coverage clause named in the evidence is still open and needs a re-derive. Three docstrings still describe the behaviour 8i inverted — `storage/service.py`'s `save_cursor` ("a provider that returned an empty `200` covered nothing"), `app/pipelines.py` ("a harvest that learned nothing records no window"), and `domain/lifecycle.py`, which still narrates an empty `200` arming `covered` as the defect without distinguishing the fabricated window from the measured one that is now legitimate.
   evidence: 8i revised four connector-side docstrings and missed these three, which sit on the read path a future reader of these records will follow. Not bundled into 4l because they belong to a merged slice and one commit per slice is this repo's convention. `SPEC.md` carries the same tension in its coverage clause, but it is re-rendered from the memlog per AGENTS.md, so it needs a re-derive rather than an edit.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8i-coverage-earned-by-an-empty-fetch.md`
@@ -824,3 +824,15 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4l-every-enrolled-project.md`
   summary: The working directory now decides which project a command acts in, but **no subcommand yet writes to that project** — `dashboard` takes an explicit `--scope` and defaults to personal, `goal set` writes personal, and `project add` names its own project.
   evidence: Found while writing 4l's write-side test, and stated in that test's docstring rather than hidden: the story's "nothing that separates projects loosens" constraint had no witness at the command level, because nothing at the command level consults the acting project when choosing where to write. The selection is real and is consumed internally — the empty-harvest write target and the cross-scope citation guard both read it — and `doctor` now names it, so the plumbing is right and tested. What is missing is a command that uses it. The natural first one is `dashboard` defaulting to the acting project instead of personal when the directory chooses one, which is a behaviour change to a shipped command and therefore its own slice rather than a line in this one.
+
+## Split out of the hygiene slice at routing, 2026-09-25
+
+- source_spec: none
+  summary: With `PM_AI_DISABLE_ENCRYPTION` set, commands that do no work (`--help`, a mistyped command, `project` with no subcommand, `doctor`) each append an "encryption is disabled" entry to the application event log; the entry should be written the first time the process actually writes a protected file in plaintext, not on every start.
+  evidence: Split from the hygiene slice so the behaviour change is reviewed on its own. Measured 2026-09-25 in a throwaway home with one project enrolled: with the variable set, those four commands added four lines and changed nothing else; with encryption on, `--help` and a mistyped command wrote nothing. Approach decided at routing: record on first plaintext write of the encrypted set (today `private/config.json` and `private/telegram_cache/`, neither of which is the event log), console warning unchanged. AD-6's "one entry per daemon start" needs restating through the architecture skill.
+
+## Surfaced by the one-Python slice (1o), 2026-09-25
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1o-one-python-and-honest-notes.md`
+  summary: `ARCHITECTURE-SPINE.md` still states the old Python version twice — the stack table's Python row ("3.13 (3.14 is the upgrade path)", line 711) and the `watchdog` row ("against this project's ≥3.13", line 721); the project now requires exactly 3.14 (`.python-version`, `requires-python = ">=3.14,<3.15"`, mypy `python_version = "3.14"`), so both need a re-derive.
+  evidence: Story 1o made 3.14 the one supported version because the prompt-injection filter's recorded fingerprint includes Python's Unicode tables — measured 2026-09-25, 3.13 ships Unicode 15.1.0 and 3.14 ships 16.0.0, and `test_the_rule_fingerprint_matches_its_version` fails under 3.13. The architecture document is skill-rendered, so it is recorded here for a re-derive rather than hand-edited.
