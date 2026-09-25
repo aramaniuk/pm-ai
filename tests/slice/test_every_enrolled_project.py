@@ -137,9 +137,9 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Machine:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    # An ambient debug flag would make `build()` write a security entry into the
-    # application event log on every compose, which is not what any row here is
-    # measuring.
+    # An ambient debug flag would print a console warning on every compose and
+    # record a security entry on the first protected write, and neither is what
+    # any row here is measuring.
     monkeypatch.delenv(DISABLE_ENCRYPTION_VAR, raising=False)
     monkeypatch.setattr(entry, "MacOSKeychainAdapter", Keychain)
     # Start every test standing somewhere that is inside no project, so a row

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -284,9 +285,9 @@ def build(
     for watched_scope in spans.values():
         resolver.scope_root(watched_scope)
     # The cipher is chosen before storage, because storage performs every
-    # encrypted read and write and therefore holds it. The *announcement* of a
-    # disabled cipher needs storage, so it happens after — splitting the two is
-    # what keeps this acyclic.
+    # encrypted read and write and therefore holds it. The *record* of a
+    # disabled cipher needs storage, so `_writer` binds it after — splitting the
+    # two is what keeps this acyclic.
     # `None` means consult the environment, which is the only way a user may
     # disable encryption — no config key, no stored profile, nothing that
     # survives a restart. Reading ambient state is the composition root's job and
@@ -298,9 +299,9 @@ def build(
     # second adapter for the CLI would put key custody in two places.
     custody = keychain or MacOSKeychainAdapter()
     crypto = _choose_crypto(custody, encryption_disabled=disabled)
-    storage = StorageService(resolver, now=clock, vcs=vcs or GitVcs(), crypto=crypto)
+    storage = _writer(resolver, now=clock, vcs=vcs or GitVcs(), crypto=crypto)
     if disabled:
-        _announce_disabled_encryption(storage)
+        _warn_disabled_encryption()
     skills = SkillRegistry(storage, scope=scope)
     skills.register(PostComment())  # credentials would be injected here, from storage
     # One built-in per **watched** project, each bound to its own scope. AD-10
@@ -421,17 +422,108 @@ def _choose_crypto(keychain: KeychainPort, *, encryption_disabled: bool) -> Cryp
     installation, not to a constructor that would quietly do it.
     """
     if encryption_disabled:
-        return PlaintextCrypto()
+        return _RecordedPlaintext()
     return LazyKeyCrypto(keychain, MASTER_KEY_NAME)
 
 
-def _announce_disabled_encryption(storage: StorageService) -> None:
-    """Say so twice, because the two audiences are different.
+class _RecordedPlaintext(PlaintextCrypto):
+    """The pass-through, recording itself once before its first protected write.
 
-    The console reaches whoever is running the daemon now. The event log reaches
-    whoever reads the record later and would otherwise find plaintext credentials
-    with no explanation — and a console warning is gone the moment the terminal
-    scrolls. Only the composition root knows the flag exists, so only it can say.
+    Storage calls `encrypt` only for a path in the encrypted set and only just
+    before publishing it, so the first `encrypt` is exactly "a protected file is
+    about to reach the disk in plaintext" — the moment the event-log line
+    explains. Recording at start-up instead put a line in a never-trimmed log for
+    every `--help` and mistyped command, burying the one that mattered (1p).
+
+    The record runs *before* the bytes are returned, so a failed append
+    propagates and the file is never written: a plaintext credential with no
+    line explaining it is the state this exists to make impossible. `decrypt`
+    records nothing — reading writes nothing unprotected.
+
+    The "already recorded" flag lives here, on the one cipher each writer owns,
+    rather than in a module variable (AD-30). A `PlaintextCrypto` still, so every
+    check for the debug cipher keeps recognising it.
+
+    The recorder arrives after construction because the writer holds the cipher
+    and the recorder needs the writer. An `encrypt` before `bind` refuses rather
+    than writing unrecorded.
+
+    The check, the record and the flag are held under one lock, because
+    connector work runs on threads and two first protected writes through one
+    writer would otherwise both see "not yet recorded" and append twice.
+
+    Setting attributes here works only because `PlaintextCrypto` is a frozen
+    dataclass *with no fields*: the frozen `__setattr__` refuses field names and
+    exact-class instances, and lets a subclass set anything else. Giving
+    `PlaintextCrypto` a field named like one of these slots, or replacing its
+    frozen check, would break this class.
+    """
+
+    __slots__ = ("_lock", "_record", "_recorded")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._record: Callable[[], None] | None = None
+        self._recorded = False
+
+    def bind(self, record: Callable[[], None]) -> None:
+        self._record = record
+
+    def encrypt(self, plaintext: bytes) -> bytes:
+        with self._lock:
+            if not self._recorded:
+                if self._record is None:
+                    raise RuntimeError(
+                        "a protected file was about to be written in plaintext "
+                        "before anything could record why; nothing was written."
+                    )
+                self._record()
+                self._recorded = True
+        return plaintext
+
+
+def _writer(
+    resolver: ScopePaths,
+    *,
+    now: Callable[[], datetime],
+    vcs: VcsPort,
+    crypto: CryptoPort,
+) -> StorageService:
+    """A `StorageService`, with a disabled cipher bound to record through it.
+
+    Every writer pm-ai builds goes through here — the daemon's, `pm-ai setup`'s
+    and project enrolment's — so none of them can write a protected file in
+    plaintext without the event-log line first.
+    """
+    storage = StorageService(resolver, now=now, vcs=vcs, crypto=crypto)
+    if isinstance(crypto, _RecordedPlaintext):
+        crypto.bind(lambda: _record_disabled_encryption(storage))
+    return storage
+
+
+def _warn_disabled_encryption() -> None:
+    """The console half: whoever is running pm-ai now, on every command.
+
+    Printed at start rather than on the first protected write, because it costs
+    nothing permanent and the person at the keyboard should know straight away.
+    The durable half is `_record_disabled_encryption`, written only when a
+    protected file is actually about to be written in plaintext.
+    """
+    print(
+        "WARNING: encryption is disabled by an explicit debug flag. "
+        "Credentials and voice notes are being written in plaintext. This is "
+        "never the default in a fresh installation.",
+        file=sys.stderr,
+    )
+
+
+def _record_disabled_encryption(storage: StorageService) -> None:
+    """The event-log half: whoever reads the record later.
+
+    Someone who finds a credential file readable in plain text needs to find out
+    why, and a console warning is gone the moment the terminal scrolls. Only the
+    composition root knows the flag exists, so only it can say. Called by
+    `_RecordedPlaintext` once per writer, just before the first protected write.
 
     Into the *application* scope's event log, always. The flag describes the
     daemon's own posture on this machine — application-scope subject matter —
@@ -443,12 +535,6 @@ def _announce_disabled_encryption(storage: StorageService) -> None:
     which narrows the old consequence without touching the reason this writes
     where it does — the subject matter is the daemon's, not the team's.
     """
-    print(
-        "WARNING: encryption is disabled by an explicit debug flag. "
-        "Credentials and voice notes are being written in plaintext. This is "
-        "never the default in a fresh installation.",
-        file=sys.stderr,
-    )
     storage.append_event_log(
         EventEntry(
             category=SelfActionType.SECURITY,
@@ -969,7 +1055,7 @@ def application_storage(
     perfectly well.
     """
     resolver = paths if paths is not None else ScopePaths.production()
-    return StorageService(
+    return _writer(
         resolver,
         now=lambda: datetime.now(timezone.utc),
         vcs=GitVcs(),
@@ -1085,7 +1171,7 @@ def onboard_project(
     scope = DataScope(ScopeKind.PROJECT, project_id)
     known.scope_root(scope)
     _assert_usable(repository)
-    storage = StorageService(
+    storage = _writer(
         known,
         now=lambda: datetime.now(timezone.utc),
         vcs=GitVcs(),
