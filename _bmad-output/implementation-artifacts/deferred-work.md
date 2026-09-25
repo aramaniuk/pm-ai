@@ -824,3 +824,10 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4l-every-enrolled-project.md`
   summary: The working directory now decides which project a command acts in, but **no subcommand yet writes to that project** — `dashboard` takes an explicit `--scope` and defaults to personal, `goal set` writes personal, and `project add` names its own project.
   evidence: Found while writing 4l's write-side test, and stated in that test's docstring rather than hidden: the story's "nothing that separates projects loosens" constraint had no witness at the command level, because nothing at the command level consults the acting project when choosing where to write. The selection is real and is consumed internally — the empty-harvest write target and the cross-scope citation guard both read it — and `doctor` now names it, so the plumbing is right and tested. What is missing is a command that uses it. The natural first one is `dashboard` defaulting to the acting project instead of personal when the directory chooses one, which is a behaviour change to a shipped command and therefore its own slice rather than a line in this one.
+
+## Split out of the hygiene slice at routing, 2026-09-25
+
+- source_spec: none
+  summary: With `PM_AI_DISABLE_ENCRYPTION` set, commands that do no work (`--help`, a mistyped command, `project` with no subcommand, `doctor`) each append an "encryption is disabled" entry to the application event log; the entry should be written the first time the process actually writes a protected file in plaintext, not on every start.
+  evidence: Split from the hygiene slice so the behaviour change is reviewed on its own. Measured 2026-09-25 in a throwaway home with one project enrolled: with the variable set, those four commands added four lines and changed nothing else; with encryption on, `--help` and a mistyped command wrote nothing. Approach decided at routing: record on first plaintext write of the encrypted set (today `private/config.json` and `private/telegram_cache/`, neither of which is the event log), console warning unchanged. AD-6's "one entry per daemon start" needs restating through the architecture skill.
+
