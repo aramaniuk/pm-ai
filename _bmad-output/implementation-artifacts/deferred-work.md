@@ -828,7 +828,7 @@ transcript.
 ## Split out of the hygiene slice at routing, 2026-09-25
 
 - source_spec: none
-  summary: With `PM_AI_DISABLE_ENCRYPTION` set, commands that do no work (`--help`, a mistyped command, `project` with no subcommand, `doctor`) each append an "encryption is disabled" entry to the application event log; the entry should be written the first time the process actually writes a protected file in plaintext, not on every start.
+  summary: **RESOLVED 2026-09-25 in `1p`** for the behaviour — shipped once per writer, not once per process, as 1p's design notes record; the AD-6 restatement is recorded under 1p below. With `PM_AI_DISABLE_ENCRYPTION` set, commands that do no work (`--help`, a mistyped command, `project` with no subcommand, `doctor`) each append an "encryption is disabled" entry to the application event log; the entry should be written the first time the process actually writes a protected file in plaintext, not on every start.
   evidence: Split from the hygiene slice so the behaviour change is reviewed on its own. Measured 2026-09-25 in a throwaway home with one project enrolled: with the variable set, those four commands added four lines and changed nothing else; with encryption on, `--help` and a mistyped command wrote nothing. Approach decided at routing: record on first plaintext write of the encrypted set (today `private/config.json` and `private/telegram_cache/`, neither of which is the event log), console warning unchanged. AD-6's "one entry per daemon start" needs restating through the architecture skill.
 
 ## Surfaced by the one-Python slice (1o), 2026-09-25
@@ -836,3 +836,9 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1o-one-python-and-honest-notes.md`
   summary: `ARCHITECTURE-SPINE.md` still states the old Python version twice — the stack table's Python row ("3.13 (3.14 is the upgrade path)", line 711) and the `watchdog` row ("against this project's ≥3.13", line 721); the project now requires exactly 3.14 (`.python-version`, `requires-python = ">=3.14,<3.15"`, mypy `python_version = "3.14"`), so both need a re-derive.
   evidence: Story 1o made 3.14 the one supported version because the prompt-injection filter's recorded fingerprint includes Python's Unicode tables — measured 2026-09-25, 3.13 ships Unicode 15.1.0 and 3.14 ships 16.0.0, and `test_the_rule_fingerprint_matches_its_version` fails under 3.13. The architecture document is skill-rendered, so it is recorded here for a re-derive rather than hand-edited.
+
+## Surfaced by the encryption-off slice (1p), 2026-09-25
+
+- source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-6)
+  summary: AD-6's rule "when off, the daemon emits a CLI banner and an `event_log/` entry" needs restating in the next architecture pass: the banner is still printed on every command, but the event-log entry is now written once per writer, just before its first protected file is written in plain text — not at start.
+  evidence: Story 1p moved the entry (`pm_ai/app/wiring.py`, `_RecordedPlaintext` bound by `_writer`), because at start it added a line to the never-trimmed application event log on every `--help`, mistyped command and `doctor`. The architecture document is skill-rendered, and the architecture pass was deferred on 2026-09-25, so it is recorded here rather than hand-edited.

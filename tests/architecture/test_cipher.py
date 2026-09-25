@@ -380,8 +380,8 @@ def test_the_debug_flag_warns_on_the_console(tmp_path, capsys):
     assert captured.err.strip(), "the warning went nowhere a human would see it"
 
 
-def test_the_debug_flag_writes_an_event_log_entry(tmp_path):
-    """The half that outlives the session.
+def test_the_debug_flag_writes_an_event_log_entry_on_the_first_protected_write(tmp_path):
+    """The half that outlives the session, written when it explains something.
 
     A console warning is gone the moment the terminal scrolls. Someone auditing
     the record later has to be able to find out why a credential file is
@@ -390,9 +390,211 @@ def test_the_debug_flag_writes_an_event_log_entry(tmp_path):
     """
     daemon = _daemon(tmp_path, disabled=True)
 
+    _seal(daemon)
+
     body = _event_log_text(daemon)
-    assert "protection=encryption-at-rest" in body
+    assert body.count("protection=encryption-at-rest") == 1
+    assert 'disabled_by="environment variable"' in body
     assert " security actor=" in body, "the entry must be findable by category"
+
+
+def test_building_with_the_debug_flag_records_nothing(tmp_path):
+    """Starting up writes nothing unprotected, so it has nothing to explain (1p).
+
+    The line used to be written at every start, so `--help` and a mistyped
+    command each added one to a log that is never trimmed.
+    """
+    daemon = _daemon(tmp_path, disabled=True)
+
+    assert _event_log_text(daemon) == ""
+
+
+def test_the_line_is_written_before_the_protected_file(tmp_path, monkeypatch):
+    """At the moment the line is appended, the plaintext file is not yet there."""
+    daemon = _daemon(tmp_path, disabled=True)
+    target = daemon.storage.paths.resolve(APPLICATION, "config.json")
+    seen: list[bool] = []
+    append = daemon.storage.append_event_log
+
+    def observing(entry, *, scope):
+        seen.append(target.exists())
+        append(entry, scope=scope)
+
+    monkeypatch.setattr(daemon.storage, "append_event_log", observing)
+
+    _seal(daemon)
+
+    assert seen == [False]
+    assert target.read_bytes() == PAYLOAD
+
+
+def test_two_protected_writes_in_one_run_record_one_line(tmp_path):
+    daemon = _daemon(tmp_path, disabled=True)
+
+    _seal(daemon)
+    daemon.storage.write_artifact(
+        PAYLOAD, scope=PERSONAL, artifact="telegram_cache/", name="voice-1.ogg"
+    )
+    _seal(daemon, b"{}")
+
+    assert _event_log_text(daemon).count("protection=encryption-at-rest") == 1
+
+
+def test_an_ordinary_write_records_nothing(tmp_path):
+    daemon = _daemon(tmp_path, disabled=True)
+
+    daemon.storage.write_artifact(PAYLOAD, scope=PERSONAL, artifact="strategic_goals.md")
+
+    assert _event_log_text(daemon) == ""
+
+
+def test_reading_a_protected_file_records_nothing(tmp_path):
+    """Only writing a protected file in plaintext needs explaining."""
+    daemon = _daemon(tmp_path, disabled=True)
+    target = daemon.storage.paths.resolve(APPLICATION, "config.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(PAYLOAD)
+
+    assert daemon.storage.read_artifact(scope=APPLICATION, artifact="config.json") == PAYLOAD
+    assert _event_log_text(daemon) == ""
+
+
+def test_a_failed_append_keeps_the_protected_file_off_the_disk(tmp_path, monkeypatch):
+    """A plaintext credential with no line explaining it must be impossible."""
+    daemon = _daemon(tmp_path, disabled=True)
+    target = daemon.storage.paths.resolve(APPLICATION, "config.json")
+
+    def refusing(entry, *, scope):
+        raise OSError("event log unwritable")
+
+    monkeypatch.setattr(daemon.storage, "append_event_log", refusing)
+
+    with pytest.raises(OSError, match="event log unwritable"):
+        _seal(daemon)
+    assert not target.exists()
+
+
+def test_a_failed_append_is_retried_rather_than_forgotten(tmp_path, monkeypatch):
+    """The flag is set only once the line is on disk, so the next write tries again."""
+    daemon = _daemon(tmp_path, disabled=True)
+    append = daemon.storage.append_event_log
+    calls = {"n": 0}
+
+    def once_refusing(entry, *, scope):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("event log unwritable")
+        append(entry, scope=scope)
+
+    monkeypatch.setattr(daemon.storage, "append_event_log", once_refusing)
+
+    with pytest.raises(OSError):
+        _seal(daemon)
+    _seal(daemon)
+
+    assert _event_log_text(daemon).count("protection=encryption-at-rest") == 1
+
+
+def test_an_unbound_debug_cipher_refuses_to_write(tmp_path):
+    """Before its writer binds it, the cipher cannot record, so it will not write."""
+    from pm_ai.app.wiring import _choose_crypto
+
+    crypto = _choose_crypto(FakeKeychain(), encryption_disabled=True)
+
+    with pytest.raises(RuntimeError, match="nothing was written"):
+        crypto.encrypt(PAYLOAD)
+    assert crypto.decrypt(PAYLOAD) == PAYLOAD
+
+
+def test_the_setup_writer_records_on_its_first_protected_write(tmp_path, monkeypatch):
+    """`pm-ai setup`'s writer follows the same rule as the daemon's."""
+    from pm_ai.app.wiring import application_storage
+    from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR
+    from pm_ai.platform.paths import ScopePaths
+
+    monkeypatch.setenv(DISABLE_ENCRYPTION_VAR, "1")
+    storage = application_storage(FakeKeychain(), paths=ScopePaths.rooted(tmp_path))
+    log = storage.paths.resolve(APPLICATION, EVENT_LOG)
+
+    assert not log.exists() or not list(log.glob("*.md"))
+    storage.write_artifact(PAYLOAD, scope=APPLICATION, artifact="config.json")
+    body = "".join(s.read_text(encoding="utf-8") for s in log.glob("*.md"))
+    assert body.count("protection=encryption-at-rest") == 1
+
+
+def test_concurrent_first_protected_writes_record_one_line(tmp_path, monkeypatch):
+    """Connector work runs on threads; two first writes must not both record."""
+    import threading
+    import time
+
+    daemon = _daemon(tmp_path, disabled=True)
+    append = daemon.storage.append_event_log
+
+    def slow(entry, *, scope):
+        # Widens the window between "not yet recorded" and the flag being set,
+        # so an unguarded check would let every thread through.
+        time.sleep(0.05)
+        append(entry, scope=scope)
+
+    monkeypatch.setattr(daemon.storage, "append_event_log", slow)
+    start = threading.Barrier(6)
+    errors: list[BaseException] = []
+
+    def write(n: int) -> None:
+        try:
+            start.wait()
+            daemon.storage.write_artifact(
+                PAYLOAD, scope=PERSONAL, artifact="telegram_cache/", name=f"voice-{n}.ogg"
+            )
+        except BaseException as failure:  # surfaced below, not swallowed
+            errors.append(failure)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert _event_log_text(daemon).count("protection=encryption-at-rest") == 1
+
+
+def test_the_daemon_and_setup_writers_hold_a_bound_recording_cipher(tmp_path, monkeypatch):
+    """Behaviourally, not by source text: each writer's cipher is bound and records."""
+    from pm_ai.app.wiring import _RecordedPlaintext, application_storage
+    from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR
+    from pm_ai.platform.paths import ScopePaths
+
+    monkeypatch.setenv(DISABLE_ENCRYPTION_VAR, "1")
+    daemon = _daemon(tmp_path / "daemon", disabled=True)
+    setup = application_storage(FakeKeychain(), paths=ScopePaths.rooted(tmp_path / "setup"))
+
+    for storage in (daemon.storage, setup):
+        cipher = storage._crypto
+        assert isinstance(cipher, _RecordedPlaintext)
+        assert cipher._record is not None, "a writer's debug cipher was never bound"
+
+        storage.write_artifact(PAYLOAD, scope=APPLICATION, artifact="config.json")
+
+        log = storage.paths.resolve(APPLICATION, EVENT_LOG)
+        body = "".join(s.read_text(encoding="utf-8") for s in log.glob("*.md"))
+        assert body.count("protection=encryption-at-rest") == 1
+
+
+def test_every_writer_wiring_builds_goes_through_the_one_that_binds(tmp_path):
+    """Three writers today — the daemon's, setup's and enrolment's — and one door.
+
+    A `StorageService(...)` constructed anywhere else in the composition root
+    would hold a debug cipher nothing had bound, and its first protected write
+    would refuse rather than record.
+    """
+    import inspect
+
+    from pm_ai.app import wiring
+
+    source = inspect.getsource(wiring)
+    assert source.count("StorageService(") == 1, "a writer built outside `_writer`"
+    assert source.count("_writer(") >= 4  # the definition and three callers
 
 
 def test_encryption_on_announces_nothing_at_all(tmp_path, capsys):
@@ -408,6 +610,15 @@ def test_encryption_on_announces_nothing_at_all(tmp_path, capsys):
     assert not isinstance(daemon.crypto, PlaintextCrypto)
     assert "encryption is disabled" not in capsys.readouterr().err
     assert "encryption disabled" not in _event_log_text(daemon)
+
+
+def test_encryption_on_records_nothing_even_on_a_protected_write(tmp_path, capsys):
+    daemon = _daemon(tmp_path, disabled=False)
+
+    _seal(daemon)
+
+    assert "encryption is disabled" not in capsys.readouterr().err
+    assert "encryption-at-rest" not in _event_log_text(daemon)
 
 
 def test_encryption_is_on_when_nobody_says_otherwise(tmp_path):
@@ -504,3 +715,99 @@ def test_appending_to_a_plaintext_ledger_still_works(tmp_path):
 
     body = _event_log_text(daemon, scope=daemon.scope)
     assert body.count("actor=test") == 2, "appending replaced rather than appended"
+
+
+# ── Through `entry.main`: commands that write nothing leave nothing (1p) ──────
+#
+# Measured 2026-09-25 with one project enrolled: each of these added a security
+# line to the application event log with encryption off, and wrote nothing else.
+
+
+def _tree(root):
+    """Every file beneath `root`, with its bytes and modification time."""
+    return {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.fixture
+def enrolled_machine(tmp_path, monkeypatch):
+    """A throwaway `HOME` with one project enrolled and encryption off."""
+    from pm_ai.app import entry
+    from pm_ai.core.project_registry import ProjectEntry, render_registry
+    from pm_ai.domain.scope_model import APPLICATION_DIRNAME
+    from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR
+
+    home = tmp_path / "home"
+    project = tmp_path / "alpha"
+    project.mkdir()
+    registry = home / APPLICATION_DIRNAME / "projects.toml"
+    registry.parent.mkdir(parents=True)
+    registry.write_bytes(render_registry({"alpha": ProjectEntry(path=project)}))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv(DISABLE_ENCRYPTION_VAR, "1")
+    monkeypatch.setattr(
+        entry, "MacOSKeychainAdapter", lambda: FakeKeychain(os.urandom(AES_KEY_BYTES))
+    )
+    monkeypatch.chdir(project)
+    return tmp_path
+
+
+def _application_event_log_text(machine) -> str:
+    from pm_ai.domain.scope_model import APPLICATION_DIRNAME
+
+    log = machine / "home" / APPLICATION_DIRNAME
+    return "".join(
+        s.read_text(encoding="utf-8") for s in log.rglob("event_log/*.md")
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--help"], 0),
+        (["no-such-command"], 2),
+        (["project"], 2),
+        # `doctor` reports this machine unhealthy — no `config.toml` has been
+        # written — so its exit code is 4, `EXIT_UNHEALTHY`.
+        (["doctor"], 4),
+    ],
+    ids=["help", "mistyped", "project-without-subcommand", "doctor"],
+)
+def test_a_command_that_writes_nothing_leaves_every_file_alone(
+    enrolled_machine, argv, expected, capsys
+):
+    from pm_ai.app import entry
+
+    # The first command on a fresh home creates the operational database; a
+    # machine already in use does not, and that is the machine this is about.
+    # It still must not write the security line: once per fresh home is still
+    # a line that explains nothing.
+    assert entry.main(argv) == expected
+    assert "encryption-at-rest" not in _application_event_log_text(enrolled_machine)
+    capsys.readouterr()
+    before = _tree(enrolled_machine)
+
+    assert entry.main(argv) == expected
+
+    assert _tree(enrolled_machine) == before
+    assert "encryption is disabled" in capsys.readouterr().err, (
+        "the console warning still appears on every command"
+    )
+
+
+def test_enrolling_a_project_with_the_debug_flag_records_nothing(enrolled_machine):
+    """Enrolment's writer writes only ordinary files, so it has nothing to explain."""
+    from pm_ai.app.wiring import onboard_project
+    from pm_ai.domain.scope_model import APPLICATION_DIRNAME
+
+    beta = enrolled_machine / "beta"
+    beta.mkdir()
+
+    onboard_project(FakeKeychain(os.urandom(AES_KEY_BYTES)), str(beta))
+
+    log = enrolled_machine / "home" / APPLICATION_DIRNAME / "event_log"
+    body = "".join(s.read_text(encoding="utf-8") for s in log.rglob("*.md"))
+    assert "encryption-at-rest" not in body

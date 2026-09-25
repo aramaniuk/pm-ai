@@ -4,7 +4,7 @@ Exactly one setting comes from here, and it is the most dangerous one pm-ai has:
 whether to write the encrypted set in plaintext. `SPEC.md` forecloses every other
 way of setting it — no `config.toml` key, no stored debug profile, no CLI flag
 that survives a restart — because a persistent switch is one somebody forgets.
-The console warning scrolls away within minutes and a startup event-log entry is
+The console warning scrolls away within minutes and an event-log entry is
 weeks old by the time anyone wonders why a credential file is readable. An
 environment variable dies with the process, so **restarting restores encryption
 unconditionally**: no expiry mechanism, no re-announcement schedule, nothing to

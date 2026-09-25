@@ -247,9 +247,9 @@ class PlaintextCrypto:
 
     A `CryptoPort` rather than a `None` the write path has to check, so there is
     exactly one code path whether or not encryption is on. `pm_ai.app.wiring`
-    owns the choice and owns announcing it — the console warning and the
-    event-log entry — because this module cannot reach either and should not
-    know a flag exists.
+    owns the choice and owns announcing it — the console warning at start, and
+    the event-log entry just before the first protected write in plaintext —
+    because this module cannot reach either and should not know a flag exists.
     """
 
     def encrypt(self, plaintext: bytes) -> bytes:
