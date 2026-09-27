@@ -708,6 +708,129 @@ dependants in this wave and, after 8e's renegotiation, no edge between them.
 | `9a` | Scheduled harvest — 240min ±15, exponential backoff, the missing `try/except` story 9 names, and the 07:00 render tick. |
 | `11b` | Real transcript path wired into the existing extraction pipeline. |
 
+### Before wave 2 — added 2026-09-27
+
+Wave 1 is complete, together with six slices it did not list: `8g`, `8h` and `8i`
+on the sanitization and coverage path, `4l` (every enrolled project is watched),
+`1o` (Python 3.14 exactly) and `1p` (running with encryption off is recorded on
+the first protected write). None of the seven wave-2 slices has a spec or a
+`stories.yaml` entry yet, and they cannot all be specified correctly today. The
+list below was compiled on 2026-09-27 from the open entries in
+`deferred-work.md`, the architecture spine's Still-open, Open Risks and Deferred
+sections, and the slice-0 spike. Line numbers are as of that date.
+
+The spike's biggest question is already answered: the tenant returned
+transcripts with HTTP 200 (`slice-0-graph-spike-2026-09-06.md:15-26`), so `33e`
+and `11b` stay in the plan, and the 403 degradation is still required because
+the switch is the tenant's.
+
+**Phase 1 — decisions, no code.** Each blocks the slice named.
+
+1. **How event-log lines are versioned** (blocks `33d`, and `23c` through it).
+   AD-27's versioning clause was withdrawn with nothing in its place; the
+   options on record are a token per line, a header per monthly segment, or a
+   dated table. `33d`'s `MessagePayload.mentions` is the first real change to
+   the line format, which is where question 3 below said the decision becomes
+   unavoidable. `deferred-work.md:275-284`, spine `:1036-1037`.
+2. **How `mentions` is labelled as outside text** (blocks `33d`). The rule for
+   declaring untrusted fields covers single strings; a list of strings is a
+   named hole. Decide with step 1. Spine `:1000`.
+3. **Which record wins when one meeting has two** (blocks `33e`, `11b`). A
+   hand-dropped transcript matched by title and start time and a Graph
+   transcript matched by calendar event can each create a record for the same
+   meeting. Spine `:1097`.
+4. **What kind of file the dashboard is** (blocks `9a`). It is declared Tier 1
+   and hand-editable, yet every render replaces it whole, so a 07:00 scheduled
+   render would erase a hand edit daily. Either it becomes rebuildable, or a
+   render stops replacing it. Spine `:1092`.
+5. **The 5-second rule** (blocks `4e`, `4f`). AD-21 says anything slower than
+   5 seconds answers at once and delivers later, on both surfaces;
+   `connector check` waits up to 10 seconds by design. Either build the
+   deliver-later mechanism or narrow the rule. Spine `:1093`.
+
+Two smaller choices belong inside their slice's spec rather than here: a length
+cap for the Proactive Enablement section (`23c`, `deferred-work.md:656-658`),
+and whether the message window is "the last 24 hours" or "since the last render"
+— they differ after a missed weekend (`9a`, `23c`, `deferred-work.md:660-662`).
+
+**Phase 2 — code before wave 2**, one slice each.
+
+6. **AD-11's project selection order** (needed by `4e`, `4f`, `9a`). A project
+   named with `--scope project:<id>` wins over the folder. Today the project is
+   chosen before the command line is read, so with several projects enrolled the
+   personal dashboard and `goal set` are refused outside every project folder —
+   a live bug. A daemon has no working directory, so the scheduled render needs
+   this. `deferred-work.md:846-850`, spine AD-11.
+7. **Save refreshed Graph tokens** (needed by `4e`, `9a`). A refresh token the
+   provider rotates mid-run lives only in memory, and the sealed credential
+   store has no update path; two parts of the code also each treat the
+   credential file as theirs. `deferred-work.md:612-614`, spine `:1098`.
+8. **One connector list** (needed by `4e`). The composition root installs its
+   registry over a process-wide global and `connector check` reads the global,
+   so the daemon and the CLI can disagree and two daemons cannot share a
+   process. `deferred-work.md:470-472`, `:806-808`.
+9. **`pm-ai connector add` must create a working Graph connector** (needed by
+   `33d`, `9a`). Its probe table holds GitLab only (`connectors/probe.py`), and
+   the entry it writes lacks the Graph settings. `deferred-work.md:558-560`,
+   `:616-618`.
+
+Renaming one of the two modules called `graph` (`deferred-work.md:562-564`) is
+small enough to be `33e`'s first step rather than a slice of its own.
+
+**Phase 3 — outside prerequisites.**
+
+10. **Admin consent** for all seven Graph permissions on any tenant other than
+    the spike's, where an administrator granted them. Whether an ordinary user
+    can consent to `ChannelMessage.Read.All` and
+    `OnlineMeetingTranscript.Read.All` is unmeasured. Spike `:61-65`.
+11. **Xcode Command Line Tools** on the build machine: under Python 3.14,
+    `watchdog` has no macOS wheel and builds from source when the runtime extra
+    is installed, which `4e` needs. Spine `:1128`.
+
+**Phase 4 — the wave-2 specs, in build order.** What each spec must include
+beyond the table above:
+
+12. **`33d`, then `23c`.**
+    - `33d`: convert HTML to text; paging rules that differ per endpoint
+      (spike `:122-134`); real fixtures with personal details removed
+      (`deferred-work.md:574-576`); message text reaching log files at `0644`
+      rather than the declared `0600` (`:690-692`); proof on each result that a
+      fetch happened (`:820-822`).
+    - `23c`: a failed event-log read must not render as "no signals"
+      (`:674-676`); sender display names must survive, which today they do not
+      because the alias table is never saved (`:598-600`).
+13. **`33e`, then `11b`.**
+    - Both: build `TranscriptSourcePort`, which AD-23 requires and which exists
+      only as a docstring (spine `:315-317`); declare Graph's refusals beside it
+      (`deferred-work.md:608-610`); match transcripts to occurrences of a
+      recurring meeting by time, fetch content separately, and let the 403
+      degrade rather than retry (spike `:43-57`, `:144-158`). A project meeting
+      nobody tagged is filed personally and cannot move later (spine `:1088`).
+    - `11b` only: confirm the transcript path reaches a model only through
+      `ModelPort` (`deferred-work.md:379-381`), and type `Extraction.detail`,
+      which is an untyped dict built from raw text (`:748-750`).
+14. **`4e`, then `4f`.** There is no daemon today: `surfaces/api/` is a
+    docstring and `pm_ai` imports no `asyncio`. Writes are kept in order by a
+    cross-process file lock no AD names, which `4e` must document or replace
+    (spine `:1089`). A writer that lives as long as the daemon also closes the
+    two writers that skip the encryption-off warning (spine `:1127`).
+15. **`9a`, last.** Its story text must label it temporary, because `10a`'s
+    durable queue replaces it (see Deferred, below). It adds the missing
+    `try/except` (`pipelines.py:69-110`), replaces the dashboard's harvest that
+    starts from an empty cursor and sleeps inline (spine `:1091`,
+    `deferred-work.md:710-712`), and handles the coverage row every harvest now
+    writes and nothing prunes (`:816-818`). A key unreadable after an OS
+    upgrade silently stops the briefing (spine `:1132`).
+
+**Housekeeping, any time.**
+
+16. Two stale notes in `stories.yaml`: `:716-719` still reads "3-Tier" as a time
+    horizon (settled as domain on 2026-09-03, question 2 below), and story 8's
+    note still says an empty answer earns no coverage (outdated since `8i`).
+
+Left out on purpose: about 80 other open `deferred-work.md` entries and about 30
+architecture items that do not touch wave 2.
+
 ## Deferred, with reasons
 
 - **Story 3 — MCP execution firewall.** Deferred because the prototype mutates
