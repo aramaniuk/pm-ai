@@ -595,6 +595,8 @@ not the payload shapes — but story 2l put payload content into Tier 1, so a ne
 field changes the on-disk entry format and takes the same care stories 2c and 2d
 took. Small, but not free, and named rather than smuggled in.
 
+**Decided 2026-09-27** (AD-27, AD-48): the field holds the Graph user ids of the people mentioned, defaults to `None`, and is declared trusted; whether the PM was mentioned is worked out when read. The entry grammar grows additively with no version marker, and lists are written comma-joined with escaping. What `33d` owes before its first real line is at the end of `deferred-work.md`.
+
 ### No fabricated content
 
 The renderer never invents. A section with no data states the computed reason —

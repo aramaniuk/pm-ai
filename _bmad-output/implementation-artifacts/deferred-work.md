@@ -849,3 +849,17 @@ transcript.
   summary: Build AD-11's selection order — a project named with `--scope project:<id>` wins over the folder and lifts the folder refusals; an unenrolled name is refused; commands aimed at personal or application scope need no selection. Fixes a live bug: with several projects enrolled, `pm-ai dashboard` (personal) and `goal set` are refused outside every folder.
   evidence: Measured 2026-09-25 by the currency review with the `machine` fixture — both `pm-ai dashboard` and `pm-ai dashboard --scope project:beta` exit 3 outside both folders. The cause is order: `entry.main` composes and selects before `dispatch` parses `argv`, and `require_daemon` calls `require_selection` for every daemon command. Also owed: the refusal sentence still says there is "no way to name a project on the command line yet"; `doctor`'s `project selection` line always says "chosen by the working directory", already wrong for a single project; and only commands without subcommands parse `--name value` options today, so a subcommand that acts in a project (`connector add`) cannot take `--scope` until that changes.
 
+## Decided in the AD-27 / AD-48 update, 2026-09-27 — owed by `33d`
+
+- source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27, AD-48)
+  summary: `33d` builds what the grammar decision needs before it writes its first real line — one encode/decode pair for payload line fields in `domain`, the pin test (payload field names and types, self-action required fields, both enumerations) and a round-trip test over every payload class, the list encoding, and AD-48's `tuple[str, ...]` declaration.
+  evidence: The architecture marks all of it not yet built. Measured by the gate reviewers on 2026-09-27: `_payload_fields` writes a tuple as its Python repr; `_assert_payload_text_is_declared` refuses a `tuple[str, ...]` declaration and accepts it undeclared; no test pins field names, since the nearest ones read names from the dataclass at test time. The comment at `domain/event_entries.py:61-70` still describes the versioning choice as open.
+
+- source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27)
+  summary: The dashboard's message line reads `channel` and `excerpt`, but the writer stores `p.channel` and `p.excerpt`, so every real message would render with neither — silently, because a missing field reads as absent.
+  evidence: `pm_ai/core/rendering.py:655-665` (`_signal_line`) looks both up by literal unprefixed name; `storage/service.py` `_payload_fields` prefixes every payload field with `p.`; the rendering tests build entries by hand with unprefixed names, so they pass. Latent until `33d` writes real message entries. Fixed by the encode/decode pair above; `23c` must not add a second literal lookup.
+
+- source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-48)
+  summary: `MessagePayload.mentions` holds Graph user ids only, defaults to `None`, and is declared trusted on that basis — so `33d` must refuse, not fall back, when a mention carries no user id (a tag or channel mention).
+  evidence: Decided 2026-09-27 (ids, not display names; the PM-was-mentioned answer derived when read). The adversarial reviewer noted nothing checks that the field holds only ids, and tag and channel mentions tempt a fallback to typed display names, which would make a trusted declaration false.
+
