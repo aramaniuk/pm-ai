@@ -68,6 +68,7 @@ __all__ = [
     "_default_project",
     "CONNECTORS",
     "CREDENTIAL_STORE",
+    "CredentialNotHeld",
     "DuplicateConnector",
     "MalformedInstanceName",
     "OrphanedCredential",
@@ -75,7 +76,9 @@ __all__ = [
     "ProbeUnreachable",
     "UnknownConnectorSystem",
     "connector_configurations",
+    "credential_for",
     "enrol_connector",
+    "replace_credential",
     "stored_credentials",
 ]
 
@@ -93,10 +96,11 @@ CONNECTORS = "connectors/"
 """The unencrypted collection, one member per enrolled connector instance."""
 
 # The one key inside the sealed store this slice owns. Nested rather than
-# top-level so that a later occupant of `config.json` — the Graph refresh token
-# `33a` needs somewhere to live is the next one — is not something this module
-# has to know about in order to preserve. The read-modify-write keeps every
-# sibling key it did not put there.
+# top-level so that a later occupant of `config.json` is not something this
+# module has to know about in order to preserve. The read-modify-write keeps
+# every sibling key it did not put there. The Graph refresh token is *not* such
+# an occupant: it is the `credential` of its own instance under this key, and a
+# rotated one is written back by `replace_credential` (story 8j).
 CREDENTIALS_KEY = "connectors"
 
 # What a connector's instance name may be spelled with. Deliberately narrower
@@ -137,6 +141,42 @@ class OrphanedCredential(RuntimeError):
     Never silent, which is the point. The reachable alternative was a sealed
     credential nothing on the machine refers to.
     """
+
+
+class CredentialNotHeld(LookupError):
+    """The sealed store holds no credential for this instance under this system.
+
+    Raised by `replace_credential`, which updates an enrolled credential and
+    never creates one. Either the instance has no entry — never enrolled, or
+    removed since — or its entry is recorded under another system, which is a
+    different connector wearing the same name. Nothing is written, and the
+    instance is named.
+    """
+
+
+def _sealed_under(entry: Mapping[str, object], system: str) -> bool:
+    """Whether a sealed entry may be used, and replaced, as `system`'s credential.
+
+    One rule for reading and for writing back, so a credential that can be
+    read can also be replaced. An entry recording a different, non-empty
+    system belongs to another connector. An entry recording none — missing,
+    empty, or not a string — is the instance's own; refusing it on write-back
+    after accepting it on read would lose a rotated token.
+    """
+    recorded = entry.get("system")
+    return not (isinstance(recorded, str) and recorded and recorded != system)
+
+
+def credential_for(sealed: object, *, system: str) -> str | None:
+    """The credential string in one sealed entry, or `None` when it has none to use.
+
+    `None` for an entry that is not an object, is recorded under another
+    system (see `_sealed_under`), or holds something other than a string.
+    """
+    if not isinstance(sealed, Mapping) or not _sealed_under(sealed, system):
+        return None
+    credential = sealed.get("credential")
+    return credential if isinstance(credential, str) else None
 
 
 def stored_credentials(storage: StoragePort) -> dict[str, dict[str, str]]:
@@ -295,6 +335,70 @@ def enrol_connector(
             ) from unwritten
 
     return _redacted(answer, credential)
+
+
+def replace_credential(
+    storage: StoragePort,
+    *,
+    system: str,
+    instance: str,
+    credential: str,
+    claimed: bool = False,
+) -> bool:
+    """Replace one enrolled instance's credential, and nothing else (story 8j).
+
+    The write-back a provider that rotates its credentials needs: Microsoft
+    retires a refresh token on use, and a replacement kept only in memory is
+    lost when the command ends. The same read-modify-write as enrolment, under
+    the same claim, so neither can lose the other's write — and keyed, so every
+    other connector's credential and every other top-level key is written back
+    as it was read.
+
+    `claimed` says the caller already holds `storage.exclusive` on the sealed
+    store. The claim is not re-entrant, so a caller holding it must say so, and
+    one that does not hold it gets it taken here.
+
+    Differs from enrolment in two ways and only two: an existing entry is
+    required rather than refused, and there is no probe, because the provider
+    that issued the credential has just answered. Refused with
+    `CredentialNotHeld`, writing nothing, when the instance has no entry or its
+    entry is sealed under another system.
+
+    Returns whether the file was written. The same credential is not written
+    again: a rewrite that changes nothing is a write that can still fail.
+    """
+    if not claimed:
+        with storage.exclusive(scope=APPLICATION, artifact=CREDENTIAL_STORE):
+            return replace_credential(
+                storage,
+                system=system,
+                instance=instance,
+                credential=credential,
+                claimed=True,
+            )
+    # Read inside the claim, for the reason enrolment does: a mapping read
+    # before it may be missing another process's write.
+    document = _decode(storage.read_artifact(scope=APPLICATION, artifact=CREDENTIAL_STORE))
+    credentials = _credentials_in(document)
+    held = credentials.get(instance)
+    if held is None:
+        raise CredentialNotHeld(
+            f"{CREDENTIAL_STORE} has no entry for {instance!r}, so there is "
+            f"nothing to replace. Nothing was written."
+        )
+    if not _sealed_under(held, system):
+        raise CredentialNotHeld(
+            f"the entry for {instance!r} in {CREDENTIAL_STORE} is recorded "
+            f"under the system {held.get('system')!r}, not {system!r}. Nothing "
+            f"was written: that is a different connector under the same "
+            f"instance name."
+        )
+    if held.get("credential") == credential:
+        return False
+    credentials[instance] = {**held, "credential": credential}
+    document[CREDENTIALS_KEY] = credentials
+    storage.write_artifact(_encode(document), scope=APPLICATION, artifact=CREDENTIAL_STORE)
+    return True
 
 
 # ── Everything below is pure, and none of it ever sees a path ────────────────
