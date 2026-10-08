@@ -64,8 +64,8 @@ scope at acquisition rather than leaving it to be misdiagnosed later.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, NoReturn, Protocol, TypeVar, runtime_checkable
@@ -76,7 +76,10 @@ __all__ = [
     "AuthDeclined",
     "AuthTimedOut",
     "CLOCK_SKEW_TOLERANCE",
+    "CredentialEntryMissing",
     "CredentialStale",
+    "CredentialStoreBusy",
+    "CustodyFailed",
     "EXPIRY_MARGIN",
     "GRAPH_RESOURCE_SCOPES",
     "GRAPH_SCOPES",
@@ -88,6 +91,9 @@ __all__ = [
     "OFFLINE_ACCESS",
     "RefreshTokenStore",
     "SealedCredential",
+    "StoreBusy",
+    "StoreEntryMissing",
+    "StoreUnavailable",
 ]
 
 
@@ -219,6 +225,41 @@ class GraphUnreachable(GraphAuthError):
     """
 
 
+class CustodyFailed(GraphAuthError):
+    """The store holding the credential could not be read, claimed or written.
+
+    Custody, not auth: nothing was learned about whether the credential is
+    good. `rotated` says whether Microsoft had already issued a replacement
+    that was then not saved. When it had, the token this machine holds is
+    retired and the stored sign-in has to be redone; when it had not, fixing
+    custody is enough.
+    """
+
+    def __init__(self, message: str, *, rotated: bool) -> None:
+        super().__init__(message)
+        self.rotated = rotated
+
+
+class CredentialStoreBusy(CustodyFailed):
+    """Another pm-ai process held the credentials file past the wait.
+
+    Not a verdict about the credential, and not a fault in pm-ai: the file is
+    one claim shared by every connector and by enrolment, and somebody else had
+    it — or a command that was stopped left its claim file behind.
+    """
+
+
+class CredentialEntryMissing(CustodyFailed):
+    """A rotated token had nowhere to go: the store holds no entry for this instance.
+
+    Always `rotated`. Nothing was written, and the replacement Microsoft issued
+    is lost with this process.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, rotated=True)
+
+
 class InteractionRequired(GraphAuthError):
     """Conditional access wants a human at the sign-in, and no refresh will do.
 
@@ -229,6 +270,26 @@ class InteractionRequired(GraphAuthError):
 
 
 # ── What is sealed, and where ────────────────────────────────────────────────
+
+
+class StoreBusy(Exception):
+    """Raised by a store whose claim another holder kept past the store's wait.
+
+    The message names what holds it, so a claim left by a stopped process can
+    be found and removed. Carries no credential material.
+    """
+
+
+class StoreUnavailable(Exception):
+    """Raised by a store that could not be opened, read, claimed or written.
+
+    A locked keychain, a missing master key, a file that will not decrypt, a
+    claim file that could not be created. Carries no credential material.
+    """
+
+
+class StoreEntryMissing(Exception):
+    """Raised by `write` when the store holds no entry this credential replaces."""
 
 
 @runtime_checkable
@@ -264,6 +325,11 @@ class RefreshTokenStore(Protocol):
         processes so completely that the retry the matrix's concurrent-refresh
         row requires can never run, and an implementation may not assume it is
         re-entrant.
+
+        A store whose claim is held elsewhere raises `StoreBusy`, and one that
+        cannot take its claim at all raises `StoreUnavailable`; the adapter
+        reports them as `CredentialStoreBusy` and `CustodyFailed`, never as its
+        own fault.
         """
 
 
@@ -276,9 +342,12 @@ class SealedCredential:
     Taking `accounts[0]` is the shape that silently refreshes the wrong
     identity on a laptop where the PM has also signed a personal account in.
 
-    Carried as one JSON string because story 8b's sealed store holds exactly one
-    `credential` per connector instance. `home_account_id` is not secret; it
-    travels with the token only so the two can never be separated.
+    Carried as one JSON string because story 8b's sealed store holds one
+    `credential` string per connector instance. The file itself holds every
+    connector's credential, keyed by instance name; a store handed to this
+    adapter reads and writes this instance's entry only. `home_account_id` is
+    not secret; it travels with the token only so the two can never be
+    separated.
     """
 
     refresh_token: str
@@ -357,6 +426,28 @@ class InMemoryRefreshTokenStore:
 
     def exclusive(self) -> AbstractContextManager[None]:
         return nullcontext()
+
+
+_CUSTODY_REMEDY = (
+    "That is custody, not auth — check the master key is enrolled and the "
+    "keychain is unlocked. Whether the credential is good is unknown, which is "
+    "not the same as bad."
+)
+
+_REDO_SIGN_IN = (
+    "The stored sign-in has to be redone: Microsoft has retired the token this "
+    "machine holds, and the replacement it issued was not saved. pm-ai has no "
+    "command yet that redoes the sign-in for a connector that is already "
+    "enrolled."
+)
+
+
+def _sentence(text: str) -> str:
+    """`text` as a whole sentence, so it reads the same whatever it ended with."""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    return stripped if stripped[-1] in ".!?" else f"{stripped}."
 
 
 # ── Error-code mapping ───────────────────────────────────────────────────────
@@ -665,11 +756,11 @@ class GraphDeviceCodeAuth:
         if not force_refresh and cached is not None and self._cached_token_is_live():
             return cached
         app = self._application()
-        with self.store.exclusive():
+        with self._claimed(rotated=False):
             sealed = self._sealed()
         result = self._acquire(app, sealed, force_refresh=force_refresh)
         if "error" in result:
-            with self.store.exclusive():
+            with self._claimed(rotated=False):
                 rotated = self._sealed_or_none()
             if rotated is not None and rotated.refresh_token != sealed.refresh_token:
                 result = self._acquire(app, rotated, force_refresh=force_refresh)
@@ -680,8 +771,12 @@ class GraphDeviceCodeAuth:
                     during="refreshing the Graph credential",
                     secret=sealed.refresh_token,
                 )
-        with self.store.exclusive():
-            self._rotate(sealed, result)
+        if self._replacement(sealed, result) is not None:
+            # Claimed only when there is something to write: an unrotated token
+            # leaves the file alone, and a claim taken for nothing is a claim
+            # another run can be refused over.
+            with self._claimed(rotated=True):
+                self._rotate(sealed, result)
         self._assert_granted(result)
         return self._adopt(result)
 
@@ -725,9 +820,7 @@ class GraphDeviceCodeAuth:
                 Health.FAILING,
                 f"the sealed store holding {self.instance}'s credential could not "
                 f"be read: {unreadable!r}",
-                "That is custody, not auth — check the master key is enrolled "
-                "and the keychain is unlocked. Whether the credential is good "
-                "is unknown, which is not the same as bad.",
+                _CUSTODY_REMEDY,
             )
         if stored is None or (isinstance(stored, str) and not stored.strip()):
             # `None`, empty and blank are one state: nothing usable is enrolled.
@@ -789,6 +882,30 @@ class GraphDeviceCodeAuth:
                 "Enrol again and finish the sign-in while the code it prints is "
                 "still live. Nothing is broken on this machine — the flow was "
                 "started and abandoned.",
+            )
+        except CredentialStoreBusy as busy:
+            return Probe(
+                self.instance,
+                Health.FAILING,
+                f"{self.instance}'s credentials file was busy: {busy}",
+                (_REDO_SIGN_IN if busy.rotated else "Run this again once the other "
+                 "pm-ai command has finished. Nothing is wrong with the credential.")
+                + " If no other pm-ai command is running, the claim file named "
+                "above is left over from one that was stopped, and can be removed.",
+            )
+        except CredentialEntryMissing as missing:
+            return Probe(
+                self.instance,
+                Health.FAILING,
+                f"{self.instance}'s rotated credential had nowhere to go: {missing}",
+                _REDO_SIGN_IN,
+            )
+        except CustodyFailed as custody:
+            return Probe(
+                self.instance,
+                Health.FAILING,
+                f"{self.instance}'s credential store failed: {custody}",
+                _REDO_SIGN_IN if custody.rotated else _CUSTODY_REMEDY,
             )
         except GraphUnreachable as silent:
             return Probe(
@@ -1024,10 +1141,63 @@ class GraphDeviceCodeAuth:
         document this adapter writes" — a corruption message for a machine
         nobody had finished setting up.
         """
-        raw = self.store.read()
+        try:
+            raw = self.store.read()
+        except Exception as unreadable:  # noqa: BLE001 — custody, typed here
+            # Any failure of the store is custody, whatever its type: a locked
+            # keychain or a file that will not decrypt must not reach the probe's
+            # catch-all and read as a bug in pm-ai. The type and message only —
+            # stores raise without credential material, and the cause is not
+            # chained in case one did not.
+            raise CustodyFailed(
+                f"the store holding {self.instance}'s credential could not be "
+                f"read: {type(unreadable).__name__}: "
+                f"{_sentence(str(unreadable)) or 'no detail given.'} Whether the "
+                f"credential is good is unknown.",
+                rotated=False,
+            ) from None
         if raw is None or (isinstance(raw, str) and not raw.strip()):
             return None
         return SealedCredential.decode(raw)
+
+    @staticmethod
+    def _replacement(used: SealedCredential, result: Mapping[str, Any]) -> str | None:
+        """The refresh token the provider issued, when it differs from the one used."""
+        issued = result.get("refresh_token")
+        if isinstance(issued, str) and issued and issued != used.refresh_token:
+            return issued
+        return None
+
+    @contextmanager
+    def _claimed(self, *, rotated: bool) -> Iterator[None]:
+        """The store's claim, with a busy or unavailable store reported as custody.
+
+        Left to propagate, either reached `check_health`'s catch-all and was
+        reported as a bug in pm-ai. Only entering the claim is translated: a
+        refusal raised inside the body is the body's, and keeps its own type.
+        """
+        lost = (
+            f"Microsoft issued a replacement credential for {self.instance} and "
+            f"it could not be saved"
+            if rotated
+            else f"{self.instance}'s credential could not be read"
+        )
+        with ExitStack() as held:
+            try:
+                held.enter_context(self.store.exclusive())
+            except StoreBusy as busy:
+                raise CredentialStoreBusy(
+                    f"{lost}, because the credentials file was busy. "
+                    f"{_sentence(str(busy))}",
+                    rotated=rotated,
+                ) from None
+            except StoreUnavailable as unavailable:
+                raise CustodyFailed(
+                    f"{lost}, because the credentials file could not be claimed. "
+                    f"{_sentence(str(unavailable))}",
+                    rotated=rotated,
+                ) from None
+            yield
 
     def _rotate(self, used: SealedCredential, result: Mapping[str, Any]) -> None:
         """Seal the new refresh token when the provider issued one.
@@ -1041,13 +1211,20 @@ class GraphDeviceCodeAuth:
         retired the token this machine still holds — so the refusal says that,
         and says it is custody rather than the credential.
         """
-        issued = result.get("refresh_token")
-        if isinstance(issued, str) and issued and issued != used.refresh_token:
+        issued = self._replacement(used, result)
+        if issued is not None:
             replacement = SealedCredential(
                 refresh_token=issued, home_account_id=used.home_account_id
             ).encode()
             try:
                 self.store.write(replacement)
+            except StoreEntryMissing as missing:
+                said = _without(_without(str(missing), issued), used.refresh_token)
+                raise CredentialEntryMissing(
+                    f"Microsoft issued a replacement credential for "
+                    f"{self.instance} and it was not saved: {_sentence(said)} "
+                    f"The replacement is lost with this process."
+                ) from None
             except Exception as uncommitted:  # noqa: BLE001 — see the docstring
                 # Redacted and *unchained*. A store that quoted the credential
                 # into its own exception would otherwise put it in the message
@@ -1055,13 +1232,13 @@ class GraphDeviceCodeAuth:
                 # the traceback of whatever it was raised from" is this module's
                 # promise rather than a hope about somebody else's formatting.
                 said = _without(_without(repr(uncommitted), issued), used.refresh_token)
-                raise GraphAuthError(
+                raise CustodyFailed(
                     f"Microsoft issued a replacement credential for "
                     f"{self.instance} and it could not be sealed: {said}. The "
                     f"provider has already retired the one this machine holds, "
                     f"so the next start will report stale — that is custody "
-                    f"failing, not the credential. Check the master key is "
-                    f"enrolled and the keychain is unlocked, then enrol again."
+                    f"failing, not the credential.",
+                    rotated=True,
                 ) from None
 
     def _adopt(self, result: Mapping[str, Any]) -> str:

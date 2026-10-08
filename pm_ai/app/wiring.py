@@ -12,7 +12,8 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,12 @@ from pm_ai.connectors.graph import (
     graph_category_scopes,
     graph_window_policy,
 )
-from pm_ai.connectors.graph.auth import GraphDeviceCodeAuth, InMemoryRefreshTokenStore
+from pm_ai.connectors.graph.auth import (
+    GraphDeviceCodeAuth,
+    StoreBusy,
+    StoreEntryMissing,
+    StoreUnavailable,
+)
 from pm_ai.connectors.graph.calendar import GraphCalendarFetch
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.connectors.registry import ConnectorRegistry, install as install_connectors
@@ -43,7 +49,13 @@ from pm_ai.core.project_registry import (
     render_registry,
 )
 from pm_ai.core.project_scaffold import render_gitignore
-from pm_ai.core.connector_enrolment import stored_credentials
+from pm_ai.core.connector_enrolment import (
+    CREDENTIAL_STORE,
+    CredentialNotHeld,
+    credential_for,
+    replace_credential,
+    stored_credentials,
+)
 from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
@@ -52,6 +64,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.ports import (
     MASTER_KEY_NAME,
+    ArtifactBusy,
     ConnectorPort,
     CryptoPort,
     KeychainPort,
@@ -671,12 +684,15 @@ def _enrolled_connectors(
             # calendar fetch were built for.
             continue
         if system == "graph":
-            if credentials is None:
-                credentials = _stored_credentials(storage)
+            # No credential is read here: the store reads the sealed file each
+            # time the adapter asks, so a token another run rotated is the one
+            # this run refreshes from (story 8j).
             graph = _graph_connector(
                 entry,
                 instance=instance,
-                credential=_credential_for(credentials.get(instance), system=system),
+                store=SealedRefreshTokenStore(
+                    storage=storage, instance=instance, system=system
+                ),
                 clock=clock,
                 registered=registered,
             )
@@ -788,7 +804,7 @@ def _graph_connector(
     entry: Mapping[str, object],
     *,
     instance: str,
-    credential: str | None,
+    store: SealedRefreshTokenStore,
     clock: Callable[[], datetime],
     registered: Callable[[str], bool],
 ) -> GraphConnector | None:
@@ -869,14 +885,10 @@ def _graph_connector(
         # school tenant; the row names one when this PM's Entra application is
         # single-tenant.
         tenant=named_tenant if named_tenant is not None else GraphDeviceCodeAuth.tenant,
-        # Custody, and the honest limit of this slice. The sealed store is read
-        # at composition and the adapter is handed what it held; a refresh token
-        # the provider rotates mid-run is kept for the life of this process and
-        # not written back, so the next start signs in from the enrolled one
-        # again. Writing back needs an update path through `8b`'s sealed store
-        # that does not exist, and a store that silently lost the rotation would
-        # be worse than one that visibly never had it.
-        store=InMemoryRefreshTokenStore(credential=credential),
+        # Custody: this instance's entry in the sealed store, read live and
+        # written back under enrolment's claim (story 8j). The adapter hands a
+        # rotated token to what it was given and never chooses where it goes.
+        store=store,
         instance=instance,
         now=clock,
     )
@@ -901,6 +913,137 @@ def _graph_connector(
         categories=categories,
         now=clock,
     )
+
+
+CLAIM_WAIT_ATTEMPTS = 40
+"""How many times the sealed store's claim is tried before reporting it busy."""
+
+CLAIM_WAIT_INTERVAL = 0.05
+"""Seconds between tries. With the attempts above, about two seconds in all."""
+
+
+@dataclass
+class SealedRefreshTokenStore:
+    """One Graph instance's refresh token, in the sealed credentials file (story 8j).
+
+    The file holds every connector's credential keyed by instance name, so this
+    store reads and writes one entry and nothing else. It reads the file each
+    time it is asked rather than a copy taken at composition, so a token
+    another run rotated is the one this run refreshes from. That is a
+    deliberate cost: every read fetches the master key and decrypts the whole
+    file. It writes through `replace_credential`, under the same claim
+    enrolment takes, so neither can lose the other's write.
+
+    `exclusive()` is that claim, plus a lock for threads sharing this object.
+    The storage service refuses at once when the claim is held, which is right
+    for enrolment and wrong here: two `pm-ai` commands refreshing at the same
+    moment are ordinary, not a mistake. So both are retried within one budget
+    of about two seconds before `StoreBusy` is raised.
+
+    `write()` is accepted only from the thread inside `exclusive()`. Taking the
+    claim is the caller's job (the adapter takes it around every write), and a
+    write from anywhere else would be a read-modify-write without the lock.
+
+    The storage service's own refusals are translated into the protocol's
+    vocabulary — `StoreBusy`, `StoreUnavailable`, `StoreEntryMissing` — so the
+    connector never learns what storage raises.
+    """
+
+    storage: StorageService
+    instance: str
+    system: str
+    sleep: Callable[[float], None] = time.sleep
+    attempts: int = CLAIM_WAIT_ATTEMPTS
+    interval: float = CLAIM_WAIT_INTERVAL
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _holder: int | None = field(default=None, init=False, repr=False)
+
+    def read(self) -> str | None:
+        """This instance's sealed credential, or `None` when it has none.
+
+        An unreadable file raises `StoreUnavailable`, so a locked keychain does
+        not present as a machine nobody enrolled.
+        """
+        try:
+            held = stored_credentials(self.storage).get(self.instance)
+        except Exception as unreadable:  # noqa: BLE001 — translated, not swallowed
+            raise StoreUnavailable(
+                f"{CREDENTIAL_STORE} could not be read: "
+                f"{type(unreadable).__name__}: {unreadable}"
+            ) from None
+        return credential_for(held, system=self.system)
+
+    def write(self, credential: str) -> None:
+        """Replace this instance's credential. Only from inside `exclusive()`."""
+        if self._holder != threading.get_ident():
+            raise RuntimeError(
+                f"a write to {self.instance}'s entry in {CREDENTIAL_STORE} was "
+                f"made outside this thread's claim on it, so it was refused: "
+                f"without the claim it could lose another run's write."
+            )
+        try:
+            replace_credential(
+                self.storage,
+                system=self.system,
+                instance=self.instance,
+                credential=credential,
+                claimed=True,
+            )
+        except CredentialNotHeld as missing:
+            raise StoreEntryMissing(str(missing)) from None
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """The sealed store's claim, waited for briefly. Not re-entrant."""
+        me = threading.get_ident()
+        if self._holder == me:
+            raise RuntimeError(
+                f"the claim on {CREDENTIAL_STORE} is already held by this thread "
+                f"for {self.instance}; it is not re-entrant."
+            )
+        tries = max(self.attempts, 1)
+        locked = False
+        busy: str | None = None
+        with ExitStack() as claimed:
+            for attempt in range(tries):
+                if not locked:
+                    locked = self._lock.acquire(blocking=False)
+                    if locked:
+                        # Registered first, so it runs last: the file's claim is
+                        # given up before another thread may try for it.
+                        claimed.callback(self._lock.release)
+                if locked:
+                    try:
+                        claimed.enter_context(
+                            self.storage.exclusive(
+                                scope=DataScope(ScopeKind.APPLICATION),
+                                artifact=CREDENTIAL_STORE,
+                            )
+                        )
+                        busy = None
+                        break
+                    except ArtifactBusy as held:
+                        busy = str(held)
+                    except OSError as unclaimable:
+                        raise StoreUnavailable(
+                            f"the claim on {CREDENTIAL_STORE} could not be taken: "
+                            f"{type(unclaimable).__name__}: {unclaimable}"
+                        ) from None
+                else:
+                    busy = (
+                        f"another caller in this process held the claim on "
+                        f"{CREDENTIAL_STORE} for {self.instance}."
+                    )
+                if attempt + 1 < tries:
+                    self.sleep(self.interval)
+            if busy is not None:
+                raise StoreBusy(busy)
+            self._holder = me
+            claimed.callback(self._release_holder)
+            yield
+
+    def _release_holder(self) -> None:
+        self._holder = None
 
 
 def _unbuilt(instance: str, reason: str) -> None:
@@ -933,13 +1076,9 @@ def _credential_for(sealed: object, *, system: str) -> str | None:
       which is the honest answer: this instance has no credential *for this
       system*.
     """
-    if not isinstance(sealed, Mapping):
-        return None
-    recorded = sealed.get("system")
-    if isinstance(recorded, str) and recorded and recorded != system:
-        return None
-    credential = sealed.get("credential")
-    return credential if isinstance(credential, str) else None
+    # The rule lives in core so the Graph write-back applies the same one: an
+    # entry readable as this system's is one `replace_credential` will replace.
+    return credential_for(sealed, system=system)
 
 
 def _stored_credentials(storage: StorageService) -> dict[str, dict[str, str]]:
@@ -951,10 +1090,12 @@ def _stored_credentials(storage: StorageService) -> dict[str, dict[str, str]]:
     locked machine raises here — and a `build()` that raised would take the
     diagnostics down with it.
 
-    The cost is stated rather than hidden: a connector whose credential could
-    not be *read* reports `ABSENT`, the same as one that has none. The keychain
-    probe is what tells those two apart, and it reports the cause directly
-    instead of through a connector row.
+    The cost is stated rather than hidden: a GitLab connector whose credential
+    could not be *read* reports `ABSENT`, the same as one that has none. The
+    keychain probe is what tells those two apart, and it reports the cause
+    directly instead of through a connector row. A Graph connector does not go
+    through here: its store reads the file live (story 8j), so an unreadable
+    file reports as a custody failure rather than `ABSENT`.
     """
     try:
         return stored_credentials(storage)

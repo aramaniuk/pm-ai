@@ -17,10 +17,12 @@ from pathlib import Path
 import pytest
 
 from pm_ai.core.connector_enrolment import (
+    CredentialNotHeld,
     MalformedInstanceName,
     OrphanedCredential,
     connector_configurations,
     enrol_connector,
+    replace_credential,
     stored_credentials,
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -800,3 +802,89 @@ def test_a_malformed_system_name_says_system_not_instance(storage):
             credential=SECRET, probe=accepts,
         )
     assert "system name" in str(refused.value)
+
+
+# ── Story 8j: replacing one enrolled credential ──────────────────────────────
+
+
+def test_replacing_one_credential_keeps_every_other_entry_and_key(storage):
+    """The file holds every connector's credential; a write-back touches one."""
+    storage.write_artifact(
+        json.dumps({"unrelated": {"keep": True}}).encode(),
+        scope=APPLICATION,
+        artifact="config.json",
+    )
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential="first", probe=accepts
+    )
+    enrol_connector(
+        storage, system="graph", instance="graph:work", credential="old", probe=accepts
+    )
+
+    assert replace_credential(
+        storage, system="graph", instance="graph:work", credential="new"
+    ) is True
+
+    document = json.loads(
+        storage.read_artifact(scope=APPLICATION, artifact="config.json").decode()
+    )
+    assert document["unrelated"] == {"keep": True}
+    assert document["connectors"] == {
+        "gitlab:alpha": {"system": "gitlab", "credential": "first"},
+        "graph:work": {"system": "graph", "credential": "new"},
+    }
+
+
+def test_replacing_with_the_same_credential_does_not_rewrite_the_file(storage, tmp_path):
+    enrol_connector(
+        storage, system="graph", instance="graph:work", credential="same", probe=accepts
+    )
+    before = _sealed_file(tmp_path).read_bytes()
+
+    assert replace_credential(
+        storage, system="graph", instance="graph:work", credential="same"
+    ) is False
+    assert _sealed_file(tmp_path).read_bytes() == before
+
+
+def test_replacing_a_credential_nobody_enrolled_is_refused_and_writes_nothing(
+    storage, tmp_path
+):
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential="first", probe=accepts
+    )
+    before = _sealed_file(tmp_path).read_bytes()
+
+    with pytest.raises(CredentialNotHeld) as refused:
+        replace_credential(storage, system="graph", instance="graph:work", credential="new")
+
+    assert "graph:work" in str(refused.value)
+    assert _sealed_file(tmp_path).read_bytes() == before
+
+
+def test_replacing_a_credential_sealed_under_another_system_is_refused(storage, tmp_path):
+    enrol_connector(
+        storage, system="gitlab", instance="shared", credential="first", probe=accepts
+    )
+    before = _sealed_file(tmp_path).read_bytes()
+
+    with pytest.raises(CredentialNotHeld) as refused:
+        replace_credential(storage, system="graph", instance="shared", credential="new")
+
+    assert "shared" in str(refused.value)
+    assert _sealed_file(tmp_path).read_bytes() == before
+
+
+def test_replacing_takes_the_claim_enrolment_takes(storage):
+    """One lock for the file: a held claim refuses the write-back as well."""
+    from pm_ai.ports import ArtifactBusy
+
+    enrol_connector(
+        storage, system="graph", instance="graph:work", credential="old", probe=accepts
+    )
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        with pytest.raises(ArtifactBusy):
+            replace_credential(
+                storage, system="graph", instance="graph:work", credential="new"
+            )
+    assert stored_credentials(storage)["graph:work"]["credential"] == "old"
