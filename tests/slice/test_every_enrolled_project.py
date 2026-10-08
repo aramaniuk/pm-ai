@@ -39,7 +39,13 @@ from pm_ai.domain.scope_model import APPLICATION_DIRNAME, PROJECT_DIRNAME
 from pm_ai.platform.doctor import registry_readable
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR
 from pm_ai.ports import KeyNotFound
-from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL
+from pm_ai.surfaces.cli import dispatch as cli
+from pm_ai.surfaces.cli.dispatch import (
+    EXIT_OK,
+    EXIT_REFUSAL,
+    EXIT_UNHEALTHY,
+    EXIT_USAGE,
+)
 
 REGISTRY_ARTIFACT = "projects.toml"
 CONFIG_ARTIFACT = "config.toml"
@@ -128,8 +134,8 @@ class Machine:
     def standing_in(self, where: Path) -> None:
         self.monkeypatch.chdir(where)
 
-    def compose(self) -> entry._Composition:
-        return entry._compose(Keychain())
+    def compose(self, target: DataScope | None = None) -> entry._Composition:
+        return entry._compose(Keychain(), target)
 
 
 @pytest.fixture
@@ -152,6 +158,10 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Machine:
 
 def project_scope(project_id: str) -> DataScope:
     return DataScope(ScopeKind.PROJECT, project_id)
+
+
+PERSONAL = DataScope(ScopeKind.PERSONAL)
+APPLICATION = DataScope(ScopeKind.APPLICATION)
 
 
 # ── Every enrolled project is watched ────────────────────────────────────────
@@ -311,19 +321,6 @@ def test_outside_every_project_with_several_enrolled_is_refused_not_guessed(mach
         assert str(path) in composed.undecided
 
 
-def test_the_refusal_reaches_the_shell_as_the_existing_deliberate_no(machine, capsys):
-    """No new exit code: 3 is the one that already means a stated, deliberate no."""
-    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
-
-    assert entry.main(["config", "show"]) == EXIT_REFUSAL
-
-    printed = capsys.readouterr().err
-    assert "alpha" in printed and "beta" in printed
-    # The generic "could not build a daemon … `pm-ai doctor` reports why"
-    # sentence would be false here: doctor reports a healthy machine.
-    assert "could not build a daemon" not in printed
-
-
 def test_two_ids_at_one_directory_are_refused_rather_than_settled_alphabetically(
     machine,
 ):
@@ -481,11 +478,10 @@ def test_a_command_writes_under_the_tree_of_the_project_it_bound_to(machine):
     """Where the bytes land, which is what "acts in that project" has to mean.
 
     Through `run_dashboard` with `daemon.scope` rather than through
-    `entry.main`, and the reason is worth recording: **no subcommand today binds
-    its write target to the acting project.** `dashboard` takes `--scope`
-    explicitly and defaults to personal, `goal set` writes personal, and
-    `project add` names its project as an argument. This is the pipeline a
-    project-scoped command would go through, and the row below covers the CLI.
+    `entry.main`: since story 4m no subcommand reaches a project through the
+    folder — `dashboard` names its project with `--scope`, and the 4m rows
+    below cover that through the CLI. This is the pipeline the first command
+    whose default target is a project would go through.
     """
     machine.configure()
     projects = machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
@@ -525,25 +521,6 @@ def test_the_cli_renders_the_other_projects_dashboard_into_the_other_projects_tr
 
 
 # ── What the operator is told ────────────────────────────────────────────────
-
-
-def test_connector_check_refuses_rather_than_reporting_a_first_run(machine, capsys):
-    """An undecided machine has an empty registry for a reason that is not a first run.
-
-    `connector check` is deliberately independent of the daemon, because a
-    machine with nothing enrolled is an ordinary first run. But the registry is
-    populated by composition, so without a check of its own this command
-    answered "nothing is registered" about a machine with two projects and a
-    sealed credential.
-    """
-    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
-    machine.enrol_connector("gitlab:beta")
-
-    assert entry.main(["connector", "check"]) == EXIT_REFUSAL
-
-    captured = capsys.readouterr()
-    assert "no connectors are registered" not in captured.out
-    assert "alpha" in captured.err and "beta" in captured.err
 
 
 def test_doctor_names_the_project_this_invocation_binds_to(machine, capsys):
@@ -624,3 +601,405 @@ def test_a_bare_string_is_not_a_set_of_projects(machine, construct):
     with pytest.raises(TypeError, match="not one project's name"):
         replace(daemon, watched="alpha")
 
+
+# ── Story 4m — a command picks its project by AD-11's order ──────────────────
+#
+# One row per line of the story's I/O matrix, plus the rule that binds every
+# dashboard row: the scope the daemon acts in is the scope the output goes to.
+
+
+@pytest.fixture
+def acted(monkeypatch) -> list[DataScope]:
+    """Record the scope of every daemon `main` hands the dashboard pipeline.
+
+    Wraps the real `_dashboard` rather than replacing it, so the file is still
+    rendered and written — the row asserts where it landed *and* where the
+    daemon believed it was acting, which are the two things that used to
+    disagree.
+    """
+    seen: list[DataScope] = []
+    real = entry._dashboard
+
+    def recording(daemon):
+        if daemon is not None:
+            seen.append(daemon.scope)
+        return real(daemon)
+
+    monkeypatch.setattr(entry, "_dashboard", recording)
+    return seen
+
+
+@pytest.fixture
+def composed_in(monkeypatch) -> list[DataScope]:
+    """Record the scope of every daemon `main` composes, for any command.
+
+    `acted` sees only what reaches the dashboard pipeline; `goal set` and
+    `config show` reach no pipeline, so their acting scope is read here.
+    """
+    seen: list[DataScope] = []
+    real = entry._compose
+
+    def recording(keychain, target=None):
+        composed = real(keychain, target)
+        if composed.daemon is not None:
+            seen.append(composed.daemon.scope)
+        return composed
+
+    monkeypatch.setattr(entry, "_compose", recording)
+    return seen
+
+
+def personal_dashboard(machine: Machine) -> Path:
+    return machine.home / ".manager-ai" / "memory" / DASHBOARD_ARTIFACT
+
+
+def project_dashboard(projects: dict[str, Path], project_id: str) -> Path:
+    return projects[project_id] / PROJECT_DIRNAME / "memory" / DASHBOARD_ARTIFACT
+
+
+def test_the_personal_dashboard_runs_outside_every_project(machine, acted, capsys):
+    """Matrix row 1 and the acceptance criterion: the live bug this story fixes."""
+    machine.configure()
+    projects = machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+
+    assert entry.main(["dashboard"]) == EXIT_OK
+
+    written = personal_dashboard(machine)
+    assert written.is_file()
+    assert str(written) in capsys.readouterr().out
+    assert acted == [PERSONAL]
+    for project_id in projects:
+        assert not project_dashboard(projects, project_id).exists()
+
+
+def test_goal_set_runs_outside_every_project(machine, composed_in, monkeypatch, capsys):
+    """Matrix row 2: personal goals belong to no project, so no folder is needed."""
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    answers = ["g_latency", "project", "short", "Cut latency"]
+    monkeypatch.setattr("builtins.input", lambda prompt: answers.pop(0))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert entry.main(["goal", "set"]) == EXIT_OK
+
+    assert not answers
+    goals = machine.home / ".manager-ai" / "memory" / "strategic_goals.md"
+    assert goals.is_file()
+    assert "g_latency is set" in capsys.readouterr().out
+    assert composed_in == [PERSONAL]
+
+
+def test_a_named_project_acts_there_from_outside_every_project(machine, acted):
+    """Matrix row 3: the name is read before the folder, so outside both is fine."""
+    machine.configure()
+    projects = machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+
+    assert entry.main(["dashboard", "--scope", "project:beta"]) == EXIT_OK
+
+    assert project_dashboard(projects, "beta").is_file()
+    assert not project_dashboard(projects, "alpha").exists()
+    assert acted == [project_scope("beta")]
+
+
+def test_a_named_project_wins_over_the_folder_it_is_run_from(machine, acted):
+    """Matrix row 4: inside alpha, `project:beta` acts in beta — not only writes there.
+
+    Before 4m the output went to beta while the daemon acted in alpha, so
+    anything recorded on the way landed in alpha.
+    """
+    machine.configure()
+    projects = machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    machine.standing_in(projects["alpha"])
+
+    assert entry.main(["dashboard", "--scope", "project:beta"]) == EXIT_OK
+
+    assert project_dashboard(projects, "beta").is_file()
+    assert not project_dashboard(projects, "alpha").exists()
+    assert acted == [project_scope("beta")]
+
+
+@pytest.mark.parametrize("inside", [False, True], ids=["outside-both", "inside-alpha"])
+def test_a_named_project_that_is_not_enrolled_is_refused(
+    machine, acted, inside, capsys
+):
+    """Matrix row 5: refused with the existing code, naming the enrolled projects.
+
+    Inside alpha too, because the name never falls back to the folder: acting
+    in alpha when the operator said gamma would be pm-ai overruling them.
+    """
+    machine.configure()
+    projects = machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    if inside:
+        machine.standing_in(projects["alpha"])
+
+    assert entry.main(["dashboard", "--scope", "project:gamma"]) == EXIT_REFUSAL
+
+    printed = capsys.readouterr().err
+    assert "gamma is not an enrolled project" in printed
+    assert "alpha" in printed and "beta" in printed
+    # A deliberate no, not a broken machine: the generic sentence sends the
+    # operator to `pm-ai doctor`, which reports nothing wrong here.
+    assert "could not build a daemon" not in printed
+    assert acted == []
+    for project_id in projects:
+        assert not project_dashboard(projects, project_id).exists()
+
+
+def test_a_named_project_never_falls_back_to_the_only_project(machine, acted, capsys):
+    """One project enrolled: `project:gamma` is still refused, never acted in alpha."""
+    machine.configure()
+    projects = machine.enrol(alpha=machine.root / "alpha")
+
+    assert entry.main(["dashboard", "--scope", "project:gamma"]) == EXIT_REFUSAL
+
+    printed = capsys.readouterr().err
+    assert "gamma is not an enrolled project" in printed
+    assert "could not build a daemon" not in printed
+    assert acted == []
+    assert not project_dashboard(projects, "alpha").exists()
+
+
+def test_the_personal_dashboard_inside_a_project_stays_personal(machine, acted):
+    """Matrix row 6: the folder decides a project, never a command's default target."""
+    machine.configure()
+    projects = machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    machine.standing_in(projects["alpha"])
+
+    assert entry.main(["dashboard"]) == EXIT_OK
+
+    assert personal_dashboard(machine).is_file()
+    assert not project_dashboard(projects, "alpha").exists()
+    assert acted == [PERSONAL]
+
+
+def test_config_show_runs_outside_every_project(machine, composed_in, capsys):
+    """Matrix row 7: an application command acts in application scope, from anywhere."""
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+
+    assert entry.main(["config", "show"]) == EXIT_OK
+
+    assert "pm_handle" in capsys.readouterr().out
+    assert composed_in == [APPLICATION]
+
+
+def test_key_enrol_runs_outside_every_project(machine, monkeypatch, capsys):
+    """An application command: the keychain is the machine's, not a project's."""
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: Keychain(secret=None))
+
+    code = entry.main(["key", "enrol"])
+
+    printed = capsys.readouterr().err
+    assert code != EXIT_REFUSAL, printed
+    assert "could not build a daemon" not in printed
+
+
+def test_connector_add_runs_outside_every_project(machine, monkeypatch, capsys):
+    """Stubbed as `test_connector_add_never_echoes_the_credential` stubs it."""
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
+    monkeypatch.setattr(
+        cli, "enrol_connector", lambda *a, **k: "gitlab accepted the credential"
+    )
+
+    code = entry.main(["connector", "add", "gitlab", "gitlab:beta"])
+
+    printed = capsys.readouterr().err
+    assert code != EXIT_REFUSAL, printed
+    assert "could not build a daemon" not in printed
+
+
+def test_connector_check_runs_outside_every_project(machine, capsys):
+    """Matrix row 7: it was refused here until 4m, and its registry was empty.
+
+    Every enrolled project is still watched, so both projects' connectors are
+    probed — the registry is the daemon's, built for the application scope.
+    Exit `4` is the built-ins reporting no credential, which is a probe answer
+    and not a refusal.
+    """
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+
+    code = entry.main(["connector", "check"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_UNHEALTHY, captured.err
+    assert "no connectors are registered" not in captured.out
+    assert "gitlab:alpha" in captured.out and "gitlab:beta" in captured.out
+
+
+def test_doctor_with_one_project_run_elsewhere_credits_the_only_project(
+    machine, capsys
+):
+    """Matrix row 8: the folder chose nothing here, so the line may not say it did."""
+    machine.enrol(alpha=machine.root / "alpha")
+
+    entry.main(["doctor"])
+
+    printed = capsys.readouterr().out
+    assert "this command acts in alpha, the only enrolled project" in printed
+    assert "chosen by the working directory" not in printed
+
+
+def test_an_unparseable_scope_is_a_usage_error_before_any_project_decision(
+    machine, monkeypatch, capsys
+):
+    """Matrix row 9: `2`, and nothing is composed — so no folder rule is consulted."""
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+
+    def composed(*_args, **_kwargs):
+        raise AssertionError("composition ran for a command line pm-ai cannot read")
+
+    monkeypatch.setattr(entry, "_compose", composed)
+
+    assert entry.main(["dashboard", "--scope", "alpha"]) == EXIT_USAGE
+    assert "is not a scope" in capsys.readouterr().err
+
+
+# ── 4m: the name lifts every folder refusal ──────────────────────────────────
+
+
+def test_a_named_project_lifts_the_one_directory_two_ids_refusal(machine):
+    shared = machine.root / "shared"
+    machine.enrol(alpha=shared, beta=shared)
+    machine.standing_in(shared)
+
+    composed = machine.compose(project_scope("beta"))
+
+    assert composed.undecided is None
+    assert composed.daemon is not None
+    assert composed.daemon.scope == project_scope("beta")
+
+
+def test_a_named_project_lifts_the_unreadable_working_directory_refusal(
+    machine, monkeypatch
+):
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+
+    def gone() -> Path:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(entry.Path, "cwd", staticmethod(gone))
+
+    composed = machine.compose(project_scope("alpha"))
+
+    assert composed.daemon is not None
+    assert composed.daemon.scope == project_scope("alpha")
+
+
+@pytest.mark.parametrize(
+    "target", [PERSONAL, APPLICATION], ids=["personal", "application"]
+)
+def test_a_target_that_is_not_a_project_acts_there_and_watches_every_project(
+    machine, target
+):
+    """Every enrolled project is still watched, whatever a command targets (4l)."""
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+
+    daemon = machine.compose(target).daemon
+
+    assert daemon is not None
+    assert daemon.scope == target
+    assert daemon.watched == ("alpha", "beta")
+    assert sorted(daemon.connectors) == ["gitlab:alpha", "gitlab:beta"]
+
+
+# ── 4m: `doctor`'s line says how the choice was made ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "enrolled, target, standing, expected",
+    [
+        (
+            ("alpha", "beta"),
+            project_scope("beta"),
+            None,
+            "this command acts in beta, named on the command line",
+        ),
+        (
+            ("alpha", "beta"),
+            None,
+            "beta",
+            "this command acts in beta, chosen by the working directory",
+        ),
+        (
+            ("alpha",),
+            None,
+            None,
+            "this command acts in alpha, the only enrolled project",
+        ),
+        (
+            ("alpha", "beta"),
+            PERSONAL,
+            None,
+            "this command acts in the personal scope; it is aimed at no project, "
+            "so none was selected",
+        ),
+    ],
+    ids=["named", "folder", "only", "not-needed"],
+)
+def test_the_selection_line_names_how_the_scope_was_chosen(
+    machine, enrolled, target, standing, expected
+):
+    """Each wording pinned whole, so a dangling clause cannot pass as a prefix."""
+    projects = machine.enrol(**{pid: machine.root / pid for pid in enrolled})
+    if standing is not None:
+        machine.standing_in(projects[standing])
+
+    probe = entry._selection_probe(machine.compose(target))
+
+    assert probe is not None
+    assert probe.health is Health.OK
+    assert probe.detail == expected
+
+
+def test_no_refusal_sentence_says_a_project_cannot_be_named(machine, monkeypatch):
+    """The three folder refusals point at `--scope project:<id>` now that it works."""
+    shared = machine.root / "shared"
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    outside = machine.compose().undecided
+    machine.enrol(alpha=shared, beta=shared)
+    machine.standing_in(shared)
+    two_ids = machine.compose().undecided
+
+    def gone() -> Path:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(entry.Path, "cwd", staticmethod(gone))
+    unreadable = machine.compose().undecided
+
+    for sentence in (outside, two_ids, unreadable):
+        assert sentence is not None
+        assert "no way to name a project" not in sentence
+        assert "Picking between them by name" not in sentence
+        # Said once: the outside-every-project sentence said it twice.
+        assert sentence.count("--scope project:<id>") == 1
+
+
+# ── 4m: an unowned enrolment is placed by the only project, never by the target ─
+
+
+def test_an_unmatched_enrolment_files_into_the_only_project_not_the_personal_scope(
+    machine,
+):
+    """A personal command builds a daemon too, and its scope is not a project's tree."""
+    machine.enrol(alpha=machine.root / "alpha")
+    machine.enrol_connector("gitlab:gamma")
+
+    daemon = machine.compose(PERSONAL).daemon
+
+    assert daemon is not None
+    assert daemon.scope == PERSONAL
+    assert daemon.connectors["gitlab:gamma"].scope == project_scope("alpha")
+
+
+def test_an_unmatched_enrolment_on_two_projects_is_skipped_for_a_personal_command(
+    machine, capsys
+):
+    machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    machine.enrol_connector("gitlab:gamma")
+
+    daemon = machine.compose(PERSONAL).daemon
+
+    assert daemon is not None
+    assert "gitlab:gamma" not in daemon.connectors
+    assert "was not built" in capsys.readouterr().err

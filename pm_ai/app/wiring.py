@@ -191,7 +191,7 @@ class Daemon:
 
 def build(
     root: Path | None,
-    project: str,
+    acting: DataScope | str,
     *,
     watched: Sequence[str] | None = None,
     paths: ScopePaths | None = None,
@@ -207,22 +207,29 @@ def build(
     `pm_ai.platform` — they are independent siblings everywhere else — so the
     path resolver is built here and handed to the single writer.
 
-    ## `project` and `watched` answer two different questions
+    ## `acting` and `watched` answer two different questions
 
-    `project` is the project **this command is about**: it becomes
-    `Daemon.scope`, which is where a command writes and what AD-38's citation
-    guard reads. `watched` is **every project pm-ai watches** — AD-10 gives each
-    registered project independently-scheduled harvesting, so a connector
-    instance is constructed for each, with its own scope and therefore its own
-    cursor.
+    `acting` is the scope **this command acts in**: it becomes `Daemon.scope`,
+    which is where a command writes and what AD-38's citation guard reads. It
+    is the command's own target (story 4m, AD-11's selection order): a named or
+    selected project, or the personal or application scope for a command aimed
+    at one of those — which is what lets `pm-ai dashboard` and `goal set` build
+    a daemon on a machine where no folder names a project. A bare `str` is
+    shorthand for that project's scope, kept because every test that wires a
+    single-project daemon spells it that way. `watched` is **every project
+    pm-ai watches** — AD-10 gives each registered project
+    independently-scheduled harvesting, so a connector instance is constructed
+    for each, with its own scope and therefore its own cursor, whatever the
+    command targets.
 
     Until story 4l one argument answered both, and the consequence was not a
     narrow one: `entry._compose` refused to assemble at all when a second
     project was enrolled, and reported that refusal as a `FAILING` probe — a
     machine in the arrangement the architecture describes, told it was broken.
 
-    `watched` defaults to `(project,)`, which is exactly the daemon this
-    function built before the argument existed. It is a `Sequence` rather than a
+    `watched` defaults to the acting project alone (nothing, for a
+    non-project scope), which is exactly the daemon this function built before
+    the argument existed. It is a `Sequence` rather than a
     set because a caller has a registry in hand, not a set; duplicates and order
     are normalised here so two callers cannot produce two different daemons from
     the same registry.
@@ -274,8 +281,12 @@ def build(
             "how ScopePaths.production() reaches the daemon)."
         )
     clock = now or (lambda: datetime.now(timezone.utc))
-    scope = DataScope(ScopeKind.PROJECT, project)
-    spans = _watched(project, watched)
+    scope = (
+        acting
+        if isinstance(acting, DataScope)
+        else DataScope(ScopeKind.PROJECT, acting)
+    )
+    spans = _watched(scope, watched)
     # Eagerly, because nothing else resolves these until the first Tier-1 write:
     # an id that cannot be a directory name, or a project no registry knows,
     # would otherwise surface mid-harvest with a batch already in hand. Every
@@ -344,7 +355,6 @@ def build(
     # remedy printed was the one they had already followed.
     for instance, enrolled in _enrolled_connectors(
         storage,
-        scope=scope,
         scopes=builtin_scopes,
         clock=clock,
         registered=_registrar(resolver),
@@ -374,7 +384,7 @@ def build(
 
 
 def _watched(
-    project: str, watched: Sequence[str] | None
+    acting: DataScope, watched: Sequence[str] | None
 ) -> dict[str, DataScope]:
     """Every project this daemon watches, as ids mapped to their scopes.
 
@@ -386,10 +396,13 @@ def _watched(
     **The acting project is always among them**, whatever the caller passed. A
     daemon that acted in a project it did not watch would write into a scope
     whose telemetry nothing collects, and the caller with the registry in hand
-    is not always the caller that chose the working directory.
+    is not always the caller that chose the working directory. An acting scope
+    that is not a project adds nothing: personal and application scope are not
+    harvested per project (story 4m).
 
-    `None` means "just this one", which is the daemon `build()` produced before
-    the argument existed. A bare **string** is refused rather than accepted:
+    `None` means "just the acting project", which is the daemon `build()`
+    produced before the argument existed. A bare **string** is refused rather
+    than accepted:
     `watched="alpha"` is a valid `Sequence[str]` whose elements are five
     one-character project ids, and every check downstream would pass.
     """
@@ -399,7 +412,8 @@ def _watched(
             f"name: {watched!r} is a string, and a string of ids is a sequence "
             f"of its characters. Pass a tuple, e.g. ({watched!r},)."
         )
-    ids = (project,) if watched is None else (project, *watched)
+    own = (acting.project_id,) if acting.kind is ScopeKind.PROJECT else ()
+    ids = (*own, *(watched or ()))
     return {
         project_id: DataScope(ScopeKind.PROJECT, project_id)
         for project_id in sorted(set(ids))
@@ -587,7 +601,6 @@ def _registrar(resolver: ScopePaths) -> Callable[[str], bool]:
 def _enrolled_connectors(
     storage: StorageService,
     *,
-    scope: DataScope,
     scopes: Mapping[str, DataScope],
     clock: Callable[[], datetime],
     registered: Callable[[str], bool],
@@ -690,7 +703,7 @@ def _enrolled_connectors(
         if credentials is None:
             credentials = _stored_credentials(storage)
         held = _credential_for(credentials.get(instance), system=system)
-        filed = _enrolment_scope(instance, scopes=scopes, acting=scope)
+        filed = _enrolment_scope(instance, scopes=scopes)
         if filed is None:
             continue
         try:
@@ -711,7 +724,7 @@ def _enrolled_connectors(
 
 
 def _enrolment_scope(
-    instance: str, *, scopes: Mapping[str, DataScope], acting: DataScope
+    instance: str, *, scopes: Mapping[str, DataScope]
 ) -> DataScope | None:
     """Which project's tree one enrolled connector files into, or `None` to skip it.
 
@@ -721,11 +734,14 @@ def _enrolment_scope(
       name (`gitlab:<enrolled-id>`), and the enrolment that collides with one is
       the documented ordinary case, so it inherits that project's scope.
     - **Exactly one project is watched.** There is nothing to be ambiguous
-      *between*, and the acting scope is that project's — so a row named
-      anything at all (`gitlab:acme/web`, a provider path rather than a pm-ai
-      id) files where it always did. Single-project machines are every machine
-      that exists today, and skipping their connectors would be this slice
-      breaking them to close a leak they cannot have.
+      *between*, so a row named anything at all (`gitlab:acme/web`, a provider
+      path rather than a pm-ai id) files into that project, as it always did.
+      Single-project machines are every machine that exists today, and
+      skipping their connectors would be this slice breaking them to close a
+      leak they cannot have. **The only watched project, and never the acting
+      scope** (story 4m): a command aimed at personal or application scope
+      builds a daemon too, and a project's harvest filed into the PM's
+      personal tree is the leak AD-38 refuses.
     - **Neither.** Several projects are watched and the row's name matches no
       enrolled id — a renamed project, a removed one, or a provider-shaped
       instance. Defaulting to the acting command's scope is precisely the leak
@@ -742,12 +758,13 @@ def _enrolment_scope(
     placed = scopes.get(instance)
     if placed is not None:
         return placed
-    if len(scopes) <= 1:
-        return acting
+    if len(scopes) == 1:
+        (only,) = scopes.values()
+        return only
     _unplaced(
         instance,
         f"it is not one of the enrolled projects' connectors "
-        f"({', '.join(sorted(scopes))}), and this machine watches "
+        f"({', '.join(sorted(scopes)) or 'none'}), and this daemon watches "
         f"{len(scopes)} projects — so nothing says which project's tree its "
         f"harvest belongs in. Re-enrol it under the instance name of the "
         f"project it covers, or remove the row.",

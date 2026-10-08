@@ -846,8 +846,8 @@ transcript.
 ## Decided in the AD-11 update, 2026-09-25 — the build slice
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-11, "Selection order for a CLI command")
-  summary: Build AD-11's selection order — a project named with `--scope project:<id>` wins over the folder and lifts the folder refusals; an unenrolled name is refused; commands aimed at personal or application scope need no selection. Fixes a live bug: with several projects enrolled, `pm-ai dashboard` (personal) and `goal set` are refused outside every folder.
-  evidence: Measured 2026-09-25 by the currency review with the `machine` fixture — both `pm-ai dashboard` and `pm-ai dashboard --scope project:beta` exit 3 outside both folders. The cause is order: `entry.main` composes and selects before `dispatch` parses `argv`, and `require_daemon` calls `require_selection` for every daemon command. Also owed: the refusal sentence still says there is "no way to name a project on the command line yet"; `doctor`'s `project selection` line always says "chosen by the working directory", already wrong for a single project; and only commands without subcommands parse `--name value` options today, so a subcommand that acts in a project (`connector add`) cannot take `--scope` until that changes.
+  summary: **RESOLVED 2026-10-08 in `4m`** — AD-11's selection order is built. `main` parses the command line once and composes for the command's target: a project named with `--scope project:<id>` wins over the folder and lifts the folder refusals, an unenrolled name is refused naming the enrolled projects, and commands aimed at personal or application scope run from any folder. The refusal sentences no longer say a project cannot be named, and `doctor`'s `project selection` line says how the choice was made. **Still open:** only commands without subcommands parse `--name value` options, so a leaf such as `connector add` cannot take `--scope`.
+  evidence: Measured 2026-09-25 by the currency review with the `machine` fixture — both `pm-ai dashboard` and `pm-ai dashboard --scope project:beta` exited 3 outside both folders, because `entry.main` composed and selected before `dispatch` parsed `argv`. The rows are now in `tests/slice/test_every_enrolled_project.py` under "Story 4m". The open half: `dispatch.parse` reads options only for a command with its own `run`, and a leaf takes positionals only.
 
 ## Decided in the AD-27 / AD-48 update, 2026-09-27 — owed by `33d`
 
@@ -866,4 +866,14 @@ transcript.
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-48)
   summary: A provider-supplied display name nested inside a payload is unclassified today — `WorkItemPayload.assignee` and `NormalizedEvent.actor` are `Actor`s whose `display_name` a person chose, and AD-48's check never looks inside them.
   evidence: Named in `pm_ai/domain/events.py:278-292` and found again by both reviewers of the AD-48 revision on 2026-09-27. Not owed by `33d`; it needs a decision on how a declaration addresses a field inside another type, before the first prompt builder reads an actor's name.
+
+## Surfaced by the 4m review (2026-10-08)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4m-project-selection-order.md`
+  summary: With no project enrolled at all, commands aimed at the personal or application scope — the personal dashboard, `goal set`, `config show` — are still refused with "enrol a project first".
+  evidence: Found by the edge-case reviewer: `_compose` returns the registry failure before it reads the command's target. 4m's intent says such a command is "never refused for want of a project"; 4l's frozen matrix says the nothing-enrolled case is "unchanged: say nothing is enrolled and how to enrol". The two disagree, so it was left for Andrei to decide rather than fixed either way.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4m-project-selection-order.md`
+  summary: A daemon can now act in the personal or application scope, and two paths that read `daemon.scope` have never run that way — `run_harvest`'s empty-batch write (`pipelines.py:164`) and `run_transcript_ingestion`'s citation guard (`:193`, `into=daemon.scope`).
+  evidence: Latent: no command calls either path today (checked 2026-10-08), and an empty batch appends no line. `9a` (scheduled harvest) and `11b` (transcript path) are the first callers, and must decide where a harvest that is not about one project records itself and which scope a transcript is cited into.
 
