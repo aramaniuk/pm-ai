@@ -793,9 +793,14 @@ def test_a_command_that_writes_nothing_leaves_every_file_alone(
     assert entry.main(argv) == expected
 
     assert _tree(enrolled_machine) == before
-    assert "encryption is disabled" in capsys.readouterr().err, (
-        "the console warning still appears on every command"
-    )
+    warned = "encryption is disabled" in capsys.readouterr().err
+    if argv == ["doctor"]:
+        assert warned, "doctor and every real command still print the warning"
+    else:
+        # Since story 4m the command line is read before anything is composed,
+        # so help and a usage error build no daemon and print no banner: there
+        # is no command for it to warn about.
+        assert not warned, "help and usage errors build nothing and print no warning"
 
 
 def test_enrolling_a_project_with_the_debug_flag_records_nothing(enrolled_machine):

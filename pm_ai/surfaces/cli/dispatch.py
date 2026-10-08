@@ -77,6 +77,7 @@ from pm_ai.ports import (
 )
 
 __all__ = [
+    "Answered",
     "EXIT_OK",
     "EXIT_REFUSAL",
     "EXIT_UNEXPECTED",
@@ -88,9 +89,11 @@ __all__ = [
     "GoalBook",
     "GoalOutcome",
     "HealthReport",
+    "Parsed",
     "Refusal",
     "TABLE",
     "dispatch",
+    "parse",
     "usage",
 ]
 
@@ -378,6 +381,16 @@ class Context:
     the offending key.
     """
 
+    target: DataScope | None = None
+    """What this command acts on, read off its command line by `parse` (4m).
+
+    A project, the personal scope or the application scope, or `None` for a
+    command that needs no daemon (`doctor`, `setup`, `project add`). The
+    composition root built the daemon to act in exactly this scope, so a
+    handler that writes to its target and the daemon's own `scope` cannot
+    disagree (AD-11).
+    """
+
     undecided: str | None = None
     """Why no project was selected, on a machine where nothing is wrong.
 
@@ -392,12 +405,10 @@ class Context:
     def require_selection(self) -> None:
         """Refuse when no project was selected; do nothing when one was.
 
-        Separate from `require_daemon` because one command needs this check and
-        *not* that one: `connector check` is deliberately independent of the
-        daemon, since an empty registry is an ordinary first run — but the
-        registry is populated by composition, so on an undecided machine it read
-        an empty registry and reported a first run. An answer about the machine
-        where a refusal was intended.
+        Consulted only for a command whose target is a project (story 4m, AD-11:
+        a command whose target is not a project needs no selection and is never
+        refused for the lack of one). The project was named on the command line,
+        so the refusal it carries is a named project that is not enrolled.
         """
         if self.undecided:
             # Raised whole rather than wrapped: it already says what is enrolled
@@ -413,8 +424,10 @@ class Context:
         on. `doctor` is the command that works regardless, and it does not call
         this.
         """
-        # First, because it is the one case where there is nothing to diagnose.
-        self.require_selection()
+        # First, because it is the one case where there is nothing to diagnose
+        # — and only for a project target, whose selection can be refused.
+        if self.target is not None and self.target.kind is ScopeKind.PROJECT:
+            self.require_selection()
         if self.daemon is None:
             # The reason goes last and unedited. It is the composition root's
             # sentence — for a refused `config.toml`, the loader's own — and
@@ -481,6 +494,17 @@ class Command:
     Every one of them takes a value; there are no flags here, because a flag
     that is absent and a flag that is false are the same word on a command line
     and no command in this table needs to tell them apart.
+    """
+
+    target: Callable[[Mapping[str, str]], DataScope] | None = None
+    """Where this command acts, read off its parsed options (story 4m, AD-11).
+
+    `None` is a command that needs no daemon — `doctor`, `setup` and
+    `project add` — and every other leaf states its target: a project named
+    on its command line, the personal scope, or the application scope.
+    Declared on the table so the composition root learns it *before* deciding
+    anything about projects, and raises `_Misread` for a word that names no
+    scope, which is a usage error rather than a refusal.
     """
 
 
@@ -680,14 +704,12 @@ def _connector_check(context: Context) -> int:
     setup is incomplete, harvests are being skipped, and `Health.ABSENT` is
     expressly not a pass.
 
-    **The undecided machine is refused before any of that**, since the `4l`
-    review. This handler is deliberately independent of the daemon — an empty
-    registry is a first run — but `build()` is what populates the registry, so
-    on a machine where no project was selected the "nothing is registered"
-    sentence above is not a first run at all: it is this command answering a
-    question about the machine when the honest answer was a refusal.
+    **Its target is the application scope** (story 4m), so it needs no
+    project selection: the daemon is composed with every enrolled project
+    watched from any folder, and the registry it reads is that daemon's. Until
+    4m this command was refused outside every folder on a machine with two
+    projects, because the registry was never populated there.
     """
-    context.require_selection()
     report = context.probe_connectors()
     if not report.probes:
         print(
@@ -726,6 +748,43 @@ cannot read (usage, `2`), and `people:bob` is one it read and declined (`3`).
 Collapsing them would tell an operator who named a real scope that they had
 mistyped.
 """
+
+
+class _Misread(Exception):
+    """A command line `parse` cannot read, carrying the sentence that says why.
+
+    Private and caught in `parse`, which turns it into a usage error (`2`)
+    before anything is composed — never a `Refusal`, which is a command line
+    pm-ai read and declined.
+    """
+
+
+PERSONAL = DataScope(ScopeKind.PERSONAL)
+APPLICATION = DataScope(ScopeKind.APPLICATION)
+
+
+def _personal(options: Mapping[str, str]) -> DataScope:
+    return PERSONAL
+
+
+def _application(options: Mapping[str, str]) -> DataScope:
+    return APPLICATION
+
+
+def _goals_target(options: Mapping[str, str]) -> DataScope:
+    return GOALS_SCOPE
+
+
+def _dashboard_target(options: Mapping[str, str]) -> DataScope:
+    """`--scope`'s scope, personal when absent; `_Misread` when it names none."""
+    requested = options.get(SCOPE_ARGUMENT)
+    scope = _scope(requested)
+    if scope is None:
+        raise _Misread(
+            f"`--{SCOPE_ARGUMENT} {requested}` is not a scope. Write "
+            f"`personal`, or `project:<id>` naming an enrolled project."
+        )
+    return scope
 
 
 def _scope(text: str | None) -> DataScope | None:
@@ -772,16 +831,19 @@ def _dashboard(context: Context) -> int:
     not a failed command. That decision lives in the renderer, and this handler's
     part in it is not to have an `except` for it.
     """
-    requested = context.options.get(SCOPE_ARGUMENT)
-    scope = _scope(requested)
+    # The target `parse` read off `--scope`, not a second reading of the option:
+    # the command line is read once (AD-11), and the daemon was composed to act
+    # in exactly this scope, so the dashboard and everything recorded on the
+    # way to it land in one place.
+    scope = context.target
     if scope is None:
-        print(
-            f"pm-ai: `--{SCOPE_ARGUMENT} {requested}` is not a scope. Write "
-            f"`personal`, or `project:<id>` naming an enrolled project.\n",
-            file=sys.stderr,
+        # A wiring fault rather than a deliberate no, so not a `Refusal`: it
+        # reaches `main`'s guard and exits 1 with a traceback, like any bug.
+        raise RuntimeError(
+            "no target scope reached the dashboard command, so nothing was "
+            "rendered. That is a wiring fault in pm-ai, not anything about this "
+            "machine."
         )
-        print(usage(), file=sys.stderr)
-        return EXIT_USAGE
     context.require_daemon()
     try:
         written = context.dashboard(scope)
@@ -1224,6 +1286,7 @@ TABLE: Mapping[str, Command] = {
         "render this scope's daily_dashboard.md, once",
         _dashboard,
         options=(SCOPE_ARGUMENT,),
+        target=_dashboard_target,
     ),
     "doctor": Command("check this machine and report what is wrong with it", _doctor),
     # `4h`: the one command that sequences the three below it on a new machine.
@@ -1237,13 +1300,21 @@ TABLE: Mapping[str, Command] = {
     "key": Command(
         "manage the master key pm-ai seals artifacts with",
         leaves={
-            "enrol": Command("mint the master key and store it in the keychain", _key_enrol),
+            "enrol": Command(
+                "mint the master key and store it in the keychain",
+                _key_enrol,
+                target=_application,
+            ),
         },
     ),
     "config": Command(
         "inspect ~/.pm-ai/config.toml",
         leaves={
-            "show": Command("print every setting, marked set or default", _config_show),
+            "show": Command(
+                "print every setting, marked set or default",
+                _config_show,
+                target=_application,
+            ),
         },
     ),
     "project": Command(
@@ -1260,7 +1331,11 @@ TABLE: Mapping[str, Command] = {
     "goal": Command(
         "the strategic goals every recommendation is aligned to",
         leaves={
-            "set": Command("create or revise one goal in strategic_goals.md", _goal_set),
+            "set": Command(
+                "create or revise one goal in strategic_goals.md",
+                _goal_set,
+                target=_goals_target,
+            ),
         },
     ),
     "connector": Command(
@@ -1270,8 +1345,13 @@ TABLE: Mapping[str, Command] = {
                 "enrol a connector: probe the credential, then seal it",
                 _connector_add,
                 takes=("system", "instance"),
+                target=_application,
             ),
-            "check": Command("probe every connector, within 10s in total", _connector_check),
+            "check": Command(
+                "probe every connector, within 10s in total",
+                _connector_check,
+                target=_application,
+            ),
         },
     ),
 }
@@ -1329,25 +1409,50 @@ def usage(*, group: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def dispatch(
-    argv: Sequence[str],
-    *,
-    daemon: DaemonPort | None,
-    diagnose: Callable[[], HealthReport],
-    probe_connectors: Callable[[], Report],
-    probe_credential: CredentialProbePort = _no_probe,
-    onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
-    dashboard: Callable[[DataScope], Path] = _no_dashboard,
-    first_run: FirstRun | None = None,
-    goals: GoalBook | None = None,
-    unavailable: str | None = None,
-    undecided: str | None = None,
-) -> int:
-    """Run what `argv` names, and return the exit code the table gives it.
+@dataclass(frozen=True, slots=True)
+class Parsed:
+    """A command line `parse` read: what to run, with what, and where it acts.
 
-    `argv` is the argument vector *without* the program name, and it is passed
-    rather than read from `sys.argv`, so every row of this story's matrix is a
-    unit test and none needs a subprocess.
+    The one reading of `argv` (AD-11: "the command line is parsed once"). The
+    composition root reads `target` to decide where the daemon acts *before*
+    anything about projects is decided, and `dispatch` runs this value rather
+    than parsing `argv` a second time.
+    """
+
+    run: Callable[[Context], int]
+    arguments: tuple[str, ...] = ()
+    options: Mapping[str, str] = field(default_factory=dict)
+    target: DataScope | None = None
+    """The command's target; `None` for a command that needs no daemon."""
+
+
+@dataclass(frozen=True, slots=True)
+class Answered:
+    """A command line `parse` answered on its own: help, or a usage error.
+
+    Nothing is composed for one of these. Returned rather than printed so
+    `parse` stays a pure step; `deliver` prints it and gives the exit code.
+    """
+
+    code: int
+    text: str
+
+    def deliver(self) -> int:
+        print(self.text, file=sys.stdout if self.code == EXIT_OK else sys.stderr)
+        return self.code
+
+
+def _misused(sentence: str, *, group: str | None = None) -> Answered:
+    return Answered(EXIT_USAGE, f"pm-ai: {sentence}\n\n{usage(group=group)}")
+
+
+def parse(argv: Sequence[str]) -> Parsed | Answered:
+    """Read `argv` once: the command, its words, and the scope it targets.
+
+    Pure — nothing is printed, opened or composed — so `pm_ai.app.entry.main`
+    can call it first and compose a daemon for the target it names (story 4m).
+    A usage error is answered here, before any project decision: `--scope
+    alpha` exits `2` on a machine where nothing could be composed at all.
 
     Hand-rolled rather than `argparse`: the surface is a table of at most two
     words, and `argparse` answers `--help` by raising `SystemExit` from inside
@@ -1355,40 +1460,22 @@ def dispatch(
     exists to avoid. (`pm_ai.app.entry` catches `SystemExit` anyway, because a
     library below here may still raise one.)
     """
-    context = Context(
-        daemon=daemon,
-        diagnose=diagnose,
-        probe_connectors=probe_connectors,
-        probe_credential=probe_credential,
-        onboard=onboard,
-        dashboard=dashboard,
-        first_run=first_run,
-        goals=goals,
-        unavailable=unavailable,
-        undecided=undecided,
-    )
     if not argv:
         # A bare `pm-ai` will open a REPL (CAP-18) and that is `4e`. Until then
         # it must not exit 0: a bare call that silently succeeded is how a broken
         # install reads as a working one.
-        print(usage(), file=sys.stderr)
-        return EXIT_USAGE
+        return Answered(EXIT_USAGE, usage())
     name, *rest = argv
     if name in _HELP_FLAGS:
         if rest:
             # Every other path refuses trailing words; this one dropped them and
             # exited 0, so `pm-ai --help enrol` looked like it had answered a
             # question about `enrol` while printing the top-level usage.
-            print(f"pm-ai: `{name}` takes no arguments\n", file=sys.stderr)
-            print(usage(), file=sys.stderr)
-            return EXIT_USAGE
-        print(usage())
-        return EXIT_OK
+            return _misused(f"`{name}` takes no arguments")
+        return Answered(EXIT_OK, usage())
     command = TABLE.get(name)
     if command is None:
-        print(f"pm-ai: unknown command {name!r}\n", file=sys.stderr)
-        print(usage(), file=sys.stderr)
-        return EXIT_USAGE
+        return _misused(f"unknown command {name!r}")
     if command.run is not None and command.leaves:
         # Measured: the `run` branch below wins and every leaf is unreachable,
         # so `pm-ai demo sub` answers "takes no arguments" instead of running
@@ -1401,9 +1488,7 @@ def dispatch(
         )
     if command.run is not None:
         if rest and not command.options:
-            print(f"pm-ai: `{name}` takes no arguments\n", file=sys.stderr)
-            print(usage(), file=sys.stderr)
-            return EXIT_USAGE
+            return _misused(f"`{name}` takes no arguments")
         # `23b`'s mechanism, and it narrows rather than relaxes the rule above:
         # a command declaring no options still refuses every trailing word, and
         # one that declares some refuses every word that is not one of them. The
@@ -1411,14 +1496,11 @@ def dispatch(
         # that silently vanishes.
         named, misread = _options(rest, allowed=command.options)
         if misread is not None:
-            print(f"pm-ai: `{name}` {misread}\n", file=sys.stderr)
-            print(usage(), file=sys.stderr)
-            return EXIT_USAGE
-        return _run(command.run, replace(context, options=named))
+            return _misused(f"`{name}` {misread}")
+        return _parsed(command, command.run, options=named)
     leaf = command.leaves.get(rest[0]) if rest else None
     if leaf is None or leaf.run is None:
-        print(usage(group=name), file=sys.stderr)
-        return EXIT_USAGE
+        return Answered(EXIT_USAGE, usage(group=name))
     supplied = tuple(rest[1:])
     if not len(leaf.takes) <= len(supplied) <= len(leaf.takes) + len(leaf.optional):
         # 4j refused every trailing word because no leaf took one. 8b's
@@ -1438,12 +1520,66 @@ def dispatch(
             if leaf.takes or leaf.optional
             else "no arguments"
         )
-        print(
-            f"pm-ai: `{name} {rest[0]}` takes {expected}\n", file=sys.stderr
-        )
-        print(usage(group=name), file=sys.stderr)
-        return EXIT_USAGE
-    return _run(leaf.run, replace(context, arguments=supplied))
+        return _misused(f"`{name} {rest[0]}` takes {expected}", group=name)
+    return _parsed(leaf, leaf.run, arguments=supplied)
+
+
+def _parsed(
+    command: Command,
+    run: Callable[[Context], int],
+    *,
+    arguments: tuple[str, ...] = (),
+    options: Mapping[str, str] | None = None,
+) -> Parsed | Answered:
+    """The parsed command with its target read, or the usage error naming why not."""
+    named = {} if options is None else options
+    try:
+        target = None if command.target is None else command.target(named)
+    except _Misread as misread:
+        return _misused(str(misread))
+    return Parsed(run, arguments=arguments, options=named, target=target)
+
+
+def dispatch(
+    argv: Sequence[str] | Parsed,
+    *,
+    daemon: DaemonPort | None,
+    diagnose: Callable[[], HealthReport],
+    probe_connectors: Callable[[], Report],
+    probe_credential: CredentialProbePort = _no_probe,
+    onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
+    dashboard: Callable[[DataScope], Path] = _no_dashboard,
+    first_run: FirstRun | None = None,
+    goals: GoalBook | None = None,
+    unavailable: str | None = None,
+    undecided: str | None = None,
+) -> int:
+    """Run an already-parsed command, and return the exit code the table gives it.
+
+    `pm_ai.app.entry.main` passes the `Parsed` it composed for, so the command
+    line is read once (story 4m). An argument vector — *without* the program
+    name — is still accepted and parsed here, so every row of the CLI's matrix
+    stays a unit test that needs neither a subprocess nor a composition root.
+    """
+    parsed = argv if isinstance(argv, Parsed) else parse(argv)
+    if isinstance(parsed, Answered):
+        return parsed.deliver()
+    context = Context(
+        daemon=daemon,
+        diagnose=diagnose,
+        probe_connectors=probe_connectors,
+        probe_credential=probe_credential,
+        onboard=onboard,
+        dashboard=dashboard,
+        first_run=first_run,
+        goals=goals,
+        unavailable=unavailable,
+        undecided=undecided,
+        arguments=parsed.arguments,
+        options=parsed.options,
+        target=parsed.target,
+    )
+    return _run(parsed.run, context)
 
 
 def _options(

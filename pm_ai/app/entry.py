@@ -19,12 +19,22 @@ survive exactly this. Nothing here loads `config.toml` before deciding what to
 run, which is what keeps a broken config from hiding a broken machine.
 
 A fourth outcome leaves no daemon either and is **not** one of those three, so
-it produces no probe: several projects are enrolled and nothing chose between
-them (story 4l). That is a refusal at dispatch, carried on
-`_Composition.undecided`, and `doctor` reports it as the non-fault it is — a
-report line naming which project this invocation binds to, or saying that the
-working directory names none. Reporting it as a failure is how `doctor` and
-`setup` came to disagree about a machine with nothing wrong with it.
+it produces no probe: nothing chose a project for a command that needs one
+(story 4l) — since story 4m, a project named on the command line that is not
+enrolled, or, for `doctor`, a folder that names no project. That is a refusal at
+dispatch, carried on `_Composition.undecided`, and `doctor` reports it as the
+non-fault it is — a report line naming where this invocation acts and how that
+was chosen, or saying that the working directory names no project. Reporting it
+as a failure is how `doctor` and `setup` came to disagree about a machine with
+nothing wrong with it.
+
+## The command line is read first (story 4m)
+
+`main` parses `argv` once, before composing, and composes for the target the
+command names (AD-11's selection order). A command aimed at the personal or
+application scope therefore acts there from any folder, and a named project is
+the project the daemon acts in, so a command never acts in one place while its
+output goes to another.
 
 ## Why this module may import `pm_ai.platform.doctor`
 
@@ -44,6 +54,7 @@ import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 
 from pm_ai.app.pipelines import run_dashboard
@@ -92,7 +103,13 @@ from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import ArtifactBusy, KeychainPort, StoragePort
 from pm_ai.storage.service import StorageService
-from pm_ai.surfaces.cli.dispatch import EXIT_REFUSAL, EXIT_UNEXPECTED, dispatch
+from pm_ai.surfaces.cli.dispatch import (
+    EXIT_REFUSAL,
+    EXIT_UNEXPECTED,
+    Answered,
+    dispatch,
+    parse,
+)
 
 __all__ = ["CONFIG_ARTIFACT", "GoalBook", "GoalWritten", "main", "read_optional"]
 
@@ -117,11 +134,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
+        # Parsed first, and once (story 4m, AD-11): the command's target decides
+        # where the daemon acts, so it has to be known before anything about
+        # projects is decided. Help and usage errors are answered here, with
+        # nothing composed.
+        parsed = parse(arguments)
+        if isinstance(parsed, Answered):
+            return parsed.deliver()
         keychain = MacOSKeychainAdapter()
-        composed = _compose(keychain)
+        composed = _compose(keychain, parsed.target)
         daemon, failure = composed.daemon, composed.failure
         return dispatch(
-            arguments,
+            parsed,
             daemon=daemon,
             diagnose=lambda: _diagnose(keychain, composed),
             probe_credential=probe_credential,
@@ -160,8 +184,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             # probe's detail is the only place it survives.
             unavailable=None if failure is None else failure.detail,
             # `4l`'s refusal, which is not a fault and must not be dressed as
-            # one: several projects are enrolled, the working directory is
-            # inside none of them, and pm-ai declines to pick. Carried
+            # one: no project was selected for a command whose target needs one
+            # — since `4m`, a named project that is not enrolled. Carried
             # separately from `unavailable` because that field's sentence sends
             # the operator to `pm-ai doctor` — which, on this machine, correctly
             # reports nothing wrong.
@@ -422,9 +446,50 @@ def _bootstrap(keychain: KeychainPort) -> Bootstrap:
     return bootstrap(keychain)
 
 
+class _ChosenBy(Enum):
+    """How this invocation's acting scope was chosen — what `doctor` reports.
+
+    AD-11's selection order, plus the case that needs no order at all. `doctor`'s
+    `project selection` line is composed from this, so it cannot credit the
+    working directory for a choice it did not make — which is what it did for
+    every single-project machine until story 4m.
+    """
+
+    NAMED = "named"
+    FOLDER = "folder"
+    ONLY = "only"
+    NOT_NEEDED = "not-needed"
+
+
+@dataclass(frozen=True, slots=True)
+class _Choice:
+    """A scope this invocation acts in, and how it was chosen — always both.
+
+    One value rather than two optional fields on `_Selection`, so a selection
+    with a scope and no account of how it was chosen cannot be constructed.
+    """
+
+    scope: DataScope
+    chosen_by: _ChosenBy
+
+    def sentence(self) -> str:
+        """`doctor`'s `project selection` line, whole."""
+        if self.chosen_by is _ChosenBy.NOT_NEEDED:
+            return (
+                f"this command acts in the {self.scope.kind.value} scope; it is "
+                f"aimed at no project, so none was selected"
+            )
+        how = {
+            _ChosenBy.NAMED: "named on the command line",
+            _ChosenBy.FOLDER: "chosen by the working directory",
+            _ChosenBy.ONLY: "the only enrolled project",
+        }[self.chosen_by]
+        return f"this command acts in {self.scope.project_id}, {how}"
+
+
 @dataclass(frozen=True, slots=True)
 class _Selection:
-    """Which project this invocation is about, or why nothing chose one.
+    """Where this invocation acts and how that was chosen, or why nothing was.
 
     A value rather than `str | None`, because `None` was answering three
     different questions with one silence: outside every enrolled project, two
@@ -433,28 +498,75 @@ class _Selection:
     enrolled project", which is false of the second — the operator is standing
     *inside* a project — and says nothing at all about the third. Each refusal
     is now composed where its cause is known.
+
+    A scope rather than a project id since story 4m: a command aimed at the
+    personal or application scope acts there, and the daemon is built to act in
+    exactly the scope the command targets. Exactly one of `choice` and
+    `refusal` is set, and only the two constructors below build one.
     """
 
-    project_id: str | None
+    choice: _Choice | None
     refusal: str | None
 
+    @property
+    def scope(self) -> DataScope | None:
+        return None if self.choice is None else self.choice.scope
+
+    @property
+    def project_id(self) -> str | None:
+        return None if self.choice is None else self.choice.scope.project_id
+
     @classmethod
-    def acting(cls, project_id: str) -> _Selection:
-        return cls(project_id, None)
+    def acting(cls, scope: DataScope, chosen_by: _ChosenBy) -> _Selection:
+        return cls(_Choice(scope, chosen_by), None)
 
     @classmethod
     def undecided(cls, refusal: str) -> _Selection:
         return cls(None, refusal)
 
 
-def _acting_project(projects: Mapping[str, ProjectEntry]) -> _Selection:
+def _project(project_id: str) -> DataScope:
+    return DataScope(ScopeKind.PROJECT, project_id)
+
+
+def _select(
+    projects: Mapping[str, ProjectEntry], target: DataScope | None
+) -> _Selection:
+    """Where a command with this target acts (story 4m, AD-11's order).
+
+    - **A project target** acts in the project it names, or is refused when
+      that project is not enrolled — never passed on to the folder. The project
+      the command acts in is the project its target names, so the two cannot
+      disagree.
+    - **A personal or application target** acts there, from any folder, and is
+      never refused for want of a project.
+    - **No target** — `doctor`, `setup`, `project add`, which need no daemon —
+      runs the order without a name: the folder, then the only project. That is
+      what `doctor`'s `project selection` line reports, and the order the first
+      command whose default target is a project will meet.
+    """
+    if target is None:
+        return _acting_project(projects)
+    if target.kind is ScopeKind.PROJECT:
+        return _acting_project(projects, named=target.project_id)
+    return _Selection.acting(target, _ChosenBy.NOT_NEEDED)
+
+
+def _acting_project(
+    projects: Mapping[str, ProjectEntry], *, named: str | None = None
+) -> _Selection:
     """Which project this invocation is about, or a refusal naming why not.
 
-    AD-11: "the CLI, when run inside a registered repository, binds to that
-    project scope". That was the rule from the start and had never been
-    implemented — `_ambiguous` stood here until `4l` and refused to assemble at
-    all, which made a second enrolled project a `FAILING` probe on a machine
-    where nothing was wrong.
+    AD-11's selection order: the first of **a project named on the command
+    line**, the enrolled project whose folder contains the working directory,
+    and the only enrolled project. The name came first only from story 4m:
+    until then this ran before the command line was read, so a named project
+    neither won nor lifted a refusal.
+
+    **A named project wins, and is settled before the working directory is
+    read** — so it lifts all three folder refusals below. A name that is not
+    enrolled is refused, naming the enrolled projects, and never falls back to
+    the folder or the single-project rule.
 
     **One enrolled project answers from anywhere.** Nobody with a single project
     has to stand anywhere in particular, and asking them to would be this slice
@@ -475,9 +587,13 @@ def _acting_project(projects: Mapping[str, ProjectEntry]) -> _Selection:
 
     Nothing here is ever a guess, and every refusal names its own cause.
     """
+    if named is not None:
+        if named in projects:
+            return _Selection.acting(_project(named), _ChosenBy.NAMED)
+        return _Selection.undecided(_not_enrolled(named, projects))
     if len(projects) == 1:
         (only,) = projects
-        return _Selection.acting(only)
+        return _Selection.acting(_project(only), _ChosenBy.ONLY)
     try:
         # Resolved, because the registry's paths are (`_resolved` at onboarding)
         # and a shell's `cwd` may reach the same directory through a symlink —
@@ -499,17 +615,17 @@ def _acting_project(projects: Mapping[str, ProjectEntry]) -> _Selection:
     if not matched:
         return _Selection.undecided(_outside_every_project(projects, here))
     innermost = max(len(root.parts) for root in matched.values())
-    named = sorted(
+    ids = sorted(
         project_id
         for project_id, root in matched.items()
         if len(root.parts) == innermost
     )
-    if len(named) == 1:
-        return _Selection.acting(named[0])
+    if len(ids) == 1:
+        return _Selection.acting(_project(ids[0]), _ChosenBy.FOLDER)
     # Two ids at one directory. Every enclosing folder is an ancestor of the
     # same path and therefore totally ordered by prefix, so equal depth means
     # equal directory — a hand-edited registry, since `project add` refuses it.
-    return _Selection.undecided(_one_directory_two_ids(named, matched[named[0]]))
+    return _Selection.undecided(_one_directory_two_ids(ids, matched[ids[0]]))
 
 
 def _folder(path: Path) -> Path | None:
@@ -550,8 +666,8 @@ def _no_selection_is_a_fault() -> str:
     return (
         "Every one of these projects is enrolled and watched, and none of this "
         "is a fault — `pm-ai doctor` reports it as a note and not a failure. "
-        "There is no way to name a project on the command line yet, and writing "
-        "to the wrong one is worse than not writing."
+        "pm-ai will not guess, because writing to the wrong one is worse than "
+        "not writing."
     )
 
 
@@ -590,7 +706,8 @@ def _outside_every_project(projects: Mapping[str, ProjectEntry], here: Path) -> 
         f"this command was run in {here}, which is inside none of the "
         f"{len(projects)} enrolled projects, so pm-ai will not choose one for "
         f"you: {_enrolled_list(projects)}. Run it again from inside the "
-        f"project's own directory — a sub-directory of it counts.{named} "
+        f"project's own directory — a sub-directory of it counts — or name "
+        f"the project with `--scope project:<id>`.{named} "
         f"{_no_selection_is_a_fault()}"
     )
 
@@ -608,9 +725,26 @@ def _one_directory_two_ids(named: Sequence[str], directory: Path) -> str:
         f"{', '.join(named)} — so standing in it does not say which project "
         f"this command is about. `pm-ai project add` refuses to create that, so "
         f"it is a hand-edit: remove or re-point the duplicate entry in "
-        f"projects.toml. Picking between them by name would be pm-ai deciding "
-        f"which project a write belongs to, and writing to the wrong one is "
+        f"projects.toml. Until then, name the project with "
+        f"`--scope project:<id>` on a command that takes it — pm-ai will not "
+        f"pick one of the two itself, because writing to the wrong one is "
         f"worse than not writing."
+    )
+
+
+def _not_enrolled(named: str, projects: Mapping[str, ProjectEntry]) -> str:
+    """The refusal for a project named on the command line that is not enrolled.
+
+    Never passed on to the folder or the single-project rule (AD-11): the
+    operator said which project, and acting anywhere else would be pm-ai
+    overruling them. Names every enrolled project, because the likeliest cause
+    is a typo and the list is the correction.
+    """
+    return (
+        f"{named} is not an enrolled project, so this command was not run "
+        f"anywhere. The enrolled projects are {_enrolled_list(projects)}. Name "
+        f"one of them with `--scope project:<id>`, or enrol {named} first with "
+        f"`pm-ai project add <path> {named}`."
     )
 
 
@@ -629,7 +763,8 @@ def _no_working_directory(
         f"tell which project this command is about: {unreadable}. That "
         f"directory has usually been deleted or unmounted under the shell — "
         f"`cd` somewhere that exists, inside one of the {len(projects)} "
-        f"enrolled projects: {_enrolled_list(projects)}. "
+        f"enrolled projects: {_enrolled_list(projects)} — or name the project "
+        f"with `--scope project:<id>`. "
         f"{_no_selection_is_a_fault()}"
     )
 
@@ -649,6 +784,14 @@ class _Composition:
     failure: Probe | None
     config: ArtifactState
     registry: ArtifactState
+    selection: _Selection | None = None
+    """Where this invocation acts and how that was chosen (story 4m).
+
+    `None` whenever composition stopped before or after selecting — no
+    project enrolled, a registry that could not be read or parsed, a
+    `config.toml` that would not load, or `build()` raising — each of which a
+    probe already reports. `doctor`'s `project selection` line reads it.
+    """
     undecided: str | None = None
     """Why no project was selected, when nothing failed (story 4l).
 
@@ -660,8 +803,14 @@ class _Composition:
     """
 
 
-def _compose(keychain: KeychainPort) -> _Composition:
+def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Composition:
     """The daemon, or the one probe that explains why there isn't one.
+
+    `target` is what the command line named (story 4m), read before anything
+    here runs, and the daemon is built to act in it: a named project, the
+    personal or application scope from any folder, or — for a command that
+    needs no daemon — whatever the folder order chooses, which is what
+    `doctor` reports. `_select` decides.
 
     Never raises for a reason an operator can act on. The four that reach here
     — an unreadable or unparseable registry, no project enrolled, a root that
@@ -695,25 +844,32 @@ def _compose(keychain: KeychainPort) -> _Composition:
         # second probe here could, because it is holding the bytes. Returned as
         # the failure so a refusal from `dispatch` can name the same reason.
         return _Composition(None, registry_readable(registry), config, registry)
-    selected = _acting_project(projects)
-    project_id = selected.project_id
-    if project_id is None:
-        # Several enrolled and nothing chose between them. No daemon, and no
-        # probe either: a command that has nowhere to act is refused, and there
-        # is nothing here for `doctor` to fix. `selected.refusal` names which of
-        # the three reasons this was.
+    selected = _select(projects, target)
+    acting = selected.scope
+    if acting is None:
+        # A named project that is not enrolled, or — for a command with no
+        # target — several enrolled and nothing chose between them. No daemon,
+        # and no probe either: a command that has nowhere to act is refused,
+        # and there is nothing here for `doctor` to fix. `selected.refusal`
+        # names which reason this was.
         return _Composition(
-            None, None, config, registry, undecided=selected.refusal
+            None,
+            None,
+            config,
+            registry,
+            selection=selected,
+            undecided=selected.refusal,
         )
     try:
         paths = ScopePaths.production(
             projects={pid: entry.path for pid, entry in projects.items()}
         )
-        # Every enrolled project is watched (AD-10); `project_id` is only which
-        # one this command acts in. The resolver was already handed all of them.
+        # Every enrolled project is watched (AD-10), whatever the command
+        # targets; `acting` is only where this command acts. The resolver was
+        # already handed all of them.
         daemon = build(
             None,
-            project_id,
+            acting,
             watched=sorted(projects),
             paths=paths,
             keychain=keychain,
@@ -764,7 +920,7 @@ def _compose(keychain: KeychainPort) -> _Composition:
         # phrased differently from the other is how `doctor` and a refusal end
         # up disagreeing about the same file.
         return _Composition(None, config_readable(config), config, registry)
-    return _Composition(daemon, None, config, registry)
+    return _Composition(daemon, None, config, registry, selection=selected)
 
 
 def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
@@ -815,20 +971,20 @@ def _selection_probe(composed: _Composition) -> Probe | None:
     so, and a second line about selecting between nothing is noise on the one
     machine where the report is most read.
     """
-    if composed.daemon is not None:
-        project_id = composed.daemon.scope.project_id
-        return Probe(
-            SELECTION_PROBE,
-            Health.OK,
-            f"this command acts in {project_id}, chosen by the working directory",
-            "",
-        )
+    choice = None if composed.selection is None else composed.selection.choice
+    if composed.daemon is not None and choice is not None:
+        # How the scope was chosen, from the selection itself: the line credited
+        # the working directory for every choice until story 4m, which was
+        # already false for a single project run from anywhere else.
+        return Probe(SELECTION_PROBE, Health.OK, choice.sentence(), "")
     if composed.undecided is None:
         return None
     return Probe(
         SELECTION_PROBE,
         Health.OK,
-        "no project is selected here, so every command but this one is refused",
+        "no project is selected here, so a command acting in a project must "
+        "name it with `--scope project:<id>`; commands aimed at the personal "
+        "or application scope still run",
         composed.undecided,
     )
 

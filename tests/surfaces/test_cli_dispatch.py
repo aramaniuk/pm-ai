@@ -875,3 +875,46 @@ def test_a_daemon_built_with_no_clock_still_has_one_that_answers():
 
     clock = build(Path(tempfile.mkdtemp()), "alpha").clock
     assert clock().tzinfo is timezone.utc
+
+
+# ── Story 4m — every command states where it acts ────────────────────────────
+
+
+def _every_runnable_command():
+    for name, command in cli.TABLE.items():
+        if command.run is not None:
+            yield name, command
+        for leaf_name, leaf in command.leaves.items():
+            yield f"{name} {leaf_name}", leaf
+
+
+def test_every_daemon_backed_command_declares_its_target():
+    """A command that forgets `target=` would compose for the folder rule.
+
+    That is the order this story replaced: the command would be refused outside
+    every folder with two projects enrolled, or act in a project its output
+    does not go to. Exactly the three commands that need no daemon declare
+    none, and any handler that asks for the daemon must declare one.
+    """
+    import inspect
+    import textwrap
+
+    def asks_for_a_daemon(handler) -> bool:
+        # Calls only, read from the syntax tree: a docstring that *mentions*
+        # `require_daemon()` — `project add` explains why it does not call it —
+        # is not a handler that needs one.
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+        return any(
+            isinstance(node, ast.Attribute) and node.attr == "require_daemon"
+            for node in ast.walk(tree)
+        )
+
+    untargeted = {
+        name for name, command in _every_runnable_command() if command.target is None
+    }
+    assert untargeted == {"doctor", "setup", "project add"}
+
+    for name, command in _every_runnable_command():
+        assert command.run is not None
+        if asks_for_a_daemon(command.run):
+            assert command.target is not None, f"`{name}` needs a daemon and no target"
