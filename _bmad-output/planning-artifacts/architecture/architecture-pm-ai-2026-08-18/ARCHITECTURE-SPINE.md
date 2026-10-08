@@ -7,7 +7,7 @@ paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pip
 scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, connectors, MCP skills, storage'
 status: final
 created: '2026-08-18'
-updated: 2026-09-27
+updated: 2026-10-08
 binds: [FR-01..FR-40, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
 sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.14.2']
 companions: ['SOLUTION-DESIGN.md']
@@ -355,6 +355,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
   - **An added field is always optional**, and a field never moves from optional to required. That includes a self-action type's required fields, which are checked when a line is parsed, so growing that list would make every older line of the type unreadable.
   - **A reader treats a missing field as absent and ignores a field it does not know**, so every line ever written stays readable under every later grammar. The reverse is not promised: an older build refuses an entry type added after it.
   - **One encode/decode pair in `domain`** turns a payload into its `p.`-prefixed line fields and back into the payload. No reader looks a field up by a literal name, because "missing means absent" turns a misspelled lookup into a silent empty read.
+  - **A list field** (`tuple[str, ...] | None`) is its elements joined by `,`, with `,` and `\` inside an element backslash-escaped. The list layer sits inside the line layer: the joined string is one field value, which the line then quotes and escapes by its own rules, and a reader undoes the line layer first, then splits — a hand edit follows the same two layers. An element may not be empty, so an empty list and a list of one empty string never share bytes. An empty list is written as an explicitly empty value, and a list field defaults to `None`, not empty: an omitted field means *not recorded* — a connector that never asked — which is a different fact from *none*.
   - **A line is never re-rendered.** Anything that moves one — compaction included (AD-5) — copies its bytes.
   - **Enforcement, not yet built** `[2026-09-27]`: a test pinning each payload class's field names *and types*, each self-action type's required fields, and both enumerations' members, plus a round-trip test of the encode/decode pair over every payload class. Owed by `33d`, the first slice that changes the grammar.
 
@@ -1001,19 +1002,17 @@ pm_ai/
 | Write visibility & durability (NFR-08) | `storage/service.py` alone | **AD-47**, AD-5, AD-6, AD-23, AD-43 |
 | Resilience & offline buffer (FR-04, NFR-10, NFR-11) | scheduler + job queue | AD-3, AD-20 |
 
-### AD-48 — Every payload field of text declares whether it came from outside `[NEW 2026-09-23]`
+### AD-48 — Every payload field of text declares whether it came from outside `[NEW 2026-09-23, revised 2026-09-27]`
 
 - **Binds:** AD-12, AD-27, every connector, every payload class
 - **Prevents:** a new payload type adding a text field nobody classified. The producer-side pass this replaced read one hard-coded field name off whatever payload arrived, so seven of eight payload types sanitized the empty string and the miss was invisible — a guess about a field name cannot be reviewed, because nothing states what the right answer would have been.
-- **Rule:** Every `str` / `str | None` field, and every `tuple[str, ...]` field `[2026-09-27]`, of every payload class registered in the type→payload map is declared in one of two records: **untrusted**, meaning some outside party authored it, or **trusted**, and a trusted declaration must carry a stated reason. Declaration is keyed by payload class rather than by event type, because the class is what owns the field. The check runs at **import**, raising rather than asserting, so an optimized interpreter cannot strip it and a mis-declared payload cannot be loaded at all.
+- **Rule:** Every `str` / `str | None` field, and every `tuple[str, ...]` / `tuple[str, ...] | None` field `[2026-09-27]`, of every payload class registered in the type→payload map is declared in one of two records: **untrusted**, meaning some outside party authored it, or **trusted**, and a trusted declaration must carry a stated reason. Declaration is keyed by payload class rather than by event type, because the class is what owns the field. The check runs at **import**, raising rather than asserting, so an optimized interpreter cannot strip it and a mis-declared payload cannot be loaded at all.
 
-  **Lists of text are declared like text** `[2026-09-27]`. A `tuple[str, ...]` field is untrusted or trusted as a whole, and the sanitizer applies to each element. *Not yet built:* today's check refuses a `tuple[str, ...]` declaration and lets such a field go undeclared, which is the reverse of this rule.
-  - **On an `event_log/` line** a list is its elements joined by `,`, with `,` and `\` inside an element backslash-escaped.
-  - **The list layer sits inside the line layer.** The joined string is one field value, which the line then quotes and escapes by its own rules. A reader undoes the line layer first, then splits; a hand edit follows the same two layers.
-  - **An element may not be empty**, so an empty list and a list of one empty string never share bytes.
-  - **An empty list is written as an explicitly empty value**, and a list field's default is `None`, not empty. Under AD-27's additive rule an omitted field means *not recorded* — a connector that never asked — which is a different fact from *none*.
+  **Why the declarations matter** `[2026-09-27]`. `ModelPort` takes outside text only as `Sanitized` in `external`, but `instructions` is a plain `str` for pm-ai's own prose (AD-12's first limit), so interpolating a provider field there type-checks. The declarations are how a prompt builder knows a field is outside text and belongs in `external`, and how a Proposal summary built outside `ModelPort` (AD-29) knows what to clean. An unclassified field is a field nobody is warned about.
 
-  **Named limit:** nested types that carry text — a dataclass inside a payload — still fall outside both records, untouched and undeclared. That is a hole with a name rather than an oversight, and closing it means deciding how a declaration addresses a field it cannot reach by name.
+  **Lists are declared, and for now only as trusted** `[2026-09-27]`. A list of text must be declared like a text field, or the payload cannot be imported. A trusted declaration carries its reason — `MessagePayload.mentions` holds Graph user ids, which Microsoft generates and nobody types. An **untrusted** list is refused at import until a slice brings a real one (GitLab labels, attendee display names); that slice decides whether the sanitizer runs per element or over the joined text, which give different results. Refusing until then means no two builders can choose differently. *Not yet built:* today's check refuses a list declaration and lets a list field go undeclared — the reverse of this rule; `33d` changes it. The list's on-disk form is AD-27's.
+
+  **Named limit, already open:** a nested type carrying text falls outside both records. It is not hypothetical: `WorkItemPayload.assignee` and `NormalizedEvent.actor` are `Actor`s holding a provider-supplied display name, unclassified today. Closing it means deciding how a declaration addresses a field inside another type.
 
   **What it does not do:** these declarations have no reader yet. They say which fields are untrusted; nothing yet requires a caller assembling a prompt to sanitize all of them rather than some. That binding arrives with the first real model call.
 
