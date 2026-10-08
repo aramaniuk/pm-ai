@@ -289,16 +289,20 @@ class Context:
     """Runs the startup probes. A callable rather than a report, so a command
     that never asks does not pay for `git --version` and a keychain round trip."""
 
-    probe_connectors: Callable[[], Report]
-    """Probes every registered connector, within CAP-35's bound.
+    probe_connectors: Callable[[], Report] | None
+    """Probes every connector the daemon holds, within CAP-35's bound.
 
     The same arrangement as `diagnose`, forced by the same contract: `8d`'s
     registry lives in `pm_ai.connectors`, and `.importlinter`'s
     `surfaces-through-core` forbids this package from importing it. So the
-    composition root runs the probes and the report arrives as a value — which
-    is also why `connector check` needs no daemon. The registry is a property of
-    the *process*, and before composition it is empty, which is a first-run
-    state rather than a refusal.
+    composition root binds the probe to the daemon it built and the report
+    arrives as a value. The connectors probed are that daemon's own — the list
+    a harvest reads (story 8k) — so this layer never sees a second copy.
+
+    With no daemon the composition root decides what is passed: with nothing
+    enrolled, a probe returning an empty report, which is a first-run state
+    rather than a refusal; for any other reason `None`, and `connector check`
+    refuses through `require_daemon()`, the one sentence for a missing daemon.
 
     Typed as `pm_ai.domain.health.Report` rather than structurally, unlike
     `HealthReport` above: that Protocol exists because `pm_ai.platform.doctor`
@@ -697,20 +701,35 @@ def _connector_check(context: Context) -> int:
     a surface that stopped at the first bad row would give the rule away at the
     only place a human reads it.
 
-    An empty registry exits `0` and says so. Nothing is registered before
-    composition, and a machine with no connectors is a first run rather than a
-    broken one — there is no claim of reachability to be false. A connector that
+    An empty report exits `0` and says so. A machine with nothing enrolled has
+    no daemon and no connectors, and that is a first run rather than a broken
+    one — there is no claim of reachability to be false. A connector that
     *is* registered and answers `ABSENT` is a different state and exits `4`:
     setup is incomplete, harvests are being skipped, and `Health.ABSENT` is
     expressly not a pass.
 
     **Its target is the application scope** (story 4m), so it needs no
     project selection: the daemon is composed with every enrolled project
-    watched from any folder, and the registry it reads is that daemon's. Until
-    4m this command was refused outside every folder on a machine with two
-    projects, because the registry was never populated there.
+    watched from any folder, and the connectors it probes are that daemon's
+    own (story 8k). Until 4m this command was refused outside every folder on a
+    machine with two projects, because no daemon was composed there.
+
+    With no daemon for any reason but an empty enrolment, no probe is passed
+    and this refuses through `require_daemon()` (exit 3), naming the reason —
+    there are no connectors this machine would harvest from, so there is
+    nothing honest to probe.
     """
-    report = context.probe_connectors()
+    probe_all = context.probe_connectors
+    if probe_all is None:
+        context.require_daemon()
+        # A daemon with no probe bound to it: `pm_ai.app.entry` binds one to
+        # every daemon it builds, so reaching here is pm-ai's own wiring fault.
+        raise Refusal(
+            "no connector probe was supplied to the CLI although a daemon was "
+            "built. That is a wiring fault in pm-ai, not anything about this "
+            "machine's connectors."
+        )
+    report = probe_all()
     if not report.probes:
         print(
             "no connectors are registered, so there is nothing to probe. That is "
@@ -1545,7 +1564,7 @@ def dispatch(
     *,
     daemon: DaemonPort | None,
     diagnose: Callable[[], HealthReport],
-    probe_connectors: Callable[[], Report],
+    probe_connectors: Callable[[], Report] | None,
     probe_credential: CredentialProbePort = _no_probe,
     onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
     dashboard: Callable[[DataScope], Path] = _no_dashboard,

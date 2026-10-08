@@ -66,7 +66,7 @@ from pm_ai.app.wiring import (
     build,
     onboard_project,
 )
-from pm_ai.connectors.registry import check_health as probe_connectors
+from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import Config, ConfigRefused, load_config
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import (
@@ -152,12 +152,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             # `pm-ai connector check`'s probes, run from the one layer permitted
             # to reach `pm_ai.connectors` — `surfaces-through-core` forbids the
             # CLI from importing the registry, exactly as `os-behind-platform`
-            # forbids it the doctor's probes. Passed unbound, so its own default
-            # timeout stays CAP-35's bound and this module holds no second copy
-            # of the number. Deliberately independent of `daemon`: the registry
-            # is populated by `build()` and empty before it, and an empty
-            # registry is a first-run state rather than a refusal.
-            probe_connectors=lambda: probe_connectors(),
+            # forbids it the doctor's probes. Bound to this composition's daemon
+            # (story 8k): the connectors probed are the daemon's own, the list a
+            # harvest reads, never a copy.
+            probe_connectors=_probe_connectors(composed),
             # `23b`'s pipeline, bound to the daemon this process built. Injected
             # for `probe_connectors`' reason: `run_dashboard` reaches a
             # connector, the scope model and the single writer at once, and
@@ -213,6 +211,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return EXIT_UNEXPECTED
+
+
+def _probe_connectors(
+    composed: _Composition,
+    *,
+    registry: Callable[[], ConnectorRegistry] = ConnectorRegistry,
+) -> Callable[[], Report] | None:
+    """`pm-ai connector check`'s probe, bound to the daemon this process built.
+
+    The connectors probed are `daemon.connectors` — the same objects
+    `run_harvest` reads — enumerated through a registry built for the call and
+    kept by nothing. Until story 8k this read a process-wide copy of that dict
+    instead, and the copy once listed a connector the harvest could not find.
+    `check_health` is called with its own default, so the timeout stays CAP-35's
+    bound and this module holds no second copy of the number. `registry` is the
+    factory, injectable so a test can shorten or record the probe without
+    patching a name in this module.
+
+    With no daemon there are two cases, and they are not the same answer:
+
+    - **nothing enrolled** is a first run, so the probe returns an empty report
+      and `connector check` says no connectors are registered, exit 0;
+    - **any other reason** returns `None`, and `connector check` asks
+      `Context.require_daemon()` — the one refusal sentence for "no daemon",
+      carrying the composition root's reason unedited. There are no connectors
+      a harvest would use, so there is nothing honest to probe.
+    """
+    daemon = composed.daemon
+    if daemon is not None:
+        def probe() -> Report:
+            enumerated = registry()
+            for instance, connector in daemon.connectors.items():
+                enumerated.register(connector, instance=instance)
+            return enumerated.check_health()
+
+        return probe
+    if composed.nothing_enrolled:
+        return lambda: Report(())
+    return None
 
 
 def _dashboard(daemon: Daemon | None) -> Callable[[DataScope], Path]:
@@ -801,6 +838,15 @@ class _Composition:
     `doctor` reporting a fault here is precisely how `doctor` and `setup` came
     to disagree about a machine with nothing wrong with it.
     """
+    nothing_enrolled: bool = False
+    """No project is enrolled at all, so there is no daemon (story 8k).
+
+    The one no-daemon state that is a first run rather than a failure:
+    `pm-ai connector check` reports an empty list for it and refuses every
+    other reason there is no daemon. Set only when the registry probe says
+    `ABSENT` — no file, or a file with no entries — never for a registry that
+    could not be read or parsed, which is a fault the operator has to fix.
+    """
 
 
 def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Composition:
@@ -843,7 +889,14 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
         # absent, empty, unreadable and unparseable — and says it better than a
         # second probe here could, because it is holding the bytes. Returned as
         # the failure so a refusal from `dispatch` can name the same reason.
-        return _Composition(None, registry_readable(registry), config, registry)
+        enrolment = registry_readable(registry)
+        return _Composition(
+            None,
+            enrolment,
+            config,
+            registry,
+            nothing_enrolled=enrolment.health is Health.ABSENT,
+        )
     selected = _select(projects, target)
     acting = selected.scope
     if acting is None:

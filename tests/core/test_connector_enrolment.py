@@ -411,15 +411,22 @@ def test_a_failed_configuration_write_reports_the_orphan(tmp_path, monkeypatch):
 
 
 def test_an_enrolled_connector_is_registered_by_a_fresh_composition(tmp_path):
-    """The only assertion that makes the success message true.
+    """The only assertion that makes the success message true — and story 8k's row.
 
     `pm-ai connector add` tells the operator the connector activates at the
     next start. Nothing read `connectors/` until story 8b wired it into
     `build()`, so that sentence described behaviour no code performed: two files
     were written and no later run ever looked at either.
+
+    Since 8k the connector `connector check` probes is the *same object* a
+    harvest resolves. Until then the check read a process-wide copy, and the
+    copy once listed an instance `run_harvest` raised `KeyError` for.
     """
+    from pm_ai.app import entry
     from pm_ai.app.wiring import build
-    from pm_ai.connectors.registry import all_connectors
+    from pm_ai.connectors.registry import ConnectorRegistry
+    from pm_ai.domain.health import Report
+    from pm_ai.platform.doctor import ArtifactState
 
     storage = _storage(tmp_path)
     enrol_connector(
@@ -428,28 +435,41 @@ def test_an_enrolled_connector_is_registered_by_a_fresh_composition(tmp_path):
     )
 
     daemon = build(tmp_path, "demo")
-    assert "gitlab:enrolled" in _instances(), (
-        "an enrolled connector was absent from a freshly composed registry, so "
+    # `run_harvest(daemon, instance)` resolves `daemon.connectors[instance]`, so
+    # this membership is what "reachable by a harvest" means.
+    assert "gitlab:enrolled" in _instances(daemon), (
+        "an enrolled connector was absent from a freshly composed daemon, so "
         "`active at the next start` never becomes true"
     )
-    # The registry is what `connector check` reads; `Daemon.connectors` is what
-    # `run_harvest` resolves against. Registering into one and not the other
-    # listed an instance that harvesting raised `KeyError` for — visible in the
-    # report, unreachable by the only code that fetches anything.
-    assert "gitlab:enrolled" in daemon.connectors, (
-        "the connector is in the registry but not the daemon, so `connector "
-        "check` lists it and `run_harvest` cannot resolve it"
+
+    # What `connector check` would probe, captured without contacting GitLab:
+    # the enrolled adapter holds a credential, so a real probe would go out.
+    probed: dict[str, object] = {}
+
+    class Recording(ConnectorRegistry):
+        def check_health(self, **kwargs) -> Report:
+            probed.update(zip(self.instances(), self.all_connectors()))
+            return Report(())
+
+    composed = entry._Composition(
+        daemon, None, ArtifactState.absent(), ArtifactState.absent()
     )
-    assert set(_instances()) == set(daemon.connectors), (
-        "the registry and the daemon disagree about which connectors exist"
+    probe = entry._probe_connectors(composed, registry=Recording)
+    assert probe is not None
+    probe()
+
+    assert set(probed) == set(daemon.connectors), (
+        "`connector check` and the daemon disagree about which connectors exist"
     )
-    assert all_connectors()
+    assert probed["gitlab:enrolled"] is daemon.connectors["gitlab:enrolled"], (
+        "`connector check` probed a different object from the one a harvest "
+        "would use — two lists again, however equal they look today"
+    )
 
 
-def _instances() -> tuple[str, ...]:
-    from pm_ai.connectors.registry import default_registry
-
-    return default_registry().instances()
+def _instances(daemon) -> tuple[str, ...]:
+    """The instances a daemon holds — the one list a harvest and the check read."""
+    return tuple(daemon.connectors)
 
 
 class _Keychain:
@@ -543,7 +563,6 @@ def test_the_enrolled_adapter_wins_at_the_name_the_builtin_already_holds(tmp_pat
         "sealed credential never reached a connector"
     )
     assert connector.check_health().health is not Health.ABSENT
-    assert set(_instances()) == set(daemon.connectors)
 
 
 def test_a_credential_sealed_under_another_system_is_not_handed_to_gitlab(tmp_path):
@@ -704,8 +723,8 @@ def test_a_disabled_entry_is_not_registered(tmp_path):
         artifact="connectors/",
         name="gitlab:off.json",
     )
-    build(tmp_path, "demo")
-    assert "gitlab:off" not in _instances()
+    daemon = build(tmp_path, "demo")
+    assert "gitlab:off" not in _instances(daemon)
 
 
 def test_a_malformed_entry_does_not_stop_the_daemon_composing(tmp_path):

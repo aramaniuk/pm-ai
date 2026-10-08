@@ -36,7 +36,6 @@ from pm_ai.connectors.graph.auth import (
 )
 from pm_ai.connectors.graph.calendar import GraphCalendarFetch
 from pm_ai.connectors.graph.client import GraphClient
-from pm_ai.connectors.registry import ConnectorRegistry, install as install_connectors
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
@@ -107,7 +106,8 @@ class Daemon:
     # it held `ConnectorPort`s, so the moment a second connector family existed
     # mypy — gated inside pytest since story 1k — refused the assignment. The port
     # is also the honest type: `run_harvest` reaches this dict and calls exactly
-    # the four methods `ConnectorPort` declares.
+    # the four methods `ConnectorPort` declares. Since story 8k this dict is the
+    # only connector list pm-ai keeps: `pm-ai connector check` probes it too.
     connectors: dict[str, ConnectorPort]
     transcripts: dict[str, object]
     # The Tier-1 accessor over `meetings/`, not a mapping. This was
@@ -345,19 +345,15 @@ def build(
         )
         connectors[builtin.instance] = builtin
         builtin_scopes[builtin.instance] = watched_scope
-    # The daemon holds the instances; `pm_ai.connectors.registry` enumerates
-    # them. Two structures rather than one because the architecture gates and
-    # `pm-ai connector check` have to ask "for every connector, ..." from
-    # outside, and this dict is unreachable from anywhere but here. Registered
-    # under the same key, so a cursor, a coverage window and a probe row all
-    # name one instance. `install` replaces, so building a second daemon in one
-    # process describes that daemon rather than accumulating both.
-    # Enrolled connectors join the daemon's own dict *before* the registry is
-    # built from it. Registering them only into the registry left the two
-    # structures disagreeing — `pm-ai connector check` listed an instance that
-    # `run_harvest` raised `KeyError` for — which is the divergence the comment
-    # above says cannot happen and `test_composition_populates_the_registry`
-    # asserts cannot.
+    # This dict is the one inventory (story 8k, AD-30): `run_harvest` reads it,
+    # and `pm-ai connector check` probes it through the daemon `entry` is handed.
+    # Until 8k it was also copied into a process-wide registry that `connector
+    # check` read instead, and the copy diverged once — `connector check` listed
+    # an instance `run_harvest` raised `KeyError` for, because enrolled
+    # connectors had been registered into the copy alone. One structure cannot
+    # disagree with itself, and a second daemon built in one process no longer
+    # replaces the first one's list. Keyed by instance, so a cursor, a coverage
+    # window and a probe row all name one connector.
     # The enrolled adapter *replaces* the built-in of the same name, and the
     # collision is the ordinary case rather than a corner: the built-in above is
     # keyed `gitlab:<project>`, and `gitlab.py`'s own ABSENT remediation tells the
@@ -373,10 +369,6 @@ def build(
         registered=_registrar(resolver),
     ):
         connectors[instance] = enrolled
-    enumerable = ConnectorRegistry()
-    for instance, connector in connectors.items():
-        enumerable.register(connector, instance=instance)
-    install_connectors(enumerable)
     return Daemon(
         storage=storage,
         crypto=crypto,
@@ -626,10 +618,10 @@ def _enrolled_connectors(
     looked at either. Registration stays construction-time per AD-9 and story
     8d — this is the start that "the next start" refers to.
 
-    Returned rather than registered, so the caller can put these in
-    `Daemon.connectors` *and* the registry. Registering them into the registry
-    alone made `pm-ai connector check` list an instance `run_harvest` could not
-    resolve.
+    Returned rather than registered, so the caller puts these in
+    `Daemon.connectors` — the one inventory a harvest and `pm-ai connector
+    check` both read (story 8k). Registering them into a separate list once made
+    `connector check` list an instance `run_harvest` could not resolve.
 
     Failures are swallowed deliberately, and only here: an unreadable or
     malformed entry must not stop a daemon composing, because `doctor` is the

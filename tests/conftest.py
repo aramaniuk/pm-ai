@@ -47,6 +47,9 @@ import pytest
 # 27 → 25, story 8d: `pm_ai.connectors.registry` exists, so
 # `test_ad27_connectors_only_emit_core_declared_event_types` and
 # `test_ad34_connectors_do_not_mint_event_ids` run instead of skipping.
+# Since story 8k (no delta) neither gate imports the registry: both read the
+# connectors of the daemon `pm_ai.app.wiring.build()` returns, so what they
+# depend on is `pm_ai.app.wiring` — and `pm_ai.domain.events` for AD-27.
 #
 # 25 → 24, story 23d: `pm_ai.core.rendering.render_project_dashboard` exists, so
 # `test_ad25_project_rendering_cannot_open_the_personal_store` runs instead of

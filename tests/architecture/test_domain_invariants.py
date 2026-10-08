@@ -102,21 +102,20 @@ def test_ad27_connectors_only_emit_core_declared_event_types(tmp_path):
     # so. This test looked for `pm_ai.core.taxonomy` — a module that will never
     # exist — and therefore skipped forever while reading as covered.
     taxonomy = mod("pm_ai.domain.events")
-    registry = mod("pm_ai.connectors.registry")
-    # The registry is populated at composition, never at import: a connector
-    # needs a project and a scope that only `build()` knows. So a daemon is
-    # wired first, and what is checked below is the set this machine would
-    # actually harvest with.
-    _daemon(tmp_path)
+    # Connectors exist only after composition: each needs a project and a scope
+    # that only `build()` knows. So a daemon is wired first, and what is checked
+    # below is that daemon's own inventory — the set a harvest reads, and the
+    # set this machine would actually harvest with (story 8k).
+    daemon = _daemon(tmp_path)
 
     allowed = set(taxonomy.ObservedEventType)
-    connectors = registry.all_connectors()
+    connectors = tuple(daemon.connectors.values())
     assert connectors, (
         "AD-27: nothing is registered, so the loop below asserts nothing and "
         "this test passes over an empty set. That is the failure this test "
         "already suffered once — it looked for a module that never existed and "
-        "skipped for its whole life while reading as covered. An empty registry "
-        "after composition means `build()` no longer registers what it builds."
+        "skipped for its whole life while reading as covered. A daemon with no "
+        "connectors after composition means `build()` no longer builds them."
     )
     for connector in connectors:
         declared = set(connector.emits())
@@ -545,9 +544,8 @@ def test_ad34_unresolvable_actors_never_become_raw_string_identities():
 
 def test_ad34_connectors_do_not_mint_event_ids(tmp_path):
     """AD-34 — storage mints the surrogate at persist; dedup uses the natural key."""
-    registry = mod("pm_ai.connectors.registry")
-    _daemon(tmp_path)  # the registry is populated at composition, not at import
-    connectors = registry.all_connectors()
+    # The daemon's own inventory: connectors exist after composition, not at import.
+    connectors = tuple(_daemon(tmp_path).connectors.values())
     assert connectors, (
         "AD-34: nothing is registered, so both loops below are empty and this "
         "test passes without executing one assertion. A vacuous pass is worse "
@@ -945,9 +943,7 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     # declaring it was a task rather than a convention; and it cannot see that
     # the method returns anything, which is why the non-empty assertion is here
     # beside it.
-    connectors = mod("pm_ai.connectors.registry")
-    _daemon(tmp_path)
-    registered = connectors.all_connectors()
+    registered = tuple(_daemon(tmp_path).connectors.values())
     assert registered, "nothing registered — the assertions below would be vacuous"
     for connector in registered:
         assert isinstance(connector, ports.ConnectorPort), (
