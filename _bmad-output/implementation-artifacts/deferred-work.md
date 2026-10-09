@@ -895,3 +895,18 @@ transcript.
   evidence: When Microsoft has rotated a refresh token and the replacement could not be saved — the credentials file busy past the wait, a failed write, or the connector's entry missing — the token on disk is retired and the stored sign-in has to be redone. `enrol_connector` refuses an instance that is already enrolled, `probe.PROBES` has no Graph probe, and no command runs the device-code sign-in for an existing instance. The messages now say exactly that rather than "sign in again" or "enrol again". AD-39 says re-consent is a Proposal (AD-13) staged on both surfaces; nothing builds it. Whichever slice builds re-consent owns this, and the remedy text in `pm_ai/connectors/graph/auth.py` (`_REDO_SIGN_IN`) should then name the command.
   also: Remedies written before 8j have the same unreachable step — "Sign in again" and "enrol again" for a stale or declined credential and for partial consent (`pm_ai/connectors/graph/auth.py`, near lines 697, 851, 869, 1342, 1399; found by the 8j implementer and left alone as outside its scope). They should change together with whatever builds the re-sign-in path.
 
+
+## Split out of step 9 (`connector add graph`) at routing, 2026-10-09
+
+- source_spec: none
+  summary: A command to redo the Microsoft sign-in for a Graph connector that is already enrolled (`pm-ai connector sign-in <instance>` or similar).
+  evidence: Split from step 9 by Andrei's choice of the smallest slice. Cheap on step 9's sign-in path: `replace_credential` already replaces one instance's credential under the claim, and `GraphDeviceCodeAuth.sign_in` writes through whatever store it is given, so a `SealedRefreshTokenStore` makes its own write the replacement. Closes the 8j entry above; `_REDO_SIGN_IN` and the older remedies in `connectors/graph/auth.py` then name the command.
+
+- source_spec: none
+  summary: `pm-ai connector add gitlab` always refuses, because `probe._gitlab` refuses every token on purpose and GitLab has no real transport.
+  evidence: Split from step 9; same gap as the 33a entry above (`probe.PROBES`). A real probe needs the GitLab transport (`connectors/gitlab.py` reaches through `_stubbed_reach`) and a host setting for self-managed instances, so it is its own, larger slice.
+
+- source_spec: none
+  summary: `pm-ai setup` has no connector step, so it can end healthy on a machine with no working connector.
+  evidence: Split from step 9. `_setup` (`surfaces/cli/dispatch.py`) runs key, project and `config.toml` steps only; the 33c entry above warns of exactly this. Once `connector add graph` works, setup can offer it as a fourth step.
+
