@@ -37,7 +37,8 @@ from __future__ import annotations
 
 import getpass
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -60,7 +61,9 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.core.connector_enrolment import (
     MalformedInstanceName,
+    MalformedSettings,
     OrphanedCredential,
+    assert_enrollable,
     enrol_connector,
 )
 from pm_ai.ports import (
@@ -88,6 +91,8 @@ __all__ = [
     "FirstRun",
     "GoalBook",
     "GoalOutcome",
+    "GraphSignIn",
+    "GraphSignInOutcome",
     "HealthReport",
     "Parsed",
     "Refusal",
@@ -237,6 +242,86 @@ class GoalOutcome(Protocol):
     def changed(self) -> bool: ...
 
 
+@runtime_checkable
+class GraphSignInOutcome(Protocol):
+    """What a completed Graph sign-in produced — `pm_ai.app.wiring.GraphSignedIn`."""
+
+    @property
+    def credential(self) -> str:
+        """The value enrolment seals. Never printed."""
+        ...
+
+    @property
+    def answer(self) -> str:
+        """The health check's sentence, for the operator."""
+        ...
+
+    @property
+    def healthy(self) -> bool:
+        """`True` when the check answered `OK`; `False` when it only warned."""
+        ...
+
+    @property
+    def settings(self) -> Mapping[str, object]:
+        """The row's own keys, spelled by the connector — written, never read here."""
+        ...
+
+
+@runtime_checkable
+class GraphSignIn(Protocol):
+    """`pm-ai connector add graph`'s sign-in and answer checks (story 8l).
+
+    `pm_ai.app.wiring.GraphEnrolment` is the real one. Named structurally
+    because both halves reach `pm_ai.connectors` — the checks a composition
+    applies to a Graph row, and Microsoft's device-code sign-in — and
+    `surfaces-through-core` forbids this package from importing it. Its
+    refusals are the two `pm_ai.ports` declares for a credential check,
+    `ProbeFailed` and `ProbeUnreachable` (AD-49).
+    """
+
+    @property
+    def minimum_window_minutes(self) -> int:
+        """CAP-2's floor on the harvest window, stated in the question."""
+        ...
+
+    @property
+    def default_tenant(self) -> str:
+        """What Enter keeps at the tenant question."""
+        ...
+
+    def settings_file(self, instance: str) -> Path:
+        """The row the closing message sends the operator to for categories."""
+        ...
+
+    def ready(self) -> None:
+        """Refuse (`ProbeFailed`) when no sign-in could run here — `msal` missing."""
+        ...
+
+    def refusal(
+        self,
+        *,
+        client_id: str | None = None,
+        tenant: str | None = None,
+        width: int | None = None,
+        reach_back: int | None = None,
+    ) -> str | None:
+        """Why the answers given so far would not build a connector, or `None`."""
+        ...
+
+    def sign_in(
+        self,
+        *,
+        instance: str,
+        client_id: str,
+        tenant: str,
+        width: int,
+        reach_back: int,
+        present: Callable[[str], None],
+    ) -> GraphSignInOutcome:
+        """Run Microsoft's sign-in through `present`, then the bounded check."""
+        ...
+
+
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
     """The `Context` default: no onboarding sequence was injected.
 
@@ -361,6 +446,15 @@ class Context:
     rather than passing — a probe that answered "fine" without asking would seal
     an unchecked credential, which is the failure 8b's whole ordering exists to
     prevent.
+    """
+
+    graph_sign_in: GraphSignIn | None = None
+    """What `pm-ai connector add graph` uses to check its answers and sign in.
+
+    It judges each typed answer, runs Microsoft's sign-in, and runs the health
+    check after it. The composition root supplies it whenever it built a
+    daemon. It is `None` when there is no daemon, and in tests that do not
+    need it; a Graph add then refuses before asking anything.
     """
 
     first_run: FirstRun | None = None
@@ -619,27 +713,33 @@ def _connector_add(context: Context) -> int:
     table. The probe arrives as a value for the same reason `connector check`'s
     does: `surfaces-through-core` forbids this package from importing
     `pm_ai.connectors`.
+
+    `graph` is not typed at all (story 8l): it is four questions and
+    Microsoft's sign-in, in `_connector_add_graph`.
     """
     daemon = context.require_daemon()
     system, instance = context.arguments
 
-    if not sys.stdin.isatty():
-        # `getpass` falls back to reading an echoing stdin when there is no
-        # terminal, so a piped or cron-driven run would put the credential in
-        # shell history and in the terminal scrollback. Refusing is the only
-        # answer that keeps the promise the prompt makes.
-        raise Refusal(
-            "a credential can only be typed at a terminal. stdin is not a TTY "
-            "here — this is a pipe, a cron job or a CI step — and prompting "
-            "would echo the secret and leave it in history. Run "
-            "`pm-ai connector add` from an interactive shell."
-        )
+    with _enrolment_refusals():
+        if system == "graph":
+            return _connector_add_graph(context, daemon, instance)
 
-    credential = getpass.getpass(f"{system} credential for {instance}: ")
-    if not credential.strip():
-        raise Refusal("no credential was typed, so nothing was enrolled.")
+        if not sys.stdin.isatty():
+            # `getpass` falls back to reading an echoing stdin when there is no
+            # terminal, so a piped or cron-driven run would put the credential
+            # in shell history and in the terminal scrollback. Refusing is the
+            # only answer that keeps the promise the prompt makes.
+            raise Refusal(
+                "a credential can only be typed at a terminal. stdin is not a "
+                "TTY here — this is a pipe, a cron job or a CI step — and "
+                "prompting would echo the secret and leave it in history. Run "
+                "`pm-ai connector add` from an interactive shell."
+            )
 
-    try:
+        credential = getpass.getpass(f"{system} credential for {instance}: ")
+        if not credential.strip():
+            raise Refusal("no credential was typed, so nothing was enrolled.")
+
         answer = enrol_connector(
             daemon.storage,
             system=system,
@@ -647,7 +747,194 @@ def _connector_add(context: Context) -> int:
             credential=credential,
             probe=context.probe_credential,
         )
-    except (DuplicateConnector, MalformedInstanceName) as refused:
+
+    print(answer)
+    print(
+        f"{instance} is enrolled. It becomes active at the next start — "
+        f"connectors are registered when the daemon is composed, so nothing is "
+        f"harvesting from it yet."
+    )
+    return EXIT_OK
+
+
+def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) -> int:
+    """`pm-ai connector add graph <instance>`: questions, sign-in, check, save (8l).
+
+    The order is the point, and each step is placed where its refusal costs the
+    least:
+
+    1. **What can be known without asking**, before anything is asked: the
+       name is free, the master key is reachable to seal with, and `msal` is
+       installed — nobody should finish a sign-in only to be told the name
+       was taken or the result cannot be saved.
+    2. **A terminal**, for the same reason: the questions and the sign-in wait
+       on a human.
+    3. **Four questions**: the app (client) id, required; the tenant, where
+       Enter keeps the default and anything typed must be a tenant id, a
+       domain or one of Microsoft's words; the harvest window, with its
+       minimum stated and no default; the first-run reach-back, at least the
+       window. An answer
+       that would not build a connector is refused with its reason and asked
+       again, never saved. Outlook categories are not asked: the closing
+       message names the file they are added to.
+    4. **Microsoft's sign-in, then the bounded health check**, behind
+       `context.graph_sign_in`. Either refusing saves nothing.
+    5. **Enrolment**, which seals the sign-in and writes the settings
+       together, as for every other connector. Another add of the same name
+       that finishes during this one's sign-in is caught by enrolment's own
+       re-check, at the cost of this sign-in.
+
+    The sign-in token never reaches this function's output: it is handed to
+    enrolment as the credential, and enrolment's own redaction applies to the
+    one sentence printed from the check.
+    """
+    graph = context.graph_sign_in
+    if graph is None:
+        raise Refusal(
+            "no Graph sign-in was supplied to the CLI, so a Graph connector "
+            "cannot be enrolled. That is a wiring fault in pm-ai, not anything "
+            "about this machine; nothing was asked and nothing was saved."
+        )
+
+    assert_enrollable(daemon.storage, system="graph", instance=instance)
+    graph.ready()
+
+    if not sys.stdin.isatty():
+        raise Refusal(
+            "adding a Graph connector asks four questions and waits for a "
+            "Microsoft sign-in in a browser, so it needs a terminal. stdin is "
+            "not a TTY here — this is a pipe, a cron job or a CI step. Nothing "
+            "was asked and nothing was saved. Run `pm-ai connector add graph` "
+            "from an interactive shell."
+        )
+
+    client_id = _ask_until(
+        "Microsoft app (client) id (required): ",
+        judge=lambda answer: graph.refusal(client_id=answer),
+    )
+    tenant = (
+        _ask_until(
+            f"Tenant [Enter keeps {graph.default_tenant}]: ",
+            judge=lambda answer: graph.refusal(tenant=answer) if answer else None,
+        )
+        or graph.default_tenant
+    )
+    minimum = graph.minimum_window_minutes
+    width = _ask_minutes(
+        f"Harvest window in minutes (at least {minimum}; no default): ",
+        judge=lambda minutes: graph.refusal(width=minutes),
+    )
+    reach_back = _ask_minutes(
+        f"First-run reach-back in minutes (at least {width}, the window): ",
+        judge=lambda minutes: graph.refusal(width=width, reach_back=minutes),
+    )
+
+    print()
+    signed = graph.sign_in(
+        instance=instance,
+        client_id=client_id,
+        tenant=tenant,
+        width=width,
+        reach_back=reach_back,
+        present=print,
+    )
+    # The sign-in and the check have both answered; enrolment re-runs the
+    # name check under its own reading of the stores and seals. Its "probe" is
+    # the check that just ran, so it is reported rather than repeated.
+    answer = enrol_connector(
+        daemon.storage,
+        system="graph",
+        instance=instance,
+        credential=signed.credential,
+        probe=lambda system, credential: signed.answer,
+        settings=signed.settings,
+    )
+
+    print(answer)
+    state = (
+        "enrolled and healthy"
+        if signed.healthy
+        else "enrolled; its health check warned (above)"
+    )
+    print(
+        f"{instance} is {state}. It becomes active at the next start — "
+        f"connectors are registered when the daemon is composed, so nothing is "
+        f"harvesting from it yet."
+    )
+    print(
+        f"Outlook categories are not mapped to projects yet, so every meeting "
+        f"is filed as personal. To map them, add a \"categories\" object — "
+        f"Outlook category to project id — to {graph.settings_file(instance)}."
+    )
+    return EXIT_OK
+
+
+def _typed(prompt: str) -> str | None:
+    """One line typed at the terminal, stripped; `None` for one that was not text.
+
+    Ctrl-D and Ctrl-C are an interruption rather than an answer, and nothing
+    has been saved at any question, so the refusal says so.
+    """
+    try:
+        return input(prompt).strip()
+    except UnicodeDecodeError:
+        return None
+    except (EOFError, KeyboardInterrupt) as closed:
+        raise Refusal(
+            "interrupted before every question was answered, so nothing was "
+            "saved."
+        ) from closed
+
+
+_NOT_TEXT = "that answer was not valid text in this terminal's encoding."
+
+
+def _ask_until(prompt: str, *, judge: Callable[[str], str | None]) -> str:
+    """Ask until `judge` accepts the answer, printing its reason each time it refuses."""
+    while True:
+        answer = _typed(prompt)
+        reason = _NOT_TEXT if answer is None else judge(answer)
+        if reason is None and answer is not None:
+            return answer
+        print(f"  {reason}", file=sys.stderr)
+
+
+def _ask_minutes(prompt: str, *, judge: Callable[[int], str | None]) -> int:
+    """A whole number of minutes, asked until `judge` accepts it.
+
+    Plain digits only, after trimming: `1440.0`, `1_440` and `+480` are all
+    numbers to Python and none of them is what the question asked for, so each
+    is asked again rather than read generously. Blank is asked again rather
+    than defaulted: neither width has a default, and Enter taking one would be
+    the answer the spec reserves for the human.
+    """
+    while True:
+        typed = _typed(prompt)
+        if typed is None:
+            print(f"  {_NOT_TEXT}", file=sys.stderr)
+            continue
+        if not typed:
+            print("  this has no default; type a whole number of minutes.", file=sys.stderr)
+            continue
+        if not (typed.isascii() and typed.isdigit()):
+            print(
+                f"  {typed!r} is not a whole number of minutes; type digits only.",
+                file=sys.stderr,
+            )
+            continue
+        minutes = int(typed)
+        reason = judge(minutes)
+        if reason is None:
+            return minutes
+        print(f"  {reason}", file=sys.stderr)
+
+
+@contextmanager
+def _enrolment_refusals() -> Iterator[None]:
+    """Every refusal an enrolment can meet, as the sentence `Refusal` carries."""
+    try:
+        yield
+    except (DuplicateConnector, MalformedInstanceName, MalformedSettings) as refused:
         raise Refusal(str(refused)) from refused
     except UnknownConnectorSystem as unknown:
         raise Refusal(str(unknown)) from unknown
@@ -680,13 +967,6 @@ def _connector_add(context: Context) -> int:
         # findable if this sentence is printed.
         raise Refusal(str(orphaned)) from orphaned
 
-    print(answer)
-    print(
-        f"{instance} is enrolled. It becomes active at the next start — "
-        f"connectors are registered when the daemon is composed, so nothing is "
-        f"harvesting from it yet."
-    )
-    return EXIT_OK
 
 def _connector_check(context: Context) -> int:
     """CAP-35's live probe: every registered connector, bounded at ten seconds.
@@ -1566,6 +1846,7 @@ def dispatch(
     diagnose: Callable[[], HealthReport],
     probe_connectors: Callable[[], Report] | None,
     probe_credential: CredentialProbePort = _no_probe,
+    graph_sign_in: GraphSignIn | None = None,
     onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     first_run: FirstRun | None = None,
@@ -1588,6 +1869,7 @@ def dispatch(
         diagnose=diagnose,
         probe_connectors=probe_connectors,
         probe_credential=probe_credential,
+        graph_sign_in=graph_sign_in,
         onboard=onboard,
         dashboard=dashboard,
         first_run=first_run,

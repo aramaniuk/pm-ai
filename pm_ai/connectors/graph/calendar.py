@@ -531,6 +531,12 @@ class CalendarWindow:
         return tuple(spans)
 
 
+def _in_minutes(span: timedelta) -> str:
+    """`span` as a count of minutes, whole where it is whole."""
+    minutes = span / timedelta(minutes=1)
+    return str(int(minutes)) if minutes == int(minutes) else f"{minutes:.2f}"
+
+
 @dataclass(frozen=True, slots=True)
 class WindowPolicy:
     """How wide a harvest window is, and how far back the first one reaches.
@@ -571,20 +577,26 @@ class WindowPolicy:
     """
 
     def __post_init__(self) -> None:
+        # Stated in minutes, the unit the window is typed in at `pm-ai connector
+        # add graph` and written in `connectors/<instance>.json` (story 8l), so
+        # the refusal an operator reads names the number they can type.
         if self.width < HARVEST_CYCLE:
             raise ValueError(
-                f"WindowPolicy.width={self.width} is narrower than CAP-2's "
-                f"{HARVEST_CYCLE} harvest cycle. Every run would leave a slice "
-                f"of calendar time that the next run's window begins after, and "
-                f"the cursor would advance past it — a permanent hole rather "
-                f"than a late fetch. Widen the window, or slow the cycle."
+                f"a harvest window of {_in_minutes(self.width)} minutes is under "
+                f"the {_in_minutes(HARVEST_CYCLE)}-minute minimum, which is "
+                f"pm-ai's harvest cycle (CAP-2), and a narrower window would "
+                f"leave a slice of calendar time that no run reads — the cursor "
+                f"would advance past it, a permanent hole rather than a late "
+                f"fetch."
             )
         if self.first_run_reach_back < self.width:
             raise ValueError(
-                f"WindowPolicy.first_run_reach_back="
-                f"{self.first_run_reach_back} is shorter than the "
-                f"{self.width} every later run reaches back anyway, so the "
-                f"first harvest would cover less history than the second."
+                f"a first-run reach-back of "
+                f"{_in_minutes(self.first_run_reach_back)} minutes is shorter "
+                f"than the {_in_minutes(self.width)}-minute window every later "
+                f"run reaches back anyway, so the first harvest would cover less "
+                f"history than the second. It must be at least "
+                f"{_in_minutes(self.width)} minutes."
             )
 
     def window(self, *, now: datetime, since: datetime | None = None) -> CalendarWindow:

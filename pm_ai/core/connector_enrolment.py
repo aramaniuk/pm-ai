@@ -42,7 +42,9 @@ beneath it.
 ## What is deliberately not here
 
 No connector-specific auth. The Graph device-code flow is story `33a`, and this
-has to work for a plain token typed at a prompt. No `pm-ai connector disable`,
+has to work for a plain token typed at a prompt. A Graph enrolment (story 8l)
+signs in and checks the result before it calls this, and hands its settings in
+as data; nothing here knows what they mean. No `pm-ai connector disable`,
 and no hot registration into a running daemon: both need a poller to halt or a
 daemon to register into, and neither exists before `4d`/`9a`. Registration is
 construction-time, per `8d` — which is why the success message says the
@@ -71,13 +73,17 @@ __all__ = [
     "CredentialNotHeld",
     "DuplicateConnector",
     "MalformedInstanceName",
+    "MalformedSettings",
     "OrphanedCredential",
     "ProbeFailed",
     "ProbeUnreachable",
+    "RESERVED_ROW_KEYS",
     "UnknownConnectorSystem",
+    "assert_enrollable",
     "connector_configurations",
     "credential_for",
     "enrol_connector",
+    "redacted",
     "replace_credential",
     "stored_credentials",
 ]
@@ -112,6 +118,14 @@ _INSTANCE_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:"
 )
 
+RESERVED_ROW_KEYS = frozenset({"instance", "system", "enabled", "project"})
+"""The keys of a `connectors/<instance>.json` row enrolment writes itself.
+
+A caller's `settings` may not name one (story 8l): a row whose `instance` or
+`system` disagreed with the credential sealed beside it would be a connector
+wearing another's name, so a clash is refused before anything is asked.
+"""
+
 # Well under any filesystem's component limit, and under `pm_ai.storage`'s own
 # 128-byte ceiling once `.json` is appended.
 _INSTANCE_LIMIT = 96
@@ -125,6 +139,17 @@ class MalformedInstanceName(ValueError):
     written outside the directory the git check just answered for — and a
     refusal that arrived after the credential was sealed would orphan one on
     every attempt.
+    """
+
+
+class MalformedSettings(ValueError):
+    """A connector's row settings cannot be written, so nothing was attempted.
+
+    Two causes, one repair at the caller: a setting names a key enrolment
+    writes itself (`RESERVED_ROW_KEYS`), or a value cannot be encoded into the
+    row. Raised **before the probe and before the seal**, for
+    `MalformedInstanceName`'s reason — refused after the credential was sealed,
+    it would orphan one.
     """
 
 
@@ -211,46 +236,19 @@ def connector_configurations(storage: StoragePort) -> tuple[str, ...]:
     )
 
 
-def enrol_connector(
-    storage: StoragePort,
-    *,
-    system: str,
-    instance: str,
-    credential: str,
-    probe: CredentialProbePort,
-) -> str:
-    """Probe `credential`, seal it, then configure `instance`.
+def assert_enrollable(storage: StoragePort, *, system: str, instance: str) -> None:
+    """Refuse an instance that cannot be enrolled, before anything is asked of anyone.
 
-    The order, and what each step buys:
+    Steps 2 to 4 of `enrol_connector`, callable on their own (story 8l). A
+    Graph enrolment asks four questions and runs a sign-in that takes minutes
+    before it has a credential to hand over, so a name already in use has to
+    be refused *first* — nobody should finish a sign-in only to be told the
+    name was taken. `enrol_connector` runs this again itself, because the state
+    may have changed while the human was answering.
 
-    1. **The name is checked.** It becomes a filename, and a bad one refused
-       after the seal would orphan a credential on every attempt.
-    2. **The duplicate check enumerates both stores** — `connectors/` first,
-       then the sealed one. `connectors/` alone misses an orphaned credential;
-       the sealed store alone misses a configured connector. First rather than
-       second because reading the sealed store needs the master key, and on a
-       keyless machine the refusal should be about the key rather than a
-       spurious duplicate.
-    3. **The git question is pre-flighted.** `connectors/` is declared
-       gitignored, so its write is refused when git cannot say whether the
-       directory would be committed — and that refusal would otherwise land
-       after the seal.
-    4. **The provider is asked.** A bad credential is refused while the human
-       who typed it is present, rather than discovered by a silent harvest at
-       03:00. Nothing has been written at this point, and nothing is if it
-       refuses.
-    5. **The sealed store is read, modified and written under an exclusive
-       claim.** It is one file holding every connector's credential and
-       `write_artifact` replaces whole, so a plain write while enrolling a
-       second connector destroys the first's token — and two enrolments racing
-       do the same thing one level down, which is what the claim is for.
-    6. **The configuration is written.** No credential in it. If this fails, the
-       sealed credential is reported as orphaned rather than left silent.
-
-    Returns the provider's own sentence about what answered, redacted — for the
-    operator, who has just typed a secret and deserves to know what accepted it.
-    Never the credential: `_redacted` removes it, and every refusal path is
-    asserted against five spellings of it.
+    Raises `MalformedInstanceName`, `DuplicateConnector`, and whatever reading
+    the sealed store, pre-flighting the git question or fetching the master
+    key raises — `KeyNotFound` on a machine with none enrolled.
     """
     _assert_nameable(instance)
     _assert_nameable(system, label="system name")
@@ -273,8 +271,106 @@ def enrol_connector(
             f"another instance name."
         )
 
-    # Before the first write, exactly as the name is checked before the probe.
+    # Before the first write, exactly as the name is checked before the probe:
+    # git's question for `connectors/`, and the master key for the sealed
+    # store, which on a fresh machine has never been read and so has never
+    # asked for it.
     storage.assert_writable(scope=APPLICATION, artifact=CONNECTORS)
+    storage.assert_writable(scope=APPLICATION, artifact=CREDENTIAL_STORE)
+
+
+def enrol_connector(
+    storage: StoragePort,
+    *,
+    system: str,
+    instance: str,
+    credential: str,
+    probe: CredentialProbePort,
+    settings: Mapping[str, object] | None = None,
+) -> str:
+    """Probe `credential`, seal it, then configure `instance`.
+
+    The order, and what each step buys:
+
+    1. **The row is composed and encoded.** `settings` are the connector's own
+       keys for it — a Graph row's app id, tenant and harvest widths (story 8l)
+       — written beside the four this module owns, never instead of them. A
+       setting naming one of `RESERVED_ROW_KEYS`, or a value that cannot be
+       encoded, is a `MalformedSettings` here, before anything is asked or
+       written; refused after the seal, it would orphan a credential.
+    2. **The name is checked.** It becomes a filename, and a bad one refused
+       after the seal would orphan a credential on every attempt.
+    3. **The duplicate check enumerates both stores** — `connectors/` first,
+       then the sealed one. `connectors/` alone misses an orphaned credential;
+       the sealed store alone misses a configured connector. First rather than
+       second because reading the sealed store needs the master key, and on a
+       keyless machine the refusal should be about the key rather than a
+       spurious duplicate.
+    4. **Both writes are pre-flighted.** `connectors/` is declared gitignored,
+       so its write is refused when git cannot say whether the directory would
+       be committed — and that refusal would otherwise land after the seal.
+       The sealed store's master key is fetched, so a machine with none
+       refuses now rather than at the seal (story 8l).
+    5. **The provider is asked.** A bad credential is refused while the human
+       who typed it is present, rather than discovered by a silent harvest at
+       03:00. Nothing has been written at this point, and nothing is if it
+       refuses.
+    6. **The sealed store is read, modified and written under an exclusive
+       claim.** It is one file holding every connector's credential and
+       `write_artifact` replaces whole, so a plain write while enrolling a
+       second connector destroys the first's token — and two enrolments racing
+       do the same thing one level down, which is what the claim is for.
+    7. **The row encoded in step 1 is written.** No credential in it. If this
+       fails, the sealed credential is reported as orphaned rather than left
+       silent.
+
+    Steps 2 to 4 are `assert_enrollable`, which a caller may also run on its
+    own before it has a credential to offer.
+
+    Returns the provider's own sentence about what answered, redacted — for the
+    operator, who has just typed a secret and deserves to know what accepted it.
+    Never the credential: `redacted` withholds any sentence holding an
+    eight-character run of it, and every refusal path is asserted against five
+    spellings of it. A credential that wraps another secret — a sealed Graph
+    sign-in holds its refresh token inside a JSON document — is redacted as the
+    string it was handed; the caller that knows the inner secret redacts it too
+    (`GraphEnrolment` does).
+    """
+    extra = dict(settings or {})
+    clash = sorted(RESERVED_ROW_KEYS & extra.keys())
+    if clash:
+        raise MalformedSettings(
+            f"the settings for {instance!r} name {', '.join(clash)}, which "
+            f"enrolment writes itself. Nothing was written."
+        )
+    # Encoded now, before anything is asked or sealed: a value that cannot be
+    # written refuses here rather than after the credential is on disk.
+    try:
+        row = _encode(
+            {
+                "instance": instance,
+                "system": system,
+                "enabled": True,
+                # Written explicitly rather than re-derived from the instance
+                # suffix at composition. The instance name is a path component
+                # and may not contain `/`, while a real GitLab project is
+                # `group/project` — so deriving one from the other silently
+                # built an adapter for the wrong path. Recorded here, and
+                # editable in this file, which is unencrypted and hand-editable
+                # for exactly this.
+                "project": _default_project(instance),
+                # A connector's own settings (story 8l): Graph's app id, tenant
+                # and harvest widths, in the same row and by the same writer.
+                **extra,
+            },
+            strict=True,
+        )
+    except (TypeError, ValueError) as unencodable:
+        raise MalformedSettings(
+            f"the settings for {instance!r} cannot be written into its row "
+            f"({unencodable}). Nothing was written."
+        ) from None
+    assert_enrollable(storage, system=system, instance=instance)
 
     answer = probe(system, credential)
 
@@ -301,21 +397,7 @@ def enrol_connector(
 
         try:
             storage.write_artifact(
-                _encode(
-                    {
-                        "instance": instance,
-                        "system": system,
-                        "enabled": True,
-                        # Written explicitly rather than re-derived from the
-                        # instance suffix at composition. The instance name is a
-                        # path component and may not contain `/`, while a real
-                        # GitLab project is `group/project` — so deriving one
-                        # from the other silently built an adapter for the wrong
-                        # path. Recorded here, and editable in this file, which
-                        # is unencrypted and hand-editable for exactly this.
-                        "project": _default_project(instance),
-                    }
-                ),
+                row,
                 scope=APPLICATION,
                 artifact=CONNECTORS,
                 name=f"{instance}.json",
@@ -334,7 +416,7 @@ def enrol_connector(
                 f"credential, which is how it is found."
             ) from unwritten
 
-    return _redacted(answer, credential)
+    return redacted(answer, credential)
 
 
 def replace_credential(
@@ -511,13 +593,28 @@ def _credentials_in(document: Mapping[str, object]) -> dict[str, dict[str, str]]
     return {str(k): dict(v) for k, v in held.items()}
 
 
-def _encode(document: Mapping[str, object]) -> bytes:
-    """Canonical JSON bytes. Sorted, so two runs writing the same state agree."""
-    return json.dumps(document, sort_keys=True, indent=2).encode("utf-8") + b"\n"
+def _encode(document: Mapping[str, object], *, strict: bool = False) -> bytes:
+    """Canonical JSON bytes. Sorted, so two runs writing the same state agree.
+
+    `strict` also refuses `NaN` and the infinities, which `json` would write as
+    tokens no JSON reader accepts — a row the next start could not read.
+    """
+    return (
+        json.dumps(document, sort_keys=True, indent=2, allow_nan=not strict).encode("utf-8")
+        + b"\n"
+    )
 
 
-def _redacted(answer: str, credential: str) -> str:
-    """The probe's sentence, with a last check that the credential is not in it.
+def redacted(
+    answer: str,
+    credential: str,
+    *,
+    instead: str = "the provider accepted the credential",
+) -> str:
+    """`answer`, or `instead` if any eight-character run of `credential` is in it.
+
+    `instead` defaults to the sentence for a probe that accepted; a caller
+    redacting a refusal passes its own.
 
     A probe is an adapter, and an adapter that interpolated the token it was
     given into "gitlab accepted <token>" would put it on the operator's screen
@@ -542,5 +639,5 @@ def _redacted(answer: str, credential: str) -> str:
         candidates |= {c.casefold() for c in list(candidates)}
     folded = answer.casefold()
     if any(candidate and candidate.casefold() in folded for candidate in candidates):
-        return "the provider accepted the credential"
+        return instead
     return answer

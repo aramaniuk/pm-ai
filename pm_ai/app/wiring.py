@@ -9,19 +9,24 @@ before it did.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.graph import (
     CLIENT_ID_KEY,
+    MAX_SETTING_MINUTES,
+    REACH_BACK_KEY,
     TENANT_KEY,
+    WIDTH_KEY,
     GraphConnector,
     MissingGraphSetting,
     UnknownProject,
@@ -29,13 +34,21 @@ from pm_ai.connectors.graph import (
     graph_window_policy,
 )
 from pm_ai.connectors.graph.auth import (
+    GraphAuthError,
     GraphDeviceCodeAuth,
+    GraphUnreachable,
+    InMemoryRefreshTokenStore,
+    SealedCredential,
     StoreBusy,
     StoreEntryMissing,
     StoreUnavailable,
+    require_msal,
+    tenant_refusal,
 )
-from pm_ai.connectors.graph.calendar import GraphCalendarFetch
+from pm_ai.connectors.graph.calendar import HARVEST_CYCLE, GraphCalendarFetch
 from pm_ai.connectors.graph.client import GraphClient
+from pm_ai.connectors.probe import CREDENTIAL_PROBE_SECONDS
+from pm_ai.connectors.registry import run_bounded
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
@@ -52,13 +65,14 @@ from pm_ai.core.connector_enrolment import (
     CREDENTIAL_STORE,
     CredentialNotHeld,
     credential_for,
+    redacted,
     replace_credential,
     stored_credentials,
 )
 from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
-from pm_ai.domain.health import ArtifactState, Presence
+from pm_ai.domain.health import ArtifactState, Health, Presence
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.ports import (
@@ -67,6 +81,8 @@ from pm_ai.ports import (
     ConnectorPort,
     CryptoPort,
     KeychainPort,
+    ProbeFailed,
+    ProbeUnreachable,
     VcsPort,
 )
 from pm_ai.platform.environment import encryption_disabled as encryption_off
@@ -83,6 +99,8 @@ __all__ = [
     "Bootstrap",
     "CONFIG_ARTIFACT",
     "Daemon",
+    "GraphEnrolment",
+    "GraphSignedIn",
     "MASTER_KEY_NAME",
     "REGISTRY_ARTIFACT",
     "application_storage",
@@ -830,13 +848,7 @@ def _graph_connector(
     """
     client_id = entry.get(CLIENT_ID_KEY)
     if not isinstance(client_id, str) or not client_id.strip():
-        _unbuilt(
-            instance,
-            f"it carries no usable {CLIENT_ID_KEY!r}. That is the Entra "
-            f"application the PM consents to, and pm-ai does not supply one: "
-            f"inventing it would be pm-ai choosing whose app asks for their "
-            f"calendar.",
-        )
+        _unbuilt(instance, f"it carries no usable {CLIENT_ID_KEY!r}. {_CLIENT_ID_REASON}")
         return None
     try:
         policy = graph_window_policy(entry)
@@ -868,6 +880,15 @@ def _graph_connector(
 
     tenant = entry.get(TENANT_KEY)
     named_tenant = tenant.strip() if isinstance(tenant, str) and tenant.strip() else None
+    if named_tenant is not None:
+        # The check `pm-ai connector add graph` applies to the typed answer
+        # (story 8l), applied to the row as well: the value becomes the last
+        # segment of the sign-in address, so a hand edit holding a space or a
+        # `/` would ask somewhere else.
+        unusable = tenant_refusal(named_tenant)
+        if unusable is not None:
+            _unbuilt(instance, f"its {TENANT_KEY!r} cannot be used: {unusable}")
+            return None
     auth = GraphDeviceCodeAuth(
         client_id=client_id.strip(),
         # The fifth setting, and the one that *is* defaulted — to the adapter's
@@ -905,6 +926,267 @@ def _graph_connector(
         categories=categories,
         now=clock,
     )
+
+
+_CLIENT_ID_REASON = (
+    "That is the Entra application the PM consents to, and pm-ai does not supply "
+    "one: inventing it would be pm-ai choosing whose app asks for their calendar."
+)
+
+
+@dataclass(frozen=True)
+class GraphSignedIn:
+    """What a completed Graph sign-in hands to enrolment (story 8l).
+
+    The credential to seal, the health check's sentence for the operator, and
+    the row settings `_graph_connector` reads back at the next start — spelled
+    with the connector's own key names, so the CLI never learns them.
+    """
+
+    credential: str = field(repr=False)
+    answer: str
+    healthy: bool
+    settings: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class GraphEnrolment:
+    """`pm-ai connector add graph`'s sign-in, behind the composition root (story 8l).
+
+    The CLI asks the questions and enrols; this does the things it may not,
+    because they reach `pm_ai.connectors`: checking up front that a sign-in
+    could run at all, judging each answer with the checks a composition applies
+    to the row, and running Microsoft's sign-in followed by CAP-35's bounded
+    health check.
+
+    The sign-in writes into an `InMemoryRefreshTokenStore`, never the sealed
+    one: nothing is sealed until the health check has passed, and enrolment
+    seals it then, under the shared claim, beside the settings. What is sealed
+    is what the store holds *after* the check, because the forced refresh the
+    check performs may have rotated the token the sign-in returned.
+
+    Every refusal leaves as one of the two `pm_ai.ports` declares for a
+    credential check (AD-49): `ProbeUnreachable` when Microsoft never answered
+    or a bounded step overran, `ProbeFailed` for everything else — Microsoft
+    refusing the app id or tenant, a declined, partial or expired sign-in, a
+    failed check, a missing `msal`. Each carries the adapter's own sentence,
+    with every refresh token this sign-in saw withheld from it.
+    """
+
+    storage: StorageService
+    client_factory: Callable[[str, str], Any] | None = None
+    """MSAL's client, or `None` for the adapter's own (a real `msal` import)."""
+
+    timeout: float = CREDENTIAL_PROBE_SECONDS
+    """The bound on each step nobody is acting on: asking for a code, and the check."""
+
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    @property
+    def minimum_window_minutes(self) -> int:
+        """CAP-2's floor, read off the constant `WindowPolicy` enforces.
+
+        Rounded up, so the minimum the question states is never below the one
+        the check applies.
+        """
+        return math.ceil(HARVEST_CYCLE / timedelta(minutes=1))
+
+    @property
+    def default_tenant(self) -> str:
+        """The adapter's own default, read off its field rather than copied."""
+        return GraphDeviceCodeAuth.tenant
+
+    def settings_file(self, instance: str) -> Path:
+        """Where `instance`'s row lands — the file categories are added to by hand."""
+        return (
+            self.storage.paths.resolve(DataScope(ScopeKind.APPLICATION), "connectors/")
+            / f"{instance}.json"
+        )
+
+    def ready(self) -> None:
+        """Refuse now if no sign-in could run on this machine: `msal` is missing.
+
+        Asked before any question, so nobody answers four of them to learn the
+        installation was incomplete. Skipped when a client was injected.
+        """
+        if self.client_factory is not None:
+            return
+        try:
+            require_msal()
+        except GraphAuthError as missing:
+            raise ProbeFailed(
+                f"{missing} Nothing was asked and nothing was saved."
+            ) from missing
+
+    def refusal(
+        self,
+        *,
+        client_id: str | None = None,
+        tenant: str | None = None,
+        width: int | None = None,
+        reach_back: int | None = None,
+    ) -> str | None:
+        """Why the answers given so far would not build a connector, or `None`.
+
+        Only what was given is judged, so each answer can be checked as it is
+        typed. The checks are the ones composition applies to the row:
+        `tenant_refusal`, `_minutes`' bounds, `WindowPolicy`'s floor and
+        ordering. A width judged alone is paired with a reach-back equal to it,
+        which `WindowPolicy` accepts, so only the width's own faults show.
+
+        Minutes arrive as whole numbers — the CLI accepts digits only — so the
+        one refusal `_minutes` can still make is its range, and it is reworded
+        here for a typed answer: its own sentence is about a hand-edited row.
+        """
+        if client_id is not None and not client_id.strip():
+            return f"no app (client) id was given. {_CLIENT_ID_REASON}"
+        if tenant is not None:
+            refused = tenant_refusal(tenant)
+            if refused is not None:
+                return refused
+        if width is None:
+            return None
+        for typed in (width, reach_back):
+            if typed is not None and not 0 < typed <= MAX_SETTING_MINUTES:
+                return (
+                    f"{typed} minutes is outside the 1 to {MAX_SETTING_MINUTES} "
+                    f"minutes (ten years) a window may be; a number past that "
+                    f"is a mistyped digit."
+                )
+        try:
+            graph_window_policy(
+                {
+                    WIDTH_KEY: width,
+                    REACH_BACK_KEY: width if reach_back is None else reach_back,
+                }
+            )
+        except (MissingGraphSetting, ValueError) as refused_window:
+            return str(refused_window)
+        return None
+
+    def sign_in(
+        self,
+        *,
+        instance: str,
+        client_id: str,
+        tenant: str,
+        width: int,
+        reach_back: int,
+        present: Callable[[str], None],
+    ) -> GraphSignedIn:
+        """Sign in through `present`, check the result, and say what to save.
+
+        Asking Microsoft for a code is bounded at `timeout`, because nothing is
+        on screen yet. The wait after the code is shown is not — a human is in
+        a browser, for minutes. The health check after it is bounded again.
+        """
+        tenant = tenant.strip() or self.default_tenant
+        refused = self.refusal(
+            client_id=client_id, tenant=tenant, width=width, reach_back=reach_back
+        )
+        if refused is not None:
+            raise ProbeFailed(f"{refused} Nothing was saved.")
+        store = InMemoryRefreshTokenStore()
+        auth = GraphDeviceCodeAuth(
+            client_id=client_id.strip(),
+            store=store,
+            tenant=tenant,
+            instance=instance,
+            now=self.now,
+            **(
+                {}
+                if self.client_factory is None
+                else {"client_factory": self.client_factory}
+            ),
+        )
+        try:
+            auth.sign_in(
+                present,
+                starting=lambda start: run_bounded(
+                    start, timeout=self.timeout, label=f"{instance} sign-in start"
+                ),
+            )
+        except TimeoutError as stalled:
+            raise ProbeUnreachable(
+                f"Microsoft did not issue a sign-in code within {self.timeout:g}s, "
+                f"so no code was shown. Nothing was saved."
+            ) from stalled
+        except GraphUnreachable as silent:
+            raise ProbeUnreachable(_nothing_saved(str(silent))) from silent
+        except GraphAuthError as refused_sign_in:
+            raise ProbeFailed(_nothing_saved(str(refused_sign_in))) from refused_sign_in
+        signed_in = _refresh_token(store.read())
+        try:
+            probe = run_bounded(
+                auth.check_health,
+                timeout=self.timeout,
+                label=f"{instance} health check",
+            )
+        except TimeoutError as overran:
+            raise ProbeUnreachable(
+                f"the sign-in completed, and the health check that follows it "
+                f"did not answer within {self.timeout:g}s, so whether this "
+                f"machine can obtain a token is unknown. Nothing was saved."
+            ) from overran
+        credential = store.read()
+        secrets = {t for t in (signed_in, _refresh_token(credential)) if t}
+
+        def withheld(text: str, instead: str) -> str:
+            for secret in secrets:
+                text = redacted(text, secret, instead=instead)
+            return text
+
+        if probe.health not in (Health.OK, Health.WARNING):
+            remedy = f" {probe.remediation}" if probe.remediation else ""
+            raise ProbeFailed(
+                withheld(
+                    f"the sign-in completed and the health check failed: "
+                    f"{probe.detail.rstrip('.')}.{remedy} Nothing was saved.",
+                    instead=(
+                        "the sign-in completed and the health check failed; its "
+                        "message is withheld because it quoted the sign-in "
+                        "token. Nothing was saved."
+                    ),
+                )
+            )
+        if not credential:
+            raise ProbeFailed(
+                "the sign-in completed and left no credential to save, which is "
+                "a fault in pm-ai rather than anything Microsoft said. Nothing "
+                "was saved."
+            )
+        answer = probe.detail
+        if probe.health is Health.WARNING and probe.remediation:
+            answer = f"{answer.rstrip('.')}. {probe.remediation}"
+        return GraphSignedIn(
+            credential=credential,
+            answer=withheld(answer, instead=f"{instance} obtained a token"),
+            healthy=probe.health is Health.OK,
+            settings={
+                CLIENT_ID_KEY: client_id.strip(),
+                TENANT_KEY: tenant,
+                WIDTH_KEY: width,
+                REACH_BACK_KEY: reach_back,
+            },
+        )
+
+
+def _refresh_token(credential: str | None) -> str | None:
+    """The raw refresh token inside a sealed Graph credential, or `None`."""
+    if not credential:
+        return None
+    try:
+        return SealedCredential.decode(credential).refresh_token
+    except GraphAuthError:
+        return None
+
+
+def _nothing_saved(sentence: str) -> str:
+    """`sentence`, ending by saying nothing was saved unless it already does."""
+    folded = sentence.casefold()
+    if "nothing was stored" in folded or "nothing was saved" in folded:
+        return sentence
+    return f"{sentence} Nothing was saved."
 
 
 CLAIM_WAIT_ATTEMPTS = 40

@@ -290,6 +290,10 @@ class LazyKeyCrypto:
             self._cipher = AesGcmCrypto(self.keychain.fetch(self.key_name))
         return self._cipher
 
+    def ready(self) -> None:
+        """Fetch the key now, refusing as a seal would, and encrypt nothing."""
+        self._resolve()
+
     def encrypt(self, plaintext: bytes) -> bytes:
         return self._resolve().encrypt(plaintext)
 

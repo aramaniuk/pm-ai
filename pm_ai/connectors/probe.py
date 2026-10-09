@@ -6,12 +6,13 @@ package. `pm_ai.core.connector_enrolment` receives this as a parameter typed
 `CredentialProbePort`, which is the same arrangement that makes story 8d's
 health probes legal in this package and illegal one layer down.
 
-**No transport yet, for either system.** Story 33a brought the Graph
-device-code flow and the first real HTTP client with it, and deliberately no
-probe: that slice fetches no resource and enrols no Graph connector, so a
-`graph` entry here would be a check nothing calls. GitLab's transport is still a
-stub. A system pm-ai has no probe for is refused by name —
-`UnknownConnectorSystem` — rather than passed, because a probe that returned
+**No Graph entry, and none is owed.** A Graph credential is not typed, so
+there is nothing to hand a probe: `pm-ai connector add graph` signs in and runs
+the connector's own bounded health check behind the composition root
+(`pm_ai.app.wiring.GraphEnrolment`, story 8l), with this module's
+`CREDENTIAL_PROBE_SECONDS` as its bound. GitLab's transport is still a stub.
+A system pm-ai has no probe for is refused by name — `UnknownConnectorSystem`
+— rather than passed, because a probe that returned
 "fine" without asking anything would put a credential on disk on the strength of
 a check that never happened. That is the failure this whole slice is ordered to
 prevent, and it would be introduced by the probe itself.
@@ -87,9 +88,9 @@ def probe_credential(system: str, credential: str) -> str:
         # `ProbeUnreachable` is the distinct refusal an operator needs: a
         # provider that never answered is not a credential that was rejected,
         # and reissuing a good token is the wrong repair. Unbounded, this hung
-        # `pm-ai connector add` indefinitely while holding the sealed store's
-        # exclusive claim open — so one silent provider wedged every later
-        # enrolment too.
+        # `pm-ai connector add` indefinitely. It holds no claim while it waits:
+        # enrolment probes before it takes the sealed store's exclusive claim,
+        # so a silent provider stalls this one command and no other enrolment.
         raise ProbeUnreachable(
             f"{system} did not answer within {CREDENTIAL_PROBE_SECONDS:g}s, so "
             f"the credential could not be checked and nothing was stored."
