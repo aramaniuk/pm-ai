@@ -46,9 +46,10 @@ class ConnectorPort(Protocol):
         """At least one event of the shape this connector produces, built offline.
 
         Declared on the port rather than left to convention because the AD-34
-        gate calls `connector.sample_events()` on every registered connector: an
-        `isinstance` conformance check cannot observe a method nothing declares,
-        so the gate would have been reading an attribute no contract promised.
+        gate calls `connector.sample_events()` on every connector a composed
+        daemon holds: an `isinstance` conformance check cannot observe a method
+        nothing declares, so the gate would have been reading an attribute no
+        contract promised.
 
         Contacts nothing. It exists so an architecture check can inspect a
         connector's output without a credential, a network, or a fixture per
@@ -74,8 +75,8 @@ class ConnectorPort(Protocol):
         that refused or would not answer. `OK` is a provider that answered.
 
         Implemented per connector, never by `doctor`: what "reachable" means is
-        provider-specific, and `doctor` reports registry membership without
-        contacting anything. The ten-second bound is not enforced here — a
+        provider-specific, and `doctor` contacts no provider. The ten-second
+        bound is not enforced here — a
         blocking call cannot cancel itself — but by
         `pm_ai.connectors.registry.ConnectorRegistry.check_health`, which waits
         for this and abandons it at the bound.

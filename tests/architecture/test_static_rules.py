@@ -844,3 +844,104 @@ def test_no_real_personal_address_is_used_as_a_fixture():
         "Use a reserved example domain (example.com/.org/.net, RFC 2606). A real "
         "address in a fixture is one somebody eventually mails.",
     )
+
+
+# ── Story 8k: no process-wide connector list ─────────────────────────────────
+
+_CONNECTOR_TYPES = frozenset({"ConnectorRegistry", "ConnectorPort"})
+
+
+def _names_a_connector_type(node: ast.AST) -> bool:
+    """Whether `node` mentions `ConnectorRegistry` or `ConnectorPort` anywhere."""
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id in _CONNECTOR_TYPES:
+            return True
+        if isinstance(child, ast.Attribute) and child.attr in _CONNECTOR_TYPES:
+            return True
+    return False
+
+
+def _module_level_statements(tree: ast.AST):
+    """Statements that run at import: the module body, through `if`/`try`/`with`.
+
+    Function and class bodies are not module level. That excludes, on purpose,
+    `Daemon.connectors: dict[str, ConnectorPort]` in `pm_ai/app/wiring.py` — a
+    dataclass field, one per daemon — and every local inside a function.
+    """
+    pending = list(getattr(tree, "body", []))
+    while pending:
+        statement = pending.pop()
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        yield statement
+        for field_name in ("body", "orelse", "finalbody", "handlers"):
+            pending.extend(getattr(statement, field_name, []) or [])
+
+
+def _process_wide_connector_state(source: ast.AST, location) -> list[str]:
+    """Every module-level connector list and every `global` that rebinds one.
+
+    Two shapes, which together are the design 8k removed:
+
+    - a module-level assignment whose value or annotation names
+      `ConnectorRegistry` or `ConnectorPort` (`_DEFAULT = ConnectorRegistry()`,
+      `_LIVE: dict[str, ConnectorPort] = {}`);
+    - a `global` statement inside a function that names either type (`install`
+      rebinding `_DEFAULT`).
+
+    No `global` statement exists anywhere in `pm_ai/` today, so the second
+    shape costs nothing to forbid.
+    """
+    found = []
+    for statement in _module_level_statements(source):
+        if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            parts = [statement.value] if statement.value is not None else []
+            if isinstance(statement, ast.AnnAssign):
+                parts.append(statement.annotation)
+            if any(_names_a_connector_type(part) for part in parts):
+                found.append(f"{location(statement)}  module-level connector state")
+    for function in ast.walk(source):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        rebinds = [n for n in ast.walk(function) if isinstance(n, ast.Global)]
+        if rebinds and _names_a_connector_type(function):
+            found.append(
+                f"{location(rebinds[0])}  `global {', '.join(rebinds[0].names)}` "
+                f"in {function.name}, which handles connectors"
+            )
+    return found
+
+
+def test_story_8k_no_process_wide_connector_list_anywhere():
+    """AD-30: whoever needs the connectors is handed the daemon that holds them.
+
+    Until 8k the composition root copied its connectors into a module-level
+    `ConnectorRegistry` and `connector check` read the copy, which once listed
+    a connector the harvest could not find.
+    """
+    violations = []
+    for f in source_files():
+        violations.extend(_process_wide_connector_state(f.tree, f.location))
+    assert not violations, format_violations(
+        violations,
+        "Story 8k: pm-ai keeps one connector list, `Daemon.connectors`. A "
+        "module-level list beside it is a second copy that can disagree.",
+    )
+
+
+def test_story_8k_the_scan_catches_the_design_it_replaced():
+    """The removed global, re-planted, must be found — or the scan above proves nothing."""
+    planted = ast.parse(
+        "_DEFAULT = ConnectorRegistry()\n"
+        "def install(connectors):\n"
+        "    global _DEFAULT\n"
+        "    fresh = ConnectorRegistry()\n"
+        "    _DEFAULT = fresh\n"
+        "_LIVE: dict[str, ConnectorPort] = {}\n"
+    )
+    found = _process_wide_connector_state(planted, lambda node: f"planted:{node.lineno}")
+    assert sorted(found) == sorted([
+        "planted:1  module-level connector state",
+        "planted:3  `global _DEFAULT` in install, which handles connectors",
+        "planted:6  module-level connector state",
+    ])

@@ -50,7 +50,6 @@ from pm_ai.connectors.graph import (
 from pm_ai.connectors.graph.auth import GraphDeviceCodeAuth
 from pm_ai.connectors.graph.calendar import GraphCalendarFetch, WindowPolicy
 from pm_ai.connectors.graph.client import GRAPH_BASE, GraphClient, GraphRequest, GraphResponse
-from pm_ai.connectors.registry import all_connectors
 from pm_ai.core.config import ACCEPTED_KEYS
 from pm_ai.core.connector_enrolment import enrol_connector
 from pm_ai.core.meeting_records import (
@@ -1254,11 +1253,11 @@ def test_the_config_vocabulary_stays_closed_and_holds_no_connector_setting():
 
 
 def test_a_registered_graph_connector_makes_the_gates_two_deep(tmp_path):
-    """AD-27 and AD-34 with a second connector, and `all_connectors()` at two."""
+    """AD-27 and AD-34 with a second connector, and the daemon's inventory at two."""
     _enrol(build(tmp_path, "alpha", now=lambda: NOW))
-    build(tmp_path, "alpha", now=lambda: NOW)
+    daemon = build(tmp_path, "alpha", now=lambda: NOW)
 
-    registered = all_connectors()
+    registered = tuple(daemon.connectors.values())
     assert len(registered) == 2
     for connector in registered:
         assert isinstance(connector, ConnectorPort)

@@ -1,36 +1,32 @@
-"""Which connectors this process holds, and whether each can reach its provider.
+"""Enumerating one composition's connectors, and asking whether each can reach its provider.
 
-## Why a registry exists beside `Daemon.connectors`
+## What this is, and what it is not
 
-`pm_ai.app.wiring.build()` already puts every connector it constructs into a
-`Daemon.connectors` dict. Nothing outside the composition root can reach that
-dict, so no architecture check could ask the question both of the AD-27 and
-AD-34 gates are written to ask — "for every connector, ...". Those two gates
-import this module, and skipped from the day they were written until it existed.
+`pm_ai.app.wiring.build()` puts every connector it constructs into
+`Daemon.connectors`, and that dict is **the one inventory**: a harvest reads it,
+and so does `pm-ai connector check`. `ConnectorRegistry` is an ordinary object
+built over such an inventory when something needs to enumerate or probe it —
+nothing here constructs a connector, schedules one, or keeps one.
 
-The division is deliberate and narrow: **`Daemon.connectors` holds the
-instances; this enumerates them.** Nothing here constructs a connector, and
-nothing here schedules one. `all_connectors()` takes no arguments because the
-gates call it that way, and `GitLabConnectorAdapter` needs a project and a scope
-that only `build()` knows — so the registry is *populated at composition*, not at
-import. A module-level registry that constructed its own connectors would need a
-hardcoded project literal, which is the thing AD-11 exists to keep out.
+There is deliberately **no process-wide registry** (story 8k, AD-30). Until 8k
+the composition root copied its connectors into a module global and `connector
+check` read the copy, and the two disagreed once: `connector check` listed an
+instance `run_harvest` could not find. A global also meant a second composition
+in one process silently replaced the first one's list, and every test that
+wired a daemon left its list behind for whatever ran next. Whoever needs the
+connectors is handed the daemon that holds them.
 
-The consequence is stated rather than hidden: **before composition the registry
-is empty.** That is not an error — it is a first-run state, and `pm-ai connector
-check` prints it as one. It is also exactly why the gates assert the registry is
-non-empty *before* their loops: a `for` over nothing passes every assertion in
-its body without running one, and a gate that turns from skipped to green while
-proving nothing is worse than the skip, which `-rs` at least shows.
+**Where another load path attaches.** The removed `install()` was documented as
+the hook for `8b`'s enrolment and any later signature-verifying loader. Both now
+attach inside `build()`: `wiring._enrolled_connectors` turns what `pm-ai
+connector add` wrote into adapters, and `build()` puts them into
+`Daemon.connectors` beside the built-ins. A verifying loader belongs at the same
+place — it decides what enters that dict, and nothing here changes.
 
-## The load path
-
-`ConnectorRegistry` is an ordinary object and `install()` makes one the process
-default. First-party and local today; `8b`'s enrolment and any later signature
-verification attach by building a registry differently and installing it, with
-no caller here changing. `install()` *replaces* rather than merges, so a second
-`build()` in one process — every test that wires a daemon — describes that
-daemon rather than accumulating the last three.
+An empty registry is a state, not an error. `pm-ai connector check` prints it as
+a first run, and the architecture gates that loop over a daemon's connectors
+assert the inventory is non-empty *before* their loops: a `for` over nothing
+passes every assertion in its body without running one.
 
 ## The bound on `check_health`
 
@@ -55,7 +51,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import TypeVar
 
 from pm_ai.domain.events import NormalizedEvent
@@ -67,11 +63,6 @@ __all__ = [
     "DuplicateConnector",
     "HEALTH_PROBE_SECONDS",
     "run_bounded",
-    "all_connectors",
-    "check_health",
-    "default_registry",
-    "install",
-    "sample_events",
 ]
 
 # CAP-35's bound, in seconds. Named rather than defaulted inline so `pm-ai
@@ -154,9 +145,9 @@ class ConnectorRegistry:
         """
         # An adapter that already knows its own instance name is asked for it
         # before falling back to the system name. Defaulting to `name` meant two
-        # GitLab projects registered through `install([...])` — 8b's documented
-        # attach path — collided on `"gitlab"` and aborted composition, while
-        # `build()` escaped it only because it passes `instance` explicitly.
+        # GitLab projects registered without an explicit `instance` collided on
+        # `"gitlab"` and aborted, while `build()` escaped it only because it
+        # passed `instance` explicitly.
         key = instance or getattr(connector, "instance", None) or connector.name
         if key in self._connectors:
             raise DuplicateConnector(
@@ -181,12 +172,15 @@ class ConnectorRegistry:
         return tuple(self._connectors)
 
     def sample_events(self) -> tuple[NormalizedEvent, ...]:
-        """Every registered connector's samples, flattened.
+        """Every connector's samples in this registry, flattened.
 
-        The convenience over `for c in all_connectors(): c.sample_events()`, for
-        checks that care about the events rather than about which connector
-        produced them. Empty when nothing is registered — so a caller asserting
-        over it must assert it is non-empty first, exactly as the gates do.
+        The convenience over calling `sample_events()` on each of
+        `self.all_connectors()`, for a check that cares about the events rather
+        than about which connector produced them. Nothing in production calls
+        it; the AD-27 and AD-34 gates loop over a daemon's connectors one by one,
+        so they can name the connector that failed. Empty when nothing is
+        registered — so a caller asserting over it must assert it is non-empty
+        first, exactly as the gates do.
         """
         return tuple(e for c in self._connectors.values() for e in c.sample_events())
 
@@ -267,56 +261,3 @@ class ConnectorRegistry:
                 )
             )
         return Report(tuple(probes))
-
-
-# ── The process default, installed by the composition root ───────────────────
-
-_DEFAULT = ConnectorRegistry()
-
-
-def install(connectors: Iterable[ConnectorPort] | ConnectorRegistry) -> ConnectorRegistry:
-    """Make `connectors` the registry this process enumerates, and return it.
-
-    Called by `pm_ai.app.wiring.build()` with the connectors it just constructed.
-    Replaces rather than merges: a second `build()` describes the daemon it just
-    built, not that one plus every earlier one — which matters because the test
-    suite wires dozens of daemons in one process and a merging registry would
-    report them all, then refuse on the first repeated instance name.
-
-    Accepts a built `ConnectorRegistry` too, which is how an alternative load
-    path — `8b`'s enrolment, a signature-verifying loader — attaches without
-    anything here knowing about it.
-    """
-    global _DEFAULT
-    if isinstance(connectors, ConnectorRegistry):
-        _DEFAULT = connectors
-        return _DEFAULT
-    fresh = ConnectorRegistry()
-    for connector in connectors:
-        fresh.register(connector)
-    _DEFAULT = fresh
-    return _DEFAULT
-
-
-def default_registry() -> ConnectorRegistry:
-    """The installed registry. Empty until something composes one."""
-    return _DEFAULT
-
-
-def all_connectors() -> tuple[ConnectorPort, ...]:
-    """Every connector this process holds — the accessor the AD gates call.
-
-    No arguments, because those gates call it that way and because the answer is
-    a property of the composition rather than of any caller.
-    """
-    return _DEFAULT.all_connectors()
-
-
-def sample_events() -> tuple[NormalizedEvent, ...]:
-    """Every registered connector's sample events, flattened."""
-    return _DEFAULT.sample_events()
-
-
-def check_health(*, timeout: float = HEALTH_PROBE_SECONDS) -> Report:
-    """Probe every registered connector, within `timeout` seconds in total."""
-    return _DEFAULT.check_health(timeout=timeout)

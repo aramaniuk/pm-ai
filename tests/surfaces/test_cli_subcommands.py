@@ -28,8 +28,10 @@ from pm_ai.platform.doctor import ArtifactState
 from pm_ai.app.wiring import Bootstrap, bootstrap
 from pm_ai.app import entry
 from pm_ai.connectors import registry as connectors
+from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import ACCEPTED_KEYS, Config, ConfigRefused, load_config
 from pm_ai.domain.health import Health, Probe
+from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.ports import (
     AES_KEY_BYTES,
     MASTER_KEY_NAME,
@@ -179,37 +181,67 @@ def registered(tmp_path, monkeypatch, keychain):
 def unregistered(monkeypatch, keychain):
     """A machine with no project enrolled, so `build()` never runs.
 
-    Which is the arrangement the connector rows want: `build()` *installs* the
-    process registry, so a composed daemon would overwrite whatever a test
-    registered. It also exercises the claim that `connector check` needs no
-    daemon — the registry is a property of the process.
+    The first-run machine: no daemon, and `connector check` reports that no
+    connectors are registered rather than refusing.
     """
     keychain()
     monkeypatch.setattr(entry, "_bootstrap", enrolled())
 
 
+class Inventory:
+    """The fakes a test put in the composed daemon, and what `main` did with them."""
+
+    def __init__(self) -> None:
+        self.chosen: list[Connector] = []
+        self.built: list[object] = []
+        self.dispatched: list[object] = []
+
+    def install(self, *connectors_: Connector) -> None:
+        self.chosen.extend(connectors_)
+
+
 @pytest.fixture
-def registry():
-    """Install connectors as the process default, and put back what was there.
+def registry(registered, monkeypatch):
+    """Put connectors in the daemon `entry` composes — its own inventory, not a copy.
 
-    The registry is module-level state that `build()` replaces, so a test that
-    installed and walked away would describe its own fakes to every architecture
-    gate that asks "for every connector, ...".
+    The real `build()` runs, on `registered`'s machine, and its
+    `Daemon.connectors` is then replaced with the fakes: that dict is the one
+    list a harvest reads and `connector check` probes (story 8k), so this is
+    the only place a test's connectors can live. Nothing is process-wide, so
+    there is nothing to put back.
+
+    The daemon `main` hands `dispatch` is recorded too, and checked at teardown
+    to be the one carrying the fakes — so a row cannot pass by reaching a
+    daemon this fixture never touched.
     """
-    previous = connectors.default_registry()
-    live: list[Connector] = []
+    inventory = Inventory()
+    real_build = entry.build
+    real_dispatch = entry.dispatch
 
-    def install(*connectors_: Connector) -> None:
-        fresh = connectors.ConnectorRegistry()
-        for connector in connectors_:
-            fresh.register(connector)
-            live.append(connector)
-        connectors.install(fresh)
+    def build(*args, **kwargs):
+        daemon = real_build(*args, **kwargs)
+        daemon.connectors = {connector.name: connector for connector in inventory.chosen}
+        inventory.built.append(daemon)
+        return daemon
 
-    yield install
-    for connector in live:
+    def dispatch(*args, **kwargs):
+        inventory.dispatched.append(kwargs["daemon"])
+        return real_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(entry, "build", build)
+    monkeypatch.setattr(entry, "dispatch", dispatch)
+    yield inventory
+    for connector in inventory.chosen:
         connector.released.set()
-    connectors.install(previous)
+    for daemon in inventory.dispatched:
+        if daemon is None:
+            continue
+        assert any(daemon is built for built in inventory.built), (
+            "`main` dispatched a daemon this fixture did not build"
+        )
+        assert list(daemon.connectors.values()) == inventory.chosen, (
+            "the fakes never reached the daemon `main` used"
+        )
 
 
 @pytest.fixture
@@ -218,11 +250,20 @@ def quick_bound(monkeypatch):
 
     A blocked probe under the real ten seconds is a correct test that costs ten
     seconds every run, so the *number* is replaced here and pinned separately in
-    `test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own`. What is not
-    replaced is any of the behaviour under test: the same registry starts the
-    same threads and abandons the same probe.
+    `test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own`. Only the
+    timeout changes: the probe is still bound to the composed daemon, and
+    `ConnectorRegistry.check_health` still starts a thread per connector and
+    abandons the one that does not answer.
     """
-    monkeypatch.setattr(entry, "probe_connectors", lambda: connectors.check_health(timeout=0.5))
+
+    class Quick(ConnectorRegistry):
+        def check_health(self, *, timeout: float = 0.5):
+            return super().check_health(timeout=timeout)
+
+    bind = entry._probe_connectors
+    monkeypatch.setattr(
+        entry, "_probe_connectors", lambda composed: bind(composed, registry=Quick)
+    )
 
 
 # ── `pm-ai key enrol` ────────────────────────────────────────────────────────
@@ -477,10 +518,10 @@ def test_an_encryption_key_in_config_is_refused_through_the_surface_too(
 # ── `pm-ai connector check` ──────────────────────────────────────────────────
 
 
-def test_connector_check_with_every_connector_healthy_exits_0(
-    unregistered, registry, capsys
-):
-    registry(Connector("gitlab:alpha", Health.OK), Connector("gitlab:beta", Health.OK))
+def test_connector_check_with_every_connector_healthy_exits_0(registry, capsys):
+    registry.install(
+        Connector("gitlab:alpha", Health.OK), Connector("gitlab:beta", Health.OK)
+    )
     assert entry.main(["connector", "check"]) == EXIT_OK
     printed = capsys.readouterr().out
     assert "gitlab:alpha" in printed
@@ -489,7 +530,7 @@ def test_connector_check_with_every_connector_healthy_exits_0(
 
 
 def test_a_silent_connector_is_failing_and_its_siblings_still_report(
-    unregistered, registry, quick_bound, capsys
+    registry, quick_bound, capsys
 ):
     """One broken connector hiding another is what `8d`'s report-never-raise rule is for.
 
@@ -498,7 +539,7 @@ def test_a_silent_connector_is_failing_and_its_siblings_still_report(
     than a success that would let a dead connector read forever as "no coverage
     yet" (AD-39).
     """
-    registry(
+    registry.install(
         Connector("gitlab:alpha", Health.OK),
         Connector("gitlab:silent"),
         Connector("gitlab:beta", Health.OK),
@@ -518,43 +559,165 @@ def test_a_silent_connector_is_failing_and_its_siblings_still_report(
     assert "not every connector is healthy" in printed
 
 
-def test_a_connector_whose_probe_raises_does_not_hide_the_rest(
-    unregistered, registry, capsys
-):
+def test_a_connector_whose_probe_raises_does_not_hide_the_rest(registry, capsys):
     """A bug in one adapter is reported as that adapter's row, not as exit 1."""
 
     class Exploding(Connector):
         def check_health(self):
             raise RuntimeError("a bug in this adapter")
 
-    registry(Exploding("gitlab:broken", Health.OK), Connector("gitlab:fine", Health.OK))
+    registry.install(
+        Exploding("gitlab:broken", Health.OK), Connector("gitlab:fine", Health.OK)
+    )
     assert entry.main(["connector", "check"]) == EXIT_UNHEALTHY
     printed = capsys.readouterr().out
     assert "gitlab:broken" in printed
     assert "gitlab:fine" in printed
 
 
-def test_an_empty_registry_says_so_and_exits_0(unregistered, registry, capsys):
-    """Nothing registered is a first-run state: no claim of reachability is false."""
-    registry()
+def test_nothing_enrolled_says_no_connectors_are_registered_and_exits_0(
+    unregistered, capsys
+):
+    """No project, no daemon: a first-run state, and no claim of reachability is false."""
     assert entry.main(["connector", "check"]) == EXIT_OK
     printed = capsys.readouterr().out
     assert "no connectors are registered" in printed
 
 
-def test_a_connector_with_no_credential_is_not_a_pass(unregistered, registry, capsys):
+def _assert_refused_naming(capsys, *reason: str) -> None:
+    """Exit 3 already asserted; the refusal is `require_daemon`'s, carrying `reason`."""
+    captured = capsys.readouterr()
+    assert "could not build a daemon" in captured.err
+    for words in reason:
+        assert words in captured.err, f"the refusal does not name {words!r}"
+    assert "no connectors are registered" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        (
+            ArtifactState.unreadable("projects.toml: [Errno 13] Permission denied"),
+            ("could not be read", "projects.toml"),
+        ),
+        (
+            ArtifactState.read(b"[[[ this is not toml"),
+            ("projects.toml cannot be read as a registry",),
+        ),
+    ],
+    ids=["unreadable", "unparseable"],
+)
+def test_a_projects_toml_that_cannot_be_read_is_refused_not_a_first_run(
+    keychain, monkeypatch, state, reason, capsys
+):
+    """Story 8k's new row: a broken registry is not an empty one.
+
+    Both leave no project and no daemon, and before 8k both printed the
+    first-run message. The states are faked rather than produced with file
+    modes, which root and some filesystems ignore.
+    """
+    keychain()
+    monkeypatch.setattr(
+        entry, "_bootstrap", lambda _: Bootstrap({}, state, ArtifactState.absent())
+    )
+    assert entry.main(["connector", "check"]) == EXIT_REFUSAL
+    _assert_refused_naming(capsys, *reason)
+
+
+@pytest.mark.parametrize(
+    ("raised", "reason"),
+    [
+        (OSError("the root went away"), ("pm-ai's own directory", "the root went away")),
+        (
+            ScopeResolutionError("alpha points nowhere"),
+            ("cannot be resolved to a directory", "alpha points nowhere"),
+        ),
+    ],
+    ids=["oserror", "unresolvable"],
+)
+def test_build_raising_is_refused_naming_it(registered, monkeypatch, raised, reason, capsys):
+    """Story 8k's new row, for the two failures `_compose` catches from `build()`."""
+
+    def build(*args, **kwargs):
+        raise raised
+
+    monkeypatch.setattr(entry, "build", build)
+    assert entry.main(["connector", "check"]) == EXIT_REFUSAL
+    _assert_refused_naming(capsys, *reason)
+
+
+@pytest.mark.parametrize("config", ["unreadable", "refused"])
+def test_a_config_that_will_not_load_is_refused_rather_than_probed(
+    registered, registry, monkeypatch, config, capsys
+):
+    """Story 8k's new row: refused, rather than probing connectors nothing will use.
+
+    `build()` succeeds and the daemon is then discarded over `config.toml`, so
+    its connectors exist and are not this machine's running set. Before 8k
+    `connector check` probed them anyway, out of the process-wide copy.
+    """
+    asked: list[str] = []
+
+    class Counted(Connector):
+        def check_health(self) -> Probe:
+            asked.append(self.name)
+            return super().check_health()
+
+    registry.install(Counted("gitlab:alpha", Health.OK))
+    if config == "unreadable":
+        # Faked: `chmod(0)` is ignored by root and by some filesystems, and the
+        # row is about pm-ai's answer, not about producing the state.
+        stub = enrolled(alpha=registered.parent / "repo")
+
+        def read(keychain_):
+            projects = stub(keychain_)
+            return Bootstrap(
+                projects.projects,
+                projects.registry,
+                ArtifactState.unreadable("config.toml: [Errno 13] Permission denied"),
+            )
+
+        monkeypatch.setattr(entry, "_bootstrap", read)
+    else:
+        path = registered / ".pm-ai" / "config.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("encryption = false\n", encoding="utf-8")
+    assert entry.main(["connector", "check"]) == EXIT_REFUSAL
+    _assert_refused_naming(capsys, "config.toml")
+    assert asked == [], "a connector the running system will not use was probed"
+    assert registry.built, "the row needs a daemon that was built and then discarded"
+
+
+def test_a_daemon_built_earlier_still_probes_only_its_own(tmp_path):
+    """Two daemons in one process: the first one's check is not the second's list.
+
+    The order is the point. Before 8k `build()` replaced a process-wide list, so
+    probing daemon A *after* daemon B was built reported B's connectors.
+    """
+    from pm_ai.app import wiring
+
+    first = wiring.build(tmp_path / "one", "alpha")
+    wiring.build(tmp_path / "two", "beta")
+    probe = entry._probe_connectors(
+        entry._Composition(first, None, ArtifactState.absent(), ArtifactState.absent())
+    )
+    assert probe is not None
+    assert [row.name for row in probe().probes] == ["gitlab:alpha"]
+
+
+def test_a_connector_with_no_credential_is_not_a_pass(registry, capsys):
     """`ABSENT` is setup outstanding, and setup outstanding is not health.
 
-    Distinct from the empty registry above, deliberately: a connector that is
+    Distinct from the first-run row above, deliberately: a connector that is
     registered and has no credential is silently skipping harvests, which is
     exactly the state AD-39 says must not read as "no activity".
     """
-    registry(Connector("gitlab:alpha", Health.ABSENT))
+    registry.install(Connector("gitlab:alpha", Health.ABSENT))
     assert entry.main(["connector", "check"]) == EXIT_UNHEALTHY
     assert Health.ABSENT.value in capsys.readouterr().out
 
 
-def test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own():
+def test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own(tmp_path):
     """CAP-35's ten seconds, named once — in `8d`, where the waiting happens.
 
     `quick_bound` shortens the number for the blocked-probe test, so something
@@ -562,8 +725,33 @@ def test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own():
     all, which is the property being asserted: a surface holding its own copy of
     the bound is how the two drift.
     """
+    import inspect
+
+    from pm_ai.app import wiring
+
     assert connectors.HEALTH_PROBE_SECONDS == 10.0
-    assert entry.probe_connectors is connectors.check_health
+    timeout = inspect.signature(ConnectorRegistry.check_health).parameters["timeout"]
+    assert timeout.default == connectors.HEALTH_PROBE_SECONDS
+    factory = inspect.signature(entry._probe_connectors).parameters["registry"]
+    assert factory.default is ConnectorRegistry, (
+        "production builds a plain ConnectorRegistry, whose default is the bound"
+    )
+
+    passed: list[dict] = []
+
+    class Spy(ConnectorRegistry):
+        def check_health(self, **kwargs):
+            passed.append(kwargs)
+            return super().check_health(**kwargs)
+
+    daemon = wiring.build(tmp_path, "alpha")
+    probe = entry._probe_connectors(
+        entry._Composition(daemon, None, ArtifactState.absent(), ArtifactState.absent()),
+        registry=Spy,
+    )
+    assert probe is not None
+    probe()
+    assert passed == [{}], "the CLI supplied its own timeout instead of CAP-35's"
 
 
 # ── The table these leaves hang on ───────────────────────────────────────────

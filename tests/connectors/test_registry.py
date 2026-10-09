@@ -20,7 +20,6 @@ import time
 
 import pytest
 
-from pm_ai.connectors import registry as registry_module
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.registry import ConnectorRegistry, DuplicateConnector
 from pm_ai.domain.events import ObservedEventType
@@ -60,19 +59,6 @@ class FakeConnector:
 
     def check_health(self) -> Probe:
         return self._probe()
-
-
-@pytest.fixture(autouse=True)
-def _isolated_default():
-    """Restore the process default registry around every test.
-
-    The default is process-wide by design — `all_connectors()` takes no
-    arguments — so a test that installs one would otherwise decide what the next
-    test sees.
-    """
-    before = registry_module.default_registry()
-    yield
-    registry_module.install(before)
 
 
 # ── Enumeration ──────────────────────────────────────────────────────────────
@@ -167,8 +153,8 @@ def test_instance_defaults_to_what_the_connector_calls_itself():
 
     The frozen matrix pins that a duplicate instance name is refused; it does
     not pin what an omitted one defaults to. Defaulting to `name` made two
-    GitLab projects collide on `"gitlab"` through `install([...])` — 8b's
-    documented attach path — and abort composition.
+    GitLab projects registered without an explicit `instance` collide on
+    `"gitlab"` and abort.
     """
     reg = ConnectorRegistry()
     reg.register(gitlab("alpha"))
@@ -354,43 +340,6 @@ def test_check_health_reports_in_registration_order():
     for n in ("c", "a", "b"):
         reg.register(FakeConnector(n))
     assert [p.name for p in reg.check_health().probes] == ["c", "a", "b"]
-
-
-# ── The process default ──────────────────────────────────────────────────────
-
-
-def test_install_replaces_rather_than_merges():
-    """A second composition describes that daemon, not it plus every earlier one."""
-    registry_module.install([FakeConnector("first")])
-    registry_module.install([FakeConnector("second")])
-    assert [c.name for c in registry_module.all_connectors()] == ["second"]
-
-
-def test_install_accepts_a_built_registry_so_another_load_path_can_attach():
-    built = ConnectorRegistry()
-    built.register(gitlab("alpha"), instance="gitlab:alpha")
-    assert registry_module.install(built) is built
-    assert registry_module.default_registry() is built
-    assert registry_module.all_connectors() == built.all_connectors()
-
-
-def test_the_module_accessors_read_the_installed_registry():
-    registry_module.install([gitlab("alpha")])
-    assert registry_module.sample_events()
-    assert [p.name for p in registry_module.check_health().probes] == ["gitlab:alpha"]
-
-
-def test_composition_populates_the_registry(tmp_path):
-    """`build()` registers what it builds — the property the AD gates rest on."""
-    from pm_ai.app import wiring
-
-    daemon = wiring.build(tmp_path, "alpha")
-    assert registry_module.all_connectors()
-    assert set(registry_module.default_registry().instances()) == set(daemon.connectors)
-    assert list(registry_module.all_connectors()) == list(daemon.connectors.values()), (
-        "the daemon holds the instances and the registry enumerates them — they "
-        "must be the same objects, not two constructions of one connector"
-    )
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
