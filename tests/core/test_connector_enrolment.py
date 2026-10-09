@@ -19,9 +19,12 @@ import pytest
 from pm_ai.core.connector_enrolment import (
     CredentialNotHeld,
     MalformedInstanceName,
+    MalformedSettings,
     OrphanedCredential,
+    assert_enrollable,
     connector_configurations,
     enrol_connector,
+    redacted,
     replace_credential,
     stored_credentials,
 )
@@ -907,3 +910,115 @@ def test_replacing_takes_the_claim_enrolment_takes(storage):
                 storage, system="graph", instance="graph:work", credential="new"
             )
     assert stored_credentials(storage)["graph:work"]["credential"] == "old"
+
+
+# ── Story 8l — the duplicate check on its own, and a row's own settings ──────
+
+
+def test_the_duplicate_check_runs_on_its_own_and_writes_nothing(storage, tmp_path):
+    """A Graph add refuses a name in use before it asks anything (story 8l)."""
+    assert_enrollable(storage, system="graph", instance="graph:work")
+    assert _connector_files(tmp_path) == []
+    assert not _sealed_file(tmp_path).exists()
+
+    enrol_connector(
+        storage, system="graph", instance="graph:work", credential=SECRET, probe=accepts
+    )
+    with pytest.raises(DuplicateConnector):
+        assert_enrollable(storage, system="graph", instance="graph:work")
+    with pytest.raises(MalformedInstanceName):
+        assert_enrollable(storage, system="graph", instance="../graph")
+
+
+def test_settings_are_written_into_the_row_beside_the_keys_enrolment_owns(
+    storage, tmp_path
+):
+    settings = {"client_id": "an-app-id", "window_width_minutes": 1440}
+    enrol_connector(
+        storage,
+        system="graph",
+        instance="graph:work",
+        credential=SECRET,
+        probe=accepts,
+        settings=settings,
+    )
+    (written,) = _connector_files(tmp_path)
+    row = json.loads(written.read_text())
+    assert row == {
+        "instance": "graph:work",
+        "system": "graph",
+        "enabled": True,
+        "project": "work",
+        **settings,
+    }
+    assert SECRET not in written.read_text()
+
+
+@pytest.mark.parametrize("key", ["instance", "system", "enabled", "project"])
+def test_a_setting_naming_a_key_enrolment_owns_is_refused_before_anything(
+    storage, tmp_path, key
+):
+    asked: list[str] = []
+
+    def probe(system: str, credential: str) -> str:
+        asked.append(system)
+        return "accepted"
+
+    with pytest.raises(MalformedSettings, match=key):
+        enrol_connector(
+            storage,
+            system="graph",
+            instance="graph:work",
+            credential=SECRET,
+            probe=probe,
+            settings={key: "something else"},
+        )
+    assert asked == []
+    assert _connector_files(tmp_path) == []
+    assert not _sealed_file(tmp_path).exists()
+
+
+@pytest.mark.parametrize("value", [object(), float("nan"), float("inf")])
+def test_a_setting_that_cannot_be_written_is_refused_before_the_seal(
+    storage, tmp_path, value
+):
+    """Encoded first, so a value the row cannot hold orphans no credential."""
+    asked: list[str] = []
+
+    def probe(system: str, credential: str) -> str:
+        asked.append(system)
+        return "accepted"
+
+    with pytest.raises(MalformedSettings):
+        enrol_connector(
+            storage,
+            system="graph",
+            instance="graph:work",
+            credential=SECRET,
+            probe=probe,
+            settings={"client_id": value},
+        )
+    assert asked == []
+    assert _connector_files(tmp_path) == []
+    assert not _sealed_file(tmp_path).exists()
+
+
+def test_the_up_front_check_asks_for_the_master_key(tmp_path):
+    """A fresh machine has no sealed store to read, so nothing asked for the key."""
+
+    class Keyless:
+        def fetch(self, name):
+            raise KeyNotFound(name)
+
+    from pm_ai.storage.crypto import LazyKeyCrypto
+
+    storage = _storage(tmp_path, crypto=LazyKeyCrypto(Keyless(), "master"))
+    with pytest.raises(KeyNotFound):
+        assert_enrollable(storage, system="graph", instance="graph:work")
+    assert _connector_files(tmp_path) == []
+    assert not _sealed_file(tmp_path).exists()
+
+
+def test_redaction_can_say_something_other_than_accepted():
+    assert redacted(f"refused: {SECRET}", SECRET, instead="withheld") == "withheld"
+    assert redacted("refused plainly", SECRET, instead="withheld") == "refused plainly"

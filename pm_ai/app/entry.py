@@ -61,6 +61,7 @@ from pm_ai.app.pipelines import run_dashboard
 from pm_ai.app.wiring import (
     Bootstrap,
     Daemon,
+    GraphEnrolment,
     application_storage,
     bootstrap,
     build,
@@ -149,6 +150,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             daemon=daemon,
             diagnose=lambda: _diagnose(keychain, composed),
             probe_credential=probe_credential,
+            # `pm-ai connector add graph`'s questions are judged, and its
+            # sign-in and health check run, behind this (story 8l): both reach
+            # `pm_ai.connectors`, which the CLI may not import. Bound to this
+            # daemon's single writer, which is also where the row lands.
+            graph_sign_in=None if daemon is None else GraphEnrolment(storage=daemon.storage),
             # `pm-ai connector check`'s probes, run from the one layer permitted
             # to reach `pm_ai.connectors` — `surfaces-through-core` forbids the
             # CLI from importing the registry, exactly as `os-behind-platform`

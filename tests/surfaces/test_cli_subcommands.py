@@ -871,9 +871,14 @@ def test_connector_add_never_echoes_the_credential(
 
 
 def test_an_unprobeable_system_is_refused_rather_than_sealed(
-    registered, monkeypatch, capsys
+    registered, keychain, monkeypatch, capsys
 ):
-    """The default probe refuses; a system pm-ai cannot ask about is not enrolled."""
+    """The default probe refuses; a system pm-ai cannot ask about is not enrolled.
+
+    A master key is enrolled: since story 8l the key is fetched before the
+    probe, so a keyless machine would refuse over the key first.
+    """
+    keychain(secret=b"K" * 32)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
     assert entry.main(["connector", "add", "nosuch", "nosuch:one"]) == EXIT_REFUSAL

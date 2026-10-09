@@ -80,6 +80,7 @@ from pm_ai.ports import ArtifactBusy, CryptoPort, ScopePathPort, VcsPort
 from pm_ai.storage.crypto import (
     ENCLAVE_DIR_MODE,
     ENCRYPTED_FILE_MODE,
+    LazyKeyCrypto,
     is_encrypted,
 )
 
@@ -1283,8 +1284,19 @@ class StorageService:
         The verdict is cached exactly as the write path caches it, because it is
         the same call — so the pre-flight costs one `git` invocation and the
         write that follows costs none.
+
+        A declared-encrypted artifact also has its master key fetched (story
+        8l), because sealing is the other question its write asks: on a machine
+        with no key enrolled the refusal is `KeyNotFound` now, before a caller
+        has spent minutes on a sign-in whose result could never be sealed.
+        Nothing is encrypted to ask it, so the plaintext debug cipher records
+        nothing either.
         """
         self._assert_git_excludes(scope, artifact)
+        if isinstance(self._crypto, LazyKeyCrypto) and is_encrypted(
+            str(self._paths.resolve(scope, artifact))
+        ):
+            self._crypto.ready()
 
     @contextlib.contextmanager
     def exclusive(self, *, scope: DataScope, artifact: str) -> Iterator[None]:

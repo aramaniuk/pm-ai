@@ -64,6 +64,7 @@ scope at acquisition rather than leaving it to be misdiagnosed later.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -91,9 +92,12 @@ __all__ = [
     "OFFLINE_ACCESS",
     "RefreshTokenStore",
     "SealedCredential",
+    "SignInRefused",
     "StoreBusy",
     "StoreEntryMissing",
     "StoreUnavailable",
+    "require_msal",
+    "tenant_refusal",
 ]
 
 
@@ -223,6 +227,20 @@ class GraphUnreachable(GraphAuthError):
     unreachable network as a stale credential sends the PM to re-enrol a token
     that is perfectly good.
     """
+
+
+class SignInRefused(GraphAuthError):
+    """Microsoft refused to start a sign-in for the app id or tenant it was given.
+
+    Raised before any code is shown, and never for a network that did not
+    answer — that stays `GraphUnreachable`. `answer` names which of the two the
+    refusal points at (`"tenant"`, `"app (client) id"`, or both when Microsoft's
+    answer does not say), so the person who typed them knows which to fix.
+    """
+
+    def __init__(self, message: str, *, answer: str) -> None:
+        super().__init__(message)
+        self.answer = answer
 
 
 class CustodyFailed(GraphAuthError):
@@ -507,6 +525,13 @@ the app registration, not on this machine's credential, network or consent.
 
 _DECLINED = frozenset({"access_denied", "consent_required"})
 
+# Which answer a refusal to *start* a sign-in points at. AADSTS90002 is "tenant
+# not found" and AADSTS900023 "invalid tenant"; AADSTS700016 is "application
+# not found in the directory".
+_TENANT_NOT_FOUND = ("AADSTS90002", "AADSTS900023")
+_CLIENT_NOT_FOUND = ("AADSTS700016",)
+_CLIENT_REFUSED = frozenset({"invalid_client", "unauthorized_client"})
+
 _INTERACTION = frozenset({"interaction_required", "login_required"})
 
 _INTERACTION_SUBERRORS = frozenset(
@@ -572,13 +597,8 @@ def _without(text: str, secret: str | None) -> str:
 # ── The adapter ──────────────────────────────────────────────────────────────
 
 
-def _msal_public_client(client_id: str, authority: str) -> Any:
-    """A real `msal.PublicClientApplication`, imported at call time.
-
-    Public rather than confidential on purpose: a confidential client needs a
-    secret, and a secret on a PM's laptop is the thing device code exists to
-    avoid.
-    """
+def require_msal() -> Any:
+    """The `msal` module, or the refusal naming the extra that installs it."""
     try:
         import msal
     except ImportError as missing:
@@ -593,7 +613,59 @@ def _msal_public_client(client_id: str, authority: str) -> Any:
             f"is an incomplete installation rather than anything the provider "
             f"said, which is why it is not one of the five auth states."
         ) from missing
-    return msal.PublicClientApplication(client_id, authority=authority)
+    return msal
+
+
+def _msal_public_client(client_id: str, authority: str) -> Any:
+    """A real `msal.PublicClientApplication`, imported at call time.
+
+    Public rather than confidential on purpose: a confidential client needs a
+    secret, and a secret on a PM's laptop is the thing device code exists to
+    avoid.
+    """
+    return require_msal().PublicClientApplication(client_id, authority=authority)
+
+
+_TENANT_WORDS = frozenset({"organizations", "common", "consumers"})
+_TENANT_GUID = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+
+
+def tenant_refusal(tenant: str) -> str | None:
+    """Why `tenant` cannot be the last segment of a sign-in authority, or `None`.
+
+    It is interpolated into `https://login.microsoftonline.com/<tenant>`, so
+    anything else — a space, a `/`, a whole URL — would ask some other address.
+    Three shapes are accepted: a tenant id (a GUID), a domain such as
+    `contoso.onmicrosoft.com`, or one of Microsoft's own words,
+    `organizations`, `common` and `consumers`.
+    """
+    if tenant in _TENANT_WORDS or _TENANT_GUID.fullmatch(tenant):
+        return None
+    labels = tenant.split(".")
+    if (
+        len(labels) >= 2
+        and len(tenant) <= 253
+        and all(_DOMAIN_LABEL.fullmatch(label) for label in labels)
+    ):
+        return None
+    return (
+        f"{tenant!r} is not a tenant Microsoft can sign in through. Type the "
+        f"tenant id (a GUID), its domain (for example contoso.onmicrosoft.com), "
+        f"or one of {', '.join(sorted(_TENANT_WORDS))}."
+    )
+
+
+def _refused_by_value(error: Exception) -> bool:
+    """Whether MSAL raised over what it was given rather than over the network.
+
+    MSAL raises a plain `ValueError` for an authority it cannot use — an unknown
+    tenant among them. Errors from its HTTP client are `OSError`s, and a few of
+    those are `ValueError`s as well; they stay a transport failure.
+    """
+    return isinstance(error, ValueError) and not isinstance(error, OSError)
 
 
 @dataclass
@@ -649,8 +721,19 @@ class GraphDeviceCodeAuth:
 
     # ── The port ─────────────────────────────────────────────────────────────
 
-    def sign_in(self, present: Callable[[str], None]) -> str:
+    def sign_in(
+        self,
+        present: Callable[[str], None],
+        *,
+        starting: Callable[[Callable[[], Any]], Any] | None = None,
+    ) -> str:
         """Present a code and a URL, wait for the human, return what to seal.
+
+        `starting`, when given, runs the part before the code is shown —
+        building MSAL's client and asking Microsoft for a code — so a caller
+        can bound it: nothing is on screen yet, and a stall there looks like a
+        hung command. Whatever it raises propagates. The wait after the code is
+        shown is human-paced and is never passed through it.
 
         `present` is called with MSAL's own sentence, which already contains the
         code and the verification URL. Nothing here opens a browser or reads a
@@ -674,10 +757,13 @@ class GraphDeviceCodeAuth:
         that this method never returned: an enrolment nobody completed, holding
         a token nothing on the machine refers to.
         """
-        app = self._application()
-        flow = self._call(app.initiate_device_flow, self._resource_scopes())
+        def start() -> tuple[Any, dict[str, Any]]:
+            app = self._application()
+            return app, self._call(self._initiate, app)
+
+        app, flow = start() if starting is None else starting(start)
         if "user_code" not in flow:
-            self._refuse(flow, during="starting the sign-in")
+            self._refuse_start(flow)
         present(self._prompt(flow))
         result = self._call(app.acquire_token_by_device_flow, flow)
         if "error" in result:
@@ -973,10 +1059,65 @@ class GraphDeviceCodeAuth:
         as "a bug in pm-ai" for a network that was simply down.
         """
         if self._app is None:
-            self._app = self._guarded(
-                lambda: self.client_factory(self.client_id, self.authority)
-            )
+            self._app = self._guarded(self._build_application)
         return self._app
+
+    def _build_application(self) -> Any:
+        """MSAL's client, with an authority it refuses reported as the tenant."""
+        try:
+            return self.client_factory(self.client_id, self.authority)
+        except Exception as raised:  # noqa: BLE001 — sorted below, never swallowed
+            if not _refused_by_value(raised):
+                raise
+            raise SignInRefused(
+                f"Microsoft did not accept {self.authority} as a sign-in "
+                f"authority ({raised}). That is the tenant {self.tenant!r}: "
+                f"check it against the app registration's directory. This is "
+                f"not the network.",
+                answer="tenant",
+            ) from raised
+
+    def _initiate(self, app: Any) -> Any:
+        """Ask for a device code, with a refused argument reported as the answers."""
+        try:
+            return app.initiate_device_flow(self._resource_scopes())
+        except Exception as raised:  # noqa: BLE001 — sorted below, never swallowed
+            if not _refused_by_value(raised):
+                raise
+            raise SignInRefused(
+                f"MSAL refused to ask Microsoft for a code ({raised}). That points "
+                f"at the app (client) id {self.client_id!r} or the tenant "
+                f"{self.tenant!r}. This is not the network.",
+                answer="app (client) id or tenant",
+            ) from raised
+
+    def _refuse_start(self, flow: Mapping[str, Any]) -> NoReturn:
+        """Microsoft would not issue a code: say which answer it points at.
+
+        A throttle is still unreachable, through `_refuse`. Anything else
+        refused at this point is about the app registration or the tenant —
+        no credential exists yet — so it is a `SignInRefused`, naming the
+        answer Microsoft's code points at.
+        """
+        code = str(flow.get("error") or "").strip()
+        if code in _THROTTLED or flow.get("http_status") == _HTTP_THROTTLED:
+            self._refuse(flow, during="starting the sign-in")
+        description = str(flow.get("error_description") or "").strip()
+        if any(marker in description for marker in _TENANT_NOT_FOUND):
+            answer = "tenant"
+        elif code in _CLIENT_REFUSED or any(m in description for m in _CLIENT_NOT_FOUND):
+            answer = "app (client) id"
+        else:
+            answer = "app (client) id or tenant"
+        detail = f": {description}" if description else ""
+        raise SignInRefused(
+            f"Microsoft refused to start the sign-in — "
+            f"{code or 'an unnamed error'}{detail}. That points at the {answer} "
+            f"(app id {self.client_id!r}, tenant {self.tenant!r}); check it "
+            f"against the app registration. This is not the network, and no "
+            f"code was issued.",
+            answer=answer,
+        )
 
     def _resource_scopes(self) -> list[str]:
         """What is passed to MSAL: the declared set minus the reserved grants.
