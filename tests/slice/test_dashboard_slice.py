@@ -125,6 +125,9 @@ class _Calendar:
             failure=self._failure,
             records=self._records,
             live=self._live,
+            # A calendar that answered was read at some instant, and EMPTY is
+            # refused without one (`8p`). The failing double never answered.
+            answered_at=None if self._failure is not None else NOW,
         )
 
     def sample_events(self) -> tuple[NormalizedEvent, ...]:

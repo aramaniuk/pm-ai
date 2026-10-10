@@ -670,4 +670,8 @@ class GitLabConnectorAdapter:
             coverage=coverage,
             failure=failure,
             refusals=tuple(refusals),
+            # The reading the window's start was already taken from, reported
+            # rather than re-read (`8p`). Set even when the window is withheld
+            # for a clock that stepped back: the page was still read then.
+            answered_at=reached_at,
         )

@@ -666,19 +666,43 @@ class GraphConnector:
             # cursor all lost, which is exactly the shape `HarvestOutcome.FAILED`
             # exists to make expressible. The rows are not carried out with it:
             # whatever broke, this run cannot say which half of them it mapped.
+            #
+            # The reason says what actually happened (`8p`): with no page read
+            # there was no page to map, and a walk that ended without raising
+            # and without a body reaches here as an EMPTY with no instant.
+            read = fetched.answered_at
+            happened = (
+                f"fetched a calendar page and then raised "
+                f"{type(unexpected).__name__} while mapping it"
+                if read is not None
+                else f"read no calendar page — the walk ended without one and "
+                f"without a fault — and then raised "
+                f"{type(unexpected).__name__} building the result"
+            )
             return HarvestResult(
                 events=(),
                 cursor=since,
                 outcome=HarvestOutcome.FAILED,
                 failure=HarvestFailure(
                     reason=(
-                        f"{self.instance} fetched a calendar page and then "
-                        f"raised {type(unexpected).__name__} while mapping it, "
-                        f"which pm-ai cannot classify. Nothing was recorded and "
-                        f"the cursor is unchanged, so the same window is walked "
-                        f"again next run."
+                        f"{self.instance} {happened}, which pm-ai cannot "
+                        f"classify. Nothing was recorded and the cursor is "
+                        f"unchanged, so the same window is walked again next run."
                     ),
                     retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
+                ),
+                # The page was read, so the provider did answer, and when is a
+                # fact the mapping fault does not undo (`8p`). No window rides
+                # with it: this run cannot say what it learned. Carried only
+                # when aware UTC: an instant `HarvestResult` refuses may be the
+                # very fault that landed here, and reusing it would raise out of
+                # a method whose contract is that it reports.
+                answered_at=(
+                    read
+                    if read is not None
+                    and read.tzinfo is not None
+                    and read.utcoffset() == timedelta(0)
+                    else None
                 ),
             )
 
@@ -764,6 +788,9 @@ class GraphConnector:
             refusals=tuple(refusals),
             records=tuple(records),
             live=tuple(live),
+            # Passed through beside the window it starts, never re-read here
+            # (`8p`): the fetch took the one reading when the first page arrived.
+            answered_at=fetched.answered_at,
         )
 
     # ── One row ──────────────────────────────────────────────────────────────

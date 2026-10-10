@@ -2,7 +2,8 @@
 title: 'A harvest result says when the provider answered'
 type: 'bugfix'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: 'a75840f8634da518fb23a528e8133d456cf1d553'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -68,13 +69,13 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/harvest.py` — `answered_at: datetime | None = None` on `HarvestResult`; refuse `EMPTY` without it, refuse a naive or non-UTC value with its own message, then refuse a coverage window with no instant or whose start is not it — the guard moves from honour system to the type
-- [ ] `pm_ai/connectors/gitlab.py` — report `reached_at` as `answered_at` — already measured
-- [ ] `pm_ai/connectors/graph/calendar.py` — `CalendarFetch.answered_at` from `reached_at` — the fetch carries it out, including when the clock stepped back
-- [ ] `pm_ai/connectors/graph/__init__.py` — pass `fetched.answered_at` onto the result in `_result`; the two early returns before a fetch carry none; the third early return (page read, mapping raised) carries `fetched.answered_at`
-- [ ] `tests/slice/test_dashboard_slice.py:120-127` — the fake connector's result gains an instant
-- [ ] `tests/domain/test_harvest_result.py` (new) — one test per matrix row on the type, including the aware-UTC refusal ordered before the window-start one; `tests/connectors/test_coverage_honesty.py:674,1064` and `tests/connectors/test_graph_calendar_fetch.py:950,1666` — assert `answered_at` equals the first-page reading under the existing fake clocks, or is `None` where no page was read; `test_graph_calendar_mapping.py` — the empty case and the mapping-raised case assert the instant on the result
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` — mark the entry at `:826-828` resolved
+- [x] `pm_ai/domain/harvest.py` — `answered_at: datetime | None = None` on `HarvestResult`; refuse `EMPTY` without it, refuse a naive or non-UTC value with its own message, then refuse a coverage window with no instant or whose start is not it — the guard moves from honour system to the type
+- [x] `pm_ai/connectors/gitlab.py` — report `reached_at` as `answered_at` — already measured
+- [x] `pm_ai/connectors/graph/calendar.py` — `CalendarFetch.answered_at` from `reached_at` — the fetch carries it out, including when the clock stepped back
+- [x] `pm_ai/connectors/graph/__init__.py` — pass `fetched.answered_at` onto the result in `_result`; the two early returns before a fetch carry none; the third early return (page read, mapping raised) carries `fetched.answered_at`
+- [x] `tests/slice/test_dashboard_slice.py:120-127` — the fake connector's result gains an instant
+- [x] `tests/domain/test_harvest_result.py` (new) — one test per matrix row on the type, including the aware-UTC refusal ordered before the window-start one; `tests/connectors/test_coverage_honesty.py:674,1064` and `tests/connectors/test_graph_calendar_fetch.py:950,1666` — assert `answered_at` equals the first-page reading under the existing fake clocks, or is `None` where no page was read; `test_graph_calendar_mapping.py` — the empty case and the mapping-raised case assert the instant on the result
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` — mark the entry at `:826-828` resolved
 
 **Acceptance Criteria:**
 - Given a provider that answers with nothing, when the result is built, then it carries the instant the page was read and a window starting at that instant — and building the same result without the instant, or with a window and no instant, is refused.
@@ -89,3 +90,38 @@ context:
 - `uv run pytest -q` — expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` — expected: no errors
 - `uv run lint-imports` — expected: all contracts kept
+
+## Suggested Review Order
+
+**The result carries the instant**
+
+- The new field; refusals ordered: EMPTY without it, its shape, then the window start.
+  [`harvest.py:347`](../../../../pm_ai/domain/harvest.py#L347)
+
+- EMPTY must prove the provider answered.
+  [`harvest.py:453`](../../../../pm_ai/domain/harvest.py#L453)
+
+- A window must start exactly when the provider answered.
+  [`harvest.py:480`](../../../../pm_ai/domain/harvest.py#L480)
+
+**Connectors report it**
+
+- Graph's fetch carries its first-page reading out, even when the clock stepped back.
+  [`calendar.py:1005`](../../../../pm_ai/connectors/graph/calendar.py#L1005)
+
+- The mapping-fault fallback keeps a valid instant, never re-raises on a bad one.
+  [`__init__.py:700`](../../../../pm_ai/connectors/graph/__init__.py#L700)
+
+- The normal path passes it onto the result.
+  [`__init__.py:793`](../../../../pm_ai/connectors/graph/__init__.py#L793)
+
+- GitLab reports the reading it already took.
+  [`gitlab.py:676`](../../../../pm_ai/connectors/gitlab.py#L676)
+
+**Tests**
+
+- One test per matrix row on the type.
+  [`test_harvest_result.py:55`](../../../../tests/domain/test_harvest_result.py#L55)
+
+- A naive clock is reported as a failure, not raised.
+  [`test_graph_calendar_mapping.py:958`](../../../../tests/connectors/test_graph_calendar_mapping.py#L958)
