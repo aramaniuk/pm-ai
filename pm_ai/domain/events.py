@@ -10,6 +10,7 @@ Imports nothing from `pm_ai` except sibling domain modules (AD-30).
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -113,6 +114,11 @@ class DocumentPayload:
 class MessagePayload:
     channel: str
     excerpt: str | None = None
+    # The Graph user ids the message mentions. `None` is "the connector never
+    # asked", which is a different fact from `()`, "it asked and there were
+    # none" (AD-27). An id pm-ai could not resolve is written under the
+    # reserved spelling `unresolved:<system>:<handle>` (AD-34, 2026-10-10).
+    mentions: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,11 +192,13 @@ PAYLOAD_FOR: dict[ObservedEventType, type] = {
 class MissingSanitizableDeclaration(InconsistentModel):
     """A payload registered in `PAYLOAD_FOR` does not account for its own text.
 
-    Seven faults raise it, not one. A class may be missing from either record
+    Nine faults raise it, not one. A class may be missing from either record
     entirely; a record may name a field the class does not have, a field that is
     not text, or a field the other record also claims; a trusted field may carry
-    no reason; a `str` field may appear in neither record; and a record may name
-    a class `PAYLOAD_FOR` no longer registers. Each is the same statement — the
+    no reason; a `str` or list field may appear in neither record; a list may be
+    declared untrusted, or a container may take any shape but the one list shape
+    (AD-48); and a record may name a class `PAYLOAD_FOR` no longer registers.
+    Each is the same statement — the
     declaration and the dataclass disagree, so nothing may be built on either.
 
     Raised from an `if` rather than an `assert`: story 1l converted every
@@ -259,7 +267,10 @@ TRUSTED_TEXT: dict[type, dict[str, str]] = {
     DocumentPayload: {
         "document_id": "the provider's document identifier",
     },
-    MessagePayload: {},
+    MessagePayload: {
+        "mentions": "Graph user ids — Microsoft generates them and nobody "
+        "types one, so a mention's display name never reaches this field",
+    },
     DecisionPayload: {},
     PipelinePayload: {
         "pipeline_id": "the CI provider's identifier for the run",
@@ -276,19 +287,21 @@ A reason is required rather than optional. Allowing silence would mean the
 completeness check passes for a class that declares nothing while carrying text
 a person wrote, which is the defect this registry replaces.
 
-**A known limit: the rule reaches `str` and `str | None`, and no other shape.**
-Any field of any other type is neither required nor refused — it simply falls
-outside both records. That covers two kinds of field that do carry provider text:
+**Lists are declared too, and only as trusted for now** (AD-48, 2026-10-08).
+A list is exactly `tuple[str, ...] | None` — a tuple of text, or not recorded —
+and is declared like a text field. An untrusted list is refused until a slice
+brings a real one, because that slice decides whether the sanitizer runs per
+element or over the joined text, and the two give different answers. A list
+declared any other way — a `list[str]`, a required tuple, any other container —
+is refused like an undeclared field.
 
-- **Nested types.** `WorkItemPayload.assignee: Actor | None` and
-  `NormalizedEvent.actor` both hold a display name the provider supplied.
-- **Containers of text.** `list[str]`, `tuple[str, ...]` and `dict[str, str]`
-  pass the check untouched, so a work item's `labels` or `tags` — the likeliest
-  next field here — would be declarable by nobody and demanded of nobody.
-
-Recorded rather than silently widened: reaching inside a nested type or walking a
-container is a different change from making sanitization run at all, and the
-declaration this slice adds is what a widening would extend.
+**A known limit: nested types.** A field whose type holds text inside it is
+neither required nor refused. `WorkItemPayload.assignee: Actor | None` and
+`NormalizedEvent.actor` both hold a display name the provider supplied — though
+on an event-log line the assignee is its actor id alone (AD-34), so the name
+never reaches Tier 1. Recorded rather than silently widened: reaching inside a
+nested type needs a decision on how a declaration addresses a field inside
+another type.
 """
 
 
@@ -308,8 +321,47 @@ def _is_text(hint: object) -> bool:
     return False
 
 
+def _is_list(hint: object) -> bool:
+    """True for exactly `tuple[str, ...] | None`, the one list shape (AD-27).
+
+    Compared on the resolved hint, never on annotation text, the way `_is_text`
+    reads `Optional[str]` and `str | None` as one: `Optional[tuple[str, ...]]`,
+    `None | tuple[str, ...]` and `typing.Tuple[str, ...] | None` all resolve to
+    a union of a `tuple` of `str` with `None`, and each is this declaration.
+    """
+    if get_origin(hint) not in (Union, UnionType):
+        return False
+    args = set(get_args(hint))
+    if type(None) not in args or len(args) != 2:
+        return False
+    (inner,) = args - {type(None)}
+    return get_origin(inner) is tuple and get_args(inner) == (str, ...)
+
+
+def _is_container(hint: object) -> bool:
+    """True when the hint, `None` aside, is any collection other than text.
+
+    Catches every shape a list could be declared in by mistake — `list[str]`,
+    a required `tuple[str, ...]`, a `frozenset`, a `dict`, `typing.Sequence` —
+    so that `_assert_payload_text_is_declared` can refuse all but the one.
+    """
+    if get_origin(hint) in (Union, UnionType):
+        members = [a for a in get_args(hint) if a is not type(None)]
+    else:
+        members = [hint]
+    for member in members:
+        origin = get_origin(member) or member
+        if (
+            isinstance(origin, type)
+            and issubclass(origin, Collection)
+            and not issubclass(origin, (str, bytes))
+        ):
+            return True
+    return False
+
+
 def _assert_payload_text_is_declared() -> None:
-    """Every `str` field of every registered payload is in exactly one record.
+    """Every `str` and list field of every registered payload is in exactly one record.
 
     Enumerated over *fields* rather than classes: a class-level check passes for
     a class that declares an empty tuple while carrying provider prose.
@@ -370,12 +422,36 @@ def _assert_payload_text_is_declared() -> None:
                 f"is one or the other; two answers is no answer."
             )
 
-        not_text = sorted(n for n in declared if not _is_text(hints[n]))
+        misshaped = sorted(
+            n for n in present if _is_container(hints[n]) and not _is_list(hints[n])
+        )
+        if misshaped:
+            raise MissingSanitizableDeclaration(
+                f"{name} carries {misshaped}, a container that is not a list. A "
+                f"list is exactly `tuple[str, ...] | None` — a tuple of text, or "
+                f"not recorded (AD-48); a `list`, a required tuple or any other "
+                f"container is refused like an undeclared field."
+            )
+
+        not_text = sorted(
+            n for n in declared if not (_is_text(hints[n]) or _is_list(hints[n]))
+        )
         if not_text:
             raise MissingSanitizableDeclaration(
-                f"{name} declares {not_text}, which is not text. Only `str` and "
-                f"`str | None` can be sanitized; declaring anything else names a "
-                f"field the boundary cannot act on."
+                f"{name} declares {not_text}, which is not text. Only `str`, "
+                f"`str | None` and the list `tuple[str, ...] | None` can be "
+                f"declared; anything else names a field the boundary cannot act "
+                f"on."
+            )
+
+        untrusted_lists = sorted(n for n in untrusted if _is_list(hints[n]))
+        if untrusted_lists:
+            raise MissingSanitizableDeclaration(
+                f"{name} declares the list {untrusted_lists} untrusted. Lists "
+                f"are trusted only, for now (AD-48): the slice that brings a "
+                f"real untrusted list decides whether the sanitizer runs per "
+                f"element or over the joined text, and refusing until then means "
+                f"no two builders choose differently."
             )
 
         unreasoned = sorted(
@@ -390,13 +466,15 @@ def _assert_payload_text_is_declared() -> None:
             )
 
         unaccounted = sorted(
-            n for n in present if _is_text(hints[n]) and n not in declared
+            n
+            for n in present
+            if (_is_text(hints[n]) or _is_list(hints[n])) and n not in declared
         )
         if unaccounted:
             raise MissingSanitizableDeclaration(
                 f"{name} leaves {unaccounted} in neither record. Every `str` "
-                f"field is declared untrusted or recorded as trusted with a "
-                f"reason, because a class that stays silent about a "
+                f"and list field is declared untrusted or recorded as trusted "
+                f"with a reason, because a class that stays silent about a "
                 f"provider-written field is the defect this replaces."
             )
 

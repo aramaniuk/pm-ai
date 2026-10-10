@@ -39,7 +39,7 @@ from pm_ai.core.rendering import (
     render_project_dashboard,
 )
 from pm_ai.domain.event_entries import EventEntry
-from pm_ai.domain.events import ObservedEventType
+from pm_ai.domain.events import MessagePayload, ObservedEventType
 from pm_ai.domain.harvest import (
     HarvestFailure,
     NoCalendarConnector,
@@ -48,6 +48,7 @@ from pm_ai.domain.harvest import (
 )
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.payload_fields import encode_payload
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 """Deliberately not `from conftest import REPO_ROOT`, which is how
@@ -117,14 +118,13 @@ def message(
     excerpt: str | None = None,
     entry_id: str = "evt_1",
 ) -> EventEntry:
-    """A `message_posted` entry off the project's event log."""
+    """A `message_posted` entry off the project's event log, its payload fields
+    built by `encode_payload` as the writer builds them."""
     fields: list[tuple[str, str]] = [
         ("ingested_at", at.isoformat()),
         ("src", "slack:msg/1"),
-        ("channel", channel),
+        *encode_payload(MessagePayload(channel=channel, excerpt=excerpt)),
     ]
-    if excerpt is not None:
-        fields.append(("excerpt", excerpt))
     return EventEntry(
         category=ObservedEventType.MESSAGE_POSTED,
         actor=actor,

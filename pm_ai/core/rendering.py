@@ -78,7 +78,7 @@ from enum import Enum
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import GoalRegister
 from pm_ai.domain.event_entries import EventEntry, SelfActionType
-from pm_ai.domain.events import ObservedEventType
+from pm_ai.domain.events import MessagePayload, ObservedEventType
 from pm_ai.domain.goals import Goal, GoalDomain
 from pm_ai.domain.harvest import (
     HarvestFailure,
@@ -86,6 +86,7 @@ from pm_ai.domain.harvest import (
     PartialCalendar,
 )
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.payload_fields import decode_payload
 
 __all__ = [
     "CalendarAnswer",
@@ -653,9 +654,18 @@ def _no_signals(*, since: datetime, now: datetime, tz: tzinfo) -> str:
 
 
 def _signal_line(at: datetime, entry: EventEntry, *, tz: tzinfo, now: datetime) -> str:
-    fields = dict(entry.fields)
-    channel = fields.get("channel")
-    excerpt = fields.get("excerpt")
+    # Decoded, never looked up by name (AD-27): the line names these `p.channel`
+    # and `p.excerpt`, and a literal lookup that misspells either reads as "not
+    # recorded" — which is how every real message would have rendered as an
+    # actor and nothing else.
+    payload = decode_payload(entry)
+    if not isinstance(payload, MessagePayload):
+        raise TypeError(
+            f"{entry.category.value} decoded to {type(payload).__name__}; the "
+            f"message line reads a MessagePayload."
+        )
+    channel = payload.channel
+    excerpt = payload.excerpt
     parts = [f"- **{_local(at, tz=tz, now=now)}**", escape(entry.actor)]
     if channel:
         parts.append(f"in {escape(channel)}")

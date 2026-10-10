@@ -30,8 +30,8 @@ from pm_ai.core.rendering import (
     escape,
     render_dashboard,
 )
-from pm_ai.domain.event_entries import EventEntry, SelfActionType
-from pm_ai.domain.events import ObservedEventType
+from pm_ai.domain.event_entries import EventEntry, MalformedEntry, SelfActionType
+from pm_ai.domain.events import MessagePayload, ObservedEventType
 from pm_ai.domain.goals import GoalDomain
 from pm_ai.domain.harvest import (
     HarvestFailure,
@@ -41,6 +41,7 @@ from pm_ai.domain.harvest import (
 )
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.payload_fields import encode_payload
 
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 
@@ -87,7 +88,8 @@ def message(
     excerpt: str | None = None,
     entry_id: str = "evt_1",
 ) -> EventEntry:
-    """A `message_posted` ledger entry, shaped as `_append_batch` writes one.
+    """A `message_posted` ledger entry, shaped as `_append_batch` writes one —
+    its payload fields built by `encode_payload`, the writer's own encoder.
 
     `at=None` is the pre-`2e` entry the matrix names: the field is absent, not
     empty, because that is what an entry written before storage stamped the
@@ -101,9 +103,9 @@ def message(
     if at is not None:
         fields.append(("ingested_at", at if isinstance(at, str) else at.isoformat()))
     fields.append(("src", "slack:msg/1"))
-    fields.append(("channel", channel))
-    if excerpt is not None:
-        fields.append(("excerpt", excerpt))
+    # Through the encoder, as the writer does: entries built with hand-spelled
+    # names passed here while every real message would have rendered empty.
+    fields.extend(encode_payload(MessagePayload(channel=channel, excerpt=excerpt)))
     return EventEntry(
         category=ObservedEventType.MESSAGE_POSTED,
         actor=actor,
@@ -1116,3 +1118,35 @@ def test_the_render_reads_no_clock_and_opens_no_file():
             called.add(func.id)
     for forbidden in ("now", "utcnow", "today", "open", "Path", "monotonic", "time"):
         assert forbidden not in called, f"{forbidden}() called in a pure renderer"
+
+
+# ── Story 2m: a message line that parses but does not decode ─────────────────
+
+
+@pytest.mark.parametrize(
+    ("payload_fields", "named"),
+    [
+        ((("p.excerpt", "hello"),), "p.channel"),
+        ((("p.channel", "#a"), ("p.channel", "#b")), "p.channel"),
+        ((("p.channel", "#a"), ("p.mentions", "u_1,")), "p.mentions"),
+    ],
+    ids=["no channel", "doubled field", "corrupt list"],
+)
+def test_a_message_entry_that_does_not_decode_refuses_the_render(payload_fields, named):
+    """The refusal 23b's contract gives an unreadable log line, kept by `2m`
+    (`23c` is the slice that makes it non-fatal). Never a fallback to the actor
+    alone: the refusal names the field and the entry — its id and its
+    `ingested_at` — so the line can be found by hand."""
+    at = NOW - timedelta(hours=1)
+    broken = EventEntry(
+        category=ObservedEventType.MESSAGE_POSTED,
+        actor="u_dana",
+        fields=(("ingested_at", at.isoformat()), ("src", "slack:msg/1"))
+        + payload_fields,
+        entry_id="evt_broken",
+    )
+    with pytest.raises(MalformedEntry) as refusal:
+        render(entries=(message(at=at, entry_id="evt_fine"), broken))
+    text = str(refusal.value)
+    assert named in text
+    assert "evt_broken" in text and at.isoformat() in text

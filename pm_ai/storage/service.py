@@ -28,7 +28,6 @@ reached at all — and `pm_ai.platform.vcs` runs the commands.
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import errno
 import json
 import os
@@ -59,6 +58,7 @@ from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.harvest import Cursor, HarvestFailure, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
+from pm_ai.domain.payload_fields import encode_payload
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.storage_tiers import (
     CAPTURES,
@@ -270,31 +270,6 @@ Both are stamped onto the entry on the way in, and `dict(entry.fields)` resolves
 a duplicate key to the *last* occurrence — so a caller passing either one would
 override the writer rather than be overridden by it.
 """
-
-
-def _payload_fields(payload: object) -> tuple[tuple[str, str], ...]:
-    """The payload's own declared fields, for the line (story 2l).
-
-    Derived from the dataclass rather than declared a second time, so a field
-    added to a payload reaches Tier 1 with nothing to update and nothing to
-    forget. Until this existed a commit's `message` and `branch` were never
-    written anywhere, and `event_index.db` — Tier 3, rebuilt from Tier 1 alone —
-    could not have been rebuilt over content that was never recorded.
-
-    Prefixed `p.` so a payload field can never shadow an envelope one. The twenty
-    payload names and the six envelope names are disjoint today; the prefix is
-    what stops that being luck.
-
-    `None` is omitted rather than rendered empty, because absent and empty are
-    different facts — the same rule `occurred_at` follows.
-    """
-    if not dataclasses.is_dataclass(payload):
-        return ()
-    return tuple(
-        (f"p.{field.name}", str(getattr(payload, field.name)))
-        for field in dataclasses.fields(payload)
-        if getattr(payload, field.name) is not None
-    )
 
 
 def _ulid() -> str:
@@ -1628,7 +1603,9 @@ class StorageService:
                             ("authored_by", stamped.authored_by.value),
                         )
                         + suspect
-                        + _payload_fields(stamped.payload),
+                        # Through the one encoder (AD-27), so the writer and
+                        # every reader agree on each field's line name and form.
+                        + encode_payload(stamped.payload),
                     )
                 )
             )

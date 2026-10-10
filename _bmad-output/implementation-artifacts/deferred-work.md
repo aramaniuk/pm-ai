@@ -272,16 +272,12 @@ Known debt this wave takes on, recorded so it is not discovered later:
   is in wave 2, and its spec must label it temporary.
 - **CAP-9 is knowingly unmet in two clauses** — Leadership Notes and the 07:00
   deadline. Both recorded in story 23's queue entry and in `23a`/`23b`.
-- **AD-27's versioning clause remains unmet** from story 2, unchanged by this
-  wave. `33d` touches the Tier-1 entry format and cannot defer the question to
-  story 1i: 1i versions `operational.db`'s table shape, and a field added to a
-  markdown line changes no column. The unmade design decision is the entry-grammar
-  one recorded below, which has no owner. `8c` was named here in
-  error — the sizing-gate split left it declaring untrusted fields and writing
-  nothing — and `8e`, which did write the field, stopped: it now derives the
-  sanitized copy at the point of use and changes no entry format
-  (renegotiated 2026-09-02). So `33d` in wave 2 is where the decision becomes
-  unavoidable, on real data.
+- **RESOLVED 2026-10-10 by `2m`** — AD-27's grammar rule (additive only, no
+  version marker, settled in the spine 2026-09-27) is enforced: a literal pin
+  table (`tests/domain/test_entry_grammar_pins.py`), one encode/decode pair
+  (`pm_ai/domain/payload_fields.py`) and a round-trip test over every payload
+  class. Was: AD-27's versioning clause unmet from story 2, with `33d` named as
+  the slice where the entry-grammar decision would become unavoidable.
 
 ## Open, raised by story 2f
 
@@ -300,8 +296,8 @@ Known debt this wave takes on, recorded so it is not discovered later:
 ## Surfaced by the story-2 code review (2026-08-30)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2c-closed-entry-type-enumeration.md`
-  summary: **ASSIGNED 2026-10-09 to `2m`** — spec written, not built. AD-27 requires both closed vocabularies to be "versioned so parsers can read historical entries", and nothing implements it. A `GRAMMAR_VERSION` constant was removed by this review because it was written nowhere and read nowhere.
-  evidence: Three review layers found it independently. The design choice is unmade: a version field on every line (honest, but a permanent per-record cost on a file meant to be grepped by hand), a per-segment header line (cheap, but the append rule says every line is a record), or a dated table mapping grammar changes to date ranges (free, but only correct if every change is dated and recorded). It becomes real the first time the entry grammar changes after something has written segments — which has not happened, since nothing is deployed.
+  summary: **RESOLVED 2026-10-10 by `2m`** — additive only, no marker (AD-27, 2026-09-27); the comment in `domain/event_entries.py` now states that rule, and `tests/domain/test_entry_grammar_pins.py` pins both vocabularies, every payload field and every self-action's required fields as a literal table. Was: AD-27 requires both closed vocabularies to be "versioned so parsers can read historical entries", and nothing implements it. A `GRAMMAR_VERSION` constant was removed by this review because it was written nowhere and read nowhere.
+  evidence: *Superseded 2026-10-10 by the resolution above; kept as the record of what was found.* Three review layers found it independently. The design choice is unmade: a version field on every line (honest, but a permanent per-record cost on a file meant to be grepped by hand), a per-segment header line (cheap, but the append rule says every line is a record), or a dated table mapping grammar changes to date ranges (free, but only correct if every change is dated and recorded). It becomes real the first time the entry grammar changes after something has written segments — which has not happened, since nothing is deployed.
 
 ## Deferred to later stories
 
@@ -858,12 +854,12 @@ transcript.
 ## Decided in the AD-27 / AD-48 update, 2026-09-27 — owed by `33d`
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27, AD-48)
-  summary: **ASSIGNED 2026-10-09 to `2m`** — spec written, not built. `33d` builds what the grammar decision needs before it writes its first real line — one encode/decode pair for payload line fields in `domain`, the pin test (payload field names and types, self-action required fields, both enumerations) and a round-trip test over every payload class, the list encoding (AD-27), and AD-48's list declaration — lists declared, trusted only for now, untrusted refused at import.
-  evidence: The architecture marks all of it not yet built. Measured by the gate reviewers on 2026-09-27: `_payload_fields` writes a tuple as its Python repr; `_assert_payload_text_is_declared` refuses a `tuple[str, ...]` declaration and lets one go undeclared; no test pins field names, since the nearest ones read names from the dataclass at test time. The comment at `domain/event_entries.py:61-70` still describes the versioning choice as open.
+  summary: **RESOLVED 2026-10-10 by `2m`** — `encode_payload`/`decode_payload` in `pm_ai/domain/payload_fields.py` (lists comma-joined with `\` escapes, counts as digits, a person as its id), the pin table, the round trip over every payload class, and AD-48's list rule in `_assert_payload_text_is_declared` (exactly `tuple[str, ...] | None`, trusted only; `MessagePayload.mentions` declared trusted). Was: `33d` builds what the grammar decision needs before it writes its first real line — one encode/decode pair for payload line fields in `domain`, the pin test (payload field names and types, self-action required fields, both enumerations) and a round-trip test over every payload class, the list encoding (AD-27), and AD-48's list declaration — lists declared, trusted only for now, untrusted refused at import.
+  evidence: *Superseded 2026-10-10 by the resolution above; kept as the record of what was found.* The architecture marks all of it not yet built. Measured by the gate reviewers on 2026-09-27: `_payload_fields` writes a tuple as its Python repr; `_assert_payload_text_is_declared` refuses a `tuple[str, ...]` declaration and lets one go undeclared; no test pins field names, since the nearest ones read names from the dataclass at test time. The comment at `domain/event_entries.py:61-70` still describes the versioning choice as open.
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27)
-  summary: **ASSIGNED 2026-10-09 to `2m`** — spec written, not built. The dashboard's message line reads `channel` and `excerpt`, but the writer stores `p.channel` and `p.excerpt`, so every real message would render with neither — silently, because a missing field reads as absent.
-  evidence: `pm_ai/core/rendering.py:655-665` (`_signal_line`) looks both up by literal unprefixed name; `storage/service.py` `_payload_fields` prefixes every payload field with `p.`; the rendering tests build entries by hand with unprefixed names, so they pass. Latent until `33d` writes real message entries. Fixed by the encode/decode pair above; `23c` must not add a second literal lookup.
+  summary: **RESOLVED 2026-10-10 by `2m`** — `_signal_line` decodes the entry and reads `channel`/`excerpt` off the payload; both rendering test builders build their fields through the encoder; `tests/architecture/test_payload_lookups.py` scans `pm_ai/` for the literal-lookup shapes it names (a `p.` literal; a payload field name as a key on, or compared against, an entry's `fields`). Was: The dashboard's message line reads `channel` and `excerpt`, but the writer stores `p.channel` and `p.excerpt`, so every real message would render with neither — silently, because a missing field reads as absent.
+  evidence: *Superseded 2026-10-10 by the resolution above; kept as the record of what was found.* `pm_ai/core/rendering.py:655-665` (`_signal_line`) looks both up by literal unprefixed name; `storage/service.py` `_payload_fields` prefixes every payload field with `p.`; the rendering tests build entries by hand with unprefixed names, so they pass. Latent until `33d` writes real message entries. Fixed by the encode/decode pair above; `23c` must not add a second literal lookup.
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27)
   summary: **ASSIGNED 2026-10-09 to `33d (a mention without a user id is left out; the row stands)`** — spec written, not built. `MessagePayload.mentions` holds Graph user ids only, defaults to `None`, and is declared trusted on that basis — so `33d` must refuse, not fall back, when a mention carries no user id (a tag or channel mention).
@@ -940,8 +936,8 @@ Found by the spec writers while reading the code each slice touches. Each names 
   evidence: `MessagePayload.excerpt` (`pm_ai/domain/events.py:115`) declares no length; the writer refuses a line over `MAX_ENTRY_LENGTH` (`pm_ai/domain/event_entries.py:166`). The renderer truncates nothing.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2m-payload-line-grammar.md`
-  summary: `tests/architecture/test_sanitize_boundary.py:937-939` still says the versioning clause is unmet; `2m`'s task list corrects it.
-  evidence: Settled in the spine on 2026-09-27 (additive only, no marker). Only needed if that task is dropped.
+  summary: **RESOLVED 2026-10-10 by `2m`** — the docstring now states the settled rule. Was: `tests/architecture/test_sanitize_boundary.py:937-939` still says the versioning clause is unmet; `2m`'s task list corrects it.
+  evidence: *Superseded 2026-10-10 — the task was done, not dropped.* Settled in the spine on 2026-09-27 (additive only, no marker).
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8m-graph-sign-in.md`
   summary: AD-39's re-consent Proposal is still unbuilt; `pm-ai connector sign-in` is the interim, and story 13 replaces the remedy text with a staged item on both surfaces.
@@ -1046,3 +1042,18 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 
 **Every spec exceeds the 2,400-token ceiling wave 1 set, and the cause is the review rounds, not the prose.** Each spec was written to roughly 1,800–2,400 tokens, then passed through the three review lenses (blind hunter, edge-case hunter, verification gap) and, for the decision-dependent ones, the architecture gate's tightenings; nearly every accepted finding became a matrix row, a clause or a named test, and the fixers cut Intent, Code Map and Design Notes redundancy rather than content. Nine splits were already taken where a reviewer found two failure classes or an independently shippable piece (`33d`/`33f`, `4n`/`4p`, `8n`/`8o`, `9a`/`9b`, `4e`/`4r`, `4f`/`4q`, `11b`/`11c`, `8m`/`8q`, `8p` and `1r` carved out). Kept at this size by the parent's call on 2026-10-10 rather than split again, so that implementation can start; the ceiling stays a proposal with Andrei's override, as the wave-1 ruling says. The named further-split candidates, if he wants them: `33e` (the client's bytes download and inner-code carry plus `StoragePort.write_capture` as a chore slice), `1r` (the `run_harvest` recording into `9a`), `4q` (the daemon-side streams refactor and per-request scope resolution), `11b` (the VTT reader), `2m` (the pin and round-trip tests).
 
+
+## Surfaced by the story-2m review (2026-10-10)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2m-payload-line-grammar.md`
+  summary: `MessagePayload.mentions` is declared trusted because it holds Graph user ids "nobody types", yet 2m's own matrix row puts an `unresolved:graph:<handle>` spelling in the list, and that handle is provider-supplied text such as an email address. The frozen block holds both; for Andrei to settle.
+  evidence: `TRUSTED_TEXT[MessagePayload]["mentions"]` in `pm_ai/domain/events.py`; the matrix row "A person pm-ai could not name" in 2m's spec; `tests/domain/test_payload_fields.py` `UNRESOLVED_MENTION`. Latent: `33d` fills `mentions` with Graph ids only, so no handle reaches the list today. Either the reason names the reserved spelling, or the list refuses it.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2m-payload-line-grammar.md`
+  summary: One unencodable event (the bare `actor_unresolved` sentinel, an empty list element, a negative count) refuses the whole `persist_events` batch, so a harvest that produces one fails on every retry; and `resolve_actor` still returns exactly that sentinel.
+  evidence: The batch is all-or-nothing by AD-34's design (2m's new storage test pins that nothing is written). Nothing produces a payload person today; the first connector that passes `resolve_actor(...)` into one must map a miss to `unresolved:<system>:<handle>` first. Belongs with `9a`'s retry ladder (a refusal that repeats identically should not be retried forever) and with whichever connector first fills `assignee`.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2m-payload-line-grammar.md`
+  summary: A message with enough mentions can push its rendered line past `MAX_ENTRY_LENGTH` (16,384), which refuses the line and with it the whole batch.
+  evidence: `encode_payload` bounds no list length; `render_entry` refuses an over-long line. `33d` caps the excerpt at 280 characters but names no cap on `mentions`; belongs with `33d`.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2m-payload-line-grammar.md`
+  summary: A message line that parses but does not decode refuses the whole dashboard render, naming the entry id and `ingested_at` but not the segment and line number.
+  evidence: Consistent with 23b's current rule that an unreadable log refuses the render; `23c` makes the section state the failure instead. The segment and line would need `parse_segment`'s position carried to the decoder.

@@ -29,7 +29,7 @@ from pm_ai.core.goal_register import MalformedGoals
 from pm_ai.core.meeting_records import as_stored, record_name
 from pm_ai.core.rendering import HEADINGS, NO_MEETINGS, PROJECT_HEADINGS
 from pm_ai.domain.event_entries import MalformedEntry
-from pm_ai.domain.events import NormalizedEvent, ObservedEventType
+from pm_ai.domain.events import MessagePayload, NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import (
     Cursor,
     HarvestFailure,
@@ -37,7 +37,7 @@ from pm_ai.domain.harvest import (
     HarvestResult,
 )
 from pm_ai.domain.health import Health, Probe
-from pm_ai.domain.identity import Actor, DataScope, ScopeKind
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.meetings import Meeting
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import KeyNotFound
@@ -419,6 +419,42 @@ def test_a_malformed_event_log_segment_refuses_and_leaves_the_file_intact(tmp_pa
     (segments / "2026-09.md").write_bytes(b"this line is not a ledger entry\n")
     with pytest.raises(MalformedEntry, match="2026-09.md"):
         run_dashboard(built, now=NOW)
+
+    assert written(built).encode("utf-8") == yesterday
+
+
+def test_a_message_line_hand_edited_to_drop_its_channel_refuses_the_render(tmp_path):
+    """Story 2m: a line that parses and does not decode. Written by the real
+    writer, then hand-edited the way a person might; the render refuses naming
+    the field and the entry, and yesterday's file is left intact."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    author_goals(built)
+    yesterday = run_dashboard(built, now=NOW).read_bytes()
+
+    built.storage.persist_events(
+        (
+            NormalizedEvent(
+                scope=PERSONAL,
+                type=ObservedEventType.MESSAGE_POSTED,
+                source_ref=SourceRef.parse("graph:alpha:message:m1"),
+                actor=Actor("u_dana"),
+                occurred_at=NOW - timedelta(minutes=5),
+                payload=MessagePayload(channel="#payments", excerpt="hello"),
+            ),
+        ),
+        scope=PERSONAL,
+    )
+    segment = built.storage.paths.resolve(PERSONAL, "event_log/") / "2026-09.md"
+    line = segment.read_text(encoding="utf-8")
+    assert " p.channel=#payments" in line
+    segment.write_text(line.replace(" p.channel=#payments", ""), encoding="utf-8")
+    entry_id = line[3 : line.index("]")]
+
+    with pytest.raises(MalformedEntry) as refusal:
+        run_dashboard(built, now=NOW)
+    assert "p.channel" in str(refusal.value)
+    assert entry_id in str(refusal.value)
+    assert NOW.isoformat() in str(refusal.value)
 
     assert written(built).encode("utf-8") == yesterday
 

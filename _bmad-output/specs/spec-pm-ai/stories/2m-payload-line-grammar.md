@@ -2,7 +2,8 @@
 title: 'Event-log lines carry payload fields through one encoder and one decoder'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: 'a75840f8634da518fb23a528e8133d456cf1d553'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -96,18 +97,18 @@ The architecture settled all of this (AD-27 on 2026-09-27; AD-48's list rule on 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/payload_fields.py` (new) -- encoder and decoder: list join/split with escaping, counts (negative refused at encode, digits only at decode), `Actor` as its id (the `unresolved:<system>:<handle>` spelling passes through unchanged; the bare `actor_unresolved` id is refused), a repeated key refused, a self-action entry refused by name
-- [ ] `pm_ai/domain/events.py` -- type check accepting exactly `tuple[str, ...] | None` as a list, compared on the resolved hint, never on annotation text; the list rule in `_assert_payload_text_is_declared` (declared or refused; untrusted refused; trusted with reason); `MessagePayload.mentions`; the "known limit" docstring narrowed to nested types
-- [ ] `pm_ai/domain/event_entries.py` -- replace the comment at 62-71 with the settled rule
-- [ ] `pm_ai/storage/service.py` -- `_append_batch` builds payload fields through the encoder; `_payload_fields` goes
-- [ ] `pm_ai/core/rendering.py` -- `_signal_line` decodes the entry and reads `channel`/`excerpt` off the payload
-- [ ] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- both `message()` builders build their fields through the encoder; the full-day golden and the project tests' expected text unchanged by this slice
-- [ ] `tests/domain/test_payload_fields.py` (new) -- one test per matrix row, plus the round trip over every class in `PAYLOAD_FOR` with every field set, comparing after an `Actor` is reduced to its `actor_id`
-- [ ] `tests/domain/test_entry_grammar_pins.py` (new) -- the literal table: payload fields with type, optionality and default; `SELF_ACTION_FIELDS`; both vocabularies
-- [ ] `tests/domain/test_sanitizable_declarations.py` -- the list cases (trusted, untrusted, undeclared, `list[str]`, required tuple, other container); one test declaring the list under each of the three spellings in a doctored registry and importing; a `_run_optimized` case that doctors the registry with an untrusted list and expects the refusal; `:435` inverted
-- [ ] `tests/architecture/test_payload_lookups.py` (new) -- scans `pm_ai/` by AST for the literal `"p."` prefix and the payload field names used as subscripts or `.get` keys outside `pm_ai/domain/payload_fields.py`
-- [ ] `tests/core/test_payload_serialisation.py`, `tests/architecture/test_sanitize_boundary.py` -- a `mentions` list through `persist_events` and back; a message line with a two-element list and one with an empty list pinned byte for byte beside the commit line; the docstring at 937-939 corrected
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: the versioning entry (`:302-304`), the "known debt" paragraph (`:275-284`), the machinery entry (`:860-862`), the dashboard message-line entry (`:864-866`), the stale-docstring entry (`:942-944`); `:868-870` stays with `33d`
+- [x] `pm_ai/domain/payload_fields.py` (new) -- encoder and decoder: list join/split with escaping, counts (negative refused at encode, digits only at decode), `Actor` as its id (the `unresolved:<system>:<handle>` spelling passes through unchanged; the bare `actor_unresolved` id is refused), a repeated key refused, a self-action entry refused by name
+- [x] `pm_ai/domain/events.py` -- type check accepting exactly `tuple[str, ...] | None` as a list, compared on the resolved hint, never on annotation text; the list rule in `_assert_payload_text_is_declared` (declared or refused; untrusted refused; trusted with reason); `MessagePayload.mentions`; the "known limit" docstring narrowed to nested types
+- [x] `pm_ai/domain/event_entries.py` -- replace the comment at 62-71 with the settled rule
+- [x] `pm_ai/storage/service.py` -- `_append_batch` builds payload fields through the encoder; `_payload_fields` goes
+- [x] `pm_ai/core/rendering.py` -- `_signal_line` decodes the entry and reads `channel`/`excerpt` off the payload
+- [x] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- both `message()` builders build their fields through the encoder; the full-day golden and the project tests' expected text unchanged by this slice
+- [x] `tests/domain/test_payload_fields.py` (new) -- one test per matrix row, plus the round trip over every class in `PAYLOAD_FOR` with every field set, comparing after an `Actor` is reduced to its `actor_id`
+- [x] `tests/domain/test_entry_grammar_pins.py` (new) -- the literal table: payload fields with type, optionality and default; `SELF_ACTION_FIELDS`; both vocabularies
+- [x] `tests/domain/test_sanitizable_declarations.py` -- the list cases (trusted, untrusted, undeclared, `list[str]`, required tuple, other container); one test declaring the list under each of the three spellings in a doctored registry and importing; a `_run_optimized` case that doctors the registry with an untrusted list and expects the refusal; `:435` inverted
+- [x] `tests/architecture/test_payload_lookups.py` (new) -- scans `pm_ai/` by AST for the literal `"p."` prefix and the payload field names used as subscripts or `.get` keys outside `pm_ai/domain/payload_fields.py`
+- [x] `tests/core/test_payload_serialisation.py`, `tests/architecture/test_sanitize_boundary.py` -- a `mentions` list through `persist_events` and back; a message line with a two-element list and one with an empty list pinned byte for byte beside the commit line; the docstring at 937-939 corrected
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: the versioning entry (`:302-304`), the "known debt" paragraph (`:275-284`), the machinery entry (`:860-862`), the dashboard message-line entry (`:864-866`), the stale-docstring entry (`:942-944`); `:868-870` stays with `33d`
 
 **Acceptance Criteria:**
 - Given a `message_posted` event with a channel, an excerpt and two mentions, when it is persisted, parsed back and decoded, then the payload equals what the connector supplied and the dashboard line shows channel and excerpt.
@@ -124,3 +125,41 @@ The architecture settled all of this (AD-27 on 2026-09-27; AD-48's list rule on 
 - `uv run pytest -q` -- expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**One encode/decode pair**
+
+- The only place the `p.` prefix is spelled; lists, counts and persons encoded here.
+  [`payload_fields.py:160`](../../../../pm_ai/domain/payload_fields.py#L160)
+
+- Decoding refuses a corrupted line by field and names the entry.
+  [`payload_fields.py:238`](../../../../pm_ai/domain/payload_fields.py#L238)
+
+- The writer uses it.
+  [`service.py:1608`](../../../../pm_ai/storage/service.py#L1608)
+
+- The dashboard reads channel and excerpt through it.
+  [`rendering.py:661`](../../../../pm_ai/core/rendering.py#L661)
+
+**The declaration check learns lists**
+
+- `mentions`, the first list field.
+  [`events.py:121`](../../../../pm_ai/domain/events.py#L121)
+
+- Exactly `tuple[str, ...] | None`, compared on the resolved hint.
+  [`events.py:324`](../../../../pm_ai/domain/events.py#L324)
+
+- Any other container is refused, declared or not.
+  [`events.py:363`](../../../../pm_ai/domain/events.py#L363)
+
+**Tests that keep it so**
+
+- Grammar pin: names, types, defaults, order, bindings.
+  [`test_entry_grammar_pins.py:171`](../../../../tests/domain/test_entry_grammar_pins.py#L171)
+
+- No reader looks a payload field up by its literal name (shapes listed in the file).
+  [`test_payload_lookups.py:175`](../../../../tests/architecture/test_payload_lookups.py#L175)
+
+- One test per matrix row, through the line and back.
+  [`test_payload_fields.py:96`](../../../../tests/domain/test_payload_fields.py#L96)
