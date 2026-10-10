@@ -864,6 +864,119 @@ failure classes (`33d`/`33f`, `4n`/`4p`, `8n`/`8o`, `9a`/`9b`), carved out what 
 independently shippable (`2m`, `8p`, `8q`, `1q`, `1r`, `4r`, `4q`, `11c`), and added the three leftovers
 from step 9 and the `4o` decision.
 
+### Wave 2 build order — added 2026-10-10
+
+Edges are hard dependencies, as in wave 1. Each one is taken from what a slice's
+spec says it lands after, depends on, or relies on, under
+`_bmad-output/specs/spec-pm-ai/stories/`, with one exception named in the table.
+The dotted lines are not dependencies: they join the three slices that each edit
+`run_harvest` (`pm_ai/app/pipelines.py`), where whoever lands later rebases.
+
+```mermaid
+flowchart LR
+    s1q["1q ledgers at their declared mode"]
+    s1r["1r one claim for whole-file writes"]
+    s2m["2m payload line grammar"]
+    s8p["8p result says when the provider answered"]
+    s8q["8q sign-in records who signed in"]
+    s8m["8m Graph re-sign-in"]
+    s4o["4o commands without a project"]
+    s4n["4n doctor and setup name the connectors"]
+    s4p["4p setup offers a connector"]
+    s33d["33d channel messages"]
+    s33f["33f listed chats"]
+    s23c["23c Proactive Enablement from messages"]
+    s33e["33e Graph transcripts"]
+    s11b["11b the transcript path"]
+    s11c["11c transcript drop command"]
+    s4e["4e daemon on loopback"]
+    s4f["4f REPL run locally"]
+    s4r["4r a line is answered or acknowledged"]
+    s4q["4q REPL through the daemon"]
+    s9a["9a scheduled harvest (temporary scheduler)"]
+    s9b["9b morning render"]
+    s8n["8n GitLab commit transport"]
+    s8o["8o connector add gitlab"]
+    done(["07:00 dashboard rendered by the daemon"])
+
+    s1r --> s8q
+    s8q --> s8m
+    s4o --> s4n
+    s4o --> s4p
+    s4n --> s4p
+    s1q --> s33d
+    s2m --> s33d
+    s8p --> s33d
+    s33d --> s33f
+    s2m --> s23c
+    s33d --> s23c
+    s8q --> s23c
+    s4n --> s23c
+    s33e --> s11b
+    s33e --> s11c
+    s11b --> s11c
+    s1r --> s4e
+    s1r --> s4r
+    s4e --> s4r
+    s4e --> s4q
+    s4f --> s4q
+    s4r --> s4q
+    s1r --> s9a
+    s4e --> s9a
+    s4r --> s9a
+    s1r --> s9b
+    s4r --> s9b
+    s9a --> s9b
+    s8n --> s8o
+    s9b --> done
+
+    s33e -. run_harvest .- s9a
+    s9a -. run_harvest .- s11b
+
+    classDef crit fill:#664d03,stroke:#413003,color:#ffffff
+    classDef island fill:#0f5132,stroke:#0a3622,color:#ffffff
+    classDef goal fill:#084298,stroke:#052c65,color:#ffffff
+    class s1r,s4e,s4r,s9a,s9b crit
+    class s8n,s8o island
+    class done goal
+```
+
+| Slice | Lands after | Where it is stated |
+|---|---|---|
+| `1q`, `1r`, `2m`, `8p`, `4o`, `4f`, `33e`, `8n` | nothing in wave 2 | — |
+| `8q` | `1r` | the build order above ("before any new whole-file path"), not `8q`'s spec |
+| `8m` | `8q` | `8m` Code Map: "Lands after story 8q" |
+| `4n` | `4o` | `4o`: "This slice lands before `4n`" |
+| `4p` | `4o`, `4n` | `4p`: "Depends on `4n`"; relies on `4o`'s commands without a project |
+| `33d` | `1q`, `2m`, `8p` | `33d` Code Map |
+| `33f` | `33d` | `33f` extends `33d`'s cursor and walk |
+| `23c` | `2m`, `33d`, `8q`, `4n` | `23c`: "slice `2m` lands before this one"; "lands after `4n`" |
+| `11b` | `33e` | `11b` uses `33e`'s acquisition and `transcript_state` |
+| `11c` | `33e`, `11b` | `11c`: bind is `11b`'s, the capture name is `33e`'s rule |
+| `4e` | `1r` | `4e`: "`1r` landed first" |
+| `4r` | `1r`, `4e` | `4r`: "Depends on `4e`; `1r` lands before" |
+| `4q` | `4e`, `4f`, `4r` | `4q`: "Depends on `4e`, `4f` and `4r`" |
+| `9a` | `1r`, `4e`, `4r` | `9a`: workers are `4r`'s; "`1r` … lands before this one" |
+| `9b` | `1r`, `4r`, `9a` | `9b`: "Builds on `9a`"; workers `4r`; "`1r` lands before" |
+| `8o` | `8n` | `8o`: "Depends on the GitLab transport slice (`8n`)" |
+
+23 slices, 29 edges, acyclic.
+
+Amber is the critical path, **five slices**: `1r → 4e → 4r → 9a → 9b`. `1r` is
+the one foundation with dependants on every later step — `8q`, `4e`, `4r`, `9a`,
+`9b` — so it goes first. Green is `8n`/`8o`, which nothing in wave 2 waits for.
+
+Eight slices have no wave-2 dependency: `1q`, `1r`, `2m`, `8p`, `4o`, `4f`,
+`33e`, `8n`. `4f` and `33e` sit in later steps of the numbered order only for
+review pacing; either can be built earlier if a slice is blocked on a PR still
+under review.
+
+**The `run_harvest` order is not consistent between the specs and the numbered
+order.** `33e`, `9a` and `11b` each state the landing order `33e`, `9a`, `11b`;
+the numbered order above puts `11b` in step 4 and `9a` in step 5. Nothing in the
+specs makes `11b` need `9a` (ingestion runs after acquisition either way), so
+the numbered order stands and `9a` rebases onto `11b`'s ingestion when it lands.
+
 ## Deferred, with reasons
 
 - **Story 3 — MCP execution firewall.** Deferred because the prototype mutates
