@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from claim_fakes import InMemoryClaims
 from pm_ai.core.meeting_records import (
     MEETINGS,
     NOTES_HEADING,
@@ -105,6 +106,7 @@ def storage(tmp_path: Path) -> StorageService:
         now=lambda: NOW,
         vcs=_NoRepository(),
         crypto=PlaintextCrypto(),
+        claims=InMemoryClaims(),
     )
 
 

@@ -63,6 +63,7 @@ import pytest
 
 from conftest import REPO_ROOT
 
+from claim_fakes import InMemoryClaims
 from pm_ai.core import ledger
 from pm_ai import ports
 from pm_ai.core.extraction import Extraction
@@ -914,6 +915,7 @@ def _persist_an_injection() -> str:
         now=lambda: PERSIST_NOW,
         vcs=GitVcs(),
         crypto=AesGcmCrypto(b"0" * 32),
+        claims=InMemoryClaims(),
     )
     event = NormalizedEvent(
         scope=PERSIST_SCOPE,

@@ -37,7 +37,7 @@ by hashing.
 from __future__ import annotations
 
 from pm_ai.domain.identity import ScopeKind
-from pm_ai.domain.scope_model import GITIGNORED, PROJECT_DIRNAME
+from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX, GITIGNORED, PROJECT_DIRNAME
 
 __all__ = ["HEADER", "project_rules", "render_gitignore"]
 
@@ -51,6 +51,12 @@ def project_rules() -> tuple[str, ...]:
     `memory/` directory anywhere in the repository, and a project that happened
     to have one would find its own source silently untracked by the act of
     onboarding.
+
+    The last rule covers the claim sidecars (story `1r`): an empty
+    `<name>.lock` beside any claimed artifact, declared once in the scope model
+    as structure outside the tier model. Today every claimed project artifact
+    sits under an ignored directory already; the rule is derived anyway, so a
+    claim on a committed artifact cannot put a lock file in front of git.
     """
     declared = GITIGNORED[ScopeKind.PROJECT]
     shallowest = sorted(
@@ -58,7 +64,10 @@ def project_rules() -> tuple[str, ...]:
         for key in declared
         if not any(key != other and key.startswith(other) for other in declared)
     )
-    return tuple(f"/{PROJECT_DIRNAME}/{key}" for key in shallowest)
+    return (
+        *(f"/{PROJECT_DIRNAME}/{key}" for key in shallowest),
+        f"/{PROJECT_DIRNAME}/**/*{CLAIM_SIDECAR_SUFFIX}",
+    )
 
 
 def render_gitignore(existing: bytes | None) -> bytes:

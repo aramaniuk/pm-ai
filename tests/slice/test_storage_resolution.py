@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from claim_fakes import InMemoryClaims
 from pm_ai.app.wiring import build
 from pm_ai.core import ledger
 from pm_ai.core.disclosure_ledger import DisclosureLedger
@@ -266,7 +267,13 @@ def test_an_unopenable_operational_store_names_itself(tmp_path):
     store.mkdir(parents=True)  # a directory where the file belongs
 
     with pytest.raises(OperationalStoreUnavailable) as refusal:
-        StorageService(paths, now=lambda: NOW, vcs=GitVcs(), crypto=TEST_CIPHER)
+        StorageService(
+            paths,
+            now=lambda: NOW,
+            vcs=GitVcs(),
+            crypto=TEST_CIPHER,
+            claims=InMemoryClaims(),
+        )
     assert str(store) in str(refusal.value)
 
 
@@ -297,7 +304,13 @@ def test_a_store_created_before_the_settle_column_still_settles(tmp_path):
     legacy.commit()
     legacy.close()
 
-    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs(), crypto=TEST_CIPHER)
+    storage = StorageService(
+        paths,
+        now=lambda: NOW,
+        vcs=GitVcs(),
+        crypto=TEST_CIPHER,
+        claims=InMemoryClaims(),
+    )
     target = TargetRef.parse("gitlab:alpha:issue:102")
     storage.record_execution("idem_legacy", target, "cmt_1")
 
@@ -353,7 +366,11 @@ def test_a_mutation_is_stamped_from_the_injected_clock_at_both_ends(daemon):
 def test_a_clock_that_is_not_utc_is_refused(tmp_path, clock, why):
     """A wrong-month segment and a `TypeError` on comparison are worse than a raise."""
     storage = StorageService(
-        ScopePaths.rooted(tmp_path), now=clock, vcs=GitVcs(), crypto=TEST_CIPHER
+        ScopePaths.rooted(tmp_path),
+        now=clock,
+        vcs=GitVcs(),
+        crypto=TEST_CIPHER,
+        claims=InMemoryClaims(),
     )
     with pytest.raises(NonUtcClock):
         storage.append_event_log(_test_entry(why), scope=PERSONAL)
@@ -391,7 +408,13 @@ def test_a_refused_write_does_not_swallow_the_batch(daemon, tmp_path):
     of a segment entry that does not exist.
     """
     paths = RefusingPaths(ScopePaths.rooted(tmp_path / "txn"))
-    storage = StorageService(paths, now=lambda: NOW, vcs=GitVcs(), crypto=TEST_CIPHER)
+    storage = StorageService(
+        paths,
+        now=lambda: NOW,
+        vcs=GitVcs(),
+        crypto=TEST_CIPHER,
+        claims=InMemoryClaims(),
+    )
     events = _events(daemon)
     assert len(events) == 2
 

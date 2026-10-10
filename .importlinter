@@ -169,6 +169,7 @@ forbidden_modules =
     pm_ai.models
     pm_ai.connectors
     pm_ai.skills
+    pm_ai.platform
 
 
 # ── AD-30: the domain is the still point ───────────────────────────────────────
