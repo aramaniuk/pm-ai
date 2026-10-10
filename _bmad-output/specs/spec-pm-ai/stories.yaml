@@ -210,6 +210,8 @@
     AD-27 closes TWO enumerations and only the NormalizedEvent one exists. The
     event_log/ entry vocabulary is the gap 2c fills - four grammars reach one
     ledger today and nothing can parse a segment.
+    WAVE 2, 2026-10-09: 2m the payload line grammar - one encode/decode pair in domain (AD-27), the list encoding, AD-48's list check corrected, pin and round-trip tests; a person-typed field is written as the actor id alone (AD-34). Lands before 33d; also fixes the dashboard's unprefixed channel/excerpt lookup.
+
 - id: "3"
   title: MCP execution firewall and skill registry
   spec_checkpoint: true
@@ -265,6 +267,8 @@
     console script cannot live in pm_ai.surfaces: surfaces sits BELOW app in the
     enforced layer stack, so importing wiring.build would invert it - 4c puts
     main() in pm_ai/app/entry.py and leaves dispatch in surfaces.
+    WAVE 2, decided 2026-10-09: 4e the daemon and loopback-only API (AD-21 narrowed: the 5-second ack rule binds the daemon's request path; foreground commands declare their own bound), 4f the REPL run locally (no model in this build, so an open prompt is answered with a stated sentence), 4q the REPL through the daemon (the loopback client; after 4e, 4f and 4r), 4r a line is answered or acknowledged with a job (the prompt and job endpoints, the requests table, the stream; after 4e), plus 4n doctor and setup name the connectors, 4o personal and application commands run with nothing enrolled (Andrei confirmed), 4p setup offers the Graph connector step.
+
 - id: "5"
   title: Telegram bridge and cryptographic pairing
   spec_checkpoint: true
@@ -311,10 +315,12 @@
     normalization, hot plugin loading, and encrypted credential storage.
     Delivers CAP-35.
   invoke_dev_with: >-
-    pm_ai/connectors/gitlab.py:62-71 builds its CoverageWindow as now-minus-4h
-    to now unconditionally, tied to nothing that proves a fetch happened, so a
-    provider declining with an empty 200 claims full coverage it never had.
-    HarvestResult has no way to say "I ran and learned nothing" - give it one.
+    pm_ai/connectors/gitlab.py once built its CoverageWindow as now-minus-4h to
+    now unconditionally, tied to nothing that proved a fetch happened. 8a
+    removed that fabricated window and gave HarvestResult its three outcomes;
+    8i then settled (2026-09-25) that an empty answer from a request that
+    reached the provider IS a receipt for having looked - a window is earned by
+    any answered request, including an empty one, and never by the clock alone.
     SPLIT 2026-09-02 into five specs, all in wave 1. 8a takes HarvestResult's
     three outcomes and both coverage defects named above; 8d takes the registry
     and the CAP-35 health probes; 8b takes the credential lifecycle and the
@@ -369,6 +375,8 @@
     which is the ordinary case on a quiet project. 8i records the check whenever
     it happened. Nothing reads these records yet - that is story 16 - so this
     makes its input honest before it is built on.
+    WAVE 2, 2026-10-09: 8m pm-ai connector sign-in <instance> (the interim for AD-39's re-consent Proposal), 8q the sign-in records who signed in (user_id, read by 23c), 8p a result says when the provider answered (HarvestResult.answered_at; AD-9 amended), 8n GitLab commit transport (the harvest was entirely stubbed: no socket, invented row shape, instance derived from the project path), 8o connector add gitlab (probe is one commits request; 403 refuses).
+
 - id: "9"
   title: Passive telemetry radar
   spec_checkpoint: true
@@ -381,6 +389,8 @@
     connector skips save_cursor and the attempt vanishes with it - leaving no
     record that story 16's three verdicts need in order to tell never-looked
     from looked-and-failed.
+    WAVE 2, 2026-10-09/10: 9a the scheduled harvest inside the daemon - LABELLED TEMPORARY: its scheduler is an in-memory timer that story 10a's durable queue replaces. It adds the missing try/except, owns the real cursor (the dashboard's live day read stays), backs off by failure kind, writes receipts in the instance's own scope and prunes coverage rows older than 90 days. 9b the 07:00 render (after 9a): flips daily_dashboard.md to Tier 3 (Andrei, step 4: every render replaces it, no edit survives), renders once per local day per scope, records the last render instant so Proactive Enablement reads 'since the last render'.
+
 - id: "10"
   title: Durable job queue and offline replay
   spec_checkpoint: true
@@ -503,6 +513,8 @@
     at all. 11a adds derivation-services.md rule 3's MeetingRecords accessor and
     retires the dict. Binding transcripts to meetings is 11b, in wave 2, and
     needs 33e.
+    WAVE 2, decided 2026-10-09 (step 3): one record per meeting per scope and the first record keeps its id - a hand drop binds by title and start, a calendar harvest adopts a manual-only record. 11b wires the real transcript path (the typed extraction carrier, the VTT reader, the binding rule, the Graph capture 33e stores) and 11c adds the `pm-ai transcript drop` command (.vtt/.txt; .docx deferred); the citation guard uses the meeting's scope; Extraction.detail is typed; the path reaches no model.
+
 - id: "12"
   title: Spoken anchor resolution and fuzzy recovery
   spec_checkpoint: true
@@ -713,9 +725,12 @@
     it needs synthesis and the prototype path puts no model in the path; and the
     07:00 deadline is NOT met until 9a supplies the scheduled tick. The renderer
     never fabricates: an empty section names a file or a window, never a state
-    of the world. 3-Tier is read as GoalHorizon, not GoalDomain - both are
-    three-valued and CAP-9 says only "3-Tier"; the section is about when
-    milestones land.
+    of the world. 3-Tier is GoalDomain - Project, Team, Personal Career - not
+    GoalHorizon. An earlier line here read it as the horizon; that was settled
+    against prd.md on 2026-09-03 and corrected in 23a. The word "Milestones" in
+    CAP-9's section title is what misled the earlier reading.
+    WAVE 2, decided 2026-10-09: 23c fills Proactive Enablement from real message entries read through 2m's decoder; a failed or unreadable log read is STATED in the section, not fatal (supersedes 23b's exit-3 row); mentions of the PM first, a 20-line cap with the rest counted; the 24-hour window stays until 9a records the last render.
+
 - id: "24"
   title: Socratic 1:1 protocol and meta-coaching scorecard
   spec_checkpoint: true
@@ -838,3 +853,4 @@
     transitively and the contract lists direct imports - so whether the contract
     should name msal is an open question for 33a.
     msal is a new runtime dependency and needs a pin.
+    WAVE 2, decided 2026-10-09: 33d channel messages (listed channels, replies are events, a 280-character excerpt), 33f listed chats only (Andrei: never every chat - a chat with a direct report belongs to the team-member scope and no registry of people exists yet), 33e transcripts (join URL -> online meeting -> transcript per occurrence matched by time, content fetched separately as VTT, a tenant's 403 degrades that meeting only). Specs under stories/.

@@ -833,6 +833,37 @@ beyond the table above:
 Left out on purpose: about 80 other open `deferred-work.md` entries and about 30
 architecture items that do not touch wave 2.
 
+### Status of the checklist — 2026-10-10
+
+Every step above is done, decided, or verified on this machine; the wave-2 specs
+are written and reviewed, and the remaining work is building them.
+
+| Step | State |
+|---|---|
+| 1–2 | Done 2026-09-27 (AD-27 additive grammar, `mentions` as Graph user ids; AD-48 lists). |
+| 3 | **Decided 2026-10-09 (Andrei):** one record per meeting per scope, the first keeps its id; a later hand drop binds by title and start, a later calendar harvest adopts a manual-only record. AD-33. Built by `33e`/`11b`. |
+| 4 | **Decided 2026-10-09 (Andrei):** the dashboard is a render product — every render replaces it, no edit survives — so it is Tier 3. AD-3/AD-44/AD-47. The code flip is owed by `9a`. |
+| 5 | **Decided 2026-10-09 (Andrei):** AD-21 binds the daemon's request path; foreground commands declare their own bound. |
+| 6–9 | Done 2026-10-08/09 (`4m`, `8j`, `8k`, `8l`). Three leftovers split from step 9 are specified: `8m` re-sign-in (with `8q`), `8n`/`8o` GitLab, `4n`/`4p` setup. |
+| 10 | Outside: admin consent on another tenant is still unmeasured. None of the wave-2 slices adds a scope, so the spike's grant covers them; `33e` checks whether `OnlineMeetings.Read` is already declared. |
+| 11 | **Verified 2026-10-09:** `uv sync --extra runtime` built `watchdog` 6.0.0 from source under Python 3.14.7 and the FSEvents backend loads — on this machine, which runs an x86_64 interpreter under Rosetta (see `deferred-work.md`). |
+| 12–15 | **Written and reviewed 2026-10-09/10**, under `_bmad-output/specs/spec-pm-ai/stories/`, every one through the three review lenses with the accepted findings applied. Build order below. |
+| 16 | Done 2026-10-09 (both notes corrected in `stories.yaml`). |
+
+**Wave-2 build order** (each spec names what it lands after):
+
+1. `1q` ledgers at their declared mode · `1r` one claim primitive for whole-file writes (added at the 2026-10-10 architecture gate; before any new whole-file path) · `2m` payload line grammar · `8p` a result says when the provider answered — four small foundations, independent of each other.
+2. `8q` the sign-in records who signed in · `8m` Graph re-sign-in · `4o` commands without a project · `4n` doctor and setup name the connectors · `4p` setup offers a connector.
+3. `33d` channel messages (after 1q, 2m, 8p) · `33f` listed chats (after 33d) · `23c` Proactive Enablement from messages (after 2m, 33d, 8q, 4n).
+4. `33e` Graph transcripts · `11b` the transcript path (after 33e) · `11c` the transcript drop command (after 11b).
+5. `4e` daemon and loopback API · `4f` the REPL run locally (independent of 4e) · `4r` a line is answered or acknowledged (after 4e) · `4q` the REPL through the daemon (after 4e, 4f, 4r) · `9a` scheduled harvest (after 4e; temporary scheduler, replaced by 10a) · `9b` the morning render (after 9a; flips the dashboard to Tier 3).
+6. `8n` GitLab commit transport · `8o` connector add gitlab (after 8n) — when convenient; not on wave 2's critical path.
+
+The wave grew from seven slices to twenty-four: the reviews split what was two
+failure classes (`33d`/`33f`, `4n`/`4p`, `8n`/`8o`, `9a`/`9b`), carved out what was
+independently shippable (`2m`, `8p`, `8q`, `1q`, `1r`, `4r`, `4q`, `11c`), and added the three leftovers
+from step 9 and the `4o` decision.
+
 ## Deferred, with reasons
 
 - **Story 3 — MCP execution firewall.** Deferred because the prototype mutates

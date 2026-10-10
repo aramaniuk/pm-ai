@@ -1,19 +1,19 @@
 ## **title: Local-First AI PM Assistant (pm-ai)**
 
-version: 0.14.2  
+version: 0.15.0  
 created: 2026-08-16  
-updated: 2026-08-20  
+updated: 2026-10-09  
 status: draft
 
 # **PRD: Local-First AI PM Assistant (pm-ai)**
 
 ## **0\. Document Purpose**
 
-This PRD defines the functional capabilities, behavioral boundaries, security architecture, and technical topology for pm-ai, an executive personal PM coach, mobile voice concierge, and sovereign career companion running locally against a monitored $20/month operating target. It completely replaces legacy cloud RAG architectures (AWS \+ Onyx @ $800+/month) with a git-backed, markdown-driven operating system designed to eradicate managerial cognitive tax, protect executive bandwidth, enforce strict zero-trust security boundaries, and continuously align daily micro-decisions across three goal horizons: Project(s), Team(s), and Personal/Career Growth.
+This PRD defines the functional capabilities, behavioral boundaries, security architecture, and technical topology for pm-ai, an executive personal PM coach, mobile voice concierge, and sovereign career companion running locally against a monitored $20/month operating target. It completely replaces legacy cloud RAG architectures (AWS \+ Onyx @ $800+/month) with a local, markdown-driven operating system (only a project's rules and skills ride in git) designed to eradicate managerial cognitive tax, protect executive bandwidth, enforce strict zero-trust security boundaries, and continuously align daily micro-decisions across three goal domains — Project(s), Team(s), and Personal/Career Growth — and their short, medium, and long horizons (FR-11).
 
 ## **1\. Vision**
 
-pm-ai is a local-first, privacy-preserving Executive Operating System and Socratic PM Companion. Rather than acting as an open-ended conversational chatbot with raw shell privileges or a noisy notification relay, pm-ai operates inside a sandboxed local environment. It silently harvests telemetry across GitLab, Teams, Outlook Calendar, Telegram, HR tools, Slack, Jira, Notion, and extensible third-party platforms through registry-authorized Model Context Protocol (MCP) APIs and pre-parsing input sanitization firewalls. It enables high-context voice synthesis, delivers pre-rendered focus briefings before scheduled meetings, handles deep asynchronous cross-telemetry queries, synthesizes telemetry-enriched daily standup and meeting preparation dashboards, parses structured spoken protocols during live meetings, executes automated research tasks, and facilitates structured, telemetry-backed 1:1 Socratic retrospectives. Dual access is provided via a mobile Telegram voice/text bridge with cryptographic pairing and a terminal-native interactive CLI console bound strictly to loopback (127.0.0.1). The PM's own career records, coaching logs, and personal rules remain strictly sovereign in local plaintext Markdown files — records *about direct reports* are held separately and may sync to the employer's HR platform on explicit approval (§2.1, FR-31) — \- with credentials, raw transcripts, and telemetry indexes encrypted per NFR-08 \- ensuring complete portability, zero enterprise surveillance, and zero vendor lock-in.
+pm-ai is a local-first, privacy-preserving Executive Operating System and Socratic PM Companion. Rather than acting as an open-ended conversational chatbot with raw shell privileges or a noisy notification relay, pm-ai operates inside a sandboxed local environment. It silently harvests telemetry across GitLab, Teams, Outlook Calendar, Telegram, HR tools, Slack, Jira, Notion, and extensible third-party platforms through registry-authorized Model Context Protocol (MCP) APIs and an input sanitization firewall that binds before any model context is built. It enables high-context voice synthesis, delivers pre-rendered focus briefings before scheduled meetings, handles deep asynchronous cross-telemetry queries, synthesizes telemetry-enriched daily standup and meeting preparation dashboards, parses structured spoken protocols during live meetings, executes automated research tasks, and facilitates structured, telemetry-backed 1:1 Socratic retrospectives. Dual access is provided via a mobile Telegram voice/text bridge with cryptographic pairing and a terminal-native interactive CLI console bound strictly to loopback (127.0.0.1). The PM's own career records, coaching logs, and personal rules remain strictly sovereign in local plaintext Markdown files — records *about direct reports* are held separately and may sync to the employer's HR platform on explicit approval (§2.1, FR-31) — \- with API credentials and the PM's own voice notes encrypted per NFR-08, and everything else plaintext at 600 permissions under full-disk encryption \- ensuring complete portability, zero enterprise surveillance, and zero vendor lock-in.
 
 ## **2\. Target User & Scope Isolation**
 
@@ -21,8 +21,8 @@ pm-ai is a local-first, privacy-preserving Executive Operating System and Socrat
 
 > * **Application Scope (\~/.pm-ai/):** System-level state owned by the application itself — daemon settings, the registry of enrolled projects, per-project connector configuration, encrypted credentials, operational telemetry, and diagnostic logs. Deliberately separate so that no employer-specific or project-specific configuration ever lands in the sovereign personal scope.  
 > * **Sovereign Personal PM Scope (\~/.manager-ai/):** Independent personal coaching hub containing leadership philosophy (manager\_principles.md), 3-tier goals (strategic\_goals.md), Socratic 1:1 coaching logs (coaching\_1on1\_history.md), literature and web page subscriptions (article\_sources.md), and anti-burnout metrics. Contains **no** project-specific information or configuration. This scope survives independently across project, role, or company transitions and is governed by a strict User Privacy & Data Boundary Charter.  
-> * **Team-Member Scope (\~/.pm-ai/private/people/):** Encrypted, gitignored records about direct reports — career dossiers, goals agreed in a team 1:1 (UJ-4), and per-employee monitored metrics (FR-30, FR-31). Stored under the application scope but governed by its own rules, because two requirements turn on telling it apart from the sovereign personal scope: **these records may sync to an external HR platform on explicit PM approval, and personal-scope records never may** (FR-16). It is deliberately **not** part of the sovereign scope and does not survive a company transition — it is a single directory, deleted on leaving the role.
-> * **Isolated Project Scopes (\<project-root\>/.project-ai/):** Repository-specific directory committed to version control, containing project-specific rules, task automation scripts, team cultural rules/conventions, local daily project dashboards, meeting records, and the team meeting commitments ledger. Its one gitignored subdirectory, **`transcripts/`**, holds the raw captures of those meetings (encrypted, purged at 30 days). Every scope holds its captures at that same relative path, the way each holds its own `event_log/`.
+> * **Team-Member Scope (\~/.pm-ai/private/people/):** Gitignored, 600-permissioned (not encrypted) records about direct reports — career dossiers, goals agreed in a team 1:1 (UJ-4), and per-employee monitored metrics (FR-30, FR-31). Stored under the application scope but governed by its own rules, because two requirements turn on telling it apart from the sovereign personal scope: **these records may sync to an external HR platform on explicit PM approval, and personal-scope records never may** (FR-16). It is deliberately **not** part of the sovereign scope and does not survive a company transition — it is a single directory, deleted on leaving the role.
+> * **Isolated Project Scopes (\<project-root\>/.project-ai/):** Repository-specific directory. Only **`rules/`** and **`skills/`** are committed to version control — project-specific rules, task automation scripts, and team cultural rules/conventions. **`memory/`** (the local daily project dashboard, meeting records, the team meeting commitments ledger, and the project `event_log/`) and **`transcripts/`** are machine-local and gitignored: merging two machines' copies of an append-only ledger would falsify the mechanics the ledger rests on, so the ledger does not cross clones and project aggregations are per machine. Transcripts are the raw captures of the project's meetings, plaintext, purged at 30 days. The three scopes that own meetings — project, team-member, and personal — hold their captures at that same relative path, the way each holds its own `event_log/`; the application scope owns no meetings and holds no captures.
 > * **Scope is decided by subject, not by convenience.** A meeting record and its transcript live in the scope that owns the meeting: a team meeting in its project, a 1:1 with a direct report in the team-member scope, a purely personal session in the sovereign scope. A committed record may cite only a meeting in its own scope, so the capture is never more or less shareable than the event it records.
 
 \================================================================================  
@@ -39,11 +39,12 @@ A. APPLICATION SCOPE (\~/.pm-ai/)
 ├── logs/                               \# Rotating structured diagnostic logs (NOT event\_log/)  
 │  
 └── private/                            \# OPERATIONAL ENCLAVE (Gitignored)  
-    ├── operational.db                   \# Tier 2: job queue, cursors, executed-key ledger, staged proposals (Encrypted, never rebuilt)
-    ├── derived.db                       \# Tier 3: search & commitment indexes — disposable, rebuilt by pm-ai reindex  
+    ├── operational.db                   \# Tier 2: job queue, cursors, coverage receipts, executed-key ledger, staged proposals (plaintext, 0600; never rebuilt)
+    ├── event\_index.db                  \# Tier 3: search index over events, rules/ and meetings/ — disposable, rebuilt by its declared job (plaintext, 0600)  
+    ├── commitment\_index.db             \# Tier 3: commitment index — disposable, rebuilt by its declared job (plaintext, 0600)  
     ├── config.json                     \# API credentials (Encrypted: GitLab, Teams, Telegram, HR MCP, Jira, Slack, Notion)  
     ├── vector\_index/                   \# Pruned embeddings (FR-37) — NOT encrypted, rebuildable per NFR-11
-    └── people/                          \# TEAM-MEMBER SCOPE (Encrypted) — career dossiers, agreed
+    └── people/                          \# TEAM-MEMBER SCOPE (Gitignored, 600; not encrypted) — career dossiers, agreed
                                          \# 1:1 goals, per-employee metrics (FR-30, FR-31).
                                          \# Never committed; deleted on role change.  
 
@@ -69,13 +70,13 @@ B. SOVEREIGN PERSONAL PM SCOPE (\~/.manager-ai/)
 │   ├── synthesize\_manager\_dashboard.py \# Manager Strategic Focus generator  
 │   └── anti\_burnout\_shield.py          \# Workload telemetry & PTO guardrail analyzer (FR-16)  
 │  
-└── private/                            \# PERSONAL ENCLAVE (Gitignored, AES-256 Encrypted)  
+└── private/                            \# PERSONAL ENCLAVE (Gitignored, 600; mixed — see each entry)  
     ├── telegram\_cache/                 \# The PM's own voice notes & dialogue state (Encrypted)  
     │                                    \# Transient input, NFR-09 retention; never a backup target.  
-    └── personal\_analytics.db           \# Burnout metrics, workload & calendar-density dynamics (FR-16)  
+    └── personal\_analytics.db           \# Burnout metrics, workload & calendar-density dynamics (FR-16) — plaintext, 0600  
                                         \# Separate DB by design: project-scope rendering never opens it,  
                                         \# so personal analytics cannot be joined into team-facing output.  
-                                        \# Tier 2: backed up, never rebuilt \- burnout trends outlive the  
+                                        \# Tier 2: a declared backup target, never rebuilt \- burnout trends outlive the  
                                         \# telemetry they were computed from once FR-37 compaction runs.  
                                         \# Gitignore this directory if the personal scope is kept as a repo.
 
@@ -84,33 +85,35 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 \================================================================================  
 \<project-repository-alpha\>/  
 │  
-├── .project-ai/                        \# PROJECT ALPHA SPECIFIC CONTEXT (Committed to Git)  
+├── .project-ai/                        \# PROJECT ALPHA SPECIFIC CONTEXT (rules/ and skills/ committed; memory/ and transcripts/ gitignored)  
 │   ├── rules/  
 │   │   ├── persona.md                  \# Project Alpha assistant persona definition (FR-20)  
 │   │   ├── conventions.md              \# Project Alpha team cultural rules  
 │   │   └── engineering\_specs.md        \# Architecture & code guidelines  
-│   ├── memory/  
-│   │   ├── daily\_dashboard.md          \# Project Alpha Daily Team Dashboard  
-│   │   ├── commitments\_log.md          \# Spoken commitments & promise tracking ledger (FR-34)  
+│   ├── memory/                         \# MACHINE-LOCAL (gitignored as one directory rule)  
+│   │   ├── daily\_dashboard.md          \# Project Alpha Daily Team Dashboard — MACHINE-LOCAL (gitignored)  
+│   │   ├── commitments\_log.md          \# Spoken commitments & promise tracking ledger (FR-34) — MACHINE-LOCAL (gitignored)  
 │   │   ├── meetings/                   \# Meeting SUMMARIES \- citation root for every extracted  
 │   │   │                               \# fact (FR-03 man-hour cost, attendees, duration).  
-│   │   │                               \# Committed: a commitment in this scope may only cite  
+│   │   │                               \# MACHINE-LOCAL (gitignored). A commitment in this scope may only cite  
 │   │   │                               \# a meeting in this scope.  
 │   │   └── event\_log/                \# Project Alpha specific audit trail & decision log (FR-27)  
 │   ├── skills/                         \# PROJECT ALPHA SPECIFIC SKILLS  
 │   │   ├── parse\_standup.py  
 │   │   └── sync\_gitlab\_wi.py  
 │   │  
-│   └── transcripts/                    \# RAW CAPTURES (Gitignored, AES-256 Encrypted)  
+│   └── transcripts/                    \# RAW CAPTURES (Gitignored, plaintext)  
 │                                       \# Verbatim transcripts & audio; 30-day purge (NFR-09).  
-│                                       \# The one gitignored directory inside a committed scope \-  
-│                                       \# the daemon verifies the .gitignore rule before writing,  
-│                                       \# because the rule is the only thing keeping verbatim  
-│                                       \# meeting minutes out of the team's repository.  
+│                                       \# Protected by exclusion from version control, which is  
+│                                       \# the whole of it: before writing, the daemon asks git itself  
+│                                       \# (check-ignore and ls-files) whether the directory is  
+│                                       \# ignored and untracked, refusing only when a repository is  
+│                                       \# present and cannot be asked. git is optional; its absence  
+│                                       \# never blocks a capture.  
 │                                       \# A 1:1 with a direct report is people-scoped instead \-  
 │                                       \# the capture always lives wherever its meeting lives.  
 │  
-└── .gitignore                          \# Contains /.project-ai/transcripts/
+└── .gitignore                          \# Contains /.project-ai/memory/ and /.project-ai/transcripts/
 
 ### **2.2 Jobs To Be Done**
 
@@ -124,7 +127,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 > * **JTBD-8 (Zero-Friction In-Meeting Task Automation & Research Execution):** Issue direct verbal commands and complex research instructions to pm-ai by name during meetings to instantly mutate Work Items, record explicit priorities, and dispatch async background research without breaking conversation flow.  
 > * **JTBD-9 (Dual-Layer Meeting Authorization & Missed Meeting Analysis):** Differentiate between explicit in-meeting commands (auto-executed via authorized MCP skills) and implicit discussion extractions (staged via Telegram/CLI approval cards with parsed/suggested Work Item metadata), while enabling on-demand transcript ingestion for missed or optional meetings.  
 > * **JTBD-10 (Terminal-Native Interactive CLI Console Access):** Launch local interactive console sessions (pm-ai) bound to loopback to execute commands, run open-text natural language prompts in an interactive REPL shell, and trigger background skills with full feature parity to the Telegram text interface.  
-> * **JTBD-11 (Mindful Multi-Horizon Planning & Burnout Prevention):** Mindfully calibrate weekly and daily work schedules by mapping operational tasks and tactical deliverables against 3-tier long/middle/short-term strategic goals, while actively capping calendar density to mitigate burnout risks under a private data boundary charter.  
+> * **JTBD-11 (Mindful Multi-Horizon Planning & Burnout Prevention):** Mindfully calibrate weekly and daily work schedules by mapping operational tasks and tactical deliverables against 3-tier (Project/Team/Personal) strategic goals across their short/medium/long horizons, while actively capping calendar density to mitigate burnout risks under a private data boundary charter.  
 > * **JTBD-12 (Extensible Telemetry & Multi-Tool Connector Lifecycle):** Dynamically configure, enable, disable, and expand external telemetry connectors (GitLab, Teams, Outlook, HR systems, Slack, Jira, Notion) via CLI or Telegram interfaces with encrypted credential management, input sanitization, and hot-swappable schema normalization.
 
 ### **2.3 Key User Journeys**
@@ -229,10 +232,10 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
   * **Persona \+ context:** Andrei needs to configure connection credentials for existing services (GitLab, Teams, Outlook, HR tools) or add new external platforms (e.g., Jira, Slack, Notion) into pm-ai to expand telemetry coverage without restarting core daemons or exposing raw secrets.  
   * **Entry state:** Opens terminal (pm-ai connector) or sends Telegram command (/connectors).  
   * **Path:**  
-    1. Andrei inputs /connectors add jira on Telegram or runs pm-ai connector add \--type jira in CLI.  
+    1. Andrei inputs /connectors add jira on Telegram or runs pm-ai connector add jira work in CLI — the system and an instance name, positional, with the credential typed at a hidden prompt rather than passed as a flag.  
     2. pm-ai displays a secure step-by-step prompt requesting target domain URL, API token/OAuth key, and sync parameters.  
     3. pm-ai executes an immediate endpoint health check probe to verify API connectivity, permissions, and polling reachability.  
-    4. Upon successful probe verification, pm-ai encrypts credentials inside \~/.pm-ai/private/config.json using AES-256 with file permissions 600 and dynamically registers the Jira harvester module into the active background radar without requiring a daemon restart.  
+    4. Upon successful probe verification, pm-ai seals the credential inside \~/.pm-ai/private/config.json using AES-256 with file permissions 600 first, then writes the instance's settings to \~/.pm-ai/connectors/work.json at 600 (unencrypted, carrying no secret), and dynamically registers the Jira harvester module into the active background radar without requiring a daemon restart.  
     5. pm-ai triggers a background historical telemetry backfill (past 7 days) and outputs a confirmation card displaying active status, connector health, and available entity mappings (e.g., Jira Issues → Work Items).  
   * **Climax:** pm-ai seamlessly incorporates Jira tickets, Slack discussions, or Notion docs into morning dashboards, 1:1 dossiers, and deep inquiry queries alongside existing GitLab and Teams telemetry.  
   * **Resolution:** Andrei manages and expands his multi-tool ecosystem across both personal and project scopes in under 2 minutes with zero plaintext secret exposure.
@@ -249,14 +252,14 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 > * **Automated Memory Pruning Pipeline:** An background daemon process that systematically compresses short-term activity streams (routine diffs, daily logs) into structured long-term milestone summaries, maintaining vector index embeddings and capping **retrieval** latency to 50–150 ms (synthesis latency is governed separately by NFR-04).  
 > * **User Privacy & Data Boundary Charter:** A binding operational specification governing personal workload telemetry, burnout metrics, and Socratic coaching records in \~/.manager-ai/. Its adversary is **employer-controlled systems** — team channels, shared repositories, enterprise IT dashboards, HR platforms — to which this material is never exported. Frontier model APIs are a disclosed exception: personal-scope material may enter a model prompt, every such call is recorded in the disclosure ledger, and no record written to a git-committed scope may reference personal-scope material. The charter names its threat model explicitly because a charter meaning something narrower than its words invites a reader to assume more protection than exists.  
 > * **External System Connector:** A modular plugin component within pm-ai that interfaces with external APIs (e.g., GitLab, Teams, Outlook, HR MCP, Slack, Jira, Notion) to harvest telemetry, sync state, and post responses using encrypted credential storage.  
-> * **Connector Schema:** A standardized data contract and event normalization protocol that converts disparate external system activity (commits, tickets, channel chats, pages) into unified JSON telemetry entries inside operational.db and event\_log/.  
+> * **Connector Schema:** A standardized data contract and event normalization protocol that converts disparate external system activity (commits, tickets, channel chats, pages) into typed Markdown ledger lines in the owning scope's event\_log/ — one newline-terminated line per event, carrying a minted entry id, timestamp, actor and category. operational.db keeps the connector cursors, coverage receipts and dedup state, not the events.  
 > * **CLI Interactive REPL Shell:** A terminal-based interactive shell started by running pm-ai without parameters, allowing the PM to type fixed commands or open natural language prompts continuously until explicitly typing exit or quit.  
 > * **Socratic 1:1 Protocol:** An asynchronous or conversational dialogue mechanism conducted via Telegram or CLI where pm-ai surfaces telemetry-backed blind spots and asks reflective questions rather than issuing direct mandates.  
 > * **High-Context Voice Concierge:** The capability of pm-ai to expand short voice prompts into detailed, context-rich correspondence by synthesizing background repository specs, meeting transcripts, and project data.  
 > * **Contextual Web & Literature Engine (FR-17):** The background ingestion and situational matching of external industry RSS feeds and HTTP web pages against live project bottlenecks, team dynamics, and career goals.  
 > * **Meeting ROI Metric:** A post-meeting mindfulness calculation (attendees × duration\_hours × blended\_hourly\_rate, where the blended rate is a single PM-configured figure in \~/.pm-ai/config.toml) displayed as an informative metric within post-meeting summary header blocks to foster team cost awareness.  
 > * **Verbal Commitment Sync:** The automatic extraction of spoken meeting promises and staging of timestamped comments attached to target GitLab Work Items or Jira tickets.  
-> * **Meeting Commitment Ledger & Closed-Loop Lifecycle:** The persistent accountability mechanism (recorded as structured Markdown entries in .project-ai/memory/commitments\_log.md and indexed in operational.db) that captures extracted spoken promises, assigned owners, target deadlines, target Work Items, lifecycle statuses (\[STAGED\_APPROVAL\], \[PENDING\], \[FULFILLED\], \[ALTERED\], \[BROKEN\], \[UNKNOWN\]), and continuously cross-references incoming Git commits, PR review latencies, and ticket state updates to verify real-world execution.  
+> * **Meeting Commitment Ledger & Closed-Loop Lifecycle:** The persistent accountability mechanism (recorded as structured Markdown entries in .project-ai/memory/commitments\_log.md and indexed in commitment\_index.db, Tier 3 and disposable) that captures extracted spoken promises, assigned owners, target deadlines, target Work Items, lifecycle statuses (\[STAGED\_APPROVAL\], \[PENDING\], \[FULFILLED\], \[ALTERED\], \[BROKEN\], \[UNKNOWN\], \[ERROR\] — the last three never collapsed into one another, FR-34.2), and continuously cross-references incoming Git commits, PR review latencies, and ticket state updates to verify real-world execution.  
 > * **Spoken Anchor Protocol & Fuzzy Recovery:** A structured speaking convention used to identify target Work Item numbers, coupled with an automated fuzzy search recovery mechanism (\>85% confidence threshold) for phonetic or transcript speech recognition errors.  
 > * **Explicit In-Meeting Command:** A direct spoken directive during a meeting explicitly addressing the assistant by name (e.g., *"pm-ai, update WI-226..."*) that serves as explicit authorization for immediate downstream execution via authorized MCP tools without requiring staged confirmation cards.  
 > * **Implicit Discussion Extraction:** Information, context, decisions, or ticket updates derived from general team meeting conversations where pm-ai was not explicitly invoked.  
@@ -266,7 +269,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 > * **Career Dossier:** A pre-meeting executive summary combining recent Git telemetry, custom monitored metrics, and external HR goal tracking pushed via Telegram or CLI prior to employee 1:1 syncs.  
 > * **Meta-Coaching Scorecard:** A post-session evaluation mechanism capturing Coaching Efficiency (1-10) and Domain Distress (1-10) scores to calibrate persona questioning strategies.  
 > * **Anti-Burnout Telemetry Shield:** Passive monitoring of working hours, calendar density, and PTO usage to proactively surface workload exhaustion risks strictly inside 1:1 coaching dialogues and weekly/daily planning workflows.  
-> * **Unified Telemetry & Decision Log Store:** The consolidated storage mechanism recording all operational events, system actions, and leadership decisions as typed telemetry JSON entries inside event\_log/ and operational.db.  
+> * **Unified Telemetry & Decision Log Store:** The consolidated storage mechanism recording all operational events, system actions, and leadership decisions as typed Markdown ledger lines inside the owning scope's event\_log/; operational.db holds cursors, coverage receipts, dedup state, executed keys and staged proposals, never the events themselves.  
 > * **Asynchronous Deep Inquiry Engine:** System capability permitting complex multi-source telemetry queries (commits, CI/CD, calendar, transcripts) with non-blocking deferred delivery of structured results over Telegram or CLI.  
 > * **Documentation Drift Check:** Automated comparison between recent meeting decisions/transcripts and committed repository Markdown documentation to detect protocol or specification mismatches.  
 > * **Pre-Meeting Preparation Dashboard:** A pre-meeting synthesized view combining active work items, blocked items, backlog priorities, multi-day trend analysis, and per-participant cross-source activity research generated prior to scheduled meetings.  
@@ -292,11 +295,11 @@ In cases where no matching Work Item ID exists or speech recognition misinterpre
 
 #### **FR-02: 24/7 Passive Context Telemetry Radar**
 
-Background daemon harvesting telemetry across configured external system connectors (GitLab, Teams, Outlook calendars, emails, Jira, Slack, Notion) every 4 hours into local Markdown cache and SQLite index. Ingested payloads pass through the Input Sanitization Module (FR-36). Realizes UJ-1, UJ-2, UJ-5, UJ-6, UJ-9, UJ-10.  
+Background daemon harvesting telemetry across configured external system connectors (GitLab, Teams, Outlook calendars, emails, Jira, Slack, Notion) every 4 hours into local Markdown cache and SQLite index. Ingested payloads are retained raw; the Input Sanitization Module (FR-36) is applied at the model boundary, before any model context is built from them. Realizes UJ-1, UJ-2, UJ-5, UJ-6, UJ-9, UJ-10.  
 **Consequences (testable):**
 
-> * Executes background harvesting cycle every 240 minutes (±15 minutes); writes raw parsed diffs to \~/.pm-ai/private/operational.db without exceeding 50MB RSS memory footprint during execution.  
-> * If an external provider API returns an HTTP 5xx error or times out, the daemon logs the failure to event\_log/ and retries with exponential backoff without crashing the runner.
+> * Executes background harvesting cycle every 240 minutes (±15 minutes); writes harvested events as Markdown ledger lines to the owning scope's event\_log/ and its cursors and coverage receipts to \~/.pm-ai/private/operational.db without exceeding 50MB RSS memory footprint during execution.  
+> * If an external provider API returns an HTTP 5xx error or times out, the daemon logs the failure to event\_log/ and retries with exponential backoff without crashing the runner. Only transient failures back off: a failure that cannot succeed until a human acts — an expired credential, a revoked consent, a moved repository, a broken configuration — stops retrying and surfaces as \[ERROR\] naming the connector instance (FR-34).
 
 #### **FR-03: Calendar Event-Driven Processing, On-Demand Missed Meeting Analysis & Cost Metrics**
 
@@ -308,7 +311,7 @@ Automatically fetch and process meeting transcripts upon completion or upon expl
 
 #### **FR-04: Resilient Background Runner & Offline Buffer**
 
-Asynchronous micro-job pipeline with exponential backoff, retry logic, and local SQLite offline buffering for uninterrupted offline operation.  
+Asynchronous micro-job pipeline with exponential backoff for transient failures, retry bounded by the kind of failure (a permanent failure stops retrying and surfaces as \[ERROR\] naming the instance rather than backing off forever), and local SQLite offline buffering for uninterrupted offline operation.  
 **Consequences (testable):**
 
 > * When network connectivity is severed (simulated offline mode), outgoing API actions buffer strictly in operational.db with state PENDING\_RETRY.  
@@ -359,13 +362,13 @@ Accept natural language commands via Telegram or CLI (voice or text) specifying 
 
 Provide an extensible connector architecture and interactive management interfaces via CLI (pm-ai connector) and Telegram (/connectors) allowing the PM to view, test, enable, disable, and configure external telemetry and data sync sources (GitLab, Teams, Outlook, HR platforms, Slack, Jira, Notion, and custom OpenAPI/polling integrations). All connectors are **outbound pull** adapters invoked on the daemon's schedule; none exposes an inbound endpoint, per NFR-14.
 
-> 1. **Dynamic Configuration & Health Probe:** Invoking connector configuration prompts for domain endpoints, authentication tokens, or OAuth keys, executes a synchronous connection health check probe within 10 seconds, and writes AES-256 encrypted credentials to \~/.pm-ai/private/config.json with 600 file permissions per NFR-08.  
-> 2. **Modular Event Normalization:** Every external system connector must map raw external entity events (e.g., Jira issue edits, Slack channel messages, Notion page updates, GitLab MRs) into standardized Connector Schema JSON events ingested by operational.db and indexed for event\_log/.  
+> 1. **Dynamic Configuration & Health Probe:** Invoking pm-ai connector add \<system\> \<instance\> prompts for the credential at the terminal (never as an argument, which would leave it in the process table and shell history), executes a synchronous connection health check probe within 10 seconds, seals the credential into the encrypted credential store \~/.pm-ai/private/config.json **first**, and only then writes the instance's settings to \~/.pm-ai/connectors/\<instance\>.json at 600 file permissions, unencrypted — connector configuration and code carry no secrets (NFR-08).  
+> 2. **Modular Event Normalization:** Every external system connector must map raw external entity events (e.g., Jira issue edits, Slack channel messages, Notion page updates, GitLab MRs) into standardized Connector Schema events, each persisted as one typed Markdown ledger line in the owning scope's event\_log/ and indexed from there into event\_index.db; operational.db keeps only the harvest cursors, coverage receipts and dedup state.  
 > 3. **Hot Plugin Loading:** Adding or updating a connector module takes effect dynamically in the passive telemetry radar (FR-02) without requiring a daemon restart. Realizes UJ-10.
 
 **Consequences (testable):**
 
-> * Executing pm-ai connector add \--type jira \--domain company.atlassian.net prompts for API token input, performs a live API health check within 10 seconds, and appends the validated config to config.json with AES-256 encrypted storage.  
+> * Executing pm-ai connector add graph work (the system and an instance name, positional, no flags) asks four questions at the terminal — the app (client) id, the tenant, the harvest window in minutes, and the first-run reach-back — then runs Microsoft's device-code sign-in; the sign-in token is sealed into the encrypted \~/.pm-ai/private/config.json first, and the instance's settings are then written to \~/.pm-ai/connectors/work.json at 600 permissions, unencrypted. For a token-based system (pm-ai connector add gitlab work) the credential is read by a hidden prompt, probed live within 10 seconds, and sealed before the settings row is written; when stdin is not a terminal the command refuses rather than echo the secret.  
 > * Disabling a connector (pm-ai connector disable slack) immediately halts background polling for that connector without interrupting other active harvesters.
 
 #### **FR-36: MCP Execution Firewall & Anti-Prompt-Injection Layer**
@@ -373,7 +376,7 @@ Provide an extensible connector architecture and interactive management interfac
 Provide a mandatory security boundary and input sanitization firewall isolating the LLM core from system environments:
 
 > 1. **MCP Execution Boundary:** pm-ai shall never grant open shell or raw terminal execution privileges to the LLM core. All external system read/write actions (Git repositories, Jira, Outlook Calendar, Slack, HR platforms) must route strictly through registry-authorized Model Context Protocol (MCP) skill modules.  
-> 2. **Pre-Parsing Input Sanitization Firewall:** All inbound telemetry from external systems (pull request descriptions, commit messages, issue comments, calendar event invites, meeting transcripts, email bodies) must pass through a pre-parsing sanitization module prior to LLM context ingestion. The module strips potential prompt injection attacks, hidden system instructions, and malicious delimiters. Sanitization is **non-destructive**: it produces a derived copy for LLM context while the raw payload is retained unmodified under the Transcript Lifecycle Policy, so citations and drift checks continue to resolve against the true source.  
+> 2. **Input Sanitization Firewall at the Model Boundary:** All inbound telemetry from external systems (pull request descriptions, commit messages, issue comments, calendar event invites, meeting transcripts, email bodies) must pass through the sanitization module before any model context is built from it. The boundary is enforced where a model is called — the model port accepts outside text only in its sanitized form — so no harvest or ingestion path can hand raw telemetry to a model by skipping a step. The module strips potential prompt injection attacks, hidden system instructions, and malicious delimiters. Sanitization is **non-destructive**: the harvest pipeline persists the raw payload unmodified under the Transcript Lifecycle Policy and the sanitized copy is produced at the point of model use, so citations and drift checks continue to resolve against the true source.  
 > 3. **Skill Authorization Model:** The MCP skill registry is an explicit local allowlist of first-party skill modules, each declaring the **permissions** it may exercise (`read`, `comment`, `edit`, `transition`, `create`, `send`). The daemon refuses to invoke an unlisted skill or an out-of-scope call and logs the violation. **Cryptographic signature verification is deferred** — it is not required while every skill is authored by the PM and installed locally. The skill load path shall remain pluggable so verification can be introduced without restructuring. Deferral applies **only** to signature generation and checking; the execution boundary in clause 1 and the sanitization firewall in clause 2 remain fully binding.
 
 **Revisit condition (signing):** implement signature verification before the first skill authored by anyone other than the PM is installed, or before skills are distributed to other users.
@@ -409,10 +412,10 @@ Pre-render daily briefings (\~/.manager-ai/memory/daily\_dashboard.md) categoriz
 
 #### **FR-10: Traceable Event Log & Self-Retrospective Engine**
 
-Immutably log all decisions, operational events, and telemetry diffs as typed entries in event\_log/ and local SQLite operational.db. Aggregate weekly action counts by category for self-retrospective. Realizes UJ-1, UJ-9.  
+Immutably log all decisions, operational events, and telemetry diffs as typed Markdown ledger lines in the owning scope's event\_log/ (project, team-member, personal, or application); operational.db holds no events. Aggregate weekly action counts by category for self-retrospective. Realizes UJ-1, UJ-9.  
 **Consequences (testable):**
 
-> * Every state mutation appends an immutable JSON line to \~/.manager-ai/memory/event\_log/ with ISO-8601 timestamp, actor ID, and action category.  
+> * Every state mutation appends an immutable Markdown ledger line to the owning scope's event\_log/ segment, carrying a minted entry id, ISO-8601 timestamp, actor ID, and action category.  
 > * Running pm-ai retrospective \--weekly aggregates weekly action counts by category (decisions logged, proposals staged vs. approved, commitments fulfilled vs. broken) and renders them as a weekly trend. *(A single composite "pm-ai Performance Index" is deferred \- see §10 Open Questions.)*
 
 #### **FR-11: Micro-Decision Daily Alignment Engine**
@@ -613,7 +616,7 @@ Synthesize pre-meeting dashboards for scheduled meetings (daily standups, archit
 
 #### **FR-33: Previous Meeting Commitment Closed-Loop Verification & Trend Auditor**
 
-Retrieve active and historical commitments from the persistent Meeting Commitment Ledger (.project-ai/memory/commitments\_log.md / operational.db), cross-reference spoken promises against real-world technical execution metrics (incoming Git commit logs, PR review latencies, GitLab Work Item / Jira state updates, Teams/Slack activity), and explicitly highlight met, altered, or broken promises along with multi-day stalled blockers on the pre-meeting preparation dashboard. Realizes UJ-3, UJ-6.  
+Retrieve active and historical commitments from the persistent Meeting Commitment Ledger (.project-ai/memory/commitments\_log.md, indexed in commitment\_index.db), cross-reference spoken promises against real-world technical execution metrics (incoming Git commit logs, PR review latencies, GitLab Work Item / Jira state updates, Teams/Slack activity), and explicitly highlight met, altered, or broken promises along with multi-day stalled blockers on the pre-meeting preparation dashboard. Realizes UJ-3, UJ-6.  
 **Consequences (testable):**
 
 > * Spoken promise stored in commitments\_log.md is evaluated against harvested Git and ticket telemetry; unfulfilled promises past their target date are tagged \[UNFULFILLED\_COMMITMENT\] on today's pre-meeting preparation card.  
@@ -621,23 +624,27 @@ Retrieve active and historical commitments from the persistent Meeting Commitmen
 
 #### **FR-34: Spoken Commitment Persistence, Closed-Loop Verification & Ledger**
 
-Extract, persist, and maintain the lifecycle of all spoken meeting commitments and promises in local persistent storage (.project-ai/memory/commitments\_log.md and indexed in operational.db) using closed-loop execution tracking.
+Extract, persist, and maintain the lifecycle of all spoken meeting commitments and promises in local persistent storage (.project-ai/memory/commitments\_log.md and indexed in commitment\_index.db, Tier 3 and disposable) using closed-loop execution tracking.
 
-> 1. **Extraction & Initial Staging:** Upon processing meeting transcripts (FR-03, FR-06), extracted commitments are appended to .project-ai/memory/commitments\_log.md as structured Markdown entries and indexed in operational.db. Each entry records: commitment\_id, timestamp, speaker, target\_assignee, description, target\_work\_item, due\_date, and initial status (\[STAGED\_APPROVAL\] or \[PENDING\]).  
+> 1. **Extraction & Initial Staging:** Upon processing meeting transcripts (FR-03, FR-06), extracted commitments are appended to .project-ai/memory/commitments\_log.md as structured Markdown entries and indexed in commitment\_index.db (Tier 3, disposable). Each entry records: commitment\_id, timestamp, speaker, target\_assignee, description, target\_work\_item, due\_date, and initial status (\[STAGED\_APPROVAL\] or \[PENDING\]).  
 > 2. **Closed-Loop Verification & Lifecycle Transitions:** Automatically evaluate and update commitment status based on real-world cross-platform execution telemetry or direct PM triage. **Only externally-authored telemetry is admissible as evidence**: activity pm-ai itself produced — a comment it posted, a Work Item it edited — must never count toward fulfilment, or the system verifies its own writes and reports success it manufactured. Every event carries an authorship marker of external, pm-ai, or unknown; unknown is not admissible.  
    * \[STAGED\_APPROVAL\]: Spoken implicit commitment awaiting PM approval via Telegram/CLI card. Upon PM approval, transitions to \[PENDING\].  
    * \[PENDING\]: Active commitment awaiting fulfillment before specified due date.  
    * \[FULFILLED\]: Telemetry confirms matching deliverable completed (e.g., merged MR, closed Work Item/Jira ticket) on or before due date with verified commit SHA / ticket closure metadata.  
    * \[ALTERED\]: Scope or due date updated in a subsequent meeting transcript or via direct PM edit.  
-   * \[BROKEN\]: Target due date passed, the harvest window is **covered**, and no admissible evidence was found.  
-   * \[UNKNOWN\]: Target due date passed but the system has **no telemetry coverage** for the window — for example the machine was asleep. Absence of data is not evidence of a broken promise, and FR-26's inquiries are irreversible, so this case must resolve to \[UNKNOWN\] and never to \[BROKEN\].  
+   * \[BROKEN\]: Target due date passed, the harvest window is **covered** — pm-ai looked — and no admissible evidence was found.  
+   * \[UNKNOWN\]: Target due date passed but **no harvest attempt spanned the window** — for example the machine was asleep, so nothing was tried. Temporary and self-resolving: it means pm-ai has not yet had a complete look, and it becomes \[FULFILLED\] or \[BROKEN\] once coverage catches up. Absence of data is not evidence of a broken promise, so this case never resolves to \[BROKEN\].  
+   * \[ERROR\]: Target due date passed and a contributing connector instance **attempted the window and failed** — an expired token, a revoked consent, a moved repository, a broken configuration. Not self-resolving: waiting never clears it, so it is surfaced with the failing instance named, in pm-ai doctor and the briefing, until a human acts. \[ERROR\] outranks \[UNKNOWN\] when both apply — an instance that is actively failing is the actionable fact; one that merely did not run is not.  
+   * The three overdue verdicts are never collapsed into one another, and **neither \[UNKNOWN\] nor \[ERROR\] may trigger a pre-meeting inquiry (FR-26) to the person who made the promise**: pm-ai's own blindness is never someone else's accountability, and an inquiry cannot be recalled. The alert goes privately to the PM, naming the instrument rather than the promise-owner.  
+   * **Coverage is a receipt.** A harvest window counts as covered only for a request that reached the provider and was answered, timed by pm-ai's own clock either side of the request — never a span computed from the clock alone. An empty answer is a receipt: asking and being told nothing is there is having looked. There is no coverage when the request failed, when nothing returned had a readable time, when everything returned was rejected as unreadable, or when this machine's clock stepped backwards during the request.  
 > 3. **Proactive Proactive Milestone Warning Prompts:** If unfulfilled dependencies or overdue commitments risk breaching upcoming project delivery milestones, the system triggers a private Socratic prompt (FR-12) to the PM during morning briefings or 1:1 planning sessions before delivery milestones are breached.  
 > 4. **Maintenance & Auditability:** Maintain an append-only audit trail inside commitments\_log.md with verification hashes, event timestamps, and evidence references for retrospective auditing. Realizes UJ-3, UJ-6, UJ-7, UJ-8.
 
 **Consequences (testable):**
 
-> * Approved spoken commitment creates a valid, structured Markdown entry in .project-ai/memory/commitments\_log.md and SQLite row in operational.db with state \[PENDING\].  
+> * Approved spoken commitment creates a valid, structured Markdown entry in .project-ai/memory/commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].  
 > * When telemetry detects a merged MR referencing the target Work Item of a \[PENDING\] commitment, system automatically updates commitment status to \[FULFILLED\] and appends the commit SHA verification reference.  
+> * An overdue \[PENDING\] commitment whose connector instance attempted the window and failed resolves to \[ERROR\], names that instance in pm-ai doctor and the next briefing, and sends no inquiry to the promise-owner; the same window with no attempt at all resolves to \[UNKNOWN\] and clears by itself once a covered harvest arrives.  
 > * An overdue \[PENDING\] commitment that blocks a milestone triggers a private Socratic alert card to the PM at least 48 hours prior to milestone target date.
 
 ### **4.5 Continuous Self-Improvement & Adaptive Learning**
@@ -683,6 +690,7 @@ Refine which stored material is worth surfacing, so recall improves with use rat
 
 > * **No Self-Written or Self-Executed Code:** pm-ai does not author, test, or run code it generated — including in a sandbox. It may describe a capability gap; a human writes the skill. A model-authored program on the PM's machine holding the PM's credentials is what the MCP execution boundary exists to prevent, and naming its environment a sandbox does not change what is admitted.  
 > * **No Open Shell / Raw Terminal Execution:** pm-ai will never grant raw shell access to the LLM core. Every **model-driven change to external state** must execute via registry-authorized MCP tools, which are the LLM core's only route to an external effect. Read-only telemetry harvesting, frontier API calls, and local model subprocesses are separately classified and separately constrained — a single blanket claim was weaker in practice, because the first path that contradicted it weakened the whole rule.  
+> * **No Persistent Way to Disable Encryption:** No config key, no stored debug profile, no durable flag of any kind turns encryption off. The PM\_AI\_DISABLE\_ENCRYPTION environment variable is the whole mechanism; it lives for one process and dies with it, so restarting the daemon always restores encryption (NFR-08).  
 > * **No Real-Time Audio Interruption:** pm-ai does not speak live during meetings or interrupt speakers in real-time; transcript analysis and execution occur asynchronously post-meeting or via stream processing.  
 > * **No Unsanctioned Autonomous External Writes for Implicit Extractions:** pm-ai will not modify external GitLab Work Items, Jira tickets, or project documentation based on implicit meeting discussions without explicit PM approval via Interactive Approval Cards or CLI approval commands. Spoken in-meeting directives explicitly addressing pm-ai or John authorize immediate execution only under the three conditions in FR-05 (authenticated source, speaker is the PM, reversible non-notifying verb); everything else stages.  
 > * **No Unsolicited Mid-Work Interruptions:** pm-ai will not send unprompted notifications or message relays during active work hours. Push notifications are strictly bounded to scheduled pre-meeting prep cards (15m/1h prior) and post-meeting summary/approval reports.  
@@ -704,12 +712,12 @@ Refine which stored material is worth surfacing, so recall improves with use rat
 |                                                                               |  
 |  \+-----------------------------------------------------------------------+  |  
 |  |           INPUT SANITIZATION FIREWALL & MCP EXECUTION LAYER           |  |  
-|  |  (Pre-parsing prompt injection stripper, Authorized MCP Skill Registry)     |  |  
+|  |  (Model-boundary prompt-injection stripper, Authorized MCP Skill Registry)  |  |  
 |  \+--------------+------------------------------------+-------------------+  |  
 |                 |                                    |                      |  
 |  \+--------------v------------+   \+-------------------v-------------------+  |  
 |  | Dynamic System Connectors |   |     Local Quantized Fast Models       |  |  
-|  | (GitLab, Teams, Outlook,  |   | (Whisper Voice, Ollama 7B-13B Parsing)|  |  
+|  | (GitLab, Teams, Outlook,  |   | (Whisper Voice, Ollama 8B-class Parse)|  |  
 |  |  Slack, Jira, Notion, HR) |   |                                       |  |  
 |  \+--------------+------------+   \+-------------------+-+-----------------+  |  
 |                 |                                    |                      |  
@@ -731,10 +739,12 @@ Refine which stored material is worth surfacing, so recall improves with use rat
 |  \- event\_log/ (Unified Telemetry)      \- event\_log/ (Unified Telemetry)   |  
 |                                                                               |  
 |  \[\~/.pm-ai/\] (Application Scope: settings, project registry, connectors)     |  
-|  \[\~/.pm-ai/private/\] (Gitignored) \- operational.db, config.json \=          |  
-|      Encrypted;  derived.db, vector\_index/ \= plaintext                        |  
-|  \[\<repo\>/.project-ai/transcripts/\] (Gitignored, Encrypted) \- raw captures  |  
-|  \[\~/.manager-ai/private/\] (Gitignored, Encrypted) \- personal analytics only    |  
+|  \[\~/.pm-ai/private/\] (Gitignored) \- config.json \= Encrypted;               |  
+|      operational.db, event\_index.db, commitment\_index.db, vector\_index/,   |  
+|      people/ \= plaintext, 0600                                             |  
+|  \[\<repo\>/.project-ai/transcripts/\] (Gitignored, plaintext) \- raw captures  |  
+|  \[\~/.manager-ai/private/\] (Gitignored, 600) \- telegram\_cache/ \= Encrypted;     |  
+|      personal\_analytics.db \= plaintext                                         |  
 |  All .md files above are PLAINTEXT by design (NFR-08)                          |  
 \+-------------------------------------------------------------------------------+
 
@@ -752,13 +762,13 @@ Refine which stored material is worth surfacing, so recall improves with use rat
 ### **7.2 Security, Privacy & Data Sovereignty**
 
 > * **NFR-07 (Scope Boundary Isolation):** Files in \~/.manager-ai/ must never be indexed into or committed to project repositories. Automated pre-commit hooks verify that the private enclaves are gitignored.  
-> * **NFR-08 (Scoped Encryption at Rest & Input Sanitization):** Encryption is applied to a **defined set** rather than to all local state, because plaintext Markdown is a deliberate product property (see below). Encrypted at rest with AES-256 and 600 file permissions: the Tier-2 operational store (operational.db), raw meeting transcripts and audio (transcripts/, in whichever scope owns the meeting), the PM's own voice notes and dialogue state (\~/.manager-ai/private/telegram\_cache/), API credentials (config.json), the **team-member records in \~/.pm-ai/private/people/**, and the personal analytics store at \~/.manager-ai/private/personal\_analytics.db. **Explicitly not encrypted:** (a) all Markdown files in every scope — including coaching\_1on1\_history.md, strategic\_goals.md, event\_log/, and commitments\_log.md — which remain plaintext by design so the PM can read, grep, diff, and hand-edit their own record without the system's cooperation; and (b) the Tier-3 derived state — the search and commitment indexes (derived.db) and the vector index — which hold derived embeddings and lookup structures rather than recoverable text, is fully rebuildable per NFR-11, and is protected by 600 permissions plus full-disk encryption. The master key is held in the OS keychain so the daemon can start unattended; raw key export is the supported migration path. Encryption may be disabled by an explicit debug flag, which is never the default in a fresh install and must emit both a console warning and an event\_log/ entry while active. All inbound operational telemetry must pass through the Input Sanitization Module (FR-36).  
-> * **NFR-09 (Transcript Lifecycle & Automated Purge):** Raw meeting transcript text files stored in the encrypted transcripts/ directory of the scope that owns the meeting (\<repo\>/.project-ai/transcripts/ for a team meeting) must be maintained for a default window of 30 days (configurable). The background runner will automatically purge raw text transcripts older than the retention threshold after verified conversion into Markdown summaries, Work Item updates, decision logs, and pruned memory indexes.
+> * **NFR-08 (Scoped Encryption at Rest & Input Sanitization):** Encryption is applied to a **defined set** rather than to all local state, because plaintext Markdown is a deliberate product property (see below). The encrypted set is closed and deliberately narrow — **two files**, encrypted at rest with AES-256 and 600 file permissions: the API credentials (\~/.pm-ai/private/config.json) and the PM's own voice notes and dialogue state (\~/.manager-ai/private/telegram\_cache/). Nothing encrypted is a database, so no page-level database cipher is a dependency. **Explicitly not encrypted**, held at 600 permissions with full-disk encryption as the backstop: (a) all Markdown files in every scope — including coaching\_1on1\_history.md, strategic\_goals.md, event\_log/, and commitments\_log.md — which remain plaintext by design so the PM can read, grep, diff, and hand-edit their own record without the system's cooperation; (b) the Tier-2 operational store (operational.db) and the personal analytics store at \~/.manager-ai/private/personal\_analytics.db; (c) raw meeting transcripts and audio (transcripts/, in whichever scope owns the meeting), whose exposure was always publication to a repository rather than the disk and which are protected by exclusion from version control (§2.1); (d) the team-member records in \~/.pm-ai/private/people/ and the connector configuration and plugin code in \~/.pm-ai/connectors/, both gitignored; and (e) the Tier-3 derived state — the search and commitment indexes (event\_index.db, commitment\_index.db) and the vector index — which hold derived embeddings and lookup structures rather than recoverable text and are fully rebuildable per NFR-11. The master key is **enrolled before first run** (pm-ai key enrol) and held in the OS keychain; pm-ai never mints a key for itself, because a new key makes every previously sealed artifact unreadable. The daemon starts without the key and fetches it only at the moment an encrypted artifact is touched; pm-ai doctor reports a missing key as distinct from an unreachable keychain. Raw key export is the supported migration path. Any operation that writes both secret and non-secret state writes the secret first, so a refusal leaves nothing behind. Encryption can be switched off only by the PM\_AI\_DISABLE\_ENCRYPTION environment variable, for the life of one process and only for short-term debugging; no persistent setting of any kind may disable it, and restarting the daemon restores encryption unconditionally. While it is off, the process announces it twice: a console warning when the process that owns the writer composes, and a security entry in event\_log/ written immediately before the first protected plaintext write — if that entry cannot be written, the protected file is not written either. All inbound operational telemetry passes through the Input Sanitization Module (FR-36) before any model context is built from it.  
+> * **NFR-09 (Transcript Lifecycle & Automated Purge):** Raw meeting transcript text files stored in the plaintext, gitignored transcripts/ directory of the scope that owns the meeting (\<repo\>/.project-ai/transcripts/ for a team meeting) must be maintained for a default window of 30 days (configurable). The background runner will automatically purge raw text transcripts older than the retention threshold after verified conversion into Markdown summaries, Work Item updates, decision logs, and pruned memory indexes.
 
 ### **7.3 Reliability, Offline Resilience & Hardware Constraints**
 
-> * **NFR-10 (Offline Queueing & Sequential Replay):** In the event of network disruption, all incoming audio notes, CLI commands, and state actions must buffer in encrypted operational.db and replay sequentially without data loss upon reconnection.  
-> * **NFR-11 (Cache Loss Recovery, tier-scoped):** Persistent state falls into three tiers, and the recovery guarantee applies to one of them. **Truth** (plaintext Markdown: event log segments, commitments\_log.md, coaching history, goals, rules, meeting records, disclosure ledger) and **Operational** state (job queue and retry buffer, connector cursors, executed-idempotency-key ledger, staged proposals, key material) must both survive and are both backup targets. **Derived** state (search and commitment indexes, vector index, caches) is disposable: deleting it must result in zero data loss and rebuild entirely from Truth. Operational state is **not** derivable from Markdown — losing it loses pending external writes and resets harvest position — so it is never a rebuild target and must be stored separately from Derived state. Restoring Operational state from a backup opens a re-execution window for mutations performed after the backup point; the CLI must warn, and reconciliation against the external system is the PM's call.  
+> * **NFR-10 (Offline Queueing & Sequential Replay):** In the event of network disruption, all incoming audio notes, CLI commands, and state actions must buffer in operational.db (plaintext, 600 permissions) and replay sequentially without data loss upon reconnection.  
+> * **NFR-11 (Cache Loss Recovery, tier-scoped):** Persistent state falls into three tiers, and the recovery guarantee applies to one of them. **Truth** (plaintext Markdown: event log segments, commitments\_log.md, coaching history, goals, rules, meeting records, disclosure ledger) and **Operational** state (job queue and retry buffer, connector cursors, executed-idempotency-key ledger, staged proposals, key material) must both survive and are both declared backup targets — the declaration names what a backup must cover, but **no backup mechanism ships in v1**; backup is deferred, and since project memory no longer rides in git (§2.1) nothing stands in for one. **Derived** state (search and commitment indexes, vector index, caches) is disposable: deleting it must result in zero data loss and rebuild entirely from Truth. Operational state is **not** derivable from Markdown — losing it loses pending external writes and resets harvest position — so it is never a rebuild target and must be stored separately from Derived state. Restoring Operational state from a backup opens a re-execution window for mutations performed after the backup point; the CLI must warn, and reconciliation against the external system is the PM's call.  
 > * **NFR-12 (Quantized Model Execution & Hardware Baseline):** System shall run local extraction, parsing, and transcription workloads on a quantized **8B-class** open-weight instruct model at `Q4_K_M` (via Ollama) and Whisper small.en. Minimum supported hardware is **16GB RAM on Apple Silicon (M-series)**; v1 is macOS-only, so the NVIDIA/CUDA baseline is deferred with Linux support rather than promised. Models above 8B-class are out of scope for v1: they cannot run concurrently with transcription at the 16GB baseline without swap thrashing.  
 > * **NFR-14 (Strict Loopback Network Binding & Secure Mobile Transport):** The local daemon network architecture must enforce strict loopback binding (127.0.0.1) by default, exposing zero public HTTP or WebSocket ports. Telegram mobile communications must rely strictly on **outbound HTTPS long-polling** authenticated by paired user-IDs over end-to-end transport. Webhooks are prohibited: they require a publicly reachable endpoint or tunnel, which this same requirement forbids.
 
@@ -796,14 +806,14 @@ Refine which stored material is worth surfacing, so recall improves with use rat
 
 ## **10\. Open Questions**
 
-> 1. **Local Model RAM Thrashing during Concurrent Execution:** While NFR-12 specifies a 16GB RAM baseline with quantized 7B-13B models, concurrent execution of local Whisper audio transcription (small.en) and Ollama LLM parsing under heavy background telemetry loads must be benchmarked to prevent swap thrashing on 16GB unified memory systems. *(To be monitored during Phase 1 bench tests).*
+> 1. **Local Model RAM Thrashing during Concurrent Execution:** While NFR-12 specifies a 16GB RAM baseline with a quantized 8B-class model, concurrent execution of local Whisper audio transcription (small.en) and Ollama LLM parsing under heavy background telemetry loads must be benchmarked to prevent swap thrashing on 16GB unified memory systems. *(To be monitored during Phase 1 bench tests).*
 > 2. **Definition of the pm-ai Performance Index (FR-10):** FR-10 originally promised a weekly composite "Performance Index" scoring pm-ai's own usefulness, but never defined its inputs or scale. The weekly action-count aggregation is retained and well-defined; the composite index is deferred until there is a validated answer to what "pm-ai performing well" means in practice. A candidate definition \- the ratio of staged proposals that survive PM review and commitments that reach \[FULFILLED\] \- should be evaluated against real usage before being committed to. *(To be resolved after Phase 2 produces enough proposal and commitment history to measure).*
 
 ## **11\. Assumptions Index**
 
-> * \[ASSUMPTION: Voice Ingestion SLA\] 10-second Whisper latency is achievable locally on modern Apple Silicon / CUDA hardware using whisper.cpp base/small models.  
+> * \[ASSUMPTION: Voice Ingestion SLA\] 10-second Whisper latency is achievable locally on modern Apple Silicon hardware using whisper.cpp base/small models.  
 > * \[ASSUMPTION: Literature & Web Digest Frequency\] Background polling of RSS feeds and HTTP web pages in article\_sources.md once every 24 hours is sufficient for non-urgent literature citations.  
-> * \[ASSUMPTION: Token Budget Cap\] Capping frontier LLM calls strictly to morning focus briefings, pre-meeting dashboard synthesis, complex research tasks, and 1:1 sessions while running quantized 7B-13B models locally keeps monthly token and power spend below $20/month under typical PM query volumes.  
+> * \[ASSUMPTION: Token Budget Cap\] Capping frontier LLM calls strictly to morning focus briefings, pre-meeting dashboard synthesis, complex research tasks, and 1:1 sessions while running a quantized 8B-class model locally keeps monthly token and power spend below $20/month under typical PM query volumes.  
 > * \[ASSUMPTION: Spoken Protocol & Fuzzy Matching\] Spoken anchor extraction coupled with fuzzy search matching against local Work Items achieves ≥85% confidence for minor phonetic speech recognition errors (e.g., matching "WI-2260" to "WI-226").  
 > * \[ASSUMPTION: Success Metric Targets\] The numeric targets in §8.1 (SM-1 ≥20%, SM-3 ≥7/10, SM-4 ≥80%, SM-6 ≥90%, SM-7 ≥95%, SM-8 ≥80%, SM-9 ≥90%) and the FR-12 question-ratio (≥80% of turns) are provisional first-release targets set on judgement rather than measurement, since the original figures were lost in document conversion. They are deliberately set to be meaningful without being theatrical, and should be re-baselined against actual telemetry after the first month of operation.  
 > * \[ASSUMPTION: Transcript Retention Default\] A 30-day default retention window for raw audio transcript text files provides sufficient runway for retrospective auditing while keeping disk usage lightweight.
@@ -873,6 +883,28 @@ Refine which stored material is worth surfacing, so recall improves with use rat
   2. *Set by PM decision (16 sites):* success-metric targets SM-1 ≥20%, SM-3 ≥7/10, SM-4 ≥80%, SM-6 ≥90%, SM-7 ≥95%, SM-8 ≥80%, SM-9 ≥90%, and the FR-12 question-ratio ≥80%, all recorded as provisional in §11; operational thresholds ±15 min harvest tolerance (FR-02), ≥2 consecutive sprints before a delegation experiment (FR-15), and >65% calendar density for the workload alert (FR-16, matching the figure UJ-9 already narrates).  
   3. *Man-Hour Cost formula defined* as attendees × duration\_hours × blended\_hourly\_rate across FR-03, UJ-3, and the Glossary, with the blended rate a single PM-configured figure in \~/.pm-ai/config.toml rather than per-attendee salary data \- keeping compensation out of the telemetry store.  
   4. *pm-ai Performance Index deferred:* FR-10 promised a composite index it never defined. The weekly action-count aggregation is retained and specified; the composite is moved to §10 Open Questions with a candidate definition to evaluate against real usage.
+
+> * **2026-10-09 (Documentation Sync Against the Spec and the Build \- v0.15.0):** A drift review found twenty-four places where this document still described states that the functional spec, the architecture spine, or the shipped code had since replaced. None of the decisions below was taken in this revision; each was taken on the date given and is propagated here so the log's last word matches what is built. The earlier entries that recorded the superseded states are left as written.
+
+  1. *Two-file encrypted set and the 600 rule (2026-08-22, 2026-08-23; §1, §2.1, §6, NFR-08, NFR-09, NFR-10):* The encrypted set narrowed to exactly two files — the API credentials in `~/.pm-ai/private/config.json` and the PM's own voice notes in `~/.manager-ai/private/telegram_cache/`. operational.db, personal\_analytics.db, raw transcripts, the team-member records, the connector configuration and every index are plaintext at 600 permissions with full-disk encryption as the backstop. Nothing encrypted is a database, so no database cipher is a dependency. Supersedes the v0.9.0 encrypted set.
+
+  2. *Encryption switch is an environment variable, announced twice; the key is enrolled before first run (2026-08-24, 2026-08-25, 2026-09-25; NFR-08, §5):* The only way to run with encryption off is the `PM_AI_DISABLE_ENCRYPTION` environment variable, for one process; no config key, stored profile or surviving flag may do it, and a restart restores encryption unconditionally. While it is off, a console warning prints when the writer-owning process composes and a security event-log entry is written immediately before the first protected plaintext write — if the entry cannot be written, neither is the file. The master key is enrolled with `pm-ai key enrol` before first run; pm-ai never mints one, fetches it lazily, `pm-ai doctor` tells an absent key from an unreachable keychain, and secret state is always written before the non-secret state that points at it. Supersedes the v0.9.0 debug-toggle rule.
+
+  3. *Project memory is machine-local; backup is out of scope (2026-09-03; §2.1, NFR-11):* Only `rules/` and `skills/` in `.project-ai/` are committed. `memory/` — the daily dashboard, commitments ledger, meeting records and event log — and `transcripts/` are gitignored by directory name, because merging two clones' copies of an append-only ledger would falsify the mechanics the ledger rests on. The v0.6.1 purpose "persist commitments across git clones" no longer holds: project aggregations and retrospective counts are per machine. Truth and Operational state remain declared backup targets, but no backup mechanism ships in v1.
+
+  4. *Captures are plaintext and the guard asks git (2026-08-22; §2.1, NFR-09):* A capture's exposure was always publication to a repository, not the disk, so transcripts are protected by exclusion from version control rather than a cipher. Before writing, the daemon asks git itself — `check-ignore` for the rules and `ls-files` for the index — instead of reading `.gitignore` text, and refuses only when a repository is demonstrably present and cannot be asked. git is optional; its absence never blocks recording a meeting. Supersedes the v0.12.0 "verifies the rule" wording.
+
+  5. *Three commitment verdicts, no inquiry on blindness, coverage as a receipt (2026-08-22, 2026-09-25; FR-34, Glossary):* An overdue commitment resolves by what pm-ai attempted: looked and found nothing is \[BROKEN\]; never looked is \[UNKNOWN\], temporary and self-resolving; attempted and failed is \[ERROR\], not self-resolving, surfaced by instance name in `pm-ai doctor` and the briefing, and outranking \[UNKNOWN\]. Neither \[UNKNOWN\] nor \[ERROR\] may trigger a pre-meeting inquiry to the promise-owner. A coverage window is a receipt for a request the provider answered, timed by pm-ai's own clock; an empty answer counts, while a failed request, unreadable rows or a backwards clock step do not. Extends the v0.11.0 \[UNKNOWN\] entry.
+
+  6. *Retry bounded by the kind of failure (2026-08-22; FR-02, FR-04):* Transient failures back off and retry. A failure that cannot succeed until a human acts — expired credential, revoked consent, moved repository, broken configuration — stops retrying and becomes \[ERROR\] naming the instance, so a dead connector never reads as a pending retry forever.
+
+  7. *Event-log entries are Markdown ledger lines in the owning scope (2026-08-29; FR-02, FR-10, FR-35, Glossary):* Each event is one newline-terminated Markdown line carrying a minted entry id, written to the monthly `event_log/` segment of the scope that owns it — project, team-member, personal or application — not a JSON line in the personal scope. operational.db holds cursors, coverage receipts, dedup state, executed keys and staged proposals, never the events.
+
+  8. *Tier-3 index split (2026-08-27; §2.1, §6, NFR-08, FR-33, FR-34, Glossary):* `derived.db` became two files, one per rebuilding job: `event_index.db` for search over events, rules and meeting records, and `commitment_index.db` for the commitment index. The commitment index never lived in operational.db. Supersedes the v0.11.0 split into operational.db and derived.db.
+
+  9. *Sanitization at the model boundary (2026-09-23; §1, §6, FR-02, FR-36):* The sanitization firewall is enforced where a model is called — the model port accepts outside text only in sanitized form — rather than as a pre-parsing pass on ingest. The harvest pipeline persists the raw record untouched and the sanitized copy is produced at the point of model use. The non-destructive and raw-retention rules from v0.9.0 stand.
+
+  10. *Shipped connector-add shape (2026-10-09; FR-35, UJ-10):* The command is `pm-ai connector add <system> <instance>`, positional, with the credential typed at a hidden prompt rather than passed as a flag. For `graph` it asks four questions — app id, tenant, harvest window, first-run reach-back — and runs Microsoft's device-code sign-in. The token is sealed into the encrypted config.json first; the instance's settings are then written to `~/.pm-ai/connectors/<instance>.json` at 600, unencrypted. Supersedes the `--type … --domain` example.
 
 > * **2026-08-20 (No Self-Generated Code \- v0.14.2):** The last open component of the self-improvement framework — *"tests modular Python/Bash skills in a local sandbox"* — is resolved: **no code generation, and the sandbox work is deprioritised.**
 

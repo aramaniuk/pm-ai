@@ -286,7 +286,8 @@ Known debt this wave takes on, recorded so it is not discovered later:
 ## Open, raised by story 2f
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2f-segment-parser-and-deterministic-fold.md`
-  summary: `_ulid()` (`pm_ai/storage/service.py:215`) returns `"evt_" + secrets.token_hex(10)` — random, not time-sortable — while `ARCHITECTURE-SPINE.md:649` says these ids are "sortable by creation time". Either the minting gains a time prefix or the spine drops the claim.
+  summary: **RESOLVED 2026-10-09 in the architecture update run — the spine drops the claim.** `_ulid()` (`pm_ai/storage/service.py:215`) returns `"evt_" + secrets.token_hex(10)` — random, not time-sortable — while `ARCHITECTURE-SPINE.md:649` says these ids are "sortable by creation time". Either the minting gains a time prefix or the spine drops the claim.
+  resolution: Nothing wanted `id > cursor` pagination — arrival order is file order and every reader folds by `(occurred_at, entry_id)` — so the Identifiers row now says the ids are random surrogates and not time-sortable, and the minting is unchanged.
   evidence: AD-35's fold is `(occurred_at, entry_id)`, and it is deterministic either way because the id is stable once written — so nothing is broken today. The concrete risk is the `id > cursor` pagination the claim invites (incremental indexing in story 18, oldest-first selection in story 19, paged reads in 2h): with random ids that query silently returns the wrong set rather than failing.
   narrowed 2026-08-29: two arguments first made against a time-sortable id do not hold. It would **not** introduce a third clock — `append_event_log` reads `at` on the line before it mints, so a prefix would re-encode `ingested_at` rather than read a new clock. Its real cost is that `_ulid()` has three call sites and one, the `.part` staging name at `service.py:857`, has no clock in scope. What is also now settled: a time-sortable id would not have delivered arrival order anyway — 48-bit millisecond resolution buckets a fast batch and orders within it by the random tail. Arrival order is file order, and that is now documented on `parse_segment` and tested. So this question is narrowed to one thing only: does anything want `id > cursor` pagination? If not, drop the claim from the spine.
 
@@ -299,7 +300,7 @@ Known debt this wave takes on, recorded so it is not discovered later:
 ## Surfaced by the story-2 code review (2026-08-30)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2c-closed-entry-type-enumeration.md`
-  summary: AD-27 requires both closed vocabularies to be "versioned so parsers can read historical entries", and nothing implements it. A `GRAMMAR_VERSION` constant was removed by this review because it was written nowhere and read nowhere.
+  summary: **ASSIGNED 2026-10-09 to `2m`** — spec written, not built. AD-27 requires both closed vocabularies to be "versioned so parsers can read historical entries", and nothing implements it. A `GRAMMAR_VERSION` constant was removed by this review because it was written nowhere and read nowhere.
   evidence: Three review layers found it independently. The design choice is unmade: a version field on every line (honest, but a permanent per-record cost on a file meant to be grepped by hand), a per-segment header line (cheap, but the append rule says every line is a record), or a dated table mapping grammar changes to date ranges (free, but only correct if every change is dated and recorded). It becomes real the first time the entry grammar changes after something has written segments — which has not happened, since nothing is deployed.
 
 ## Deferred to later stories
@@ -377,7 +378,7 @@ Known debt this wave takes on, recorded so it is not discovered later:
 ## Deferred at the story-4a review gate (2026-09-02), second pass
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8e-sanitization-binds-at-the-boundary.md`
-  summary: Story `11b` wires the real transcript path and owes a confirmation that no path to a model bypasses `ModelPort` — an obligation `8e` hands it and nothing outside `8e` records. `11b` is a wave-2 slice with no spec yet.
+  summary: **ASSIGNED 2026-10-10 to `11b`** — spec written, not built. Story `11b` wires the real transcript path and owes a confirmation that no path to a model bypasses `ModelPort` — an obligation `8e` hands it and nothing outside `8e` records. `11b` is a wave-2 slice with no spec yet.
   evidence: `run_transcript_ingestion` (`pipelines.py:51,64`) reaches `extract()`, which calls `sanitize` itself and keeps the pair (`extraction.py:36,50-51,63-64`), but reaches `stage_proposal` rather than the harvest path. Under `8e`'s original persist design this was scoped out as uncovered; under the consumer-side design it is covered by the same chokepoint, so what remains for `11b` is narrower — confirming the transcript path reaches models only through the port, not building a second sanitization. `11a` also defers transcript binding to `11b`. Recorded because when `11b` is written the obligation is otherwise discoverable only by re-reading `8e`.
 
 - source_spec: `_bmad-output/implementation-artifacts/review-wave-1-2026-09-02.md` (finding A1)
@@ -432,7 +433,7 @@ transcript.
   evidence: `service.py:581` calls `sqlite3.connect(store, ...)` in `__init__` unconditionally. Measured 2026-09-15 by tracing `sqlite3.connect` through one `onboard_project` run on an empty `HOME`: `.pm-ai/private/operational.db` and its `-wal`/`-shm` sidecars exist afterwards. Since `4d`, `pm-ai doctor` also builds a bootstrap `StorageService`, so the command whose entire job is to report on a machine now creates a Tier-2 file on it. Nothing is corrupted and the file would be created on first real use anyway; what is wrong is that a diagnostic has a side effect, and that "no file's bytes change" is unassertable for any command without excluding sqlite's sidecars by name — which `test_project_onboarding.py` now does, and says why. The fix is a lazy connection opened on first operational use.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4k-project-onboarding.md`
-  summary: The exclusive claim leaves a `projects.toml.lock` in `~/.pm-ai/` that no scope tree declares.
+  summary: **ASSIGNED 2026-10-10 to `1r`** — spec written, not built. The exclusive claim leaves a `projects.toml.lock` in `~/.pm-ai/` that no scope tree declares.
   evidence: `pm_ai/platform/claims.py` creates it and deliberately never unlinks it — removing a lock file races a process that has already opened it and is waiting to lock it, after which two processes hold claims on different inodes and both believe they are alone. So the file is correct and permanent. What it is not is *declared*: AD-44's rule is that every persistent artifact is in exactly one of the three tiers, `RETENTION_MANAGED` or `DIAGNOSTIC_ONLY`, derived from the scope model, and this one is in none. It is empty and carries no data, so nothing leaks and no backup misses anything — but the set of files in `~/.pm-ai/` is no longer fully derivable from the trees, which is the property AD-44 exists to keep. Either declare it or give the claim a directory that is declared.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4d-project-registry.md`
@@ -473,7 +474,7 @@ transcript.
   resolution: There is no process-global registry left to leak. The AD-27 and AD-34 gates, and the connector conformance check, read `daemon.connectors` from the daemon they build, and `tests/connectors/test_registry.py`'s `_isolated_default` fixture is gone with the global it restored.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8d-connector-registry.md`
-  summary: `ConnectorRegistry.instances()` documents itself as what `doctor` lists without contacting anything, but `doctor.run_all` has no connector-membership probe and `instances()` has no production caller.
+  summary: **ASSIGNED 2026-10-09 to `4n`** — spec written, not built. `ConnectorRegistry.instances()` documents itself as what `doctor` lists without contacting anything, but `doctor.run_all` has no connector-membership probe and `instances()` has no production caller.
   evidence: The stated split — membership in `doctor`, reachability in `connector check` — exists only in the docstring. Either `doctor` gains the probe or the docstring stops promising it.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4j-cli-service-subcommands.md`
@@ -489,7 +490,7 @@ transcript.
   evidence: 8f moved absence-as-a-value into the port, which is where `4c` said it belonged once something declared it. Retiring it touches one call site, one test in `tests/surfaces/test_cli_dispatch.py`, and a by-name reference in this file. Left in place because 8f's task list names five files and `app/entry.py` is not one; its docstring was corrected so it no longer claims to do the translation.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
-  summary: `_append` still writes event-log and meeting segments at the umask, so the declared restricted mode never reaches them.
+  summary: **ASSIGNED 2026-10-09 to `1q`** — spec written, not built. `_append` still writes event-log and meeting segments at the umask, so the declared restricted mode never reaches them.
   evidence: `event_log/` and `meetings/` are declared gitignored in the PEOPLE tree, but ledger appends go through `path.open("a")` rather than `_publish`, which is where `restricted_mode` is consulted. Outside 8f's matrix, and it matters the moment the people enclave's segment modes do.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
@@ -501,7 +502,7 @@ transcript.
   evidence: `DuplicateConnector` says "Remove the entry from the sealed store" and `OrphanedCredential` says "enrol again"; `private/config.json` is encrypted under a keychain-held master key and there is no `connector remove`, no `connector list`, and no way to hand-edit it. The design deliberately reports the orphan rather than rolling back, which is right — but the state it chooses is currently a dead end. A `pm-ai connector remove` belongs with the disable clause 8b's Ask First already defers.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
-  summary: A GitLab project containing a slash cannot be enrolled, and `gitlab:<group>/<project>` would silently build an adapter for the wrong path.
+  summary: **ASSIGNED 2026-10-09 to `8o`** — spec written, not built. A GitLab project containing a slash cannot be enrolled, and `gitlab:<group>/<project>` would silently build an adapter for the wrong path.
   evidence: `_assert_nameable` forbids `/` because the instance becomes one path component of `connectors/`, while `wiring._enrolled_connectors` derives the project as `instance.split(":", 1)[1]`. Real GitLab projects are `group/project`. The coupling — the instance suffix *is* the project path — is undocumented, and 33a will hit the same question for Graph.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
@@ -517,7 +518,7 @@ transcript.
   evidence: The implementation is a single `_assert_git_excludes` call. It takes no `name`, so it never validates the member name `write_artifact` will, and it checks no directory writability — so an unwritable `connectors/` still orphans a credential on every attempt. Either narrow the docstring or widen the check.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
-  summary: `_append` still writes at the umask, so the declared restricted mode reaches two of the three writers.
+  summary: **ASSIGNED 2026-10-09 to `1q`** — spec written, not built. `_append` still writes at the umask, so the declared restricted mode reaches two of the three writers.
   evidence: `disclosure.md` is declared GITIGNORED in the application tree and goes through `append_disclosure` → `_append` → `path.open("a")`, never `_publish`, where `restricted_mode` is consulted. `write_artifact` and `write_capture` both honour the declaration; this one does not, which is the selective enforcement the mode rule was introduced to end.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
@@ -557,12 +558,12 @@ transcript.
   evidence: `test_a_live_access_token_is_reused_and_a_forced_refresh_is_not` covers what the adapter owns — `force_refresh` bypassing the cache so a page that 401s on a credential valid when the walk started gets a fresh token. "The page retried once; pages already walked retained" is paging behaviour, and 33a's frozen Never excludes all fetching ("No calendar, message or transcript fetching — 33b, 33d, 33e"). Nothing to fix here; `33b` must not treat the row as already satisfied.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33a-graph-device-code-auth.md`
-  summary: **Graph half RESOLVED 2026-10-09 in `8l`; GitLab half open.** No credential can be sealed through the shipped CLI, because `probe.PROBES` holds only `_gitlab` and that probe unconditionally refuses.
+  summary: **ASSIGNED 2026-10-09 to `8o (GitLab half)`** — spec written, not built. **Graph half RESOLVED 2026-10-09 in `8l`; GitLab half open.** No credential can be sealed through the shipped CLI, because `probe.PROBES` holds only `_gitlab` and that probe unconditionally refuses.
   resolution: `pm-ai connector add graph <instance>` no longer goes through `probe.PROBES`: it asks for the app id, tenant and both harvest widths, runs Microsoft's sign-in, runs the connector's own health check bounded at ten seconds (`GraphEnrolment` in `pm_ai/app/wiring.py`), and only then seals the sign-in and writes the row through `enrol_connector`. `tests/slice/test_connector_add_graph.py` covers it. `pm-ai connector add gitlab` still always refuses — that half is the "Split out of step 9" entry at the end of this file.
   evidence: Pre-existing from `8b`, surfaced by 33a's read-back review rather than caused by it. `pm_ai/connectors/probe.py._gitlab` raises `ProbeFailed` on every call — the deliberate "refuse rather than seal a credential nobody checked" choice — and it is the only entry in the table, so `pm-ai connector add gitlab ...` always refuses and `pm-ai connector add --type graph` has no probe at all. The read-back is therefore verified against a store `enrol_connector` wrote directly, not against one the CLI produced. 33a's Never forbids adding a Graph probe here; it arrives with the transport in `33b`.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33a-graph-device-code-auth.md`
-  summary: `pm_ai.connectors.graph` and `pm_ai.connectors.transcripts.graph` are two importable modules whose last segment is `graph`.
+  summary: **ASSIGNED 2026-10-10 to `33e`** — spec written, not built. `pm_ai.connectors.graph` and `pm_ai.connectors.transcripts.graph` are two importable modules whose last segment is `graph`.
   evidence: 33a's own Code Map cites the second as the `_fake_api` that `33e` replaces "using this auth", so both will be live in the same slice. Two same-named leaves in one package tree read ambiguously in imports and in tracebacks. Cosmetic today; cheapest to rename before `33e` has call sites in both.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33a-graph-device-code-auth.md`
@@ -570,11 +571,11 @@ transcript.
   evidence: Decision on CAP-35: `SPEC.md` scopes the ten seconds to `pm-ai connector add`, "runs a live health probe within 10 seconds", with a human at the keyboard, and `ConnectorRegistry.check_health` extends the same deadline to `pm-ai connector check`. Both are interactive. `GraphAuthPort.check_health` is neither, and the Graph harvest is an asynchronous background fetch with nobody waiting — a latency bound there measures nothing and would refuse a slow but working provider. Where a bound is owed it is inherited for free: `33b`'s `GraphConnector` is a `ConnectorPort` in the registry, and this call happens inside its probe. Decision on the mid-harvest row: narrowed to `force_refresh` reaching the provider and `CredentialStale` staying distinct from `GraphUnreachable`. `33b`'s matrix already carried "Token expires mid-fetch | 401 on page 3 | `33a`'s silent refresh, the page retried once; earlier pages retained", so the duplication was the whole defect — a row in a `done` spec reading as satisfied when its paging half was unbuilt. All 17 rows of 33a's matrix are now covered by tests that ran and passed.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33b-graph-calendar-fetch.md`
-  summary: `urllib.request` is now one of this codebase's HTTP clients and the `http-confined-to-adapters` contract cannot name it, so a misplaced adapter could speak HTTP from `pm_ai.platform` and pass the gate.
+  summary: **NOTE 2026-10-09:** slice `8n` widens this (a second standard-library HTTP client). `urllib.request` is now one of this codebase's HTTP clients and the `http-confined-to-adapters` contract cannot name it, so a misplaced adapter could speak HTTP from `pm_ai.platform` and pass the gate.
   evidence: `pm_ai/connectors/graph/client.py._urllib_transport` reaches Graph over the standard library rather than a declared client, which adds no pinned dependency and sits in a layer the contract already permits. Adding `urllib.request` to the contract was attempted and refused by import-linter: "Invalid forbidden module urllib.request: subpackages of external packages are not valid." Forbidding the parent `urllib` would forbid `urllib.parse` — a URL parser — in `surfaces`, `storage` and `platform`, which is an overreach that would be worked around rather than obeyed. Nothing in those three layers imports `urllib` at all today (measured: `grep -rn urllib pm_ai/` finds only the Graph client), and `core-is-io-free` does forbid `urllib` in `pm_ai.core`. The residual hole needs an AST check of the kind `tests/architecture/test_static_rules.py` already applies to `open()` and `subprocess` — a call-level rule, since this is exactly the class of gap the msal entry in that contract was added to close.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33b-graph-calendar-fetch.md`
-  summary: The story's Design Notes ask for recorded real Graph payloads as fixtures; the shapes are recorded and no captured response body is.
+  summary: **ASSIGNED 2026-10-09 to `33d and 33f (message bodies; the calendar body stays open)`** — spec written, not built. The story's Design Notes ask for recorded real Graph payloads as fixtures; the shapes are recorded and no captured response body is.
   evidence: `tests/connectors/test_graph_calendar_fetch.py` builds its fixtures to slice 0's measured `calendarView` shape — the thirty-nine-key event, the naive `dateTime` with seven fractional digits, `timeZone` in a separate field, `seriesMasterId` and `occurrenceId` both present — but the values are written by hand, because slice 0 was deliberately generalised for a public repository and kept no body. The Design Note's argument stands and is unmet: the shapes that break a fetcher are the ones nobody would invent, and three it names specifically — `isAllDay` midnight-to-midnight in a shifting zone, a cancelled occurrence inside a series, `@odata.nextLink` on a response that looks complete — are covered only as this file imagines them. Closing it needs a redaction-safe capture step in the spike (ids, subjects and attendees replaced, structure kept), not a new story.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33b-graph-calendar-fetch.md`
@@ -658,11 +659,11 @@ transcript.
   evidence: The test module's opening docstring argues for a fixed offset so nothing depends on the optional `tzdata` extra, which is right for every row that only needs a local wall-clock. But `_local` decides whether a meeting carries its date by comparing `local.date()` against `now.astimezone(tz).date()`, and the local date of an instant is exactly what a DST boundary shifts — so the midnight-spanning row and the dated-meeting rule are untested at the one boundary where they are interesting. `render_dashboard` takes a bare `tzinfo`, so which zone object arrives is `23b`'s decision when it resolves `display_timezone`; nothing in `23a` states that the caller owes a real zone rather than a fixed offset. Bounded: a wrong answer here misplaces a date label on one meeting, it does not drop a meeting.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23a-dashboard-sections.md`
-  summary: Neither the meeting list, the signal list, nor an excerpt is capped, in a file whose stated purpose is to be skimmed at 07:00.
+  summary: **ASSIGNED 2026-10-09 to `23c (the signal list; the meeting list stays open)`** — spec written, not built. Neither the meeting list, the signal list, nor an excerpt is capped, in a file whose stated purpose is to be skimmed at 07:00.
   evidence: `_signal_line` interpolates `fields.get("excerpt")` whole (`rendering.py:441-447`), and both section bodies render one line per input with no limit. A forty-meeting day, or a provider excerpt of several kilobytes, reaches `daily_dashboard.md` in full. No clause in the frozen block sets a budget and none of the seventeen matrix rows names one, so inventing a truncation rule during a review patch would be this codebase answering a question nobody asked — and a silently truncated dashboard is its own honesty problem, since a cut list is a claim about the day that the cut made false. Recorded because the decision has no owner: `23b` writes the file and `23c` fills the second section, and neither spec mentions length.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23a-dashboard-sections.md`
-  summary: `MESSAGE_WINDOW` is a fixed 24 hours while its docstring justifies the width as "a signal older than the last render has already been past the PM once" — two different rules that agree only while the dashboard renders daily.
+  summary: **ASSIGNED 2026-10-10 to `9b`** — spec written, not built. `MESSAGE_WINDOW` is a fixed 24 hours while its docstring justifies the width as "a signal older than the last render has already been past the PM once" — two different rules that agree only while the dashboard renders daily.
   evidence: The stated rationale is relative to the previous render; the constant is absolute. They coincide on the schedule `9a` will establish and diverge the moment it does not run — a laptop closed over a long weekend renders Tuesday with a window that silently excludes Saturday and Sunday, and the empty-section string still says only that nothing was found between two timestamps, which is true and incomplete. Not `23a`'s to fix: nothing records when the last render happened, and the artifact that would is `9a`'s scheduled tick in wave 2. Recorded so that whoever gives the renderer a last-render instant knows this docstring is already written against it.
 
 ## Surfaced by the story-23d review (2026-09-14)
@@ -676,7 +677,7 @@ transcript.
   evidence: `tests/core/test_rendering_sections.py:57-161` and `tests/core/test_project_rendering.py` carry near-identical copies of all three helpers. The divergence is not hypothetical: 23a's `message()` takes `at: datetime | str | None`, which is how it reaches `_ingested_at`'s ABSENT and UNREADABLE branches, while 23d's takes a `datetime` only — so no project-side test can produce an entry whose `ingested_at` is missing or unparseable, and the `_window_notes` footnote is unexercised there. The byte-identity assertion between the two files is therefore made by two different parsers over two different input vocabularies. A shared `tests/core/conftest.py` is the fix, and it is a test-only refactor with no production consequence, which is why it is recorded rather than done inside this slice.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23d-project-render-scope-wall.md`
-  summary: `entries` has no failure representation while `meetings` does, so an event-log read that fails renders as an affirmative "no signals in the window" in both dashboards.
+  summary: **ASSIGNED 2026-10-09 to `23c`** — spec written, not built. `entries` has no failure representation while `meetings` does, so an event-log read that fails renders as an affirmative "no signals in the window" in both dashboards.
   evidence: `render_dashboard` and `render_project_dashboard` both take `Sequence[Meeting] | HarvestFailure` for the calendar — the union exists because "the calendar could not be read" and "no meetings today" are different facts, and the module docstring argues the point at length. `entries` is a bare `Sequence[EventEntry]`, so the same distinction is unavailable one parameter over: a caller that failed to read the log can only pass an empty sequence, and `_proactive_enablement` then prints `_no_signals`, which names a window and asserts nothing was found in it. Inherited from `23a` rather than introduced here — 23d copies the shape faithfully. Nil consequence today because no caller exists (`23b` is unbuilt) and the log is a local file read that either succeeds or raises. It becomes real when something reads the log across a boundary that can fail partially, and the fix is the same union `8a` already established for harvests.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23d-project-render-scope-wall.md`
@@ -692,7 +693,7 @@ transcript.
 ## Surfaced by the story-1n review (2026-09-15)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1n-project-artifacts-go-machine-local.md`
-  summary: `_append` is the one writer that ignores `restricted_mode`, so every declared-gitignored append-only ledger lands at the operator's umask while the declaration says `0600`.
+  summary: **ASSIGNED 2026-10-09 to `1q`** — spec written, not built. `_append` is the one writer that ignores `restricted_mode`, so every declared-gitignored append-only ledger lands at the operator's umask while the declaration says `0600`.
   evidence: `restricted_mode` derives from `GITIGNORED` (`storage_tiers.py:194`), and its two sibling writers adopt the answer — `_replace` and `_create_exclusively` both take a `declared_mode`. `_append` (`service.py:880`) takes none and writes through a bare `path.open("a")`, so a segment is declared `0600` and created at the umask, typically `0644`. Measured during the 1n review: `restricted_mode(PROJECT, "event_log/")` returns `0o600` and the segment on disk is `0o644`, with the full suite green across the divergence. **Pre-existing rather than introduced here** — people-scope `event_log/` and the application `disclosure.md` were already gitignored and already landed at the umask — which is why 1n corrected its own change-log claim to what the code does instead of changing the writer. What 1n adds is a fourth subject and the first test that measures the mode rather than the declaration. The fix is a `declared_mode` on `_append` and the mode applied at segment creation, not on every append; it belongs with whichever slice next touches the single writer's file-creation path. Consequence is confidentiality-shaped and bounded: the files are machine-local by declaration and group- and world-readable in fact, on a single-user laptop.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1n-project-artifacts-go-machine-local.md`
@@ -750,7 +751,7 @@ transcript.
   evidence: The matrix row "Prompt assembled from fragments" is satisfied for `external`, whose `Sequence[Sanitized]` refuses a joined string. It cannot be satisfied for `instructions`, because the same matrix declares that internally-sourced text "may be `str`" — pm-ai writes that prose about itself and there is no outside author to distrust. So `complete(instructions=f"Summarise: {provider_text}", external=())` type-checks. This is a bound on what the chokepoint can promise, not a defect in it: closing it needs a distinct type for internal prose, which would be a different design than the one approved. Recorded so the port's guarantee is not read as wider than it is.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8e-sanitization-binds-at-the-boundary.md`
-  summary: The uncovered transcript route is `Extraction.detail`, an untyped `dict`, not only the two bare `str` fields 8e's named limit pins.
+  summary: **ASSIGNED 2026-10-10 to `11b`** — spec written, not built. The uncovered transcript route is `Extraction.detail`, an untyped `dict`, not only the two bare `str` fields 8e's named limit pins.
   evidence: `extraction.py` builds `detail` from the **raw** utterance — `m["rest"]` comes off `u.text`, never `clean.for_model` — and `pipelines.py` sends it outbound as `payload={"comment": ex.detail["rest"]}`. 8e's `Scoped out` paragraph names this, and its test pins `raw`/`for_model` as `str`, but nothing pins the dict. A bare, unparameterised `dict` field (`extraction.py:30`) is a hole no port signature can close, so `11b` must retype the carrier rather than add a second sanitization. Sharpens the 11b obligation already recorded at the 4a review gate.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8e-sanitization-binds-at-the-boundary.md`
@@ -819,11 +820,11 @@ transcript.
   evidence: 8i revised four connector-side docstrings and missed these three, which sit on the read path a future reader of these records will follow. Not bundled into 4l because they belong to a merged slice and one commit per slice is this repo's convention. `SPEC.md` carries the same tension in its coverage clause, but it is re-rendered from the memlog per AGENTS.md, so it needs a re-derive rather than an edit.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8i-coverage-earned-by-an-empty-fetch.md`
-  summary: A quiet project now writes one coverage row per harvest forever — the insert de-duplicates only on an exact `(instance, start, end)` match, and nothing compacts or prunes them.
+  summary: **ASSIGNED 2026-10-10 to `9a (prunes rows older than 90 days)`** — spec written, not built. A quiet project now writes one coverage row per harvest forever — the insert de-duplicates only on an exact `(instance, start, end)` match, and nothing compacts or prunes them.
   evidence: Before 8i a quiet project wrote none, so this is new pressure the slice created rather than an existing one it inherited: six rows per instance per day, and the fold story 16 owns will union an unbounded list. Raised independently by two review lenses. The fix belongs with whoever builds that fold, since the retention horizon and the fold's gap tolerance are the same question asked twice.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8i-coverage-earned-by-an-empty-fetch.md`
-  summary: `HarvestResult` states that an empty outcome proves a request completed, but the type cannot see that — the outcome is derived from "mapped nothing and refused nothing", which a connector could report without having fetched at all.
+  summary: **ASSIGNED 2026-10-09 to `8p`** — spec written, not built. `HarvestResult` states that an empty outcome proves a request completed, but the type cannot see that — the outcome is derived from "mapped nothing and refused nothing", which a connector could report without having fetched at all.
   evidence: The guard is honour-system across every future connector: the shipped two both measure honestly, and nothing checks it. The connector already knows the instant it reached the provider, so carrying that on the result would make the exemption checkable rather than trusted. Recorded rather than fixed because it widens the persisted shape, which 8i's matrix says it does not touch.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4l-every-enrolled-project.md`
@@ -857,15 +858,15 @@ transcript.
 ## Decided in the AD-27 / AD-48 update, 2026-09-27 — owed by `33d`
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27, AD-48)
-  summary: `33d` builds what the grammar decision needs before it writes its first real line — one encode/decode pair for payload line fields in `domain`, the pin test (payload field names and types, self-action required fields, both enumerations) and a round-trip test over every payload class, the list encoding (AD-27), and AD-48's list declaration — lists declared, trusted only for now, untrusted refused at import.
+  summary: **ASSIGNED 2026-10-09 to `2m`** — spec written, not built. `33d` builds what the grammar decision needs before it writes its first real line — one encode/decode pair for payload line fields in `domain`, the pin test (payload field names and types, self-action required fields, both enumerations) and a round-trip test over every payload class, the list encoding (AD-27), and AD-48's list declaration — lists declared, trusted only for now, untrusted refused at import.
   evidence: The architecture marks all of it not yet built. Measured by the gate reviewers on 2026-09-27: `_payload_fields` writes a tuple as its Python repr; `_assert_payload_text_is_declared` refuses a `tuple[str, ...]` declaration and lets one go undeclared; no test pins field names, since the nearest ones read names from the dataclass at test time. The comment at `domain/event_entries.py:61-70` still describes the versioning choice as open.
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27)
-  summary: The dashboard's message line reads `channel` and `excerpt`, but the writer stores `p.channel` and `p.excerpt`, so every real message would render with neither — silently, because a missing field reads as absent.
+  summary: **ASSIGNED 2026-10-09 to `2m`** — spec written, not built. The dashboard's message line reads `channel` and `excerpt`, but the writer stores `p.channel` and `p.excerpt`, so every real message would render with neither — silently, because a missing field reads as absent.
   evidence: `pm_ai/core/rendering.py:655-665` (`_signal_line`) looks both up by literal unprefixed name; `storage/service.py` `_payload_fields` prefixes every payload field with `p.`; the rendering tests build entries by hand with unprefixed names, so they pass. Latent until `33d` writes real message entries. Fixed by the encode/decode pair above; `23c` must not add a second literal lookup.
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-27)
-  summary: `MessagePayload.mentions` holds Graph user ids only, defaults to `None`, and is declared trusted on that basis — so `33d` must refuse, not fall back, when a mention carries no user id (a tag or channel mention).
+  summary: **ASSIGNED 2026-10-09 to `33d (a mention without a user id is left out; the row stands)`** — spec written, not built. `MessagePayload.mentions` holds Graph user ids only, defaults to `None`, and is declared trusted on that basis — so `33d` must refuse, not fall back, when a mention carries no user id (a tag or channel mention).
   evidence: Decided 2026-09-27 (ids, not display names; the PM-was-mentioned answer derived when read). The adversarial reviewer noted nothing checks that the field holds only ids, and tag and channel mentions tempt a fallback to typed display names — text a person typed, which would make the trusted declaration false.
 
 - source_spec: `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md` (AD-48)
@@ -875,39 +876,173 @@ transcript.
 ## Surfaced by the 4m review (2026-10-08)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4m-project-selection-order.md`
-  summary: With no project enrolled at all, commands aimed at the personal or application scope — the personal dashboard, `goal set`, `config show` — are still refused with "enrol a project first".
+  summary: **ASSIGNED 2026-10-09 to `4o (pending Andrei)`** — spec written, not built. With no project enrolled at all, commands aimed at the personal or application scope — the personal dashboard, `goal set`, `config show` — are still refused with "enrol a project first".
   evidence: Found by the edge-case reviewer: `_compose` returns the registry failure before it reads the command's target. 4m's intent says such a command is "never refused for want of a project"; 4l's frozen matrix says the nothing-enrolled case is "unchanged: say nothing is enrolled and how to enrol". The two disagree, so it was left for Andrei to decide rather than fixed either way.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4m-project-selection-order.md`
-  summary: A daemon can now act in the personal or application scope, and two paths that read `daemon.scope` have never run that way — `run_harvest`'s empty-batch write (`pipelines.py:164`) and `run_transcript_ingestion`'s citation guard (`:193`, `into=daemon.scope`).
+  summary: **ASSIGNED 2026-10-10 to `11b (the citation guard) and 9a (the empty-batch receipt)`** — spec written, not built. A daemon can now act in the personal or application scope, and two paths that read `daemon.scope` have never run that way — `run_harvest`'s empty-batch write (`pipelines.py:164`) and `run_transcript_ingestion`'s citation guard (`:193`, `into=daemon.scope`).
   evidence: Latent: no command calls either path today (checked 2026-10-08), and an empty batch appends no line. `9a` (scheduled harvest) and `11b` (transcript path) are the first callers, and must decide where a harvest that is not about one project records itself and which scope a transcript is cited into.
 
 ## Surfaced by story 8j (2026-10-08)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8j-rotated-tokens-are-kept.md`
-  summary: AD-39 contradicts itself about who persists a rotated credential, and the spine needs the architecture skill to settle it.
+  summary: **RESOLVED 2026-10-09 in the architecture update run.** AD-39 contradicts itself about who persists a rotated credential, and the spine needs the architecture skill to settle it.
+  resolution: AD-39's custody bullet now says a rotated credential leaves the connector only through the store the composition root handed it, sealed under the shared lock for that instance; "never writes one itself" and the "admitted limit … owed by 8b" are withdrawn; the second bullet keeps cadence with the scheduler and says a connector never prompts — sign-in is a foreground command (slice `8m`) or a Proposal once story 13 exists. The "Two compliant custodians" row is struck as closed by `8j`.
   evidence: AD-39's revised custody bullet (2026-09-23) puts sign-in, refresh and rotation in the connector and custody in the daemon, and says the composition root injects the store a connector writes to. Its next bullet still says "A connector never persists, refreshes, or prompts for a credential." Since `8j` the Graph connector refreshes and hands the rotated token to the store it was given, which the custody bullet allows and the second bullet forbids. The custody bullet's "Admitted limit … owed by story `8b`" is also stale: the write-back exists now, in `8j`. The Open Risks row "Two compliant custodians of the sealed credential store" describes the state before `8j`. All three are spine text, so they change through the architecture skill rather than by hand.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8j-rotated-tokens-are-kept.md`
-  summary: A harvest that finds the credentials file busy records a non-retryable failure.
+  summary: **ASSIGNED 2026-10-10 to `9a`** — spec written, not built. A harvest that finds the credentials file busy records a non-retryable failure.
   evidence: `CredentialStoreBusy` is a `GraphAuthError`, so `GraphCalendarFetch.fetch` (`pm_ai/connectors/graph/calendar.py`) records it with `retryable=False`, the same as a stale credential. When nothing was rotated, waiting does clear it, so the failure should be retryable in that case. The failure text still says "busy", and the next scheduled run tries again, so it is not silent.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8j-rotated-tokens-are-kept.md`
-  summary: There is no way to redo the sign-in for a Graph connector that is already enrolled, so the remedy for a lost rotated token names a step pm-ai cannot perform.
+  summary: **ASSIGNED 2026-10-09 to `8m`** — spec written, not built. There is no way to redo the sign-in for a Graph connector that is already enrolled, so the remedy for a lost rotated token names a step pm-ai cannot perform.
   evidence: When Microsoft has rotated a refresh token and the replacement could not be saved — the credentials file busy past the wait, a failed write, or the connector's entry missing — the token on disk is retired and the stored sign-in has to be redone. `enrol_connector` refuses an instance that is already enrolled, `probe.PROBES` has no Graph probe, and no command runs the device-code sign-in for an existing instance. The messages now say exactly that rather than "sign in again" or "enrol again". AD-39 says re-consent is a Proposal (AD-13) staged on both surfaces; nothing builds it. Whichever slice builds re-consent owns this, and the remedy text in `pm_ai/connectors/graph/auth.py` (`_REDO_SIGN_IN`) should then name the command.
   also: Remedies written before 8j have the same unreachable step — "Sign in again" and "enrol again" for a stale or declined credential and for partial consent (`pm_ai/connectors/graph/auth.py`, near lines 697, 851, 869, 1342, 1399; found by the 8j implementer and left alone as outside its scope). They should change together with whatever builds the re-sign-in path.
 
 ## Split out of step 9 (`connector add graph`) at routing, 2026-10-09
 
 - source_spec: none
-  summary: A command to redo the Microsoft sign-in for a Graph connector that is already enrolled (`pm-ai connector sign-in <instance>` or similar).
+  summary: **ASSIGNED 2026-10-09 to `8m`** — spec written, not built. A command to redo the Microsoft sign-in for a Graph connector that is already enrolled (`pm-ai connector sign-in <instance>` or similar).
   evidence: Split from step 9 by Andrei's choice of the smallest slice. Cheap on step 9's sign-in path: `replace_credential` already replaces one instance's credential under the claim, and `GraphDeviceCodeAuth.sign_in` writes through whatever store it is given, so a `SealedRefreshTokenStore` makes its own write the replacement. Closes the 8j entry above; `_REDO_SIGN_IN` and the older remedies in `connectors/graph/auth.py` then name the command.
 
 - source_spec: none
-  summary: `pm-ai connector add gitlab` always refuses, because `probe._gitlab` refuses every token on purpose and GitLab has no real transport.
+  summary: **ASSIGNED 2026-10-09 to `8o`** — spec written, not built. `pm-ai connector add gitlab` always refuses, because `probe._gitlab` refuses every token on purpose and GitLab has no real transport.
   evidence: Split from step 9; same gap as the 33a entry above (`probe.PROBES`). A real probe needs the GitLab transport (`connectors/gitlab.py` reaches through `_stubbed_reach`) and a host setting for self-managed instances, so it is its own, larger slice.
 
 - source_spec: none
-  summary: `pm-ai setup` has no connector step, so it can end healthy on a machine with no working connector.
+  summary: **ASSIGNED 2026-10-09 to `4p (the step) and 4n (the closing sentence)`** — spec written, not built. `pm-ai setup` has no connector step, so it can end healthy on a machine with no working connector.
   evidence: Split from step 9. `_setup` (`surfaces/cli/dispatch.py`) runs key, project and `config.toml` steps only; the 33c entry above warns of exactly this. Once `connector add graph` works, setup can offer it as a fourth step.
+
+## Surfaced during wave-2 preparation (2026-10-09)
+
+- source_spec: none
+  summary: Every interpreter uv manages on the development machine is an x86_64 build running under Rosetta 2 on an Apple M3 Pro, so every timing recorded in this repository (8h's budgets, the one-minute suite) and every native extension built here (`sqlite-vec`, `watchdog`) is for the emulated architecture, not the Apple Silicon baseline the spec names.
+  evidence: Measured 2026-10-09: `uname -m` → `arm64`, `machdep.cpu.brand_string` → `Apple M3 Pro`, 18 GB; `uv run python -c 'import platform; print(platform.machine())'` → `x86_64`; `uv python list --only-installed` shows only `macos-x86_64-none` builds of 3.13, 3.14 and 3.15; the `watchdog` extension built today is a Mach-O x86_64 bundle. Not a defect in pm-ai — a fact about the machine the budgets were set on. Switching to an arm64 interpreter (`uv python install cpython-3.14-macos-aarch64-none`, then `uv sync --extra runtime`) changes no rule, since both builds ship the same Unicode tables, but it re-baselines every timing, so 8h's budget figures are re-measured in the same change. Belongs with whichever slice first needs a local model (story 7), where emulation is the difference between usable and not; recorded now so the 16 GB Apple Silicon hardware floor is never judged against a Rosetta measurement.
+
+## Surfaced while writing the wave-2 specs (2026-10-09)
+
+Found by the spec writers while reading the code each slice touches. Each names the slice that owns it, or says it has none.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md`
+  summary: A ledger segment created before `1q` keeps whatever mode the umask gave it; nothing reports it and no migration changes it.
+  evidence: `1q` applies the declared mode only when it creates a file, by decision, so a segment already on disk at `0644` stays there. `doctor` would need to walk every project's and person's ledger directory to say so, which is a probe of its own. No owner.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4n-doctor-and-setup-name-the-connectors.md`
+  summary: `doctor`'s `connectors` line lists an enabled row of a known system even when composition would not build it (a Graph row missing a harvest width, say); the build's stderr warning is the only place that reason appears.
+  evidence: The line reads enrolment rows, not the built registry, because setup's closing report and a `doctor` run from outside every project folder have no daemon to ask. A row that cannot build is therefore listed as enrolled. Owner: whichever slice gives `doctor` a build-time reason per row.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/23c-proactive-enablement-from-messages.md`
+  summary: `23b`'s frozen matrix row "Malformed event-log segment → refused, exit 3" is superseded by `23c`, which writes the dashboard with the section stating that the log could not be read and why — pending Andrei's confirmation.
+  evidence: `run_dashboard` (`pm_ai/app/pipelines.py:292`) lets a parse failure propagate today, and `tests/slice/test_dashboard_slice.py:408` pins the refusal. `23c` flips that test and must append a dated line to `23b`'s Spec Change Log when it lands.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/23c-proactive-enablement-from-messages.md`
+  summary: A message excerpt's length is bounded only by the 16,384-character ledger-line limit; `33d` decides how long an excerpt it writes.
+  evidence: `MessagePayload.excerpt` (`pm_ai/domain/events.py:115`) declares no length; the writer refuses a line over `MAX_ENTRY_LENGTH` (`pm_ai/domain/event_entries.py:166`). The renderer truncates nothing.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2m-payload-line-grammar.md`
+  summary: `tests/architecture/test_sanitize_boundary.py:937-939` still says the versioning clause is unmet; `2m`'s task list corrects it.
+  evidence: Settled in the spine on 2026-09-27 (additive only, no marker). Only needed if that task is dropped.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8m-graph-sign-in.md`
+  summary: AD-39's re-consent Proposal is still unbuilt; `pm-ai connector sign-in` is the interim, and story 13 replaces the remedy text with a staged item on both surfaces.
+  evidence: The spine (AD-39, 2026-10-09 wording) names the command as the foreground path and the Proposal as the eventual one. Owner: story 13.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8m-graph-sign-in.md`
+  summary: `pm_ai/core/enrolment.py:135,148` still say "enrol again" for the master key, meaning `pm-ai key enrol`; the remedy should name the command.
+  evidence: Same shape as the Graph remedies `8m` corrects, one layer over. Owner: `8m` if cheap, else the next slice touching key enrolment.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: One coverage window per connector instance cannot express per-resource coverage, so a channel or chat that fails withholds the calendar's window too until the failing resource is fixed or delisted.
+  evidence: `HarvestResult` carries one `CoverageWindow | None`; `33d`/`33f` claim none for a run in which any listed resource failed, because the connector may not vouch for a resource it could not read. Honest and coarse. Owner: whichever slice first needs per-resource verdicts (story 16's fold is the candidate).
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: The alias table is keyed `(system, handle)`; Graph messages supply user ids and the calendar supplies e-mail addresses, so one person resolves as two actors until an alias can carry both.
+  evidence: `pm_ai/domain/identity.py` `ALIASES` keys on one handle per system. Owner: the slice that puts the alias table in Tier 1.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
+  summary: Chat positions in the connector's cursor are never pruned, so a chat that ends keeps its entry forever.
+  evidence: The cursor carries one position per chat id; nothing removes one. Bounded by the number of chats, not by time. No owner.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
+  summary: A meeting's chat is filed in the personal scope and is not joined to its calendar meeting or project.
+  evidence: Chats carry no project mapping; the meeting chat's id is not the meeting's id. Owner: wave-2 meeting work (`33e`/`11b`) or a later slice that maps meeting chats to meetings.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: A thread with more inline replies than one page is refused by name; no reply paging is built.
+  evidence: Replies arrive inline with `$expand=replies`, one page; `33d` emits what it got and files a refusal naming the thread. Owner: a later slice if real threads exceed a page.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: HTML→text drops tags and attributes, so an injection carried only in markup (an attribute, a comment) is not in the stored excerpt; the raw payload is retained per AD-29.
+  evidence: Standard-library `html.parser` conversion keeps text nodes only. Recorded so the sanitization limits list stays complete; no owner.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md`
+  summary: The GitLab adapter derives its instance name from the project path, so an enrolled `gitlab:alpha` for `acme/web` calls itself `gitlab:acme/web` and every cursor save is refused; and `SourceRef.parse` refuses a `/` in the scope slot, so a commit reference built from a provider path raises out of `harvest`. Both fixed by `8n`.
+  evidence: Measured 2026-10-09: `test_coverage_honesty.py:926` pins the refusal; `identity.py:160` raises `MalformedReference` for `gitlab:acme/web:commit:<sha>`. A connector cites the pm-ai project id, never the provider's path.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md`
+  summary: GitLab merge requests and events are not harvested at all — `gitlab.py` emits only `COMMIT_PUSHED` — so CAP-33's "verified via MR telemetry" has no GitLab input yet.
+  evidence: `8n` builds the commit transport only. Owner: its own slice, after `8n`.
+
+## Surfaced while writing the decision-dependent wave-2 specs (2026-10-10)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
+  summary: A project literally named `personal` would collide with personal-scope references (`graph:personal:message:…`), and the guard is a docstring, not a refusal.
+  evidence: `pm_ai/domain/identity.py:25-26` states the rule; `pm_ai/core/project_registry.py` refuses no such name (grepped 2026-10-10). Owner: the next slice touching project enrolment (`project add`) refuses the four scope-kind names as project ids.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md`
+  summary: No command clears a stale stored cursor; a connector whose cursor cannot be read refuses every run, non-retryable, naming a remedy that does not exist.
+  evidence: Graph (`pm_ai/connectors/graph/__init__.py:618-632`) and, after `8n`, GitLab both refuse an unreadable cursor by name; the cursor row lives in `operational.db`, which is not hand-editable. Owner: a `pm-ai connector reset <instance>` slice, with story 10a's queue if cursors move there.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
+  summary: Per-meeting transcript refusals are returned as values and nothing persists or surfaces them until `9a`'s daemon health line; a meeting that leaves the harvest window before Teams finished its transcript is never tried again (there is no on-demand fetch); a transcript created outside the 15-minute-widened occurrence window is refused by name; after a tenant-wide transcript-access refusal, three requests per meeting per run are still spent.
+  evidence: All four are stated limits in `33e`'s Design Notes, chosen for honesty per meeting over an early stop. Owner: an on-demand `pm-ai transcript fetch <meeting>` belongs with CAP-8's "fetch transcript for today's meeting" (story 11 proper); the early stop is a later optimisation.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: Graph VTT speaker labels are display names, not tenant account ids, so AD-32's "provider-issued speaker identity" is not met by a Graph transcript today: every Graph extraction stages until the alias table resolves names against the meeting's attendees — an unowned slice.
+  evidence: Microsoft's transcript content (`callTranscript` get, fetched 2026-10-10) carries `<v Speaker>` voice tags and a `speakerName`, never an id. `11b` keeps `TranscriptSource.GRAPH` for the file's provenance and lets the PM-handle equality test decide. Owner: the slice that puts the alias table in Tier 1 and resolves attendees.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: `Proposal.target` becomes optional for a promise, and `stage_proposal` is an upsert keyed `prp_<meeting>_<i>`, so re-ingestion idempotency rests on the capture-name guard rather than on the proposal store; `tests/slice/test_r4_gate_fixes.py:345,359` pin the old citation guard (`into=daemon.scope`) and invert under `11b`.
+  evidence: Today `pipelines.py` stages promises with an invented target (`gitlab:alpha:issue:0`), which a typed carrier cannot reproduce. Both facts are stated in `11b`; recorded so the proposal store's idempotency is revisited with story 13.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11c-transcript-drop-command.md`
+  summary: Three drop paths are deferred by name: a `.docx` drop (needs a parser dependency), a watched-folder drop (needs story 10a's watcher; the command stands in), and a drop into a team-member scope (`people:<id>`, refused until the team-member registry exists). No command re-ingests a stored capture after a failed ingestion.
+  evidence: AD-23 names `.docx` and the watched folder; `people` trees declare `transcripts/`. Owner: 10a for the folder; a later story-11 slice for `.docx`, `people` drops and re-ingestion.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md`
+  summary: **Half withdrawn 2026-10-10:** after the architecture gate narrowed AD-21 to a transport rule, a subcommand sent through the daemon (`dashboard` typed at the REPL) acks at 5 seconds and is the real job, so the acknowledgement and stream path is exercised for real in `4q`. Still open: no command reads a finished job's result after the REPL session that started it ended.
+  evidence: `4q` says so plainly and tests the client half against a fake daemon. Owner: the first slice that puts real work on the request path (story 5's Telegram bridge, or a model-backed answer).
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4e-daemon-and-loopback-api.md`
+  summary: The thin-client loopback path uses the standard library's `http.client` from `platform` and `surfaces`, which `.importlinter` neither forbids nor names; a running job's work lives in memory while it runs, so a daemon crash marks it failed and story 10 owns re-running; the pool bound and the shutdown wait are constants with no settings key; `config.py`'s `_literal` widens every integer to a float, which `daemon_port` makes a per-field rule.
+  evidence: Reported by the `4e` writer against `.importlinter:62`, `config.py:472-475` and the pool design. Owner: `4e` states the first and fourth; story 10 the second; the third waits for a reason to tune.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
+  summary: `9a`'s scheduler is an in-memory timer (`pm_ai/app/ticks.py`), labelled temporary: story 10a's durable queue replaces it, and until then a backoff position is lost on restart. The briefing does not yet name an instance with a recorded permanent failure — `doctor` does — so the `[ERROR]` surfacing in the dashboard belongs to stories 16 and 23. A hand-run `pm-ai dashboard` and the daemon both write `operational.db`; `4e`'s lock decision applies.
+  evidence: Stated in `9a`'s Intent and Never clauses by decision (prototype path, "Deferred, with reasons"). Owner: 10a for the timer; 16/23 for the dashboard's `[ERROR]` line; 4e for the writer question.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
+  summary: `9a`'s `try/except` around the connector call must classify `ArtifactBusy` as the retryable failure `1r` already recorded with the position unchanged, not as a raising connector — otherwise `9a`'s "connector raised → not retryable" row misfiles it. And `tests/connectors/test_probe.py:81`'s docstring still says enrolment probes inside the claim; `8l` corrected the code comment, not the test's.
+  evidence: `1r` makes `run_harvest` record the busy refusal and re-raise it; `9a` owns the surrounding `try/except`. Owner: `9a` for the first, `1r` for the docstring.
+
+## Wave 2 sizing — measured 2026-10-10
+
+Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body excluding frontmatter, before any Spec Change Log exists. Twenty-three specs, total 84,762 tokens, median 3,565, smallest 2,332 (`33f`), largest 5,097 (`33e`).
+
+| Slice | Tokens | | Slice | Tokens |
+|---|---:|---|---|---:|
+| `1q` | 2,991 | | `4e` | 4,777 |
+| `1r` | 5,073 | | `4f` | 3,091 |
+| `2m` | 4,737 | | `4n` | 3,565 |
+| `8m` | 3,377 | | `4o` | 3,937 |
+| `8n` | 3,971 | | `4p` | 3,385 |
+| `8o` | 3,408 | | `4q` | 3,737 |
+| `8p` | 2,396 | | `4r` | 4,087 |
+| `8q` | 2,612 | | `9a` | 3,971 |
+| `33d` | 3,749 | | `9b` | 3,259 |
+| `33e` | 5,097 | | `11b` | 4,616 |
+| `33f` | 2,332 | | `11c` | 3,126 |
+| `23c` | 3,468 | | | |
+
+**Every spec exceeds the 2,400-token ceiling wave 1 set, and the cause is the review rounds, not the prose.** Each spec was written to roughly 1,800–2,400 tokens, then passed through the three review lenses (blind hunter, edge-case hunter, verification gap) and, for the decision-dependent ones, the architecture gate's tightenings; nearly every accepted finding became a matrix row, a clause or a named test, and the fixers cut Intent, Code Map and Design Notes redundancy rather than content. Nine splits were already taken where a reviewer found two failure classes or an independently shippable piece (`33d`/`33f`, `4n`/`4p`, `8n`/`8o`, `9a`/`9b`, `4e`/`4r`, `4f`/`4q`, `11b`/`11c`, `8m`/`8q`, `8p` and `1r` carved out). Kept at this size by the parent's call on 2026-10-10 rather than split again, so that implementation can start; the ceiling stays a proposal with Andrei's override, as the wave-1 ruling says. The named further-split candidates, if he wants them: `33e` (the client's bytes download and inner-code carry plus `StoragePort.write_capture` as a chore slice), `1r` (the `run_harvest` recording into `9a`), `4q` (the daemon-side streams refactor and per-request scope resolution), `11b` (the VTT reader), `2m` (the pin and round-trip tests).
 
