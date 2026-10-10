@@ -132,10 +132,10 @@ The user throughout is **Andrei**, an engineering PM.
 
 **Entry:** `pm-ai connector` in the terminal, or `/connectors` on Telegram.
 
-1. Andrei runs `pm-ai connector add --type jira` (or the Telegram equivalent).
+1. Andrei runs `pm-ai connector add jira jira:alpha` (or the Telegram equivalent); for Microsoft Graph the command asks the app id, tenant and harvest widths and runs Microsoft's sign-in instead of asking for a token.
 2. pm-ai prompts step by step for domain URL, API token or OAuth key, and sync parameters.
 3. It runs an immediate endpoint health probe verifying connectivity, permissions, and polling reachability.
-4. On success it encrypts credentials at 600 permissions and registers the harvester into the running radar with no daemon restart.
+4. On success it seals the credential into the encrypted credential store first, writes the connector's settings to `~/.pm-ai/connectors/<instance>.json` at 600 permissions, and registers the harvester into the running radar with no daemon restart.
 5. It triggers a 7-day historical backfill and confirms active status, health, and entity mappings (e.g. Jira Issues → Work Items).
 
 **Climax:** The new source flows into morning dashboards, dossiers, and deep inquiries alongside the existing ones.

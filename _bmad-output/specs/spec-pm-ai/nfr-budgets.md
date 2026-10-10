@@ -21,14 +21,14 @@ The 50–150 ms and 60-second figures describe **different operations**, not a c
 | --- | --- |
 | **NFR-07** | Sovereign personal files are never indexed into or committed to project repositories. Automated pre-commit hooks verify the private enclaves are gitignored. |
 | **NFR-08** | Encryption applies to a **defined set** at AES-256 with 600 permissions, not to all local state — Markdown is plaintext by design and derived state is rebuildable. Master key in the OS keychain; raw key export is the supported migration path; the debug disable flag is never the fresh-install default and must warn on console and in the event log while active. All inbound telemetry passes the Input Sanitization Module. Full set in `storage-contract.md`. |
-| **NFR-09** | Raw transcripts in the owning scope's encrypted `transcripts/` are retained a default **30 days** (configurable) and purged automatically only after verified conversion into summaries, Work Item updates, decision logs, and pruned indexes. |
+| **NFR-09** | Raw transcripts in the owning scope's plaintext, gitignored `transcripts/` are retained a default **30 days** (configurable) and purged automatically only after verified conversion into summaries, Work Item updates, decision logs, and pruned indexes. |
 
 ## Reliability, offline resilience & hardware
 
 | Id | Requirement |
 | --- | --- |
-| **NFR-10** | On network disruption, incoming audio notes, CLI commands, and state actions buffer in the encrypted operational store and replay sequentially without data loss on reconnection. |
-| **NFR-11** | Recovery is **tier-scoped**: Truth and Operational state both survive and are both backup targets; only Derived state is disposable and rebuilds with zero loss. Operational state is never a rebuild target, and restoring it opens a re-execution window the CLI must warn about. |
+| **NFR-10** | On network disruption, incoming audio notes, CLI commands, and state actions buffer in the operational store (plaintext at 600; the encrypted set is two files, neither a database) and replay sequentially without data loss on reconnection. |
+| **NFR-11** | Recovery is **tier-scoped**: Truth and Operational state both survive and are both declared backup targets — a target list, since no backup mechanism ships in v1 (deferred 2026-09-03); only Derived state is disposable and rebuilds with zero loss. Operational state is never a rebuild target, and restoring it opens a re-execution window the CLI must warn about. |
 | **NFR-12** | Local extraction, parsing, and transcription run on a quantized **8B-class** open-weight instruct model at `Q4_K_M` plus Whisper `small.en`. Minimum hardware **16GB RAM on Apple Silicon**; v1 is macOS-only, so the CUDA baseline is deferred alongside Linux. Models above 8B-class are out of scope for v1 — they cannot run concurrently with transcription at the 16GB baseline without swap thrashing. |
 | **NFR-14** | The daemon binds **loopback only**, exposing zero public HTTP or WebSocket ports. Telegram runs over **outbound HTTPS long-polling** authenticated by paired user-IDs. Webhooks are prohibited: they require the public endpoint this same requirement forbids. |
 
