@@ -16,7 +16,7 @@ Companion to `SPEC.md`. Terms are contract vocabulary: where a capability or con
 
 **External System Connector** — A modular plugin interfacing with an external API (GitLab, Teams, Outlook, HR MCP, Slack, Jira, Notion) to harvest telemetry, sync state, and post responses using encrypted credential storage. All connectors are outbound pull adapters; none exposes an inbound endpoint.
 
-**Connector Schema** — The standardized data contract and event normalization protocol converting disparate external activity (commits, tickets, channel chats, pages) into unified JSON telemetry entries.
+**Connector Schema** — The standardized data contract and event normalization protocol converting disparate external activity (commits, tickets, channel chats, pages) into typed events written as one Markdown ledger line each in the owning scope's `event_log/` segment (operational.db holds cursors, coverage and dedup state, never the events).
 
 **CLI Interactive REPL Shell** — The terminal shell started by running `pm-ai` with no parameters, accepting fixed commands or open natural-language prompts continuously until `exit` or `quit`.
 
@@ -30,7 +30,7 @@ Companion to `SPEC.md`. Terms are contract vocabulary: where a capability or con
 
 **Verbal Commitment Sync** — Automatic extraction of spoken meeting promises and staging of timestamped comments attached to target Work Items or tickets.
 
-**Meeting Commitment Ledger & Closed-Loop Lifecycle** — The persistent accountability mechanism (structured Markdown in the project scope's `commitments_log.md`, indexed in `operational.db`) capturing extracted promises, owners, target deadlines, target Work Items, lifecycle statuses `[STAGED_APPROVAL]`, `[PENDING]`, `[FULFILLED]`, `[ALTERED]`, `[BROKEN]`, `[UNKNOWN]` (pm-ai has not yet had a complete successful look; self-resolving), `[ERROR]` (a contributing connector attempted and failed; needs a human to re-authenticate or fix configuration), and cross-referencing incoming commits, PR review latencies, and ticket state to verify real-world execution.
+**Meeting Commitment Ledger & Closed-Loop Lifecycle** — The persistent accountability mechanism (structured Markdown in the project scope's `commitments_log.md`, indexed in `commitment_index.db`, a Tier-3 index a declared job rebuilds) capturing extracted promises, owners, target deadlines, target Work Items, lifecycle statuses `[STAGED_APPROVAL]`, `[PENDING]`, `[FULFILLED]`, `[ALTERED]`, `[BROKEN]`, `[UNKNOWN]` (pm-ai has not yet had a complete successful look; self-resolving), `[ERROR]` (a contributing connector attempted and failed; needs a human to re-authenticate or fix configuration), and cross-referencing incoming commits, PR review latencies, and ticket state to verify real-world execution.
 
 **Spoken Anchor Protocol & Fuzzy Recovery** — The structured speaking convention identifying target Work Item numbers, with automated fuzzy recovery (≥85% confidence) for phonetic or transcription errors.
 
@@ -50,7 +50,7 @@ Companion to `SPEC.md`. Terms are contract vocabulary: where a capability or con
 
 **Anti-Burnout Telemetry Shield** — Passive monitoring of working hours, calendar density, and PTO usage, surfacing exhaustion risk strictly inside 1:1 coaching dialogue and weekly/daily planning.
 
-**Unified Telemetry & Decision Log Store** — The consolidated per-scope record of operational events, system actions, and leadership decisions as typed JSON entries in `event_log/` and `operational.db`. Segmented: a directory of dated segments, one open, earlier ones sealed and immutable.
+**Unified Telemetry & Decision Log Store** — The consolidated per-scope record of operational events, system actions, and leadership decisions as typed entries, one Markdown ledger line each, in `event_log/`; `operational.db` keeps the operational state beside it (cursors, coverage windows, dedup keys, staged proposals). Segmented: a directory of dated segments, one open, earlier ones sealed and immutable.
 
 **Asynchronous Deep Inquiry Engine** — Complex multi-source telemetry queries (commits, CI/CD, calendar, transcripts) with non-blocking deferred delivery of structured results over Telegram or CLI.
 

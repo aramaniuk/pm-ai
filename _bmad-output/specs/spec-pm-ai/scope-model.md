@@ -172,7 +172,7 @@ The application scope holds none, because it owns no meetings. **All three are e
 │                                      # A 1:1 with a direct report is people-scoped instead;
 │                                      # the capture always lives where its meeting lives.
 │
-└── .gitignore                         # Contains /.project-ai/transcripts/
+└── .gitignore                         # Contains /.project-ai/memory/ and /.project-ai/transcripts/ (memory/ since 2026-09-03)
 ```
 
 ## Boundary rules that follow from this model
