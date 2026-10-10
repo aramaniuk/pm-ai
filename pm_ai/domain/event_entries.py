@@ -177,6 +177,33 @@ headroom for a long body or an excerpt rather than a licence for large content.
 Raised rather than clipped: a truncated payload in Tier 1 is the same rebuild gap
 in smaller form, and hand-readability of the rare long line is worth less than
 Tier 1 being complete.
+
+**Concurrent appenders, measured — a bound, not a promise** (story 1q, AD-5,
+2026-10-10). Until the daemon exists every `pm-ai` invocation is a writer, and
+what keeps two of them from splicing records in one segment is that one record
+is one `write(2)` on an `O_APPEND` descriptor. Darwin promises no atomicity for
+a regular-file write above a page, so the figure is measured, not assumed.
+
+Procedure: two processes released together by a barrier, each opening one
+segment `O_WRONLY|O_APPEND` and making 5,000 `os.write` calls of one record each
+(a run of one letter per process, newline-terminated, the size under test); the
+file then scanned line by line for any line that is not one whole record of one
+letter at the full length. Short writes were counted and none occurred. A
+short write would send the rest of the record as a second `write(2)`, and the
+one-record-one-write guarantee against a concurrent appender is then gone for
+that record. Run on
+macOS 26.6.2 (Darwin 25.6.0), APFS, the Data volume that holds `~` and the
+repositories. In the run that counted it, 7,317 to 9,975 of the 9,999 line
+boundaries switched writer, depending on size, so the two genuinely overlapped.
+
+Result: **no interleaved or partial line at any size tried — 4 KiB, 16 KiB,
+32 KiB, 64 KiB, 256 KiB, 1 MiB** (16 KiB to 64 KiB repeated three times). 1 MiB
+is the largest size tried, not a ceiling found: whether one exists above it on
+this machine is unmeasured. A record at this bound is at most 64 KiB of UTF-8
+(16,384 characters, four bytes at most each). One harvest batch is a single
+write of many records with no bound of its own, so a batch above 1 MiB is
+outside what was measured. A different filesystem — an enrolled repository on
+exFAT or a network mount — is outside it too.
 """
 
 ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r"}

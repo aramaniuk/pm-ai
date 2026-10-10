@@ -214,6 +214,39 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         written += progressed
 
 
+_APPEND_OPEN_ATTEMPTS = 3
+
+
+def _open_for_append(path: Path, creation_mode: int) -> tuple[int, bool]:
+    """Open `path` for append, creating it exclusively if absent.
+
+    Returns the descriptor and whether this call created the file. Creation and
+    append are told apart by the kernel (`O_CREAT|O_EXCL`), not by a prior
+    existence check. If the file vanishes between a refused exclusive create
+    and the plain reopen, the create is tried again — at most
+    `_APPEND_OPEN_ATTEMPTS` times, after which the `FileNotFoundError`
+    propagates rather than looping on a directory something keeps emptying.
+    """
+    for attempt in range(_APPEND_OPEN_ATTEMPTS):
+        try:
+            return (
+                os.open(
+                    path,
+                    os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL,
+                    creation_mode,
+                ),
+                True,
+            )
+        except FileExistsError:
+            pass
+        try:
+            return os.open(path, os.O_WRONLY | os.O_APPEND), False
+        except FileNotFoundError:
+            if attempt == _APPEND_OPEN_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable: the last attempt returns or raises")
+
+
 def _mkdir_enclave(directory: Path) -> None:
     """Create `directory` and any missing ancestors, each at `ENCLAVE_DIR_MODE`.
 
@@ -880,7 +913,7 @@ class StorageService:
     # caller remembering which helper to reach for. The classifier knew the answer
     # before this; nothing asked it at the moment it mattered.
 
-    def _append(self, path: Path, text: str) -> None:
+    def _append(self, path: Path, text: str, *, declared_mode: int | None) -> None:
         """Append to a plaintext artifact, or refuse if it is declared encrypted.
 
         There is no such thing as appending to a sealed file. AES-GCM covers the
@@ -891,6 +924,33 @@ class StorageService:
         So declaring a ledger encrypted is refused loudly here rather than
         honoured by quietly rewriting the file. No ledger is encrypted today; this
         is the guard that makes changing that a decision rather than an accident.
+
+        `declared_mode` is `restricted_mode`'s answer for the ledger, computed by
+        the caller that knows the scope and the artifact — the same rule the two
+        whole-file writers follow (story 1q). It applies **when the file is
+        created, and only then**: creation and append are told apart by the
+        kernel (`O_CREAT|O_EXCL`), not by an existence check another process
+        could race. The creation mode is the declared one, so the umask can only
+        strip bits and the file never exists wider than declared; `fchmod` then
+        restores owner bits an owner-stripping umask removed, or pm-ai could not
+        append to its own ledger. An existing segment's mode is never touched,
+        including one created at the umask before this rule — and a ledger
+        declared without a mode (`None`) stays at the umask's answer.
+
+        A segment removed between a refused exclusive create and the reopen
+        (`FileNotFoundError` on the reopen) is created again, a bounded number of
+        times, rather than refused — the old `path.open("a")` created it too.
+
+        **An empty segment left by a failure between the create and the write is
+        not always harmless.** Under an ordinary umask it already carries the
+        declared mode, and the next append treats it as existing. Under an
+        owner-stripping umask it does not: the create yields `declared_mode &
+        ~umask` (`0400` at umask `200`), and a kill between `os.open` and
+        `fchmod` leaves that file behind. The next append takes the
+        existing-file branch, which never `fchmod`s, so pm-ai is locked out of
+        that segment with the operating system's permission error until someone
+        restores owner-write by hand. Changing an existing file's mode is not
+        this writer's call (story 1q), so it is stated here rather than repaired.
         """
         if is_encrypted(str(path)):
             raise AppendToSealedArtifact(
@@ -899,8 +959,21 @@ class StorageService:
                 f"segmented compaction exists to avoid. Either the declaration is "
                 f"wrong, or this artifact needs a segment-per-write shape."
             )
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(text)
+        descriptor, created = _open_for_append(
+            path, 0o666 if declared_mode is None else declared_mode
+        )
+        try:
+            if created and declared_mode is not None:
+                os.fchmod(descriptor, declared_mode)
+            # One record is one `write(2)` on an `O_APPEND` descriptor, and that
+            # is what keeps a concurrent appender from splicing into it. The
+            # loop in `_write_all` exists for short writes: a short write sends
+            # the rest as a second `write(2)`, which gives up that guarantee for
+            # this record. The measured bound on concurrent appenders sits
+            # beside `MAX_ENTRY_LENGTH`.
+            _write_all(descriptor, text.encode("utf-8"))
+        finally:
+            os.close(descriptor)
 
     def _create_exclusively(
         self, path: Path, text: str, *, staging: Path, declared_mode: int | None
@@ -1392,7 +1465,11 @@ class StorageService:
             # it without knowing which one produced the line.
             fields=(("ingested_at", at.isoformat()),) + entry.fields,
         )
-        self._append(self._segment(scope, EVENT_LOG, at), render_entry(named) + "\n")
+        self._append(
+            self._segment(scope, EVENT_LOG, at),
+            render_entry(named) + "\n",
+            declared_mode=restricted_mode(scope.kind, EVENT_LOG),
+        )
 
     def append_disclosure(
         self, record: DisclosureRecord, *, scope: DataScope | None = None
@@ -1418,7 +1495,11 @@ class StorageService:
         target = self._paths.resolve(
             destination, DISCLOSURE_LEDGER_ARTIFACT, create=True
         )
-        self._append(target, render_disclosure(record) + "\n")
+        self._append(
+            target,
+            render_disclosure(record) + "\n",
+            declared_mode=restricted_mode(destination.kind, DISCLOSURE_LEDGER_ARTIFACT),
+        )
 
     def read_disclosure(self) -> str:
         """The application ledger's text, or empty if nothing has left the machine.
@@ -1634,7 +1715,11 @@ class StorageService:
             )
             persisted += 1
         if lines:
-            self._append(self._segment(scope, EVENT_LOG, at), "\n".join(lines) + "\n")
+            self._append(
+                self._segment(scope, EVENT_LOG, at),
+                "\n".join(lines) + "\n",
+                declared_mode=restricted_mode(scope.kind, EVENT_LOG),
+            )
         return PersistResult(
             persisted=persisted, duplicates=duplicates, at=at, flagged=flagged
         )
