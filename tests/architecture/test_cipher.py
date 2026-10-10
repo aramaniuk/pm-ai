@@ -696,7 +696,9 @@ def test_appending_to_a_declared_encrypted_artifact_is_refused(tmp_path):
     target.parent.mkdir(parents=True, exist_ok=True)
 
     with pytest.raises(AppendToSealedArtifact) as refusal:
-        daemon.storage._append(target, "one more line\n")
+        daemon.storage._append(
+            target, "one more line\n", declared_mode=ENCRYPTED_FILE_MODE
+        )
 
     assert "telegram_cache" in str(refusal.value)
     assert not target.exists(), "the refusal created the file it refused to write"

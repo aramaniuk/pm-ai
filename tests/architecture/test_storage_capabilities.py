@@ -22,7 +22,9 @@ from pathlib import Path
 import pytest
 
 from ledger_fixtures import entry as _entry
-from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.disclosure import DISCLOSURE_LEDGER_ARTIFACT, DisclosureRecord
+from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.storage_tiers import (
     EVENT_LOG,
     NotACollection,
@@ -32,12 +34,13 @@ from pm_ai.domain.storage_tiers import (
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import ArtifactBusy
 from pm_ai.storage.crypto import ENCLAVE_DIR_MODE, ENCRYPTED_FILE_MODE, AesGcmCrypto
-from pm_ai.storage.service import StorageService
+from pm_ai.storage.service import AppendToSealedArtifact, StorageService
 
 NOW = datetime(2026, 9, 3, 9, 0, tzinfo=timezone.utc)
 APPLICATION = DataScope(ScopeKind.APPLICATION)
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
+PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="bob")
 KEY = b"K" * 32
 
 
@@ -359,25 +362,17 @@ def test_a_raw_capture_lands_at_the_declared_restricted_mode(storage):
     assert _mode(written) == RESTRICTED_FILE_MODE
 
 
-def test_the_append_path_does_not_adopt_the_declared_mode(storage):
-    """Measured, because story 1n's change log was about to claim the opposite.
+def test_the_append_path_adopts_the_declared_mode(storage):
+    """Story 1q flipped this row; story 1n's change log records the flip.
 
     `restricted_mode` derives from the `gitignored` declaration, so story 1n made
-    it answer `0600` for the project scope's `memory/` — and the obvious sentence
-    to write next, that those four artifacts now land owner-only, is false.
-    `_replace` and `_create_exclusively` adopt `declared_mode`; `_append`
-    (`service.py:880`) opens with a bare `path.open("a")` and takes no mode at
-    all, so a segment lands at the umask.
+    it answer `0600` for the project scope's `memory/`. Until 1q, `_append` opened
+    with a bare `path.open("a")` and a segment landed at the umask — this row
+    pinned that, written to fail the day `_append` honoured the declaration. It
+    now honours it, like `_replace` and `_create_exclusively`.
 
-    The non-adoption predates 1n — people-scope `event_log/` and application
-    `disclosure.md` were already gitignored and already landed this way — so this
-    row pins the behaviour rather than arguing for it. It is written to fail if
-    `_append` ever starts honouring the declaration, which is the point: the day
-    that changes, the claim in the change log has to change with it, and nothing
-    else in the suite would say so.
-
-    The umask is pinned, because the assertion is about what the writer did
-    *not* impose and an ambient 0077 would make the two indistinguishable.
+    The umask is pinned, because the assertion is about what the writer imposed
+    and an ambient 0077 would make the two indistinguishable.
     """
     previous = os.umask(0o022)
     try:
@@ -388,10 +383,200 @@ def test_the_append_path_does_not_adopt_the_declared_mode(storage):
     segment = storage.paths.resolve(PROJECT, EVENT_LOG) / f"{NOW:%Y-%m}.md"
     assert restricted_mode(ScopeKind.PROJECT, EVENT_LOG) == RESTRICTED_FILE_MODE, (
         "the declaration is what makes this row interesting; without it there is "
-        "nothing for the append path to fail to adopt"
+        "nothing for the append path to adopt"
     )
-    assert _mode(segment) == 0o644, (
-        "`_append` has started adopting the declared mode. That is an improvement "
-        "and it makes story 1n's change-log line — the declaration changed, the "
-        "append path does not honour it — out of date: update both together."
+    assert _mode(segment) == RESTRICTED_FILE_MODE, (
+        "the append path no longer applies the declared mode, so a project's "
+        "event-log segment lands at the umask's answer. The code is wrong, and "
+        "story 1n's change-log line saying the append path adopts the "
+        "declaration since 1q is now false."
     )
+    assert segment.read_text(encoding="utf-8").count("\n") == 1
+
+
+# ── Story 1q: every append-only ledger is created at its declared mode ───────
+#
+# One row per line of 1q's I/O matrix. Each sets a *real* process umask and
+# restores it in `finally`: monkeypatching `os.umask` changes nothing the kernel
+# applies (story 1m), so it cannot fail.
+
+
+def _segment(storage, scope: DataScope) -> Path:
+    return storage.paths.resolve(scope, EVENT_LOG) / f"{NOW:%Y-%m}.md"
+
+
+def _under_umask(mask: int, write) -> None:
+    previous = os.umask(mask)
+    try:
+        write()
+    finally:
+        os.umask(previous)
+
+
+def test_a_second_entry_leaves_the_segment_at_its_declared_mode(storage):
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("one"), scope=PROJECT))
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("two"), scope=PROJECT))
+
+    segment = _segment(storage, PROJECT)
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 2
+
+
+def test_a_segment_from_before_1q_keeps_its_mode(storage):
+    """No `chmod` of an existing file: its mode may be the operator's decision."""
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+    segment.write_text("", encoding="utf-8")
+    segment.chmod(0o644)
+
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("old"), scope=PROJECT))
+
+    assert _mode(segment) == 0o644, "the append changed an existing segment's mode"
+    assert segment.read_text(encoding="utf-8").count("\n") == 1
+
+
+def _event(n: int) -> NormalizedEvent:
+    return NormalizedEvent(
+        scope=PROJECT,
+        type=ObservedEventType.COMMIT_PUSHED,
+        source_ref=SourceRef.parse(f"gitlab:alpha:commit:{n:08x}"),
+        actor=Actor(actor_id="u_42", display_name="Ada"),
+        occurred_at=datetime(2026, 9, 2, 17, 30, tzinfo=timezone.utc),
+        payload=CommitPayload(sha=f"{n:08x}", message=f"change {n}", branch="main"),
+    )
+
+
+def test_a_segment_removed_between_create_and_reopen_is_created_again(
+    storage, monkeypatch
+):
+    """The exclusive create is refused, then the file vanishes before the reopen.
+
+    The old `path.open("a")` created it; the reopen alone would raise
+    `FileNotFoundError`, so the writer tries the exclusive create again.
+    """
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+    segment.write_text("", encoding="utf-8")
+    segment.chmod(0o644)
+
+    real_open = os.open
+    vanished: list[bool] = []
+
+    def _racing(path, flags, *args, **kwargs):
+        if not flags & os.O_CREAT and not vanished and str(path) == str(segment):
+            vanished.append(True)
+            os.unlink(segment)
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _racing)
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("race"), scope=PROJECT))
+    monkeypatch.undo()
+
+    assert vanished == [True], "the reopen branch was never reached"
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 1
+
+
+@pytest.mark.parametrize("directory_exists", [False, True], ids=["no-dir", "dir"])
+def test_a_harvest_batch_creates_the_segment_at_the_declared_mode(
+    storage, directory_exists
+):
+    segment = _segment(storage, PROJECT)
+    if directory_exists:
+        segment.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        assert not segment.parent.exists()
+    events = tuple(_event(n) for n in range(3))
+
+    observed: list[int] = []
+
+    def _persist() -> None:
+        observed.append(storage.persist_events(events, scope=PROJECT).persisted)
+
+    _under_umask(0o022, _persist)
+
+    assert observed == [3]
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 3
+
+
+def test_the_disclosure_ledger_is_created_at_its_declared_mode(storage):
+    record = DisclosureRecord(
+        at=NOW,
+        task_class="summarize",
+        model="claude-opus-5",
+        contributing_scopes=frozenset({PERSONAL}),
+        input_tokens=100,
+        output_tokens=50,
+        estimated_cost_usd=0.01,
+    )
+    _under_umask(0o022, lambda: storage.append_disclosure(record))
+
+    ledger = storage.paths.resolve(APPLICATION, DISCLOSURE_LEDGER_ARTIFACT)
+    assert ledger.name == "disclosure.md"
+    assert restricted_mode(ScopeKind.APPLICATION, DISCLOSURE_LEDGER_ARTIFACT) == 0o600
+    assert _mode(ledger) == RESTRICTED_FILE_MODE
+    assert ledger.read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_a_team_members_segment_is_created_at_its_declared_mode(storage):
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("1:1"), scope=PEOPLE))
+
+    assert restricted_mode(ScopeKind.PEOPLE, EVENT_LOG) == RESTRICTED_FILE_MODE
+    assert _mode(_segment(storage, PEOPLE)) == RESTRICTED_FILE_MODE
+
+
+def test_a_ledger_declared_without_a_mode_answers_to_the_umask(storage):
+    """The personal event log's declaration names no mode; that is not an oversight."""
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("me"), scope=PERSONAL))
+
+    assert restricted_mode(ScopeKind.PERSONAL, EVENT_LOG) is None
+    assert _mode(_segment(storage, PERSONAL)) == 0o644
+
+
+def test_an_owner_stripping_umask_cannot_lock_pm_ai_out_of_its_ledger(storage):
+    """At umask 200 the creation mode alone yields 0400 and the second append fails.
+
+    The mask is set only after the segment's directory exists, since
+    `_writable_dir` creates it under the same mask, and 0200 would strip
+    owner-write from the directory — a failure this row is not about.
+    """
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+
+    def _twice() -> None:
+        storage.append_event_log(_entry("one"), scope=PROJECT)
+        storage.append_event_log(_entry("two"), scope=PROJECT)
+
+    _under_umask(0o200, _twice)
+
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 2
+
+
+def test_a_read_only_segment_refuses_with_the_operating_systems_error(storage):
+    if os.geteuid() == 0:  # pragma: no cover — the suite does not run as root
+        pytest.skip("root bypasses the permission bits this row is about")
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+    segment.write_text("by hand\n", encoding="utf-8")
+    segment.chmod(0o400)
+    try:
+        with pytest.raises(PermissionError) as refused:
+            _under_umask(
+                0o022, lambda: storage.append_event_log(_entry("no"), scope=PROJECT)
+            )
+        assert refused.value.filename == str(segment)
+        assert segment.read_text(encoding="utf-8") == "by hand\n"
+        assert _mode(segment) == 0o400
+    finally:
+        segment.chmod(0o644)
+
+
+def test_a_ledger_declared_encrypted_is_refused_before_any_file_exists(storage):
+    """`telegram_cache/` is sealed; no ledger is, so the declaration is borrowed."""
+    target = storage.paths.resolve(PERSONAL, "telegram_cache/", create=True) / "x.md"
+    with pytest.raises(AppendToSealedArtifact):
+        storage._append(target, "line\n", declared_mode=ENCRYPTED_FILE_MODE)
+    assert not target.exists()
