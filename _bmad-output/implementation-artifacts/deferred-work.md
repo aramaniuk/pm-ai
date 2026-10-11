@@ -433,8 +433,9 @@ transcript.
   evidence: `service.py:581` calls `sqlite3.connect(store, ...)` in `__init__` unconditionally. Measured 2026-09-15 by tracing `sqlite3.connect` through one `onboard_project` run on an empty `HOME`: `.pm-ai/private/operational.db` and its `-wal`/`-shm` sidecars exist afterwards. Since `4d`, `pm-ai doctor` also builds a bootstrap `StorageService`, so the command whose entire job is to report on a machine now creates a Tier-2 file on it. Nothing is corrupted and the file would be created on first real use anyway; what is wrong is that a diagnostic has a side effect, and that "no file's bytes change" is unassertable for any command without excluding sqlite's sidecars by name — which `test_project_onboarding.py` now does, and says why. The fix is a lazy connection opened on first operational use.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4k-project-onboarding.md`
-  summary: **ASSIGNED 2026-10-10 to `1r`** — spec written, not built. The exclusive claim leaves a `projects.toml.lock` in `~/.pm-ai/` that no scope tree declares.
+  summary: **RESOLVED 2026-10-10 by `1r`.** The exclusive claim leaves a `projects.toml.lock` in `~/.pm-ai/` that no scope tree declares.
   evidence: `pm_ai/platform/claims.py` creates it and deliberately never unlinks it — removing a lock file races a process that has already opened it and is waiting to lock it, after which two processes hold claims on different inodes and both believe they are alone. So the file is correct and permanent. What it is not is *declared*: AD-44's rule is that every persistent artifact is in exactly one of the three tiers, `RETENTION_MANAGED` or `DIAGNOSTIC_ONLY`, derived from the scope model, and this one is in none. It is empty and carries no data, so nothing leaks and no backup misses anything — but the set of files in `~/.pm-ai/` is no longer fully derivable from the trees, which is the property AD-44 exists to keep. Either declare it or give the claim a directory that is declared.
+  resolution: Declared. `pm_ai/domain/scope_model.py` declares `CLAIM_SIDECAR_SUFFIX` (from `LOCK_SUFFIX`, now in `pm_ai/domain/claims.py`) beside the scope trees as structure outside the tier model — never backed up, rebuilt, pruned or encrypted — and refuses at import a declared node spelled like one. `pm_ai/core/project_scaffold.project_rules()` derives `/.project-ai/**/*.lock` from it. Every whole-file claim (`config.json`, `meetings/`, the sign-in store, `projects.toml`) now takes this one `flock` sidecar through `StorageService.exclusive`.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4d-project-registry.md`
   summary: There are two TOML basic-string escapers in `pm_ai.core`, and they are byte-identical by intention rather than by construction.
@@ -1023,7 +1024,7 @@ Found by the spec writers while reading the code each slice touches. Each names 
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
   summary: `9a`'s `try/except` around the connector call must classify `ArtifactBusy` as the retryable failure `1r` already recorded with the position unchanged, not as a raising connector — otherwise `9a`'s "connector raised → not retryable" row misfiles it. And `tests/connectors/test_probe.py:81`'s docstring still says enrolment probes inside the claim; `8l` corrected the code comment, not the test's.
-  evidence: `1r` makes `run_harvest` record the busy refusal and re-raise it; `9a` owns the surrounding `try/except`. Owner: `9a` for the first, `1r` for the docstring.
+  evidence: `1r` makes `run_harvest` record the busy refusal and re-raise it; `9a` owns the surrounding `try/except`. Owner: `9a` for the first, `1r` for the docstring — the docstring half done in `1r` on 2026-10-10.
 
 ## Wave 2 sizing — measured 2026-10-10
 
@@ -1055,3 +1056,15 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md`
   summary: `disclosure.md` is one file that never rolls over, so on a machine where it was created before 1q it stays at the umask's mode for good, unlike event-log segments, which reach `0600` at the next month.
   evidence: 1q leaves existing files' modes alone by decision; event logs self-correct through monthly segments, the disclosure ledger does not. The `doctor` wrong-mode entry under "Surfaced while writing the wave-2 specs" is where this would be reported; no deployed machine has a ledger today (`~/.pm-ai` holds `private/` only).
+
+## Surfaced by the story-1r review (2026-10-10)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
+  summary: When `meetings/` is claimed by a concurrent harvest of the same connector instance, `run_harvest` records its failure with the cursor it loaded, which can overwrite the position and cleared failure the other harvest just saved.
+  evidence: `_record_busy_meetings` calls `save_cursor(instance, <loaded cursor>, None, failure)`. Two harvests of one instance at once is what `9a`'s one-at-a-time scheduler rules out; until then two terminals can do it. Belongs with `9a` (or a compare-and-set on the stored cursor).
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
+  summary: A meeting-record write that fails on the claim for a reason other than busy (a filesystem without `flock`, a directory or unreadable sidecar) raises out of `run_harvest` with no failure row recorded, so the scheduler has nothing to report or back off on.
+  evidence: Only `ArtifactBusy` is caught around `put`; the non-busy `OSError`s are named refusals at the CLI but unrecorded in Tier 2. Belongs with `9a`'s `try/except` around the cycle.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
+  summary: An older build's `.<name>.claim` marker is reported on stderr from the storage layer once per writer per path, and never cleaned up; a daemon or Telegram context would not show stderr.
+  evidence: `_report_older_build_marker` in `pm_ai/storage/service.py` prints; the spec says the marker is "reported, not obeyed" without naming the channel. `4e` (one writer for the daemon's lifetime) or a `doctor` probe is the natural home.

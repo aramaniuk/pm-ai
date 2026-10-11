@@ -37,6 +37,19 @@ from conftest import PACKAGE_ROOT
 # the three disjointness assertions are one property stated three ways, and a
 # test per line would triple the maintenance for no extra signal.
 CASES = {
+    "a_declared_key_spelled_like_a_claim_sidecar": (
+        "pm_ai.domain.scope_model",
+        "_assert_declarations_agree",
+        # Story 1r: a `<name>.lock` is the one undeclared kind of file in a scope,
+        # and `list_collection` hides it. A declared node spelled that way would
+        # be indistinguishable from a sidecar. Doctored off a real Placement.
+        "import dataclasses, pathlib;"
+        " m.ADDRESS = {k: dict(v) for k, v in m.ADDRESS.items()};"
+        " first = next(iter(m.ADDRESS));"
+        " sample = next(iter(m.ADDRESS[first].values()));"
+        " m.ADDRESS[first]['state.lock'] = dataclasses.replace("
+        "     sample, key='state.lock', relative=pathlib.Path('state.lock'))",
+    ),
     "a_key_meaning_two_paths": (
         "pm_ai.domain.scope_model",
         "_assert_declarations_agree",

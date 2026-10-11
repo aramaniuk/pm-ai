@@ -31,6 +31,7 @@ from pm_ai.connectors import registry as connectors
 from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import ACCEPTED_KEYS, Config, ConfigRefused, load_config
 from pm_ai.domain.health import Health, Probe
+from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.ports import (
     AES_KEY_BYTES,
@@ -919,3 +920,142 @@ def test_a_silent_provider_is_not_reported_as_a_bad_credential(
     monkeypatch.setattr(cli, "enrol_connector", silent)
     assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_REFUSAL
     assert "not the credential" in capsys.readouterr().err
+
+
+# ── Story 1r — a busy file, refused by name at every command that claims one ──
+
+BUSY_CREDENTIALS = (
+    "config.json in application is claimed by another pm-ai process; nothing "
+    "was changed. Run the command again."
+)
+BUSY_REGISTRY = (
+    "projects.toml in application is claimed by another pm-ai process; nothing "
+    "was changed. Run the command again."
+)
+
+
+APPLICATION_SCOPE = DataScope(ScopeKind.APPLICATION)
+
+
+def _held(home: Path, artifact: str):
+    """The platform lock on `artifact`, held directly — the same lock the façade takes."""
+    from pm_ai.platform.claims import exclusive
+    from pm_ai.platform.paths import ScopePaths
+
+    return exclusive(ScopePaths.production().resolve(APPLICATION_SCOPE, artifact).resolve())
+
+
+def test_connector_add_with_the_credentials_file_held_is_refused_by_name(
+    registered, keychain, monkeypatch, capsys
+):
+    keychain(secret=b"K" * 32)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
+    monkeypatch.setattr(entry, "probe_credential", lambda system, credential: "accepted")
+
+    with _held(registered, "config.json"):
+        code = entry.main(["connector", "add", "gitlab", "gitlab:alpha"])
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert BUSY_CREDENTIALS in err
+    assert ".claim" not in err and ".lock" not in err, "names a file to delete"
+
+
+def test_project_add_with_the_registry_held_is_refused_by_name(
+    unregistered, tmp_path, monkeypatch, capsys
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (tmp_path / "alpha").mkdir()
+
+    with _held(home, "projects.toml"):
+        code = entry.main(["project", "add", str(tmp_path / "alpha")])
+
+    assert code == EXIT_REFUSAL
+    assert BUSY_REGISTRY in capsys.readouterr().err
+    assert not (home / ".pm-ai" / "projects.toml").exists()
+
+
+def test_project_add_with_an_unusable_sidecar_is_refused_by_name(
+    unregistered, tmp_path, monkeypatch, capsys
+):
+    """An operating-system fault on the lock file is a refusal, not a traceback."""
+    home = tmp_path / "home"
+    (home / ".pm-ai" / "projects.toml.lock").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    (tmp_path / "alpha").mkdir()
+
+    code = entry.main(["project", "add", str(tmp_path / "alpha")])
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "projects.toml.lock" in err and "Traceback" not in err
+    assert "claimed by another" not in err, "a fault reported as busy"
+    assert "registry could not be written" not in err, "names a file it did not check"
+
+
+def test_connector_add_with_an_unusable_sidecar_is_refused_by_name(
+    registered, keychain, monkeypatch, capsys
+):
+    """`config.json.lock` a directory: the OS fault is a refusal, not a traceback."""
+    keychain(secret=b"K" * 32)
+    (registered / ".pm-ai" / "private" / "config.json.lock").mkdir(parents=True)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
+    monkeypatch.setattr(entry, "probe_credential", lambda system, credential: "accepted")
+
+    code = entry.main(["connector", "add", "gitlab", "gitlab:alpha"])
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "connector add stopped" in err and "config.json.lock" in err
+    assert "Traceback" not in err
+    assert "claimed by another" not in err, "a fault reported as busy"
+
+
+def _setup_answers(monkeypatch, *answers: str) -> None:
+    script = list(answers)
+
+    def answer(prompt: str = "") -> str:
+        if not script:
+            raise EOFError
+        return script.pop(0)
+
+    monkeypatch.setattr("builtins.input", answer)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
+def test_setup_step_two_with_the_registry_held_is_refused_by_name(
+    unregistered, tmp_path, monkeypatch, capsys
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _setup_answers(monkeypatch, str(tmp_path / "alpha"), "")
+
+    with _held(home, "projects.toml"):
+        code = entry.main(["setup"])
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "setup stopped at step 2 (project); step 1 stays done" in err
+    assert BUSY_REGISTRY in err
+
+
+def test_setup_step_two_with_an_unusable_sidecar_is_refused_by_name(
+    unregistered, tmp_path, monkeypatch, capsys
+):
+    home = tmp_path / "home"
+    (home / ".pm-ai" / "projects.toml.lock").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    _setup_answers(monkeypatch, str(tmp_path / "alpha"), "")
+
+    code = entry.main(["setup"])
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "setup stopped at step 2 (project); step 1 stays done" in err
+    assert "projects.toml.lock" in err and "Traceback" not in err
+    assert "registry could not be written" not in err, "names a file it did not check"

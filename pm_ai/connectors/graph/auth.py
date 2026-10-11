@@ -263,7 +263,8 @@ class CredentialStoreBusy(CustodyFailed):
 
     Not a verdict about the credential, and not a fault in pm-ai: the file is
     one claim shared by every connector and by enrolment, and somebody else had
-    it — or a command that was stopped left its claim file behind.
+    it. A command that was stopped holds nothing: the claim is a kernel lock,
+    released with its process, so there is no claim file to remove.
     """
 
 
@@ -293,8 +294,9 @@ class InteractionRequired(GraphAuthError):
 class StoreBusy(Exception):
     """Raised by a store whose claim another holder kept past the store's wait.
 
-    The message names what holds it, so a claim left by a stopped process can
-    be found and removed. Carries no credential material.
+    The message names the file that was busy. A stopped process holds no
+    claim, so there is nothing to find and remove. Carries no credential
+    material.
     """
 
 
@@ -302,7 +304,8 @@ class StoreUnavailable(Exception):
     """Raised by a store that could not be opened, read, claimed or written.
 
     A locked keychain, a missing master key, a file that will not decrypt, a
-    claim file that could not be created. Carries no credential material.
+    claim the operating system would not grant — a permission fault on its
+    lock file, or a filesystem with no locks. Carries no credential material.
     """
 
 
@@ -974,10 +977,8 @@ class GraphDeviceCodeAuth:
                 self.instance,
                 Health.FAILING,
                 f"{self.instance}'s credentials file was busy: {busy}",
-                (_REDO_SIGN_IN if busy.rotated else "Run this again once the other "
-                 "pm-ai command has finished. Nothing is wrong with the credential.")
-                + " If no other pm-ai command is running, the claim file named "
-                "above is left over from one that was stopped, and can be removed.",
+                _REDO_SIGN_IN if busy.rotated else "Run this again once the other "
+                "pm-ai command has finished. Nothing is wrong with the credential.",
             )
         except CredentialEntryMissing as missing:
             return Probe(

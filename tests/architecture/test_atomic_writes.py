@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from ledger_fixtures import entry as _entry, mask_ids
+from claim_fakes import InMemoryClaims
 from pm_ai.domain import CAPTURE_STAGING, DataScope, ScopeKind
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.storage import service as service_module
@@ -57,6 +58,7 @@ def _writer(tmp_path: Path, *, crypto=None) -> StorageService:
         now=lambda: NOW,
         vcs=_AlwaysUntracked(),
         crypto=crypto or PlaintextCrypto(),
+        claims=InMemoryClaims(),
     )
 
 
@@ -187,7 +189,11 @@ def test_staging_never_re_asks_git(tmp_path):
             return super().tracking(path, repository=repository)
 
     storage = StorageService(
-        ScopePaths.rooted(tmp_path), now=lambda: NOW, vcs=_Counting(), crypto=PlaintextCrypto()
+        ScopePaths.rooted(tmp_path),
+        now=lambda: NOW,
+        vcs=_Counting(),
+        crypto=PlaintextCrypto(),
+        claims=InMemoryClaims(),
     )
     storage.write_capture(BODY, scope=PERSONAL, name="once.vtt")
     assert len(trees_asked) == 1, f"git was asked about {len(trees_asked)} trees: {trees_asked}"

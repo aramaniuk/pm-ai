@@ -275,10 +275,6 @@ CUSTODY = (
     "keychain is unlocked. Whether the credential is good is unknown, which is "
     "not the same as bad."
 )
-LEFT_OVER = (
-    " If no other pm-ai command is running, the claim file named above is left "
-    "over from one that was stopped, and can be removed."
-)
 
 
 def test_a_busy_file_is_waited_for_and_then_used(tmp_path):
@@ -315,12 +311,14 @@ def test_a_file_busy_past_the_wait_is_reported_busy_not_as_a_bug(tmp_path):
 
     assert probe.health is Health.FAILING
     assert "busy" in probe.detail
-    assert ".config.json.claim" in probe.detail, "the claim file is not named"
+    assert ".claim" not in probe.detail and ".lock" not in probe.detail, (
+        "a kill releases the claim, so there is no file to name"
+    )
     assert "bug in pm-ai" not in probe.detail
     assert ".." not in probe.detail and ". ." not in probe.detail
     assert probe.remediation == (
         "Run this again once the other pm-ai command has finished. Nothing is "
-        "wrong with the credential." + LEFT_OVER
+        "wrong with the credential."
     )
     assert sum(waited) <= 2.5, "waited longer than a couple of seconds"
     assert provider.asked == [], "Microsoft was asked without a token read under the claim"
@@ -343,7 +341,7 @@ def test_a_file_busy_at_write_back_says_the_stored_sign_in_must_be_redone(tmp_pa
     assert "busy" in probe.detail and "could not be saved" in probe.detail
     assert "bug in pm-ai" not in probe.detail
     assert "Sign in again" not in probe.detail, "the remedy is said twice"
-    assert probe.remediation == REDO + LEFT_OVER
+    assert probe.remediation == REDO
     assert ROTATED not in probe.detail and ENROLLED not in probe.detail
     assert _held_token(storage) == ENROLLED
 

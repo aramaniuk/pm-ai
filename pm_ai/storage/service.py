@@ -35,12 +35,14 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from pm_ai.domain import clocks
+from pm_ai.domain.claims import ClaimHeld
 from pm_ai.domain.disclosure import (
     DISCLOSURE_LEDGER_ARTIFACT,
     DISCLOSURE_LEDGER_SCOPE,
@@ -60,6 +62,7 @@ from pm_ai.domain.harvest import Cursor, HarvestFailure, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.proposals import Proposal
+from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX
 from pm_ai.domain.storage_tiers import (
     CAPTURES,
     CAPTURE_STAGING,
@@ -76,7 +79,7 @@ from pm_ai.domain.storage_tiers import (
     restricted_mode,
 )
 from pm_ai.domain.vcs import VcsUnavailable
-from pm_ai.ports import ArtifactBusy, CryptoPort, ScopePathPort, VcsPort
+from pm_ai.ports import ArtifactBusy, ClaimPort, CryptoPort, ScopePathPort, VcsPort
 from pm_ai.storage.crypto import (
     ENCLAVE_DIR_MODE,
     ENCRYPTED_FILE_MODE,
@@ -578,6 +581,7 @@ class StorageService:
         now: Callable[[], datetime],
         vcs: VcsPort,
         crypto: CryptoPort,
+        claims: ClaimPort,
     ) -> None:
         """Every dependency is injected, and none is optional.
 
@@ -601,8 +605,15 @@ class StorageService:
         that answers without asking git. The second is the leak this dependency
         exists to prevent, so there is no default and a caller that forgets it
         gets a `TypeError` at construction rather than an unprotected write later.
+
+        `claims` likewise (story `1r`): the cross-process lock `exclusive` takes
+        is an OS API, so its adapter lives in `pm_ai.platform` and arrives from
+        the composition root. A default that did not lock would make every
+        read-modify-write decorative.
         """
         self._paths = paths
+        self._claims = claims
+        self._markers_reported: set[Path] = set()
         self._crypto = crypto
         self._git_checked: set[tuple[object, ...]] = set()
         self._now = now
@@ -1329,13 +1340,23 @@ class StorageService:
         the `.part` files `_publish` stages and unlinks, which are deliberately
         invisible to the operator NFR-09's purge rule serves — reporting one as
         a member would name a file that is about to stop existing.
+
+        Claim sidecars (`<name>.lock`, story `1r`) are omitted too: a claim on a
+        member leaves one beside it for good, and it is structure, not a member.
+        The scope model refuses to declare any name with that suffix, so nothing
+        real is hidden by this.
         """
         directory = self._paths.resolve(scope, artifact)
         assert_is_collection(scope.kind, artifact)
         if not directory.is_dir():
             return ()
         return tuple(
-            sorted(entry.name for entry in directory.iterdir() if not entry.name.startswith("."))
+            sorted(
+                entry.name
+                for entry in directory.iterdir()
+                if not entry.name.startswith(".")
+                and not entry.name.endswith(CLAIM_SIDECAR_SUFFIX)
+            )
         )
 
     def assert_writable(self, *, scope: DataScope, artifact: str) -> None:
@@ -1373,7 +1394,7 @@ class StorageService:
 
     @contextlib.contextmanager
     def exclusive(self, *, scope: DataScope, artifact: str) -> Iterator[None]:
-        """An exclusive claim on `artifact`, for a read-modify-write (story 8b).
+        """An exclusive claim on `artifact`, for a read-modify-write (stories 8b, 1r).
 
         `write_artifact` replaces a file whole and publishes by `os.replace`,
         which overwrites deliberately and coordinates nothing. That is right for
@@ -1383,48 +1404,55 @@ class StorageService:
         and lose the other. The read and the write have to be one step, and this
         is what makes them one.
 
-        A claim file created with `O_CREAT|O_EXCL`, which is the same
-        kernel-enforced exclusivity `_create_exclusively` publishes captures
-        with — not an advisory lock and not a check followed by a create. Dot-
-        prefixed, so `list_collection` does not report it as a member and the
-        operator's own listings do not show it.
+        The claim is the platform's kernel lock (`ClaimPort`), taken on an empty
+        `<name>.lock` sidecar beside the artifact, keyed on the resolved path —
+        so a caller holding the platform lock on the same file directly, or
+        through another spelling of it, holds the same claim. A kill releases
+        it. The sidecar is never deleted, and is declared as structure outside
+        the tier model (`scope_model.CLAIM_SIDECAR_SUFFIX`).
 
-        **Refuses rather than waits.** `ArtifactBusy` names the claim file, so a
-        claim orphaned by a kill can be removed by hand: `pm_ai.core` may not
-        learn where an artifact lives (story `1a`), so the writer that does know
-        composes the sentence. Waiting would be the wrong trade for a command a
-        human is standing at — and a wait on a dead holder's claim hangs instead
-        of saying so.
+        **Refuses rather than waits**, as `ArtifactBusy` naming the artifact and
+        its scope. The platform's `ClaimHeld` is translated here and only for
+        this claim's own entry: a refusal raised inside the body is the inner
+        file's, and passes through untouched. Any other `OSError` from taking
+        the claim is the operating system's and propagates as itself.
 
-        The claim is not the write's durability story and does not try to be. It
-        is removed however the body leaves; a process killed inside the body
-        leaves it behind, which is exactly the state the refusal explains.
+        An older build's marker file (`.<name>.claim`) is reported once per
+        writer and per path on the error stream, and otherwise ignored: nothing
+        holds it, and obeying it would wedge every later run.
         """
         target = self._paths.resolve(scope, artifact)
-        parent = target.parent
+        self._report_older_build_marker(target)
         # The parent may not exist yet on a first run, and the claim has to live
         # beside what it claims. Created by the same rule the artifact itself
         # would be created under, so claiming a sealed artifact does not open a
-        # world-listable `private/` a moment before the enclave would have been.
+        # world-listable `private/` a moment before the enclave would have been —
+        # the platform lock's own `mkdir` runs at the umask.
         if is_encrypted(str(target)):
-            _mkdir_enclave(parent)
+            _mkdir_enclave(target.parent)
         else:
-            parent.mkdir(parents=True, exist_ok=True)
-        claim = parent / f".{target.name}.claim"
-        try:
-            descriptor = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError as held:
-            raise ArtifactBusy(
-                f"{artifact} in {scope} is claimed by another pm-ai process, so "
-                f"this one refuses rather than overwriting what that one is "
-                f"about to write. If nothing else is running, the claim was "
-                f"orphaned by a kill and removing {claim} releases it."
-            ) from held
-        os.close(descriptor)
-        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(self._claims.exclusive(target))
+            except ClaimHeld as busy:
+                raise ArtifactBusy(
+                    f"{artifact} in {scope} is claimed by another pm-ai process; "
+                    f"nothing was changed. Run the command again."
+                ) from busy
             yield
-        finally:
-            claim.unlink(missing_ok=True)
+
+    def _report_older_build_marker(self, target: Path) -> None:
+        """Say so, once per writer, when an older build's marker sits beside `target`."""
+        marker = target.parent / f".{target.name}.claim"
+        if marker in self._markers_reported or not os.path.lexists(marker):
+            return
+        self._markers_reported.add(marker)
+        print(
+            f"pm-ai: {marker} was left by an older pm-ai build; delete it — "
+            f"nothing holds it.",
+            file=sys.stderr,
+        )
 
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None:
         """Append one typed record to `scope`'s open segment, naming it here.

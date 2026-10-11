@@ -132,6 +132,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar, Union
 
+from pm_ai.domain.claims import LOCK_SUFFIX
 from pm_ai.domain.identity import ScopeKind
 from pm_ai.domain.invariants import InconsistentModel
 
@@ -792,6 +793,28 @@ SCOPE_TREES: Mapping[ScopeKind, tuple[LayoutNode, ...]] = MappingProxyType(
 )
 
 
+# ── Claim sidecars: structure beside the trees, outside the tier model ───────
+CLAIM_SIDECAR_SUFFIX = LOCK_SUFFIX
+"""The one kind of file in a scope that no tree declares, declared here instead.
+
+A read-modify-write over a whole file is held under a kernel lock taken on an
+empty `<name>.lock` beside that file (story `1r`, `pm_ai.platform.claims`), and
+any declared artifact a writer claims may grow one: `projects.toml.lock`,
+`private/config.json.lock`, `memory/meetings.lock`. The sidecar is never
+deleted — unlinking it races a process already waiting on it — so it is
+permanent, and AD-44 asks that every permanent file be accounted for.
+
+It is *structure*, not state: empty, carrying no data, and meaningful only while
+a process holds it. So it is in no tier and in neither `OutsideTierModel` set —
+never backed up, never rebuilt, never pruned, never encrypted. It is not a
+`File` node either, because a node is an artifact the resolver addresses and
+`ENCRYPTION`/`GITIGNORED` derive answers for, and this is none of those. With
+this declaration the set of files under a scope root is derivable again: the
+trees' nodes, plus at most one sidecar per declared node. Inside a repository a
+derived ignore rule covers it (`pm_ai.core.project_scaffold.project_rules`).
+"""
+
+
 # ── Everything below is derived from the trees ───────────────────────────────
 
 
@@ -1112,6 +1135,20 @@ def _assert_declarations_agree() -> None:
         raise InconsistentModel(
             "a personal artifact with no path: "
             f"{sorted(PERSONAL_SUBJECT_ARTIFACTS - KEYS)}"
+        )
+
+    # No declared node may be spelled like a claim sidecar, or the one
+    # undeclared kind of file would be indistinguishable from a declared one.
+    sidecar_named = sorted(
+        key
+        for kind in SCOPE_TREES
+        for key in ADDRESS[kind]
+        if key.rstrip("/").endswith(CLAIM_SIDECAR_SUFFIX)
+    )
+    if sidecar_named:
+        raise InconsistentModel(
+            f"a declared node ends in the claim sidecar's suffix "
+            f"{CLAIM_SIDECAR_SUFFIX!r}: {sidecar_named}."
         )
 
     if not all(SCOPE_TREES.get(kind) for kind in ScopeKind):

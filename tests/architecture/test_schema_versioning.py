@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from claim_fakes import InMemoryClaims
 from pm_ai.domain import DataScope, ScopeKind, TargetRef
 from pm_ai.domain.storage_tiers import OPERATIONAL_DB
 from pm_ai.platform.paths import ScopePaths
@@ -36,7 +37,13 @@ APPLICATION = DataScope(ScopeKind.APPLICATION)
 
 
 def _open(paths: ScopePaths) -> StorageService:
-    return StorageService(paths, now=lambda: NOW, vcs=GitVcs(), crypto=PlaintextCrypto())
+    return StorageService(
+        paths,
+        now=lambda: NOW,
+        vcs=GitVcs(),
+        crypto=PlaintextCrypto(),
+        claims=InMemoryClaims(),
+    )
 
 
 def _store(paths: ScopePaths):
