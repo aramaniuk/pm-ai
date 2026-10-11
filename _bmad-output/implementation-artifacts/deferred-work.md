@@ -1086,3 +1086,15 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2m-payload-line-grammar.md`
   summary: A message line that parses but does not decode refuses the whole dashboard render, naming the entry id and `ingested_at` but not the segment and line number.
   evidence: Consistent with 23b's current rule that an unreadable log refuses the render; `23c` makes the section state the failure instead. The segment and line would need `parse_segment`'s position carried to the decoder.
+
+## Surfaced while specifying 2n and 2o (2026-10-11)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2n-people-are-written-as-handles.md`
+  summary: Where a bot account's handles are stored is not decided; AD-36's declared set of pm-ai's own handles is empty at the composition root because no enrolment records a bot today.
+  evidence: Graph signs in as the user (`8m`) and GitLab uses the user's personal access token (`8o`), so neither connector is a bot account. The first enrolment that authenticates as a distinct bot must decide where its handle is recorded (the connector's settings row is the obvious home) and fill the set `build(...)` passes.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2o-people-are-read-as-people.md`
+  summary: The alias table is a module dict that only tests fill; read-time resolution (`person_for`) and `pm_identity`'s alias half both wait on a slice that persists it.
+  evidence: Recorded as an Open Risk in the architecture spine (2026-10-11). Neither `33d` nor `23c` needs it; the first reader that joins handles across systems or shows a resolved name does. Needs an owner, the application scope, a row shape and a correction rule (2o refuses an alias that would reassign a handle in memory).
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2n-people-are-written-as-handles.md`
+  summary: Wave-2 sizing, the two specs added on 2026-10-11, measured the same way as the table above (tiktoken cl100k_base, body after the frontmatter): `2n` 4,625 tokens, `2o` 3,352.
+  evidence: Both within the range accepted for wave 2 (`2m` 4,737, `1r` 5,073, `33e` 5,097); kept whole. Split candidate for `2n` if it proves too large to build in one PR: the self-action actor rule and the `skill` field.

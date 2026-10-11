@@ -211,6 +211,7 @@
     event_log/ entry vocabulary is the gap 2c fills - four grammars reach one
     ledger today and nothing can parse a segment.
     WAVE 2, 2026-10-09: 2m the payload line grammar - one encode/decode pair in domain (AD-27), the list encoding, AD-48's list check corrected, pin and round-trip tests; a person-typed field is written as the actor id alone (AD-34). Lands before 33d; also fixes the dashboard's unprefixed channel/excerpt lookup.
+    WAVE 2, 2026-10-11 (Andrei, AD-34): a person on a line is the provider's handle <system>:<handle> (graph: a Graph user id, email: an address, graph_app: a bot, none: nobody), matched to a pm-ai person only when read - supersedes 2m's 'actor id alone' and its unresolved:<system>:<handle> spelling. Two slices: 2n people are written as handles (the one producer over the closed handle systems, the envelope writer, 2m's person encoding, every connector incl. the Graph calendar moving to email:, AD-36's declared set of pm-ai's own handles, the self-action actor constant) - lands before 33d; 2o people are read as people (the one read-time mapping over the alias table, pm_identity()) - lands after 8q, before 23c.
 
 - id: "3"
   title: MCP execution firewall and skill registry
@@ -376,6 +377,7 @@
     it happened. Nothing reads these records yet - that is story 16 - so this
     makes its input honest before it is built on.
     WAVE 2, 2026-10-09: 8m pm-ai connector sign-in <instance> (the interim for AD-39's re-consent Proposal), 8q the sign-in records who signed in (user_id, read by 23c), 8p a result says when the provider answered (HarvestResult.answered_at; AD-9 amended), 8n GitLab commit transport (the harvest was entirely stubbed: no socket, invented row shape, instance derived from the project path), 8o connector add gitlab (probe is one commits request; 403 refuses).
+    WAVE 2, 2026-10-11: 8q also makes a second claim on a path the process already holds a programming error, never ArtifactBusy (AD-5; 8m runs 8q's row update under the claim), and accepts the home_account_id fallback only when its tenant matches the row's.
 
 - id: "9"
   title: Passive telemetry radar
@@ -514,6 +516,7 @@
     retires the dict. Binding transcripts to meetings is 11b, in wave 2, and
     needs 33e.
     WAVE 2, decided 2026-10-09 (step 3): one record per meeting per scope and the first record keeps its id - a hand drop binds by title and start, a calendar harvest adopts a manual-only record. 11b wires the real transcript path (the typed extraction carrier, the VTT reader, the binding rule, the Graph capture 33e stores) and 11c adds the `pm-ai transcript drop` command (.vtt/.txt; .docx deferred); the citation guard uses the meeting's scope; Extraction.detail is typed; the path reaches no model.
+    WAVE 2, 2026-10-11 (Andrei, AD-34/AD-32): who spoke is decided by pm_identity() against the utterance's person handle (2o), and a speaker label is never a handle - a Graph transcript stages because its utterances carry no handle. 11b lands after 2o.
 
 - id: "12"
   title: Spoken anchor resolution and fuzzy recovery
@@ -730,6 +733,7 @@
     against prd.md on 2026-09-03 and corrected in 23a. The word "Milestones" in
     CAP-9's section title is what misled the earlier reading.
     WAVE 2, decided 2026-10-09: 23c fills Proactive Enablement from real message entries read through 2m's decoder; a failed or unreadable log read is STATED in the section, not fatal (supersedes 23b's exit-3 row); mentions of the PM first, a 20-line cap with the rest counted; the 24-hour window stays until 9a records the last render.
+    WAVE 2, 2026-10-11 (Andrei, AD-34): 23c decides 'mentions you' by pm_identity() (2o) - graph: handles of every Graph row, enabled or disabled - never a raw user_id; user_id is saved by 8q. Lands after 2o.
 
 - id: "24"
   title: Socratic 1:1 protocol and meta-coaching scorecard
@@ -854,3 +858,4 @@
     should name msal is an open question for 33a.
     msal is a new runtime dependency and needs a pin.
     WAVE 2, decided 2026-10-09: 33d channel messages (listed channels, replies are events, a 280-character excerpt), 33f listed chats only (Andrei: never every chat - a chat with a direct report belongs to the team-member scope and no registry of people exists yet), 33e transcripts (join URL -> online meeting -> transcript per occurrence matched by time, content fetched separately as VTT, a tenant's 403 degrades that meeting only). Specs under stories/.
+    WAVE 2, 2026-10-11 (Andrei, AD-34): 33d writes the sender and each mention as graph:<user id> handles from 2n's producer (never resolved when written, never raw ids) and a bot sender as graph_app:<application id>. Lands after 2n.
