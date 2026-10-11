@@ -33,17 +33,35 @@ import errno
 import fcntl
 import os
 import stat
+import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
-from pm_ai.domain.claims import LOCK_SUFFIX, ClaimHeld
+from pm_ai.domain.claims import LOCK_SUFFIX, ClaimHeld, ClaimReentered
 
-__all__ = ["ClaimHeld", "FlockClaims", "LOCK_SUFFIX", "exclusive"]
+__all__ = ["ClaimHeld", "ClaimReentered", "FlockClaims", "LOCK_SUFFIX", "exclusive"]
 
 # `ClaimHeld` and `LOCK_SUFFIX` are declared in `pm_ai.domain.claims` and
 # re-exported here. The scope model declares the sidecar and may not import this
 # module; the storage service translates the refusal and may not either.
+
+# The claims this thread holds, by canonical sidecar path (AD-5, story 8q). A
+# `flock` taken twice in one process through two descriptors conflicts with
+# itself, so asking again used to come back as `ClaimHeld` — a busy refusal
+# blaming a process that does not exist. Per thread, because another thread
+# holding the claim is contention that releases, and stays `ClaimHeld`; it
+# cannot see asyncio tasks that share one thread.
+_HELD_HERE = threading.local()
+
+
+def _held_here() -> set[Path]:
+    held: set[Path] | None = getattr(_HELD_HERE, "paths", None)
+    if held is None:
+        held = set()
+        _HELD_HERE.paths = held
+    return held
+
 
 # `ENOLCK` is what an NFS mount with no lock daemon answers.
 _UNSUPPORTED = frozenset({errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOLCK})
@@ -74,12 +92,30 @@ def exclusive(guarded: Path) -> Iterator[None]:
     not followed, so the sidecar always sits beside the artifact as named and
     never beside a target that may lie outside the scope tree.
 
+    A second claim on `guarded` by the thread already holding it is
+    `ClaimReentered`, a programming error naming the path, raised before the
+    lock is asked for or any directory created (AD-5, story 8q). The guard is
+    per thread: another thread holding it is `ClaimHeld`, and asyncio tasks
+    sharing one thread are one holder to it — it cannot tell them apart.
     Refuses with `ClaimHeld` only when another holder has the lock. Everything
     else is an `OSError`: a sidecar that is a link (`O_NOFOLLOW`), a directory
     or unreadable is the operating system's own fault, and a filesystem with no
     `flock` (exFAT, some network mounts) is refused naming the mount — never
     silently unlocked.
     """
+    # Re-entry first, before any directory is created, so "nothing was
+    # changed" is true. The set is captured here and the same set is the one
+    # discarded from on release.
+    canonical = guarded.parent.resolve() / guarded.name
+    claim = canonical.with_name(canonical.name + LOCK_SUFFIX)
+    held = _held_here()
+    if claim in held:
+        raise ClaimReentered(
+            f"this pm-ai thread already holds the claim on {canonical}, and asked "
+            f"for it again. That is a bug in pm-ai, not a busy file: a caller "
+            f"inside the claim must write under it rather than take it twice. "
+            f"Nothing was changed."
+        )
     guarded.parent.mkdir(parents=True, exist_ok=True)
     guarded = guarded.parent.resolve() / guarded.name
     claim = guarded.with_name(guarded.name + LOCK_SUFFIX)
@@ -119,9 +155,11 @@ def exclusive(guarded: Path) -> Iterator[None]:
                 f"another pm-ai process is holding {guarded.name} right now. "
                 f"Nothing was changed; run the command again."
             ) from taken
+        held.add(claim)
         try:
             yield
         finally:
+            held.discard(claim)
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)

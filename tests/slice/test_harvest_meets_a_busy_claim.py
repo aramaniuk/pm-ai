@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from claim_fakes import held_by_another_thread
 from pm_ai.app.pipelines import run_harvest
 from pm_ai.app.wiring import build
 from pm_ai.core.config import Config
@@ -73,16 +74,18 @@ class _ThreeRecords:
 def _daemon(tmp_path: Path, monkeypatch, *, busy_at: int, failure=None):
     """A daemon whose `meetings/` is claimed just before record `busy_at` is written.
 
-    The holder is the platform lock taken on the same path from this process —
-    a second open file description, which `flock` treats exactly as it treats
-    another process. Yields the daemon; the lock is released after the test.
+    The holder is the platform lock taken on the same path by another thread of
+    this process — a second open file description, which `flock` treats exactly
+    as it treats another process. Not this thread: a claim taken again by its
+    own holder is a programming error, not a busy file (AD-5, story 8q). Yields
+    the daemon; the lock is released after the test.
     """
     daemon = build(tmp_path, "alpha", now=lambda: NOW, config=Config(pm_handle="pm@x"))
     daemon.connectors[INSTANCE] = _ThreeRecords(failure)
     daemon.storage.save_cursor(INSTANCE, LOADED, EARLIER, None)
 
     target = daemon.storage.paths.resolve(PERSONAL, MEETINGS).resolve()
-    holder = exclusive(target)
+    holder = held_by_another_thread(lambda: exclusive(target))
     entered = False
     real = MeetingRecords.put
     calls: list[str] = []

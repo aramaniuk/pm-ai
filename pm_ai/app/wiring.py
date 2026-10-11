@@ -26,6 +26,7 @@ from pm_ai.connectors.graph import (
     MAX_SETTING_MINUTES,
     REACH_BACK_KEY,
     TENANT_KEY,
+    USER_ID_KEY,
     WIDTH_KEY,
     GraphConnector,
     MissingGraphSetting,
@@ -70,6 +71,7 @@ from pm_ai.core.connector_enrolment import (
     stored_credentials,
 )
 from pm_ai.core.meeting_records import MeetingRecords
+from pm_ai.domain.claims import ClaimReentered
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
 from pm_ai.domain.health import ArtifactState, Health, Presence
@@ -942,7 +944,9 @@ class GraphSignedIn:
 
     The credential to seal, the health check's sentence for the operator, and
     the row settings `_graph_connector` reads back at the next start — spelled
-    with the connector's own key names, so the CLI never learns them.
+    with the connector's own key names, so the CLI never learns them. The
+    settings carry the signed-in user's Graph user id under `USER_ID_KEY`
+    (story 8q), which the row records and nothing at the start reads.
     """
 
     credential: str = field(repr=False)
@@ -1157,6 +1161,21 @@ class GraphEnrolment:
                 "a fault in pm-ai rather than anything Microsoft said. Nothing "
                 "was saved."
             )
+        # Read back from what is sealed, which carries the account the sign-in
+        # named (story 8q). The adapter refused before sealing an account it
+        # could not read a user id from, so `None` here is a pm-ai fault. A
+        # credential that does not decode is its own failure and is not folded
+        # into that one: it propagates as the adapter's refusal.
+        try:
+            user_id = SealedCredential.decode(credential).user_id
+        except GraphAuthError as undecodable:
+            raise ProbeFailed(_nothing_saved(str(undecodable))) from undecodable
+        if user_id is None:
+            raise ProbeFailed(
+                "the sign-in completed and the credential it left does not name "
+                "the signed-in user's Graph user id, which is a fault in pm-ai "
+                "rather than anything Microsoft said. Nothing was saved."
+            )
         answer = probe.detail
         if probe.health is Health.WARNING and probe.remediation:
             answer = f"{answer.rstrip('.')}. {probe.remediation}"
@@ -1169,6 +1188,7 @@ class GraphEnrolment:
                 TENANT_KEY: tenant,
                 WIDTH_KEY: width,
                 REACH_BACK_KEY: reach_back,
+                USER_ID_KEY: user_id,
             },
         )
 
@@ -1273,7 +1293,9 @@ class SealedRefreshTokenStore:
         """The sealed store's claim, waited for briefly. Not re-entrant."""
         me = threading.get_ident()
         if self._holder == me:
-            raise RuntimeError(
+            # A programming error, raised before any attempt and never retried
+            # as busy (AD-5, story 8q): waiting would wait on this thread itself.
+            raise ClaimReentered(
                 f"the claim on {CREDENTIAL_STORE} is already held by this thread "
                 f"for {self.instance}; it is not re-entrant."
             )

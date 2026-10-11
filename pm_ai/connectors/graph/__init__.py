@@ -64,6 +64,7 @@ from pm_ai.connectors.graph.calendar import (
     GraphCalendarFetch,
     WindowPolicy,
 )
+from pm_ai.domain.connector_rows import USER_ID_KEY
 from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, render_value
 from pm_ai.domain.events import (
     MeetingHeldPayload,
@@ -105,6 +106,7 @@ __all__ = [
     "REACH_BACK_KEY",
     "SAMPLE_ROW",
     "UnknownProject",
+    "USER_ID_KEY",
     "WIDTH_KEY",
     "graph_category_scopes",
     "graph_window_policy",
@@ -229,6 +231,11 @@ laptop signs in through, how much calendar this PM wants read, and which of thei
 Outlook categories mean which project. None of that is a fact about pm-ai, and a
 key in the closed vocabulary is a key every installation then has.
 """
+
+# `USER_ID_KEY` ("user_id", story 8q) — the signed-in Microsoft user's Graph user
+# id — is imported above from `pm_ai.domain.connector_rows` and re-exported. It
+# is spelled there, once, because `pm_ai.core.connector_enrolment` writes it and
+# applies its absent rule, and this package does not import `core`.
 
 
 @dataclass(frozen=True)

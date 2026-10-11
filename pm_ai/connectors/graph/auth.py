@@ -418,6 +418,48 @@ class SealedCredential:
             )
         return cls(refresh_token=token, home_account_id=account)
 
+    @property
+    def user_id(self) -> str | None:
+        """The signed-in user's Graph user id: the first part of the account id (story 8q).
+
+        A sign-in seals `<oid>.<tid>` — the id token's `oid`, which Microsoft
+        documents as the immutable id of the user and the value Graph returns as
+        a user's `id` — or MSAL's own `<uid>.<utid>`, accepted only in that
+        two-part shape. So the user id is read back from what was sealed rather
+        than carried beside it, and the sealed document keeps its two fields.
+
+        `None` for an id without two non-empty parts — a credential sealed
+        before story 8q from an account id of another shape. Not a secret.
+        """
+        return _user_part(self.home_account_id)
+
+
+def _unusable_claim(name: str, value: object) -> str | None:
+    """Why an id-token claim cannot be one half of a sealed account id, or `None`.
+
+    Usable means text, non-empty, unpadded and without a `.` — the separator of
+    `<oid>.<tid>`, which a dotted half would make ambiguous to read back.
+    """
+    if value is None:
+        return f"the id token's `{name}` claim is absent"
+    if not isinstance(value, str):
+        return f"the id token's `{name}` claim is a {type(value).__name__}, not text"
+    if not value.strip():
+        return f"the id token's `{name}` claim is blank"
+    if value != value.strip():
+        return f"the id token's `{name}` claim {value!r} is padded with whitespace"
+    if "." in value:
+        return f"the id token's `{name}` claim {value!r} contains a `.`"
+    return None
+
+
+def _user_part(account_id: str) -> str | None:
+    """The `<user>` of a two-part `<user>.<tenant>` account id, or `None`."""
+    user, separator, tenant = account_id.partition(".")
+    if not separator or not user or not tenant or "." in tenant:
+        return None
+    return user
+
 
 @dataclass
 class InMemoryRefreshTokenStore:
@@ -1239,31 +1281,82 @@ class GraphDeviceCodeAuth:
     def _enrolling_account(self, app: Any, result: Mapping[str, Any]) -> str:
         """Which account just signed in, taken from the sign-in itself.
 
-        The id token's claims are preferred because they describe *this* result;
-        MSAL's account list is the fallback and is only unambiguous when it holds
-        one account, which is why several are refused here too.
+        The id token's claims are preferred because they describe *this* result:
+        `<oid>.<tid>`, whose first part is the signed-in user's Graph user id
+        (story 8q, `SealedCredential.user_id`). MSAL's account list is the
+        fallback, and is accepted only when it holds exactly one account whose
+        id has MSAL's two-part `<user>.<tenant>` shape and whose tenant part is
+        this sign-in's tenant: a guest account's id names its *home* tenant,
+        not this one, so its user part is not this tenant's user id. A row
+        tenant that is not a tenant id (`organizations`, a domain) cannot be
+        compared, so the fallback is refused there too, saying so. The claims
+        are sealed as they arrived; an `oid` or `tid` that is blank, padded or
+        dotted counts as not carried. Anything else is refused naming the
+        missing identifier, before anything is sealed — an account pm-ai cannot
+        name is not one it can harvest for.
         """
         claims = result.get("id_token_claims")
-        if isinstance(claims, Mapping):
-            oid, tid = claims.get("oid"), claims.get("tid")
-            if isinstance(oid, str) and oid and isinstance(tid, str) and tid:
-                return f"{oid}.{tid}"
+        claims = claims if isinstance(claims, Mapping) else {}
+        oid, tid = claims.get("oid"), claims.get("tid")
+        # Sealed exactly as the token carried them, never trimmed: the sealed
+        # `home_account_id` is matched against MSAL's cache by equality, so a
+        # value pm-ai tidied would match nothing. A value that cannot be sealed
+        # as it came counts as not carried, and the fallback below is asked.
+        unusable = _unusable_claim("oid", oid) or _unusable_claim("tid", tid)
+        if unusable is None:
+            return f"{oid}.{tid}"
+        if "oid" in claims:
+            missing = (
+                f"usable Graph user id for the signed-in user ({unusable}, so it "
+                f"cannot be sealed as the account MSAL caches)"
+            )
+        else:
+            missing = "Graph user id for the signed-in user (the id token's `oid` claim)"
         accounts = [a for a in self._guarded(app.get_accounts) if a.get("home_account_id")]
-        if len(accounts) == 1:
-            return str(accounts[0]["home_account_id"])
         # `CredentialStale`, matching `_cached_account`, because it is the same
         # fact — the account behind this credential cannot be identified — and
         # the matrix's ambiguous-cache row names that state. `AuthDeclined` said
         # consent was refused, which it was not: consent succeeded and the
         # identity is what is missing, and `AuthDeclined`'s own docstring scopes
         # it to consent.
-        raise CredentialStale(
-            f"the sign-in succeeded and did not say which account it was for "
-            f"({len(accounts)} in MSAL's cache, no usable id-token claims). "
-            f"pm-ai will not seal a credential it cannot later match to an "
-            f"account, because refreshing the wrong one harvests the wrong "
-            f"calendar. Nothing was stored."
-        )
+        if len(accounts) != 1:
+            raise CredentialStale(
+                f"the sign-in succeeded and did not say which account it was for: "
+                f"it carried no {missing}, and MSAL's cache holds "
+                f"{len(accounts)} accounts rather than exactly one to take it "
+                f"from. pm-ai will not seal a credential it cannot later match "
+                f"to an account, because refreshing the wrong one harvests the "
+                f"wrong calendar. Nothing was stored."
+            )
+        account = str(accounts[0]["home_account_id"])
+        if _user_part(account) is None:
+            raise CredentialStale(
+                f"the sign-in succeeded and did not say which account it was for: "
+                f"it carried no {missing}, and the one account in MSAL's cache "
+                f"has the id {account!r}, which is not the two-part "
+                f"`<user>.<tenant>` id a Graph user id can be read from. Nothing "
+                f"was stored."
+            )
+        home_tenant = account.partition(".")[2]
+        if not _TENANT_GUID.fullmatch(self.tenant):
+            raise CredentialStale(
+                f"the sign-in succeeded and did not say which account it was for: "
+                f"it carried no {missing}, and {self.tenant!r}, the tenant "
+                f"{self.instance} signs in through, is not a tenant id (a GUID), "
+                f"so the one account in MSAL's cache, of the tenant "
+                f"{home_tenant!r}, cannot be matched to it. Nothing was stored. "
+                f"Enrol again with the tenant id as the tenant."
+            )
+        if home_tenant.casefold() != self.tenant.casefold():
+            raise CredentialStale(
+                f"the sign-in succeeded and did not say which account it was for: "
+                f"it carried no {missing}, and the one account in MSAL's cache "
+                f"belongs to the tenant {home_tenant!r}, not to {self.tenant!r} "
+                f"that {self.instance} signs in through — a guest account's id "
+                f"names its home tenant, so its user part is not a user id in "
+                f"this one. Nothing was stored."
+            )
+        return account
 
     def _sealed(self) -> SealedCredential:
         """The stored credential, or the refusal that says to sign in."""

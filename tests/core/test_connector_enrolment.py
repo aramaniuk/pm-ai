@@ -16,19 +16,28 @@ from pathlib import Path
 
 import pytest
 
-from claim_fakes import InMemoryClaims
+from claim_fakes import InMemoryClaims, held_by_another_thread
 from pm_ai.core.connector_enrolment import (
+    USER_ID_KEY,
+    ClaimNotHeld,
+    ConnectorNotConfigured,
     CredentialNotHeld,
+    DifferentUser,
     MalformedInstanceName,
     MalformedSettings,
+    NotAGraphRow,
     OrphanedCredential,
     assert_enrollable,
+    assert_same_user,
     connector_configurations,
     enrol_connector,
+    record_user_id,
+    recorded_user_id,
     redacted,
     replace_credential,
     stored_credentials,
 )
+from pm_ai.domain.claims import ClaimReentered
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.storage_tiers import RESTRICTED_FILE_MODE
 from pm_ai.platform.paths import ScopePaths
@@ -906,7 +915,9 @@ def test_replacing_takes_the_claim_enrolment_takes(storage):
     enrol_connector(
         storage, system="graph", instance="graph:work", credential="old", probe=accepts
     )
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+    with held_by_another_thread(
+        lambda: storage.exclusive(scope=APPLICATION, artifact="config.json")
+    ):
         with pytest.raises(ArtifactBusy):
             replace_credential(
                 storage, system="graph", instance="graph:work", credential="new"
@@ -1024,3 +1035,200 @@ def test_the_up_front_check_asks_for_the_master_key(tmp_path):
 def test_redaction_can_say_something_other_than_accepted():
     assert redacted(f"refused: {SECRET}", SECRET, instead="withheld") == "withheld"
     assert redacted("refused plainly", SECRET, instead="withheld") == "refused plainly"
+
+
+# ── Story 8q — the row records which user signed in ──────────────────────────
+
+GRAPH = "graph:work"
+PM = "a-graph-user-id"
+
+
+def _graph_row_file(root: Path) -> Path:
+    return root / ".pm-ai" / "connectors" / f"{GRAPH}.json"
+
+
+def _enrol_graph(storage, root: Path, **settings: object) -> Path:
+    enrol_connector(
+        storage,
+        system="graph",
+        instance=GRAPH,
+        credential="sealed",
+        probe=accepts,
+        settings={"client_id": "an-app", "tenant": "organizations", **settings},
+    )
+    return _graph_row_file(root)
+
+
+def test_the_user_id_key_is_spelled_once_and_the_graph_package_uses_it():
+    from pm_ai.connectors.graph import USER_ID_KEY as graphs
+
+    assert USER_ID_KEY == graphs == "user_id"
+
+
+def test_recording_the_user_keeps_a_hand_added_mapping_and_every_other_key(
+    storage, tmp_path
+):
+    row_file = _enrol_graph(storage, tmp_path)
+    row = json.loads(row_file.read_text())
+    row["categories"] = {"Alpha": "alpha"}
+    row_file.write_text(json.dumps(row))  # a hand edit, in the PM's own formatting
+
+    assert record_user_id(storage, instance=GRAPH, user_id=PM) is True
+
+    after = json.loads(row_file.read_text())
+    assert after == {**row, USER_ID_KEY: PM}, "a key other than user_id changed"
+    assert after["categories"] == {"Alpha": "alpha"}
+
+
+def test_recording_the_same_user_again_changes_no_bytes(storage, tmp_path):
+    row_file = _enrol_graph(storage, tmp_path)
+    assert record_user_id(storage, instance=GRAPH, user_id=PM) is True
+    before = row_file.read_bytes()
+
+    assert record_user_id(storage, instance=GRAPH, user_id=PM) is False
+    assert row_file.read_bytes() == before
+
+
+def test_recording_another_user_replaces_only_that_key(storage, tmp_path):
+    row_file = _enrol_graph(storage, tmp_path, user_id="the-first-user")
+    before = json.loads(row_file.read_text())
+
+    assert record_user_id(storage, instance=GRAPH, user_id=PM) is True
+    assert json.loads(row_file.read_text()) == {**before, USER_ID_KEY: PM}
+
+
+def test_recording_the_user_of_an_unconfigured_instance_writes_nothing(storage, tmp_path):
+    with pytest.raises(ConnectorNotConfigured) as refused:
+        record_user_id(storage, instance=GRAPH, user_id=PM)
+    assert GRAPH in str(refused.value)
+    assert _connector_files(tmp_path) == []
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None, 7])
+def test_a_blank_user_id_is_not_recorded(storage, tmp_path, blank):
+    row_file = _enrol_graph(storage, tmp_path)
+    before = row_file.read_bytes()
+    with pytest.raises(ValueError):
+        record_user_id(storage, instance=GRAPH, user_id=blank)  # type: ignore[arg-type]
+    assert row_file.read_bytes() == before
+
+
+def test_a_row_that_is_not_an_object_is_refused_rather_than_replaced(storage, tmp_path):
+    row_file = _enrol_graph(storage, tmp_path)
+    row_file.write_text("[1, 2]")
+    with pytest.raises(MalformedSettings):
+        record_user_id(storage, instance=GRAPH, user_id=PM)
+    assert row_file.read_text() == "[1, 2]"
+
+
+def test_recording_takes_the_claim_enrolment_takes(storage, tmp_path):
+    row_file = _enrol_graph(storage, tmp_path)
+    before = row_file.read_bytes()
+    from pm_ai.ports import ArtifactBusy
+
+    with held_by_another_thread(
+        lambda: storage.exclusive(scope=APPLICATION, artifact="config.json")
+    ):
+        with pytest.raises(ArtifactBusy):
+            record_user_id(storage, instance=GRAPH, user_id=PM)
+    assert row_file.read_bytes() == before
+
+
+def test_a_caller_holding_the_claim_records_under_it_and_never_takes_it_twice(
+    storage, tmp_path
+):
+    """AD-5: `connector sign-in` (8m) holds the claim while it updates the row."""
+    row_file = _enrol_graph(storage, tmp_path)
+    before = row_file.read_bytes()
+
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        with pytest.raises(ClaimReentered) as reentered:
+            record_user_id(storage, instance=GRAPH, user_id=PM)
+        assert "config.json" in str(reentered.value)
+        assert row_file.read_bytes() == before, "written despite the re-entry"
+
+        assert record_user_id(storage, instance=GRAPH, user_id=PM, claimed=True) is True
+    assert json.loads(row_file.read_text())[USER_ID_KEY] == PM
+
+
+def test_replacing_a_credential_under_a_held_claim_is_a_programming_error(storage):
+    enrol_connector(storage, system="graph", instance=GRAPH, credential="old", probe=accepts)
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        with pytest.raises(ClaimReentered):
+            replace_credential(storage, system="graph", instance=GRAPH, credential="new")
+    assert stored_credentials(storage)[GRAPH]["credential"] == "old"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [{}, {USER_ID_KEY: ""}, {USER_ID_KEY: "  "}, {USER_ID_KEY: 42}, {USER_ID_KEY: None}],
+    ids=["missing", "empty", "whitespace", "a number", "null"],
+)
+def test_a_row_without_a_usable_user_id_records_no_user(row):
+    assert recorded_user_id(row) is None
+    assert_same_user(recorded_user_id(row), "anybody-at-all")  # any user is accepted
+
+
+def test_a_recorded_user_id_is_read_back():
+    assert recorded_user_id({USER_ID_KEY: PM}) == PM
+
+
+def test_a_sign_in_by_a_different_user_is_refused_naming_both():
+    with pytest.raises(DifferentUser) as refused:
+        assert_same_user(PM, "somebody-else", instance=GRAPH)
+    message = str(refused.value)
+    assert PM in message and "somebody-else" in message and GRAPH in message
+    assert (refused.value.recorded, refused.value.signed_in) == (PM, "somebody-else")
+
+
+def test_a_sign_in_by_the_same_user_is_accepted():
+    assert_same_user(PM, PM)
+    # A Graph user id is a GUID, whose case is not part of its identity.
+    assert_same_user(PM.upper(), PM)
+
+
+def test_a_repeat_sign_in_in_another_case_changes_no_bytes(storage, tmp_path):
+    row_file = _enrol_graph(storage, tmp_path)
+    assert record_user_id(storage, instance=GRAPH, user_id=PM) is True
+    before = row_file.read_bytes()
+
+    assert record_user_id(storage, instance=GRAPH, user_id=PM.upper()) is False
+    assert row_file.read_bytes() == before
+
+
+def test_a_row_that_is_not_graphs_records_no_graph_user(storage, tmp_path):
+    enrol_connector(
+        storage, system="gitlab", instance="gitlab:alpha", credential=SECRET, probe=accepts
+    )
+    row_file = tmp_path / ".pm-ai" / "connectors" / "gitlab:alpha.json"
+    before = row_file.read_bytes()
+
+    with pytest.raises(NotAGraphRow) as refused:
+        record_user_id(storage, instance="gitlab:alpha", user_id=PM)
+
+    assert "gitlab:alpha" in str(refused.value)
+    assert row_file.read_bytes() == before
+
+
+def test_saying_the_claim_is_held_when_it_is_not_is_a_programming_error(
+    storage, tmp_path
+):
+    row_file = _enrol_graph(storage, tmp_path)
+    before = row_file.read_bytes()
+
+    with pytest.raises(ClaimNotHeld):
+        record_user_id(storage, instance=GRAPH, user_id=PM, claimed=True)
+    with held_by_another_thread(
+        lambda: storage.exclusive(scope=APPLICATION, artifact="config.json")
+    ):
+        with pytest.raises(ClaimNotHeld):  # another thread's claim is not this one's
+            record_user_id(storage, instance=GRAPH, user_id=PM, claimed=True)
+    assert row_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("recorded", [None, PM], ids=["no user recorded", "a user recorded"])
+@pytest.mark.parametrize("signed_in", ["", "   ", None, 7], ids=["empty", "blank", "None", "a number"])
+def test_comparing_against_no_signed_in_user_is_a_programming_error(recorded, signed_in):
+    with pytest.raises(ValueError) as refused:
+        assert_same_user(recorded, signed_in)  # type: ignore[arg-type]
+    assert not isinstance(refused.value, DifferentUser)

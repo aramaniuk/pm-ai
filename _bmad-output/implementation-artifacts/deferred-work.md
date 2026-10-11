@@ -1098,3 +1098,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2n-people-are-written-as-handles.md`
   summary: Wave-2 sizing, the two specs added on 2026-10-11, measured the same way as the table above (tiktoken cl100k_base, body after the frontmatter): `2n` 4,625 tokens, `2o` 3,352.
   evidence: Both within the range accepted for wave 2 (`2m` 4,737, `1r` 5,073, `33e` 5,097); kept whole. Split candidate for `2n` if it proves too large to build in one PR: the self-action actor rule and the `skill` field.
+
+## Surfaced by the story-8q review (2026-10-11)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: The architecture spine's AD-5 does not state the re-entry rule (a second claim on a path the process already holds is a programming error, never `ArtifactBusy`); only the 8q spec does, and the code's docstrings cite "AD-5 (2026-10-11, story 8q)".
+  evidence: A search of `ARCHITECTURE-SPINE.md` for re-entry finds nothing about claims. The spine changes only through `bmad-architecture`. The rule as built is per thread, not per process, and cannot see asyncio tasks sharing one thread; the spine amendment should say which.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: With the default tenant `organizations` (or `common`, `consumers`, or a domain name), the cached-account fallback for a sign-in without `oid` can never succeed, because a cached account's tenant part is always a tenant id.
+  evidence: The frozen rule compares the cached tenant part with the row's tenant. A normal work-account sign-in carries `oid`, so no sign-in seen so far reaches the fallback. Whether the fallback should accept the id token's `tid` in place of a tenant word is a product decision for whoever next touches the sign-in.

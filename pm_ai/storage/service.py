@@ -35,13 +35,14 @@ import re
 import sqlite3
 import stat
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from pm_ai.domain import clocks
-from pm_ai.domain.claims import ClaimHeld
+from pm_ai.domain.claims import ClaimHeld, ClaimReentered
 from pm_ai.domain.disclosure import (
     DISCLOSURE_LEDGER_ARTIFACT,
     DISCLOSURE_LEDGER_SCOPE,
@@ -542,6 +543,27 @@ class CoverageInstanceMismatch(ValueError):
     and an absence assertion over the intended key passes with a real row on
     disk. Refused at the write, where both names are still in scope.
     """
+
+
+# The artifacts this thread holds a claim on, by canonical path, across every
+# writer in the process (AD-5, story 8q). Per thread: it cannot see asyncio
+# tasks that share one thread. Checked before the port is asked, so
+# a re-entry is a programming error whichever `ClaimPort` is wired — the kernel
+# lock refuses it too, and an in-memory one would otherwise answer "busy".
+_CLAIMED_HERE = threading.local()
+
+
+def _canonical(target: Path) -> Path:
+    """`target` keyed as the platform lock keys it: its directory resolved."""
+    return target.parent.resolve() / target.name
+
+
+def _claimed_here() -> set[Path]:
+    held: set[Path] | None = getattr(_CLAIMED_HERE, "paths", None)
+    if held is None:
+        held = set()
+        _CLAIMED_HERE.paths = held
+    return held
 
 
 class StorageService:
@@ -1386,6 +1408,15 @@ class StorageService:
         it. The sidecar is never deleted, and is declared as structure outside
         the tier model (`scope_model.CLAIM_SIDECAR_SUFFIX`).
 
+        **Never re-entrant** (AD-5, story 8q): the thread already holding this
+        claim that asks for it again gets `ClaimReentered`, a programming error
+        naming the path, before anything is created or the port is asked —
+        never `ArtifactBusy`, which would blame a process that does not exist
+        and send a retry into itself. The guard is **per thread**: another
+        thread holding the claim is ordinary contention and answers busy, and
+        asyncio tasks sharing one thread are one holder to it — it cannot tell
+        them apart.
+
         **Refuses rather than waits**, as `ArtifactBusy` naming the artifact and
         its scope. The platform's `ClaimHeld` is translated here and only for
         this claim's own entry: a refusal raised inside the body is the inner
@@ -1397,6 +1428,18 @@ class StorageService:
         holds it, and obeying it would wedge every later run.
         """
         target = self._paths.resolve(scope, artifact)
+        # Checked first, before any directory is created, so "nothing was
+        # changed" is true. The set is captured here and the same set is the
+        # one discarded from on the way out.
+        canonical = _canonical(target)
+        claimed = _claimed_here()
+        if canonical in claimed:
+            raise ClaimReentered(
+                f"this pm-ai thread already holds the claim on {artifact} in "
+                f"{scope} ({canonical}) and asked for it again. That is a bug in "
+                f"pm-ai, not a busy file: a caller inside the claim writes under "
+                f"it rather than taking it twice. Nothing was changed."
+            )
         self._report_older_build_marker(target)
         # The parent may not exist yet on a first run, and the claim has to live
         # beside what it claims. Created by the same rule the artifact itself
@@ -1415,7 +1458,18 @@ class StorageService:
                     f"{artifact} in {scope} is claimed by another pm-ai process; "
                     f"nothing was changed. Run the command again."
                 ) from busy
+            claimed.add(canonical)
+            held.callback(claimed.discard, canonical)
             yield
+
+    def holds_claim(self, *, scope: DataScope, artifact: str) -> bool:
+        """Whether this thread holds `exclusive`'s claim on `artifact` (story 8q).
+
+        Read off the same per-thread set the re-entry guard keeps, so it sees a
+        claim taken through any writer in this process, and none taken by
+        another thread or process.
+        """
+        return _canonical(self._paths.resolve(scope, artifact)) in _claimed_here()
 
     def _report_older_build_marker(self, target: Path) -> None:
         """Say so, once per writer, when an older build's marker sits beside `target`."""
