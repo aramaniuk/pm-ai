@@ -429,8 +429,9 @@ transcript.
   evidence: `service.py:581` calls `sqlite3.connect(store, ...)` in `__init__` unconditionally. Measured 2026-09-15 by tracing `sqlite3.connect` through one `onboard_project` run on an empty `HOME`: `.pm-ai/private/operational.db` and its `-wal`/`-shm` sidecars exist afterwards. Since `4d`, `pm-ai doctor` also builds a bootstrap `StorageService`, so the command whose entire job is to report on a machine now creates a Tier-2 file on it. Nothing is corrupted and the file would be created on first real use anyway; what is wrong is that a diagnostic has a side effect, and that "no file's bytes change" is unassertable for any command without excluding sqlite's sidecars by name — which `test_project_onboarding.py` now does, and says why. The fix is a lazy connection opened on first operational use.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4k-project-onboarding.md`
-  summary: **ASSIGNED 2026-10-10 to `1r`** — spec written, not built. The exclusive claim leaves a `projects.toml.lock` in `~/.pm-ai/` that no scope tree declares.
+  summary: **RESOLVED 2026-10-10 by `1r`.** The exclusive claim leaves a `projects.toml.lock` in `~/.pm-ai/` that no scope tree declares.
   evidence: `pm_ai/platform/claims.py` creates it and deliberately never unlinks it — removing a lock file races a process that has already opened it and is waiting to lock it, after which two processes hold claims on different inodes and both believe they are alone. So the file is correct and permanent. What it is not is *declared*: AD-44's rule is that every persistent artifact is in exactly one of the three tiers, `RETENTION_MANAGED` or `DIAGNOSTIC_ONLY`, derived from the scope model, and this one is in none. It is empty and carries no data, so nothing leaks and no backup misses anything — but the set of files in `~/.pm-ai/` is no longer fully derivable from the trees, which is the property AD-44 exists to keep. Either declare it or give the claim a directory that is declared.
+  resolution: Declared. `pm_ai/domain/scope_model.py` declares `CLAIM_SIDECAR_SUFFIX` (from `LOCK_SUFFIX`, now in `pm_ai/domain/claims.py`) beside the scope trees as structure outside the tier model — never backed up, rebuilt, pruned or encrypted — and refuses at import a declared node spelled like one. `pm_ai/core/project_scaffold.project_rules()` derives `/.project-ai/**/*.lock` from it. Every whole-file claim (`config.json`, `meetings/`, the sign-in store, `projects.toml`) now takes this one `flock` sidecar through `StorageService.exclusive`.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4d-project-registry.md`
   summary: There are two TOML basic-string escapers in `pm_ai.core`, and they are byte-identical by intention rather than by construction.
@@ -486,7 +487,7 @@ transcript.
   evidence: 8f moved absence-as-a-value into the port, which is where `4c` said it belonged once something declared it. Retiring it touches one call site, one test in `tests/surfaces/test_cli_dispatch.py`, and a by-name reference in this file. Left in place because 8f's task list names five files and `app/entry.py` is not one; its docstring was corrected so it no longer claims to do the translation.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
-  summary: **ASSIGNED 2026-10-09 to `1q`** — spec written, not built. `_append` still writes event-log and meeting segments at the umask, so the declared restricted mode never reaches them.
+  summary: **RESOLVED 2026-10-10 by `1q`** — `_append` takes a required `declared_mode` and applies it when it creates a segment, so a declared-restricted ledger is created at `0600`; an existing segment keeps its mode (the `doctor` entry under "Surfaced while writing the wave-2 specs" stays open). Was: `_append` still writes event-log and meeting segments at the umask, so the declared restricted mode never reaches them.
   evidence: `event_log/` and `meetings/` are declared gitignored in the PEOPLE tree, but ledger appends go through `path.open("a")` rather than `_publish`, which is where `restricted_mode` is consulted. Outside 8f's matrix, and it matters the moment the people enclave's segment modes do.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
@@ -514,7 +515,7 @@ transcript.
   evidence: The implementation is a single `_assert_git_excludes` call. It takes no `name`, so it never validates the member name `write_artifact` will, and it checks no directory writability — so an unwritable `connectors/` still orphans a credential on every attempt. Either narrow the docstring or widen the check.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md`
-  summary: **ASSIGNED 2026-10-09 to `1q`** — spec written, not built. `_append` still writes at the umask, so the declared restricted mode reaches two of the three writers.
+  summary: **RESOLVED 2026-10-10 by `1q`** — `append_disclosure` passes `restricted_mode(scope.kind, DISCLOSURE_LEDGER_ARTIFACT)` and `disclosure.md` is created at `0600`; all three writers now take the declared mode. Was: `_append` still writes at the umask, so the declared restricted mode reaches two of the three writers.
   evidence: `disclosure.md` is declared GITIGNORED in the application tree and goes through `append_disclosure` → `_append` → `path.open("a")`, never `_publish`, where `restricted_mode` is consulted. `write_artifact` and `write_capture` both honour the declaration; this one does not, which is the selective enforcement the mode rule was introduced to end.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8b-credential-lifecycle.md`
@@ -689,7 +690,7 @@ transcript.
 ## Surfaced by the story-1n review (2026-09-15)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1n-project-artifacts-go-machine-local.md`
-  summary: **ASSIGNED 2026-10-09 to `1q`** — spec written, not built. `_append` is the one writer that ignores `restricted_mode`, so every declared-gitignored append-only ledger lands at the operator's umask while the declaration says `0600`.
+  summary: **RESOLVED 2026-10-10 by `1q`** — `_append` adopts `restricted_mode` at creation, and `test_the_append_path_adopts_the_declared_mode` (renamed from `…does_not_adopt…`) now pins `0600`. Was: `_append` is the one writer that ignores `restricted_mode`, so every declared-gitignored append-only ledger lands at the operator's umask while the declaration says `0600`.
   evidence: `restricted_mode` derives from `GITIGNORED` (`storage_tiers.py:194`), and its two sibling writers adopt the answer — `_replace` and `_create_exclusively` both take a `declared_mode`. `_append` (`service.py:880`) takes none and writes through a bare `path.open("a")`, so a segment is declared `0600` and created at the umask, typically `0644`. Measured during the 1n review: `restricted_mode(PROJECT, "event_log/")` returns `0o600` and the segment on disk is `0o644`, with the full suite green across the divergence. **Pre-existing rather than introduced here** — people-scope `event_log/` and the application `disclosure.md` were already gitignored and already landed at the umask — which is why 1n corrected its own change-log claim to what the code does instead of changing the writer. What 1n adds is a fourth subject and the first test that measures the mode rather than the declaration. The fix is a `declared_mode` on `_append` and the mode applied at segment creation, not on every append; it belongs with whichever slice next touches the single writer's file-creation path. Consequence is confidentiality-shaped and bounded: the files are machine-local by declaration and group- and world-readable in fact, on a single-user laptop.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1n-project-artifacts-go-machine-local.md`
@@ -1019,7 +1020,7 @@ Found by the spec writers while reading the code each slice touches. Each names 
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
   summary: `9a`'s `try/except` around the connector call must classify `ArtifactBusy` as the retryable failure `1r` already recorded with the position unchanged, not as a raising connector — otherwise `9a`'s "connector raised → not retryable" row misfiles it. And `tests/connectors/test_probe.py:81`'s docstring still says enrolment probes inside the claim; `8l` corrected the code comment, not the test's.
-  evidence: `1r` makes `run_harvest` record the busy refusal and re-raise it; `9a` owns the surrounding `try/except`. Owner: `9a` for the first, `1r` for the docstring.
+  evidence: `1r` makes `run_harvest` record the busy refusal and re-raise it; `9a` owns the surrounding `try/except`. Owner: `9a` for the first, `1r` for the docstring — the docstring half done in `1r` on 2026-10-10.
 
 ## Wave 2 sizing — measured 2026-10-10
 
@@ -1042,6 +1043,27 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 
 **Every spec exceeds the 2,400-token ceiling wave 1 set, and the cause is the review rounds, not the prose.** Each spec was written to roughly 1,800–2,400 tokens, then passed through the three review lenses (blind hunter, edge-case hunter, verification gap) and, for the decision-dependent ones, the architecture gate's tightenings; nearly every accepted finding became a matrix row, a clause or a named test, and the fixers cut Intent, Code Map and Design Notes redundancy rather than content. Nine splits were already taken where a reviewer found two failure classes or an independently shippable piece (`33d`/`33f`, `4n`/`4p`, `8n`/`8o`, `9a`/`9b`, `4e`/`4r`, `4f`/`4q`, `11b`/`11c`, `8m`/`8q`, `8p` and `1r` carved out). Kept at this size by the parent's call on 2026-10-10 rather than split again, so that implementation can start; the ceiling stays a proposal with Andrei's override, as the wave-1 ruling says. The named further-split candidates, if he wants them: `33e` (the client's bytes download and inner-code carry plus `StoragePort.write_capture` as a chore slice), `1r` (the `run_harvest` recording into `9a`), `4q` (the daemon-side streams refactor and per-request scope resolution), `11b` (the VTT reader), `2m` (the pin and round-trip tests).
 
+
+## Surfaced by the story-1q review (2026-10-10)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md`
+  summary: A harvest batch is appended as one write of all its lines with no size bound, so a batch above 1 MiB is outside the concurrent-appender bound 1q measured.
+  evidence: `_append_batch` joins every rendered line into a single `_append` call; the measurement note beside `MAX_ENTRY_LENGTH` covers single writes up to 1 MiB only. Bounded in practice by harvest page caps, but nothing asserts or chunks it. Moot once the daemon is the only writer.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md`
+  summary: `disclosure.md` is one file that never rolls over, so on a machine where it was created before 1q it stays at the umask's mode for good, unlike event-log segments, which reach `0600` at the next month.
+  evidence: 1q leaves existing files' modes alone by decision; event logs self-correct through monthly segments, the disclosure ledger does not. The `doctor` wrong-mode entry under "Surfaced while writing the wave-2 specs" is where this would be reported; no deployed machine has a ledger today (`~/.pm-ai` holds `private/` only).
+
+## Surfaced by the story-1r review (2026-10-10)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
+  summary: When `meetings/` is claimed by a concurrent harvest of the same connector instance, `run_harvest` records its failure with the cursor it loaded, which can overwrite the position and cleared failure the other harvest just saved.
+  evidence: `_record_busy_meetings` calls `save_cursor(instance, <loaded cursor>, None, failure)`. Two harvests of one instance at once is what `9a`'s one-at-a-time scheduler rules out; until then two terminals can do it. Belongs with `9a` (or a compare-and-set on the stored cursor).
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
+  summary: A meeting-record write that fails on the claim for a reason other than busy (a filesystem without `flock`, a directory or unreadable sidecar) raises out of `run_harvest` with no failure row recorded, so the scheduler has nothing to report or back off on.
+  evidence: Only `ArtifactBusy` is caught around `put`; the non-busy `OSError`s are named refusals at the CLI but unrecorded in Tier 2. Belongs with `9a`'s `try/except` around the cycle.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
+  summary: An older build's `.<name>.claim` marker is reported on stderr from the storage layer once per writer per path, and never cleaned up; a daemon or Telegram context would not show stderr.
+  evidence: `_report_older_build_marker` in `pm_ai/storage/service.py` prints; the spec says the marker is "reported, not obeyed" without naming the channel. `4e` (one writer for the daemon's lifetime) or a `doctor` probe is the natural home.
 
 ## Surfaced by the story-2m review (2026-10-10)
 

@@ -176,6 +176,9 @@ def _os_open_writes(node: ast.Call) -> bool:
         "O_EXCL",
         "O_CLOEXEC",
         "O_NOFOLLOW",
+        # Story 1r: so a FIFO sidecar opens at once and is refused, not waited on.
+        # It changes whether `open` blocks, never whether a byte can be written.
+        "O_NONBLOCK",
     }
 
 

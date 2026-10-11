@@ -902,8 +902,18 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     paths = mod("pm_ai.platform.paths").ScopePaths.rooted(tmp_path)
     vcs = mod("pm_ai.platform.vcs").GitVcs()
     clock = lambda: datetime.datetime(2026, 8, 19, tzinfo=datetime.timezone.utc)
+    claims = mod("pm_ai.platform.claims").FlockClaims()
     storage = mod("pm_ai.storage.service").StorageService(
-        paths, now=clock, vcs=vcs, crypto=mod("pm_ai.storage.crypto").AesGcmCrypto(b"0" * 32)
+        paths,
+        now=clock,
+        vcs=vcs,
+        crypto=mod("pm_ai.storage.crypto").AesGcmCrypto(b"0" * 32),
+        claims=claims,
+    )
+
+    assert isinstance(claims, ports.ClaimPort), (
+        "the lock adapter the composition root injects does not satisfy the port "
+        "the single writer takes every whole-file claim through"
     )
 
     assert isinstance(paths, ports.ScopePathPort), (

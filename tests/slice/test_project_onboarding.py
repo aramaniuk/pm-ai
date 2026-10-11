@@ -25,11 +25,10 @@ from pm_ai.core.project_registry import (
     parse_registry,
 )
 from pm_ai.core.project_scaffold import project_rules
-from pm_ai.domain.claims import ClaimHeld
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.platform.claims import exclusive
 from pm_ai.platform.paths import MalformedSubjectId, ScopePaths
-from pm_ai.ports import KeyNotFound
+from pm_ai.ports import ArtifactBusy, KeyNotFound
 from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL, EXIT_USAGE
 
 
@@ -260,6 +259,36 @@ def test_inside_a_repository_a_gitignored_write_succeeds_afterwards(home, tmp_pa
     assert ignored.returncode == 0, "git does not ignore what pm-ai just wrote"
 
 
+@pytest.mark.skipif(not os.environ.get("PATH"), reason="no PATH to find git on")
+def test_a_claim_sidecar_in_a_committed_project_directory_is_ignored(home, tmp_path):
+    """Story 1r: the derived `/.project-ai/**/*.lock` rule is what keeps a claim's
+    sidecar out of a commit — asked of git, beside a committed artifact that no
+    other rule covers, and with the artifact itself still not ignored."""
+    repository = tmp_path / "alpha"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+
+    onboard_project(Keychain(), str(repository))
+
+    sidecar = repository / ".project-ai" / "rules" / "persona.md.lock"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.touch()
+    matched = subprocess.run(
+        ["git", "check-ignore", "-v", str(sidecar)],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+    )
+    assert matched.returncode == 0, "git would commit a claim's sidecar"
+    assert "/.project-ai/**/*.lock" in matched.stdout, matched.stdout
+    artifact = subprocess.run(
+        ["git", "check-ignore", str(sidecar.parent / "persona.md")],
+        cwd=repository,
+        capture_output=True,
+    )
+    assert artifact.returncode == 1, "the sidecar rule also ignores the artifact"
+
+
 # ── Refusals ─────────────────────────────────────────────────────────────────
 
 
@@ -348,13 +377,18 @@ def test_a_second_run_refuses_while_the_claim_is_held(home, tmp_path):
     """`write_artifact` publishes with `os.replace`, which keeps the last writer
     whole and discards the other — so without the claim, two runs that both read
     a one-entry registry both render a two-entry one and one project vanishes
-    with both commands reporting success."""
+    with both commands reporting success.
+
+    Two doors, one file (story `1r`): the platform lock held directly on the
+    resolved registry path refuses onboarding through the storage façade."""
     (tmp_path / "alpha").mkdir()
-    registry = ScopePaths.production().project_registry
+    registry = ScopePaths.production().project_registry.resolve()
 
     with exclusive(registry):
-        with pytest.raises(ClaimHeld):
+        with pytest.raises(ArtifactBusy) as refused:
             onboard_project(Keychain(), str(tmp_path / "alpha"))
+
+    assert str(refused.value).startswith("projects.toml in application")
 
     assert not (home / ".pm-ai" / "projects.toml").exists()
 

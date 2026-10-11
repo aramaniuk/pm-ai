@@ -490,8 +490,8 @@ class MeetingRecords:
         `private/config.json`, and for the same reason: two `put`s that each read
         a different snapshot of the notes would each write their own back and one
         human edit would be gone. The claim refuses rather than waits, so a
-        concurrent `put` in another process raises `ArtifactBusy` naming the
-        claim file instead of quietly winning.
+        concurrent `put` in another process raises `ArtifactBusy` naming
+        `meetings/` and its scope instead of quietly winning.
         **What the claim does not cover is a human's editor**, which honours no
         claim of pm-ai's: an edit saved between the read and the write is still
         lost. Stated rather than implied, because the region this preserves is

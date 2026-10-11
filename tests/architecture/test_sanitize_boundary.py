@@ -63,6 +63,7 @@ import pytest
 
 from conftest import REPO_ROOT
 
+from claim_fakes import InMemoryClaims
 from pm_ai.core import ledger
 from pm_ai import ports
 from pm_ai.core.extraction import Extraction
@@ -915,6 +916,7 @@ def _persist_one(event: NormalizedEvent) -> str:
         now=lambda: PERSIST_NOW,
         vcs=GitVcs(),
         crypto=AesGcmCrypto(b"0" * 32),
+        claims=InMemoryClaims(),
     )
     storage.persist_events((event,), scope=PERSIST_SCOPE)
     segment = storage.paths.resolve(PERSIST_SCOPE, "event_log/") / "2026-09.md"

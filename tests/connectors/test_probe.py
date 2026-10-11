@@ -77,9 +77,10 @@ def test_the_cli_is_wired_to_this_adapter_and_not_to_the_refusing_default():
 def test_a_hung_provider_is_abandoned_at_the_bound(monkeypatch):
     """Unbounded, this hung `pm-ai connector add` forever.
 
-    Worse than a hang: `enrol_connector` probes *inside* the sealed store's
-    exclusive claim, so one silent provider wedged every later enrolment on the
-    machine until the process was killed.
+    `enrol_connector` probes *before* taking the sealed store's exclusive claim
+    (`8l` moved it out), so a silent provider no longer wedges other
+    enrolments — but the command at the terminal still hung, which is what the
+    bound is for.
     """
     import time
 

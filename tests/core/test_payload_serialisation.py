@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from claim_fakes import InMemoryClaims
 from pm_ai.core import ledger
 from pm_ai.domain.event_entries import EventEntry, MalformedEntry, SelfActionType, render_entry
 from pm_ai.core.rendering import render_project_dashboard
@@ -39,6 +40,7 @@ def _storage():
     return StorageService(
         ScopePaths.rooted(pathlib.Path(tempfile.mkdtemp())),
         now=lambda: NOW, vcs=GitVcs(), crypto=AesGcmCrypto(b"0" * 32),
+        claims=InMemoryClaims(),
     )
 
 

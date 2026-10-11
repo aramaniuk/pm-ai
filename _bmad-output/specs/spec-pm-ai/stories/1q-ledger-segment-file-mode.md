@@ -2,7 +2,8 @@
 title: 'Append-only ledgers are created at their declared file mode'
 type: 'bugfix'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '679f96e94603be6f85afa0cc00c0841234eb5fe9'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -74,12 +75,12 @@ Verified against `ddcb9aa` on 2026-10-09.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/storage/service.py` -- `_append` takes a required keyword `declared_mode: int | None`; creates the file with that mode and opens it for append untouched when it exists; the three callers pass `restricted_mode(scope.kind, <artifact>)` -- one rule for three writers
-- [ ] `tests/architecture/test_cipher.py` -- the direct `_append` call at 698 passes `declared_mode` -- the signature changed
-- [ ] `tests/architecture/test_storage_capabilities.py` -- flip the 1n row to assert the declared mode; one test per matrix row, each setting a real process umask and restoring it in `finally`; the umask-`200` test sets the mask only after the segment directory exists, since `_writable_dir` creates it under the same mask -- the matrix is the contract
-- [ ] `pm_ai/domain/event_entries.py` -- measure on this machine the largest record size at which two processes appending to one segment concurrently (each opening with `O_APPEND`, one `os.write` per record, several thousand records each, the file then scanned for any line that is not one whole record) never interleave; record the figure, the date and the procedure in a note beside `MAX_ENTRY_LENGTH` -- a measured bound, not a promise
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/1n-project-artifacts-go-machine-local.md` -- append a dated Spec Change Log line: the append path (`service.py:883`) adopts the declaration since 1q -- the flipped test's message asks for it
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the three `_append` entries resolved; the `doctor` wrong-mode entry under "Surfaced while writing the wave-2 specs" stays open
+- [x] `pm_ai/storage/service.py` -- `_append` takes a required keyword `declared_mode: int | None`; creates the file with that mode and opens it for append untouched when it exists; the three callers pass `restricted_mode(scope.kind, <artifact>)` -- one rule for three writers
+- [x] `tests/architecture/test_cipher.py` -- the direct `_append` call at 698 passes `declared_mode` -- the signature changed
+- [x] `tests/architecture/test_storage_capabilities.py` -- flip the 1n row to assert the declared mode; one test per matrix row, each setting a real process umask and restoring it in `finally`; the umask-`200` test sets the mask only after the segment directory exists, since `_writable_dir` creates it under the same mask -- the matrix is the contract
+- [x] `pm_ai/domain/event_entries.py` -- measure on this machine the largest record size at which two processes appending to one segment concurrently (each opening with `O_APPEND`, one `os.write` per record, several thousand records each, the file then scanned for any line that is not one whole record) never interleave; record the figure, the date and the procedure in a note beside `MAX_ENTRY_LENGTH` -- a measured bound, not a promise
+- [x] `_bmad-output/specs/spec-pm-ai/stories/1n-project-artifacts-go-machine-local.md` -- append a dated Spec Change Log line: the append path (`service.py:883`) adopts the declaration since 1q -- the flipped test's message asks for it
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the three `_append` entries resolved; the `doctor` wrong-mode entry under "Surfaced while writing the wave-2 specs" stays open
 
 **Acceptance Criteria:**
 - Given a project with no event-log segment for this month and a process umask of `022`, when one event is appended, then the segment's mode is `0600` and the file holds that one entry.
@@ -109,7 +110,7 @@ finally:
 
 The append's safety against another process appending at the same moment rests on one record being one `write(2)` call on a descriptor opened for append, and Darwin promises no atomicity for a regular-file write above a page — so this slice measures the largest record size at which concurrent appenders from two processes never interleave on this machine and records the figure beside `MAX_ENTRY_LENGTH` (16,384) with the date: a measured bound, not a promise (AD-5 note, 2026-10-10).
 
-An empty segment left behind by a failure between the exclusive create and the write is harmless: it already carries the declared mode, and the next append treats it as existing. A ledger declared without a mode (`None`) under an owner-stripping umask is created without owner-write and fails on the second append — today's behaviour, unchanged.
+An empty segment left behind by a failure between the exclusive create and the write is harmless under an ordinary umask: it already carries the declared mode, and the next append treats it as existing. Under an owner-stripping umask it is not: the create yields the declared mode minus the masked bits (`0400` at umask `200`), and a kill between the create and the `fchmod` leaves that file behind; the next append opens it as existing, never `fchmod`s it, and pm-ai is refused its own segment until owner-write is restored by hand. That is stated, not repaired — changing an existing file's mode is outside this slice. A ledger declared without a mode (`None`) under an owner-stripping umask is created without owner-write and fails on the second append — today's behaviour, unchanged.
 
 ## Verification
 
@@ -118,3 +119,50 @@ An empty segment left behind by a failure between the exclusive create and the w
 - `uv run pytest -q` -- expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Spec Change Log
+
+- **2026-10-10, Design Notes corrected after the blind-hunter review.** The review found that the sentence calling an empty segment left between the exclusive create and the write "harmless" is false under an owner-stripping umask: the create yields `0400` at umask `200`, and a kill before `fchmod` leaves a segment the next append opens as existing without restoring owner-write, so pm-ai is locked out of it. The sentence now says so, and `_append`'s docstring says the same. Code behaviour is unchanged by this entry — no `chmod` of an existing file was added, which the Never list forbids.
+
+## Suggested Review Order
+
+**The append path takes the declared mode**
+
+- The one writer that ignored the declaration; mode applied only when the file is created.
+  [`service.py:916`](../../../../pm_ai/storage/service.py#L916)
+
+- Creation and append told apart by `O_EXCL`; a vanished file is created again, bounded.
+  [`service.py:220`](../../../../pm_ai/storage/service.py#L220)
+
+- `fchmod` restores owner bits an owner-stripping umask removed, on a new file only.
+  [`service.py:967`](../../../../pm_ai/storage/service.py#L967)
+
+**One rule for three callers**
+
+- Event log: the caller that knows scope and artifact passes `restricted_mode`.
+  [`service.py:1471`](../../../../pm_ai/storage/service.py#L1471)
+
+- Disclosure ledger, same rule.
+  [`service.py:1501`](../../../../pm_ai/storage/service.py#L1501)
+
+- Harvest batch, same rule.
+  [`service.py:1721`](../../../../pm_ai/storage/service.py#L1721)
+
+**The measured bound**
+
+- Two concurrent appenders never interleaved up to 1 MiB per write; a bound, not a promise.
+  [`event_entries.py:181`](../../../../pm_ai/domain/event_entries.py#L181)
+
+**Tests**
+
+- The 1n row flipped to pin `0600`.
+  [`test_storage_capabilities.py:365`](../../../../tests/architecture/test_storage_capabilities.py#L365)
+
+- An existing segment keeps its mode — no chmod of operator files.
+  [`test_storage_capabilities.py:425`](../../../../tests/architecture/test_storage_capabilities.py#L425)
+
+- The reopen race, forced through a patched `os.open`.
+  [`test_storage_capabilities.py:449`](../../../../tests/architecture/test_storage_capabilities.py#L449)
+
+- Real umask 200: pm-ai can still append twice.
+  [`test_storage_capabilities.py:538`](../../../../tests/architecture/test_storage_capabilities.py#L538)

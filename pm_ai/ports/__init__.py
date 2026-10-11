@@ -168,9 +168,10 @@ class ArtifactBusy(RuntimeError):
 
     Refusing rather than blocking is deliberate: enrolment is a command a human
     is waiting on, at a prompt, and a second one is a mistake rather than a
-    queue. The refusal names the claim file, so a claim orphaned by a kill can
-    be removed by hand — `pm_ai.core` may not learn where an artifact lives
-    (story `1a`), which is why the sentence is composed by the writer that does.
+    queue. The refusal names the artifact and its scope, says nothing was
+    changed and asks for the command to be run again. It names no file to
+    remove, because there is none: the claim is a kernel lock, released with
+    its holder however that holder died (story `1r`).
     """
 
 
@@ -385,6 +386,31 @@ class VcsPort(Protocol):
         Returns the `.git` itself, so a refusal can name what it found. Never
         raises: a directory walk has no failure mode worth propagating, and one
         that could not read a parent has already been reported by `working_tree`.
+        """
+
+
+@runtime_checkable
+class ClaimPort(Protocol):
+    """An exclusive, cross-process claim on one file (story `1r`).
+
+    Until the daemon exists every `pm-ai` command is the writer, and what stops
+    two of them losing each other's read-modify-write over a file rewritten
+    whole is a claim held across the read and the write. The mechanism is a
+    kernel lock — released with the process however it dies — and that is an
+    OS API, so it sits behind this port with its adapter in `pm_ai.platform`
+    (AD-26), handed to the single writer by the composition root exactly as
+    `VcsPort` is. The shape is what makes a Windows adapter possible later.
+    """
+
+    def exclusive(self, guarded: Path) -> AbstractContextManager[None]:
+        """Hold the claim on `guarded` for the body of a `with`, or refuse at once.
+
+        Keyed on the file, not on its spelling: two paths reaching one file
+        share one claim. Raises `pm_ai.domain.claims.ClaimHeld` on entry when
+        another holder has it — never waits — and `OSError` for anything that
+        is not "busy": a filesystem with no lock semantics, a permission fault,
+        a sidecar that is not a plain file. Released however the body leaves.
+        Not re-entrant: a caller holding the claim that asks again is refused.
         """
 
 
@@ -697,9 +723,16 @@ class StoragePort(Protocol):
         down.
 
         Refuses rather than waits: `ArtifactBusy` when the claim is already
-        held. Enrolment is a command a human is standing at, so a second one
-        concurrently is a mistake and not a queue, and a blocking claim on a
-        machine where the holder was killed would hang instead of saying so.
+        held, naming the artifact and its scope. Enrolment is a command a human
+        is standing at, so a second one concurrently is a mistake and not a
+        queue. A holder that was killed holds nothing — the claim is a kernel
+        lock on a sidecar beside the file, released with the process — so there
+        is no orphan to remove and the refusal names none.
+
+        An `ArtifactBusy` raised *inside* the body is the body's own refusal
+        (an inner file that was busy), never re-reported as this artifact.
+        A fault that is not "busy" — no lock support on the filesystem, a
+        permission error on the sidecar — is an `OSError`, reported as such.
 
         The claim is released however the body leaves.
         """

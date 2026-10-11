@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from ledger_fixtures import entry as _entry, mask_ids
+from claim_fakes import InMemoryClaims
 from pm_ai.domain import (
     CAPTURES,
     EVENT_LOG,
@@ -174,7 +175,11 @@ def _fixture(
         paths.gitignore("alpha").write_text(gitignore, encoding="utf-8")
     return Fixture(
         storage=StorageService(
-            paths, now=lambda: NOW, vcs=vcs or GitVcs(), crypto=TEST_CIPHER
+            paths,
+            now=lambda: NOW,
+            vcs=vcs or GitVcs(),
+            crypto=TEST_CIPHER,
+            claims=InMemoryClaims(),
         ),
         repository=repository,
     )
