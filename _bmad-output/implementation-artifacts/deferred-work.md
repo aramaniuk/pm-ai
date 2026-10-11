@@ -821,8 +821,9 @@ transcript.
   evidence: Before 8i a quiet project wrote none, so this is new pressure the slice created rather than an existing one it inherited: six rows per instance per day, and the fold story 16 owns will union an unbounded list. Raised independently by two review lenses. The fix belongs with whoever builds that fold, since the retention horizon and the fold's gap tolerance are the same question asked twice.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8i-coverage-earned-by-an-empty-fetch.md`
-  summary: **ASSIGNED 2026-10-09 to `8p`** — spec written, not built. `HarvestResult` states that an empty outcome proves a request completed, but the type cannot see that — the outcome is derived from "mapped nothing and refused nothing", which a connector could report without having fetched at all.
+  summary: **RESOLVED 2026-10-10 in `8p`.** `HarvestResult` states that an empty outcome proves a request completed, but the type cannot see that — the outcome is derived from "mapped nothing and refused nothing", which a connector could report without having fetched at all.
   evidence: The guard is honour-system across every future connector: the shipped two both measure honestly, and nothing checks it. The connector already knows the instant it reached the provider, so carrying that on the result would make the exemption checkable rather than trusted. Recorded rather than fixed because it widens the persisted shape, which 8i's matrix says it does not touch.
+  resolution: `HarvestResult` carries `answered_at`, the instant by this machine's clock the provider's first page was read. `EMPTY` without it is refused when built, a naive or non-UTC value is refused with its own message, and a coverage window with no instant or starting anywhere else is refused — so the window is derived from the reading rather than kept beside it. The type checks the instant's presence and shape, not its provenance: that it is the first page's reading is still the connector's word, pinned by the connector tests rather than by the type. Both connectors report the reading they already took for the window's start (`gitlab.py`'s `reached_at`; Graph's `CalendarFetch.answered_at`, passed through `_result` and through the early return after a page was read and mapping raised). The persisted shape did not widen after all: no result is stored, and the stored window already begins at this instant. Tests in `tests/domain/test_harvest_result.py` and the connector suites.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4l-every-enrolled-project.md`
   summary: **DECIDED 2026-09-25 in AD-11:** `dashboard`'s default stays personal — the folder never changes a command's default target. The working directory now decides which project a command acts in, but **no subcommand yet writes to that project** — `dashboard` takes an explicit `--scope` and defaults to personal, `goal set` writes personal, and `project add` names its own project.
@@ -1064,6 +1065,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
   summary: An older build's `.<name>.claim` marker is reported on stderr from the storage layer once per writer per path, and never cleaned up; a daemon or Telegram context would not show stderr.
   evidence: `_report_older_build_marker` in `pm_ai/storage/service.py` prints; the spec says the marker is "reported, not obeyed" without naming the channel. `4e` (one writer for the daemon's lifetime) or a `doctor` probe is the natural home.
+
+## Surfaced by the story-8p review (2026-10-10)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8p-a-result-says-when-the-provider-answered.md`
+  summary: GitLab's `harvest` builds its final `HarvestResult` outside any `try`, so an injected clock that returns a naive or non-UTC instant after a page is read raises out of a method whose contract is report-not-raise.
+  evidence: Measured by the 8p implementer: a naive `now()` with an empty 200 page now raises `ValueError: answered_at=... is not aware UTC` (before 8p that path returned a naive window). With rows, the same clock already raised before 8p through `validate_occurred_at`, of which only `ImplausibleTimestamp` is caught. Graph's connector has the wrapper; GitLab's lacks it. Belongs with `8n`, which rewrites the GitLab transport.
 
 ## Surfaced by the story-2m review (2026-10-10)
 

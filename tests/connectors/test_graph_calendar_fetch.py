@@ -273,6 +273,9 @@ def test_a_single_page_returns_its_rows_and_the_coverage_the_fetch_earned():
     assert result.coverage is not None
     assert result.coverage.connector_instance == INSTANCE
     assert result.coverage.start == BASE + TICK, "the instant the provider answered"
+    assert result.answered_at == result.coverage.start, (
+        "the fetch carries out the reading the window starts at (8p)"
+    )
     assert result.coverage.end == clock.at
     assert (result.coverage.start, result.coverage.end) != (
         result.window.start,
@@ -954,6 +957,7 @@ def test_a_5xx_is_a_failure_with_no_coverage_and_an_unmoved_cursor():
 
     assert result.rows == ()
     assert result.coverage is None
+    assert result.answered_at is None, "an error status is not a page, so no instant"
     assert result.walked_through is None
     assert result.failure is not None
     assert result.failure.retryable is True
@@ -980,6 +984,7 @@ def test_a_403_mid_fetch_is_a_consent_change_and_never_enters_the_refresh_path()
     assert result.failure.retryable is False
     assert "403" in result.failure.reason
     assert result.coverage is not None, "page one was fetched before consent changed"
+    assert result.answered_at == BASE + TICK, "page one's reading, kept beside the failure"
 
 
 def test_a_403_is_its_own_refusal_type():
@@ -1686,12 +1691,25 @@ def test_a_clock_that_steps_backwards_mid_fetch_claims_no_coverage():
             return at
 
     rewinding = Rewinding()
+    # The fetch's own readings, apart from the client's on the same clock:
+    # started, the first page's arrival, finished — in that order.
+    own: list[datetime] = []
+
+    def fetch_clock() -> datetime:
+        own.append(rewinding())
+        return own[-1]
+
     fetch, _, _, _, _ = _fetcher(_page(_event(id="still-a-row")))
-    fetch.now = rewinding
+    fetch.now = fetch_clock
     fetch.client.now = rewinding
     result = fetch.fetch()
 
     assert rewinding.readings[-1] < rewinding.readings[0], "the premise of the row"
+    assert len(own) == 3, "started, first page, finished"
+    assert result.answered_at == own[1], (
+        "the window is withheld, but the page was still read at this instant, "
+        "and that fact stays (8p)"
+    )
     assert [row.event_id for row in result.rows] == ["still-a-row"], "the fetch worked"
     assert result.failure is None, "and it was not turned into a failure either"
     assert result.coverage is None, (

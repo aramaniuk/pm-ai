@@ -288,6 +288,8 @@ class HarvestResult:
       provider answered and there was nothing there";
     - coverage claimed by a fetch that mapped nothing *and did not complete
       cleanly*, which is the fabrication `8a` deleted.
+    - `EMPTY` without `answered_at`, an `answered_at` that is not aware UTC,
+      and coverage with no `answered_at` or starting anywhere else (`8p`).
 
     `EMPTY` is exempt from that last one, because it is the one outcome that
     means the request finished and the answer was "nothing here" (`8i`) — and
@@ -340,6 +342,30 @@ class HarvestResult:
     dashboard makes instead of reading `event_log/`, which could not answer it:
     `MeetingHeldPayload` has no field for a title or a start, so a meeting that
     has not happened has no honest representation as an event (AD-27).
+    """
+
+    answered_at: datetime | None = None
+    """The instant, by this machine's clock, the provider's first page was read.
+
+    Slice `8p` (AD-9, 2026-10-09). A clock reading taken by the connector when
+    the first page's body is in hand — never when the request was sent, never a
+    provider header, and never computed from a window or a row. `None` exactly
+    when no page was read: a provider that answered only with an error, or never
+    answered, gave no page.
+
+    Before it, `EMPTY` was inferred from "nothing mapped, nothing refused,
+    nothing failed", which a connector could report without having asked the
+    provider at all, and the window it carried was taken on its word. Now the
+    type refuses `EMPTY` without an instant, and refuses a coverage window with
+    no instant or starting anywhere but exactly at it — the window is derived
+    from this reading, not kept beside it. The type checks that the instant is
+    present and well-formed, not where it came from: that it really is the
+    first page's reading is still the connector's word, pinned by each
+    connector's own tests.
+
+    It stays set when the window is withheld: a clock that stepped backwards
+    between the first page and the finish has no honest interval, but the page
+    was still read at this instant.
     """
 
     def __post_init__(self) -> None:
@@ -420,6 +446,45 @@ class HarvestResult:
                 f"with no rows in it to parse; either way the silence is ours. "
                 f"EMPTY is the outcome that may carry a window over no rows."
             )
+        # `8p`: the proof of an answer, checked in the order the spec gives —
+        # its absence under EMPTY first, then its shape, and only then whether
+        # the window starts at it, so a naive instant is reported as naive
+        # rather than as a window-start mismatch it happens to cause.
+        if self.outcome is HarvestOutcome.EMPTY and self.answered_at is None:
+            raise ValueError(
+                "outcome=empty with no answered_at. EMPTY means the provider "
+                "answered and there was nothing there, and answered_at — the "
+                "instant the first page was read — is the proof that it "
+                "answered. Without it, 'checked and found nothing' is "
+                "indistinguishable from never having asked."
+            )
+        if self.answered_at is not None and (
+            self.answered_at.tzinfo is None
+            or self.answered_at.utcoffset() != timedelta(0)
+        ):
+            raise ValueError(
+                f"answered_at={self.answered_at!r} is not aware UTC. It is a "
+                f"reading of this machine's clock, which every producer here "
+                f"emits as aware UTC; comparing it with a coverage window or an "
+                f"ingested_at would silently answer a different question."
+            )
+        if self.coverage is not None:
+            if self.answered_at is None:
+                raise ValueError(
+                    f"coverage from {self.coverage.start.isoformat()} claimed "
+                    f"with no answered_at. A coverage window starts at the "
+                    f"instant the provider's first page was read; with no such "
+                    f"instant there was no page, and a window over no answer is "
+                    f"the fabrication `8a` deleted."
+                )
+            if self.coverage.start != self.answered_at:
+                raise ValueError(
+                    f"coverage starts at {self.coverage.start.isoformat()} but "
+                    f"the provider answered at {self.answered_at.isoformat()}. "
+                    f"The window is derived from that reading, not kept beside "
+                    f"it, so its start must be exactly the instant the first "
+                    f"page was read."
+                )
         # Refused rows deliberately do **not** earn coverage, though they do
         # make the outcome HARVESTED. Coverage arms AD-35's fail-closed reading
         # — within a covered window, absence of evidence is evidence of absence,

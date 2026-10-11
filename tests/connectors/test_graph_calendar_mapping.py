@@ -342,6 +342,33 @@ def test_a_cancelled_upcoming_row_is_neither_returned_nor_written():
     # presence. The fetch begins and ends inside one reading here, so the honest
     # window is the instant `NOW`.
     assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW)
+    assert result.answered_at == NOW, "the page was read, and the window starts there (8p)"
+
+
+def test_an_empty_calendar_carries_the_instant_its_page_was_read():
+    """Matrix (`8p`): a window with no rows — EMPTY, and the proof it answered.
+
+    The instant is the fetch's own reading, passed onto the result beside the
+    window it starts; `HarvestResult` refuses EMPTY without it. The clock moves
+    on every reading here, so the instant is named rather than merely present.
+    """
+    readings: list[datetime] = []
+
+    def ticking() -> datetime:
+        readings.append(NOW + len(readings) * timedelta(seconds=1))
+        return readings[-1]
+
+    connector = _connector()
+    connector.calendar.now = ticking
+    result = connector.harvest(Cursor())
+
+    assert result.outcome is HarvestOutcome.EMPTY
+    # The fetch's readings: started, the first page's arrival, finished.
+    assert len(readings) == 3
+    assert result.answered_at == readings[1]
+    assert result.coverage == CoverageWindow(INSTANCE, readings[1], readings[2]), (
+        "the fetch's window, passed through unchanged"
+    )
 
 
 def test_a_row_cancelled_after_it_ended_keeps_its_record():
@@ -921,6 +948,59 @@ def test_an_unexpected_fault_after_the_fetch_is_a_value_and_not_a_raise():
     assert result.failure.retryable is False
     assert result.cursor == Cursor(), "nothing was learned, so nothing moved"
     assert result.records == () and result.live == () and result.events == ()
+    assert result.coverage is None
+    assert result.answered_at == NOW, (
+        "the page was read before the mapping raised, so the provider did "
+        "answer — and when is a fact the fault does not undo (8p)"
+    )
+
+
+def test_a_naive_first_page_reading_is_reported_as_a_failure_not_raised():
+    """`8p`: an instant `HarvestResult` refuses must not escape `harvest`.
+
+    The fetch's clock answers aware UTC for the window and naive after it, so
+    the first page's reading is naive. `_result` then raises building the
+    result, and the fallback must not carry the same instant into a second
+    `HarvestResult` that would raise again — out of a method that reports.
+    """
+    readings: list[datetime] = []
+
+    def turning_naive() -> datetime:
+        readings.append(NOW if not readings else NOW.replace(tzinfo=None))
+        return readings[-1]
+
+    connector = _connector()
+    connector.calendar.now = turning_naive
+    result = connector.harvest(Cursor())
+
+    assert readings[1].tzinfo is None, "the premise: the first page's reading is naive"
+    assert result.outcome is HarvestOutcome.FAILED
+    assert result.failure is not None
+    assert "ValueError" in result.failure.reason
+    assert "fetched a calendar page" in result.failure.reason
+    assert result.answered_at is None, "a refused instant is dropped, not reused"
+    assert result.coverage is None
+
+
+def test_a_walk_that_yields_no_page_and_no_fault_says_no_page_was_read():
+    """`8p`: the fallback's reason is true when no page arrived.
+
+    A walk that ends without a body and without raising leaves no instant, so
+    the fetch looks like "found nothing" with no proof of an answer — which
+    `HarvestResult` refuses. The failure that results must not claim a page was
+    fetched and then mis-mapped.
+    """
+    connector = _connector()
+    connector.calendar.client.walk = lambda url, *, deadline=None: iter(())
+    result = connector.harvest(Cursor())
+
+    assert result.outcome is HarvestOutcome.FAILED
+    assert result.failure is not None
+    assert "read no calendar page" in result.failure.reason
+    assert "fetched a calendar page" not in result.failure.reason
+    assert result.answered_at is None
+    assert result.coverage is None
+    assert result.cursor == Cursor(), "nothing was learned, so nothing moved"
 
 
 def test_a_span_that_runs_backwards_is_refused_rather_than_clamped():

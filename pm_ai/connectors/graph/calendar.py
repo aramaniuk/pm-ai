@@ -796,6 +796,17 @@ class CalendarFetch:
     failure: HarvestFailure | None = None
     refusals: tuple[RowRefusal, ...] = ()
     pages: int = 0
+    answered_at: datetime | None = None
+    """This machine's clock when the first page's body arrived, or `None` when
+    no page did (`8p`).
+
+    The same reading `coverage` starts at, carried out on its own because the
+    window can be withheld while the reading stands — a clock that stepped back
+    before the finish, rows with no credible clock, a failure on a later page.
+    `GraphConnector` passes it onto the `HarvestResult`, which refuses a
+    window that does not start at it.
+    """
+
     walked_through: datetime | None = None
     """The calendar instant the next run may start from: the end of the last
     span walked to completion, or `None` when none was.
@@ -991,6 +1002,7 @@ class GraphCalendarFetch:
             refusals=tuple(refusals),
             pages=pages,
             walked_through=walked_through,
+            answered_at=reached_at,
         )
 
     # ── One page, one row ────────────────────────────────────────────────────
