@@ -56,7 +56,6 @@ from pm_ai.domain.goals import Goal
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report
 from pm_ai.core.project_registry import RegistryRefused
-from pm_ai.domain.claims import ClaimHeld
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.core.connector_enrolment import (
@@ -966,6 +965,11 @@ def _enrolment_refusals() -> Iterator[None]:
         # on the machine, because a credential nothing refers to is only
         # findable if this sentence is printed.
         raise Refusal(str(orphaned)) from orphaned
+    except OSError as failed:
+        # The claim's lock file is a directory or unreadable, or the filesystem
+        # has no locks (story `1r`) — or any other fault the operating system
+        # names. Its own message names the file; a traceback would read as a bug.
+        raise Refusal(f"connector add stopped: {failed}") from failed
 
 
 def _connector_check(context: Context) -> int:
@@ -1177,8 +1181,12 @@ def _project_add(context: Context) -> int:
     path, alias = (context.arguments + (None,))[:2]  # type: ignore[operator]
     try:
         outcome = context.onboard(str(path), None if alias is None else str(alias))
-    except (ScopeResolutionError, RegistryRefused, ClaimHeld) as refused:
+    except (ScopeResolutionError, RegistryRefused, ArtifactBusy) as refused:
         raise Refusal(str(refused)) from refused
+    except OSError as failed:
+        # Wraps all of onboarding, so the operating system's own error — which
+        # names its file — is the report, not a guess at which file it was.
+        raise Refusal(f"project add stopped: {failed}") from failed
     if outcome.already_registered:
         print(
             f"{outcome.project_id} is already onboarded at {outcome.repository}; "
@@ -1306,14 +1314,13 @@ def _setup_project(context: Context) -> None:
     )
     try:
         outcome = context.onboard(path, alias)
-    except (ScopeResolutionError, RegistryRefused, ClaimHeld) as refused:
+    except (ScopeResolutionError, RegistryRefused, ArtifactBusy) as refused:
         raise Refusal(
             f"setup stopped at step 2 (project); step 1 stays done: {refused}"
         ) from refused
     except OSError as unwritable:
         raise Refusal(
-            f"setup stopped at step 2 (project); step 1 stays done. The "
-            f"registry could not be written: {unwritable}"
+            f"setup stopped at step 2 (project); step 1 stays done: {unwritable}"
         ) from unwritable
     if outcome.already_registered:
         print(

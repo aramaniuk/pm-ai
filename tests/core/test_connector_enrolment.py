@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from claim_fakes import InMemoryClaims
 from pm_ai.core.connector_enrolment import (
     CredentialNotHeld,
     MalformedInstanceName,
@@ -73,6 +74,7 @@ def _storage(root: Path, *, crypto=None, vcs=None) -> StorageService:
         now=lambda: NOW,
         vcs=vcs or _NoRepository(),
         crypto=crypto or AesGcmCrypto(KEY),
+        claims=InMemoryClaims(),
     )
 
 

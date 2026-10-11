@@ -2,7 +2,8 @@
 title: 'One claim for every whole-file write'
 type: 'refactor'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: 'a75840f8634da518fb23a528e8133d456cf1d553'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -86,23 +87,23 @@ Verified against `ddcb9aa` on 2026-10-10.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/claims.py` -- `LOCK_SUFFIX` moves in; `ClaimHeld` docstring: the platform spelling storage translates, caught by no caller
-- [ ] `pm_ai/ports/__init__.py` -- `ClaimPort` beside `VcsPort`; `ArtifactBusy` and `StoragePort.exclusive` docstrings stop promising a file to delete
-- [ ] `pm_ai/platform/claims.py` -- `FlockClaims`; canonicalise before naming the sidecar; `O_NOFOLLOW`; `EACCES` propagates as `OSError`; `ENOTSUP`/`EOPNOTSUPP` raised as an `OSError` naming the mount; `LOCK_SUFFIX` re-exported
-- [ ] `pm_ai/storage/service.py` -- `__init__` takes `claims: ClaimPort`; `exclusive` per Design Notes: marker check first (once per writer, a set on the instance), enclave, the port's claim, `ClaimHeld` → `ArtifactBusy` at this enter only
-- [ ] `pm_ai/domain/scope_model.py`, `pm_ai/core/project_scaffold.py` -- declare the `.lock` sidecar as structure outside the tier model, naming `LOCK_SUFFIX`; `project_rules()` derives its ignore rule -- closes the undeclared-sidecar entry
-- [ ] `pm_ai/app/wiring.py` -- `_writer` passes `FlockClaims()`; `onboard_project` claims through `storage.exclusive`; the platform import goes
-- [ ] `pm_ai/app/pipelines.py` -- `run_harvest`: `except ArtifactBusy` around the `put` loop only; `save_cursor` with the loaded position, no coverage, `HarvestFailure(retryable=True)` naming `meetings/`, the scope, record N and the earlier-records sentence; a failure of that save is logged and the original refusal raised; then raise
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `:1180` and `:1309` catch `ArtifactBusy`; `:1180` gains `except OSError` in the shape of 1313; the `ClaimHeld` import goes
-- [ ] `.importlinter` -- `pm_ai.platform` added to `surfaces-through-core`'s forbidden modules
-- [ ] `pm_ai/core/meeting_records.py`, `pm_ai/connectors/graph/auth.py` -- docstrings and the health remedy stop naming a claim file to remove
-- [ ] `tests/architecture/test_storage_capabilities.py` -- one test per storage row, `FlockClaims()` under test: refusal names no file; release keeps the sidecar; pre-existing sidecar; two spellings via a symlinked `tmp_path`; inner refusal names the inner file; marker line asserts the marker path and "delete" in captured stderr, before a refused claim too, once per writer and again from a second writer; `ENOTSUP`, `EACCES` and a directory sidecar through a `ClaimPort` fake raising them; enclave mode. Kill test: the child runs `sys.executable`, builds `StorageService(ScopePaths.rooted(tmp_path), …, claims=FlockClaims())`, holds `exclusive(scope=APPLICATION, artifact="config.json")`, prints `held`; the parent kills it with SIGKILL only after reading that line, then claims and succeeds
-- [ ] `tests/` -- an in-memory `ClaimPort` fake for every `StorageService(...)` not testing the lock (thirteen files), so a filesystem without `flock` fails only the lock tests
-- [ ] `tests/slice/test_project_onboarding.py` -- the held-claim test holds the platform lock directly on the resolved registry path; onboarding through the façade is refused with `ArtifactBusy`
-- [ ] `tests/surfaces/test_cli_subcommands.py` -- `project add` and `setup` step 2 with a held registry, and an `OSError` on the sidecar; `connector add` with held credentials asserting the exact sentence
-- [ ] `tests/slice/` -- `run_harvest` with `meetings/` held at record 2 of 3: the failure row names `meetings/`, the scope, the record, the earlier-records sentence; retryable; position unchanged; `ArtifactBusy` raised; a `save_cursor` that raises still re-raises the refusal
-- [ ] `tests/slice/test_rotated_tokens_are_kept.py`, `tests/core/test_connector_enrolment.py`, `tests/core/test_meeting_records.py` -- drop the `.config.json.claim` and `LEFT_OVER` assertions; otherwise unchanged and green
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark `:436` resolved; add that `9a`'s `run_harvest` `try/except` must treat `ArtifactBusy` as the already-recorded retryable failure
+- [x] `pm_ai/domain/claims.py` -- `LOCK_SUFFIX` moves in; `ClaimHeld` docstring: the platform spelling storage translates, caught by no caller
+- [x] `pm_ai/ports/__init__.py` -- `ClaimPort` beside `VcsPort`; `ArtifactBusy` and `StoragePort.exclusive` docstrings stop promising a file to delete
+- [x] `pm_ai/platform/claims.py` -- `FlockClaims`; canonicalise before naming the sidecar; `O_NOFOLLOW`; `EACCES` propagates as `OSError`; `ENOTSUP`/`EOPNOTSUPP` raised as an `OSError` naming the mount; `LOCK_SUFFIX` re-exported
+- [x] `pm_ai/storage/service.py` -- `__init__` takes `claims: ClaimPort`; `exclusive` per Design Notes: marker check first (once per writer, a set on the instance), enclave, the port's claim, `ClaimHeld` → `ArtifactBusy` at this enter only
+- [x] `pm_ai/domain/scope_model.py`, `pm_ai/core/project_scaffold.py` -- declare the `.lock` sidecar as structure outside the tier model, naming `LOCK_SUFFIX`; `project_rules()` derives its ignore rule -- closes the undeclared-sidecar entry
+- [x] `pm_ai/app/wiring.py` -- `_writer` passes `FlockClaims()`; `onboard_project` claims through `storage.exclusive`; the platform import goes
+- [x] `pm_ai/app/pipelines.py` -- `run_harvest`: `except ArtifactBusy` around the `put` loop only; `save_cursor` with the loaded position, no coverage, `HarvestFailure(retryable=True)` naming `meetings/`, the scope, record N and the earlier-records sentence; a failure of that save is logged and the original refusal raised; then raise
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `:1180` and `:1309` catch `ArtifactBusy`; `:1180` gains `except OSError` in the shape of 1313; the `ClaimHeld` import goes
+- [x] `.importlinter` -- `pm_ai.platform` added to `surfaces-through-core`'s forbidden modules
+- [x] `pm_ai/core/meeting_records.py`, `pm_ai/connectors/graph/auth.py` -- docstrings and the health remedy stop naming a claim file to remove
+- [x] `tests/architecture/test_storage_capabilities.py` -- one test per storage row, `FlockClaims()` under test: refusal names no file; release keeps the sidecar; pre-existing sidecar; two spellings via a symlinked `tmp_path`; inner refusal names the inner file; marker line asserts the marker path and "delete" in captured stderr, before a refused claim too, once per writer and again from a second writer; `ENOTSUP`, `EACCES` and a directory sidecar through a `ClaimPort` fake raising them; enclave mode. Kill test: the child runs `sys.executable`, builds `StorageService(ScopePaths.rooted(tmp_path), …, claims=FlockClaims())`, holds `exclusive(scope=APPLICATION, artifact="config.json")`, prints `held`; the parent kills it with SIGKILL only after reading that line, then claims and succeeds
+- [x] `tests/` -- an in-memory `ClaimPort` fake for every `StorageService(...)` not testing the lock (thirteen files), so a filesystem without `flock` fails only the lock tests
+- [x] `tests/slice/test_project_onboarding.py` -- the held-claim test holds the platform lock directly on the resolved registry path; onboarding through the façade is refused with `ArtifactBusy`
+- [x] `tests/surfaces/test_cli_subcommands.py` -- `project add` and `setup` step 2 with a held registry, and an `OSError` on the sidecar; `connector add` with held credentials asserting the exact sentence
+- [x] `tests/slice/` -- `run_harvest` with `meetings/` held at record 2 of 3: the failure row names `meetings/`, the scope, the record, the earlier-records sentence; retryable; position unchanged; `ArtifactBusy` raised; a `save_cursor` that raises still re-raises the refusal
+- [x] `tests/slice/test_rotated_tokens_are_kept.py`, `tests/core/test_connector_enrolment.py`, `tests/core/test_meeting_records.py` -- drop the `.config.json.claim` and `LEFT_OVER` assertions; otherwise unchanged and green
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark `:436` resolved; add that `9a`'s `run_harvest` `try/except` must treat `ArtifactBusy` as the already-recorded retryable failure
 
 **Acceptance Criteria:**
 - Given one process holding `config.json` through the sign-in store, when `pm-ai connector add` runs in another, then it is refused naming `config.json` and the application scope, says nothing was changed, names no file to delete, and exits 3.
@@ -139,3 +140,43 @@ with claimed:                                 # a ClaimHeld from the body is the
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept, including `pm_ai.platform` forbidden to `pm_ai.surfaces`
 - `grep -rn 'pm_ai.domain.claims\|ClaimHeld' pm_ai/surfaces/` -- expected: no output
+
+## Suggested Review Order
+
+**One claim primitive**
+
+- The façade: report an old marker, make the parent, take the port's lock; busy becomes `ArtifactBusy`.
+  [`service.py:1323`](../../../../pm_ai/storage/service.py#L1323)
+
+- The port the storage layer depends on.
+  [`__init__.py:393`](../../../../pm_ai/ports/__init__.py#L393)
+
+- The `flock` adapter: path canonicalised by parent, sidecar opened non-blocking and no-follow, plain file only.
+  [`claims.py:130`](../../../../pm_ai/platform/claims.py#L130)
+
+- Filesystems without locks are named, never treated as busy.
+  [`claims.py:49`](../../../../pm_ai/platform/claims.py#L49)
+
+- The composition root wires the real adapter.
+  [`wiring.py:536`](../../../../pm_ai/app/wiring.py#L536)
+
+**A job that meets the refusal**
+
+- A busy `meetings/` fails the harvest attempt by name, cursor and coverage unchanged.
+  [`pipelines.py:128`](../../../../pm_ai/app/pipelines.py#L128)
+
+- The recorded failure keeps the connector's own reason when there was one.
+  [`pipelines.py:156`](../../../../pm_ai/app/pipelines.py#L156)
+
+**The sidecar is declared structure**
+
+- Declared once beside the trees; no tier node may be spelled like it.
+  [`scope_model.py:797`](../../../../pm_ai/domain/scope_model.py#L797)
+
+**Tests**
+
+- A SIGKILLed holder leaves the claim free.
+  [`test_storage_capabilities.py:621`](../../../../tests/architecture/test_storage_capabilities.py#L621)
+
+- Two spellings of one file share one lock.
+  [`test_storage_capabilities.py:379`](../../../../tests/architecture/test_storage_capabilities.py#L379)

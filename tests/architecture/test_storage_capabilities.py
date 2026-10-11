@@ -14,30 +14,44 @@ seen it.
 
 from __future__ import annotations
 
+import errno
 import os
+import select
+import signal
 import stat
+import subprocess
+import sys
+import textwrap
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from ledger_fixtures import entry as _entry
-from pm_ai.domain.identity import DataScope, ScopeKind
+from claim_fakes import InMemoryClaims
+from pm_ai.domain.claims import LOCK_SUFFIX, ClaimHeld
+from pm_ai.domain.disclosure import DISCLOSURE_LEDGER_ARTIFACT, DisclosureRecord
+from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.storage_tiers import (
     EVENT_LOG,
     NotACollection,
     RESTRICTED_FILE_MODE,
     restricted_mode,
 )
+from pm_ai.platform import claims as platform_claims
+from pm_ai.platform.claims import FlockClaims
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import ArtifactBusy
 from pm_ai.storage.crypto import ENCLAVE_DIR_MODE, ENCRYPTED_FILE_MODE, AesGcmCrypto
-from pm_ai.storage.service import StorageService
+from pm_ai.storage.service import AppendToSealedArtifact, StorageService
 
 NOW = datetime(2026, 9, 3, 9, 0, tzinfo=timezone.utc)
 APPLICATION = DataScope(ScopeKind.APPLICATION)
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
+PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="bob")
 KEY = b"K" * 32
 
 
@@ -65,6 +79,7 @@ def storage(tmp_path: Path) -> StorageService:
         now=lambda: NOW,
         vcs=_NoRepository(),
         crypto=AesGcmCrypto(KEY),
+        claims=InMemoryClaims(),
     )
 
 
@@ -275,69 +290,424 @@ def test_a_declared_plaintext_artifact_still_answers_to_the_umask(storage):
     assert _mode(written) == 0o644
 
 
-# ── The exclusive claim (story 8b's read-modify-write) ───────────────────────
+# ── The exclusive claim (stories 8b and 1r) ───────────────────────────────────
+#
+# Every row here runs the real kernel lock (`FlockClaims`), because these are the
+# tests about the lock. Everything else in the suite uses `InMemoryClaims`.
 
 
-def _claim_for(storage, artifact: str) -> Path:
+def _locked(root: Path) -> StorageService:
+    return StorageService(
+        ScopePaths.rooted(root),
+        now=lambda: NOW,
+        vcs=_NoRepository(),
+        crypto=AesGcmCrypto(KEY),
+        claims=FlockClaims(),
+    )
+
+
+@pytest.fixture
+def locked(tmp_path: Path) -> StorageService:
+    return _locked(tmp_path)
+
+
+def _sidecar_for(storage, artifact: str) -> Path:
+    target = storage.paths.resolve(APPLICATION, artifact).resolve()
+    return target.with_name(target.name + LOCK_SUFFIX)
+
+
+def _marker_for(storage, artifact: str) -> Path:
     target = storage.paths.resolve(APPLICATION, artifact)
     return target.parent / f".{target.name}.claim"
 
 
-def test_a_second_claim_on_one_artifact_is_refused(storage):
-    """The whole reason `exclusive` exists, and nothing asserted it.
+def test_a_second_claim_on_one_artifact_is_refused_naming_no_file_to_delete(locked):
+    """The whole reason `exclusive` exists: two enrolments racing both read
+    `private/config.json`, both merge, and one credential is lost.
 
-    Two enrolments racing both read `private/config.json`, both merge, and one
-    credential is lost. Dropping `O_EXCL` made the claim decorative and left the
-    entire suite green, because every other test claims sequentially.
+    The refusal names the artifact and its scope and nothing to remove — a kill
+    releases a kernel lock, so there is no orphan for an operator to find.
     """
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
         with pytest.raises(ArtifactBusy) as held:
-            with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+            with locked.exclusive(scope=APPLICATION, artifact="config.json"):
                 raise AssertionError("a second claim was granted")
+        # The holder is unaffected: its claim is still held.
+        with pytest.raises(ArtifactBusy):
+            with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("the holder's claim was lost")
     message = str(held.value)
-    assert "config.json" in message
-    assert ".claim" in message, "the claim path must be named, or a kill wedges the machine"
+    assert message == (
+        "config.json in application is claimed by another pm-ai process; "
+        "nothing was changed. Run the command again."
+    )
+    for named in (".claim", LOCK_SUFFIX, "remov", "delete"):
+        assert named not in message, f"the refusal names a file to delete: {message}"
 
 
-def test_the_claim_is_released_on_the_way_out(storage):
-    claim = _claim_for(storage, "config.json")
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
-        assert claim.exists()
-    assert not claim.exists()
-
-
-def test_the_claim_is_released_even_when_the_body_raises(storage):
-    """A refused enrolment must not wedge every later one."""
-    claim = _claim_for(storage, "config.json")
-    with pytest.raises(RuntimeError):
-        with storage.exclusive(scope=APPLICATION, artifact="config.json"):
-            raise RuntimeError("the body failed")
-    assert not claim.exists()
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+def test_the_claim_is_released_on_the_way_out_and_the_sidecar_kept(locked):
+    sidecar = _sidecar_for(locked, "config.json")
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+        assert sidecar.is_file()
+    assert sidecar.is_file(), "the sidecar was deleted, which races a waiting process"
+    assert sidecar.stat().st_size == 0
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
         pass  # claimable again
 
 
-def test_two_different_artifacts_do_not_block_each_other(storage):
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
-        with storage.exclusive(scope=APPLICATION, artifact="projects.toml"):
+def test_the_claim_is_released_even_when_the_body_raises(locked):
+    """A refused enrolment must not wedge every later one."""
+    with pytest.raises(RuntimeError, match="the body failed"):
+        with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+            raise RuntimeError("the body failed")
+    assert _sidecar_for(locked, "config.json").is_file()
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+        pass  # claimable again
+
+
+def test_a_sidecar_already_present_and_unheld_is_claimed(locked):
+    sidecar = _sidecar_for(locked, "projects.toml")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.touch()
+    with locked.exclusive(scope=APPLICATION, artifact="projects.toml"):
+        pass
+
+
+def test_two_different_artifacts_do_not_block_each_other(locked):
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+        with locked.exclusive(scope=APPLICATION, artifact="projects.toml"):
             pass
 
 
-def test_claiming_a_sealed_artifact_does_not_create_a_world_listable_enclave(storage):
+def test_two_spellings_of_one_file_share_one_lock(tmp_path):
+    """Keyed on the file: a symlinked root and the plain one are one claim."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    plain, linked = _locked(real), _locked(link)
+
+    with plain.exclusive(scope=APPLICATION, artifact="config.json"):
+        with pytest.raises(ArtifactBusy):
+            with linked.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("two spellings took two locks")
+
+
+def test_the_platform_lock_on_the_resolved_path_is_the_same_claim(locked):
+    """Two doors, one file: the platform lock held directly refuses the façade."""
+    target = locked.paths.resolve(APPLICATION, "projects.toml")
+    with platform_claims.exclusive(target.resolve()):
+        with pytest.raises(ArtifactBusy):
+            with locked.exclusive(scope=APPLICATION, artifact="projects.toml"):
+                raise AssertionError("the façade took a second lock")
+
+
+def test_a_refused_inner_claim_names_the_inner_file(locked):
+    """A refusal inside a claimed body is the inner file's, never re-reported as
+    the outer one being busy: `config.json` claimed inside a `meetings/` claim."""
+    with platform_claims.exclusive(locked.paths.resolve(APPLICATION, "config.json")):
+        with pytest.raises(ArtifactBusy) as inner:
+            with locked.exclusive(scope=PERSONAL, artifact="meetings/"):
+                with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+                    raise AssertionError("the inner claim was granted")
+    assert str(inner.value).startswith("config.json in application")
+    assert "meetings" not in str(inner.value)
+
+
+# ── A marker left by an older build ──────────────────────────────────────────
+
+
+def test_an_older_builds_marker_is_reported_and_not_obeyed(locked, capsys):
+    marker = _marker_for(locked, "config.json")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+        pass
+
+    err = capsys.readouterr().err
+    assert str(marker) in err and "delete" in err
+    assert err.count("\n") == 1
+    assert marker.exists(), "the marker is reported, never removed"
+
+
+def test_the_marker_is_reported_before_a_refused_claim_too(locked, tmp_path, capsys):
+    marker = _marker_for(locked, "config.json")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    other = _locked(tmp_path)
+
+    with platform_claims.exclusive(locked.paths.resolve(APPLICATION, "config.json")):
+        with pytest.raises(ArtifactBusy):
+            with other.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("granted")
+
+    err = capsys.readouterr().err
+    assert str(marker) in err and "delete" in err
+
+
+def test_the_marker_is_reported_once_per_writer(locked, tmp_path, capsys):
+    """Once per writer, not per run: `setup` builds a second writer and may say it twice."""
+    marker = _marker_for(locked, "config.json")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+    for _ in range(3):
+        with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+            pass
+    assert capsys.readouterr().err.count(str(marker)) == 1
+
+    second = _locked(tmp_path)
+    with second.exclusive(scope=APPLICATION, artifact="config.json"):
+        pass
+    assert capsys.readouterr().err.count(str(marker)) == 1
+
+
+# ── Faults that are not "busy" ───────────────────────────────────────────────
+
+
+class _Faulting:
+    """A `ClaimPort` whose claim fails with one operating-system error."""
+
+    def __init__(self, error: OSError) -> None:
+        self.error = error
+
+    @contextmanager
+    def exclusive(self, guarded: Path):
+        raise self.error
+        yield  # pragma: no cover
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.ENOTSUP, "the filesystem mounted at /Volumes/x has no locks"),
+        OSError(errno.EOPNOTSUPP, "the filesystem mounted at /Volumes/x has no locks"),
+        PermissionError(errno.EACCES, "Permission denied"),
+        IsADirectoryError(errno.EISDIR, "Is a directory"),
+    ],
+    ids=["ENOTSUP", "EOPNOTSUPP", "EACCES", "directory"],
+)
+def test_a_fault_taking_the_claim_is_the_operating_systems_and_not_busy(tmp_path, error):
+    storage = StorageService(
+        ScopePaths.rooted(tmp_path),
+        now=lambda: NOW,
+        vcs=_NoRepository(),
+        crypto=AesGcmCrypto(KEY),
+        claims=_Faulting(error),
+    )
+    with pytest.raises(OSError) as raised:
+        with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+            raise AssertionError("claimed through a fault")
+    assert raised.value is error
+    assert not isinstance(raised.value, ArtifactBusy)
+
+
+def test_the_platform_refuses_a_filesystem_without_locks_naming_the_mount(
+    tmp_path, monkeypatch
+):
+    def unsupported(descriptor, operation):
+        if operation & platform_claims.fcntl.LOCK_UN:
+            return None
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(platform_claims.fcntl, "flock", unsupported)
+    with pytest.raises(OSError) as refused:
+        with platform_claims.exclusive(tmp_path / "config.json"):
+            raise AssertionError("claimed without a lock")
+    assert not isinstance(refused.value, ClaimHeld)
+    assert refused.value.errno == errno.ENOTSUP
+    assert "mounted at /" in str(refused.value)
+
+
+def test_the_platform_refuses_a_sidecar_that_is_a_directory(tmp_path):
+    (tmp_path / f"config.json{LOCK_SUFFIX}").mkdir()
+    with pytest.raises(OSError) as refused:
+        with platform_claims.exclusive(tmp_path / "config.json"):
+            raise AssertionError("claimed a directory")
+    assert not isinstance(refused.value, ClaimHeld)
+
+
+def test_the_platform_refuses_a_sidecar_that_is_a_link(tmp_path):
+    (tmp_path / "elsewhere").touch()
+    (tmp_path / f"config.json{LOCK_SUFFIX}").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(OSError) as refused:
+        with platform_claims.exclusive(tmp_path / "config.json"):
+            raise AssertionError("followed a link")
+    assert refused.value.errno == errno.ELOOP
+
+
+def test_the_platform_refuses_a_sidecar_that_is_a_fifo_without_hanging(tmp_path):
+    """Opening a FIFO for reading waits for a writer; `O_NONBLOCK` stops that,
+    and the plain-file check then refuses it by name."""
+    sidecar = tmp_path / f"config.json{LOCK_SUFFIX}"
+    os.mkfifo(sidecar)
+    with pytest.raises(OSError) as refused:
+        with platform_claims.exclusive(tmp_path / "config.json"):
+            raise AssertionError("claimed through a FIFO")
+    assert not isinstance(refused.value, ClaimHeld)
+    assert str(sidecar) in str(refused.value)
+
+
+def test_the_platform_refuses_a_filesystem_without_a_lock_daemon_naming_the_mount(
+    tmp_path, monkeypatch
+):
+    """`ENOLCK` is NFS with no lock daemon: the same explanation as no `flock`."""
+
+    def no_lock_daemon(descriptor, operation):
+        if operation & platform_claims.fcntl.LOCK_UN:
+            return None
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(platform_claims.fcntl, "flock", no_lock_daemon)
+    with pytest.raises(OSError) as refused:
+        with platform_claims.exclusive(tmp_path / "config.json"):
+            raise AssertionError("claimed without a lock")
+    assert not isinstance(refused.value, ClaimHeld)
+    assert refused.value.errno == errno.ENOLCK
+    assert "mounted at /" in str(refused.value)
+
+
+def test_a_symlinked_artifact_keeps_its_sidecar_in_its_own_directory(locked, tmp_path):
+    """The name is not followed: the sidecar sits beside the artifact as named,
+    never beside a target that may be outside the scope tree."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "creds.json").touch()
+    artifact = locked.paths.resolve(APPLICATION, "config.json")
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.symlink_to(outside / "creds.json")
+
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+        pass
+
+    assert (artifact.parent.resolve() / f"config.json{LOCK_SUFFIX}").is_file()
+    assert not (outside / f"creds.json{LOCK_SUFFIX}").exists()
+
+
+def test_a_sidecar_inside_a_collection_is_not_listed_as_a_member(locked):
+    """A claim on a member leaves `<member>.lock` beside it for good; it is
+    structure, and a listing that reported it would name a member nobody wrote."""
+    locked.write_artifact(
+        b"# a record\n", scope=PERSONAL, artifact="meetings/", name="2026-09-03-a.md"
+    )
+    member = locked.paths.resolve(PERSONAL, "meetings/") / "2026-09-03-a.md"
+    with platform_claims.exclusive(member):
+        pass
+    assert (member.parent.resolve() / f"2026-09-03-a.md{LOCK_SUFFIX}").is_file()
+
+    assert locked.list_collection(scope=PERSONAL, artifact="meetings/") == (
+        "2026-09-03-a.md",
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_an_unreadable_sidecar_is_a_permission_fault_not_busy(locked):
+    sidecar = _sidecar_for(locked, "config.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.touch()
+    sidecar.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError):
+            with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("claimed an unreadable sidecar")
+    finally:
+        sidecar.chmod(0o600)
+
+
+# ── A kill releases the claim ────────────────────────────────────────────────
+
+
+HELD_WITHIN_SECONDS = 30
+
+
+def test_a_holder_killed_with_sigkill_leaves_the_claim_free(tmp_path):
+    """The property the marker file never had: a dead holder holds nothing."""
+    child = textwrap.dedent(
+        f"""
+        import sys, time
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from pm_ai.domain.identity import DataScope, ScopeKind
+        from pm_ai.platform.claims import FlockClaims
+        from pm_ai.platform.paths import ScopePaths
+        from pm_ai.storage.crypto import PlaintextCrypto
+        from pm_ai.storage.service import StorageService
+
+        class NoRepository:
+            def working_tree(self, path): return None
+            def repository_marker_above(self, path): return None
+            def tracking(self, path, *, repository): raise AssertionError
+
+        storage = StorageService(
+            ScopePaths.rooted(Path({str(tmp_path)!r})),
+            now=lambda: datetime.now(timezone.utc),
+            vcs=NoRepository(),
+            crypto=PlaintextCrypto(),
+            claims=FlockClaims(),
+        )
+        with storage.exclusive(
+            scope=DataScope(ScopeKind.APPLICATION), artifact="config.json"
+        ):
+            print("held", flush=True)
+            time.sleep(60)
+        """
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None and process.stderr is not None
+        # Bounded, so a child that failed to start or stalled is reported with
+        # its own stderr rather than hanging the suite on `readline`.
+        ready, _, _ = select.select([process.stdout], [], [], HELD_WITHIN_SECONDS)
+        line = process.stdout.readline().strip() if ready else ""
+        if line != "held":
+            process.kill()
+            _, err = process.communicate(timeout=10)
+            pytest.fail(
+                f"the child never reported holding the claim (read {line!r}, "
+                f"exit {process.returncode}); its stderr:\n{err}"
+            )
+        storage = _locked(tmp_path)
+        with pytest.raises(ArtifactBusy):
+            with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("claimed while the child held it")
+        process.send_signal(signal.SIGKILL)
+        process.wait(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        pass
+    assert _sidecar_for(storage, "config.json").is_file()
+
+
+def test_claiming_a_sealed_artifact_does_not_create_a_world_listable_enclave(locked):
     """A claim must not open `private/` a moment before the write would seal it.
 
     Stated as *create*, not *is*: `_mkdir_enclave` leaves an existing directory
     alone on purpose — its mode is its owner's decision — and `ScopePaths.rooted`
     has already made `private/` at the umask by the time any test runs. So the
-    enclave is removed first, and the claim is what brings it back.
+    enclave is removed first, and the claim is what brings it back. The platform
+    lock's own `mkdir` runs at the umask, which is why the writer makes the
+    enclave first.
     """
-    enclave = _claim_for(storage, "config.json").parent
+    enclave = locked.paths.resolve(APPLICATION, "config.json").parent
     for leftover in enclave.iterdir():
         leftover.unlink()
     enclave.rmdir()
     assert not enclave.exists()
 
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
         assert _mode(enclave) == ENCLAVE_DIR_MODE, (
             "the claim created `private/` at the umask, so it was world-listable "
             "for the window between claiming a credential store and sealing it"
@@ -359,25 +729,17 @@ def test_a_raw_capture_lands_at_the_declared_restricted_mode(storage):
     assert _mode(written) == RESTRICTED_FILE_MODE
 
 
-def test_the_append_path_does_not_adopt_the_declared_mode(storage):
-    """Measured, because story 1n's change log was about to claim the opposite.
+def test_the_append_path_adopts_the_declared_mode(storage):
+    """Story 1q flipped this row; story 1n's change log records the flip.
 
     `restricted_mode` derives from the `gitignored` declaration, so story 1n made
-    it answer `0600` for the project scope's `memory/` — and the obvious sentence
-    to write next, that those four artifacts now land owner-only, is false.
-    `_replace` and `_create_exclusively` adopt `declared_mode`; `_append`
-    (`service.py:880`) opens with a bare `path.open("a")` and takes no mode at
-    all, so a segment lands at the umask.
+    it answer `0600` for the project scope's `memory/`. Until 1q, `_append` opened
+    with a bare `path.open("a")` and a segment landed at the umask — this row
+    pinned that, written to fail the day `_append` honoured the declaration. It
+    now honours it, like `_replace` and `_create_exclusively`.
 
-    The non-adoption predates 1n — people-scope `event_log/` and application
-    `disclosure.md` were already gitignored and already landed this way — so this
-    row pins the behaviour rather than arguing for it. It is written to fail if
-    `_append` ever starts honouring the declaration, which is the point: the day
-    that changes, the claim in the change log has to change with it, and nothing
-    else in the suite would say so.
-
-    The umask is pinned, because the assertion is about what the writer did
-    *not* impose and an ambient 0077 would make the two indistinguishable.
+    The umask is pinned, because the assertion is about what the writer imposed
+    and an ambient 0077 would make the two indistinguishable.
     """
     previous = os.umask(0o022)
     try:
@@ -388,10 +750,200 @@ def test_the_append_path_does_not_adopt_the_declared_mode(storage):
     segment = storage.paths.resolve(PROJECT, EVENT_LOG) / f"{NOW:%Y-%m}.md"
     assert restricted_mode(ScopeKind.PROJECT, EVENT_LOG) == RESTRICTED_FILE_MODE, (
         "the declaration is what makes this row interesting; without it there is "
-        "nothing for the append path to fail to adopt"
+        "nothing for the append path to adopt"
     )
-    assert _mode(segment) == 0o644, (
-        "`_append` has started adopting the declared mode. That is an improvement "
-        "and it makes story 1n's change-log line — the declaration changed, the "
-        "append path does not honour it — out of date: update both together."
+    assert _mode(segment) == RESTRICTED_FILE_MODE, (
+        "the append path no longer applies the declared mode, so a project's "
+        "event-log segment lands at the umask's answer. The code is wrong, and "
+        "story 1n's change-log line saying the append path adopts the "
+        "declaration since 1q is now false."
     )
+    assert segment.read_text(encoding="utf-8").count("\n") == 1
+
+
+# ── Story 1q: every append-only ledger is created at its declared mode ───────
+#
+# One row per line of 1q's I/O matrix. Each sets a *real* process umask and
+# restores it in `finally`: monkeypatching `os.umask` changes nothing the kernel
+# applies (story 1m), so it cannot fail.
+
+
+def _segment(storage, scope: DataScope) -> Path:
+    return storage.paths.resolve(scope, EVENT_LOG) / f"{NOW:%Y-%m}.md"
+
+
+def _under_umask(mask: int, write) -> None:
+    previous = os.umask(mask)
+    try:
+        write()
+    finally:
+        os.umask(previous)
+
+
+def test_a_second_entry_leaves_the_segment_at_its_declared_mode(storage):
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("one"), scope=PROJECT))
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("two"), scope=PROJECT))
+
+    segment = _segment(storage, PROJECT)
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 2
+
+
+def test_a_segment_from_before_1q_keeps_its_mode(storage):
+    """No `chmod` of an existing file: its mode may be the operator's decision."""
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+    segment.write_text("", encoding="utf-8")
+    segment.chmod(0o644)
+
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("old"), scope=PROJECT))
+
+    assert _mode(segment) == 0o644, "the append changed an existing segment's mode"
+    assert segment.read_text(encoding="utf-8").count("\n") == 1
+
+
+def _event(n: int) -> NormalizedEvent:
+    return NormalizedEvent(
+        scope=PROJECT,
+        type=ObservedEventType.COMMIT_PUSHED,
+        source_ref=SourceRef.parse(f"gitlab:alpha:commit:{n:08x}"),
+        actor=Actor(actor_id="u_42", display_name="Ada"),
+        occurred_at=datetime(2026, 9, 2, 17, 30, tzinfo=timezone.utc),
+        payload=CommitPayload(sha=f"{n:08x}", message=f"change {n}", branch="main"),
+    )
+
+
+def test_a_segment_removed_between_create_and_reopen_is_created_again(
+    storage, monkeypatch
+):
+    """The exclusive create is refused, then the file vanishes before the reopen.
+
+    The old `path.open("a")` created it; the reopen alone would raise
+    `FileNotFoundError`, so the writer tries the exclusive create again.
+    """
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+    segment.write_text("", encoding="utf-8")
+    segment.chmod(0o644)
+
+    real_open = os.open
+    vanished: list[bool] = []
+
+    def _racing(path, flags, *args, **kwargs):
+        if not flags & os.O_CREAT and not vanished and str(path) == str(segment):
+            vanished.append(True)
+            os.unlink(segment)
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _racing)
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("race"), scope=PROJECT))
+    monkeypatch.undo()
+
+    assert vanished == [True], "the reopen branch was never reached"
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 1
+
+
+@pytest.mark.parametrize("directory_exists", [False, True], ids=["no-dir", "dir"])
+def test_a_harvest_batch_creates_the_segment_at_the_declared_mode(
+    storage, directory_exists
+):
+    segment = _segment(storage, PROJECT)
+    if directory_exists:
+        segment.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        assert not segment.parent.exists()
+    events = tuple(_event(n) for n in range(3))
+
+    observed: list[int] = []
+
+    def _persist() -> None:
+        observed.append(storage.persist_events(events, scope=PROJECT).persisted)
+
+    _under_umask(0o022, _persist)
+
+    assert observed == [3]
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 3
+
+
+def test_the_disclosure_ledger_is_created_at_its_declared_mode(storage):
+    record = DisclosureRecord(
+        at=NOW,
+        task_class="summarize",
+        model="claude-opus-5",
+        contributing_scopes=frozenset({PERSONAL}),
+        input_tokens=100,
+        output_tokens=50,
+        estimated_cost_usd=0.01,
+    )
+    _under_umask(0o022, lambda: storage.append_disclosure(record))
+
+    ledger = storage.paths.resolve(APPLICATION, DISCLOSURE_LEDGER_ARTIFACT)
+    assert ledger.name == "disclosure.md"
+    assert restricted_mode(ScopeKind.APPLICATION, DISCLOSURE_LEDGER_ARTIFACT) == 0o600
+    assert _mode(ledger) == RESTRICTED_FILE_MODE
+    assert ledger.read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_a_team_members_segment_is_created_at_its_declared_mode(storage):
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("1:1"), scope=PEOPLE))
+
+    assert restricted_mode(ScopeKind.PEOPLE, EVENT_LOG) == RESTRICTED_FILE_MODE
+    assert _mode(_segment(storage, PEOPLE)) == RESTRICTED_FILE_MODE
+
+
+def test_a_ledger_declared_without_a_mode_answers_to_the_umask(storage):
+    """The personal event log's declaration names no mode; that is not an oversight."""
+    _under_umask(0o022, lambda: storage.append_event_log(_entry("me"), scope=PERSONAL))
+
+    assert restricted_mode(ScopeKind.PERSONAL, EVENT_LOG) is None
+    assert _mode(_segment(storage, PERSONAL)) == 0o644
+
+
+def test_an_owner_stripping_umask_cannot_lock_pm_ai_out_of_its_ledger(storage):
+    """At umask 200 the creation mode alone yields 0400 and the second append fails.
+
+    The mask is set only after the segment's directory exists, since
+    `_writable_dir` creates it under the same mask, and 0200 would strip
+    owner-write from the directory — a failure this row is not about.
+    """
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+
+    def _twice() -> None:
+        storage.append_event_log(_entry("one"), scope=PROJECT)
+        storage.append_event_log(_entry("two"), scope=PROJECT)
+
+    _under_umask(0o200, _twice)
+
+    assert _mode(segment) == RESTRICTED_FILE_MODE
+    assert segment.read_text(encoding="utf-8").count("\n") == 2
+
+
+def test_a_read_only_segment_refuses_with_the_operating_systems_error(storage):
+    if os.geteuid() == 0:  # pragma: no cover — the suite does not run as root
+        pytest.skip("root bypasses the permission bits this row is about")
+    segment = _segment(storage, PROJECT)
+    segment.parent.mkdir(parents=True, exist_ok=True)
+    segment.write_text("by hand\n", encoding="utf-8")
+    segment.chmod(0o400)
+    try:
+        with pytest.raises(PermissionError) as refused:
+            _under_umask(
+                0o022, lambda: storage.append_event_log(_entry("no"), scope=PROJECT)
+            )
+        assert refused.value.filename == str(segment)
+        assert segment.read_text(encoding="utf-8") == "by hand\n"
+        assert _mode(segment) == 0o400
+    finally:
+        segment.chmod(0o644)
+
+
+def test_a_ledger_declared_encrypted_is_refused_before_any_file_exists(storage):
+    """`telegram_cache/` is sealed; no ledger is, so the declaration is borrowed."""
+    target = storage.paths.resolve(PERSONAL, "telegram_cache/", create=True) / "x.md"
+    with pytest.raises(AppendToSealedArtifact):
+        storage._append(target, "line\n", declared_mode=ENCRYPTED_FILE_MODE)
+    assert not target.exists()

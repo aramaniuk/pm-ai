@@ -86,7 +86,7 @@ from pm_ai.ports import (
     VcsPort,
 )
 from pm_ai.platform.environment import encryption_disabled as encryption_off
-from pm_ai.platform.claims import exclusive
+from pm_ai.platform.claims import FlockClaims
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.platform.vcs import GitVcs
@@ -532,7 +532,9 @@ def _writer(
     and project enrolment's — so none of them can write a protected file in
     plaintext without the event-log line first.
     """
-    storage = StorageService(resolver, now=now, vcs=vcs, crypto=crypto)
+    storage = StorageService(
+        resolver, now=now, vcs=vcs, crypto=crypto, claims=FlockClaims()
+    )
     if isinstance(crypto, _RecordedPlaintext):
         crypto.bind(lambda: _record_disabled_encryption(storage))
     return storage
@@ -1561,7 +1563,9 @@ def onboard_project(
     publishes with `os.replace`, so two concurrent runs that both read a
     one-entry registry both render a two-entry one and the second silently
     discards the first's project. The claim is what makes "both entries are
-    present afterwards" true rather than usually true.
+    present afterwards" true rather than usually true. Taken through
+    `storage.exclusive`, the one door every whole-file claim uses (story `1r`),
+    so a busy registry is `ArtifactBusy` naming `projects.toml` and its scope.
 
     Inside the claim: `.gitignore` before the structure, and the registry last.
 
@@ -1609,7 +1613,9 @@ def onboard_project(
         vcs=GitVcs(),
         crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
     )
-    with exclusive(known.project_registry):
+    with storage.exclusive(
+        scope=DataScope(ScopeKind.APPLICATION), artifact=REGISTRY_ARTIFACT
+    ):
         state = _artifact_state(storage, REGISTRY_ARTIFACT)
         if state.presence is Presence.UNREADABLE:
             # The registry exists and could not be opened. `parse_registry(None)`

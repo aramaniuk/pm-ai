@@ -19,6 +19,7 @@ on the write path, which therefore carries no second copy of anything.
 from __future__ import annotations
 
 import errno
+import logging
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -53,6 +54,9 @@ from pm_ai.domain.harvest import (
     UnreadCalendar,
 )
 from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
+from pm_ai.ports import ArtifactBusy
+
+_log = logging.getLogger(__name__)
 
 DASHBOARD_ARTIFACT = "daily_dashboard.md"
 """CAP-9's file, spelled once — the personal tree's copy and the project's.
@@ -111,8 +115,21 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # refuses any scope whose tree does not declare `meetings/`, and the project
     # ids a connector may put there were checked against the registry when its
     # `CategoryScopes` was built.
-    for meeting in result.records:
-        daemon.meetings.put(meeting)
+    #
+    # A `meetings/` claimed by another process fails this attempt by name
+    # (story `1r`): recorded as a retryable failure with the position unchanged,
+    # so the scheduled harvest has a row to back off from, and then raised on for
+    # the command at the terminal. Only the busy refusal — a displaced or
+    # malformed record keeps propagating as it always has.
+    total = len(result.records)
+    for index, meeting in enumerate(result.records, start=1):
+        try:
+            daemon.meetings.put(meeting)
+        except ArtifactBusy as busy:
+            _record_busy_meetings(
+                daemon, instance, cursor, (index, meeting), total, busy, result.failure
+            )
+            raise
 
     # Persist first, then record where the harvest got to. The order is the
     # matrix row about a persist that raises after page one: `persist_events` is
@@ -134,6 +151,62 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # survives the process as something other than the absence of coverage.
     daemon.storage.save_cursor(instance, result.cursor, result.coverage, result.failure)
     return persisted
+
+
+def _record_busy_meetings(
+    daemon: Daemon,
+    instance: str,
+    cursor: Cursor,
+    stopped_at: tuple[int, Meeting],
+    total: int,
+    busy: ArtifactBusy,
+    fetched: HarvestFailure | None,
+) -> None:
+    """Record a harvest attempt `meetings/`'s claim stopped, before it is raised.
+
+    The position saved is the one loaded, so nothing is skipped, and no coverage
+    is recorded, because the events were never persisted. Records written before
+    the one that was refused are durable and will be rewritten next attempt —
+    `put` replaces fields whole and carries notes over, so that is idempotent.
+
+    A failure the connector already reported for this attempt (`fetched`) is
+    kept, its reason recorded ahead of the busy one: replacing it would hide a
+    fault the next attempt will meet again. The record is retryable only if that
+    failure was, and carries its retry hint — a busy file clears on its own, an
+    expired credential does not.
+
+    A failure of this save is logged and swallowed: the refusal the caller is
+    about to raise is the fact the operator needs, and an error from the record
+    of it must not replace it.
+    """
+    index, meeting = stopped_at
+    earlier = (
+        f"the {index - 1} record(s) before it were written and will be rewritten "
+        f"on the next attempt."
+        if index > 1
+        else "no record before it was written."
+    )
+    reason = (
+        f"meetings/ in {meeting.scope} was claimed by another pm-ai process, "
+        f"so this harvest stopped at record {index} of {total} "
+        f"({meeting.meeting_id}); {earlier} The harvest position is unchanged."
+    )
+    if fetched is None:
+        failure = HarvestFailure(reason=reason, retryable=True)
+    else:
+        failure = HarvestFailure(
+            reason=f"{fetched.reason} Then: {reason}",
+            retryable=fetched.retryable,
+            retry_after=fetched.retry_after,
+        )
+    try:
+        daemon.storage.save_cursor(instance, cursor, None, failure)
+    except Exception:  # noqa: BLE001 — logged; the refusal is re-raised by the caller
+        _log.exception(
+            "could not record that %s's harvest stopped at a busy meetings/ (%s)",
+            instance,
+            busy,
+        )
 
 
 def _persist_by_scope(

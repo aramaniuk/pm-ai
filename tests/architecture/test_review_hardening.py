@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from claim_fakes import InMemoryClaims
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ADDRESS
 from pm_ai.domain.storage_tiers import (
@@ -61,6 +62,7 @@ def _writer(tmp_path: Path, *, crypto=None) -> StorageService:
         now=lambda: NOW,
         vcs=_NoRepository(),
         crypto=crypto or AesGcmCrypto(KEY),
+        claims=InMemoryClaims(),
     )
 
 
