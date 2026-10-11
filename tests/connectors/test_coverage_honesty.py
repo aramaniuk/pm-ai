@@ -204,6 +204,9 @@ def test_two_pages_bound_the_window_with_the_connectors_own_clock():
     # walk decides to continue past.
     assert clock.readings == [NOW, NOW + TICK, NOW + 2 * TICK]
     assert result.cursor == Cursor(b"2")
+    assert result.answered_at == clock.readings[0], (
+        "page one's reading is the instant, not the budget check after it (8p)"
+    )
 
 
 def test_two_pages_read_back_exactly_one_window_bounded_by_the_fetch(tmp_path):
@@ -571,6 +574,10 @@ def test_an_empty_200_is_ran_and_learned_nothing_and_says_it_ran(tmp_path):
     assert clock.readings == [NOW, NOW + TICK], (
         "and those are the only two readings the fetch took"
     )
+    assert result.answered_at == clock.readings[0], (
+        "the instant the empty page was read is the first reading, and the "
+        "window starts there (8p)"
+    )
 
     ticking = Ticking()
     wired = daemon(tmp_path, rows=[], now=ticking)
@@ -670,9 +677,14 @@ def test_an_empty_first_page_and_a_failed_second_claims_nothing_and_still_return
             return Page(rows=(), next_offset=1)
         raise PageUnavailable("the provider went away", retryable=True)
 
-    result = connector(now=Ticking(), fetch_page=empty_then_gone).harvest(Cursor())
+    clock = Ticking()
+    result = connector(now=clock, fetch_page=empty_then_gone).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.FAILED
+    assert result.answered_at == clock.readings[0], (
+        "page one was read, so the provider answered — the failure on page two "
+        "does not undo when (8p)"
+    )
     assert result.events == ()
     assert result.failure is not None
     assert "went away" in result.failure.reason
@@ -701,6 +713,7 @@ def test_a_5xx_is_a_value_and_moves_nothing(tmp_path):
     assert result.events == ()
     assert result.coverage is None
     assert result.cursor is since, "the cursor must be the one handed in, unchanged"
+    assert result.answered_at is None, "no page was read, so there is no instant"
     assert result.failure is not None
     assert "502" in result.failure.reason
     assert result.failure.retryable is True
@@ -726,6 +739,7 @@ def test_page_two_failing_returns_page_ones_events_coverage_and_the_failure(tmp_
     assert result.outcome is HarvestOutcome.FAILED
     assert len(result.events) == 1
     assert result.coverage == CoverageWindow(INSTANCE, clock.readings[0], clock.readings[-1])
+    assert result.answered_at == clock.readings[0], "page one's reading, not a later one"
     assert result.failure is not None and "page two refused" in result.failure.reason
     assert result.cursor == Cursor(b"1"), "the cursor advanced past page two"
 
@@ -1077,6 +1091,10 @@ def test_a_clock_that_steps_backwards_mid_harvest_claims_no_coverage():
     assert len(result.events) == 2
     assert backwards.readings[-1] < backwards.readings[0], "the premise of the row"
     assert result.coverage is None
+    assert result.answered_at == backwards.readings[0], (
+        "the window is withheld, but the first page was still read at this "
+        "instant, and that fact stays (8p)"
+    )
 
 
 def test_save_cursors_signature_is_what_rejects_a_non_window(tmp_path):

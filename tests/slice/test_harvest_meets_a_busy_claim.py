@@ -64,6 +64,8 @@ class _ThreeRecords:
             outcome=HarvestOutcome.FAILED if self.failure else HarvestOutcome.HARVESTED,
             coverage=WINDOW,
             failure=self.failure,
+            # 8p: a window starts at the instant the provider answered.
+            answered_at=WINDOW.start,
             records=tuple(_meeting(n) for n in (1, 2, 3)),
         )
 
