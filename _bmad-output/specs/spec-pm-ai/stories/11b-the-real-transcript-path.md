@@ -117,3 +117,8 @@ context:
 - `uv run pytest -q` -- expected: all pass; two fewer skips than before this slice
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Spec Change Log
+
+- **2026-10-11, note from slices `2n` and `2o`** (Andrei, architecture AD-34 and AD-32). Who spoke is now decided by `pm_identity()` against the utterance's person handle, and a speaker label is never a handle. So a Graph transcript stages because its utterances carry no handle, not because of a source switch: this slice's "PM-handle test skipped for `GRAPH`" task becomes "the comparison through the identity is kept; Graph utterances carry no handle", and lands after `2o`. The frozen intent is unchanged: no Graph transcript auto-executes.
+

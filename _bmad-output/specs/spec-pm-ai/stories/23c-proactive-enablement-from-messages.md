@@ -14,16 +14,16 @@ context:
 
 **Problem:** The dashboard's Proactive Enablement section was written before any message existed, and it will read real Teams messages wrongly in two ways. An event log that cannot be read — one corrupt line in a monthly segment — refuses the whole dashboard today, and the renderer can only say "no signals in the window", a false claim about a quiet day. And it cannot tell which messages mention the PM, which is the one thing a 07:00 reader wants first. (The build note saying no connector writes messages is slice `33d`'s to delete; that slice lands first.)
 
-**Approach:** Widen the renderer's log input to carry a failure the way the calendar input already does, mark and list first the messages whose mentions hold the PM's own Graph user id, and cap the list honestly.
+**Approach:** Widen the renderer's log input to carry a failure the way the calendar input already does, mark and list first the messages whose mentions hold one of the PM's own handles, and cap the list honestly.
 
 ## Boundaries & Constraints
 
 **Always:**
 - **Message details are read through the shared payload decoder** that slice `2m` lands before this one; this slice adds no literal field lookup. A line the decoder refuses is counted in the section's footnote as a line that could not be decoded — not dropped in silence, not a crash.
 - **A failed event-log read is stated, never rendered as a quiet day.** Four kinds of failure are stated: a line that is not a well-formed entry, an entry whose kind pm-ai does not know, a segment that is not valid UTF-8 text, and a segment that could not be read from disk (missing, or unreadable). The section says the event log could not be read and why, with the ledger's own reason naming the segment. The pipeline hands the failure to the renderer as the same kind of value the calendar already uses and saves it nowhere; the file is still written, the other sections render from their own inputs, and the command exits zero — as an unreachable calendar does today. On that branch the "No `message_posted` entries in the event log between …" sentence is absent (there was no query result), no "the connector reports" sentence appears (no connector was asked), and no sign-in line is printed (no mention could have been marked anyway).
-- **Whether the PM was mentioned is decided when the section is rendered.** An entry whose `mentions` holds one of the PM's own Graph user ids ends with `mentions you` and is listed before every other entry. The ids come from the `user_id` that slice `8m` saves at sign-in on each Graph connector's settings row — only rows the shared connector reader (slice `4n`) accepts: enabled rows of a known system, not every readable file. With two tenants enrolled, either id counts. The project dashboard marks mentions the same way: the rows are pm-ai's own settings, which the wall between project rendering and the personal store does not forbid.
+- **Whether the PM was mentioned is decided when the section is rendered, by `pm_identity()`** (`2o`; AD-34, Andrei 2026-10-11). An entry whose `mentions` holds one of the handles `pm_identity()` returns ends with `mentions you` and is listed before every other entry. Those handles are `graph:<user_id>` for the `user_id` that slice `8q` saves at sign-in on each Graph connector's settings row — every Graph row the shared connector reader (slice `4n`) reads, **enabled or disabled**, so disabling a row does not unmark past lines; a row of a system pm-ai does not know is never read. With two tenants enrolled, either handle counts. The comparison is on handles and is never made against a raw id. The project dashboard marks mentions the same way: the rows are pm-ai's own settings, which the wall between project rendering and the personal store does not forbid.
 - **A sign-in that predates the saved user id is said, not guessed around.** When a Graph row's `user_id` is absent, blank, whitespace, or not text, it is never compared; nothing is marked for that tenant and one line says the sign-in for that connector predates pm-ai recording the user id, naming the connector and `pm-ai connector sign-in <instance>`.
-- **Sender names are what the ledger line carries.** The actor field is rendered as written — a handle, not a name. The alias table that would turn a handle into a name is held in memory and saved nowhere, so no name resolution is built here; it belongs to the slice that puts the alias table in Tier 1.
+- **Sender names are what the ledger line carries.** The actor field is rendered as written — a handle, not a name — except the absence value `none:`, which renders as `an unknown sender`. The alias table that would turn a handle into a name is held in memory and saved nowhere, so no name resolution is built here; it belongs to the slice that puts the alias table in Tier 1.
 - **At most 20 signal lines**, mentions of the PM first, then newest first, ties broken by entry id so a re-render is byte-identical. When mentions alone exceed the cap, the newest mentions fill it. When the window held more, one closing line states how many more there were and that they are in the event log — a cut list is never a claim that the day held only those.
 - **The window stays the last 24 hours**, and the empty sentence and footnotes keep naming both instants.
 - **Each dashboard reads its own scope's log.** The personal dashboard reads the personal log; a project dashboard reads that project's log and nothing else (AD-25, `23d`). A message harvested into a project's log never appears on the personal dashboard, and the reverse.
@@ -33,7 +33,7 @@ context:
 
 **Never:**
 - No "since the last render" window. That needs a recorded last-render instant, which only slice `9b`'s scheduled render can supply, so `9b` owns that change.
-- No name resolution, no alias table read, no reverse index.
+- No name resolution and no reverse index. The alias table is read only through `pm_identity()` (`2o`), and only once that table is persisted.
 - No model call, no write beyond `23b`'s, no scheduling, no change to what `33d` writes, no second literal field lookup.
 
 ## I/O & Edge-Case Matrix
@@ -41,13 +41,14 @@ context:
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Real message line | a `33d`-written entry with channel, excerpt, mentions | `- **HH:MM** <actor> in <channel> — <excerpt>` | N/A |
-| Mentions the PM | `mentions` holds the PM's `user_id` | the line ends ` — mentions you` and sits above every unmarked line | N/A |
-| Mentions someone else | other ids only | listed, unmarked | N/A |
+| Mentions the PM | `mentions` holds `graph:<the PM's user_id>` | the line ends ` — mentions you` and sits above every unmarked line | N/A |
+| Mentions someone else | other handles only | listed, unmarked | N/A |
 | Mentions not recorded | `mentions` absent from the line | listed, unmarked; no claim either way | N/A |
-| Two tenants | two Graph rows, two user ids | a mention of either id is marked | N/A |
+| Two tenants | two Graph rows, two user ids | a mention of either handle is marked | N/A |
 | Project dashboard, mention | `--scope project:alpha`; the PM's id in a project-log entry | marked and listed first, from the same connector rows | N/A |
 | No `user_id` on a row | absent, blank, whitespace, or not text | no marking for that tenant; one line names the connector and `pm-ai connector sign-in <instance>` | N/A |
-| Disabled or unknown-system row | `enabled: false`, or a system pm-ai does not know | its `user_id` is not used; no sign-in line for it | N/A |
+| Disabled Graph row | `enabled: false`, `user_id` set | its handle still marks mentions; no sign-in line for it | N/A |
+| Unknown-system row | a system pm-ai does not know | never read; no sign-in line for it | N/A |
 | No Graph connector | no Graph row at all | entries listed unmarked; no sign-in line | N/A |
 | Over the cap | 23 entries in the window | 20 lines, then "3 more message signals in this window are not shown; they are in the event log" | N/A |
 | Exactly the cap | 20 entries | 20 lines, no closing line | N/A |
@@ -74,7 +75,7 @@ Verified against `ddcb9aa` on 2026-10-09.
 - `pm_ai/core/rendering.py:655` -- `_signal_line`, decoding through `2m`'s pair; the marker and closing line join it. `:668` `_window_notes` gains a fourth sentence under a new counter name — its `unreadable` already means a bad `ingested_at`
 - `pm_ai/domain/payload_fields.py` -- `2m`'s `decode_payload(entry)` (name as landed); `MessagePayload.mentions: tuple[str, ...] | None` at `events.py:113`; `excerpt` (`:115`) declares no length; `MAX_ENTRY_LENGTH` at `event_entries.py:166`
 - `pm_ai/app/pipelines.py:292` -- `EventLog(daemon.storage).read(scope=scope)`, raising today to exit 3; wrap it, turning `MalformedEntry`, `UnknownCategory` (`event_entries.py:198,202`), `UnicodeDecodeError` (a `ValueError`) and `OSError` into `HarvestFailure(reason=<the refusal's text>, retryable=False)`. Passed to the renderer only: `HarvestFailure`'s docstring (`harvest.py:127`) describes the persisted harvest case, and this value is never persisted. The goals read keeps refusing
-- `pm_ai/app/wiring.py:1380` -- `_enrolled_configurations`: every readable `connectors/<name>.json`, application scope, no filter. `4n`'s shared reader accepts enabled rows of a known system; this slice lands after `4n` and reads through it, or carries the same filter if ordered first. `graph/__init__.py:218-222` spells the row's keys; `user_id` joins them in `8m`
+- `pm_ai/app/wiring.py:1380` -- `_enrolled_configurations`: every readable `connectors/<name>.json`, application scope, no filter. `4n`'s shared reader accepts rows of a known system; this slice lands after `4n` and `2o` and reads through them — `pm_identity()` takes every Graph row, enabled or disabled; only the sign-in line filters to enabled ones. `graph/__init__.py:218-222` spells the row's keys; `user_id` joins them in `8q`
 - `pm_ai/domain/identity.py:341-343` -- the comment says the alias table is "persisted as Tier-1 data"; `ALIASES` (344) is a module dict nothing saves. Stale; named here, not fixed here
 - `pm_ai/core/ledger.py:43` -- `parse_segment`, raising at `:66,:72` with the segment name in the text; `service.py:1448` raises `FileNotFoundError` for a vanished segment; `service.py:1618` writes the actor as `actor_id`, which is what the line renders
 - `tests/core/test_rendering_sections.py:269,287` -- the calendar precedents asserting the negatives (`NO_MEETINGS not in body`, `"the connector reports" not in body`); the failure-branch test here asserts its three absences the same way
@@ -86,7 +87,7 @@ Verified against `ddcb9aa` on 2026-10-09.
 
 **Execution:**
 - [ ] `pm_ai/core/rendering.py` -- widen `entries` on both renderers; the PM-ids parameter; failure branch with its three absences; mark, sort, cap, closing line; the sign-in line naming `pm-ai connector sign-in <instance>`; fourth footnote under its own name -- the section's contract
-- [ ] `pm_ai/app/pipelines.py` -- catch the four failure kinds into `HarvestFailure`, passed and not saved; build the PM-ids value from the `4n` reader's Graph rows, a blank, whitespace or non-string `user_id` counting as absent; pass both -- the pipeline passes, the renderer states
+- [ ] `pm_ai/app/pipelines.py` -- catch the four failure kinds into `HarvestFailure`, passed and not saved; get the PM's handles and the enabled rows without a usable `user_id` from `2o`'s one app function — one read of the rows at one instant, never a call to `pm_identity()` directly and never a second read; pass both -- the pipeline passes, the renderer states
 - [ ] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- one test per matrix row, the failure test asserting the negatives as `:269,287` do; the parameter-list assertion; re-pin the golden -- the matrix is the contract
 - [ ] `tests/slice/test_dashboard_slice.py` -- the corrupt-segment test flipped; a non-UTF-8 segment; `user_id` read from a row, a disabled row ignored; the project dashboard marking a mention; scope isolation end to end -- what the renderer cannot see
 - [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: the "no failure representation" entry and the cap entry; append the dated line to `23b`'s Spec Change Log (its "malformed segment → refused" row is superseded)
@@ -105,3 +106,7 @@ Verified against `ddcb9aa` on 2026-10-09.
 - `uv run pytest -q` -- expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Spec Change Log
+
+- **2026-10-11, frozen block renegotiated by Andrei** (architecture AD-34 and AD-32, same day). A person on a line is the provider's handle, matched to a pm-ai person only when read, and the PM is one function, `pm_identity()` (`2o`). Amended: the actor `none:` renders as `an unknown sender`, not as the bare value; the PM's handles and the sign-in line's rows come from `2o`'s one app function in one read; "mentions you" compares `mentions` against `pm_identity()`'s handles (`graph:<user_id>`), never a raw id; a disabled Graph row's handle still counts (it no longer drops out), while the sign-in line stays limited to enabled rows; the alias table may be read only through `pm_identity()`; `user_id` is saved by `8q` (the spec named `8m`); lands after `2o`. Avoided: a mention of the PM going unmarked once senders and mentions are handles, and past lines unmarked by disabling a row.

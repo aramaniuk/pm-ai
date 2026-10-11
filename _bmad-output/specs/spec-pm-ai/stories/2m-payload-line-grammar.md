@@ -163,3 +163,7 @@ The architecture settled all of this (AD-27 on 2026-09-27; AD-48's list rule on 
 
 - One test per matrix row, through the line and back.
   [`test_payload_fields.py:96`](../../../../tests/domain/test_payload_fields.py#L96)
+
+## Spec Change Log
+
+- **2026-10-11, after the slice was built (Andrei, architecture AD-34).** A person on a line is now the provider's handle `<system>:<handle>` — `graph:<user id>`, `email:<address>` — matched to a pm-ai person only when read. Two things here are superseded and are not edited above, because this block was built as written: the matrix and acceptance example `unresolved:graph:dana@example.com` is wrong under the new rule (an email address is never the Graph handle; it is `email:dana@example.com`), and this slice's person spelling — a resolved actor id, or `unresolved:<system>:<handle>` — is replaced by slice `2n` before `33d` writes the first real line. The encode/decode machinery, the list grammar and the pins stand; `2n` changes the person form only.

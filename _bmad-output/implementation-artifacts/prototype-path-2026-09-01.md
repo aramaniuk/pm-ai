@@ -878,6 +878,8 @@ flowchart LR
     s1r["1r one claim for whole-file writes"]
     s2m["2m payload line grammar"]
     s8p["8p result says when the provider answered"]
+    s2n["2n people are written as handles"]
+    s2o["2o people are read as people"]
     s8q["8q sign-in records who signed in"]
     s8m["8m Graph re-sign-in"]
     s4o["4o commands without a project"]
@@ -904,6 +906,12 @@ flowchart LR
     s4o --> s4n
     s4o --> s4p
     s4n --> s4p
+    s2m --> s2n
+    s2n --> s33d
+    s2n --> s2o
+    s8q --> s2o
+    s2o --> s23c
+    s2o --> s11b
     s1q --> s33d
     s2m --> s33d
     s8p --> s33d
@@ -939,6 +947,8 @@ flowchart LR
     class s1r,s4e,s4r,s9a,s9b crit
     class s8n,s8o island
     class done goal
+    classDef merged fill:#495057,stroke:#343a40,color:#ffffff
+    class s1q,s2m,s8p merged
 ```
 
 | Slice | Lands after | Where it is stated |
@@ -948,10 +958,12 @@ flowchart LR
 | `8m` | `8q` | `8m` Code Map: "Lands after story 8q" |
 | `4n` | `4o` | `4o`: "This slice lands before `4n`" |
 | `4p` | `4o`, `4n` | `4p`: "Depends on `4n`"; relies on `4o`'s commands without a project |
-| `33d` | `1q`, `2m`, `8p` | `33d` Code Map |
+| `2n` | `2m` | `2n`'s spec (added 2026-10-11, AD-34) |
+| `2o` | `2n`, `8q` | `2o`'s spec: `pm_identity()` reads `8q`'s `user_id` |
+| `33d` | `1q`, `2m`, `8p`, `2n` | `33d` Code Map; `2n` since the 2026-10-11 change log |
 | `33f` | `33d` | `33f` extends `33d`'s cursor and walk |
-| `23c` | `2m`, `33d`, `8q`, `4n` | `23c`: "slice `2m` lands before this one"; "lands after `4n`" |
-| `11b` | `33e` | `11b` uses `33e`'s acquisition and `transcript_state` |
+| `23c` | `2m`, `33d`, `8q`, `4n`, `2o` | `23c`: "slice `2m` lands before this one"; "lands after `4n`"; `2o` since the 2026-10-11 change log |
+| `11b` | `33e`, `2o` | `11b` uses `33e`'s acquisition and `transcript_state`; `2o` since the 2026-10-11 change log (who spoke is decided by `pm_identity()`) |
 | `11c` | `33e`, `11b` | `11c`: bind is `11b`'s, the capture name is `33e`'s rule |
 | `4e` | `1r` | `4e`: "`1r` landed first" |
 | `4r` | `1r`, `4e` | `4r`: "Depends on `4e`; `1r` lands before" |
@@ -960,7 +972,7 @@ flowchart LR
 | `9b` | `1r`, `4r`, `9a` | `9b`: "Builds on `9a`"; workers `4r`; "`1r` lands before" |
 | `8o` | `8n` | `8o`: "Depends on the GitLab transport slice (`8n`)" |
 
-23 slices, 29 edges, acyclic.
+25 slices, 35 edges, acyclic. **Updated 2026-10-11:** `1q`, `1r`, `2m` and `8p` are merged (grey; `1r` stays amber because the critical path still runs through it). `2n` and `2o` were added when Andrei decided a person on a line is the provider's handle, matched to a pm-ai person only when read (architecture AD-34).
 
 Amber is the critical path, **five slices**: `1r → 4e → 4r → 9a → 9b`. `1r` is
 the one foundation with dependants on every later step — `8q`, `4e`, `4r`, `9a`,

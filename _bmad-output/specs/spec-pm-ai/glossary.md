@@ -16,6 +16,8 @@ Companion to `SPEC.md`. Terms are contract vocabulary: where a capability or con
 
 **External System Connector** — A modular plugin interfacing with an external API (GitLab, Teams, Outlook, HR MCP, Slack, Jira, Notion) to harvest telemetry, sync state, and post responses using encrypted credential storage. All connectors are outbound pull adapters; none exposes an inbound endpoint.
 
+**Person Handle** (`<system>:<handle>`) — How a person appears on a ledger line: the provider's own identifier under a declared system — `graph:<Graph user id>`, `email:<address>`, `graph_app:<application id>` for a bot, `none:` when no person is behind an event. Matched to a pm-ai person only when read, through the alias table; never a display name.
+
 **Connector Schema** — The standardized data contract and event normalization protocol converting disparate external activity (commits, tickets, channel chats, pages) into typed events written as one Markdown ledger line each in the owning scope's `event_log/` segment (operational.db holds cursors, coverage and dedup state, never the events).
 
 **CLI Interactive REPL Shell** — The terminal shell started by running `pm-ai` with no parameters, accepting fixed commands or open natural-language prompts continuously until `exit` or `quit`.
