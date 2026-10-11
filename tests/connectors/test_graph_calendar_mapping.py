@@ -63,6 +63,7 @@ from pm_ai.domain.events import ObservedEventType, Provenance
 from pm_ai.domain.harvest import Cursor, HarvestOutcome
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import UNRESOLVED_ACTOR, DataScope, ScopeKind
+from pm_ai.core.ledger import parse_segment
 from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
 from pm_ai.platform.paths import ScopePaths
@@ -605,12 +606,55 @@ def test_an_all_day_row_records_zero_minutes_and_costs_nothing():
     )
 
 
-def test_a_null_email_address_resolves_to_the_unresolved_actor():
-    """Matrix: null `emailAddress` → `UNRESOLVED`, never the raw handle."""
-    result = _harvest(_ended(attendees=[_attendee(None)]))
+def test_a_null_email_address_is_left_out_of_the_list_and_still_counted():
+    """Matrix: attendee unusable — a null address beside `c@x.com`."""
+    result = _harvest(_ended(attendees=[_attendee(None), _attendee("c@x.com")]))
 
     (record,) = result.records
-    assert [actor.actor_id for actor in record.attendees] == [UNRESOLVED_ACTOR]
+    assert [actor.actor_id for actor in record.attendees] == ["email:c@x.com"]
+    assert record.attendee_count == 2
+    assert UNRESOLVED_ACTOR not in [actor.actor_id for actor in record.attendees]
+
+
+def test_an_address_the_producer_refuses_is_left_out_and_still_counted():
+    """Matrix: attendee unusable — `a,b@x.com` beside `c@x.com`; the row is kept."""
+    result = _harvest(_ended(attendees=[_attendee("a,b@x.com"), _attendee("c@x.com")]))
+
+    (record,) = result.records
+    assert [actor.actor_id for actor in record.attendees] == ["email:c@x.com"]
+    assert record.attendee_count == 2
+    assert result.refusals == ()
+
+
+def test_attendees_are_de_duplicated_on_the_lowercased_handle():
+    """Matrix: attendees `Dana@x.com`, `dana@x.com` — one handle, a count of two."""
+    result = _harvest(_ended(attendees=[_attendee("Dana@x.com"), _attendee("dana@x.com")]))
+
+    (record,) = result.records
+    assert [actor.actor_id for actor in record.attendees] == ["email:dana@x.com"]
+    assert record.attendee_count == 2
+    assert result.events[0].payload.attendee_count == 2
+
+
+@pytest.mark.parametrize(
+    ("organizer", "actor"),
+    [
+        ({"emailAddress": {"name": "A Person", "address": "Org@Example.com"}}, "email:org@example.com"),
+        ({"emailAddress": None}, "none:"),
+        ({"emailAddress": {"name": "A Person", "address": "not an address"}}, "none:"),
+    ],
+    ids=["address", "null emailAddress", "unusable address"],
+)
+def test_the_organizer_is_the_actor_as_an_email_handle_or_none(organizer, actor):
+    """Matrix: organizer — `email:<organizer>`, `none:`, `none:`; the row is kept,
+    and the organizer is not added to the attendees."""
+    result = _harvest(_ended(organizer=organizer, attendees=[_attendee("b@x.com")]))
+
+    (event,) = result.events
+    assert str(event.actor) == actor
+    (record,) = result.records
+    assert [a.actor_id for a in record.attendees] == ["email:b@x.com"]
+    assert record.attendee_count == 1
 
 
 def test_a_distribution_list_is_one_attendee_entry_and_is_counted_as_one():
@@ -635,20 +679,18 @@ def test_zero_attendees_is_recorded_as_zero():
     assert record.man_hour_cost(100.0) == 0.0
 
 
-def test_attendees_pm_ai_cannot_name_collapse_onto_one_actor():
-    """The loss `11a`'s grammar forces, asserted rather than left to be found.
-
-    A record refuses a repeated handle — one person listed twice is two people
-    in the Man-Hour Cost — and every unresolvable handle is the same
-    `UNRESOLVED` actor. So five strangers are one attendee in the record, and the
-    event carries the provider's own count beside it.
-    """
+def test_every_attendee_is_named_by_its_address_and_priced():
+    """Five strangers are five handles: nobody collapses onto one actor now that
+    a line records what the provider said (AD-34, story 2n)."""
     result = _harvest(
         _ended(attendees=[_attendee(f"stranger{n}@example.invalid") for n in range(5)])
     )
 
     (record,) = result.records
-    assert [actor.actor_id for actor in record.attendees] == [UNRESOLVED_ACTOR]
+    assert [actor.actor_id for actor in record.attendees] == [
+        f"email:stranger{n}@example.invalid" for n in range(5)
+    ]
+    assert record.attendee_count == 5
     assert result.events[0].payload.attendee_count == 5
 
 
@@ -928,10 +970,11 @@ def test_an_unexpected_fault_after_the_fetch_is_a_value_and_not_a_raise():
     """A harvest reports; it never raises. `_result` was outside every handler.
 
     A clock that raises is the reachable case — `_result`'s first statement is
-    `self.now()` — and it stands here for `resolve_actor`, the payload
-    construction and the cursor encoding, which are all inside the same
-    unguarded stretch. Raising loses the page, its coverage and its cursor
-    together, which is the whole reason `FAILED` is a value.
+    `self.now()` — and it stands here for the payload construction and the
+    cursor encoding, which are inside the same unguarded stretch. (The actor
+    handle is not a fault source: `usable_handle` never raises.) Raising loses
+    the page, its coverage and its cursor together, which is the whole reason
+    `FAILED` is a value.
     """
 
     def _broken_clock() -> datetime:
@@ -1368,6 +1411,29 @@ def _log(daemon, scope: DataScope) -> str:
         daemon.storage.read_event_log_segment(scope=scope, name=name)
         for name in daemon.storage.event_log_segments(scope=scope)
     )
+
+
+def test_a_harvested_meeting_writes_handles_and_the_count_and_reads_them_back(tmp_path):
+    """Acceptance: through `run_harvest`, the line's actor is an `email:` handle,
+    no line holds `actor_unresolved`, and the record read back holds one handle
+    for `Dana@x.com` and `dana@x.com` beside `attendee_count=2`."""
+    daemon = _wired(
+        tmp_path,
+        _ended(attendees=[_attendee("Dana@x.com"), _attendee("dana@x.com")]),
+    )
+    assert run_harvest(daemon, INSTANCE).persisted == 1
+
+    log = _log(daemon, PERSONAL)
+    (entry,) = parse_segment(log)
+    assert entry.actor == "email:a@example.invalid"
+    assert "actor_unresolved" not in log
+
+    (member,) = daemon.storage.list_collection(scope=PERSONAL, artifact=MEETINGS)
+    text = daemon.storage.read_artifact(scope=PERSONAL, artifact=MEETINGS, name=member).decode()
+    assert "\nattendees=email:dana@x.com\nattendee_count=2\n" in text
+    stored = daemon.meetings.get("AAMkAGI2-single", scope=PERSONAL).meeting
+    assert [a.actor_id for a in stored.attendees] == ["email:dana@x.com"]
+    assert stored.attendee_count == 2
 
 
 def test_one_ended_and_one_upcoming_row_produce_exactly_one_of_each(tmp_path):

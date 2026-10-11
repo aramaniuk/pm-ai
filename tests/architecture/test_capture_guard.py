@@ -477,7 +477,7 @@ def test_a_non_excluded_artifact_in_a_repository_is_unaffected(tmp_path):
     segment = fixture.paths.resolve(PERSONAL, EVENT_LOG) / f"{NOW:%Y-%m}.md"
     body = mask_ids(segment.read_text(encoding="utf-8"))
     assert body == (
-        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=entry\n"
+        f"- [evt_ID] security actor=pm-ai ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=entry\n"
     )
     assert vcs.asked == [], "git was consulted about an artifact that has no rule"
     assert vcs.trees_asked == [], (

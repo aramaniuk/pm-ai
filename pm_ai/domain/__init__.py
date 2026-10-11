@@ -100,8 +100,6 @@ from pm_ai.domain.vcs import (
     VcsUnavailable,
 )
 from pm_ai.domain.identity import (
-    PM_AI,
-    PM_AI_ACTOR,
     UNRESOLVED,
     UNRESOLVED_ACTOR,
     Actor,
@@ -171,8 +169,6 @@ __all__ = [
     "ObservedEventType",
     "OutsideTierModel",
     "PAYLOAD_FOR",
-    "PM_AI",
-    "PM_AI_ACTOR",
     "PM_AI_MINTED",
     "PayloadMismatch",
     "Probe",

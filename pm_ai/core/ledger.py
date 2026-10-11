@@ -120,6 +120,11 @@ def parse_line(line: str) -> EventEntry:
     return EventEntry(
         entry_id=entry_id,
         category=category(raw_category),
+        # The text on the line, unchecked for an observed category: story 2n
+        # excludes a handle check on the actor column when a line is read (the
+        # writer writes `str(PersonHandle)`; payload person fields *are*
+        # checked, in `payload_fields`). A self-action's actor is checked —
+        # `EventEntry` refuses anything but `pm-ai`.
         actor=fields[1][1],
         fields=rest_fields,
         # `category()` raises `UnknownCategory` for a value in neither

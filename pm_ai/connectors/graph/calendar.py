@@ -642,9 +642,10 @@ class CalendarAttendee:
 
     Every field is optional because every field is genuinely absent sometimes: a
     room resource has no response, and slice 0's own matrix for `33c` names a
-    null `emailAddress`. `None` is carried rather than filled in — `33c` resolves
-    a missing handle to `UNRESOLVED`, which it can only do if the absence
-    survives this far.
+    null `emailAddress`. `None` is carried rather than filled in — `33c` maps a
+    missing address to `none:` for an organizer, and leaves an attendee without
+    one out of the named list while still counting it (AD-34, story 2n), which
+    it can only do if the absence survives this far.
     """
 
     email: str | None = None

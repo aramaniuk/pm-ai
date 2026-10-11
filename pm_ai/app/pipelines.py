@@ -79,7 +79,11 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # AD-36 — the match step. Connectors emit `unknown`; this is the only layer
     # that can see the executed-mutation ledger, so this is where provenance is
     # decided. Without it, pm-ai's own writes harvest back as external evidence.
-    attributed = attribute_all(result.events, daemon.storage.executed_mutations())
+    attributed = attribute_all(
+        result.events,
+        daemon.storage.executed_mutations(),
+        own_handles=daemon.own_handles,
+    )
 
     # The Tier-1 records this harvest earned, written **before** their events
     # (story 33c). A `CALENDAR_EVENT_HELD` cites `meeting:<id>` (AD-33), so an

@@ -540,6 +540,21 @@ def test_ad5_encrypted_io_belongs_to_the_single_writer_alone():
     )
 
 
+def _field_name(node: ast.expr) -> str:
+    """A field name written as a literal, or as a constant `event_entries`
+    exports (`SKILL_FIELD`) — resolved, so the scan reads what the line gets."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    from pm_ai.domain import event_entries
+
+    if isinstance(node, ast.Name) and isinstance(getattr(event_entries, node.id, None), str):
+        return getattr(event_entries, node.id)
+    raise AssertionError(
+        f"an EventEntry field name is {ast.dump(node)}; the scan reads literals "
+        f"and `pm_ai.domain.event_entries` constants only."
+    )
+
+
 def test_every_event_entry_in_the_package_satisfies_its_category_schema():
     """Runtime checks only cover producers a test actually runs.
 
@@ -570,7 +585,7 @@ def test_every_event_entry_in_the_package_satisfies_its_category_schema():
             declared = next(
                 names for m, names in SELF_ACTION_FIELDS.items() if m.name == member
             )
-            written = {e.elts[0].value for e in kw["fields"].elts} | WRITER_OWNED_FIELDS
+            written = {_field_name(e.elts[0]) for e in kw["fields"].elts} | WRITER_OWNED_FIELDS
             missing = [name for name in declared if name not in written]
             assert not missing, (
                 f"{path.name} writes a {member} entry missing {missing}; the "
