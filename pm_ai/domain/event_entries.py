@@ -59,16 +59,19 @@ __all__ = [
 ]
 
 
-# AD-27 also asks that both vocabularies be "versioned so parsers can read
-# historical entries". A `GRAMMAR_VERSION = 1` constant stood here until
-# 2026-08-30 and was removed by code review: nothing wrote it into a line and
-# nothing read it while parsing, so a segment written under one grammar was
-# byte-indistinguishable from one written under any other, and the only test
-# asserted the constant was an integer — it could not fail for the reason the
-# requirement exists. Removed rather than back-filled, because putting a version
-# on every line forever is a real cost and the choice between that, a segment
-# header, and a dated grammar table is a design decision no story has taken. See
-# deferred-work.md.
+# How this grammar changes, settled 2026-09-27 (AD-27): **additively, with no
+# version marker.** A field — payload, envelope, or a self-action's — may be
+# added and never removed, renamed, retyped or given a new meaning; an added
+# field is optional, and a required field list never grows. Both vocabularies
+# follow the same rule: a member may be added, never removed or renamed. A reader
+# treats a missing field as "not recorded" and ignores one it does not know, so
+# every line ever written stays readable under every later grammar, and a line
+# is never re-rendered. That is why nothing on a line or a segment says which
+# grammar wrote it: while no change is non-additive, no reader needs to know.
+# `tests/domain/test_entry_grammar_pins.py` freezes the current grammar, and
+# `pm_ai.domain.payload_fields` is the one place a payload field's line form is
+# spelled. (A `GRAMMAR_VERSION` constant stood here until 2026-08-30, written
+# nowhere and read nowhere; the rule above replaced it rather than a marker.)
 
 
 class SelfActionType(Enum):

@@ -26,6 +26,7 @@ import textwrap
 from dataclasses import dataclass, fields
 from datetime import datetime
 from pathlib import Path
+import typing
 from typing import Optional
 
 import pytest
@@ -65,9 +66,13 @@ def _field_names(payload: type) -> set[str]:
 
 
 def _text_fields(payload: type) -> set[str]:
-    """The `str` and `str | None` fields of a payload, resolved not read."""
+    """The `str`, `str | None` and list fields of a payload, resolved not read."""
     hints = ev.get_type_hints(payload)
-    return {name for name in _field_names(payload) if ev._is_text(hints[name])}
+    return {
+        name
+        for name in _field_names(payload)
+        if ev._is_text(hints[name]) or ev._is_list(hints[name])
+    }
 
 
 def _instead_of_decision(
@@ -415,34 +420,177 @@ def test_a_field_spelled_optional_str_is_accepted(monkeypatch):
 
 def test_provider_text_in_a_nested_type_is_a_known_limit_not_a_refusal():
     """`WorkItemPayload.assignee: Actor | None` carries a provider display name
-    the `str`-only rule cannot require. Recorded rather than silently widened:
-    this slice makes sanitization run, it does not widen what it reaches."""
+    the rule cannot require. Narrowed by `2m` to nested types alone — lists are
+    now declared — and still recorded rather than silently widened. On a line
+    the assignee is its id alone, so the name never reaches Tier 1 (AD-34)."""
     hints = ev.get_type_hints(WorkItemPayload)
     assert not ev._is_text(hints["assignee"])
+    assert not ev._is_list(hints["assignee"])
+    assert not ev._is_container(hints["assignee"])
     assert "assignee" not in UNTRUSTED_TEXT[WorkItemPayload]
     assert "assignee" not in TRUSTED_TEXT[WorkItemPayload]
     ev._assert_payload_text_is_declared()
 
 
+# ── Lists (AD-48, 2026-10-08): declared, trusted only for now ────────────────
+
+
+def test_the_mentions_list_is_declared_trusted_with_its_reason():
+    """Graph user ids: Microsoft generates them and nobody types one."""
+    hints = ev.get_type_hints(MessagePayload)
+    assert ev._is_list(hints["mentions"])
+    assert "mentions" in TRUSTED_TEXT[MessagePayload]
+    assert TRUSTED_TEXT[MessagePayload]["mentions"].strip()
+    assert "mentions" not in UNTRUSTED_TEXT[MessagePayload]
+    ev._assert_payload_text_is_declared()
+
+
+@dataclass(frozen=True, slots=True)
+class _Tagged:
+    """A payload carrying the one list shape."""
+
+    item_id: str
+    tags: tuple[str, ...] | None = None
+
+
+def _tagged(
+    *,
+    untrusted: tuple[str, ...] = (),
+    trusted: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return _instead_of_decision(
+        _Tagged,
+        untrusted=untrusted,
+        trusted={"item_id": "the provider's key"} if trusted is None else trusted,
+    )
+
+
+def test_a_trusted_list_with_a_reason_is_accepted(monkeypatch):
+    _doctor(
+        monkeypatch,
+        _tagged(trusted={"item_id": "the provider's key", "tags": "fixed set"}),
+    )
+    ev._assert_payload_text_is_declared()
+
+
+def test_an_untrusted_list_is_refused(monkeypatch):
+    """Refused until a slice brings a real one and decides per-element versus
+    joined-text sanitization."""
+    message = _refusal(monkeypatch, **_tagged(untrusted=("tags",)))
+    assert "_Tagged" in message and "tags" in message and "untrusted" in message
+
+
+def test_an_undeclared_list_is_refused(monkeypatch):
+    """The reverse of what the check did before `2m`: it let this through."""
+    message = _refusal(monkeypatch, **_tagged())
+    assert "_Tagged" in message and "tags" in message
+
+
+def test_a_trusted_list_with_no_reason_is_refused(monkeypatch):
+    message = _refusal(
+        monkeypatch, **_tagged(trusted={"item_id": "the provider's key", "tags": " "})
+    )
+    assert "_Tagged" in message and "tags" in message
+
+
 @dataclass(frozen=True, slots=True)
 class _Labelled:
-    """The likeliest next field: a work item's labels, as a container of text."""
+    """A work item's labels as a Python list — the shape AD-48 refuses."""
 
     work_item_id: str
     labels: list[str]
 
 
-def test_a_container_of_text_is_outside_the_rule(monkeypatch):
-    """The second half of the same limit. `list[str]` is neither required nor
-    refused — a fact worth pinning, because it is the shape that will force the
-    widening decision."""
-    assert not ev._is_text(ev.get_type_hints(_Labelled)["labels"])
+@dataclass(frozen=True, slots=True)
+class _RequiredTuple:
+    """A tuple with no "not recorded" — absent and empty would share a value."""
+
+    work_item_id: str
+    labels: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenSet:
+    work_item_id: str
+    labels: frozenset[str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Mapping:
+    work_item_id: str
+    labels: dict[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Sequence:
+    work_item_id: str
+    labels: typing.Sequence[str] | None = None
+
+
+MISSHAPED = [_Labelled, _RequiredTuple, _FrozenSet, _Mapping, _Sequence]
+
+
+@pytest.mark.parametrize("payload", MISSHAPED, ids=lambda p: p.__name__)
+def test_a_misshaped_list_left_undeclared_is_refused(monkeypatch, payload):
+    """Inverted by `2m`: a container of text was once outside the rule."""
+    message = _refusal(
+        monkeypatch,
+        **_instead_of_decision(
+            payload, untrusted=(), trusted={"work_item_id": "the provider's key"}
+        ),
+    )
+    assert payload.__name__ in message and "labels" in message
+
+
+@pytest.mark.parametrize("payload", MISSHAPED, ids=lambda p: p.__name__)
+def test_a_misshaped_list_declared_trusted_is_still_refused(monkeypatch, payload):
+    """Declaring it does not rescue it: a list is exactly one shape."""
+    message = _refusal(
+        monkeypatch,
+        **_instead_of_decision(
+            payload,
+            untrusted=(),
+            trusted={"work_item_id": "the provider's key", "labels": "a reason"},
+        ),
+    )
+    assert payload.__name__ in message and "labels" in message
+
+
+@dataclass(frozen=True, slots=True)
+class _OptionalSpelling:
+    item_id: str
+    tags: Optional[tuple[str, ...]] = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReversedSpelling:
+    item_id: str
+    tags: None | tuple[str, ...] = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TypingTupleSpelling:
+    item_id: str
+    tags: typing.Tuple[str, ...] | None = None  # noqa: UP006
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [_OptionalSpelling, _ReversedSpelling, _TypingTupleSpelling],
+    ids=lambda p: p.__name__,
+)
+def test_three_spellings_of_one_list_declaration_are_one(monkeypatch, payload):
+    """Read as a type, never as text (AD-48, 2026-10-10). Every annotation here
+    is a string under `from __future__ import annotations`, and each spelling
+    is accepted as the list only because the check resolves it first."""
+    assert isinstance(payload.__annotations__["tags"], str)
+    assert ev._is_list(ev.get_type_hints(payload)["tags"])
     _doctor(
         monkeypatch,
         _instead_of_decision(
-            _Labelled,
+            payload,
             untrusted=(),
-            trusted={"work_item_id": "the provider's key"},
+            trusted={"item_id": "the provider's key", "tags": "fixed set"},
         ),
     )
     ev._assert_payload_text_is_declared()
@@ -561,6 +709,38 @@ def test_the_guard_still_refuses_a_doctored_registry_under_optimization():
         f"\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "REFUSED:" in result.stdout
+
+
+def test_an_untrusted_list_is_refused_under_optimization():
+    """AD-48's list rule is inside the same guard, so it must survive `-O` too:
+    doctor the declarations to list `mentions` untrusted, demand the refusal."""
+    result = _run_optimized(
+        """
+        import pm_ai.domain.events as m
+
+        assert not __debug__, 'the -O flag did not take, so this proves nothing'
+
+        trusted = dict(m.TRUSTED_TEXT[m.MessagePayload])
+        trusted.pop('mentions')
+        m.TRUSTED_TEXT = {**m.TRUSTED_TEXT, m.MessagePayload: trusted}
+        m.UNTRUSTED_TEXT = {
+            **m.UNTRUSTED_TEXT,
+            m.MessagePayload: (*m.UNTRUSTED_TEXT[m.MessagePayload], 'mentions'),
+        }
+
+        try:
+            m._assert_payload_text_is_declared()
+        except m.MissingSanitizableDeclaration as refusal:
+            print('REFUSED:', refusal)
+        else:
+            raise SystemExit('GUARD INERT: an untrusted list was accepted')
+        """
+    )
+    assert result.returncode == 0, (
+        "the guard did not refuse an untrusted list under -O."
+        f"\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "REFUSED:" in result.stdout and "mentions" in result.stdout
 
 
 def test_a_coherent_model_still_imports_silently_under_optimization():

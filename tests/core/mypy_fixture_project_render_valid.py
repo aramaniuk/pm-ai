@@ -20,10 +20,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from pm_ai.domain.event_entries import EventEntry
-from pm_ai.domain.events import ObservedEventType
+from pm_ai.domain.events import MessagePayload, ObservedEventType
 from pm_ai.domain.harvest import HarvestFailure
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.payload_fields import encode_payload
 
 from pm_ai.core.rendering import render_project_dashboard
 
@@ -43,7 +44,9 @@ MEETING = Meeting(
 ENTRY = EventEntry(
     category=ObservedEventType.MESSAGE_POSTED,
     actor="u_dana",
-    fields=(("ingested_at", NOW.isoformat()),),
+    # A valid line: its payload fields built by the writer's own encoder.
+    fields=(("ingested_at", NOW.isoformat()),)
+    + encode_payload(MessagePayload(channel="#alpha-build")),
     entry_id="evt_a",
 )
 
