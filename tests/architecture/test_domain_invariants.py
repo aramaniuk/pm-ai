@@ -942,7 +942,18 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
     # asserted directly: these three are the artifact half of AD-3's tiering
     # contract as far as any consumer of this port can see.
     declared = typing.get_protocol_members(ports.StoragePort)
-    for member in ("write_artifact", "read_artifact", "list_collection"):
+    # `write_capture` and the two acquisition-state methods joined with story
+    # 33e: the writer had `write_capture` and the port did not — the same
+    # under-declaration `8f` closed for artifacts — so the acquisition in `core`
+    # had nothing to write a transcript through.
+    for member in (
+        "write_artifact",
+        "read_artifact",
+        "list_collection",
+        "write_capture",
+        "record_transcript_state",
+        "transcript_states",
+    ):
         assert member in declared, (
             f"StoragePort does not declare {member}, so nothing typed against "
             f"the port can reach it and `isinstance` cannot notice"
@@ -951,6 +962,29 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
             f"StoragePort declares {member} and the single writer does not "
             f"implement it"
         )
+
+    # Transcript sources, added by story 33e. AD-23 named the port for a year
+    # before it existed; the Graph adapter is its primary implementation, and
+    # the stand-in a daemon holds with no Graph connector enrolled answers the
+    # same protocol so a caller has one thing to hold.
+    transcripts = mod("pm_ai.connectors.transcripts.graph_transcripts")
+    client = mod("pm_ai.connectors.graph.client")
+
+    class _Auth:
+        instance = "graph:work"
+
+        def access_token(self, *, force_refresh: bool = False) -> str:
+            return "token"
+
+    adapter = transcripts.GraphTranscriptAdapter(
+        client=client.GraphClient(auth=_Auth()), instance="graph:work"
+    )
+    for source in (adapter, transcripts.UnenrolledGraphTranscripts()):
+        assert isinstance(source, ports.TranscriptSourcePort), (
+            f"{type(source).__name__} does not satisfy TranscriptSourcePort, the "
+            f"protocol transcript acquisition calls it through"
+        )
+    assert "acquire" in typing.get_protocol_members(ports.TranscriptSourcePort)
 
     # Connectors, added by story 8d. Three adapters were covered here and no
     # connector was — so `sample_events`, the one method the AD-34 gate actually

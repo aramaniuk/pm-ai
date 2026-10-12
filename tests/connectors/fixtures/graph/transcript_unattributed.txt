@@ -1,0 +1,5 @@
+0:0:0.0 --> 0:0:4.120
+The migration ships Friday, not Thursday.
+
+0:0:4.500 --> 0:0:9.0
+I will take the rollback plan.

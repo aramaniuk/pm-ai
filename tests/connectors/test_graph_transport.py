@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import email.message
 import io
+import json
 import urllib.error
 import urllib.request
 from dataclasses import fields
@@ -410,3 +411,49 @@ def test_a_request_that_gets_no_answer_at_all_is_graph_unavailable(monkeypatch):
     )
     assert "startDateTime" not in str(silent.value)
     assert silent.value.retryable is True
+
+
+# ── Bytes that are not JSON (story 33e) ──────────────────────────────────────
+
+WEBVTT = "WEBVTT\r\n\r\n00:00:00.000 --> 00:00:02.000\r\n<v Sam>Café at ten.</v>\r\n".encode()
+
+
+def test_a_2xx_body_that_is_not_json_arrives_as_the_bytes_served(monkeypatch):
+    """A transcript's `/content` is WebVTT; `content` carries it unchanged."""
+    _no_sockets(monkeypatch, Answer(body=WEBVTT, headers={"Content-Type": "text/vtt"}))
+    answer = _urllib_transport(_request())
+
+    assert answer.content == WEBVTT
+    assert answer.body is None
+
+
+def test_an_error_answers_bytes_survive_beside_its_parsed_body(monkeypatch):
+    served = b'{"error": {"code": "Forbidden", "innerError": {"code": "SpeakerAttributionNotAllowed"}}}'
+    _no_sockets(monkeypatch, _error(403, body=served))
+    answer = _urllib_transport(_request())
+
+    assert answer.content == served
+    assert answer.body == json.loads(served)
+
+
+def test_a_page_request_still_asks_for_json_and_a_download_for_its_own_type(monkeypatch):
+    from pm_ai.connectors.graph.client import JSON
+
+    sockets = _no_sockets(
+        monkeypatch,
+        Answer(),
+        Answer(body=WEBVTT, headers={"Content-Type": "text/vtt"}),
+    )
+
+    class Auth:
+        instance = "graph:work"
+
+        def access_token(self, *, force_refresh: bool = False) -> str:
+            return TOKEN
+
+    client = GraphClient(auth=Auth())
+    client.page(URL)
+    raw = client.download(URL, accept="text/vtt")
+
+    assert raw == WEBVTT
+    assert [request.get_header("Accept") for request in sockets.opened] == [JSON, "text/vtt"]

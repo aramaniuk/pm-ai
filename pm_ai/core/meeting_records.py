@@ -100,6 +100,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 
@@ -111,6 +112,7 @@ from pm_ai.domain.event_entries import (
 )
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import InvalidAttendeeCount, Meeting
+from pm_ai.domain.transcripts import CaptureFormat
 from pm_ai.ports import StoragePort
 
 __all__ = [
@@ -123,6 +125,9 @@ __all__ = [
     "MeetingRecord",
     "MeetingRecords",
     "as_stored",
+    "capture_name",
+    "capture_stem",
+    "has_capture",
     "parse_record",
     "record_name",
     "render_record",
@@ -343,6 +348,48 @@ def record_name(meeting_id: str, start: datetime) -> str:
     _assert_recordable_id(meeting_id)
     day = _assert_utc(start, where="Meeting.start").date().isoformat()
     return f"{day}-{_slug(meeting_id)}{_digest_suffix(meeting_id)}"
+
+
+_RECORD_SUFFIX = ".md"
+
+
+def capture_stem(meeting_id: str, start: datetime) -> str:
+    """A meeting's capture prefix: its record's filename without `.md` (story 33e).
+
+    The one naming rule for transcripts, owned here beside `record_name` and
+    called by `33e`'s acquisition, `11b`'s reader and `11c`'s drop, so a
+    capture is found by the record it belongs to and by nothing else. The
+    record's day and digest are in it, so no two meetings share a stem.
+    """
+    name = record_name(meeting_id, start)
+    return name[: -len(_RECORD_SUFFIX)]
+
+
+def capture_name(meeting_id: str, start: datetime, source: CaptureFormat) -> str:
+    """The filename one capture of this meeting is written under.
+
+    The stem, a dash, then the source's tail — `-graph.vtt` for a Graph
+    capture, `-manual.vtt` or `-manual.txt` for a dropped file. The stem is 108
+    characters at most, so the longest name fits `CAPTURE_NAME_LIMIT` (128).
+    """
+    if not isinstance(source, CaptureFormat):
+        raise TypeError(
+            f"capture_name was given {source!r}; a capture's source is a "
+            f"CaptureFormat, so a misspelled tail cannot name a file nothing finds"
+        )
+    return f"{capture_stem(meeting_id, start)}-{source.value}"
+
+
+def has_capture(names: Iterable[str], stem: str) -> bool:
+    """Whether any capture directory member belongs to the meeting with `stem`.
+
+    A prefix test rather than a lookup of one name, so a Graph capture and a
+    hand-dropped one cannot both exist unseen: whichever arrived first makes
+    the meeting captured, for every source.
+    """
+    if not stem:
+        raise ValueError("an empty stem would make every member a capture of it")
+    return any(name.startswith(stem) for name in names)
 
 
 def render_record(record: MeetingRecord) -> str:
@@ -600,6 +647,33 @@ class MeetingRecords:
             )
         scope = _assert_records_meetings(scope, where="for_day(scope=…)")
         begin, end = _utc_span(day, tz)
+        days = _utc_days(begin, end)
+        found: list[MeetingRecord] = []
+        for member in self._storage.list_collection(scope=scope, artifact=MEETINGS):
+            if not _RECORD_NAME.match(member) or member[:10] not in days:
+                continue
+            record = self._record(member, scope=scope)
+            if record is not None and begin <= record.meeting.start < end:
+                found.append(record)
+        return tuple(
+            sorted(found, key=lambda held: (held.meeting.start, held.meeting.meeting_id))
+        )
+
+    def between(
+        self, begin: datetime, end: datetime, *, scope: DataScope
+    ) -> tuple[MeetingRecord, ...]:
+        """Every record whose `start` lies in `[begin, end)`, ordered (story 33e).
+
+        What transcript acquisition reads to find the meetings inside the
+        harvest's reach-back. Both bounds aware UTC; like `for_day`, only the
+        files whose names carry a day inside the span are opened, and a
+        malformed record inside it refuses rather than vanishing.
+        """
+        begin = _assert_utc(begin, where="between(begin=…)")
+        end = _assert_utc(end, where="between(end=…)")
+        scope = _assert_records_meetings(scope, where="between(scope=…)")
+        if end <= begin:
+            return ()
         days = _utc_days(begin, end)
         found: list[MeetingRecord] = []
         for member in self._storage.list_collection(scope=scope, artifact=MEETINGS):
