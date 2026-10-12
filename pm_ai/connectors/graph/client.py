@@ -103,10 +103,13 @@ __all__ = [
     "GraphThrottled",
     "GraphUnavailable",
     "GraphUninterpretedStatus",
+    "ERROR_CODE_CAP",
+    "JSON",
     "PAGE_CAP",
     "PageCapReached",
     "PREFER_UTC",
     "THROTTLE_RETRIES",
+    "TRANSCRIPTS_DISABLED",
     "TokenSource",
 ]
 
@@ -126,6 +129,20 @@ GRAPH_BASE = f"https://{GRAPH_HOST}/v1.0"
 endpoint may change shape without a version bump — which for a connector means
 a mapping that breaks on a Tuesday.
 """
+
+JSON = "application/json"
+"""The `Accept` every page request sends; a download names its own (`33e`)."""
+
+TRANSCRIPTS_DISABLED = "GraphAccessToTranscriptsDisabled"
+"""The detailed code of a 403 from a tenant that switched Graph access to
+transcripts off (`33e`). A tenant policy, not a permission: no grant on the app
+registration changes it, so `ConsentChanged`'s message names the switch instead."""
+
+ERROR_CODE_CAP = 16
+"""How many error codes one response body may contribute to a refusal (`33e`).
+
+The codes reach a durable reason, and the body is provider content: bounded so
+no answer can grow the sentence without limit."""
 
 PREFER_UTC = 'outlook.timezone="UTC"'
 """The `Prefer` value that asks Outlook to answer in UTC.
@@ -206,6 +223,7 @@ class GraphCallFailed(Exception):
         *,
         retry_after: timedelta | None = None,
         status: int | None = None,
+        codes: tuple[str, ...] = (),
     ) -> None:
         super().__init__(reason)
         self.reason = reason
@@ -215,6 +233,19 @@ class GraphCallFailed(Exception):
         # `33d`): a 404 on a listed channel is a mistyped id in the settings
         # file, which is not what it means anywhere else.
         self.status = status
+        # Every error code the provider's body named — `error.code`, each nested
+        # `innerError.code`, and each `details[].code` — outermost first (story
+        # `33e`). A 403 is two different refusals on the transcript endpoints:
+        # a permission not granted, and a tenant that switched transcript
+        # access off (`GraphAccessToTranscriptsDisabled`), which only the inner
+        # code tells apart. Codes are Microsoft's identifiers, never its prose,
+        # so they may reach a durable reason where the message may not.
+        self.codes = codes
+
+    def names(self, code: str) -> bool:
+        """Whether the provider named `code` anywhere in its error, ignoring case."""
+        folded = code.casefold()
+        return any(named.casefold() == folded for named in self.codes)
 
 
 class GraphThrottled(GraphCallFailed):
@@ -362,6 +393,14 @@ class GraphResponse:
     status: int
     body: Mapping[str, Any] | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
+    content: bytes | None = None
+    """The body exactly as it arrived, for a response that is not JSON.
+
+    A transcript's `/content` is WebVTT (story `33e`), and `body` above is
+    decoded as JSON or not at all — so the bytes are carried beside it, and
+    `GraphClient.download` returns them unchanged. `None` from a transport
+    that kept no bytes; a download reads that as an empty body.
+    """
 
     def header(self, name: str) -> str | None:
         """One header, matched case-insensitively.
@@ -509,10 +548,12 @@ def _urllib_transport(request: GraphRequest) -> GraphResponse:
                     f"from the one the bearer token was sent to. Refusing the "
                     f"answer rather than reading it."
                 )
+            raw = answer.read()
             return GraphResponse(
                 status=int(answer.status),
-                body=_decoded(answer.read()),
+                body=_decoded(raw),
                 headers={key: value for key, value in answer.headers.items()},
+                content=raw,
             )
     except urllib.error.HTTPError as answered:
         if 300 <= int(answered.code) < 400:
@@ -527,10 +568,12 @@ def _urllib_transport(request: GraphRequest) -> GraphResponse:
             ) from answered
         # A status this client interprets, not a failure. The body is read
         # because a 429 sometimes carries its hint there as well as in a header.
+        raw = answered.read()
         return GraphResponse(
             status=int(answered.code),
-            body=_decoded(answered.read()),
+            body=_decoded(raw),
             headers={key: value for key, value in answered.headers.items()},
+            content=raw,
         )
     except GraphCallFailed:
         # The two refusals above are already the sentence a caller needs, so
@@ -586,6 +629,38 @@ def _decoded(raw: bytes) -> Mapping[str, Any] | None:
     except (TypeError, ValueError):
         return None
     return document if isinstance(document, dict) else None
+
+
+def _error_codes(body: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Every `code` in a Graph error body, outermost first, and nothing else.
+
+    Graph nests its detail: `error.code` is generic (`Forbidden`), and the
+    specific reason sits in `error.innerError.code` — spelled `innererror` by
+    some services — possibly nested again, or in `error.details[].code`. All of
+    them are collected, bounded in depth, because which one carries the
+    specific code is a per-endpoint fact. Only strings that look like codes are
+    kept: they become part of a refusal's reason, and the provider's message
+    text never does.
+    """
+    if not isinstance(body, Mapping):
+        return ()
+    found: list[str] = []
+
+    def visit(node: object, depth: int) -> None:
+        if depth > 6 or len(found) >= ERROR_CODE_CAP or not isinstance(node, Mapping):
+            return
+        code = node.get("code")
+        if isinstance(code, str) and code.strip() and len(code) <= 128 and code.isprintable():
+            found.append(code.strip())
+        for key in ("innerError", "innererror", "InnerError"):
+            visit(node.get(key), depth + 1)
+        details = node.get("details")
+        if isinstance(details, list):
+            for detail in details[:16]:
+                visit(detail, depth + 1)
+
+    visit(body.get("error"), 0)
+    return tuple(dict.fromkeys(found))[:ERROR_CODE_CAP]
 
 
 # ── The client ───────────────────────────────────────────────────────────────
@@ -659,6 +734,37 @@ class GraphClient:
         other outcome, so a caller can tell "wait" from "an administrator
         revoked this" from "pm-ai sent a request Graph rejected".
         """
+        response = self._answered(url, accept=JSON, deadline=deadline)
+        body = response.body
+        if body is None:
+            raise GraphProtocolError(
+                f"Graph answered {response.status} for "
+                f"{self._named(url)} with no JSON object to read. "
+                f"Refusing rather than reporting an empty window: a "
+                f"body pm-ai cannot parse is not evidence that there "
+                f"was nothing in the range."
+            )
+        return body
+
+    def download(
+        self, url: str, *, accept: str, deadline: datetime | None = None
+    ) -> bytes:
+        """One `GET` whose answer is not JSON, returned as the bytes that arrived.
+
+        For a transcript's `/content` (story `33e`): WebVTT, or Microsoft's
+        unattributed text format, chosen by the caller through `Accept`. Every
+        refusal `page` makes is made here too, by the same code — the origin
+        check, the 401 refresh, the throttle handling and the budget — so the
+        one difference is the body: bytes, never decoded. An answer with no
+        bytes is `b""`, which the caller reads as an empty download.
+        """
+        response = self._answered(url, accept=accept, deadline=deadline)
+        return response.content if response.content is not None else b""
+
+    def _answered(
+        self, url: str, *, accept: str, deadline: datetime | None
+    ) -> GraphResponse:
+        """The 2xx response to one `GET`, or the refusal that names why not."""
         limit = deadline if deadline is not None else self.now() + self.budget
         token = self.auth.access_token()
         refreshed = False
@@ -666,19 +772,10 @@ class GraphClient:
 
         while True:
             self._assert_time_remains(url, limit)
-            response = self._send(url, token)
+            response = self._send(url, token, accept=accept)
 
             if 200 <= response.status < 300:
-                body = response.body
-                if body is None:
-                    raise GraphProtocolError(
-                        f"Graph answered {response.status} for "
-                        f"{self._named(url)} with no JSON object to read. "
-                        f"Refusing rather than reporting an empty window: a "
-                        f"body pm-ai cannot parse is not evidence that there "
-                        f"was nothing in the range."
-                    )
-                return body
+                return response
 
             if response.status == 401:
                 if refreshed:
@@ -696,14 +793,30 @@ class GraphClient:
                 continue
 
             if response.status == 403:
+                codes = _error_codes(response.body)
+                named = f" ({', '.join(codes)})" if codes else ""
+                if any(code.casefold() == TRANSCRIPTS_DISABLED.casefold() for code in codes):
+                    # A tenant policy rather than a missing grant: telling the
+                    # operator to grant a permission would send them to the one
+                    # place that cannot change the answer.
+                    raise ConsentChanged(
+                        f"Graph refused {self._named(url)} with 403{named}: the "
+                        f"tenant has switched Graph access to transcripts off. "
+                        f"No permission on the app registration changes that and "
+                        f"there is no way round it from pm-ai; only a tenant "
+                        f"administrator can switch it back on.",
+                        status=403,
+                        codes=codes,
+                    )
                 raise ConsentChanged(
-                    f"Graph refused {self._named(url)} with 403. The credential "
-                    f"is valid and the permission is not granted — an "
+                    f"Graph refused {self._named(url)} with 403{named}. The "
+                    f"credential is valid and the permission is not granted — an "
                     f"administrator revoked it, or it was never consented to. "
                     f"Grant it on the app registration; signing in again will "
                     f"not change the answer, and this is deliberately not "
                     f"treated as a stale token.",
                     status=403,
+                    codes=codes,
                 )
 
             if response.status == 429:
@@ -781,6 +894,7 @@ class GraphClient:
                 f"That is a request pm-ai got wrong rather than a provider "
                 f"fault, so re-sending it would be rejected identically.",
                 status=response.status,
+                codes=_error_codes(response.body),
             )
 
     # ── Every page ───────────────────────────────────────────────────────────
@@ -891,7 +1005,7 @@ class GraphClient:
 
     # ── The parts every branch above leans on ────────────────────────────────
 
-    def _send(self, url: str, token: str) -> GraphResponse:
+    def _send(self, url: str, token: str, *, accept: str = JSON) -> GraphResponse:
         """One transport call, with the headers every Graph request carries.
 
         A transport that raises anything other than a `GraphCallFailed` is a
@@ -904,7 +1018,8 @@ class GraphClient:
             url=url,
             headers={
                 "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
+                # JSON for every page; a download (`33e`) names its own type.
+                "Accept": accept,
                 # A request, not a guarantee. `calendar.py` converts whatever
                 # comes back regardless — see this slice's Design Notes.
                 "Prefer": PREFER_UTC,

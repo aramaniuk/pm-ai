@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -24,8 +25,14 @@ from pm_ai.domain.harvest import (
 from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow
+from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.sanitize import Sanitized
 from pm_ai.domain.task_classes import TaskClass
+from pm_ai.domain.transcripts import (
+    TranscriptOutcome,
+    TranscriptState,
+    TranscriptStateKind,
+)
 from pm_ai.domain.vcs import TrackingVerdict
 
 
@@ -611,6 +618,83 @@ class CryptoPort(Protocol):
         """Open an envelope, or raise `DecryptionFailed`. Never a partial read."""
 
 
+class MalformedCaptureName(ValueError):
+    """A capture filename that is not a single name inside the capture directory.
+
+    The name reaches this service from a meeting id, a dropped filename, or a
+    connector handle, so none of it is the daemon's own string — and it is
+    interpolated into a path. `pm_ai.platform.paths` validates the subject ids it
+    interpolates for the same reason; this is the one path component that module
+    never sees, because it names a record rather than a scope.
+
+    Declared here with `StoragePort.write_capture` since story 33e (AD-49): the
+    acquisition in `pm_ai.core` catches it, and `core` may not import the
+    storage adapter. `pm_ai.storage.service` re-exports it.
+    """
+
+
+class EmptyCapture(ValueError):
+    """A capture with no content, which would consume a name and say nothing.
+
+    A zero-length transcript reads downstream exactly like a real one — a meeting
+    that happened and in which nobody spoke — and it occupies the name the real
+    capture would have used, so the retry that carries the content is refused as
+    a duplicate. Refusing here keeps the failure attached to its cause.
+    """
+
+
+class CaptureAlreadyExists(FileExistsError):
+    """A capture already occupies this name, and neither outcome is acceptable.
+
+    Appending would splice two recordings into one file that reads as a single
+    meeting; truncating would destroy the first. Subclasses `FileExistsError`
+    because that is what the exclusive open raises and a caller may reasonably
+    already catch it — the name and the message are what this adds.
+    """
+
+
+class TranscriptSourceUnavailable(RuntimeError):
+    """A transcript source that cannot be asked anything at all.
+
+    The daemon's Graph source when no Graph connector is enrolled: a stand-in
+    that refuses by name rather than a missing key, so a caller holding the
+    port has one thing to catch. About the port's contract, so declared beside
+    it (AD-49). Nothing about any meeting is learned from it, so no meeting's
+    state is recorded.
+    """
+
+
+@runtime_checkable
+class TranscriptSourcePort(Protocol):
+    """AD-23 — where a meeting's transcript is acquired from (story 33e).
+
+    Implemented by the Graph adapter here and by the manual adapter (`11c`'s
+    dropped file); both yield captures. Reading a capture's text is `11b`'s
+    separate contract.
+
+    Read-only and class H egress (AD-1) for a networked source.
+    """
+
+    name: str
+    requires_network: bool
+
+    def acquire(
+        self, meetings: Sequence[Meeting], *, since: datetime
+    ) -> tuple[TranscriptOutcome, ...]:
+        """One outcome per meeting reached, in the order asked; never raises per meeting.
+
+        `since` is the start of the harvest's reach-back: no meeting asked about
+        starts before it, and a source that lists transcripts may stop listing
+        once it reaches ones created well before it.
+
+        A meeting missing from the answer was not reached: a provider fault
+        (a throttle, a server error, no answer) stops the run at the meeting it
+        struck, which is refused retryably with the provider's hint, and the
+        meetings after it wait for the next run. Raises only
+        `TranscriptSourceUnavailable`, when nothing can be asked at all.
+        """
+
+
 @runtime_checkable
 class StoragePort(Protocol):
     """AD-5 — the single writer, behind a port."""
@@ -777,6 +861,40 @@ class StoragePort(Protocol):
         Per thread, as the re-entry guard is; it cannot see asyncio tasks that
         share one thread.
         """
+
+    # Captures and their acquisition state, added with story 33e. `write_capture`
+    # existed on the single writer and not here — the under-declaration `8f`
+    # closed for artifacts — so the acquisition in `core` had nothing to write
+    # a transcript through.
+
+    def write_capture(self, body: str, *, scope: DataScope, name: str) -> Path:
+        """Write one raw capture into `scope`'s `transcripts/`, exclusively.
+
+        Asks git about the final directory first (AD-43), stages in
+        `transcripts/temp/` and links into place (AD-47). Refuses with
+        `pm_ai.domain.UnprotectedCaptureDir`, `MalformedCaptureName`,
+        `EmptyCapture` or `CaptureAlreadyExists` — never overwrites, never
+        appends.
+        """
+
+    def record_transcript_state(
+        self,
+        scope: DataScope,
+        meeting_id: str,
+        state: TranscriptStateKind,
+        reason: str,
+        *,
+        retryable: bool,
+        retry_after: timedelta | None = None,
+    ) -> None:
+        """Where one meeting's transcript acquisition got to (Tier 2, AD-33).
+
+        One row per meeting in a scope, replaced on every write and stamped
+        from the storage clock. Never on the meeting record.
+        """
+
+    def transcript_states(self, scope: DataScope) -> dict[str, TranscriptState]:
+        """Every recorded acquisition state in `scope`, by meeting id."""
 
 
 @runtime_checkable

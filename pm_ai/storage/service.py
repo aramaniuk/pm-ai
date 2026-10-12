@@ -68,6 +68,7 @@ from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.payload_fields import encode_payload
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX
+from pm_ai.domain.transcripts import TranscriptState, TranscriptStateKind
 from pm_ai.domain.storage_tiers import (
     API_TOKEN,
     CAPTURES,
@@ -85,7 +86,16 @@ from pm_ai.domain.storage_tiers import (
     restricted_mode,
 )
 from pm_ai.domain.vcs import VcsUnavailable
-from pm_ai.ports import ArtifactBusy, ClaimPort, CryptoPort, ScopePathPort, VcsPort
+from pm_ai.ports import (
+    ArtifactBusy,
+    CaptureAlreadyExists,
+    ClaimPort,
+    CryptoPort,
+    EmptyCapture,
+    MalformedCaptureName,
+    ScopePathPort,
+    VcsPort,
+)
 from pm_ai.storage.crypto import (
     ENCLAVE_DIR_MODE,
     ENCRYPTED_FILE_MODE,
@@ -145,6 +155,16 @@ CREATE TABLE IF NOT EXISTS proposals (
 );
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS transcript_state (
+    scope       TEXT NOT NULL,
+    meeting_id  TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    retryable   INTEGER NOT NULL,
+    retry_after REAL,
+    at          TEXT NOT NULL,
+    PRIMARY KEY (scope, meeting_id)
 );
 """
 
@@ -613,37 +633,6 @@ class NonUtcClock(ValueError):
     filename is formatted from this value, so an offset clock files an entry
     under the wrong month at a boundary, and a naive one raises `TypeError` later
     when it is compared against the aware timestamps every other producer emits.
-    """
-
-
-class MalformedCaptureName(ValueError):
-    """A capture filename that is not a single name inside the capture directory.
-
-    The name reaches this service from a meeting id, a dropped filename, or a
-    connector handle, so none of it is the daemon's own string — and it is
-    interpolated into a path. `pm_ai.platform.paths` validates the subject ids it
-    interpolates for the same reason; this is the one path component that module
-    never sees, because it names a record rather than a scope.
-    """
-
-
-class EmptyCapture(ValueError):
-    """A capture with no content, which would consume a name and say nothing.
-
-    A zero-length transcript reads downstream exactly like a real one — a meeting
-    that happened and in which nobody spoke — and it occupies the name the real
-    capture would have used, so the retry that carries the content is refused as
-    a duplicate. Refusing here keeps the failure attached to its cause.
-    """
-
-
-class CaptureAlreadyExists(FileExistsError):
-    """A capture already occupies this name, and neither outcome is acceptable.
-
-    Appending would splice two recordings into one file that reads as a single
-    meeting; truncating would destroy the first. Subclasses `FileExistsError`
-    because that is what the exclusive open raises and a caller may reasonably
-    already catch it — the name and the message are what this adds.
     """
 
 
@@ -2211,6 +2200,65 @@ class StorageService:
                 "SELECT start, end FROM coverage WHERE instance = ? ORDER BY id", (instance,)
             )
         ]
+
+    # ── Transcript acquisition state (story 33e): Tier 2, never the record ──
+    # One row per meeting in a scope. On the record it would be a processing
+    # status, which AD-33 forbids; here it is operational state like a cursor —
+    # where a meeting's acquisition got to, and whether to ask again. The table
+    # is created by `_SCHEMA` on open, so `SCHEMA_VERSION` does not move (see
+    # the note beside it).
+
+    def record_transcript_state(
+        self,
+        scope: DataScope,
+        meeting_id: str,
+        state: TranscriptStateKind,
+        reason: str,
+        *,
+        retryable: bool,
+        retry_after: timedelta | None = None,
+    ) -> None:
+        """Replace this meeting's row, stamped from the storage clock."""
+        if not isinstance(state, TranscriptStateKind):
+            raise TypeError(
+                f"record_transcript_state was given {state!r}; a state is a "
+                f"TranscriptStateKind, so a misspelled one cannot reach Tier 2"
+            )
+        self._db.execute(
+            "INSERT INTO transcript_state "
+            "(scope, meeting_id, state, reason, retryable, retry_after, at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(scope, meeting_id) DO UPDATE SET state = excluded.state, "
+            "reason = excluded.reason, retryable = excluded.retryable, "
+            "retry_after = excluded.retry_after, at = excluded.at",
+            (
+                str(scope),
+                meeting_id,
+                state.value,
+                reason,
+                int(bool(retryable)),
+                retry_after.total_seconds() if retry_after is not None else None,
+                self._at().isoformat(),
+            ),
+        )
+        self._db.commit()
+
+    def transcript_states(self, scope: DataScope) -> dict[str, TranscriptState]:
+        """Every acquisition row in `scope`, keyed by meeting id."""
+        return {
+            meeting_id: TranscriptState(
+                state=state,
+                reason=reason,
+                retryable=bool(retryable),
+                retry_after=timedelta(seconds=retry_after) if retry_after is not None else None,
+                at=datetime.fromisoformat(at),
+            )
+            for meeting_id, state, reason, retryable, retry_after, at in self._db.execute(
+                "SELECT meeting_id, state, reason, retryable, retry_after, at "
+                "FROM transcript_state WHERE scope = ? ORDER BY meeting_id",
+                (str(scope),),
+            )
+        }
 
     def was_executed(self, idempotency_key: str) -> bool:
         """True only for a *settled* execution — an in-flight one proves nothing."""
