@@ -40,6 +40,7 @@ from pm_ai.connectors.graph import (
     TENANT_KEY,
     WIDTH_KEY,
     CategoryScopes,
+    ChannelListing,
     GraphConnector,
     GraphRowRefused,
     MissingGraphSetting,
@@ -817,9 +818,11 @@ def test_every_emitted_event_leaves_the_connector_unattributed():
         assert getattr(event, "id", None) is None
 
 
-def test_the_connector_emits_exactly_the_held_event_type():
-    """`MESSAGE_POSTED` joins it in `33d`, deliberately and not by a connector."""
-    assert _connector().emits() == frozenset({ObservedEventType.CALENDAR_EVENT_HELD})
+def test_the_connector_emits_exactly_the_held_and_the_message_event_types():
+    """`MESSAGE_POSTED` joined it in `33d`, deliberately and not by a connector."""
+    assert _connector().emits() == frozenset(
+        {ObservedEventType.CALENDAR_EVENT_HELD, ObservedEventType.MESSAGE_POSTED}
+    )
 
 
 def test_the_connector_satisfies_the_port_and_samples_a_real_event():
@@ -832,8 +835,9 @@ def test_the_connector_satisfies_the_port_and_samples_a_real_event():
     assert isinstance(connector, ConnectorPort)
     samples = connector.sample_events()
     assert samples
+    # One sample per declared type (story 33d added the message one).
+    assert {event.type for event in samples} == connector.emits()
     for event in samples:
-        assert event.type is ObservedEventType.CALENDAR_EVENT_HELD
         assert event.authored_by is Provenance.UNKNOWN
         assert getattr(event, "id", None) is None
 
@@ -1090,7 +1094,9 @@ def test_the_cursor_advances_to_the_calendar_instant_the_walk_reached():
     result = _harvest(_ended())
 
     assert result.cursor.token
-    assert datetime.fromisoformat(result.cursor.token.decode()) == NOW + WIDTH
+    # One position per resource since story 33d; the calendar's is `calendar`.
+    position = json.loads(result.cursor.token.decode())["calendar"]
+    assert datetime.fromisoformat(position) == NOW + WIDTH
 
 
 def test_a_cursor_this_connector_did_not_write_fails_the_run_and_moves_nothing():
@@ -1596,9 +1602,18 @@ def test_a_failed_harvest_still_writes_the_rows_the_walk_did_reach(tmp_path):
     Stated in `_result`'s docstring and asserted here, because until this ran the
     decision existed only as the absence of a filter.
     """
-    def _partial() -> GraphConnector:
-        """A walk whose second page 500s. One per harvest: a script is spent once."""
+    def _partial(*, with_channel: bool = False) -> GraphConnector:
+        """A walk whose second page 500s. One per harvest: a script is spent once.
+
+        `with_channel` lists one channel that answers cleanly after the calendar
+        (story 33d): the calendar's failure still withholds the run's window.
+        """
         clock = lambda: NOW
+        channel_page = GraphResponse(
+            status=200,
+            body={"value": []},
+            headers={"Content-Type": "application/json"},
+        )
         return GraphConnector(
             auth=Auth(),
             calendar=GraphCalendarFetch(
@@ -1616,6 +1631,7 @@ def test_a_failed_harvest_still_writes_the_rows_the_walk_did_reach(tmp_path):
                             headers={"Content-Type": "application/json"},
                         ),
                         GraphResponse(status=500),
+                        *((channel_page,) if with_channel else ()),
                     ),
                     now=clock,
                 ),
@@ -1625,11 +1641,28 @@ def test_a_failed_harvest_still_writes_the_rows_the_walk_did_reach(tmp_path):
             ),
             categories=CategoryScopes(projects={}, registered=lambda project: True),
             now=clock,
+            channels=(
+                (
+                    ChannelListing(
+                        team="00000000-0000-0000-0000-0000000000aa",
+                        channel="19:ok@thread.tacv2",
+                        project="alpha",
+                    ),
+                )
+                if with_channel
+                else ()
+            ),
         )
+
+    with_channel = _partial(with_channel=True).harvest(Cursor())
+    assert with_channel.outcome is HarvestOutcome.FAILED
+    assert with_channel.failure is not None and with_channel.failure.retryable is True
+    assert with_channel.coverage is None, "one failed resource withholds the run's window"
 
     result = _partial().harvest(Cursor())
     assert result.outcome is HarvestOutcome.FAILED
     assert result.failure is not None
+    assert result.coverage is None
     assert [record.meeting_id for record in result.records] == ["AAMk-page-one"]
     assert result.cursor == Cursor(), (
         "the span was not walked to completion, so the position does not move "

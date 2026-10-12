@@ -62,7 +62,8 @@ guarantee — the service honours it, the protocol does not — so
 `calendar.py` converts defensively regardless. Sending it anyway is what keeps
 the ordinary case cheap and the defensive path rare.
 
-No `$top` and no `$select`. Slice 0 measured three sibling collections
+No `$top` and no `$select` on `calendarView` (`channel_messages` is the
+exception, and says why). Slice 0 measured three sibling collections
 disagreeing about whether `$top` is even accepted (`_bmad-output/
 implementation-artifacts/slice-0-graph-spike-2026-09-06.md`), and its conclusion
 was that a paging option is a per-endpoint fact rather than a Graph-wide
@@ -103,6 +104,7 @@ __all__ = [
     "GraphUnavailable",
     "GraphUninterpretedStatus",
     "PAGE_CAP",
+    "PageCapReached",
     "PREFER_UTC",
     "THROTTLE_RETRIES",
     "TokenSource",
@@ -198,10 +200,21 @@ class GraphCallFailed(Exception):
     to state it: `HarvestFailure.retryable` has no default for the same reason.
     """
 
-    def __init__(self, reason: str, *, retry_after: timedelta | None = None) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        retry_after: timedelta | None = None,
+        status: int | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.retry_after = retry_after
+        # The HTTP status that produced this refusal, when one did. Carried for
+        # the caller that reads one status differently by resource (story
+        # `33d`): a 404 on a listed channel is a mistyped id in the settings
+        # file, which is not what it means anywhere else.
+        self.status = status
 
 
 class GraphThrottled(GraphCallFailed):
@@ -282,6 +295,17 @@ class GraphProtocolError(GraphCallFailed):
     A body that is not a JSON object, or a `@odata.nextLink` that points off-host,
     repeats, or arrives past the page cap. Not retryable: nothing about waiting
     makes a link to another origin safe to follow.
+    """
+
+
+class PageCapReached(GraphProtocolError):
+    """The walk reached `page_cap` with a further page still offered.
+
+    A `GraphProtocolError`, and not retryable here, so the calendar reads it
+    exactly as it always has. Its own subclass because the channel walk
+    (`33d`) reads it differently: a channel's history is walked newest first,
+    so a cap reached is older messages not read rather than a link pm-ai cannot
+    trust, and the walk records that loss by name.
     """
 
 
@@ -669,7 +693,8 @@ class GraphClient:
                     f"administrator revoked it, or it was never consented to. "
                     f"Grant it on the app registration; signing in again will "
                     f"not change the answer, and this is deliberately not "
-                    f"treated as a stale token."
+                    f"treated as a stale token.",
+                    status=403,
                 )
 
             if response.status == 429:
@@ -745,7 +770,8 @@ class GraphClient:
             raise GraphRefused(
                 f"Graph rejected {self._named(url)} with {response.status}. "
                 f"That is a request pm-ai got wrong rather than a provider "
-                f"fault, so re-sending it would be rejected identically."
+                f"fault, so re-sending it would be rejected identically.",
+                status=response.status,
             )
 
     # ── Every page ───────────────────────────────────────────────────────────
@@ -790,7 +816,7 @@ class GraphClient:
                     f"here and the pages already walked keep their coverage."
                 )
             if walked >= self.page_cap:
-                raise GraphProtocolError(
+                raise PageCapReached(
                     f"the walk from {self._named(url)} reached the {self.page_cap}-page "
                     f"cap with a further page still offered. The continuation "
                     f"condition is a value the response body controls, so it is "
@@ -834,6 +860,25 @@ class GraphClient:
             for name, value in (("startDateTime", stamps[0]), ("endDateTime", stamps[1]))
         )
         return f"{self.base}/me/calendarView?{query}"
+
+    def channel_messages(self, team: str, channel: str) -> str:
+        """The first page of one channel's messages, replies inline (story `33d`).
+
+        `$top=50` — the endpoint's maximum, so a walk asks for as few pages as
+        it can — and `$expand=replies`, which brings up to two hundred replies
+        inline with their thread. Nothing else: the endpoint refuses `$filter`
+        and `$orderby`, so where the walk stops is decided by reading the pages,
+        not by asking for a narrower list.
+
+        The two ids are percent-encoded as path segments with `:` and `@` left
+        as they are — both are legal in a path segment, and a channel id is
+        spelled `19:…@thread.tacv2`. Anything else that is not a path character
+        is encoded, so a hand-typed id cannot add a segment or a query.
+        """
+        segments = "/".join(
+            quote(value, safe=":@") for value in ("teams", team, "channels", channel, "messages")
+        )
+        return f"{self.base}/{segments}?$top=50&$expand=replies"
 
     # ── The parts every branch above leans on ────────────────────────────────
 

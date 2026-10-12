@@ -228,23 +228,6 @@ truncated one a reader assumes was cut off.
 # printed sentence by changing this.
 SIGNAL_CATEGORIES: tuple[ObservedEventType, ...] = (ObservedEventType.MESSAGE_POSTED,)
 
-# A statement about this build, not about the data — the one line in this module
-# that is neither computed nor permanent. Nothing in wave 1 writes a
-# `message_posted` entry: no connector emits one, so the window is empty for a
-# reason the window itself cannot show. `core` may not import `pm_ai.connectors`
-# (AD-1's layering), so it cannot be derived here; it is stated instead, and
-# story `33d` — which supplies the signals — deletes it.
-#
-# Printed only when the log holds no `message_posted` entry at all, which *is*
-# computed. Saying "nothing writes these" beside a log containing three of them
-# that merely fell outside the window would be this module's own rule broken in
-# the other direction, and it is exactly what `33d` will produce first.
-NO_PRODUCER_YET = (
-    "No connector in this build writes `message_posted` entries, so this window "
-    "is empty for that reason and not because the day was quiet (story `33d`)."
-)
-
-
 def render_dashboard(
     meetings: CalendarAnswer,
     entries: Sequence[EventEntry],
@@ -593,11 +576,8 @@ def _proactive_enablement(
     absent = 0
     unreadable = 0
     ahead = 0
-    seen = 0
     for entry in entries:
-        if entry.category in SIGNAL_CATEGORIES:
-            seen += 1
-        else:
+        if entry.category not in SIGNAL_CATEGORIES:
             # `SelfActionType` entries share this log and are not signals: their
             # subject is pm-ai, and a dashboard reporting pm-ai's own compaction
             # back to the PM as something to act on is noise wearing evidence's
@@ -627,12 +607,7 @@ def _proactive_enablement(
 
     footnote = _window_notes(absent=absent, unreadable=unreadable, ahead=ahead)
     if not inside:
-        # The build note only when the log holds no `message_posted` entry at
-        # all. Printing "no connector writes these" beside a log that plainly
-        # contains two of them, merely outside the window, would be the same
-        # invented claim in the other direction.
-        note = f"\n\n{NO_PRODUCER_YET}" if seen == 0 else ""
-        return f"{_no_signals(since=since, now=now, tz=tz)}{note}{footnote}"
+        return f"{_no_signals(since=since, now=now, tz=tz)}{footnote}"
 
     inside.sort(key=lambda pair: (pair[0], pair[1].entry_id or ""))
     lines = "\n".join(

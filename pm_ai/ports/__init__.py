@@ -83,6 +83,23 @@ class ConnectorPort(Protocol):
         """
 
 
+@runtime_checkable
+class CalendarReadPort(Protocol):
+    """A connector's calendar alone, for a live read of the day (2026-10-12).
+
+    Optional beside `ConnectorPort`, never part of it: AD-9's harvest surface
+    stays closed, and a connector without this method keeps being asked through
+    `harvest`. The dashboard's live calendar read calls this when a connector
+    has it, so a connector that also harvests other resources — Graph's listed
+    Teams channels (`33d`) — reads only the calendar on every render, and a
+    failure in a resource the dashboard did not need cannot mark its calendar
+    unread.
+    """
+
+    def read_calendar(self, since: Cursor) -> HarvestResult:
+        """The calendar, read exactly as `harvest` reads it, and nothing else."""
+
+
 class DuplicateConnector(Exception):
     """Two connectors under one instance name, so one of them would be lost.
 

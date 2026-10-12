@@ -2,7 +2,8 @@
 title: 'Teams channel messages reach the project event log'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '57320f4adfbca18bdca441fb11ad5fafdb36c066'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -36,7 +37,8 @@ context:
 - **One coverage window for the whole run**, built here: from the first resource's answer instant to the end of the last resource's walk, withheld entirely when any listed resource failed. Stricter on purpose than "a partial walk keeps its window": the connector may not vouch for a resource it could not read, and the calendar's window is not separable while the result carries one. The per-resource limitation goes to deferred work.
 - **Failures are per resource; the run's one failure is honest about all of them.** A permission refused on a listed channel means pm-ai is not a member of it or lacks access: non-retryable, the remedy names the channel — not the tenant-wide consent-change reading a 403 gets elsewhere. A mistyped team or channel id (not-found or bad-request) fails that channel only, non-retryable, naming the entry. The calendar and the other channels still harvest and advance. Several failures: retryable only if every one is, carrying the largest retry hint. A sign-in failure on the calendar — stale credential, declined consent — ends the run; no later resource is attempted.
 - **The connector declares exactly `{calendar_event_held, message_posted}`**, and the dashboard's "no connector in this build writes message entries" sentence is deleted.
-- **Fixtures come from a real tenant, redacted.** The spike never reached a message, so before any fixture is written it is re-run against one listed channel and the page kept with ids, names and text replaced, structure intact.
+- **Fixtures come from a real tenant, redacted** — owed (Andrei, 2026-10-12: a hand-written fixture shaped on Microsoft's published example is accepted for now, its `_provenance` saying so). The spike is re-run against one listed channel and the page kept with ids, names and text replaced, structure intact, replacing it.
+- **The dashboard reads the calendar only** (Andrei, 2026-10-12). Its live read walks no channel, so a failing channel never marks the calendar unread and no message is fetched only to be discarded; the scheduled harvest still reads every listed channel.
 - **Lands after four earlier slices:** every result carrying the provider's answer instant; `mentions` and the list grammar; ledger segments created readable by the owner alone; person handles and their producer (`2n`).
 
 **Ask First:** Nothing. Replies and the excerpt length were settled on 2026-10-09; the chat questions belong to the chat slice.
@@ -92,13 +94,14 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] scratch script, not committed -- re-run the spike on one listed channel with the existing auth and client; save the redacted page as `tests/connectors/fixtures/graph/channel_messages.json`
-- [ ] `pm_ai/connectors/graph/channels.py` -- new: message row, HTML-to-text, newest-first walk with the thread-activity cut and creation-time emission, the cap/budget position rule, per-row refusals, clock readings, per-channel 403/404/400 readings
-- [ ] `pm_ai/connectors/graph/__init__.py` -- `channels` reader with refusals at construction; per-resource cursor reading the old form; the message event; `emits()`; one shared budget; the built window; the combined failure; stop after a calendar sign-in failure
-- [ ] `pm_ai/app/wiring.py` -- read `channels` off the row, build the fetchers
-- [ ] `pm_ai/core/rendering.py` -- delete `NO_PRODUCER_YET` and its branch
-- [ ] `tests/connectors/test_graph_channel_messages.py` -- one test per matrix row from the fixture through a scripted transport; `$top=50&$expand=replies` asserted on the recorded request; after a per-channel 403 the returned cursor holds that channel's previous position
-- [ ] `tests/connectors/test_graph_calendar_mapping.py:750-752` -- flip the `emits()` assertion; `tests/core/test_rendering_sections.py` -- a render with zero message entries asserts the deleted sentence is absent
+- [ ] scratch script, not committed -- re-run the spike on one listed channel with the existing auth and client; save the redacted page as `tests/connectors/fixtures/graph/channel_messages.json` -- OWED (2026-10-12): hand-written fixture accepted for now
+- [x] `pm_ai/app/pipelines.py` (`_ask`) and the Graph connector -- the dashboard's live read is calendar-only; a render with listed channels sends no channel request and a failing channel leaves the calendar read
+- [x] `pm_ai/connectors/graph/channels.py` -- new: message row, HTML-to-text, newest-first walk with the thread-activity cut and creation-time emission, the cap/budget position rule, per-row refusals, clock readings, per-channel 403/404/400 readings
+- [x] `pm_ai/connectors/graph/__init__.py` -- `channels` reader with refusals at construction; per-resource cursor reading the old form; the message event; `emits()`; one shared budget; the built window; the combined failure; stop after a calendar sign-in failure
+- [x] `pm_ai/app/wiring.py` -- read `channels` off the row, build the fetchers
+- [x] `pm_ai/core/rendering.py` -- delete `NO_PRODUCER_YET` and its branch
+- [x] `tests/connectors/test_graph_channel_messages.py` -- one test per matrix row from the fixture through a scripted transport; `$top=50&$expand=replies` asserted on the recorded request; after a per-channel 403 the returned cursor holds that channel's previous position
+- [x] `tests/connectors/test_graph_calendar_mapping.py:750-752` -- flip the `emits()` assertion; `tests/core/test_rendering_sections.py` -- a render with zero message entries asserts the deleted sentence is absent
 
 **Acceptance Criteria:**
 - Given a row listing one channel mapped to `alpha`, when `run_harvest` runs against the fixture, then every `message_posted` entry is in `alpha`'s event log and none in the personal one.
@@ -125,3 +128,13 @@ Dependencies: `8p` (`answered_at`), `2m` (`mentions`, list grammar; AD-27 / AD-4
 ## Spec Change Log
 
 - **2026-10-11, frozen block renegotiated by Andrei** (architecture AD-34, same day). A person on a line is the provider's handle and is matched to a pm-ai person only when read. Amended: the sender and each `mentions` member are `graph:<user id>` handles from `2n`'s producer (were: the sender resolved through the alias table; mentions as raw Graph ids); a bot sender is `graph_app:<application id>` (was: actor unresolved); lands after `2n`. Avoided: a Graph account fixed as a person's identity in an immutable line, and a wrong alias that could never be corrected.
+- **2026-10-12, frozen block amended by Andrei** (reviewing this slice). The real-tenant fixture is owed, the hand-written one accepted for now; the dashboard's live read becomes calendar-only, because each render walked every listed channel and one failing channel marked the calendar unread.
+
+## Suggested Review Order
+
+1. The settings list and its refusals: [`graph_channel_listings`](../../../../pm_ai/connectors/graph/__init__.py#L429).
+2. The walk per channel: [`GraphChannelFetch.fetch`](../../../../pm_ai/connectors/graph/channels.py#L300) — the stop rule, emission by creation time, the position after a full or cut-short walk; the body as text in [`plain_text`](../../../../pm_ai/connectors/graph/channels.py#L234).
+3. One message, one event: [`_message_event`](../../../../pm_ai/connectors/graph/__init__.py#L1171) — `graph:`/`graph_app:` sender, mentions as handles, the reference and the excerpt.
+4. The run as a whole: [`harvest`](../../../../pm_ai/connectors/graph/__init__.py#L798) — one time budget, one coverage window, failures per resource; the cursor's one position per resource in [`_Positions`](../../../../pm_ai/connectors/graph/__init__.py#L1353).
+5. The dashboard's calendar-only read: [`read_calendar`](../../../../pm_ai/connectors/graph/__init__.py#L819), the optional [`CalendarReadPort`](../../../../pm_ai/ports/__init__.py#L87), and its caller in [`pipelines.py`](../../../../pm_ai/app/pipelines.py#L575).
+6. Tests: `tests/connectors/test_graph_channel_messages.py` over the hand-written fixture `tests/connectors/fixtures/graph/channel_messages.json`.
