@@ -395,8 +395,13 @@ def test_a_registry_path_that_cannot_be_resolved_is_named_in_the_refusal(
     assert "could not resolve the registered directory of beta" in composed.undecided
 
 
-def test_nothing_enrolled_is_unchanged(machine):
-    """An empty registry still says nothing is enrolled, in the registry's own probe."""
+def test_nothing_enrolled_with_no_target_is_unchanged(machine):
+    """An empty registry still says nothing is enrolled, in the registry's own probe.
+
+    For a command with no target — `doctor`, `setup`, `project add`. A command
+    aimed at the person or at pm-ai itself composes there since story 4o; the
+    rows for it are at the end of this file.
+    """
     composed = machine.compose()
 
     assert composed.daemon is None
@@ -455,6 +460,32 @@ def test_an_enrolment_naming_no_watched_project_is_skipped_rather_than_misfiled(
     assert sorted(daemon.connectors) == ["gitlab:alpha", "gitlab:beta"]
     printed = capsys.readouterr().err
     assert "gitlab:gamma" in printed and "was not built" in printed
+    # Story 4o: kept, so `connector check` lists it beside the built ones.
+    assert [row.instance for row in daemon.unbuilt] == ["gitlab:gamma"]
+
+
+def test_connector_check_lists_built_and_unbuilt_rows_together(
+    machine, monkeypatch, capsys
+):
+    """Built connectors probed, the unbuilt row listed, and only the probes judge."""
+    from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+    from pm_ai.domain.health import Probe
+
+    projects = machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
+    machine.enrol_connector("gitlab:gamma")
+    machine.standing_in(projects["alpha"])
+    monkeypatch.setattr(
+        GitLabConnectorAdapter,
+        "check_health",
+        lambda self: Probe(self.instance, Health.OK, "stood in for GitLab"),
+    )
+
+    assert entry.main(["connector", "check"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "gitlab:alpha" in out and "gitlab:beta" in out
+    assert "[unbuilt] gitlab:gamma: enrolled, not built:" in out
+    assert "1 enrolled, not built, and not probed." in out
 
 
 def test_a_single_project_machine_still_builds_an_unmatched_enrolment(machine):
@@ -1003,3 +1034,545 @@ def test_an_unmatched_enrolment_on_two_projects_is_skipped_for_a_personal_comman
     assert daemon is not None
     assert "gitlab:gamma" not in daemon.connectors
     assert "was not built" in capsys.readouterr().err
+
+
+# ── Story 4o — commands aimed at no project run with nothing enrolled ────────
+#
+# One row per line of the story's I/O matrix, through `entry.main` over a
+# temporary home with no `projects.toml` at all. AD-11: a command not aimed at a
+# project is never refused for the lack of one.
+
+
+def test_build_with_a_non_project_scope_and_nothing_watched_holds_no_connector(
+    machine,
+):
+    """The daemon these commands run on: it watches nothing and builds nothing."""
+    daemon = build(machine.root / "rooted", PERSONAL, watched=(), keychain=Keychain())
+
+    assert daemon.scope == PERSONAL
+    assert daemon.watched == ()
+    assert daemon.connectors == {}
+    assert daemon.unbuilt == ()
+
+
+def test_4o_the_personal_dashboard_runs_with_nothing_enrolled(machine, acted, capsys):
+    machine.configure()
+
+    assert entry.main(["dashboard"]) == EXIT_OK
+
+    written = personal_dashboard(machine)
+    assert written.is_file()
+    assert str(written) in capsys.readouterr().out
+    assert acted == [PERSONAL]
+
+
+def test_4o_goal_set_runs_with_nothing_enrolled(machine, monkeypatch, capsys):
+    answers = ["g_latency", "personal", "short", "Cut latency"]
+    monkeypatch.setattr("builtins.input", lambda prompt: answers.pop(0))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert entry.main(["goal", "set"]) == EXIT_OK
+
+    assert not answers
+    goals = machine.home / ".manager-ai" / "memory" / "strategic_goals.md"
+    assert goals.is_file()
+    assert "g_latency is set" in capsys.readouterr().out
+
+
+def test_4o_goal_set_without_a_terminal_is_refused_for_the_terminal_first(
+    machine, monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    assert entry.main(["goal", "set"]) == EXIT_REFUSAL
+
+    err = capsys.readouterr().err
+    assert "can only run at a terminal" in err
+    assert "no project is enrolled" not in err
+
+
+def test_4o_config_show_runs_with_nothing_enrolled(machine, capsys):
+    machine.configure()
+
+    assert entry.main(["config", "show"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "display_timezone" in out and "Europe/Warsaw" in out
+
+
+def test_4o_key_enrol_runs_with_nothing_enrolled(machine, monkeypatch, capsys):
+    chain = Keychain(secret=None)
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: chain)
+
+    assert entry.main(["key", "enrol"]) == EXIT_OK
+
+    assert chain.secret is not None
+    assert "a master key is enrolled under" in capsys.readouterr().out
+
+
+def test_4o_no_master_key_runs_the_dashboard_and_refuses_the_sealed_write(
+    machine, monkeypatch, capsys
+):
+    """The dashboard is plaintext; only `connector add` needs the key, to seal."""
+    chain = Keychain(secret=None)
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: chain)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    machine.configure()
+
+    assert entry.main(["dashboard"]) == EXIT_OK
+    assert personal_dashboard(machine).is_file()
+    capsys.readouterr()
+
+    assert entry.main(["connector", "add", "graph", "graph:work"]) == EXIT_REFUSAL
+
+    err = capsys.readouterr().err
+    assert "pm-ai key enrol" in err
+    assert "no project is enrolled" not in err
+    assert chain.secret is None, "nothing minted a key on the way"
+
+
+def test_4o_a_named_project_is_still_refused_with_nothing_enrolled(machine, capsys):
+    machine.configure()
+
+    assert entry.main(["dashboard", "--scope", "project:alpha"]) == EXIT_REFUSAL
+
+    err = capsys.readouterr().err
+    assert "no project is enrolled" in err
+    assert "pm-ai project add" in err
+
+
+def test_4o_doctor_is_unchanged_with_nothing_enrolled(machine, capsys):
+    assert entry.main(["doctor"]) == EXIT_UNHEALTHY
+
+    out = capsys.readouterr().out
+    assert f"[{Health.ABSENT.value:>7}] project registry: no project is enrolled" in out
+    assert "pm-ai project add" in out
+    assert entry.SELECTION_PROBE not in out
+
+
+def test_4o_connector_check_with_nothing_added_says_none_are_registered(
+    machine, capsys
+):
+    assert entry.main(["connector", "check"]) == EXIT_OK
+
+    assert "no connectors are registered" in capsys.readouterr().out
+
+
+def test_4o_a_gitlab_connector_added_with_nothing_enrolled_is_listed_not_built(
+    machine, monkeypatch, capsys
+):
+    """Saved, warned about on every start, listed by `connector check` with why."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": SECRET)
+    monkeypatch.setattr(entry, "probe_credential", accepts)
+
+    assert entry.main(["connector", "add", "gitlab", "gitlab:x"]) == EXIT_OK
+    capsys.readouterr()
+
+    warning = "the enrolled connector 'gitlab:x' was not built — no project is enrolled"
+    for _ in range(2):
+        assert entry.main(["config", "show"]) == EXIT_OK
+        assert warning in capsys.readouterr().err
+
+    assert entry.main(["connector", "check"]) == EXIT_OK
+
+    captured = capsys.readouterr()
+    assert warning in captured.err
+    assert "[unbuilt] gitlab:x: enrolled, not built: no project is enrolled" in (
+        captured.out
+    )
+    assert "no connectors are registered" not in captured.out
+
+
+def _graph_row(machine: Machine, **settings: object) -> None:
+    """A Graph row as `connector add graph` saves it, with `settings` over the defaults.
+
+    A setting given as `None` is left out, so a row can be one key short.
+    """
+    row: dict[str, object] = {
+        "client_id": "00000000-0000-0000-0000-0000000000a0",
+        "window_width_minutes": 1440,
+        "first_run_reach_back_minutes": 10080,
+    }
+    row.update(settings)
+    enrol_connector(
+        application_storage(Keychain()),
+        system="graph",
+        instance="graph:work",
+        credential="a-sealed-sign-in",
+        probe=accepts,
+        settings={key: value for key, value in row.items() if value is not None},
+    )
+
+
+def _row_file(machine: Machine, instance: str) -> Path:
+    return machine.home / APPLICATION_DIRNAME / "connectors" / f"{instance}.json"
+
+
+def _rewrite_row(machine: Machine, file: str, changes: dict[str, object]) -> None:
+    """Hand-edit one saved row: a value of `None` removes the key."""
+    import json
+
+    path = _row_file(machine, file)
+    row = json.loads(path.read_text())
+    for key, value in changes.items():
+        if value is None:
+            row.pop(key, None)
+        else:
+            row[key] = value
+    path.write_text(json.dumps(row))
+
+
+GRAPH_SCOPES = " ".join(
+    f"https://graph.microsoft.com/{scope}"
+    for scope in sorted(__import__(
+        "pm_ai.connectors.graph.auth", fromlist=["GRAPH_RESOURCE_SCOPES"]
+    ).GRAPH_RESOURCE_SCOPES)
+)
+
+
+class Microsoft:
+    """MSAL's client, as much as `connector add graph`'s sign-in and check touch.
+
+    The device flow issues one refresh token, and redeeming it issues another;
+    nothing opens a socket.
+    """
+
+    def __init__(self) -> None:
+        self.live: str | None = None
+
+    def __call__(self, client_id: str, authority: str) -> "Microsoft":
+        return self
+
+    @staticmethod
+    def _token(refresh_token: str) -> dict:
+        return {
+            "access_token": "an-access-token",
+            "refresh_token": refresh_token,
+            "expires_in": 3600,
+            "scope": GRAPH_SCOPES,
+            "token_type": "Bearer",
+            "id_token_claims": {
+                "oid": "6f1c2b3a-0000-4000-8000-000000000001",
+                "tid": "a-tenant-id",
+            },
+        }
+
+    def initiate_device_flow(self, scopes):
+        return {
+            "user_code": "ABCD-EFGH",
+            "device_code": "a-device-code",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "expires_in": 900,
+            "interval": 5,
+            "message": "open https://microsoft.com/devicelogin and enter ABCD-EFGH",
+        }
+
+    def acquire_token_by_device_flow(self, flow):
+        self.live = "signed-in"
+        return self._token("signed-in")
+
+    def acquire_token_by_refresh_token(self, refresh_token, scopes):
+        if refresh_token != self.live:
+            return {"error": "invalid_grant", "error_description": "retired"}
+        self.live = "rotated"
+        return self._token("rotated")
+
+    def acquire_token_silent(self, scopes, account, force_refresh=False):
+        return None
+
+    def get_accounts(self, username=None):
+        return []
+
+
+def test_4o_a_graph_connector_added_with_nothing_enrolled_asks_for_no_project(
+    machine, monkeypatch, capsys
+):
+    """`connector add graph` through `main`, with Microsoft stood in."""
+    import functools
+
+    from pm_ai.app.wiring import GraphEnrolment
+
+    monkeypatch.setattr(
+        entry,
+        "GraphEnrolment",
+        functools.partial(GraphEnrolment, client_factory=Microsoft(), timeout=10.0),
+    )
+    answers = ["00000000-0000-0000-0000-0000000000a0", "", "1440", "10080"]
+    monkeypatch.setattr("builtins.input", lambda prompt="": answers.pop(0))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    assert entry.main(["connector", "add", "graph", "graph:work"]) == EXIT_OK
+
+    captured = capsys.readouterr()
+    assert not answers
+    assert "graph:work is enrolled" in captured.out
+    assert "no project is enrolled" not in captured.err
+    assert _row_file(machine, "graph:work").is_file()
+
+    # The next start builds it, and `connector check` probes it: exit 0 when
+    # its probe (stood in, since the real one would reach Microsoft) is OK.
+    from pm_ai.connectors.graph import GraphConnector
+    from pm_ai.domain.health import Probe
+
+    monkeypatch.setattr(
+        GraphConnector,
+        "check_health",
+        lambda self: Probe(self.instance, Health.OK, "stood in for Microsoft"),
+    )
+    assert entry.main(["connector", "check"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "graph:work" in out and "[unbuilt]" not in out
+
+
+@pytest.mark.parametrize(
+    "health, code", [(Health.OK, EXIT_OK), (Health.FAILING, EXIT_UNHEALTHY)]
+)
+def test_4o_a_graph_connector_with_nothing_enrolled_is_built_and_probed(
+    machine, monkeypatch, capsys, health, code
+):
+    """Built at the next start; the exit code follows the health it reports."""
+    from pm_ai.connectors.graph import GraphConnector
+    from pm_ai.domain.health import Probe
+
+    _graph_row(machine)
+    probed: list[str] = []
+
+    def answers(self):
+        probed.append(self.instance)
+        return Probe(self.instance, health, "stood in for Microsoft")
+
+    monkeypatch.setattr(GraphConnector, "check_health", answers)
+
+    assert entry.main(["connector", "check"]) == code
+
+    assert probed == ["graph:work"]
+    out = capsys.readouterr().out
+    assert "graph:work" in out and "[unbuilt]" not in out
+
+
+def _never_probed(monkeypatch) -> None:
+    from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+    from pm_ai.connectors.graph import GraphConnector
+
+    for adapter in (GraphConnector, GitLabConnectorAdapter):
+        monkeypatch.setattr(
+            adapter,
+            "check_health",
+            lambda self: pytest.fail("a row that was not built was probed"),
+        )
+
+
+def test_4o_a_graph_row_one_key_short_is_listed_not_probed(
+    machine, monkeypatch, capsys
+):
+    _graph_row(machine, client_id=None)
+    _never_probed(monkeypatch)
+
+    assert entry.main(["connector", "check"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "[unbuilt] graph:work: enrolled, not built:" in out
+    assert "'client_id'" in out
+
+
+def test_4o_a_graph_row_mapping_a_category_to_a_project_is_listed_not_built(
+    machine, monkeypatch, capsys
+):
+    """With nothing enrolled, a mapping naming a project is refused as today."""
+    _graph_row(machine, categories={"Alpha work": "alpha"})
+    _never_probed(monkeypatch)
+
+    assert entry.main(["connector", "check"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    line = next(
+        line for line in out.splitlines() if line.startswith("[unbuilt] graph:work")
+    )
+    assert "alpha" in line
+
+
+@pytest.mark.parametrize(
+    "changes, listed_as, reason",
+    [
+        ({"instance": None}, "connectors/gitlab:x", "'instance' is missing"),
+        ({"system": None}, "gitlab:x", "'system' is missing"),
+        ({"system": "jira"}, "gitlab:x", "no adapter for the system 'jira'"),
+        (
+            {"instance": "gitlab:", "project": None},
+            "gitlab:",
+            "names no GitLab project",
+        ),
+    ],
+    ids=["no-instance", "no-system", "unknown-system", "no-project"],
+)
+def test_4o_an_enabled_row_that_cannot_be_built_is_listed_with_why(
+    machine, monkeypatch, capsys, changes, listed_as, reason
+):
+    """Never omitted: every enabled row is listed, built or not (AD-39)."""
+    machine.enrol_connector("gitlab:x")
+    _rewrite_row(machine, "gitlab:x", changes)
+    _never_probed(monkeypatch)
+
+    assert entry.main(["connector", "check"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if line.startswith("[unbuilt]"))
+    assert line.startswith(f"[unbuilt] {listed_as}")
+    assert reason in line
+
+
+def test_4o_a_gitlab_adapter_that_will_not_construct_is_listed_with_its_reason(
+    machine, monkeypatch, capsys
+):
+    from pm_ai.app import wiring
+
+    machine.enrol(alpha=machine.root / "alpha")
+    machine.enrol_connector("gitlab:alpha")
+    real = wiring.GitLabConnectorAdapter
+
+    def refusing(**kwargs):
+        if "credential" in kwargs:
+            raise ValueError("the adapter refused this project path")
+        return real(**kwargs)
+
+    monkeypatch.setattr(wiring, "GitLabConnectorAdapter", refusing)
+
+    daemon = machine.compose(APPLICATION).daemon
+
+    assert daemon is not None
+    assert [(row.instance, row.reason) for row in daemon.unbuilt] == [
+        (
+            "gitlab:alpha",
+            "its adapter could not be constructed: the adapter refused this "
+            "project path",
+        )
+    ]
+
+
+def test_4o_a_disabled_row_is_skipped_and_not_listed(machine, monkeypatch, capsys):
+    machine.enrol_connector("gitlab:x")
+    _rewrite_row(machine, "gitlab:x", {"enabled": False})
+    _never_probed(monkeypatch)
+
+    assert entry.main(["connector", "check"]) == EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "no connectors are registered" in captured.out
+    assert "was not built" not in captured.err
+
+
+@pytest.mark.parametrize("registry", ["unreadable", "unparseable"])
+def test_4o_a_registry_that_cannot_be_read_still_refuses_a_personal_command(
+    machine, monkeypatch, capsys, registry
+):
+    if registry == "unreadable":
+        from pm_ai.app.wiring import Bootstrap
+        from pm_ai.domain.health import ArtifactState
+
+        monkeypatch.setattr(
+            entry,
+            "_bootstrap",
+            lambda keychain: Bootstrap(
+                {},
+                ArtifactState.unreadable("projects.toml: [Errno 13] Permission denied"),
+                ArtifactState.absent(),
+            ),
+        )
+    else:
+        path = machine.home / APPLICATION_DIRNAME / REGISTRY_ARTIFACT
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"[[[ this is not toml")
+
+    assert entry.main(["dashboard"]) == EXIT_REFUSAL
+
+    err = capsys.readouterr().err
+    assert "projects.toml" in err
+    assert "no project is enrolled" not in err
+
+
+def test_4o_an_empty_projects_toml_is_nothing_enrolled_and_runs(machine, capsys):
+    """A file with no entries is "nothing enrolled", the same as no file."""
+    machine.configure()
+    machine.enrol()
+    assert (machine.home / APPLICATION_DIRNAME / REGISTRY_ARTIFACT).is_file()
+
+    assert entry.main(["dashboard"]) == EXIT_OK
+    assert personal_dashboard(machine).is_file()
+    assert entry.main(["config", "show"]) == EXIT_OK
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["config", "show"], ["dashboard"], ["connector", "check"]],
+    ids=["config-show", "dashboard", "connector-check"],
+)
+@pytest.mark.parametrize("fault", ["config-unreadable", "config-refused", "root"])
+def test_4o_a_fault_elsewhere_is_named_as_itself_never_as_nothing_enrolled(
+    machine, monkeypatch, capsys, fault, argv
+):
+    """`connector check` included: it no longer has a nothing-enrolled exemption."""
+    if fault == "config-unreadable":
+        from pm_ai.app.wiring import Bootstrap
+        from pm_ai.domain.health import ArtifactState
+
+        monkeypatch.setattr(
+            entry,
+            "_bootstrap",
+            lambda keychain: Bootstrap(
+                {},
+                ArtifactState.absent(),
+                ArtifactState.unreadable("config.toml: [Errno 13] Permission denied"),
+            ),
+        )
+        named = "config.toml"
+    elif fault == "config-refused":
+        path = machine.home / APPLICATION_DIRNAME / CONFIG_ARTIFACT
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("encryption = false\n", encoding="utf-8")
+        named = "config.toml"
+    else:
+
+        def unwritable(*args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(machine.home / ".pm-ai"))
+
+        monkeypatch.setattr(entry, "build", unwritable)
+        named = "pm-ai's own directory"
+
+    assert entry.main(argv) == EXIT_REFUSAL
+
+    captured = capsys.readouterr()
+    assert named in captured.err
+    assert "no project is enrolled" not in captured.err
+    assert "no connectors are registered" not in captured.out
+
+
+def test_4o_a_project_enrolled_afterwards_is_watched_and_takes_the_saved_row(
+    machine, monkeypatch, capsys
+):
+    """`connector add`, then `project add`, both through `main`.
+
+    The row saved with nothing enrolled is built into the single project once
+    one is enrolled, and the warning stops.
+    """
+    machine.configure()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": SECRET)
+    monkeypatch.setattr(entry, "probe_credential", accepts)
+    assert entry.main(["connector", "add", "gitlab", "gitlab:x"]) == EXIT_OK
+    assert machine.compose(PERSONAL).daemon.connectors == {}
+
+    alpha = machine.root / "alpha"
+    alpha.mkdir()
+    assert entry.main(["project", "add", str(alpha), "alpha"]) == EXIT_OK
+    daemon = machine.compose(PERSONAL).daemon
+
+    assert daemon is not None
+    assert daemon.watched == ("alpha",)
+    assert "gitlab:alpha" in daemon.connectors
+    assert daemon.connectors["gitlab:x"].scope == project_scope("alpha")
+    assert daemon.connectors["gitlab:x"].credential == SECRET
+    assert daemon.unbuilt == ()
+    capsys.readouterr()
+    assert entry.main(["dashboard"]) == EXIT_OK
+    assert "was not built" not in capsys.readouterr().err
