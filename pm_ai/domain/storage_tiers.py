@@ -71,6 +71,7 @@ __all__ = [
     "GITIGNORED",
     "NotACollection",
     "OPERATIONAL_DB",
+    "API_TOKEN",
     "OutsideTierModel",
     "REBUILD_TARGETS",
     "RESTRICTED_FILE_MODE",
@@ -101,6 +102,9 @@ __all__ = [
 # rename of any of them fail at import instead of at the first write.
 EVENT_LOG = "event_log/"
 OPERATIONAL_DB = "operational.db"
+# The loopback API's token (AD-8, story 4e): minted and read by the daemon,
+# read by every client. Tier 3, gitignored, owner-only.
+API_TOKEN = "api_token"
 
 # Raw captures. Homed in every scope at the same relative path, so the key alone
 # does not say whether git can see it — `requires_git_exclusion` below is what
@@ -420,7 +424,7 @@ def assert_reindex_safe(artifacts: frozenset[str]) -> None:
 # The keys above are literals in this module and literals in the trees, which is
 # the one place those two structures still have to agree. A rename of any of them
 # therefore fails here, at import, rather than at the first write.
-_CODE_KEYS = frozenset({EVENT_LOG, OPERATIONAL_DB, CAPTURES, CAPTURE_STAGING})
+_CODE_KEYS = frozenset({EVENT_LOG, OPERATIONAL_DB, API_TOKEN, CAPTURES, CAPTURE_STAGING})
 
 
 def _assert_code_keys_are_declared() -> None:

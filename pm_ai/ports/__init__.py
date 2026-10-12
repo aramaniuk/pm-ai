@@ -909,6 +909,40 @@ class ConfigPort(Protocol):
     @property
     def display_timezone(self) -> str: ...
 
+    @property
+    def daemon_port(self) -> int: ...
+
+
+class DaemonRefused(RuntimeError):
+    """`pm-ai daemon run` declined to start, and says why (story 4e).
+
+    Raised by the composition root's daemon lifecycle, each time with a
+    sentence naming its cause. Every cause it is raised for:
+
+    - the `runtime` extra (`fastapi`, `uvicorn`) is not installed;
+    - `config.toml` could not be read, or the loader refused it (a bad
+      `daemon_port` included) — on a machine with no project enrolled, where
+      the daemon is composed at run time;
+    - the operational store could not be opened or prepared, or stayed busy
+      past the busy wait, or the keychain could not be reached, while composing
+      that daemon;
+    - the port is taken — something accepts connections on it, or another
+      socket is bound to it — or the daemon could not listen on it;
+    - the token file is unusable: a symlink, not a regular file, readable by
+      group or others, over 4 KiB, not ASCII, empty, whitespace or control
+      characters, shorter than 32 characters; or it could not be read or
+      written;
+    - the request log under `~/.pm-ai/logs/` could not be opened;
+    - the server bound the port but failed to start serving.
+
+    A machine where no daemon could be composed for any other reason is refused
+    by the CLI's `require_daemon()` instead. The CLI maps this onto exit 3 with
+    the sentence unedited. Declared
+    with the port (AD-49) because the layer that raises it, `pm_ai.app`, sits
+    above the layer that catches it, `pm_ai.surfaces.cli`, and neither may
+    name the other's types.
+    """
+
 
 @runtime_checkable
 class DaemonPort(Protocol):

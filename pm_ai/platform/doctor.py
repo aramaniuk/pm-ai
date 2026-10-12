@@ -45,8 +45,16 @@ it no longer decides a code at all.
 
 from __future__ import annotations
 
+import errno
+import http.client
 import importlib.metadata
+import io
+import json
+import os
 import re
+import socket
+import stat
+import time
 import shutil
 import sqlite3
 from collections.abc import Iterable
@@ -61,6 +69,12 @@ from pathlib import Path
 # resolves, and there is one `Health` in the process rather than two that agree
 # by convention.
 from pm_ai.domain.health import ArtifactState, Health, Presence, Probe, Report
+from pm_ai.domain.api_token import (
+    MAX_TOKEN_FILE_BYTES,
+    ApiTokenRefused,
+    check_api_token,
+    symlinked,
+)
 from pm_ai.core.config import ConfigRefused, load_config
 from pm_ai.core.project_registry import RegistryRefused, parse_registry
 from pm_ai.domain.vcs import VcsUnavailable
@@ -81,6 +95,7 @@ __all__ = [
     "Probe",
     "Report",
     "config_readable",
+    "daemon_reachable",
     "packages_installed",
     "registry_readable",
     "run_all",
@@ -482,6 +497,189 @@ def registry_readable(state: ArtifactState) -> Probe:
             "own.",
         )
     return Probe(name, Health.OK, f"{len(projects)} project(s) enrolled: {', '.join(sorted(projects))}")
+
+
+# ── The daemon (story 4e) ────────────────────────────────────────────────────
+
+DAEMON_PROBE = "daemon"
+DAEMON_WAIT_SECONDS = 2.0
+"""The longest `doctor` waits for a daemon to answer. Loopback answers in milliseconds."""
+
+_LOOPBACK = "127.0.0.1"
+_STATUS_PATH = "/v1/status"
+# What every response from pm-ai's own API carries (`pm_ai.surfaces.api.app`
+# names it `IDENTITY_HEADER`; `platform` may not import `surfaces`, so it is
+# spelled again here and the API's tests pin the two together).
+_IDENTITY_HEADER = "x-pm-ai"
+
+
+def daemon_reachable(
+    port: int,
+    token_path: Path,
+    *,
+    timeout: float = DAEMON_WAIT_SECONDS,
+    port_note: str = "",
+) -> Probe:
+    """Whether a pm-ai daemon answers on `127.0.0.1:port`, asked with the token file.
+
+    Not running is an ordinary state and reports `OK` — the daemon is started
+    by hand in this wave. `WARNING` is for the answers that mean the next
+    `pm-ai daemon run` or the next client will not work: something that is not
+    pm-ai holds the port, a pm-ai daemon rejects this token file or answers
+    with an error, or the port accepts a connection and no whole answer comes
+    back inside `timeout` seconds — **in total**, however the peer paces it.
+
+    The token file is read and judged by the daemon's own rule
+    (`pm_ai.domain.api_token`, with the same regular-file and size guards), so
+    a file the daemon would refuse is named as such and never sent. Speaks
+    HTTP/1.1 to loopback only — pm-ai talking to itself, not egress (AD-1) —
+    and parses the answer with the standard library's `http.client`. The token
+    is never printed. `port_note` is appended to the detail when the caller
+    could not read the configured port and fell back to the default.
+    """
+    address = f"{_LOOPBACK}:{port}"
+    token, note = _read_token(token_path)
+    note += port_note
+    deadline = time.monotonic() + timeout
+    request = (
+        f"GET {_STATUS_PATH} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n"
+        + ("" if token is None else f"Authorization: Bearer {token}\r\n")
+        + "\r\n"
+    ).encode("ascii")
+    try:
+        raw = _exchange(port, request, deadline)
+    except ConnectionRefusedError:
+        return Probe(DAEMON_PROBE, Health.OK, f"not running — nothing listens on {address}{note}")
+    except TimeoutError:
+        return Probe(
+            DAEMON_PROBE, Health.WARNING,
+            f"not answering — {address} accepted the connection and sent no "
+            f"complete answer within {timeout:g} seconds{note}",
+            "A daemon that has stopped responding needs a restart (Ctrl-C in its "
+            "terminal, then `pm-ai daemon run`). If it is not pm-ai, "
+            "`pm-ai daemon run` will be refused on this port.",
+        )
+    except OSError as unreachable:
+        return Probe(
+            DAEMON_PROBE, Health.WARNING,
+            f"not answering — {address} could not be reached ({unreachable}){note}",
+            "Check what holds the port before running `pm-ai daemon run`.",
+        )
+    response = http.client.HTTPResponse(_Received(raw))  # type: ignore[arg-type]
+    try:
+        response.begin()
+        body = response.read()
+    except (http.client.HTTPException, ValueError) as garbled:
+        return _foreign(address, f"it did not answer as HTTP ({type(garbled).__name__})", note)
+    if response.getheader(_IDENTITY_HEADER) is None:
+        return _foreign(address, f"it answered HTTP {response.status}", note)
+    if response.status == 401:
+        return Probe(
+            DAEMON_PROBE, Health.WARNING,
+            f"a pm-ai daemon answers on {address} but rejects this token file{note}",
+            "The daemon read its token when it started. If the file was replaced "
+            "or deleted since, restart the daemon so both use the same one.",
+        )
+    if response.status != 200:
+        return Probe(
+            DAEMON_PROBE, Health.WARNING,
+            f"a pm-ai daemon answers on {address} with HTTP {response.status}{note}",
+            "Restart it; a running daemon answers its status with 200.",
+        )
+    try:
+        status = json.loads(body)
+        started_at = str(status["started_at"])
+        uptime = int(status["uptime_seconds"])
+    except (ValueError, KeyError, TypeError, OverflowError):
+        return Probe(
+            DAEMON_PROBE, Health.WARNING,
+            f"a pm-ai daemon answers on {address} but its status could not be read{note}",
+            "Restart it; this pm-ai and the running daemon may be different versions.",
+        )
+    return Probe(
+        DAEMON_PROBE, Health.OK,
+        f"running on {address}, up {uptime}s, started at {started_at}{note}",
+    )
+
+
+_MAX_ANSWER_BYTES = 64 * 1024
+"""The most of an answer the probe reads. A status body is a few kilobytes."""
+
+
+def _read_token(path: Path) -> tuple[str | None, str]:
+    """The token to send, or `None` and the clause naming why nothing is sent."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None, (
+            f"; there is no token file at {path} yet — the first `pm-ai daemon "
+            f"run` mints it"
+        )
+    except OSError as unreadable:
+        if unreadable.errno == errno.ELOOP:
+            return None, f"; {symlinked(str(path))}"
+        return None, f"; the token file at {path} could not be read ({unreadable.strerror})"
+    try:
+        mode = os.fstat(descriptor).st_mode
+        raw = b""
+        if stat.S_ISREG(mode):
+            limit = MAX_TOKEN_FILE_BYTES + 1
+            while len(raw) < limit and (chunk := os.read(descriptor, limit - len(raw))):
+                raw += chunk
+    except OSError as unreadable:
+        return None, f"; the token file at {path} could not be read ({unreadable.strerror})"
+    finally:
+        os.close(descriptor)
+    try:
+        return check_api_token(raw, mode=mode, where=str(path)), ""
+    except ApiTokenRefused as unusable:
+        return None, f"; the daemon would refuse its token file, so it was not sent: {unusable}"
+
+
+def _exchange(port: int, request: bytes, deadline: float) -> bytes:
+    """Send `request` and read until the peer closes, all before `deadline`.
+
+    Every socket operation gets only what is left of the one budget, so a
+    peer that drips a byte at a time cannot stretch the wait. `TimeoutError`
+    when the budget runs out; `ConnectionRefusedError` when nothing listens.
+    """
+
+    def left() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("the probe's deadline passed")
+        return remaining
+
+    with socket.create_connection((_LOOPBACK, port), timeout=left()) as connection:
+        connection.settimeout(left())
+        connection.sendall(request)
+        received = bytearray()
+        while len(received) <= _MAX_ANSWER_BYTES:
+            connection.settimeout(left())
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            received += chunk
+        return bytes(received)
+
+
+class _Received:
+    """A finished answer, offered to `http.client.HTTPResponse` as its socket."""
+
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def makefile(self, mode: str, *args: object, **kwargs: object) -> io.BytesIO:
+        return io.BytesIO(self._raw)
+
+
+def _foreign(address: str, how: str, note: str = "") -> Probe:
+    return Probe(
+        DAEMON_PROBE, Health.WARNING,
+        f"something that is not pm-ai answers on {address} — {how}{note}",
+        "`pm-ai daemon run` would be refused on this port. Stop that service, or "
+        "choose a free port with `daemon_port` in ~/.pm-ai/config.toml.",
+    )
 
 
 def run_all(

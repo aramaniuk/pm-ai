@@ -479,6 +479,18 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
             # path.
             File("event_index.db", Tier.DERIVED, encrypted=False, gitignored=True),
             File("commitment_index.db", Tier.DERIVED, encrypted=False, gitignored=True),
+            # Tier 3 — the loopback API's per-user token (AD-8, story 4e). The
+            # daemon mints one at first start when none is here and reads it
+            # thereafter; every client reads it to authenticate. Disposable by
+            # design, with one cost stated: a running daemon keeps the token it
+            # read at start, so a token deleted (or replaced) while it runs means
+            # it refuses every client until it is restarted, when it mints or
+            # reads afresh. Otherwise a rebuild that deletes it costs a re-mint
+            # at the next start and nothing else, so it is never a backup target — a
+            # restored token is a credential copied to wherever the backup went.
+            # Plaintext, because every pm-ai process has to read it without the
+            # keychain; owner-only (0600) because it is declared gitignored.
+            File("api_token", Tier.DERIVED, encrypted=False, gitignored=True),
             # API credentials (encrypted). Tier 2, not Tier 1: it is not derivable
             # from Markdown truth, and Tier 3 would mean a rebuild could delete
             # every connector credential the daemon holds.

@@ -18,6 +18,7 @@ Local-first AI PM assistant — daemon, CLI, Telegram bridge, connectors, MCP sk
 - Run `uv run pytest` before claiming done — it takes about a minute (65 s measured 2026-09-25), and nothing else runs it: no CI, no pre-commit hook.
 - Python is 3.14 exactly: `.python-version` selects it and `requires-python = ">=3.14,<3.15"` refuses anything else. The prompt-injection filter's recorded fingerprint includes the Unicode tables Python ships (16.0.0 in 3.14, 15.1.0 in 3.13), so on another version `test_the_rule_fingerprint_matches_its_version` fails. If it fails that way, the fix is the interpreter — do not follow the test's advice to record a new rule version. Moving to 3.15 is its own slice: new Unicode data is a new rule, so the rates are re-measured first.
 - Runtime deps are an extra, not defaults. `uv sync --extra runtime` before touching anything importing anthropic, fastapi, telegram, or sqlite-vec.
+- The test suite needs the runtime extra from story 4e on: without it `tests/conftest.py` fails collection naming `uv sync --extra runtime` rather than skipping the API tests.
 - `tests/architecture/test_layering.py` skips silently when `lint-imports` is missing, so a green run without it does not mean the import contracts hold.
 - Invariant tests skip on modules that do not exist yet and name them; a story is done when its skip turns into a pass.
 

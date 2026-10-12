@@ -54,6 +54,8 @@ MATRIX = [
     (APPLICATION, "event_index.db", None, False),
     (APPLICATION, "commitment_index.db", None, False),
     (APPLICATION, "operational.db", None, False),
+    # Story 4e: plaintext, because every pm-ai process reads it without a key.
+    (APPLICATION, "api_token", None, False),
     (APPLICATION, "config.json", None, True),
     # Configuration, not credentials: the token it is enrolled with goes to
     # config.json, which is encrypted. The split was always in the layout.
@@ -362,6 +364,8 @@ def test_the_other_three_scopes_exclusion_sets_are_pinned():
             "connectors/",
             "disclosure.md",
             "private/",
+            # Story 4e: the loopback API token — owner-only, never committed.
+            "private/api_token",
             "private/commitment_index.db",
             "private/config.json",
             "private/event_index.db",
