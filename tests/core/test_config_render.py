@@ -49,6 +49,7 @@ SET_VALUES: dict[str, object] = {
     "blended_hourly_rate": 85.5,
     "verbose_logging": True,
     "display_timezone": "Europe/Warsaw",
+    "daemon_port": 9000,
 }
 
 KEYS = tuple(field.name for field in fields(Config))
@@ -593,3 +594,18 @@ def test_no_toml_writing_dependency_was_added():
         f"`render_config` emits four typed scalars directly, and adding a "
         f"writer would give config.toml a second idea of its own format."
     )
+
+
+# ── `daemon_port`, story 4e ──────────────────────────────────────────────────
+
+
+def test_a_set_port_is_written_as_a_whole_number_and_reads_back_equal():
+    """`Config(daemon_port=9000)` round-trips as `daemon_port = 9000`, never `9000.0`."""
+    rendered = render_config(Config(daemon_port=9000)).decode("utf-8")
+    assert "daemon_port = 9000\n" in rendered
+    assert "9000.0" not in rendered
+    assert load_config(rendered.encode("utf-8")) == Config(daemon_port=9000)
+
+
+def test_a_port_at_its_default_is_omitted():
+    assert "daemon_port" not in render_config(Config(daemon_port=8747)).decode("utf-8")

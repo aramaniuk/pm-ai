@@ -57,12 +57,15 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
+from pm_ai.app.daemon import serve as serve_daemon
 from pm_ai.app.pipelines import run_dashboard
 from pm_ai.app.wiring import (
+    REGISTRY_ARTIFACT,
     Bootstrap,
     Daemon,
     GraphEnrolment,
     application_storage,
+    artifact_state,
     bootstrap,
     build,
     onboard_project,
@@ -98,13 +101,21 @@ from pm_ai.platform.doctor import (
     Probe,
     Report,
     config_readable,
+    daemon_reachable,
     registry_readable,
     run_all,
 )
+from pm_ai.domain.storage_tiers import API_TOKEN
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
-from pm_ai.ports import ArtifactBusy, KeychainPort, StoragePort
-from pm_ai.storage.service import StorageService
+from pm_ai.ports import (
+    ArtifactBusy,
+    DaemonRefused,
+    KeychainPort,
+    KeychainUnavailable,
+    StoragePort,
+)
+from pm_ai.storage.service import OperationalStoreUnavailable, StorageService
 from pm_ai.surfaces.cli.dispatch import (
     EXIT_REFUSAL,
     EXIT_UNEXPECTED,
@@ -194,6 +205,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             # daemon, and `goal set` asks `require_daemon()` first, so the
             # refusal it meets names why there is none.
             goals=None if daemon is None else GoalBook(daemon.storage, channel="cli"),
+            # `4e`'s `daemon run`, bound to the daemon this process composed —
+            # composed once, here, and never again per request.
+            serve=_serve(keychain, composed),
             # What stopped the daemon being built, so a refusal can name it.
             # `config.toml` is the case that needs it: `4j`'s matrix requires
             # `pm-ai config show` to report the loader's own message, and this
@@ -268,6 +282,66 @@ def _probe_connectors(
     if composed.nothing_enrolled:
         return lambda: Report(())
     return None
+
+
+def _serve(keychain: KeychainPort, composed: _Composition) -> Callable[[], int] | None:
+    """`pm-ai daemon run`, bound to this process's daemon (story 4e).
+
+    Three cases:
+
+    - **a daemon was composed** — the command targets the application scope,
+      so it acts there and watches every enrolled project;
+    - **nothing is enrolled** (D-4o) — the daemon still runs, acting in pm-ai's
+      own scope and watching no project. Composed when the command runs and not
+      before, so no other command on a fresh machine pays for it;
+    - **anything else** — `None`, and the CLI refuses through
+      `require_daemon()`, carrying the composition root's reason.
+    """
+    daemon = composed.daemon
+    if daemon is not None:
+        return lambda: serve_daemon(daemon, probes=_status_probes(keychain, daemon))
+    if composed.nothing_enrolled:
+        return lambda: _serve_unenrolled(keychain, composed)
+    return None
+
+
+def _serve_unenrolled(keychain: KeychainPort, composed: _Composition) -> int:
+    """The daemon on a machine with no project enrolled: pm-ai's own scope, watching none."""
+    config = composed.config
+    if config.presence is Presence.UNREADABLE:
+        raise DaemonRefused(config_readable(config).detail)
+    try:
+        settings = load_config(config.raw)
+    except ConfigRefused as refused:
+        raise DaemonRefused(str(refused)) from refused
+    try:
+        daemon = build(
+            None,
+            APPLICATION,
+            paths=ScopePaths.production(),
+            keychain=keychain,
+            config=settings,
+        )
+    except (OperationalStoreUnavailable, KeychainUnavailable) as unbuildable:
+        # `OperationalStoreBusy` is an `OperationalStoreUnavailable`. Each
+        # sentence names its own cause; the daemon refuses with it, exit 3.
+        raise DaemonRefused(str(unbuildable)) from unbuildable
+    return serve_daemon(daemon, probes=_status_probes(keychain, daemon))
+
+
+def _status_probes(keychain: KeychainPort, daemon: Daemon) -> Callable[[], Report]:
+    """`run_all` over the two artifacts, re-read through the daemon's own writer.
+
+    What `doctor` reports, minus the `daemon` probe: this process is the
+    daemon, and it never sends a request to itself. Re-read per request so a
+    hand-edited `config.toml` or a project enrolled since the start shows in
+    the report; nothing is composed to do it.
+    """
+    return lambda: run_all(
+        keychain,
+        config=artifact_state(daemon.storage, CONFIG_ARTIFACT),
+        registry=artifact_state(daemon.storage, REGISTRY_ARTIFACT),
+    )
 
 
 def _dashboard(daemon: Daemon | None) -> Callable[[DataScope], Path]:
@@ -1019,9 +1093,38 @@ def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
     selection = _selection_probe(composed)
     if selection is not None:
         probes = (*probes, selection)
+    # `4e`: whether a daemon answers. Appended here and not in `run_all`, so
+    # the daemon's own `/v1/status`, which calls `run_all`, never asks itself.
+    probes = (*probes, _daemon_probe(composed))
     if composed.failure is None or composed.failure.name in {p.name for p in probes}:
         return Report(probes)
     return Report((*probes, composed.failure))
+
+
+def _daemon_probe(composed: _Composition) -> Probe:
+    """`daemon_reachable` on the configured port, with the token file's path.
+
+    The port is the composed daemon's when there is one, else read off the
+    `config.toml` bytes `doctor` already holds, else the default — a config
+    the loader refuses is reported by its own probe, and the daemon could not
+    have started on it either.
+    """
+    note = ""
+    if composed.daemon is not None:
+        port = composed.daemon.config.daemon_port
+    else:
+        try:
+            if composed.config.presence in (Presence.UNREADABLE, Presence.UNOBTAINABLE):
+                raise ConfigRefused("config.toml could not be read")
+            port = load_config(composed.config.raw).daemon_port
+        except ConfigRefused:
+            port = Config().daemon_port
+            note = (
+                f" (config.toml could not be read or was refused, so the default "
+                f"port {port} was asked, not a configured one)"
+            )
+    token = ScopePaths.production().resolve(APPLICATION, API_TOKEN)
+    return daemon_reachable(port, token, port_note=note)
 
 
 SELECTION_PROBE = "project selection"

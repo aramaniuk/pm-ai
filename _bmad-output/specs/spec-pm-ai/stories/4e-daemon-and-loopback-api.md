@@ -2,7 +2,8 @@
 title: 'A long-lived daemon answers on loopback'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '585ee4fad781b0c3387d0fd9c4e4b4568ff7dee8'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -94,18 +95,18 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/config.py` -- add `daemon_port: int = 8747`; an integer reader (1024–65535, refuses bool, float and string); render an `int` field as an integer; the vocabulary and `config show` follow from the dataclass -- the port is the only new setting
-- [ ] `pm_ai/domain/scope_model.py` -- declare `private/api_token` (Tier 3, plaintext, gitignored, owner-only mode) -- the scope-model tests refuse an undeclared file
-- [ ] `pm_ai/storage/service.py` -- the token file through `write_artifact` / `read_artifact`, the write with `O_EXCL` semantics and the validity check (length, whitespace, mode) on read; nothing else -- AD-5
-- [ ] `pm_ai/surfaces/api/app.py` -- `create_app`: bearer check with `hmac.compare_digest`, `/v1/status` from `run_all` without the daemon probe, a request log (method, path, status) to the `logs/` handler; lazy `fastapi` -- the API
-- [ ] `pm_ai/app/daemon.py` -- new: bind, then mint or read the token; uvicorn bound to `127.0.0.1`; the start-time stamp; `SIGTERM` and `SIGHUP` handled as Ctrl-C; shutdown order; refuses a taken port, a bad token file and a missing extra by name; the lifespan hook where `9a`/`9b` attach -- the composition root owns the lifecycle (AD-30)
-- [ ] `pm_ai/app/entry.py` / `pm_ai/surfaces/cli/dispatch.py` -- `daemon` group with a `run` leaf, application target, help naming the foreground and the port; `serve` injected like `dashboard`; `_diagnose` appends the `daemon` probe -- the command
-- [ ] `pm_ai/platform/doctor.py` -- `daemon_reachable(port, token_path)` over `http.client` on loopback, two-second timeout, the states the matrix names -- the probe
-- [ ] `tests/conftest.py` -- fail collection, naming `uv sync --extra runtime`, when `starlette` is missing; `AGENTS.md` "Running and verifying" gains the sentence that the suite needs the extra from this slice on -- no environment-dependent skip
-- [ ] `tests/` -- one test per matrix row, including the bind-address assertion (no `0.0.0.0` anywhere under `pm_ai/`, and the listener's host is `127.0.0.1`), the request-log test reading `~/.pm-ai/logs/` in the throwaway home, and a writer wrapper that fakes a busy database for the five-second row; `test_ad8_*` now passes; a slice test that starts the daemon on a free port in a throwaway home and reads `/v1/status` with and without the token -- the matrix is the contract
-- [ ] `tests/surfaces/test_cli_dispatch.py:130` -- the docstring names `4f`, not `4e`
-- [ ] `tests/architecture/README.md` -- AD-2 row gains the bind test; AD-8 row no longer skips
-- [ ] `_bmad-output/planning-artifacts/architecture/…/ARCHITECTURE-SPINE.md` -- AD-5's paragraph: `1r` landed first; the daemon keeps the one lock and is one more writer under it for the thin clients until story 10; the enforcement-gap row "There is no daemon…" closes; the Open Risks row on the two warning-less writers narrows to `setup` and `project add` -- through the architecture skill, not by hand
+- [x] `pm_ai/core/config.py` -- add `daemon_port: int = 8747`; an integer reader (1024–65535, refuses bool, float and string); render an `int` field as an integer; the vocabulary and `config show` follow from the dataclass -- the port is the only new setting
+- [x] `pm_ai/domain/scope_model.py` -- declare `private/api_token` (Tier 3, plaintext, gitignored, owner-only mode) -- the scope-model tests refuse an undeclared file
+- [x] `pm_ai/storage/service.py` -- the token file through `write_artifact` / `read_artifact`, the write with `O_EXCL` semantics and the validity check (length, whitespace, mode) on read; nothing else -- AD-5
+- [x] `pm_ai/surfaces/api/app.py` -- `create_app`: bearer check with `hmac.compare_digest`, `/v1/status` from `run_all` without the daemon probe, a request log (method, path, status) to the `logs/` handler; lazy `fastapi` -- the API
+- [x] `pm_ai/app/daemon.py` -- new: bind, then mint or read the token; uvicorn bound to `127.0.0.1`; the start-time stamp; `SIGTERM` and `SIGHUP` handled as Ctrl-C; shutdown order; refuses a taken port, a bad token file and a missing extra by name; the lifespan hook where `9a`/`9b` attach -- the composition root owns the lifecycle (AD-30)
+- [x] `pm_ai/app/entry.py` / `pm_ai/surfaces/cli/dispatch.py` -- `daemon` group with a `run` leaf, application target, help naming the foreground and the port; `serve` injected like `dashboard`; `_diagnose` appends the `daemon` probe -- the command
+- [x] `pm_ai/platform/doctor.py` -- `daemon_reachable(port, token_path)` over `http.client` on loopback, two-second timeout, the states the matrix names -- the probe
+- [x] `tests/conftest.py` -- fail collection, naming `uv sync --extra runtime`, when `starlette` is missing; `AGENTS.md` "Running and verifying" gains the sentence that the suite needs the extra from this slice on -- no environment-dependent skip
+- [x] `tests/` -- one test per matrix row, including the bind-address assertion (no `0.0.0.0` anywhere under `pm_ai/`, and the listener's host is `127.0.0.1`), the request-log test reading `~/.pm-ai/logs/` in the throwaway home, and a writer wrapper that fakes a busy database for the five-second row; `test_ad8_*` now passes; a slice test that starts the daemon on a free port in a throwaway home and reads `/v1/status` with and without the token -- the matrix is the contract
+- [x] `tests/surfaces/test_cli_dispatch.py:130` -- the docstring names `4f`, not `4e`
+- [x] `tests/architecture/README.md` -- AD-2 row gains the bind test; AD-8 row no longer skips
+- [x] `_bmad-output/planning-artifacts/architecture/…/ARCHITECTURE-SPINE.md` -- AD-5's paragraph: `1r` landed first; the daemon keeps the one lock and is one more writer under it for the thin clients until story 10; the enforcement-gap row "There is no daemon…" closes; the Open Risks row on the two warning-less writers narrows to `setup` and `project add` -- through the architecture skill, not by hand
 
 **Acceptance Criteria:**
 - Given a throwaway home with no project enrolled and the runtime extra installed, when `pm-ai daemon run` starts and `pm-ai doctor` runs in another shell, then doctor prints `[ok] daemon: running` with the address and start time, and `pm-ai daemon run` a second time is refused naming the port.
@@ -127,3 +128,59 @@ context:
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai daemon run` in one shell and `… pm-ai doctor` in another -- expected: `[ok] daemon: running`, the token file at owner-only mode (`ls -l`), `lsof -nP -iTCP:8747` showing `127.0.0.1` only, a `GET /v1/status 200` line under `<scratch>/.pm-ai/logs/`
+
+## Suggested Review Order
+
+**The daemon's lifecycle**
+
+- Start order: runtime extra, bind loopback, take the token, serve; stop signals; refusals by name.
+  [`daemon.py:77`](../../../../pm_ai/app/daemon.py#L77)
+
+- Binds 127.0.0.1 only; a port that answers or does not finish connecting counts as taken.
+  [`daemon.py:186`](../../../../pm_ai/app/daemon.py#L186)
+
+- Mint with exclusive create, or read; never minted over.
+  [`daemon.py:249`](../../../../pm_ai/app/daemon.py#L249)
+
+**Authentication and the one endpoint**
+
+- Every non-lifespan scope needs the bearer token; constant-time digest comparison; the request log.
+  [`app.py:131`](../../../../pm_ai/surfaces/api/app.py#L131)
+
+- `/v1/status`: what doctor reports, without the daemon probe.
+  [`app.py:120`](../../../../pm_ai/surfaces/api/app.py#L120)
+
+**The token file**
+
+- One validity rule both sides share.
+  [`api_token.py:58`](../../../../pm_ai/domain/api_token.py#L58)
+
+- Read guarded: regular file, no symlink, capped, owner-only.
+  [`service.py:1450`](../../../../pm_ai/storage/service.py#L1450)
+
+**Two processes on operational.db**
+
+- A busy write is refused by name, worded by what happened.
+  [`service.py:481`](../../../../pm_ai/storage/service.py#L481)
+
+**Commands**
+
+- `daemon run` with and without an enrolled project.
+  [`entry.py:287`](../../../../pm_ai/app/entry.py#L287)
+
+- doctor's daemon probe over loopback, two-second total deadline.
+  [`doctor.py:516`](../../../../pm_ai/platform/doctor.py#L516)
+
+- The `daemon_port` setting and its one validator.
+  [`config.py:208`](../../../../pm_ai/core/config.py#L208)
+
+**Tests**
+
+- Starts the real console script in a throwaway home.
+  [`test_daemon_slice.py`](../../../../tests/slice/test_daemon_slice.py)
+
+- No `0.0.0.0`; the listener's host; collection fails without the extra.
+  [`test_loopback.py`](../../../../tests/architecture/test_loopback.py)
+
+- Every doctor probe state.
+  [`test_doctor_daemon_probe.py`](../../../../tests/slice/test_doctor_daemon_probe.py)
