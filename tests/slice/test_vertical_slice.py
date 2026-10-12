@@ -25,7 +25,8 @@ from pm_ai.domain import (
     evaluate_commitment,
 )
 from pm_ai.domain.harvest import Cursor
-from pm_ai.domain.identity import UNRESOLVED_ACTOR, Actor, register_alias
+from pm_ai.domain.handles import UNRESOLVED_SENTINEL, person_handle, register_alias
+from pm_ai.domain.identity import Actor
 from pm_ai.core.ledger import parse_segment
 from pm_ai.skills.registry import MissingIdempotencyKey, SkillNotAuthorized
 
@@ -116,7 +117,7 @@ def test_harvest_records_a_coverage_window(daemon):
     )
 
 
-def test_a_commit_author_is_written_as_the_handle_the_provider_gave(daemon, monkeypatch):
+def test_a_commit_author_is_written_as_the_handle_the_provider_gave(daemon):
     """AD-34 — a line records what the provider said; a reader decides who.
 
     Matrix: commit author — `author_email` set, absent, or not an address gives
@@ -124,10 +125,7 @@ def test_a_commit_author_is_written_as_the_handle_the_provider_gave(daemon, monk
     before the harvest changes nothing on the line, because nothing on the write
     path reads the alias table.
     """
-    import pm_ai.domain.identity as identity
-
-    monkeypatch.setattr(identity, "ALIASES", {})
-    register_alias("gitlab", "alex@example.com", Actor("actor_alex", "Alex"))
+    register_alias(person_handle("email", "alex@example.com"), Actor("actor_alex", "Alex"))
     daemon.connectors["gitlab:alpha"]._fake_api = [
         {"sha": "9f2a1c", "message": "a", "author_email": "Alex@Example.com",
          "committed_at": NOW - timedelta(hours=3)},
@@ -144,7 +142,7 @@ def test_a_commit_author_is_written_as_the_handle_the_provider_gave(daemon, monk
         for entry in parse_segment(body)
     }
     assert actors == {"9f2a1c": "email:alex@example.com", "3b7e02": "none:", "77aa00": "none:"}
-    assert UNRESOLVED_ACTOR not in body
+    assert UNRESOLVED_SENTINEL not in body
     assert "actor_alex" not in body
 
 

@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pm_ai.app.wiring import Daemon
+from pm_ai.app.wiring import Daemon, read_pm_identity
 from pm_ai.core.config import ConfigRefused
 from pm_ai.core.event_log import EventLog
 from pm_ai.core.extraction import extract
@@ -268,7 +268,10 @@ def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: s
     # owned by `personal` or `people` cannot be cited from the project scope,
     # and every extraction below will cite this meeting (AD-33).
     assert_citation_legal(cited=meeting.scope, into=daemon.scope)
-    results = extract(transcript, meeting, pm_handle=daemon.pm_handle, provider=provider)
+    # Who the PM is, read once for this ingestion, so every utterance in it is
+    # judged against the same answer (story 2o, AD-32).
+    identity = read_pm_identity(daemon.storage).identity
+    results = extract(transcript, meeting, identity=identity, provider=provider)
     # The Tier-1 record, and the citation root every extraction above points at
     # (AD-33). Through the accessor since story 11a: this was an assignment into
     # a process-lifetime dict, so the record a citation resolved against was gone

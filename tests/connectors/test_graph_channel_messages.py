@@ -1105,7 +1105,7 @@ def _dashboard(tmp_path: Path, connector: GraphConnector) -> str:
         "alpha",
         now=lambda: NOW,
         keychain=_NoKey(),
-        config=Config(display_timezone="UTC", pm_handle="andrei@example.com"),
+        config=Config(display_timezone="UTC"),
     )
     daemon.connectors = {INSTANCE: connector}
     run_dashboard(daemon, now=NOW)

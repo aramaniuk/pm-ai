@@ -1040,7 +1040,7 @@ def test_redaction_can_say_something_other_than_accepted():
 # ── Story 8q — the row records which user signed in ──────────────────────────
 
 GRAPH = "graph:work"
-PM = "a-graph-user-id"
+PM = "0d9e3c4f-1a2b-4c3d-8e9f-a0b1c2d3e4f5"  # a Graph user id is a GUID
 
 
 def _graph_row_file(root: Path) -> Path:
@@ -1167,6 +1167,26 @@ def test_replacing_a_credential_under_a_held_claim_is_a_programming_error(storag
 def test_a_row_without_a_usable_user_id_records_no_user(row):
     assert recorded_user_id(row) is None
     assert_same_user(recorded_user_id(row), "anybody-at-all")  # any user is accepted
+
+
+@pytest.mark.parametrize("not_a_guid", ["a-graph-user-id", "pm@example.com", "0d9e3c4f"])
+def test_a_user_id_the_reader_ignores_is_not_recorded(storage, tmp_path, not_a_guid):
+    """Story 2o: the writer refuses what `recorded_user_id` reads as absent, or a
+    row would record a user that `assert_same_user` then lets anyone replace."""
+    row_file = _enrol_graph(storage, tmp_path)
+    before = row_file.read_bytes()
+    with pytest.raises(ValueError) as refused:
+        record_user_id(storage, instance=GRAPH, user_id=not_a_guid)
+    assert repr(not_a_guid) in str(refused.value)
+    assert row_file.read_bytes() == before
+
+
+def test_a_recorded_value_that_is_not_a_guid_accepts_any_user():
+    """The stated fail-open: a hand-edited or pre-2o row whose `user_id` is not a
+    Graph user id reads as no recorded user, so any sign-in is accepted."""
+    row = {USER_ID_KEY: "a-graph-user-id"}
+    assert recorded_user_id(row) is None
+    assert_same_user(recorded_user_id(row), "somebody-else", instance=GRAPH)
 
 
 def test_a_recorded_user_id_is_read_back():

@@ -179,11 +179,9 @@ def by_name(report: Report) -> dict[str, Probe]:
     return {probe.name: probe for probe in report.probes}
 
 
-def answers_for(
-    repository: Path, *, project_id: str = "", handle: str = "pm@example.com"
-) -> tuple[str, ...]:
-    """A full first run: path, id, handle, rate, zone, verbose."""
-    return (str(repository), project_id, handle, "85", "Europe/Warsaw", "n")
+def answers_for(repository: Path, *, project_id: str = "") -> tuple[str, ...]:
+    """A full first run: path, id, rate, zone, verbose."""
+    return (str(repository), project_id, "85", "Europe/Warsaw", "n")
 
 
 def setup() -> int:
@@ -204,7 +202,6 @@ def test_a_clean_machine_reaches_healthy_keychain_registry_and_config_probes(
     assert keychain.secret is not None and keychain.writes == 1
     assert set(registry_of(home)) == {"alpha"}
     config = load_config(config_path(home).read_bytes())
-    assert config.pm_handle == "pm@example.com"
     assert config.blended_hourly_rate == 85.0
     assert config.display_timezone == "Europe/Warsaw"
     (report,) = reports
@@ -240,7 +237,7 @@ def test_an_unhealthy_probe_after_a_full_run_exits_four(
     assert setup() == EXIT_UNHEALTHY
     assert keychain.secret is not None
     assert set(registry_of(home)) == {"alpha"}
-    assert load_config(config_path(home).read_bytes()).pm_handle == "pm@example.com"
+    assert load_config(config_path(home).read_bytes()).display_timezone == "Europe/Warsaw"
 
 
 # ── Second runs ──────────────────────────────────────────────────────────────
@@ -437,7 +434,7 @@ def test_an_unreadable_config_is_refused_before_anything_is_written(
     home, tmp_path, keychain, operator, capsys
 ):
     config_path(home).parent.mkdir(parents=True)
-    config_path(home).write_bytes(b"pm_handle = \"pm\"\n")
+    config_path(home).write_bytes(b"verbose_logging = true\n")
     config_path(home).chmod(0)
     operator.script(*answers_for(tmp_path / "alpha"))
     try:
@@ -446,25 +443,22 @@ def test_an_unreadable_config_is_refused_before_anything_is_written(
         config_path(home).chmod(0o600)
 
     assert keychain.writes == 0
-    assert config_path(home).read_bytes() == b"pm_handle = \"pm\"\n"
+    assert config_path(home).read_bytes() == b"verbose_logging = true\n"
 
 
-def test_an_empty_handle_is_re_asked_and_setup_never_completes_without_one(
-    home, tmp_path, keychain, operator, capsys
+def test_setup_on_a_fresh_home_never_asks_who_the_pm_is(
+    home, tmp_path, keychain, operator, installed, capsys
 ):
-    operator.script(str(tmp_path / "alpha"), "", *([""] * SETUP_ATTEMPTS))
+    """Story 2o: who the PM is comes from the Graph connector rows, so a fresh
+    home is set up without being asked, and every config answer may be empty."""
+    operator.script(str(tmp_path / "alpha"), "", "", "", "")
 
-    code = setup()
+    assert setup() == EXIT_OK
 
-    assert code != EXIT_OK and code == EXIT_REFUSAL
-    handle_prompts = [p for p in operator.asked if p.startswith("pm_handle")]
-    assert len(handle_prompts) == SETUP_ATTEMPTS
-    assert not config_path(home).exists()
-    err = capsys.readouterr().err
-    assert "pm_handle is required" in err and "step 3" in err
-    # What was done stays done.
-    assert keychain.secret is not None
-    assert set(registry_of(home)) == {"alpha"}
+    assert not any("pm_handle" in prompt for prompt in operator.asked), operator.asked
+    assert len(operator.asked) == 5, operator.asked
+    assert load_config(config_path(home).read_bytes()) == load_config(None)
+    assert "pm_handle" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -474,7 +468,7 @@ def test_an_empty_handle_is_re_asked_and_setup_never_completes_without_one(
 def test_an_inadmissible_rate_is_named_and_re_asked(
     home, tmp_path, keychain, operator, capsys, bad_rate, named
 ):
-    operator.script(str(tmp_path / "alpha"), "", "pm", bad_rate, "40", "", "")
+    operator.script(str(tmp_path / "alpha"), "", bad_rate, "40", "", "")
 
     setup()
 
@@ -482,24 +476,22 @@ def test_an_inadmissible_rate_is_named_and_re_asked(
     assert named in capsys.readouterr().err
 
 
-def test_a_whitespace_handle_is_refused_by_config_itself_and_re_asked(
+def test_an_inadmissible_flag_is_named_and_re_asked(
     home, tmp_path, keychain, operator, capsys
 ):
-    operator.script(str(tmp_path / "alpha"), "", "   ", "pm", "", "", "maybe", "y")
+    operator.script(str(tmp_path / "alpha"), "", "", "", "maybe", "y")
 
     setup()
 
     config = load_config(config_path(home).read_bytes())
-    assert config.pm_handle == "pm"
     assert config.verbose_logging is True
     err = capsys.readouterr().err
-    assert "whitespace" in err
     assert "'maybe' is not y or n" in err
     assert len([p for p in operator.asked if p.startswith("verbose_logging")]) == 2
 
 
 def test_an_unknown_zone_is_named_and_re_asked(home, tmp_path, keychain, operator, capsys):
-    operator.script(str(tmp_path / "alpha"), "", "pm", "", "Europe/Warsav", "Europe/Warsaw", "")
+    operator.script(str(tmp_path / "alpha"), "", "", "Europe/Warsav", "Europe/Warsaw", "")
 
     setup()
 
@@ -510,7 +502,7 @@ def test_an_unknown_zone_is_named_and_re_asked(home, tmp_path, keychain, operato
 def test_inadmissible_answers_to_the_end_exit_three_and_not_a_traceback(
     home, tmp_path, keychain, operator, capsys
 ):
-    operator.script(str(tmp_path / "alpha"), "", "pm", *(["-1"] * SETUP_ATTEMPTS))
+    operator.script(str(tmp_path / "alpha"), "", *(["-1"] * SETUP_ATTEMPTS))
 
     assert setup() == EXIT_REFUSAL
 
@@ -560,30 +552,69 @@ def test_a_busy_config_write_is_a_refusal_naming_step_three(
     assert not config_path(home).exists()
 
 
-def test_a_config_without_a_handle_is_completed_and_keeps_what_it_held(
+def test_a_partial_config_is_completed_and_keeps_what_it_held(
     home, tmp_path, keychain, operator, capsys
 ):
-    """The partial-config path: read, kept as the defaults, and written over
-    only because the file did not change underneath."""
+    """The partial-config path: only the unset keys are asked, what the file sets
+    is kept, and it is written over only because it did not change underneath."""
     config_path(home).parent.mkdir(parents=True)
     config_path(home).write_bytes(b"blended_hourly_rate = 50\n")
-    operator.script(str(tmp_path / "alpha"), "", "pm", "", "", "")
+    operator.script(str(tmp_path / "alpha"), "", "Europe/Warsaw")
 
     code = setup()
 
     assert code != EXIT_REFUSAL
     assert "changed while setup" not in capsys.readouterr().err
     config = load_config(config_path(home).read_bytes())
-    assert config.pm_handle == "pm"
     assert config.blended_hourly_rate == 50.0
-    (rate_prompt,) = [p for p in operator.asked if p.startswith("blended_hourly_rate")]
-    assert "[50.0]" in rate_prompt and "keep" in rate_prompt
+    assert config.display_timezone == "Europe/Warsaw"
+    asked = [p.split(" ", 1)[0] for p in operator.asked[2:]]
+    assert asked == ["display_timezone,"], operator.asked
+    assert not any(p.startswith("blended_hourly_rate") for p in operator.asked)
+
+
+def test_a_complete_config_is_a_completed_step_and_left_byte_identical(
+    home, tmp_path, keychain, operator, capsys
+):
+    """Rate and zone both set: nothing asked, nothing written."""
+    config_path(home).parent.mkdir(parents=True)
+    body = b'blended_hourly_rate = 50\ndisplay_timezone = "Europe/Warsaw"\n'
+    config_path(home).write_bytes(body)
+    operator.script(str(tmp_path / "alpha"), "")
+
+    assert setup() != EXIT_REFUSAL
+
+    assert config_path(home).read_bytes() == body
+    assert len(operator.asked) == 2, operator.asked
+    assert "already configured" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"\n", b"   \n\t\n", b"\xef\xbb\xbf", b"# only a comment\n# and another\n"],
+    ids=["newline", "whitespace", "bom", "comments"],
+)
+def test_a_config_holding_no_setting_is_a_first_run_file(
+    home, tmp_path, keychain, operator, capsys, body
+):
+    """Decided from what `load_config` reads, not from the bytes: every key is asked."""
+    config_path(home).parent.mkdir(parents=True)
+    config_path(home).write_bytes(body)
+    operator.script(*answers_for(tmp_path / "alpha"))
+
+    assert setup() != EXIT_REFUSAL
+
+    assert "changed while setup" not in capsys.readouterr().err
+    assert len(operator.asked) == 5, operator.asked
+    config = load_config(config_path(home).read_bytes())
+    assert config.blended_hourly_rate == 85.0
+    assert config.display_timezone == "Europe/Warsaw"
 
 
 def test_a_config_that_changed_during_the_prompts_is_not_written_over(
     home, tmp_path, keychain, operator, monkeypatch, capsys
 ):
-    written_meanwhile = b'pm_handle = "someone-else"\n'
+    written_meanwhile = b"verbose_logging = true\n"
     answers = iter(answers_for(tmp_path / "alpha"))
 
     def racing(prompt: str = "") -> str:
@@ -606,7 +637,7 @@ def test_an_interrupted_setup_keeps_what_it_did_and_a_rerun_continues(
     home, tmp_path, keychain, operator, installed
 ):
     repository = tmp_path / "alpha"
-    operator.script(str(repository), "")  # stdin closes at the handle prompt
+    operator.script(str(repository), "")  # stdin closes at the rate prompt
 
     assert setup() == EXIT_REFUSAL
     assert keychain.writes == 1
@@ -617,7 +648,7 @@ def test_an_interrupted_setup_keeps_what_it_did_and_a_rerun_continues(
     assert setup() == EXIT_OK
 
     assert keychain.writes == 1, "the rerun minted a second key"
-    assert load_config(config_path(home).read_bytes()).pm_handle == "pm@example.com"
+    assert load_config(config_path(home).read_bytes()).display_timezone == "Europe/Warsaw"
 
 
 def test_ctrl_c_at_a_prompt_is_a_refusal(home, tmp_path, keychain, operator, capsys):
@@ -659,7 +690,7 @@ def test_an_undecodable_answer_is_re_asked_rather_than_a_traceback(
     failed = []
 
     def undecodable_once(prompt: str = "") -> str:
-        if prompt.startswith("pm_handle") and not failed:
+        if prompt.startswith("blended_hourly_rate") and not failed:
             failed.append(prompt)
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
         return next(answers)
@@ -668,5 +699,5 @@ def test_an_undecodable_answer_is_re_asked_rather_than_a_traceback(
 
     setup()
 
-    assert load_config(config_path(home).read_bytes()).pm_handle == "pm@example.com"
+    assert load_config(config_path(home).read_bytes()).display_timezone == "Europe/Warsaw"
     assert "not valid text" in capsys.readouterr().err

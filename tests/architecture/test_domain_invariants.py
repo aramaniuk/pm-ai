@@ -530,15 +530,21 @@ def test_ad34_source_refs_follow_the_fixed_grammar():
 
 
 def test_ad34_unresolvable_actors_never_become_raw_string_identities():
-    """AD-34 — this is how one engineer becomes four people in a performance metric."""
+    """AD-34 — this is how one engineer becomes four people in a performance metric.
+
+    Since story 2o a handle maps to a pm-ai person through `person_for`, and one
+    with no alias answers `None` — the reader shows the handle as written, and
+    never treats it as a person in its own right.
+    """
     ids = mod("pm_ai.domain.identity")
-    ids.register_alias("gitlab", "alex@example.com", ids.Actor("actor_alex", "Alex"))
-    resolved = ids.resolve_actor(system="gitlab", handle="alex@example.com")
-    assert resolved.is_resolved and resolved.actor_id == "actor_alex"
-    unknown = ids.resolve_actor(system="teams", handle="Unknown Speaker 3")
-    assert unknown.actor_id == ids.UNRESOLVED_ACTOR, (
-        "AD-34: an unresolvable handle must resolve to the explicit unresolved actor, "
-        "not be used as an identity in its own right."
+    handles = mod("pm_ai.domain.handles")
+    alex = handles.person_handle("email", "alex@example.com")
+    handles.register_alias(alex, ids.Actor("actor_alex", "Alex"))
+    assert handles.person_for(alex) == ids.Actor("actor_alex", "Alex")
+    unknown = handles.person_handle("email", "unknown@example.com")
+    assert handles.person_for(unknown) is None, (
+        "AD-34: an unmapped handle must read as no known person, not be used as "
+        "an identity in its own right."
     )
 
 

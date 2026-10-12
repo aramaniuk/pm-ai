@@ -57,6 +57,7 @@ import json
 from collections.abc import Mapping
 
 from pm_ai.domain.connector_rows import USER_ID_KEY
+from pm_ai.domain.handles import usable_user_id
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
     CredentialProbePort,
@@ -561,12 +562,22 @@ def record_user_id(
     a repeat sign-in changes no bytes. Refused, writing nothing, with
     `ConnectorNotConfigured` when no row exists, `MalformedSettings` when the
     row is not a JSON object, `NotAGraphRow` when its `system` is not `graph`,
-    and `ValueError` for a blank or non-text `user_id`.
+    and `ValueError` for a blank or non-text `user_id`, or one
+    `usable_user_id` reads as absent (not a GUID): a value the reader ignores
+    is never written.
     """
     if not isinstance(user_id, str) or not user_id.strip():
         raise ValueError(
             f"no user id was given to record for {instance!r}; a blank one would "
             f"read as no recorded user. Nothing was written."
+        )
+    if usable_user_id({USER_ID_KEY: user_id}) is None:
+        # The writer refuses what its reader ignores: a value `recorded_user_id`
+        # reads as absent would leave a row any account may sign in for.
+        raise ValueError(
+            f"{user_id!r} is not a Graph user id (a GUID), so it would read back "
+            f"as no recorded user and any account could sign in for "
+            f"{instance!r}. Nothing was written."
         )
     _assert_nameable(instance)
     if not claimed:
@@ -621,14 +632,12 @@ def record_user_id(
 def recorded_user_id(row: Mapping[str, object]) -> str | None:
     """The user a connector row records, or `None` when it records none (story 8q).
 
-    A `user_id` that is missing, blank, whitespace or not text is absent: any
-    user may sign in for such a row, and nothing compares against it. The rule
-    every reader of the key applies — story 23c's included.
+    `domain`'s one rule (`usable_user_id`, story 2o): a `user_id` that is
+    missing, blank, whitespace, not text, or not a Graph user id the producer
+    accepts is absent — any user may sign in for such a row, and nothing
+    compares against it. Stripped, and as the provider cased it.
     """
-    value = row.get(USER_ID_KEY)
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return value.strip()
+    return usable_user_id(row)
 
 
 def assert_same_user(
@@ -637,8 +646,13 @@ def assert_same_user(
     """Refuse a sign-in by a different user than the row records (story 8q).
 
     `recorded` is `recorded_user_id`'s answer; absent (or blank, read the same
-    way) accepts any user. A blank or non-text `signed_in` is a `ValueError`,
-    a programming error, whatever is recorded. Otherwise the two ids must
+    way) accepts any user. **This fails open, stated rather than hidden:** a
+    recorded value that is not a Graph user id (a GUID) — hand-edited, or
+    written before story 2o — reaches here from `recorded_user_id` as `None`,
+    so it too accepts any user. `record_user_id` refuses to write one.
+
+    A blank or non-text `signed_in` is a `ValueError`, a programming error,
+    whatever is recorded. Otherwise the two ids must
     match, compared ignoring case — a Graph user id is a GUID — or
     `DifferentUser` names both. Pure:
     run it before anything is sealed or written, so a refusal saves nothing.

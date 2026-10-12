@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from pm_ai.domain.handles import PersonHandle
+
 
 class TranscriptSource(Enum):
     GRAPH = "graph"    # speaker identity issued by the tenant
@@ -25,9 +27,20 @@ class UnboundTranscript(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Utterance:
+    """One line of a transcript.
+
+    `speaker_handle` is the speaker's **label** as the transcript gave it — a
+    display name, never parsed as a handle (AD-34). `speaker` is the speaker's
+    person handle, which only an authenticated source can supply: both adapters
+    leave it `None` today, because a label is all either has, so every spoken
+    command stages until a slice gives an authenticated transcript the
+    speaker's Graph user id (story 2o).
+    """
+
     speaker_handle: str
     text: str
     offset_seconds: int
+    speaker: PersonHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -349,12 +349,12 @@ def test_read_optional_turns_absence_into_a_value(registered, tmp_path):
     ) is None
     path = registered / ".pm-ai" / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('pm_handle = "pm@example.com"\n', encoding="utf-8")
+    path.write_text("verbose_logging = true\n", encoding="utf-8")
     assert (
         entry.read_optional(
             daemon.storage, scope=entry.APPLICATION, artifact="config.toml"
         )
-        == b'pm_handle = "pm@example.com"\n'
+        == b"verbose_logging = true\n"
     )
 
 
@@ -379,11 +379,11 @@ def test_a_malformed_config_does_not_stop_the_probes(registered, probes, capsys)
 def test_a_config_reaches_the_daemon_when_it_parses(registered):
     path = registered / ".pm-ai" / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('pm_handle = "pm@example.com"\n', encoding="utf-8")
+    path.write_text('display_timezone = "Europe/Warsaw"\n', encoding="utf-8")
     composed = entry._compose(_Keychain())
     assert composed.failure is None
     assert composed.daemon is not None
-    assert composed.daemon.pm_handle == "pm@example.com"
+    assert composed.daemon.config.display_timezone == "Europe/Warsaw"
 
 
 # ── Bugs, refusals, and the secret that must never be printed ────────────────
@@ -844,7 +844,7 @@ def test_the_real_dashboard_closure_writes_a_file_through_the_cli(
     config = registered / ".pm-ai" / "config.toml"
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(
-        'pm_handle = "a@b.c"\ndisplay_timezone = "Europe/Warsaw"\n', encoding="utf-8"
+        'display_timezone = "Europe/Warsaw"\n', encoding="utf-8"
     )
     assert entry.main(["dashboard"]) == EXIT_OK
 

@@ -100,8 +100,6 @@ from pm_ai.domain.vcs import (
     VcsUnavailable,
 )
 from pm_ai.domain.identity import (
-    UNRESOLVED,
-    UNRESOLVED_ACTOR,
     Actor,
     DataScope,
     MalformedReference,
@@ -188,8 +186,6 @@ __all__ = [
     "Tier",
     "TierViolation",
     "TrackingVerdict",
-    "UNRESOLVED",
-    "UNRESOLVED_ACTOR",
     "UnknownCategory",
     "UnknownVerb",
     "UnpermittedGitSubcommand",

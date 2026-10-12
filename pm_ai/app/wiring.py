@@ -75,7 +75,13 @@ from pm_ai.core.project_registry import (
 from pm_ai.core.project_scaffold import render_gitignore
 from pm_ai.domain.claims import ClaimReentered
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
-from pm_ai.domain.handles import PersonHandle, own_handle_set
+from pm_ai.domain.handles import (
+    GRAPH,
+    PersonHandle,
+    own_handle_set,
+    pm_identity,
+    usable_user_id,
+)
 from pm_ai.domain.health import ArtifactState, Health, Presence
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
@@ -90,6 +96,7 @@ from pm_ai.ports import (
     ArtifactBusy,
     ConnectorPort,
     CryptoPort,
+    DecryptionFailed,
     KeychainPort,
     ProbeFailed,
     ProbeUnreachable,
@@ -113,6 +120,9 @@ __all__ = [
     "build",
     "onboard_project",
     "Onboarded",
+    "PmIdentityReading",
+    "UnusableRow",
+    "read_pm_identity",
 ]
 
 REGISTRY_ARTIFACT = "projects.toml"
@@ -224,18 +234,6 @@ class Daemon:
                 f"acting in a project nothing watches writes where no harvest "
                 f"ever runs."
             )
-
-    @property
-    def pm_handle(self) -> str:
-        """Who the daemon treats as the PM, per `config.toml`.
-
-        A property rather than a field, so `Config` stays the single place the
-        value lives. It was a literal default here — one developer's own email
-        address, compiled into the package — until `pm_ai.core.config` existed
-        to be asked. Unset by default now, and an unset handle matches no
-        speaker, so nothing spoken auto-executes (AD-32).
-        """
-        return self.config.pm_handle
 
 
 def build(
@@ -1466,6 +1464,105 @@ def _enrolled_configurations(
         if isinstance(decoded, dict):
             entries.append(decoded)
     return tuple(entries)
+
+
+@dataclass(frozen=True, slots=True)
+class UnusableRow:
+    """A connector row `read_pm_identity` could not use, and why."""
+
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PmIdentityReading:
+    """Who the PM is, and which rows could not say, from one read at one instant.
+
+    `identity` is what `pm_identity` answered; `unusable` lists every row that
+    could not be read, and every enabled Graph row with no usable user id, so
+    `23c`'s sign-in line and its marking come from the same read.
+    """
+
+    identity: frozenset[PersonHandle]
+    unusable: tuple[UnusableRow, ...]
+
+
+def read_pm_identity(storage: StorageService) -> PmIdentityReading:
+    """Read every `connectors/` row once, now, and ask `pm_identity` (story 2o).
+
+    The one caller of `pm_identity`: `23c` and the transcript pipeline call
+    this, never `pm_identity`. Nothing is cached, so a row added while the
+    daemon runs is in the next call's answer. A row is replaced whole by
+    `write_artifact`, so a read during `8q`'s write sees a whole row.
+
+    A row that cannot be used is listed, never raised and never dropped:
+    a storage-read failure (`OSError`, `DecryptionFailed`), bytes that are not
+    UTF-8 JSON, a document that is not an object, a row removed between the
+    listing and its read, and a Graph row with no usable user id that is
+    enabled — or whose `enabled` is neither `true` nor `false`, which is named.
+    A failure to list `connectors/` is one entry for the collection. Anything
+    else is a defect in pm-ai and propagates.
+
+    `aliased` is empty: no row names the PM's person, and a test-filled alias
+    table is not a record. The slice that saves the table fills it here and
+    changes no caller.
+    """
+    application = DataScope(ScopeKind.APPLICATION)
+    try:
+        names = storage.list_collection(scope=application, artifact="connectors/")
+    except (OSError, DecryptionFailed) as unlisted:
+        return PmIdentityReading(
+            identity=pm_identity((), aliased=frozenset()),
+            unusable=(
+                UnusableRow("connectors/", f"could not be listed ({unlisted})"),
+            ),
+        )
+    rows: list[Mapping[str, object]] = []
+    unusable: list[UnusableRow] = []
+    for name in names:
+        try:
+            raw = storage.read_artifact(
+                scope=application, artifact="connectors/", name=name
+            )
+        except (OSError, DecryptionFailed) as unreadable:
+            unusable.append(UnusableRow(name, f"could not be read ({unreadable})"))
+            continue
+        if raw is None:
+            unusable.append(UnusableRow(name, "was removed while it was read"))
+            continue
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            unusable.append(UnusableRow(name, "is not UTF-8"))
+            continue
+        except json.JSONDecodeError:
+            unusable.append(UnusableRow(name, "is not valid JSON"))
+            continue
+        if not isinstance(decoded, dict):
+            unusable.append(
+                UnusableRow(name, f"holds a {type(decoded).__name__}, not an object")
+            )
+            continue
+        rows.append(decoded)
+        if decoded.get("system") != GRAPH or usable_user_id(decoded) is not None:
+            continue
+        enabled = decoded.get("enabled")
+        if enabled is True:
+            unusable.append(
+                UnusableRow(name, "is an enabled Graph row with no usable user id")
+            )
+        elif enabled is not False:
+            unusable.append(
+                UnusableRow(
+                    name,
+                    f"is a Graph row with no usable user id whose `enabled` is "
+                    f"{enabled!r}, neither true nor false",
+                )
+            )
+    return PmIdentityReading(
+        identity=pm_identity(rows, aliased=frozenset()),
+        unusable=tuple(unusable),
+    )
 
 
 @dataclass(frozen=True, slots=True)
