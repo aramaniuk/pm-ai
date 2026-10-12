@@ -3,7 +3,7 @@
 
 ## pm-ai
 
-Local-first AI PM assistant — daemon, CLI, Telegram bridge, connectors, MCP skills. Python 3.14 under uv, hexagonal layering around a plugin kernel. The build contract is `_bmad-output/specs/spec-pm-ai/SPEC.md` plus the companions named in its frontmatter; architecture invariants AD-1…AD-42 live in `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md`.
+Local-first AI PM assistant — daemon, CLI, Telegram bridge, connectors, MCP skills. Python 3.14 under uv, hexagonal layering around a plugin kernel. The build contract is `_bmad-output/specs/spec-pm-ai/SPEC.md` plus the companions named in its frontmatter; the architecture invariants (`AD-n`) live in `_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md`.
 
 ## Where things are
 
