@@ -20,17 +20,20 @@ from __future__ import annotations
 
 import errno
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pm_ai.app.wiring import Daemon, read_pm_identity
+from pm_ai.connectors.graph import GraphConnector
 from pm_ai.core.config import ConfigRefused
 from pm_ai.core.event_log import EventLog
 from pm_ai.core.extraction import extract
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import parse_goals
 from pm_ai.core.normalize import attribute_all
+from pm_ai.core.transcript_acquisition import acquire_transcripts
 from pm_ai.core.rendering import (
     CalendarAnswer,
     render_dashboard,
@@ -54,6 +57,7 @@ from pm_ai.domain.harvest import (
     UnreadCalendar,
 )
 from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
+from pm_ai.domain.transcripts import TranscriptReport
 from pm_ai.ports import ArtifactBusy, CalendarReadPort
 
 _log = logging.getLogger(__name__)
@@ -154,7 +158,70 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # `result.failure` travels with it, in the same write, so "ran and failed"
     # survives the process as something other than the absence of coverage.
     daemon.storage.save_cursor(instance, result.cursor, result.coverage, result.failure)
+
+    # Story 33e — the transcripts of recorded meetings, acquired only **after**
+    # the cursor and coverage are saved, so nothing in it can lose this harvest's
+    # progress. It earns no coverage window and never touches a meeting record;
+    # its report rides on `PersistResult` as a field. `9a` adds the `try/except`
+    # around the connector call above and `11b` the ingestion after this.
+    if isinstance(connector, GraphConnector):
+        report = _acquire_transcripts(daemon, instance, connector, result)
+        if report is not None:
+            persisted = replace(persisted, transcripts=report)
     return persisted
+
+
+def _acquire_transcripts(
+    daemon: Daemon,
+    instance: str,
+    connector: GraphConnector,
+    result: HarvestResult,
+) -> TranscriptReport | None:
+    """Transcript acquisition after a Graph calendar harvest, or `None` when skipped.
+
+    Which meetings: every one recorded within the harvest's reach-back in the
+    scopes this connector files into — personal, and each project its Outlook
+    category mapping names. The reach-back is the connector's own
+    `first_run_reach_back`, the one span both the calendar's first run and every
+    channel walk reach back across; it is at least the steady-state window, so
+    every meeting a harvest records is inside it.
+
+    Skipped for a harvest that failed outright: the provider just faulted or the
+    credential did not sign in, and asking it again in the same run is the
+    request the scheduler's backoff exists to defer.
+
+    Wrapped: anything acquisition raises that nothing classified becomes a
+    named, run-level refusal in the report, never a crash — the cursor and
+    coverage above are already saved.
+    """
+    if result.outcome is HarvestOutcome.FAILED:
+        return None
+    # This instance's own source and no other: a second account's source would
+    # be asked about meetings it never recorded. No fallback to `"graph"`.
+    source = daemon.transcript_sources.get(instance)
+    if source is None:
+        return TranscriptReport(
+            refusals=(
+                f"no transcript source is wired for {instance}, so no meeting's "
+                f"transcript was asked for.",
+            )
+        )
+    try:
+        now = daemon.clock()
+        since = now - connector.calendar.windows.first_run_reach_back
+        projects = sorted(set(connector.categories.projects.values()))
+        scopes = (PERSONAL, *(DataScope(ScopeKind.PROJECT, project) for project in projects))
+        return acquire_transcripts(
+            source, daemon.storage, scopes=scopes, since=since, now=now
+        )
+    except Exception as unexpected:  # noqa: BLE001 — the harvest is already saved
+        return TranscriptReport(
+            refusals=(
+                f"transcript acquisition after {instance}'s harvest raised "
+                f"{type(unexpected).__name__}, which pm-ai cannot classify. The "
+                f"harvest's cursor and coverage were saved before it ran.",
+            )
+        )
 
 
 def _record_busy_meetings(

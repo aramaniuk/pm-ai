@@ -24,6 +24,7 @@ from enum import Enum
 from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.transcripts import TranscriptReport
 
 
 UNCLASSIFIED_FAULT_IS_RETRYABLE = False
@@ -508,4 +509,13 @@ class PersistResult:
     is flagged and the batch is all-or-nothing. Without a count, a connector whose
     clock is wrong flags every event it emits and nothing anywhere says so — the
     entries are in the ledger and no one is looking at them.
+    """
+
+    transcripts: TranscriptReport | None = None
+    """What the transcript acquisition after a calendar harvest did (story 33e).
+
+    A field rather than a second return value: `PersistResult` has dozens of
+    call sites, and a tuple return would have changed every one. `None` for a
+    harvest that ran no acquisition — any connector but the Graph calendar, a
+    harvest that failed outright, or a persist that never got that far.
     """

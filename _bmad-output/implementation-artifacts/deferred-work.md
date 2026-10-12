@@ -560,7 +560,7 @@ transcript.
   evidence: Pre-existing from `8b`, surfaced by 33a's read-back review rather than caused by it. `pm_ai/connectors/probe.py._gitlab` raises `ProbeFailed` on every call — the deliberate "refuse rather than seal a credential nobody checked" choice — and it is the only entry in the table, so `pm-ai connector add gitlab ...` always refuses and `pm-ai connector add --type graph` has no probe at all. The read-back is therefore verified against a store `enrol_connector` wrote directly, not against one the CLI produced. 33a's Never forbids adding a Graph probe here; it arrives with the transport in `33b`.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33a-graph-device-code-auth.md`
-  summary: **ASSIGNED 2026-10-10 to `33e`** — spec written, not built. `pm_ai.connectors.graph` and `pm_ai.connectors.transcripts.graph` are two importable modules whose last segment is `graph`.
+  summary: RESOLVED 2026-10-12 by `33e` — `pm_ai/connectors/transcripts/graph.py` is now `graph_transcripts.py`, so `pm_ai.connectors.graph` is the only module whose last segment is `graph`.
   evidence: 33a's own Code Map cites the second as the `_fake_api` that `33e` replaces "using this auth", so both will be live in the same slice. Two same-named leaves in one package tree read ambiguously in imports and in tracebacks. Cosmetic today; cheapest to rename before `33e` has call sites in both.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33a-graph-device-code-auth.md`
@@ -1152,3 +1152,24 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
   summary: The channel-messages fixture is hand-written from Microsoft's published example, not recorded from a real tenant; the redacted real-tenant page the spec requires is owed.
   evidence: Accepted for now by Andrei on 2026-10-12. Recording it needs the PM's sign-in and a channel id the PM picks. Still unconfirmed against a real tenant: whether replies arrive newest first (the code does not depend on it) and the up-to-200 inline-replies figure.
+
+## Surfaced by the story-33e review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
+  summary: With two Graph connectors filing into one scope, each account's transcript step asks about the other account's meetings; a 404 on `/me/events/{id}` refuses them for good, so the account that recorded the meeting never fetches its transcript.
+  evidence: `calendar_event_ref` is the bare Graph event id and records no connector instance, so `select_meetings` cannot tell whose calendar recorded a meeting. The fix is to store the recording instance on the meeting record, which changes the record format. Raised with Andrei on 2026-10-12; deferred, since one Microsoft account is the case being built.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
+  summary: The transcript fixtures (`transcripts.json`, `transcript.vtt`, `transcript_unattributed.txt`) are hand-written from slice 0's shapes and Microsoft's docs, not re-captured from a tenant.
+  evidence: Re-running the spike needs Andrei's sign-in. Unconfirmed against a real tenant: whether transcripts are listed newest first (the early stop is now order-checked, so a different order costs paging rather than missed transcripts), the nesting of `GraphAccessToTranscriptsDisabled` in the error body, the code Graph uses for an expired meeting, and Graph's year-one sentinel for an unfinished transcript.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
+  summary: Whether a capture carries speaker names is not stored durably; `attributed=False` lives only on the run's report.
+  evidence: `11b`'s rule that every extraction from an unattributed capture stages needs it after a restart. `11b` can read it from the stored text (no `<v Speaker>` voice tags), or record it in its ingestion row.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
+  summary: Transcript acquisition has no wall-clock bound of its own and no cap on download size.
+  evidence: N meetings times up to five requests run inline in `run_harvest` after the cursor is saved, and `download` reads the whole body. The spec puts acquisition time inside `9a`'s one-at-a-time harvest, so `9a` is the owner of the bound.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
+  summary: The shared-join-link check sees only meetings selected this run, and `has_capture` matches on a stem that includes the record's day.
+  evidence: A transcript that also fits an occurrence settled on an earlier run is stored without the two-occurrence check; a meeting moved to another day gets a new stem, so a second capture can be written. Both need series occurrences across runs, which needs `11b`'s ingestion rows.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
+  summary: `transcript_state` rows are never removed, and a project scope dropped from the category mapping is no longer asked about.
+  evidence: Rows outlive the reach-back; `_acquire_transcripts` derives scopes from the current mapping, not from the scopes that hold records.

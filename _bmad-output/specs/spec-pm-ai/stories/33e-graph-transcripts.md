@@ -2,7 +2,8 @@
 title: 'A recorded meeting''s transcript is fetched from Microsoft Graph and kept with the meeting'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '585ee4fad781b0c3387d0fd9c4e4b4568ff7dee8'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -92,19 +93,19 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/transcripts/graph_transcripts.py` -- `git mv` from `graph.py`; update `wiring.py:52` -- the rename first
-- [ ] `pm_ai/domain/transcripts.py` -- `TranscriptCapture` (meeting id, transcript id, created, ended, text, attributed flag) -- the raw value the port returns
-- [ ] `pm_ai/ports/__init__.py` -- `TranscriptSourcePort.acquire(meetings) -> outcomes`, one per meeting: captured, absent (reason), skipped, or refused (reason, `retryable`); `write_capture` on `StoragePort` -- AD-23, AD-49, AD-30
-- [ ] `pm_ai/storage/service.py` -- `transcript_state` in `_SCHEMA`; `record_transcript_state(scope, meeting_id, state, reason)` and `transcript_states(scope)` on the writer and the port -- Tier 2 state
-- [ ] `pm_ai/connectors/graph/client.py` -- a bytes download with a caller-chosen `Accept`; `ConsentChanged` carries the inner-error code -- the content fetch and the tenant switch
-- [ ] `pm_ai/connectors/transcripts/graph_transcripts.py` -- the adapter: event by id (`$select=isOnlineMeeting,onlineMeeting,onlineMeetingProvider,start,end`), online meeting by join link, transcripts walked newest-first with the stop rule, time matching, VTT download, the unattributed retry on `SpeakerAttributionNotAllowed`; stops at the first retryable fault -- the port's primary implementation
-- [ ] `pm_ai/core/meeting_records.py` -- `capture_name(meeting_id, source)` from `record_name`'s stem; `has_capture(names, stem)` the prefix check -- one encoding for both names
-- [ ] `pm_ai/core/transcript_acquisition.py` -- new, I/O-free: selects records in the reach-back with a calendar reference, no capture (`list_collection`) and no closing state, calls the port, writes each capture through `write_capture` into `transcript_home`, records each state, returns the report and the fetched-not-ingested captures -- the port's caller
-- [ ] `pm_ai/app/pipelines.py` -- `run_harvest` runs the acquisition after `save_cursor`, wrapped so an unclassified exception is a named refusal; the report rides on `PersistResult` as a new field -- composition
-- [ ] `pm_ai/app/wiring.py` -- build the adapter from `_graph_connector`'s auth and client; `Daemon.transcripts["graph"]` is the real one, or the refusing stand-in with no Graph connector enrolled -- composition root
-- [ ] `tests/connectors/test_graph_transcripts.py` -- one test per matrix row on recorded payloads shaped as the spike measured, fake transport, no network; a fixture from re-running the spike is preferred to a hand-written one
-- [ ] `tests/core/test_transcript_acquisition.py` -- selection by reach-back and state, write, state rows, report, name derivation and the prefix check
-- [ ] `tests/architecture/test_domain_invariants.py` -- `write_capture` joins the asserted `StoragePort` members; the adapter asserted against `TranscriptSourcePort`
+- [x] `pm_ai/connectors/transcripts/graph_transcripts.py` -- `git mv` from `graph.py`; update `wiring.py:52` -- the rename first
+- [x] `pm_ai/domain/transcripts.py` -- `TranscriptCapture` (meeting id, transcript id, created, ended, text, attributed flag) -- the raw value the port returns
+- [x] `pm_ai/ports/__init__.py` -- `TranscriptSourcePort.acquire(meetings) -> outcomes`, one per meeting: captured, absent (reason), skipped, or refused (reason, `retryable`); `write_capture` on `StoragePort` -- AD-23, AD-49, AD-30
+- [x] `pm_ai/storage/service.py` -- `transcript_state` in `_SCHEMA`; `record_transcript_state(scope, meeting_id, state, reason)` and `transcript_states(scope)` on the writer and the port -- Tier 2 state
+- [x] `pm_ai/connectors/graph/client.py` -- a bytes download with a caller-chosen `Accept`; `ConsentChanged` carries the inner-error code -- the content fetch and the tenant switch
+- [x] `pm_ai/connectors/transcripts/graph_transcripts.py` -- the adapter: event by id (`$select=isOnlineMeeting,onlineMeeting,onlineMeetingProvider,start,end`), online meeting by join link, transcripts walked newest-first with the stop rule, time matching, VTT download, the unattributed retry on `SpeakerAttributionNotAllowed`; stops at the first retryable fault -- the port's primary implementation
+- [x] `pm_ai/core/meeting_records.py` -- `capture_name(meeting_id, source)` from `record_name`'s stem; `has_capture(names, stem)` the prefix check -- one encoding for both names
+- [x] `pm_ai/core/transcript_acquisition.py` -- new, I/O-free: selects records in the reach-back with a calendar reference, no capture (`list_collection`) and no closing state, calls the port, writes each capture through `write_capture` into `transcript_home`, records each state, returns the report and the fetched-not-ingested captures -- the port's caller
+- [x] `pm_ai/app/pipelines.py` -- `run_harvest` runs the acquisition after `save_cursor`, wrapped so an unclassified exception is a named refusal; the report rides on `PersistResult` as a new field -- composition
+- [x] `pm_ai/app/wiring.py` -- build the adapter from `_graph_connector`'s auth and client; `Daemon.transcripts["graph"]` is the real one, or the refusing stand-in with no Graph connector enrolled -- composition root
+- [x] `tests/connectors/test_graph_transcripts.py` -- one test per matrix row on recorded payloads shaped as the spike measured, fake transport, no network; a fixture from re-running the spike is preferred to a hand-written one
+- [x] `tests/core/test_transcript_acquisition.py` -- selection by reach-back and state, write, state rows, report, name derivation and the prefix check
+- [x] `tests/architecture/test_domain_invariants.py` -- `write_capture` joins the asserted `StoragePort` members; the adapter asserted against `TranscriptSourcePort`
 
 **Acceptance Criteria:**
 - Given a recorded one-off project meeting with a transcript on the provider, when the harvest runs, then `<repo>/.project-ai/transcripts/<record stem>-graph.vtt` exists with bytes identical to the fixture, the state row says fetched, and the meeting record is byte-identical to before.
@@ -133,3 +134,58 @@ Two admitted limits. A meeting that overran its slot by more than 15 minutes is 
 - `uv run pytest -q` -- expected: all pass; the skip count unchanged by this slice
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**Selection and the state table**
+
+- Which meetings are tried: reach-back, calendar reference, no capture, no closing or waiting state.
+  [`transcript_acquisition.py:88`](../../../../pm_ai/core/transcript_acquisition.py#L88)
+
+- Writes each capture, records each state, lists captures awaiting `11b`.
+  [`transcript_acquisition.py:174`](../../../../pm_ai/core/transcript_acquisition.py#L174)
+
+- What closes a meeting, and the provider's retry hint.
+  [`transcripts.py:200`](../../../../pm_ai/domain/transcripts.py#L200)
+
+- The one naming rule `11b` and `11c` call.
+  [`meeting_records.py:368`](../../../../pm_ai/core/meeting_records.py#L368)
+
+**The Graph path**
+
+- Event, join link, online meeting, transcripts, content.
+  [`graph_transcripts.py:210`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L210)
+
+- Order-checked newest-first listing with the stop rule.
+  [`graph_transcripts.py:449`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L449)
+
+- Download, and the unattributed retry.
+  [`graph_transcripts.py:507`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L507)
+
+- Time matching to occurrences.
+  [`graph_transcripts.py:634`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L634)
+
+- Bytes download through the existing client; tenant-switch code.
+  [`client.py:748`](../../../../pm_ai/connectors/graph/client.py#L748)
+
+**The port and composition**
+
+- The transcript source contract.
+  [`ports/__init__.py:668`](../../../../pm_ai/ports/__init__.py#L668)
+
+- Acquisition after the cursor is saved; per-instance source, no fallback.
+  [`pipelines.py:174`](../../../../pm_ai/app/pipelines.py#L174)
+
+- One source per Graph instance.
+  [`wiring.py:436`](../../../../pm_ai/app/wiring.py#L436)
+
+- The Tier 2 state table.
+  [`service.py:154`](../../../../pm_ai/storage/service.py#L154)
+
+**Tests**
+
+- Matrix rows and acceptance through `run_harvest`.
+  [`test_graph_transcripts.py`](../../../../tests/connectors/test_graph_transcripts.py)
+
+- Selection, write, state and naming.
+  [`test_transcript_acquisition.py`](../../../../tests/core/test_transcript_acquisition.py)

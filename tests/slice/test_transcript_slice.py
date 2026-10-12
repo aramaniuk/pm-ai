@@ -14,6 +14,7 @@ import pytest
 
 from pm_ai.app.pipelines import run_transcript_ingestion
 from pm_ai.app.wiring import build
+from pm_ai.connectors.transcripts.graph_transcripts import GraphTranscriptAdapter
 from pm_ai.core.config import Config
 from pm_ai.core.extraction import extract
 from pm_ai.domain.handles import GRAPH, GRAPH_APP, PersonHandle, person_handle
@@ -101,22 +102,28 @@ def test_manual_transcript_without_a_meeting_is_rejected(tmp_path):
 
 
 def test_manual_adapter_needs_no_network(tmp_path):
-    """AD-23 — the pipeline stays exercisable without tenant-admin consent."""
+    """AD-23 — the pipeline stays exercisable without tenant-admin consent.
+
+    The Graph half is asserted on the real adapter class rather than on the
+    daemon's entry: with no Graph connector enrolled that entry is the stand-in
+    that refuses by name (story 33e), and a claim about the stand-in says
+    nothing about the adapter that reaches the tenant.
+    """
     d = _daemon(tmp_path)
     assert d.transcripts["manual"].requires_network is False
-    assert d.transcripts["graph"].requires_network is True
+    assert GraphTranscriptAdapter.requires_network is True
 
 
-def test_both_adapters_leave_the_speaker_handle_unset(tmp_path):
-    """Story 2o — a speaker label is a display name, never parsed as a handle."""
+def test_the_manual_adapter_leaves_the_speaker_handle_unset(tmp_path):
+    """Story 2o — a speaker label is a display name, never parsed as a handle.
+
+    The Graph adapter no longer parses anything (story 33e): it acquires a
+    capture verbatim, and reading speakers out of it is `11b`'s.
+    """
     d = _daemon(tmp_path)
-    graph = d.transcripts["graph"]
-    graph._fake_api = {"mtg_01HX": [(PM, "pm-ai, post_comment gitlab:alpha:issue:102 x", 0)]}
-    fetched = graph.fetch("mtg_01HX")
     loaded = d.transcripts["manual"].load(f"{PM}: hello", meeting_id="mtg_01HX")
-    assert [u.speaker for u in fetched.utterances] == [None]
     assert [u.speaker for u in loaded.utterances] == [None]
-    assert fetched.utterances[0].speaker_handle == PM
+    assert loaded.utterances[0].speaker_handle == PM
 
 
 # ── AD-32: the three conditions ──────────────────────────────────────────────

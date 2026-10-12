@@ -57,7 +57,10 @@ from pm_ai.connectors.graph.channels import GraphChannelFetch
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.connectors.probe import CREDENTIAL_PROBE_SECONDS
 from pm_ai.connectors.registry import run_bounded
-from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
+from pm_ai.connectors.transcripts.graph_transcripts import (
+    GraphTranscriptAdapter,
+    UnenrolledGraphTranscripts,
+)
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
 from pm_ai.core.connector_enrolment import (
@@ -115,6 +118,7 @@ from pm_ai.ports import (
     KeychainPort,
     ProbeFailed,
     ProbeUnreachable,
+    TranscriptSourcePort,
     VcsPort,
 )
 from pm_ai.skills.gitlab import PostComment
@@ -225,6 +229,15 @@ class Daemon:
     # Every setting `config.toml` carries, held once. Defaults when the caller
     # supplied none, which is a first run rather than an error.
     config: Config = field(default_factory=Config)
+    transcript_sources: dict[str, TranscriptSourcePort] = field(default_factory=dict)
+    """Each calendar connector's transcript source, keyed by connector instance.
+
+    What `run_harvest` acquires through after that instance's harvest (story
+    33e). Separate from `transcripts`, whose keys are source families
+    (`"graph"`, `"manual"`), so no instance name can shadow one. A Graph
+    connector with no entry here gets a named refusal, never another
+    account's source.
+    """
 
     def __post_init__(self) -> None:
         """Refuse a daemon whose acting project is not one it watches.
@@ -420,6 +433,7 @@ def build(
         registered=_registrar(resolver),
     ):
         connectors[instance] = enrolled
+    sources = _transcript_sources(connectors)
     return Daemon(
         storage=storage,
         crypto=crypto,
@@ -427,7 +441,8 @@ def build(
         connectors=connectors,
         # AD-23 — both adapters wired from day one, so the pipeline is exercisable
         # without a live tenant.
-        transcripts={"graph": GraphTranscriptAdapter(), "manual": ManualTranscriptAdapter()},
+        transcripts=_transcript_families(sources),
+        transcript_sources=sources,
         meetings=MeetingRecords(storage),
         scope=scope,
         keychain=custody,
@@ -443,6 +458,36 @@ def build(
         clock=clock,
         config=config if config is not None else Config(),
     )
+
+
+def _transcript_sources(
+    connectors: Mapping[str, ConnectorPort],
+) -> dict[str, TranscriptSourcePort]:
+    """Each Graph connector's transcript source, keyed by its instance (story 33e).
+
+    Built from that connector's own client — the same credential, origin check,
+    page cap, throttle handling and budget — so a harvest of one Microsoft
+    account asks that account, and never another, about the meetings it
+    recorded. A mapping of its own rather than keys beside `"graph"` and
+    `"manual"` in `Daemon.transcripts`, so an instance named either cannot
+    collide with a family key.
+    """
+    return {
+        instance: GraphTranscriptAdapter(client=connector.calendar.client, instance=instance)
+        for instance, connector in connectors.items()
+        if isinstance(connector, GraphConnector)
+    }
+
+
+def _transcript_families(sources: Mapping[str, TranscriptSourcePort]) -> dict[str, object]:
+    """`Daemon.transcripts`: one source per family (AD-23).
+
+    `"graph"` is the first enrolled Graph connector's adapter or, with none
+    enrolled, the stand-in that refuses by name. `"manual"` is the watched-folder
+    fallback, which joins the port with `11c`.
+    """
+    graph: TranscriptSourcePort = next(iter(sources.values()), UnenrolledGraphTranscripts())
+    return {"graph": graph, "manual": ManualTranscriptAdapter()}
 
 
 def _watched(
