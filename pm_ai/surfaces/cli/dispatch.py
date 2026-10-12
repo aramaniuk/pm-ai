@@ -54,7 +54,7 @@ from pm_ai.core.goal_register import (
 )
 from pm_ai.domain.goals import Goal
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
-from pm_ai.domain.health import Report
+from pm_ai.domain.health import Report, UnbuiltConnector
 from pm_ai.core.project_registry import RegistryRefused
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
@@ -422,16 +422,26 @@ class Context:
     arrives as a value. The connectors probed are that daemon's own — the list
     a harvest reads (story 8k) — so this layer never sees a second copy.
 
-    With no daemon the composition root decides what is passed: with nothing
-    enrolled, a probe returning an empty report, which is a first-run state
-    rather than a refusal; for any other reason `None`, and `connector check`
-    refuses through `require_daemon()`, the one sentence for a missing daemon.
+    With no daemon it is `None`, and `connector check` refuses through
+    `require_daemon()`, the one sentence for a missing daemon. A machine with
+    nothing enrolled has a daemon for this command (story 4o) — one that watches
+    no project — so its empty report is what says no connectors are registered.
 
     Typed as `pm_ai.domain.health.Report` rather than structurally, unlike
     `HealthReport` above: that Protocol exists because `pm_ai.platform.doctor`
     is unreachable from here, whereas `pm_ai.domain` is the layer everything may
     name, and the leaf needs `probes` to tell an empty registry from a healthy
     one.
+    """
+
+    unbuilt_connectors: tuple[UnbuiltConnector, ...] = ()
+    """Every enabled connector row the daemon did not build, with why (4o).
+
+    `connector check` lists each one beside the probed connectors — enrolled,
+    not built, and the reason — so no enabled row is omitted, and so that
+    `doctor`'s count of enrolled rows (slice `4n`, not yet built) and this one
+    can be one count (AD-39). A disabled row is skipped and not listed. None is
+    probed, so none moves the exit code.
     """
 
     arguments: tuple[str, ...] = ()
@@ -567,10 +577,13 @@ class Context:
     def require_daemon(self) -> DaemonPort:
         """The daemon, or a refusal naming what is missing.
 
-        A refusal rather than a crash: a machine with no project enrolled is an
-        incomplete setup, which pm-ai understands perfectly and declines to act
-        on. `doctor` is the command that works regardless, and it does not call
-        this.
+        A refusal rather than a crash: a project target with no project
+        enrolled, a registry that cannot be read, a root or `config.toml` that
+        will not answer — each is a state pm-ai understands and declines to act
+        on. A command aimed at the person or at pm-ai itself gets a daemon on a
+        machine with nothing enrolled (story 4o), so "nothing is enrolled"
+        reaches here only for a command aimed at a project. `doctor` is the
+        command that works regardless, and it does not call this.
         """
         # First, because it is the one case where there is nothing to diagnose
         # — and only for a project target, whose selection can be refused.
@@ -1149,12 +1162,22 @@ def _connector_check(context: Context) -> int:
     a surface that stopped at the first bad row would give the rule away at the
     only place a human reads it.
 
-    An empty report exits `0` and says so. A machine with nothing enrolled has
-    no daemon and no connectors, and that is a first run rather than a broken
-    one — there is no claim of reachability to be false. A connector that
-    *is* registered and answers `ABSENT` is a different state and exits `4`:
-    setup is incomplete, harvests are being skipped, and `Health.ABSENT` is
+    An empty report exits `0` and says so. A machine with nothing enrolled has a
+    daemon for this command that watches no project (story 4o), so it holds no
+    built-in connector, and that is a first run rather than a broken one —
+    there is no claim of reachability to be false. A connector that *is*
+    registered and answers `ABSENT` is a different state and exits `4`: setup
+    is incomplete, harvests are being skipped, and `Health.ABSENT` is
     expressly not a pass.
+
+    **Every enabled row is listed, built or not** (AD-39, story 4o). A row the
+    daemon did not build — a GitLab row with no project to file into, a Graph
+    row a settings key short, a row naming no usable instance or system or a
+    system with no adapter, an adapter that would not construct — is printed as
+    enrolled, not built, with the sentence the build gave. It is not probed, so
+    it moves no exit code. A **disabled** row is skipped and not listed: the
+    operator turned it off. Listing every enabled row is what lets `doctor`'s
+    count (slice `4n`) and this one be one count.
 
     **Its target is the application scope** (story 4m), so it needs no
     project selection: the daemon is composed with every enrolled project
@@ -1162,10 +1185,10 @@ def _connector_check(context: Context) -> int:
     own (story 8k). Until 4m this command was refused outside every folder on a
     machine with two projects, because no daemon was composed there.
 
-    With no daemon for any reason but an empty enrolment, no probe is passed
-    and this refuses through `require_daemon()` (exit 3), naming the reason —
-    there are no connectors this machine would harvest from, so there is
-    nothing honest to probe.
+    With no daemon — a registry that cannot be read, a root or `config.toml`
+    fault — no probe is passed and this refuses through `require_daemon()`
+    (exit 3), naming the reason: there are no connectors this machine would
+    harvest from, so there is nothing honest to probe.
     """
     probe_all = context.probe_connectors
     if probe_all is None:
@@ -1178,7 +1201,8 @@ def _connector_check(context: Context) -> int:
             "machine's connectors."
         )
     report = probe_all()
-    if not report.probes:
+    unbuilt = context.unbuilt_connectors
+    if not report.probes and not unbuilt:
         print(
             "no connectors are registered, so there is nothing to probe. That is "
             "an ordinary first-run state: connectors are registered when the "
@@ -1187,7 +1211,17 @@ def _connector_check(context: Context) -> int:
         return EXIT_OK
     for probe in report.probes:
         print(probe)
+    for row in unbuilt:
+        print(row)
     print()
+    if not report.probes:
+        print(
+            f"no connector was built, so nothing was probed; "
+            f"{len(unbuilt)} enrolled, not built."
+        )
+        return EXIT_OK
+    if unbuilt:
+        print(f"{len(unbuilt)} enrolled, not built, and not probed.")
     # Not `print(report)`: `Report.__str__` ends in "pm-ai is healthy.", which is
     # a claim about the machine. This command asked about providers, and the two
     # verdicts are not interchangeable — `doctor` can pass while every connector
@@ -2034,6 +2068,7 @@ def dispatch(
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
+    unbuilt_connectors: tuple[UnbuiltConnector, ...] = (),
 ) -> int:
     """Run an already-parsed command, and return the exit code the table gives it.
 
@@ -2058,6 +2093,7 @@ def dispatch(
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,
+        unbuilt_connectors=unbuilt_connectors,
         arguments=parsed.arguments,
         options=parsed.options,
         target=parsed.target,

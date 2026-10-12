@@ -114,3 +114,7 @@ Two things follow. The second project's work is **never looked at** — no commi
   [`test_every_enrolled_project.py:21`](../../../../tests/slice/test_every_enrolled_project.py)
 - setup and doctor agree on a two-project machine — the disagreement that exposed all of this.
   [`test_first_run.py:329`](../../../../tests/slice/test_first_run.py#L329)
+
+## Spec Change Log
+
+- **2026-10-12, renegotiated by slice `4o`** (Andrei confirmed "run them", 2026-10-09; AD-11). The matrix row "Nothing enrolled yet — unchanged: say nothing is enrolled and how to enrol" now holds only for a command aimed at a project and for a command with no target (`doctor`, `setup`, `project add`). A command aimed at the person or at pm-ai itself — the personal dashboard, `goal set`, `config show`, `key enrol`, `connector add`, `connector check` — runs with nothing enrolled, on a daemon that watches no project. The frozen row is kept as written; this entry is what makes it no longer read as true for those commands.

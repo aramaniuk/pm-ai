@@ -97,7 +97,7 @@ from pm_ai.domain.handles import (
     pm_identity,
     usable_user_id,
 )
-from pm_ai.domain.health import ArtifactState, Health, Presence
+from pm_ai.domain.health import ArtifactState, Health, Presence, UnbuiltConnector
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
@@ -226,6 +226,17 @@ class Daemon:
     # Every setting `config.toml` carries, held once. Defaults when the caller
     # supplied none, which is a first run rather than an error.
     config: Config = field(default_factory=Config)
+    unbuilt: tuple[UnbuiltConnector, ...] = ()
+    """Every enabled connector row this build did not construct, with why (4o).
+
+    The sentence each one printed on stderr at composition — no project enrolled
+    to file a GitLab harvest into, a Graph row a settings key short, a row with
+    no usable instance or system, a system with no adapter, an adapter that
+    would not construct — kept so `pm-ai connector check` can list the row
+    rather than omit it (AD-39). A **disabled** row is not here: it is skipped
+    without a word, because the operator turned it off. A row here is not a
+    connector: nothing harvests it and nothing probes it.
+    """
 
     def __post_init__(self) -> None:
         """Refuse a daemon whose acting project is not one it watches.
@@ -414,12 +425,13 @@ def build(
     # built-in and dropped the adapter holding the sealed credential, so the
     # connector the operator had just enrolled went on reporting ABSENT and the
     # remedy printed was the one they had already followed.
-    for instance, enrolled in _enrolled_connectors(
+    enrolled_rows, unbuilt = _enrolled_connectors(
         storage,
         scopes=builtin_scopes,
         clock=clock,
         registered=_registrar(resolver),
-    ):
+    )
+    for instance, enrolled in enrolled_rows:
         connectors[instance] = enrolled
     return Daemon(
         storage=storage,
@@ -443,6 +455,7 @@ def build(
         # has to build a second one.
         clock=clock,
         config=config if config is not None else Config(),
+        unbuilt=unbuilt,
     )
 
 
@@ -675,7 +688,7 @@ def _enrolled_connectors(
     scopes: Mapping[str, DataScope],
     clock: Callable[[], datetime],
     registered: Callable[[str], bool],
-) -> tuple[tuple[str, ConnectorPort], ...]:
+) -> tuple[tuple[tuple[str, ConnectorPort], ...], tuple[UnbuiltConnector, ...]]:
     """What `pm-ai connector add` wrote, as adapters, so enrolment survives a restart.
 
     Story 8b's success message tells the operator the connector becomes active
@@ -692,8 +705,10 @@ def _enrolled_connectors(
     Failures are swallowed deliberately, and only here: an unreadable or
     malformed entry must not stop a daemon composing, because `doctor` is the
     command that diagnoses exactly that and it cannot run if `build()` raises.
-    A connector that fails to load is simply absent, which `connector check`
-    reports as a missing row.
+    An enabled row that fails to build is not raised but kept, with its reason,
+    in the second half of the pair (story 4o). A file that cannot be read or
+    decoded at all is still skipped: it has no `enabled` to read, so nothing
+    says it was meant to run.
 
     Credentials **are** read, since story 33a. They were not until then, and the
     consequence was live rather than theoretical: `8b`'s success message tells
@@ -718,6 +733,11 @@ def _enrolled_connectors(
     happened to be standing in. `_enrolment_scope` decides, and a row it cannot
     place on a multi-project machine is **skipped and said out loud** rather
     than defaulted.
+
+    **The second half of the pair is every enabled row skipped out loud** (story
+    4o): the instance and the sentence printed for it, so `pm-ai connector
+    check` lists the row as enrolled and not built instead of omitting it
+    (AD-39). A disabled row is skipped silently and is in neither half.
     """
     # Fetched on first need, not up front. Opening the sealed store costs a
     # master-key fetch from the keychain, and a machine with no connectors
@@ -725,21 +745,50 @@ def _enrolled_connectors(
     # every `build()` to read a mapping nothing then consulted.
     credentials: dict[str, dict[str, str]] | None = None
     built: list[tuple[str, ConnectorPort]] = []
-    for entry in _enrolled_configurations(storage):
-        instance = entry.get("instance")
-        system = entry.get("system")
-        if not isinstance(instance, str) or not isinstance(system, str) or not instance:
-            continue
+    unbuilt: list[UnbuiltConnector] = []
+    for name, entry in _named_configurations(storage):
         # Anything but an explicit `true` is off. The file is plaintext and
         # hand-editable on purpose, so `"false"`, `0` and `null` are all things
-        # an operator will actually write meaning "not this one".
+        # an operator will actually write meaning "not this one". A disabled
+        # row is the one enrolled row skipped without a word: the operator
+        # turned it off, and listing it as "not built" would report their own
+        # choice back to them as a fault.
         if entry.get("enabled") is not True:
             continue
+        instance = entry.get("instance")
+        system = entry.get("system")
+        if not isinstance(instance, str) or not instance:
+            # Named by its file, since the row cannot name itself (story 4o:
+            # an enabled row is listed, never dropped).
+            unbuilt.append(
+                _unplaced(
+                    f"connectors/{name}",
+                    "its 'instance' is missing or not text, so pm-ai cannot tell "
+                    "which connector it is. Repair the row or remove it.",
+                )
+            )
+            continue
+        if not isinstance(system, str) or not system:
+            unbuilt.append(
+                _unplaced(
+                    instance,
+                    "its 'system' is missing or not text, so pm-ai cannot tell "
+                    "which adapter to build. Repair the row or remove it.",
+                )
+            )
+            continue
         if system not in ("gitlab", "graph"):
-            # An enrolled system pm-ai has no adapter for is skipped rather than
-            # guessed at. Two families exist: `gitlab` below, and `graph` since
-            # story 33c, which is the connector `33a`'s token and `33b`'s
-            # calendar fetch were built for.
+            # An enrolled system pm-ai has no adapter for is not guessed at.
+            # Two families exist: `gitlab` below, and `graph` since story 33c,
+            # which is the connector `33a`'s token and `33b`'s calendar fetch
+            # were built for.
+            unbuilt.append(
+                _unplaced(
+                    instance,
+                    f"pm-ai has no adapter for the system {system!r}; the "
+                    f"systems it builds are 'gitlab' and 'graph'.",
+                )
+            )
             continue
         if system == "graph":
             # No credential is read here: the store reads the sealed file each
@@ -754,7 +803,9 @@ def _enrolled_connectors(
                 clock=clock,
                 registered=registered,
             )
-            if graph is not None:
+            if isinstance(graph, UnbuiltConnector):
+                unbuilt.append(graph)
+            else:
                 built.append((instance, graph))
             continue
         # The connector's own declared project, not one re-derived from its
@@ -769,6 +820,21 @@ def _enrolled_connectors(
             else (instance.split(":", 1)[1] if ":" in instance else instance)
         )
         if not project:
+            unbuilt.append(
+                _unplaced(
+                    instance,
+                    "it names no GitLab project — no 'project' setting and "
+                    "nothing after 'gitlab:' in its name — so there is nothing "
+                    "to harvest. Enrol it afresh as `gitlab:<project>`.",
+                )
+            )
+            continue
+        # Placed before the credential is read, so a row that will not be built
+        # — on a machine with no project enrolled, every GitLab row — costs no
+        # master-key fetch.
+        filed = _enrolment_scope(instance, scopes=scopes)
+        if isinstance(filed, UnbuiltConnector):
+            unbuilt.append(filed)
             continue
         # The credential the sealed store holds for *this* instance, or `None`
         # when there is none. `None`, absent and blank are one state to the
@@ -777,9 +843,6 @@ def _enrolled_connectors(
         if credentials is None:
             credentials = _stored_credentials(storage)
         held = _credential_for(credentials.get(instance), system=system)
-        filed = _enrolment_scope(instance, scopes=scopes)
-        if filed is None:
-            continue
         try:
             built.append(
                 (
@@ -792,17 +855,24 @@ def _enrolled_connectors(
                     ),
                 )
             )
-        except Exception:
+        except Exception as refused:  # noqa: BLE001 — `build()` composes regardless
+            unbuilt.append(
+                _unplaced(
+                    instance,
+                    f"its adapter could not be constructed: {refused}",
+                )
+            )
             continue
-    return tuple(built)
+    return tuple(built), tuple(unbuilt)
 
 
 def _enrolment_scope(
     instance: str, *, scopes: Mapping[str, DataScope]
-) -> DataScope | None:
-    """Which project's tree one enrolled connector files into, or `None` to skip it.
+) -> DataScope | UnbuiltConnector:
+    """Which project's tree one enrolled connector files into, or why it is skipped.
 
-    Three answers, and the third is the one the `4l` review asked for:
+    Four answers; the third is the one the `4l` review asked for, the fourth
+    story 4o's:
 
     - **The row replaces a built-in.** `scopes` is keyed by built-in instance
       name (`gitlab:<enrolled-id>`), and the enrolment that collides with one is
@@ -824,6 +894,12 @@ def _enrolment_scope(
       differently on the next invocation. Refused, and said out loud, because a
       connector that silently vanishes is indistinguishable from one that was
       never enrolled.
+    - **No project is watched at all** (story 4o). A command aimed at the
+      person or at pm-ai itself runs on a machine with nothing enrolled, and
+      its daemon watches nothing — so there is no project's tree to file into,
+      and none is invented. Said out loud on every start until a project is
+      enrolled. With exactly one enrolled the row becomes the second answer
+      above; with more, it must be named for its project (the first answer).
 
     The row's own `project` key is deliberately **not** consulted: for GitLab it
     holds the *provider's* path (`group/project`), not a pm-ai project id, and
@@ -835,27 +911,36 @@ def _enrolment_scope(
     if len(scopes) == 1:
         (only,) = scopes.values()
         return only
-    _unplaced(
+    if not scopes:
+        return _unplaced(
+            instance,
+            "no project is enrolled, so there is no project's tree for its "
+            "harvest to file into. It is saved, and it is built once a single "
+            "project is enrolled with `pm-ai project add <path>`; with more "
+            "than one enrolled, its instance name must name its project.",
+        )
+    return _unplaced(
         instance,
         f"it is not one of the enrolled projects' connectors "
-        f"({', '.join(sorted(scopes)) or 'none'}), and this daemon watches "
+        f"({', '.join(sorted(scopes))}), and this daemon watches "
         f"{len(scopes)} projects — so nothing says which project's tree its "
         f"harvest belongs in. Enrol it afresh under the instance name of the "
         f"project it covers, or remove the row.",
     )
-    return None
 
 
-def _unplaced(instance: str, reason: str) -> None:
-    """Say why an enrolled connector was not built, for `_unbuilt`'s reason.
+def _unplaced(instance: str, reason: str) -> UnbuiltConnector:
+    """Say why an enrolled connector was not built, and keep the sentence.
 
-    stderr and nothing else: the daemon has not composed yet, so there is no
-    event log to write into.
+    stderr, because the daemon has not composed yet and there is no event log to
+    write into; and returned, so the daemon carries it for `pm-ai connector
+    check` to list (story 4o).
     """
     print(
         f"WARNING: the enrolled connector {instance!r} was not built — {reason}",
         file=sys.stderr,
     )
+    return UnbuiltConnector(instance, reason)
 
 
 class _RowRefused(Exception):
@@ -958,8 +1043,8 @@ def _graph_connector(
     store: SealedRefreshTokenStore,
     clock: Callable[[], datetime],
     registered: Callable[[str], bool],
-) -> GraphConnector | None:
-    """One Graph enrolment row as a connector, or `None` with the reason said out loud.
+) -> GraphConnector | UnbuiltConnector:
+    """One Graph enrolment row as a connector, or the reason said out loud.
 
     **Five settings come off the row and four of them are undefaulted**: the
     Entra `client_id` this laptop signs in through, the two harvest widths, and
@@ -984,7 +1069,8 @@ def _graph_connector(
     one key short is a file they are holding open, and a connector that quietly
     fails to appear is indistinguishable from one that was never enrolled.
 
-    Returns `None` rather than raising, because `build()` must compose on a
+    Returns the reason (`_unbuilt`'s, kept for `pm-ai connector check`, story
+    4o) rather than raising, because `build()` must compose on a
     misconfigured machine — that is the whole reason the diagnostics can run at
     all.
 
@@ -1002,18 +1088,16 @@ def _graph_connector(
     except (_RowRefused, UnknownProject, ValueError) as refused:
         # `ChannelListRefused` is a `ValueError`; `UnknownProject` a channel
         # mapped to a project no registry knows (`33d`).
-        _unbuilt(instance, str(refused))
-        return None
+        return _unbuilt(instance, str(refused))
     client_id, named_tenant, policy = judged.client_id, judged.tenant, judged.policy
     categories = judged.categories
     if categories is None:
         # Unreachable: judged with `registered`, so the mapping was read. Said
         # rather than asserted, so `python -O` cannot remove it.
-        _unbuilt(
+        return _unbuilt(
             instance,
             "its category mapping was not read, which is a fault in pm-ai — report it.",
         )
-        return None
     auth = GraphDeviceCodeAuth(
         client_id=client_id,
         # The fifth setting, and the one that *is* defaulted — to the adapter's
@@ -1749,17 +1833,19 @@ class SealedRefreshTokenStore:
         self._holder = None
 
 
-def _unbuilt(instance: str, reason: str) -> None:
+def _unbuilt(instance: str, reason: str) -> UnbuiltConnector:
     """Say why a connector this machine is configured for was not constructed.
 
-    stderr, and nothing else: the daemon has not composed yet, so there is no
-    event log to write into and no storage to reach that has not already been
-    the thing that failed.
+    stderr, because the daemon has not composed yet, so there is no event log to
+    write into and no storage to reach that has not already been the thing that
+    failed; and returned, so the daemon carries the sentence for `pm-ai
+    connector check` to list (story 4o).
     """
     print(
         f"WARNING: the Graph connector {instance!r} was not built — {reason}",
         file=sys.stderr,
     )
+    return UnbuiltConnector(instance, reason)
 
 
 def _credential_for(sealed: object, *, system: str) -> str | None:
@@ -1806,16 +1892,20 @@ def _stored_credentials(storage: StorageService) -> dict[str, dict[str, str]]:
         return {}
 
 
-def _enrolled_configurations(
+def _named_configurations(
     storage: StorageService,
-) -> tuple[Mapping[str, object], ...]:
-    """Every readable `connectors/<name>.json`, as decoded mappings."""
+) -> tuple[tuple[str, Mapping[str, object]], ...]:
+    """Every readable `connectors/<name>.json`, with the member name it was read from.
+
+    The name is what a row that cannot name itself — no usable `instance` — is
+    listed under by `pm-ai connector check` (story 4o).
+    """
     application = DataScope(ScopeKind.APPLICATION)
     try:
         names = storage.list_collection(scope=application, artifact="connectors/")
     except Exception:
         return ()
-    entries: list[Mapping[str, object]] = []
+    entries: list[tuple[str, Mapping[str, object]]] = []
     for name in names:
         try:
             raw = storage.read_artifact(
@@ -1830,7 +1920,7 @@ def _enrolled_configurations(
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
         if isinstance(decoded, dict):
-            entries.append(decoded)
+            entries.append((name, decoded))
     return tuple(entries)
 
 
