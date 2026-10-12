@@ -161,7 +161,9 @@ _REF = re.compile(r"^(?P<system>[a-z0-9_]+):(?P<scope>[A-Za-z0-9_.-]+):(?P<kind>
 # Global entities belong to no project, so they take the two-part form:
 # `meeting:mtg_01HX`, `goal:goal_01HX`. A closed set (AD-34) — adding a member
 # is a deliberate change here, not something a caller may assume.
-_SCOPELESS = frozenset({"meeting", "goal"})
+SCOPELESS_SYSTEMS = frozenset({"meeting", "goal"})
+# Public because `pm_ai.domain.handles` keeps the person-handle systems apart
+# from it (AD-34).
 _NON_DURABLE = frozenset({"transcript", "file", "chat_history"})
 
 # Of the scopeless systems, those whose identifiers pm-ai itself mints. AD-41
@@ -189,7 +191,7 @@ def _assert_reference_sets_agree() -> None:
     Callable so a test can re-run it against a doctored model, which is the only
     way to prove the guard still fires under `-O`.
     """
-    stray = PM_AI_MINTED - _SCOPELESS
+    stray = PM_AI_MINTED - SCOPELESS_SYSTEMS
     if stray:
         raise InconsistentReferenceModel(
             f"PM_AI_MINTED names systems that are not scopeless: {sorted(stray)}. "
@@ -240,7 +242,7 @@ class SourceRef:
                 f"{raw!r} cites a derived capture. Cite the event it came from "
                 f"(a transcript's referent is its meeting)."
             )
-        if head in _SCOPELESS:
+        if head in SCOPELESS_SYSTEMS:
             parts = raw.split(":")
             if len(parts) != 2 or not parts[1]:
                 raise MalformedReference(f"{raw!r} is not `{head}:<id>`")
@@ -308,8 +310,10 @@ class TargetRef:
 
 # ── Actors ───────────────────────────────────────────────────────────────────
 
+# The alias-table resolution below stays until `2o`, with no caller on the write
+# path: since 2026-10-11 (AD-34) an observed event's line records a person
+# handle (`pm_ai.domain.handles`) and a reader decides who that is.
 UNRESOLVED_ACTOR = "actor_unresolved"
-PM_AI_ACTOR = "actor_pm_ai"
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,13 +333,8 @@ class Actor:
     def is_resolved(self) -> bool:
         return self.actor_id != UNRESOLVED_ACTOR
 
-    @property
-    def is_pm_ai(self) -> bool:
-        return self.actor_id == PM_AI_ACTOR
-
 
 UNRESOLVED = Actor(actor_id=UNRESOLVED_ACTOR, display_name="unresolved")
-PM_AI = Actor(actor_id=PM_AI_ACTOR, display_name="pm-ai")
 
 
 # The alias table maps a provider's native handle to a stable actor. Seeded at

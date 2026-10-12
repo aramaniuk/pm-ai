@@ -61,10 +61,83 @@ def test_compaction_declares_the_checksums_it_must_record():
     )
 
 
-def test_a_skill_invocation_declares_its_idempotency_key_and_not_the_actor():
+def test_a_skill_invocation_declares_its_idempotency_key_and_its_skill():
+    """Since story 2n the actor is `pm-ai` and the skill is its own field."""
     declared = ee.SELF_ACTION_FIELDS[ee.SelfActionType.SKILL_INVOKED]
     assert "idempotency_key" in declared
-    assert "skill" not in declared, "the skill name is the actor, not a field"
+    assert "skill" in declared
+
+
+# ── Self-action lines: actor `pm-ai`, and `skill_invoked`'s `skill` ─────────
+
+SKILL_FIELDS = (
+    ("skill", "gitlab.post_comment"),
+    ("target", "gitlab:alpha:issue:1"),
+    ("external_id", "n_1"),
+    ("idempotency_key", "k_1"),
+)
+
+
+@pytest.mark.parametrize("action", list(ee.SelfActionType), ids=lambda a: a.value)
+def test_a_self_action_with_another_actor_is_refused_naming_it(action):
+    """Matrix: wrong self-action actor, at construction."""
+    fields = tuple(
+        (name, "gitlab.post_comment" if name == "skill" else "x")
+        for name in ee.SELF_ACTION_FIELDS[action]
+    )
+    with pytest.raises(ee.MalformedEntry) as caught:
+        ee.EventEntry(entry_id="evt_1", category=action, actor="test", fields=fields)
+    assert "'test'" in str(caught.value)
+
+
+def test_a_self_action_line_with_another_actor_is_refused_when_read():
+    """Matrix: wrong self-action actor, read — `parse_line` builds an `EventEntry`."""
+    from pm_ai.core.ledger import parse_line
+
+    with pytest.raises(ee.MalformedEntry) as caught:
+        parse_line(
+            "- [evt_1] security actor=test protection=encryption-at-rest "
+            "disabled_by=env-var"
+        )
+    assert "'test'" in str(caught.value)
+
+
+@pytest.mark.parametrize("skill", ["gitlab.post_comment", "jira.transition_issue", "a-b.c_d"])
+def test_a_skill_name_in_the_grammar_is_accepted(skill):
+    assert ee.check_skill_name(skill) == skill
+
+
+def test_a_skill_invocation_with_its_fields_is_accepted():
+    entry = ee.EventEntry(
+        entry_id="evt_1", category=ee.SelfActionType.SKILL_INVOKED,
+        actor=ee.DAEMON_ACTOR, fields=SKILL_FIELDS,
+    )
+    assert "skill_invoked actor=pm-ai skill=gitlab.post_comment " in ee.render_entry(entry)
+
+
+def test_a_skill_invocation_without_its_skill_is_refused_naming_it():
+    with pytest.raises(ee.MalformedEntry) as caught:
+        ee.EventEntry(
+            category=ee.SelfActionType.SKILL_INVOKED, actor=ee.DAEMON_ACTOR,
+            fields=SKILL_FIELDS[1:],
+        )
+    assert "skill" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "skill",
+    [
+        "post_comment", ".post_comment", "gitlab.", "", "a b.c", "a.b c", "a\tb.c",
+        "a.b.c", "a=b.c", "a.b=c", 'a".c', 'a.b"', "a,b.c", "a.b,c", "a\x07.c", "a.b\x7f",
+    ],
+)
+def test_a_skill_not_written_system_dot_skill_is_refused_naming_it(skill):
+    with pytest.raises(ee.MalformedEntry) as caught:
+        ee.EventEntry(
+            category=ee.SelfActionType.SKILL_INVOKED, actor=ee.DAEMON_ACTOR,
+            fields=(("skill", skill),) + SKILL_FIELDS[1:],
+        )
+    assert "skill" in str(caught.value)
 
 
 # ── Resolving a category off the wire ────────────────────────────────────────
@@ -174,8 +247,8 @@ def test_a_value_containing_a_newline_is_escaped_not_refused():
 
 def test_an_actor_containing_a_newline_is_escaped_too():
     entry = ee.EventEntry(
-        entry_id="evt_1", category=ee.SelfActionType.SECURITY, actor="pm\nai",
-        fields=SECURITY_FIELDS,
+        entry_id="evt_1", category=ObservedEventType.DECISION, actor="pm\nai",
+        fields=(("statement", "ship"),),
     )
     assert "\n" not in ee.render_entry(entry)
 

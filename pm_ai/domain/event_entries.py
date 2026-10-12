@@ -32,6 +32,7 @@ import (AD-44).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -50,10 +51,12 @@ __all__ = [
     "InconsistentVocabulary",
     "LedgerCategory",
     "SELF_ACTION_FIELDS",
+    "SKILL_FIELD",
     "WRITER_OWNED_FIELDS",
     "SelfActionType",
     "UnknownCategory",
     "category",
+    "check_skill_name",
     "render_value",
     "scan_fields",
 ]
@@ -107,9 +110,11 @@ SELF_ACTION_FIELDS: dict[SelfActionType, tuple[str, ...]] = {
     SelfActionType.COMPACTION: ("source", "replaced", "summary"),
     # Which protection the operator turned off, and the mechanism that did it.
     SelfActionType.SECURITY: ("protection", "disabled_by"),
-    # AD-1's one entry per invocation. The skill's name is the *actor*, so it is
-    # not repeated here — a schema declares fields, and the actor is not one.
-    SelfActionType.SKILL_INVOKED: ("target", "external_id", "idempotency_key"),
+    # AD-1's one entry per invocation. The actor is `pm-ai`, like every
+    # self-action; the skill that acted is `skill`, `<system>.<skill>`
+    # (AD-34, 2026-10-11 — it was the actor until then, under a dated AD-27
+    # exemption: no line had been written).
+    SelfActionType.SKILL_INVOKED: ("skill", "target", "external_id", "idempotency_key"),
     # The goal as it now reads, whole — its id, domain, horizon and title, since
     # a revision is only legible against the one before it if every entry
     # carries all four — plus the surface that set it, since the CLI is the
@@ -159,12 +164,41 @@ which re-runs `__post_init__`.
 """
 
 DAEMON_ACTOR = "pm-ai"
-"""The actor on a record pm-ai wrote about itself.
+"""The actor on every record pm-ai wrote about itself — the only one allowed.
 
 One spelling, because the actor field is what a retrospective groups by: `pm-ai`
 in one entry and `pm_ai` in another are two actors to every reader that counts
 them. `storage-contract.md`'s COMPACTION example fixes this form.
+
+Self-action lines are outside AD-34's handle rule: the acting component (a
+skill, a pipeline) goes in its own field, and a reader tells an observed line
+from a self-action line by its category. `EventEntry` refuses any other actor on
+a self-action category, when built and when a line is read.
 """
+
+SKILL_FIELD = "skill"
+"""`skill_invoked`'s field naming the skill, `<system>.<skill>`."""
+
+_SKILL_PART = r"[^\s.=\",\x00-\x1f\x7f]+"
+_SKILL_NAME = re.compile(rf"{_SKILL_PART}\.{_SKILL_PART}")
+"""`<system>.<skill>`: two non-empty parts, neither holding whitespace, `.`,
+`=`, `"`, `,` or a control character."""
+
+
+def check_skill_name(name: object) -> str:
+    """The `skill` field's grammar, or `MalformedEntry` naming the value.
+
+    Public so `SkillRegistry.register` refuses a name the AD-1 line could not
+    carry *before* the skill can run — otherwise the external change happens
+    and only then does the line fail to write.
+    """
+    if not isinstance(name, str) or not _SKILL_NAME.fullmatch(name):
+        raise MalformedEntry(
+            f"skill={name!r}. `{SKILL_FIELD}` is `<system>.<skill>`, both parts "
+            f"non-empty and neither holding whitespace, `.`, `=`, `\"`, `,` or a "
+            f"control character — e.g. `gitlab.post_comment`."
+        )
+    return name
 
 MAX_ENTRY_LENGTH = 16384
 """How long one rendered record may be.
@@ -303,6 +337,12 @@ class EventEntry:
         """
         if not isinstance(self.category, SelfActionType):
             return
+        if self.actor != DAEMON_ACTOR:
+            raise MalformedEntry(
+                f"{self.category.value} has actor {self.actor!r}. Every pm-ai "
+                f"action's actor is {DAEMON_ACTOR!r}; the component that acted "
+                f"goes in its own field (AD-34)."
+            )
         present = {key for key, _ in self.fields} | WRITER_OWNED_FIELDS
         missing = [name for name in SELF_ACTION_FIELDS[self.category] if name not in present]
         if missing:
@@ -311,6 +351,8 @@ class EventEntry:
                 f"{list(SELF_ACTION_FIELDS[self.category])} and this entry carries "
                 f"{sorted(key for key, _ in self.fields)}."
             )
+        if self.category is SelfActionType.SKILL_INVOKED:
+            check_skill_name(next(value for key, value in self.fields if key == SKILL_FIELD))
 
 
 def render_value(value: str, *, where: str) -> str:

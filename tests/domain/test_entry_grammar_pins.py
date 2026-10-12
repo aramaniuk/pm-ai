@@ -22,7 +22,7 @@ import typing
 
 from pm_ai.domain.event_entries import SELF_ACTION_FIELDS, SelfActionType
 from pm_ai.domain.events import PAYLOAD_FOR, ObservedEventType
-from pm_ai.domain.identity import Actor
+from pm_ai.domain.handles import PersonHandle
 
 REQUIRED = object()
 """Stands in the default column for a field with no default."""
@@ -33,7 +33,9 @@ PAYLOAD_FIELDS: dict[str, tuple[tuple[str, object, object], ...]] = {
         ("work_item_id", str, REQUIRED),
         ("title", str | None, None),
         ("state", str | None, None),
-        ("assignee", Actor | None, None),
+        # Retyped from `Actor | None` by story 2n under a dated AD-27
+        # exemption (2026-10-11): no event-log line had been written.
+        ("assignee", PersonHandle | None, None),
     ),
     "CommitPayload": (
         ("sha", str, REQUIRED),
@@ -86,7 +88,9 @@ PAYLOAD_BINDING: dict[str, str] = {
 SELF_ACTIONS: dict[str, tuple[str, ...]] = {
     "compaction": ("source", "replaced", "summary"),
     "security": ("protection", "disabled_by"),
-    "skill_invoked": ("target", "external_id", "idempotency_key"),
+    # `skill` joined the required fields with story 2n under the same dated
+    # exemption: the skill name moved out of the actor, which is now `pm-ai`.
+    "skill_invoked": ("skill", "target", "external_id", "idempotency_key"),
     "goal_set": ("goal_id", "domain", "horizon", "title", "channel"),
 }
 

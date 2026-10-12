@@ -17,7 +17,8 @@ from enum import Enum
 from types import UnionType
 from typing import Union, get_args, get_origin, get_type_hints
 
-from pm_ai.domain.identity import Actor, DataScope, SourceRef
+from pm_ai.domain.handles import PersonHandle
+from pm_ai.domain.identity import DataScope, SourceRef
 from pm_ai.domain.invariants import InconsistentModel
 
 
@@ -87,7 +88,8 @@ class WorkItemPayload:
     work_item_id: str
     title: str | None = None
     state: str | None = None
-    assignee: Actor | None = None
+    # A person handle (AD-34), never `none:` — absence here is `None`.
+    assignee: PersonHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,10 +116,15 @@ class DocumentPayload:
 class MessagePayload:
     channel: str
     excerpt: str | None = None
-    # The Graph user ids the message mentions. `None` is "the connector never
-    # asked", which is a different fact from `()`, "it asked and there were
-    # none" (AD-27). An id pm-ai could not resolve is written under the
-    # reserved spelling `unresolved:<system>:<handle>` (AD-34, 2026-10-10).
+    # The people the message mentions, each a person handle's canonical text —
+    # `graph:<user id>` for a Teams mention — and never `none:` (AD-34,
+    # 2026-10-11). Declared in `PERSON_LIST_FIELDS`, so the encoder and decoder
+    # check every member as a handle; any handle system but `none` passes that
+    # check. Which mentions become members is the connector's mapping, not this
+    # field's: AD-27 has a mention with no user behind it (a channel, team, tag
+    # or bot) left out by the connector that reads it (`33d`).
+    # `None` is "the connector never asked", which is a different fact from
+    # `()`, "it asked and there were none" (AD-27).
     mentions: tuple[str, ...] | None = None
 
 
@@ -268,8 +275,8 @@ TRUSTED_TEXT: dict[type, dict[str, str]] = {
         "document_id": "the provider's document identifier",
     },
     MessagePayload: {
-        "mentions": "Graph user ids — Microsoft generates them and nobody "
-        "types one, so a mention's display name never reaches this field",
+        "mentions": "person handles around Graph user ids, which Microsoft "
+        "generates and nobody types",
     },
     DecisionPayload: {},
     PipelinePayload: {
@@ -296,12 +303,11 @@ declared any other way — a `list[str]`, a required tuple, any other container 
 is refused like an undeclared field.
 
 **A known limit: nested types.** A field whose type holds text inside it is
-neither required nor refused. `WorkItemPayload.assignee: Actor | None` and
-`NormalizedEvent.actor` both hold a display name the provider supplied — though
-on an event-log line the assignee is its actor id alone (AD-34), so the name
-never reaches Tier 1. Recorded rather than silently widened: reaching inside a
-nested type needs a decision on how a declaration addresses a field inside
-another type.
+neither required nor refused. Today no payload has one: the person-typed field
+is a `PersonHandle`, a single text value whose shape the producer checks and
+which carries no display name (AD-34). Recorded rather than silently widened:
+reaching inside a nested type needs a decision on how a declaration addresses a
+field inside another type.
 """
 
 
@@ -495,8 +501,27 @@ def _assert_payload_text_is_declared() -> None:
 _assert_payload_text_is_declared()
 
 
+PERSON_LIST_FIELDS: dict[type, frozenset[str]] = {
+    MessagePayload: frozenset({"mentions"}),
+}
+"""The list fields whose members are person handles, by payload class (AD-34).
+
+A list keeps AD-48's one shape, `tuple[str, ...] | None`; this declaration is
+what makes `pm_ai.domain.payload_fields` check each member as a handle's
+canonical text, on encode and on decode, and refuse `none:` as a member.
+"""
+
+
 class PayloadMismatch(TypeError):
     """The payload does not match the shape registered for this event type."""
+
+
+class ActorNotAHandle(TypeError):
+    """An observed event's actor is not a `PersonHandle` (AD-34).
+
+    Checked at runtime because a connector's actor often comes from `row.get`,
+    which is `Any` to mypy.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,13 +536,22 @@ class NormalizedEvent:
     scope: DataScope
     type: ObservedEventType
     source_ref: SourceRef
-    actor: Actor
+    # What the provider said about who acted, as a person handle — resolved to a
+    # person only when read (AD-34). `none:` when nobody is behind it.
+    actor: PersonHandle
     occurred_at: datetime | None  # provider clock — may be absent or skewed
     payload: object
     authored_by: Provenance = Provenance.UNKNOWN
     ingested_at: datetime | None = field(default=None)  # assigned by storage
 
     def __post_init__(self) -> None:
+        if not isinstance(self.actor, PersonHandle):
+            raise ActorNotAHandle(
+                f"{self.type.value} has actor {self.actor!r}, which is not a "
+                f"PersonHandle. An observed event records what the provider "
+                f"said as `<system>:<handle>`, built by "
+                f"`pm_ai.domain.handles.person_handle`, or `none:` (AD-34)."
+            )
         expected = PAYLOAD_FOR[self.type]
         if not isinstance(self.payload, expected):
             raise PayloadMismatch(

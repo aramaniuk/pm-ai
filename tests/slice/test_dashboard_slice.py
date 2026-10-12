@@ -37,6 +37,7 @@ from pm_ai.domain.harvest import (
     HarvestResult,
 )
 from pm_ai.domain.health import Health, Probe
+from pm_ai.domain.handles import person_handle
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.meetings import Meeting
 from pm_ai.platform.paths import ScopePaths
@@ -440,7 +441,7 @@ def test_a_message_line_hand_edited_to_drop_its_channel_refuses_the_render(tmp_p
                 scope=PERSONAL,
                 type=ObservedEventType.MESSAGE_POSTED,
                 source_ref=SourceRef.parse("graph:alpha:message:m1"),
-                actor=Actor("u_dana"),
+                actor=person_handle("email", "dana@example.com"),
                 occurred_at=NOW - timedelta(minutes=5),
                 payload=MessagePayload(channel="#payments", excerpt="hello"),
             ),

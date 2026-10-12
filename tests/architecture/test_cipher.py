@@ -716,7 +716,7 @@ def test_appending_to_a_plaintext_ledger_still_works(tmp_path):
     daemon.storage.append_event_log(_entry("another"), scope=daemon.scope)
 
     body = _event_log_text(daemon, scope=daemon.scope)
-    assert body.count("actor=test") == 2, "appending replaced rather than appended"
+    assert body.count("actor=pm-ai") == 2, "appending replaced rather than appended"
 
 
 # ── Through `entry.main`: commands that write nothing leave nothing (1p) ──────

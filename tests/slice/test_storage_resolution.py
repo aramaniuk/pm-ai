@@ -119,7 +119,7 @@ def _test_entry(marker: str):
     """
     return EventEntry(
         category=SelfActionType.SECURITY,
-        actor="test",
+        actor="pm-ai",
         fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("detail", marker)),
     )
 
@@ -146,8 +146,8 @@ def test_the_event_log_is_appended_to_never_rewritten(daemon):
     assert len(segments) == 1, "one open segment per month, appended to"
     body = _mask(segments[0].read_text())
     assert body == (
-        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=first\n"
-        "- [evt_ID] security actor=test ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=second\n"
+        "- [evt_ID] security actor=pm-ai ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=first\n"
+        "- [evt_ID] security actor=pm-ai ingested_at=2026-08-19T09:00:00+00:00 protection=encryption-at-rest disabled_by=env-var detail=second\n"
     )
 
 
@@ -186,7 +186,7 @@ def test_every_scope_writes_into_its_own_resolved_tree(daemon, tmp_path):
     assert len(set(resolved.values())) == len(ALL_SCOPES), "two scopes share one ledger"
     for scope, log in resolved.items():
         assert _mask((log / f"{NOW:%Y-%m}.md").read_text()) == (
-            f"- [evt_ID] security actor=test "
+            f"- [evt_ID] security actor=pm-ai "
             f"ingested_at=2026-08-19T09:00:00+00:00 "
             f"protection=encryption-at-rest disabled_by=env-var detail={scope}\n"
         )
@@ -524,7 +524,7 @@ def test_the_writer_mints_the_entry_id(daemon):
 
     line = _segment(daemon.storage, daemon.scope).read_text().rstrip("\n")
     assert re.fullmatch(
-        r"- \[evt_[0-9a-f]+\] security actor=test "
+        r"- \[evt_[0-9a-f]+\] security actor=pm-ai "
         + re.escape(
             f"ingested_at={NOW.isoformat()} protection=encryption-at-rest "
             f"disabled_by=env-var detail=first"
@@ -892,7 +892,7 @@ def test_an_entry_carrying_the_writers_own_field_is_refused(daemon):
     the whole clock rule forbids, reachable through the public port."""
     entry = EventEntry(
         category=SelfActionType.SECURITY,
-        actor="test",
+        actor="pm-ai",
         fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("ingested_at", "1999-01-01T00:00:00+00:00")),
     )
     with pytest.raises(ValueError) as caught:
@@ -903,7 +903,7 @@ def test_an_entry_carrying_the_writers_own_field_is_refused(daemon):
 def test_an_entry_carrying_the_writers_flag_field_is_refused(daemon):
     entry = EventEntry(
         category=SelfActionType.SECURITY,
-        actor="test",
+        actor="pm-ai",
         fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("occurred_at_flag", "implausible")),
     )
     with pytest.raises(ValueError):

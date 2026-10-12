@@ -28,7 +28,8 @@ from pm_ai.domain.harvest import (
     RowRefusal,
 )
 from pm_ai.domain.health import Health, Probe
-from pm_ai.domain.identity import DataScope, SourceRef, resolve_actor
+from pm_ai.domain.handles import EMAIL, NO_PERSON, usable_handle
+from pm_ai.domain.identity import DataScope, SourceRef
 from pm_ai.domain.lifecycle import CoverageWindow
 
 # The row `sample_events` maps. Fixed values, because the point of a sample is
@@ -251,11 +252,13 @@ class GitLabConnectorAdapter:
             type=ObservedEventType.COMMIT_PUSHED,
             # AD-34 grammar — not a URL, so it joins across connectors
             source_ref=SourceRef.parse(f"gitlab:{self.project}:commit:{sha}"),
-            # AD-34 — a native handle resolves to an Actor or to UNRESOLVED,
-            # never to itself. `.get`, and no refusal: an absent handle is what
-            # `UNRESOLVED` is *for*, and a commit whose author pm-ai cannot name
-            # is still a commit that happened.
-            actor=resolve_actor(system="gitlab", handle=row.get("author_email")),
+            # AD-34 — what the provider said, as a person handle; a reader
+            # decides who that is. Commits are GitLab's only source of people
+            # today, and the author is an address. `.get`, and no refusal: an
+            # absent or unusable address is `none:`, and a commit whose author
+            # pm-ai cannot name is still a commit that happened.
+            actor=usable_handle(EMAIL, row.get("author_email"))
+            or NO_PERSON,
             # Provider clock (AD-35), and absent is a real state:
             # `NormalizedEvent.occurred_at` is `datetime | None` and a row with
             # no timestamp is a row we cannot place in time, not a KeyError.

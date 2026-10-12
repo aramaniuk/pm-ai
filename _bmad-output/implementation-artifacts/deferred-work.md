@@ -1098,3 +1098,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2n-people-are-written-as-handles.md`
   summary: Wave-2 sizing, the two specs added on 2026-10-11, measured the same way as the table above (tiktoken cl100k_base, body after the frontmatter): `2n` 4,625 tokens, `2o` 3,352.
   evidence: Both within the range accepted for wave 2 (`2m` 4,737, `1r` 5,073, `33e` 5,097); kept whole. Split candidate for `2n` if it proves too large to build in one PR: the self-action actor rule and the `skill` field.
+
+## Surfaced by the story-2n review (2026-10-11)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2n-people-are-written-as-handles.md`
+  summary: The dashboard's meeting line still prints `len(meeting.attendees)` while Man-Hour Cost multiplies by `attendee_count`, so a meeting with an attendee who has no usable address shows one person fewer than it is priced for.
+  evidence: `_meeting_line` in `pm_ai/core/rendering.py` counts the named list; 2n leaves out attendees without a usable address but counts them in `attendee_count`. 2n's Never list rules out dashboard changes (`23c`), so the line should switch to `attendee_count` there.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2n-people-are-written-as-handles.md`
+  summary: Meeting-record attendees are not parsed as person handles when read, while event-log person fields are; a hand-edited `attendees=actor_unresolved` reads back without complaint.
+  evidence: `_parse_attendees` in `pm_ai/core/meeting_records.py` accepts any text and `Meeting.attendees` stays `Actor`. The event log and the meeting record now follow two person rules; whichever slice next reads attendees as people (`2o`) should parse them through `parse_person_handle`.

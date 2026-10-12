@@ -14,7 +14,13 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass
 
-from pm_ai.domain.event_entries import EventEntry, SelfActionType
+from pm_ai.domain.event_entries import (
+    DAEMON_ACTOR,
+    SKILL_FIELD,
+    EventEntry,
+    SelfActionType,
+    check_skill_name,
+)
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import lookup_verb
 from pm_ai.ports import SkillPort, StoragePort
@@ -59,6 +65,10 @@ class SkillRegistry:
         skill updates, so the substitution is spelled at the call site.
         """
         qualified = f"{skill.system}.{skill.name}"
+        # Refused here, before the skill can ever run: a name the AD-1 line's
+        # `skill` field cannot carry would otherwise surface only after the
+        # external change had happened, when the line failed to write.
+        check_skill_name(qualified)
         if qualified in self._skills and not replace:
             raise ValueError(
                 f"{qualified} is already registered. A second registration "
@@ -109,8 +119,10 @@ class SkillRegistry:
             self._storage.append_event_log(  # AD-1
                 EventEntry(
                     category=SelfActionType.SKILL_INVOKED,
-                    actor=qualified_name,
+                    # pm-ai acted; which skill acted is its own field (AD-34).
+                    actor=DAEMON_ACTOR,
                     fields=(
+                        (SKILL_FIELD, qualified_name),
                         ("target", target.lock_key),
                         ("external_id", external_id),
                         # `idempotency_key`, not `key`: this name lands in a

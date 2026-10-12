@@ -36,7 +36,8 @@ from pm_ai.domain.events import (
     ReviewPayload,
     WorkItemPayload,
 )
-from pm_ai.domain.identity import UNRESOLVED_ACTOR, Actor
+from pm_ai.domain.handles import NO_PERSON, person_handle
+from pm_ai.domain.identity import UNRESOLVED_ACTOR
 from pm_ai.domain.payload_fields import (
     NoPayload,
     UnencodablePayload,
@@ -47,8 +48,25 @@ from pm_ai.domain.payload_fields import (
 CATEGORY_FOR = {payload: category for category, payload in reversed(PAYLOAD_FOR.items())}
 """One observed category per payload class, to build a line around it."""
 
-UNRESOLVED_DANA = "unresolved:gitlab:dana@example.com"
-UNRESOLVED_MENTION = "unresolved:graph:dana@example.com"
+DANA = person_handle("email", "dana@example.com")
+U1 = "graph:00000001-0000-4000-8000-000000000001"
+U2 = "graph:00000002-0000-4000-8000-000000000002"
+
+
+@pytest.fixture
+def plain_lists(monkeypatch):
+    """`mentions` as a plain text list, so the list layer's escaping is tested.
+
+    `mentions` is the only list field and it is a person list, whose members
+    never hold a comma or a space — so a comma to escape, and a space for the
+    line layer to quote, are reachable only with the person check switched off.
+    (An `email:` member may hold a backslash; that escape is tested on a real
+    handle below.)
+    """
+    import pm_ai.domain.payload_fields as module
+
+    monkeypatch.setattr(module, "PERSON_LIST_FIELDS", {})
+    monkeypatch.setattr(module, "_LAYOUTS", {})
 
 
 def _entry(category: ObservedEventType, fields: tuple[tuple[str, str], ...]) -> EventEntry:
@@ -75,19 +93,10 @@ def _hand_edited(category: ObservedEventType, tail: str) -> EventEntry:
     return parse_line(f"- [evt_1] {category.value} actor=u_dana {tail}")
 
 
-def _person_by_id(value: object) -> object:
-    """A person reduced to its id — the one loss the round trip allows (AD-34)."""
-    return Actor(value.actor_id) if isinstance(value, Actor) else value
-
-
 def _reduced(payload: object) -> object:
-    return dataclasses.replace(
-        payload,
-        **{
-            f.name: _person_by_id(getattr(payload, f.name))
-            for f in dataclasses.fields(payload)
-        },
-    )
+    """What the round trip gives back: since story 2n a person handle loses
+    nothing, so this is the payload itself."""
+    return payload
 
 
 # ── The matrix ───────────────────────────────────────────────────────────────
@@ -114,36 +123,39 @@ def test_a_detail_not_recorded_is_left_off_the_line_and_decodes_as_not_recorded(
     assert _through_the_line(message).mentions is None  # type: ignore[attr-defined]
 
 
-def test_a_person_is_written_as_the_id_alone_and_decodes_with_no_name():
-    payload = WorkItemPayload(work_item_id="PAY-1", assignee=Actor("u_1", "Dana"))
+def test_a_person_is_written_as_its_handle_text_and_decodes_equal():
+    payload = WorkItemPayload(work_item_id="PAY-1", assignee=DANA)
     line = _line(payload)
-    assert "p.assignee=u_1" in line
-    assert "Dana" not in line
-    decoded = _through_the_line(payload)
-    assert decoded.assignee == Actor("u_1")  # type: ignore[attr-defined]
-    assert decoded.assignee.display_name is None  # type: ignore[attr-defined]
+    assert "p.assignee=email:dana@example.com" in line
+    assert _through_the_line(payload).assignee == DANA  # type: ignore[attr-defined]
 
 
-def test_a_person_pm_ai_could_not_name_keeps_the_handle_it_came_with():
-    """The reserved spelling passes through unchanged, on a person and inside a
-    list alike, so a sender and a mention of one person join on the line."""
-    work_item = WorkItemPayload(work_item_id="PAY-1", assignee=Actor(UNRESOLVED_DANA))
-    message = MessagePayload(channel="#payments", mentions=("u_1", UNRESOLVED_MENTION))
-    assert f"p.assignee={UNRESOLVED_DANA}" in _line(work_item)
-    assert dict(encode_payload(message))["p.mentions"] == f"u_1,{UNRESOLVED_MENTION}"
-    assert _through_the_line(work_item).assignee == Actor(UNRESOLVED_DANA)  # type: ignore[attr-defined]
-    assert _through_the_line(message).mentions == ("u_1", UNRESOLVED_MENTION)  # type: ignore[attr-defined]
+def test_a_sender_and_a_mention_of_one_person_share_the_handle_text():
+    message = MessagePayload(channel="#payments", mentions=(U1, str(DANA)))
+    assert dict(encode_payload(message))["p.mentions"] == f"{U1},email:dana@example.com"
+    assert _through_the_line(message).mentions == (U1, str(DANA))  # type: ignore[attr-defined]
 
 
-def test_the_bare_unresolved_sentinel_is_refused_naming_the_field():
+def test_an_assignee_that_is_not_a_handle_is_refused_naming_the_field():
     with pytest.raises(UnencodablePayload) as caught:
-        encode_payload(WorkItemPayload(work_item_id="PAY-1", assignee=Actor(UNRESOLVED_ACTOR)))
+        encode_payload(WorkItemPayload(work_item_id="PAY-1", assignee="dana@example.com"))  # type: ignore[arg-type]
     assert "assignee" in str(caught.value)
 
 
-def test_the_bare_unresolved_sentinel_is_refused_as_a_list_member_naming_the_field():
+def test_no_person_as_an_assignee_is_refused_naming_the_field():
+    """Matrix: `none:` out of place — absence of an assignee is `None`."""
     with pytest.raises(UnencodablePayload) as caught:
-        encode_payload(MessagePayload(channel="#p", mentions=("u_1", UNRESOLVED_ACTOR)))
+        encode_payload(WorkItemPayload(work_item_id="PAY-1", assignee=NO_PERSON))
+    assert "assignee" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "member", ["u_1", UNRESOLVED_ACTOR, "none:", "email:Dana@X.com", "Dana Smith"]
+)
+def test_a_mention_that_is_not_a_canonical_handle_is_refused_naming_the_field(member):
+    """Matrix: mention not a handle — refused at encode, naming `mentions`."""
+    with pytest.raises(UnencodablePayload) as caught:
+        encode_payload(MessagePayload(channel="#p", mentions=(U1, member)))
     assert "mentions" in str(caught.value)
 
 
@@ -174,17 +186,26 @@ def test_a_negative_count_is_refused_at_encode_naming_the_field():
 
 
 def test_a_list_of_two_is_joined_by_a_comma():
-    payload = MessagePayload(channel="#payments", mentions=("u_1", "u_2"))
-    assert "p.mentions=u_1,u_2" in _line(payload)
-    assert _through_the_line(payload).mentions == ("u_1", "u_2")  # type: ignore[attr-defined]
+    payload = MessagePayload(channel="#payments", mentions=(U1, U2))
+    assert f"p.mentions={U1},{U2}" in _line(payload)
+    assert _through_the_line(payload).mentions == (U1, U2)  # type: ignore[attr-defined]
 
 
+def test_a_handle_holding_a_backslash_is_escaped_by_the_list_layer_and_round_trips():
+    member = str(person_handle("email", "a\\b@x.com"))
+    payload = MessagePayload(channel="#p", mentions=(member, U1))
+    assert dict(encode_payload(payload))["p.mentions"] == f"email:a\\\\b@x.com,{U1}"
+    assert _through_the_line(payload).mentions == (member, U1)  # type: ignore[attr-defined]
+
+
+@pytest.mark.usefixtures("plain_lists")
 def test_an_element_holding_a_comma_or_a_backslash_is_escaped_and_round_trips():
     payload = MessagePayload(channel="#p", mentions=("a,b", "c\\d"))
     assert dict(encode_payload(payload))["p.mentions"] == "a\\,b,c\\\\d"
     assert _through_the_line(payload).mentions == ("a,b", "c\\d")  # type: ignore[attr-defined]
 
 
+@pytest.mark.usefixtures("plain_lists")
 def test_an_element_the_line_must_quote_is_quoted_by_the_line_layer():
     """The list layer has no opinion on spaces; the line layer quotes them, and
     a reader undoes the quoting before it splits."""
@@ -210,7 +231,7 @@ def test_an_empty_element_is_refused_at_encode_naming_the_field():
 
 @pytest.mark.parametrize(
     "raw",
-    ["u_1,", "u_1\\", "u_1\\x", ",u_1", "u_1,,u_2"],
+    [f"{U1},", f"{U1}\\", f"{U1}\\x", f",{U1}", f"{U1},,{U2}"],
     ids=["trailing separator", "dangling escape", "escape before x", "leading", "doubled"],
 )
 def test_a_hand_edited_list_is_refused_naming_the_field(raw):
@@ -267,7 +288,10 @@ def test_a_kind_with_no_payload_is_refused_naming_the_kind(action):
         entry_id="evt_1",
         category=action,
         actor="pm-ai",
-        fields=tuple((name, "x") for name in SELF_ACTION_FIELDS[action]),
+        fields=tuple(
+            (name, "gitlab.post_comment" if name == "skill" else "x")
+            for name in SELF_ACTION_FIELDS[action]
+        ),
     )
     with pytest.raises(NoPayload) as caught:
         decode_payload(entry)
@@ -298,12 +322,6 @@ def test_a_count_too_long_to_read_is_refused_naming_the_field():
     assert "p.comment_count" in str(caught.value)
 
 
-def test_a_person_with_an_empty_id_is_refused_at_encode_naming_the_field():
-    with pytest.raises(UnencodablePayload) as caught:
-        encode_payload(WorkItemPayload(work_item_id="PAY-1", assignee=Actor("")))
-    assert "assignee" in str(caught.value)
-
-
 def test_an_empty_person_on_a_line_is_refused_naming_the_field():
     entry = _entry(
         ObservedEventType.WORK_ITEM_UPDATED,
@@ -323,16 +341,44 @@ def test_an_empty_person_on_a_line_is_refused_naming_the_field():
             "p.assignee",
         ),
         (
+            ObservedEventType.WORK_ITEM_UPDATED,
+            (("p.work_item_id", "PAY-1"), ("p.assignee", "email:Dana@X.com")),
+            "p.assignee",
+        ),
+        (
+            ObservedEventType.WORK_ITEM_UPDATED,
+            (("p.work_item_id", "PAY-1"), ("p.assignee", "none:")),
+            "p.assignee",
+        ),
+        (
             ObservedEventType.MESSAGE_POSTED,
-            (("p.channel", "#p"), ("p.mentions", f"u_1,{UNRESOLVED_ACTOR}")),
+            (("p.channel", "#p"), ("p.mentions", "u_1")),
+            "p.mentions",
+        ),
+        (
+            ObservedEventType.MESSAGE_POSTED,
+            (("p.channel", "#p"), ("p.mentions", f"{U1},{UNRESOLVED_ACTOR}")),
+            "p.mentions",
+        ),
+        (
+            ObservedEventType.MESSAGE_POSTED,
+            (("p.channel", "#p"), ("p.mentions", "none:")),
             "p.mentions",
         ),
     ],
-    ids=["assignee", "list member"],
+    ids=[
+        "assignee sentinel",
+        "assignee not canonical",
+        "assignee none",
+        "mention not a handle",
+        "mention sentinel",
+        "mention none",
+    ],
 )
-def test_the_bare_sentinel_on_a_line_is_refused_naming_the_field(category, fields, named):
-    """Symmetric with encode: the writer never writes it, so a line carrying
-    it is a corrupted one."""
+def test_a_person_value_on_a_line_that_is_not_a_handle_is_corrupted(category, fields, named):
+    """The writer never writes any of these, so a line carrying one is a
+    corrupted one — refused naming the field. Non-canonical text included, so a
+    round trip stays byte-stable."""
     with pytest.raises(MalformedEntry) as caught:
         decode_payload(_entry(category, fields))
     assert named in str(caught.value)
@@ -365,14 +411,14 @@ EVERY_FIELD_SET: dict[type, object] = {
         work_item_id="PAY-102",
         title="Cut latency, again",
         state="In Progress",
-        assignee=Actor("u_1", "Dana Scully"),
+        assignee=DANA,
     ),
     PipelinePayload: PipelinePayload(pipeline_id="881", status="success"),
     DocumentPayload: DocumentPayload(document_id="doc-1", title="Runbook = v2"),
     MessagePayload: MessagePayload(
         channel="#payments",
         excerpt="Cache TTL is still 60s, in staging \\ prod",
-        mentions=("u_1", "a,b", "c\\d", "e f", UNRESOLVED_MENTION),
+        mentions=(U1, U2, str(DANA)),
     ),
     MeetingHeldPayload: MeetingHeldPayload(
         meeting_id="mtg_01", attendee_count=4, duration_minutes=30
@@ -392,8 +438,7 @@ def test_the_round_trip_table_covers_every_payload_class():
 )
 def test_every_field_set_round_trips(payload):
     """Every field set to a value other than its default, so nothing
-    round-trips by being left off or by falling back to the default; equal
-    after a person is reduced to its id."""
+    round-trips by being left off or by falling back to the default."""
     defaulted = [
         f.name
         for f in dataclasses.fields(payload)
