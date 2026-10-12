@@ -12,8 +12,9 @@ the CLI's behaviour is a unit test rather than a subprocess.
 
 `pm-ai doctor` is the command an operator runs when the machine is broken, so a
 broken machine must not be what makes it unreachable. Three things can stop the
-daemon being built — no project enrolled, a root that cannot be read or written,
-a `config.toml` that will not parse — and each becomes **one probe result**
+daemon being built — no project enrolled for a command that needs one, a root
+that cannot be read or written, a `config.toml` that will not parse — and each
+becomes **one probe result**
 appended to the report rather than a traceback out of a command that exists to
 survive exactly this. Nothing here loads `config.toml` before deciding what to
 run, which is what keeps a broken config from hiding a broken machine.
@@ -35,6 +36,11 @@ command names (AD-11's selection order). A command aimed at the personal or
 application scope therefore acts there from any folder, and a named project is
 the project the daemon acts in, so a command never acts in one place while its
 output goes to another.
+
+Since story 4o that holds on a machine with **no project enrolled** too: a
+command aimed at the person or at pm-ai itself composes a daemon that watches
+no project, and only a command aimed at a project — or one with no target,
+`doctor`, `setup`, `project add` — still meets "nothing is enrolled".
 
 ## Why this module may import `pm_ai.platform.doctor`
 
@@ -110,7 +116,6 @@ from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import (
     ArtifactBusy,
-    DaemonRefused,
     KeychainPort,
     KeychainUnavailable,
     StoragePort,
@@ -166,10 +171,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             # sign-in and health check run, behind this (story 8l): both reach
             # `pm_ai.connectors`, which the CLI may not import. Bound to this
             # daemon's single writer, which is also where the row lands. With no
-            # daemon — no project enrolled, say — it is bound to the writer over
-            # the application scope alone, which is every artifact a sign-in
-            # touches: `pm-ai connector sign-in` needs no project (story 8m),
-            # and `connector add` still refuses through `require_daemon()`.
+            # daemon — a `config.toml` that will not load, say — it is bound to
+            # the writer over the application scope alone, which is every
+            # artifact a sign-in touches: `pm-ai connector sign-in` needs no
+            # project (story 8m), and `connector add` still refuses through
+            # `require_daemon()`.
             graph_sign_in=(
                 GraphEnrolment(storage=daemon.storage)
                 if daemon is not None
@@ -185,6 +191,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             # (story 8k): the connectors probed are the daemon's own, the list a
             # harvest reads, never a copy.
             probe_connectors=_probe_connectors(composed),
+            # Every enabled row that build did not construct, with the
+            # sentence it printed (story 4o): `connector check` lists each
+            # beside the probed connectors, so no enabled row is omitted.
+            unbuilt_connectors=() if daemon is None else daemon.unbuilt,
             # `23b`'s pipeline, bound to the daemon this process built. Injected
             # for `probe_connectors`' reason: `run_dashboard` reaches a
             # connector, the scope model and the single writer at once, and
@@ -261,14 +271,17 @@ def _probe_connectors(
     factory, injectable so a test can shorten or record the probe without
     patching a name in this module.
 
-    With no daemon there are two cases, and they are not the same answer:
+    With no daemon this returns `None`, and `connector check` asks
+    `Context.require_daemon()` — the one refusal sentence for "no daemon",
+    carrying the composition root's reason unedited. There are no connectors a
+    harvest would use, so there is nothing honest to probe.
 
-    - **nothing enrolled** is a first run, so the probe returns an empty report
-      and `connector check` says no connectors are registered, exit 0;
-    - **any other reason** returns `None`, and `connector check` asks
-      `Context.require_daemon()` — the one refusal sentence for "no daemon",
-      carrying the composition root's reason unedited. There are no connectors
-      a harvest would use, so there is nothing honest to probe.
+    **Nothing enrolled is not one of those cases** since story 4o. `connector
+    check` targets the application scope, so on a first run it gets a daemon
+    that watches no project and holds no built-in connector, and its empty
+    report is what says no connectors are registered. The empty-report branch
+    this function carried for that machine (story 8k) is gone with the
+    `_Composition.nothing_enrolled` flag that selected it.
     """
     daemon = composed.daemon
     if daemon is not None:
@@ -279,54 +292,25 @@ def _probe_connectors(
             return enumerated.check_health()
 
         return probe
-    if composed.nothing_enrolled:
-        return lambda: Report(())
     return None
 
 
 def _serve(keychain: KeychainPort, composed: _Composition) -> Callable[[], int] | None:
     """`pm-ai daemon run`, bound to this process's daemon (story 4e).
 
-    Three cases:
+    Two cases:
 
     - **a daemon was composed** — the command targets the application scope,
-      so it acts there and watches every enrolled project;
-    - **nothing is enrolled** (D-4o) — the daemon still runs, acting in pm-ai's
-      own scope and watching no project. Composed when the command runs and not
-      before, so no other command on a fresh machine pays for it;
+      so it acts there and watches every enrolled project. With nothing
+      enrolled (D-4o) that is a daemon watching no project, composed by
+      `_compose` like any other command aimed at no project (story 4o);
     - **anything else** — `None`, and the CLI refuses through
       `require_daemon()`, carrying the composition root's reason.
     """
     daemon = composed.daemon
     if daemon is not None:
         return lambda: serve_daemon(daemon, probes=_status_probes(keychain, daemon))
-    if composed.nothing_enrolled:
-        return lambda: _serve_unenrolled(keychain, composed)
     return None
-
-
-def _serve_unenrolled(keychain: KeychainPort, composed: _Composition) -> int:
-    """The daemon on a machine with no project enrolled: pm-ai's own scope, watching none."""
-    config = composed.config
-    if config.presence is Presence.UNREADABLE:
-        raise DaemonRefused(config_readable(config).detail)
-    try:
-        settings = load_config(config.raw)
-    except ConfigRefused as refused:
-        raise DaemonRefused(str(refused)) from refused
-    try:
-        daemon = build(
-            None,
-            APPLICATION,
-            paths=ScopePaths.production(),
-            keychain=keychain,
-            config=settings,
-        )
-    except (OperationalStoreUnavailable, KeychainUnavailable) as unbuildable:
-        # `OperationalStoreBusy` is an `OperationalStoreUnavailable`. Each
-        # sentence names its own cause; the daemon refuses with it, exit 3.
-        raise DaemonRefused(str(unbuildable)) from unbuildable
-    return serve_daemon(daemon, probes=_status_probes(keychain, daemon))
 
 
 def _status_probes(keychain: KeychainPort, daemon: Daemon) -> Callable[[], Report]:
@@ -381,8 +365,8 @@ class _FirstRun:
     run pays nothing for a command it did not ask for.
 
     The writer is `application_storage`'s rather than `daemon.storage`, because
-    on the machine `setup` exists for there is no daemon: composition stopped
-    at "no project enrolled", which is what step 2 fixes.
+    on the machine `setup` exists for there is no daemon: `setup` has no target,
+    so composition stops at "no project enrolled", which is what step 2 fixes.
     """
 
     def __init__(self, keychain: KeychainPort) -> None:
@@ -917,7 +901,8 @@ class _Composition:
     """Where this invocation acts and how that was chosen (story 4m).
 
     `None` whenever composition stopped before or after selecting — no
-    project enrolled, a registry that could not be read or parsed, a
+    project enrolled for a command with no target or a project target, a
+    registry that could not be read or parsed, a
     `config.toml` that would not load, or `build()` raising — each of which a
     probe already reports. `doctor`'s `project selection` line reads it.
     """
@@ -929,15 +914,10 @@ class _Composition:
     them. `_diagnose` appends `failure` to the report and must not append this —
     `doctor` reporting a fault here is precisely how `doctor` and `setup` came
     to disagree about a machine with nothing wrong with it.
-    """
-    nothing_enrolled: bool = False
-    """No project is enrolled at all, so there is no daemon (story 8k).
 
-    The one no-daemon state that is a first run rather than a failure:
-    `pm-ai connector check` reports an empty list for it and refuses every
-    other reason there is no daemon. Set only when the registry probe says
-    `ABSENT` — no file, or a file with no entries — never for a registry that
-    could not be read or parsed, which is a fault the operator has to fix.
+    Also set, beside the registry probe as `failure`, for a project named on a
+    machine with no project enrolled (story 4o): `require_selection` then says
+    how to enrol rather than only that no daemon could be built.
     """
 
 
@@ -950,11 +930,22 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
     needs no daemon — whatever the folder order chooses, which is what
     `doctor` reports. `_select` decides.
 
-    Never raises for a reason an operator can act on. The four that reach here
-    — an unreadable or unparseable registry, no project enrolled, a root that
-    will not answer, a `config.toml` that will not parse — are reported rather
-    than propagated, because the command most likely to be running is the one
-    asking what is wrong.
+    Never raises for a reason an operator can act on. The three faults that
+    reach here — an unreadable or unparseable registry, a root that will not
+    answer, a `config.toml` that will not parse — are reported rather than
+    propagated, because the command most likely to be running is the one asking
+    what is wrong. An empty registry is not a fault; it is reported the same
+    way, as the registry probe, only for a command that needs a project.
+
+    **No project enrolled stops composition only for a command that needs a
+    project** (story 4o, AD-11). The target is read first: a command aimed at
+    the personal or application scope composes on a daemon that watches no
+    project, and meets the root and `config.toml` checks below exactly as it
+    would on a machine with projects — so a fault there is named as itself,
+    never as "nothing enrolled". "Nothing enrolled" means only what the
+    registry probe calls `ABSENT`, no file or a file with no entries; a
+    registry that could not be read or parsed refuses every daemon-backed
+    command with its own reason, as before.
 
     A fifth outcome is not a failure at all and is carried separately:
     several projects enrolled and a working directory inside none of them. That
@@ -982,13 +973,19 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
         # second probe here could, because it is holding the bytes. Returned as
         # the failure so a refusal from `dispatch` can name the same reason.
         enrolment = registry_readable(registry)
-        return _Composition(
-            None,
-            enrolment,
-            config,
-            registry,
-            nothing_enrolled=enrolment.health is Health.ABSENT,
-        )
+        nothing_enrolled = enrolment.health is Health.ABSENT
+        if not (nothing_enrolled and _aimed_at_no_project(target)):
+            return _Composition(
+                None,
+                enrolment,
+                config,
+                registry,
+                undecided=(
+                    _named_project_refusal(target)
+                    if nothing_enrolled
+                    else None
+                ),
+            )
     selected = _select(projects, target)
     acting = selected.scope
     if acting is None:
@@ -1031,6 +1028,29 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
             config,
             registry,
         )
+    except OperationalStoreUnavailable as unopenable:
+        # Busy (`OperationalStoreBusy` is one) or unpreparable: named by its own
+        # sentence, so the command refuses with exit 3 rather than a traceback.
+        return _Composition(
+            None,
+            Probe(
+                "operational store", Health.FAILING, str(unopenable),
+                "Run the command again once the other pm-ai process has finished; "
+                "if it persists, run `pm-ai doctor`.",
+            ),
+            config,
+            registry,
+        )
+    except KeychainUnavailable as locked:
+        return _Composition(
+            None,
+            Probe(
+                "keychain", Health.FAILING, str(locked),
+                "Unlock the login keychain and run the command again.",
+            ),
+            config,
+            registry,
+        )
     except OSError as unreadable:
         return _Composition(
             None,
@@ -1066,6 +1086,30 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
         # up disagreeing about the same file.
         return _Composition(None, config_readable(config), config, registry)
     return _Composition(daemon, None, config, registry, selection=selected)
+
+
+def _named_project_refusal(target: DataScope | None) -> str | None:
+    """The refusal for a project named on a machine with no project enrolled.
+
+    Its own short sentence rather than `_not_enrolled`'s, which lists the
+    enrolled projects and has none to list. `None` for a command with no target,
+    which `doctor` reports through the registry probe alone.
+    """
+    if target is None or target.project_id is None:
+        return None
+    return (
+        f"{target.project_id} is not an enrolled project: no project is "
+        f"enrolled. Run `pm-ai project add <path>`."
+    )
+
+
+def _aimed_at_no_project(target: DataScope | None) -> bool:
+    """Whether a command's target is the person or pm-ai itself (story 4o).
+
+    `None` is not: a command with no target — `doctor`, `setup`, `project add`
+    — runs the folder order, which on an empty registry has nothing to say.
+    """
+    return target is not None and target.kind is not ScopeKind.PROJECT
 
 
 def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:

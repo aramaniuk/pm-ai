@@ -874,7 +874,7 @@ transcript.
 ## Surfaced by the 4m review (2026-10-08)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4m-project-selection-order.md`
-  summary: **ASSIGNED 2026-10-09 to `4o (pending Andrei)`** — spec written, not built. With no project enrolled at all, commands aimed at the personal or application scope — the personal dashboard, `goal set`, `config show` — are still refused with "enrol a project first".
+  summary: **RESOLVED 2026-10-12 by `4o`** — with nothing enrolled, a command aimed at the person or at pm-ai itself composes on a daemon that watches no project and runs; a command aimed at a project, or with no target, is refused as before; `connector check` lists every enrolled row, built or not, with the reason. Andrei confirmed "run them" on 2026-10-09, renegotiating 4l's nothing-enrolled row for those commands. Was: With no project enrolled at all, commands aimed at the personal or application scope — the personal dashboard, `goal set`, `config show` — are still refused with "enrol a project first".
   evidence: Found by the edge-case reviewer: `_compose` returns the registry failure before it reads the command's target. 4m's intent says such a command is "never refused for want of a project"; 4l's frozen matrix says the nothing-enrolled case is "unchanged: say nothing is enrolled and how to enrol". The two disagree, so it was left for Andrei to decide rather than fixed either way.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4m-project-selection-order.md`

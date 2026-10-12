@@ -519,7 +519,7 @@ def test_a_request_log_that_cannot_be_opened_refuses_the_start(machine, capsys):
     assert "logs" in err
 
 
-def test_a_busy_store_while_composing_the_unenrolled_daemon_refuses_by_name(
+def test_a_busy_store_while_composing_the_daemon_refuses_by_name(
     machine, capsys, monkeypatch
 ):
     from pm_ai.storage.service import OperationalStoreBusy
@@ -643,3 +643,16 @@ def test_uvicorn_still_has_what_the_signal_override_relies_on():
     assert "sockets" in inspect.signature(server.serve).parameters, (
         "uvicorn.Server.serve(sockets=...) is gone; serve() passes its own listener"
     )
+
+
+def test_a_locked_keychain_while_composing_the_daemon_refuses_by_name(
+    machine, capsys, monkeypatch
+):
+    from pm_ai.ports import KeychainUnavailable
+
+    def locked(*args: object, **kwargs: object) -> None:
+        raise KeychainUnavailable("the login keychain is locked")
+
+    monkeypatch.setattr(entry, "build", locked)
+    assert entry.main(["daemon", "run"]) == EXIT_REFUSAL
+    assert "the login keychain is locked" in capsys.readouterr().err
