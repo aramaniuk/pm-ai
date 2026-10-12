@@ -1111,11 +1111,26 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 ## Surfaced by the story-8q review (2026-10-11)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
-  summary: The architecture spine's AD-5 does not state the re-entry rule (a second claim on a path the process already holds is a programming error, never `ArtifactBusy`); only the 8q spec does, and the code's docstrings cite "AD-5 (2026-10-11, story 8q)".
-  evidence: A search of `ARCHITECTURE-SPINE.md` for re-entry finds nothing about claims. The spine changes only through `bmad-architecture`. The rule as built is per thread, not per process, and cannot see asyncio tasks sharing one thread; the spine amendment should say which.
+  summary: The re-entry rule in AD-5 said "one process" and 8q built it per thread.
+  evidence: Resolved 2026-10-12: Andrei kept per thread; AD-5 is amended through `bmad-architecture` and the 8q spec's change log records it. (The original entry said the spine did not state the rule at all; it did, as an item owed by 8q.)
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
   summary: With the default tenant `organizations` (or `common`, `consumers`, or a domain name), the cached-account fallback for a sign-in without `oid` can never succeed, because a cached account's tenant part is always a tenant id.
   evidence: The frozen rule compares the cached tenant part with the row's tenant. A normal work-account sign-in carries `oid`, so no sign-in seen so far reaches the fallback. Whether the fallback should accept the id token's `tid` in place of a tenant word is a product decision for whoever next touches the sign-in.
+
+## Surfaced by the AD-5 re-entry gate (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: A busy refusal says "another pm-ai process" holds the claim even when the holder is another thread of this process; AD-5 now says the message names no process.
+  evidence: The wording is in `pm_ai/platform/claims.py` (`ClaimHeld`), the `ArtifactBusy` message in `pm_ai/storage/service.py`, and the `ClaimReentered` docstring in `pm_ai/domain/claims.py`, which still says "one process" (as does a section header in `tests/architecture/test_storage_capabilities.py`). Reviews: `reviews/review-currency-2026-10-12.md`, `review-rubric-2026-10-12.md`.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: `replace_credential(claimed=True)` trusts the flag and `SealedRefreshTokenStore` keeps its own holder record; AD-5 now makes `holds_claim` the one answer that every `claimed=True` writer checks. `ClaimNotHeld` lives in core while `ClaimReentered` lives in domain.
+  evidence: `pm_ai/core/connector_enrolment.py` `replace_credential` and `pm_ai/app/wiring.py` `SealedRefreshTokenStore.write` (`_holder == thread ident`). Review: `reviews/review-adversarial-2026-10-12.md` finding 3.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: `ClaimReentered` is not retried only because `UNCLASSIFIED_FAULT_IS_RETRYABLE` is `False`; AD-5 now says it is non-retryable by its type, so the harvest catch-alls need a named non-retryable branch for it.
+  evidence: `pm_ai/domain/harvest.py` and the connector/pipeline catch-alls. Review: `reviews/review-rubric-2026-10-12.md` finding 2.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: The Graph health probe runs on a thread `run_bounded` abandons at its timeout, and it takes the `config.json` claim with the keychain fetch inside it; AD-5 now forbids a claim taken by abandonable work and puts the keychain fetch before the claim.
+  evidence: Worked out from the code, not reproduced (`reviews/review-adversarial-2026-10-12.md` finding 2). In the CLI the process exits; in the daemon (`4e`) an abandoned holder would keep `config.json` claimed for the daemon's life.
 
 ## Surfaced by the story-2o review (2026-10-12)
 

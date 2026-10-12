@@ -377,7 +377,7 @@
     it happened. Nothing reads these records yet - that is story 16 - so this
     makes its input honest before it is built on.
     WAVE 2, 2026-10-09: 8m pm-ai connector sign-in <instance> (the interim for AD-39's re-consent Proposal), 8q the sign-in records who signed in (user_id, read by 23c), 8p a result says when the provider answered (HarvestResult.answered_at; AD-9 amended), 8n GitLab commit transport (the harvest was entirely stubbed: no socket, invented row shape, instance derived from the project path), 8o connector add gitlab (probe is one commits request; 403 refuses).
-    WAVE 2, 2026-10-11: 8q also makes a second claim on a path the process already holds a programming error, never ArtifactBusy (AD-5; 8m runs 8q's row update under the claim), and accepts the home_account_id fallback only when its tenant matches the row's.
+    WAVE 2, 2026-10-11: 8q also makes a second claim on a path the same thread already holds a programming error, never ArtifactBusy, while another thread of this process holding it is ArtifactBusy (AD-5, per thread since 2026-10-12; 8m runs 8q's row update under the claim), and accepts the home_account_id fallback only when its tenant matches the row's.
 
 - id: "9"
   title: Passive telemetry radar
