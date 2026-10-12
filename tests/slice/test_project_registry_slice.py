@@ -146,4 +146,4 @@ def test_a_registry_naming_a_vanished_repository_still_composes_but_doctor_says_
 
     assert probe.health is Health.FAILING
     assert "alpha" in probe.detail
-    assert "re-enrol" in probe.remediation.lower()
+    assert "enrol the project afresh" in probe.remediation.lower()

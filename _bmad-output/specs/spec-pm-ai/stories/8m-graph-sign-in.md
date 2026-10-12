@@ -2,7 +2,8 @@
 title: 'pm-ai connector sign-in redoes the Microsoft sign-in for an enrolled Graph connector'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '1dccb6e119dba197db864f99e5383d69f3108f97'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -25,7 +26,7 @@ When Microsoft rotates a connector's token and pm-ai cannot save the new one, wh
 - **It needs a terminal** and an enrolled master key, but no enrolled project, like the other connector commands.
 - **Refused by name before the sign-in, saving nothing:** no connector of that name; a row whose system is missing, not text, or not Graph; a sealed entry recorded under another system; runtime packages missing; no master key. A row switched off (`enabled` false) may still be signed in — the switch governs harvesting, not enrolment.
 - **The sign-in is the one `connector add graph` built:** Microsoft's address and code on screen; a declined, partial or expired sign-in reported by its own reason; then the bounded 10-second health check (CAP-35). Either failing saves nothing. A check that passes with a warning saves, prints the warning, and exits 0.
-- **The signed-in user must be the connector's user.** The sign-in's tenant must match the row's, and the signed-in user must match the user the row records, by 8q's rule (a row with no usable user id accepts any user and records it); either mismatch is refused by name, saving nothing — a different person or tenant is a different connector.
+- **Any authenticated sign-in is accepted** (Andrei, 2026-10-12). Identity and access are Microsoft's to guard: pm-ai compares neither the user nor the tenant, and records the signed-in user's id through 8q's one-key update, replacing whatever was recorded.
 - **The new sign-in replaces this connector's stored one and nothing else**, under the shared credentials lock with the brief wait a rotation write gets; a file still busy after that is refused as busy, by name. An absent entry — none for the name, or no credentials file at all — is written, or the "rotated token had nowhere to go" case would have no remedy.
 - **Credential first, then the row.** Under the same lock the row is updated through 8q's one-key writer, so a category mapping hand-added during the sign-in is kept. If the row write fails after the credential was replaced, the command says exactly that — the sign-in is replaced, the user id was not recorded, re-running records it — and exits 3. The closing message (sign-in replaced; check passed or warned; no restart needed, a running daemon reads the new sign-in on its next refresh) is printed only when both landed.
 - **Every remedy that asks for a new sign-in names `pm-ai connector sign-in <instance>`**: a stale, revoked or never-completed credential, conditional access, a permission granted late, a rotated token that could not be saved, an account that cannot be identified, a request Graph refused twice. "Sign in again", "enrol again" and "pm-ai has no command" no longer appear.
@@ -54,7 +55,7 @@ When Microsoft rotates a connector's token and pm-ai cannot save the new one, wh
 | Health check warns | check passes with a warning | saved; the warning printed; "sign-in replaced; warned" | exit 0 |
 | Credentials file busy | another run holds the lock past the wait | "busy", naming the claim file; untouched | exit 3 |
 | Sealed entry or file absent | row present; no entry for the name, or no credentials file | entry written (file created if needed); "sign-in replaced" | exit 0 |
-| Different user or tenant | the signed-in user differs from the row's recorded one (8q's comparison); or the sign-in's tenant differs from the row's | refused naming the mismatch; untouched | exit 3 |
+| Different user or tenant | the signed-in user differs from the row's recorded one; or the sign-in's tenant differs from the row's | accepted; the new user id recorded | N/A |
 | Row write fails after the credential landed | row directory made unwritable after the sign-in | "sign-in replaced; the user id was not recorded; run the command again to record it"; no closing success line | exit 3 |
 | Remedies name the command | a check on a stale, interactive, declined, abandoned or unsaved-rotation credential; a request refused twice | each remedy contains `pm-ai connector sign-in graph:work`; no "Sign in again", "enrol again" or "has no command" | N/A |
 | Token never on screen | happy path and every refusal | neither the old nor the new token in any output | N/A |
@@ -79,12 +80,12 @@ When Microsoft rotates a connector's token and pm-ai cannot save the new one, wh
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/auth.py`, `client.py` -- every remedy listed, and the 401-twice one, names `pm-ai connector sign-in <instance>` -- the remedies become true
-- [ ] `pm_ai/core/connector_enrolment.py` -- `replace_credential` writes an absent entry or file when told the row exists -- one writer for the sealed file
-- [ ] `pm_ai/app/wiring.py` -- `GraphEnrolment`: read and judge a row with `_graph_connector`'s checks; a replacement that signs in, checks, compares tenant and (through 8q) user, writes the credential then the row through 8q's one-key update under the waited-for claim, and reports a row write that fails after the credential landed -- the connector layer stays behind the composition root
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `sign-in` leaf (application target) and handler -- the command
-- [ ] `tests/slice/test_connector_sign_in.py` -- one test per matrix row through `entry.main`, reusing `Microsoft` and `machine` -- the matrix is the contract
-- [ ] `tests/connectors/test_graph_auth.py`, `test_graph_calendar_fetch.py`, `tests/slice/test_rotated_tokens_are_kept.py` -- one test per credential state (stale, interactive, declined, abandoned, unsaved rotation) and one for the 401-twice walk, each asserting the remedy contains `pm-ai connector sign-in <instance>`; a source scan asserting "Sign in again", "enrol again", "enrolling again" and "has no command" are absent from `pm_ai/connectors/graph/` -- the old wording cannot return
+- [x] `pm_ai/connectors/graph/auth.py`, `client.py` -- every remedy listed, and the 401-twice one, names `pm-ai connector sign-in <instance>` -- the remedies become true
+- [x] `pm_ai/core/connector_enrolment.py` -- `replace_credential` writes an absent entry or file when told the row exists -- one writer for the sealed file
+- [x] `pm_ai/app/wiring.py` -- `GraphEnrolment`: read and judge a row with `_graph_connector`'s checks; a replacement that signs in, checks, writes the credential then the row through 8q's one-key update under the waited-for claim, and reports a row write that fails after the credential landed -- the connector layer stays behind the composition root
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `sign-in` leaf (application target) and handler -- the command
+- [x] `tests/slice/test_connector_sign_in.py` -- one test per matrix row through `entry.main`, reusing `Microsoft` and `machine` -- the matrix is the contract
+- [x] `tests/connectors/test_graph_auth.py`, `test_graph_calendar_fetch.py`, `tests/slice/test_rotated_tokens_are_kept.py` -- one test per credential state (stale, interactive, declined, abandoned, unsaved rotation) and one for the 401-twice walk, each asserting the remedy contains `pm-ai connector sign-in <instance>`; a source scan asserting "Sign in again", "enrol again", "enrolling again" and "has no command" are absent from `pm_ai/connectors/graph/` -- the old wording cannot return
 
 **Acceptance Criteria:**
 - Given a Graph connector whose stored token Microsoft has retired, when `pm-ai connector sign-in graph:work` runs and the sign-in is approved, then `pm-ai connector check` reports it healthy and a fresh composition refreshes from the new token.
@@ -93,7 +94,7 @@ When Microsoft rotates a connector's token and pm-ai cannot save the new one, wh
 
 ## Design Notes
 
-The tenant comparison uses the `tid` claim of the sign-in's id token against the row's `tenant`. Who signed in — the `oid` claim, its `home_account_id` fallback, the blank-as-absent rule — is 8q's and is not restated here.
+Who signed in — the `oid` claim, its `home_account_id` fallback, the blank-as-absent rule — is 8q's and is not restated here.
 
 ## Verification
 
@@ -102,3 +103,18 @@ The tenant comparison uses the `tid` claim of the sign-in's id token against the
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
 - `grep -rn "Sign in again\|enrol again\|enrolling again\|has no command" pm_ai/connectors/graph/` -- expected: no output
+
+## Spec Change Log
+
+- **2026-10-12, frozen block amended by Andrei** (reviewing this slice). The same-user and same-tenant refusals are withdrawn: any authenticated Graph sign-in is valid, identity and access being Microsoft's to guard, and comparing ids protects nothing. The matrix row "Different user or tenant" is now accepted and recorded.
+
+## Suggested Review Order
+
+1. The command: [`_connector_sign_in`](../../../../pm_ai/surfaces/cli/dispatch.py#L1023) and its refusals.
+2. The replacement: [`GraphEnrolment.replace`](../../../../pm_ai/app/wiring.py#L1370) — the row judged by the daemon's own checks ([`_judged_graph_row`](../../../../pm_ai/app/wiring.py#L878)), the sign-in, then under the waited-for claim the row judged again, the credential written, and the user id recorded; any authenticated account is accepted (Andrei, 2026-10-12).
+3. Writing a credential for a row that has none: [`assert_replaceable`](../../../../pm_ai/core/connector_enrolment.py#L354), [`replace_credential`](../../../../pm_ai/core/connector_enrolment.py#L525) with `configured=True`, [`connector_row`](../../../../pm_ai/core/connector_enrolment.py#L686).
+4. A refresh racing a sign-in: [`_rotate`](../../../../pm_ai/connectors/graph/auth.py#L1510) writes back only if the store still holds the token it refreshed from.
+5. Every remedy names the command: [`_redo_sign_in`](../../../../pm_ai/connectors/graph/auth.py#L514); tenant words accepted in any case in [`tenant_refusal`](../../../../pm_ai/connectors/graph/auth.py#L696).
+6. With no daemon, the encryption-off warning: [`warn_if_encryption_disabled`](../../../../pm_ai/app/wiring.py#L582).
+7. Tests: `tests/slice/test_connector_sign_in.py` (one per matrix row, plus the mid-sign-in edits and the refresh race).
+

@@ -28,6 +28,7 @@ from pm_ai.connectors.graph import (
     TENANT_KEY,
     USER_ID_KEY,
     WIDTH_KEY,
+    CategoryScopes,
     GraphConnector,
     MissingGraphSetting,
     UnknownProject,
@@ -46,7 +47,11 @@ from pm_ai.connectors.graph.auth import (
     require_msal,
     tenant_refusal,
 )
-from pm_ai.connectors.graph.calendar import HARVEST_CYCLE, GraphCalendarFetch
+from pm_ai.connectors.graph.calendar import (
+    HARVEST_CYCLE,
+    GraphCalendarFetch,
+    WindowPolicy,
+)
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.connectors.probe import CREDENTIAL_PROBE_SECONDS
 from pm_ai.connectors.registry import run_bounded
@@ -63,9 +68,19 @@ from pm_ai.core.project_registry import (
 )
 from pm_ai.core.project_scaffold import render_gitignore
 from pm_ai.core.connector_enrolment import (
+    CONNECTORS,
     CREDENTIAL_STORE,
+    ConnectorNotConfigured,
+    ConnectorRowChanged,
     CredentialNotHeld,
+    CredentialStoreUnclaimable,
+    MalformedSettings,
+    NotAGraphRow,
+    UserNotRecorded,
+    assert_replaceable,
+    connector_row,
     credential_for,
+    record_user_id,
     redacted,
     replace_credential,
     stored_credentials,
@@ -103,6 +118,7 @@ __all__ = [
     "CONFIG_ARTIFACT",
     "Daemon",
     "GraphEnrolment",
+    "GraphSignInReplaced",
     "GraphSignedIn",
     "MASTER_KEY_NAME",
     "REGISTRY_ARTIFACT",
@@ -111,6 +127,7 @@ __all__ = [
     "build",
     "onboard_project",
     "Onboarded",
+    "warn_if_encryption_disabled",
 ]
 
 REGISTRY_ARTIFACT = "projects.toml"
@@ -562,6 +579,12 @@ def _writer(
     return storage
 
 
+def warn_if_encryption_disabled() -> None:
+    """`build()`'s console warning, for a writer composed without a daemon (story 8m)."""
+    if encryption_off():
+        _warn_disabled_encryption()
+
+
 def _warn_disabled_encryption() -> None:
     """The console half: whoever is running pm-ai now, on every command.
 
@@ -816,7 +839,7 @@ def _enrolment_scope(
         f"it is not one of the enrolled projects' connectors "
         f"({', '.join(sorted(scopes)) or 'none'}), and this daemon watches "
         f"{len(scopes)} projects — so nothing says which project's tree its "
-        f"harvest belongs in. Re-enrol it under the instance name of the "
+        f"harvest belongs in. Enrol it afresh under the instance name of the "
         f"project it covers, or remove the row.",
     )
     return None
@@ -831,6 +854,99 @@ def _unplaced(instance: str, reason: str) -> None:
     print(
         f"WARNING: the enrolled connector {instance!r} was not built — {reason}",
         file=sys.stderr,
+    )
+
+
+class _RowRefused(Exception):
+    """A Graph row that would not build a connector, with the sentence naming the key."""
+
+
+@dataclass(frozen=True)
+class _JudgedGraphRow:
+    """What `_judged_graph_row` read off a Graph row that would build."""
+
+    client_id: str
+    tenant: str | None
+    """The row's own tenant, trimmed, or `None` for the adapter's default."""
+    policy: WindowPolicy
+    width: int
+    reach_back: int
+    categories: CategoryScopes | None
+    """`None` when the caller did not ask for them (no `registered`)."""
+
+
+def _judged_graph_row(
+    entry: Mapping[str, object],
+    *,
+    registered: Callable[[str], bool] | None = None,
+) -> _JudgedGraphRow:
+    """The checks a start applies to one Graph row, or `_RowRefused` naming the key.
+
+    One place for them, applied at every start by `_graph_connector` and before
+    the sign-in by `pm-ai connector sign-in` (story 8m): the app id present,
+    both harvest widths present and valid, the category mapping when
+    `registered` is given, and a named tenant well-formed. A sign-in judges no
+    categories — it writes no mapping, keeps the row's as it is, and runs on a
+    machine with no project enrolled, where every mapping would name an unknown
+    project.
+    """
+    client_id = entry.get(CLIENT_ID_KEY)
+    if not isinstance(client_id, str) or not client_id.strip():
+        raise _RowRefused(f"it carries no usable {CLIENT_ID_KEY!r}. {_CLIENT_ID_REASON}")
+    try:
+        policy = graph_window_policy(entry)
+        categories = (
+            None
+            if registered is None
+            else graph_category_scopes(entry, registered=registered)
+        )
+    except (MissingGraphSetting, UnknownProject, ValueError) as refused:
+        # The refusals this row is *expected* to produce, each of which composed
+        # a sentence naming what to change. `ValueError` is
+        # `WindowPolicy.__post_init__`'s: CAP-2's 240-minute floor, and a
+        # reach-back shorter than the width every later run covers anyway.
+        raise _RowRefused(str(refused)) from None
+    except Exception as unexpected:  # noqa: BLE001 — `build()` composes regardless
+        # And everything else, for the reason the rest of this module swallows:
+        # the row is plaintext and hand-editable, and no hand edit may stop
+        # `build()` composing — `pm-ai doctor` is the command that diagnoses a
+        # bad row, and it cannot run if the daemon will not compose. The live
+        # instance was `OverflowError` from an absurd minute count, which is
+        # bounded in `_minutes` now; this clause is what stops the next one
+        # being found the same way. The **type** and not just the message,
+        # because an unclassified fault's message rarely says what file it is
+        # about.
+        raise _RowRefused(
+            f"reading it raised {type(unexpected).__name__}: {unexpected}. That "
+            f"is a row pm-ai could not classify rather than a setting it can "
+            f"name — report it."
+        ) from None
+
+    tenant = entry.get(TENANT_KEY)
+    named_tenant = tenant.strip() if isinstance(tenant, str) and tenant.strip() else None
+    if named_tenant is not None:
+        # The check `pm-ai connector add graph` applies to the typed answer
+        # (story 8l), applied to the row as well: the value becomes the last
+        # segment of the sign-in address, so a hand edit holding a space or a
+        # `/` would ask somewhere else.
+        unusable = tenant_refusal(named_tenant)
+        if unusable is not None:
+            raise _RowRefused(f"its {TENANT_KEY!r} cannot be used: {unusable}")
+    width, reach_back = entry.get(WIDTH_KEY), entry.get(REACH_BACK_KEY)
+    if not isinstance(width, int) or not isinstance(reach_back, int):
+        # Unreachable: `graph_window_policy` accepted both as whole minutes.
+        # Said rather than asserted, so `python -O` cannot remove it.
+        raise _RowRefused(
+            f"its {WIDTH_KEY!r} and {REACH_BACK_KEY!r} passed the window check and "
+            f"are not whole numbers, which is a fault in pm-ai — report it."
+        )
+    return _JudgedGraphRow(
+        client_id=client_id.strip(),
+        tenant=named_tenant,
+        policy=policy,
+        width=width,
+        reach_back=reach_back,
+        categories=categories,
     )
 
 
@@ -869,52 +985,28 @@ def _graph_connector(
     Returns `None` rather than raising, because `build()` must compose on a
     misconfigured machine — that is the whole reason the diagnostics can run at
     all.
+
+    The row's checks are `_judged_graph_row`'s, which `pm-ai connector sign-in`
+    applies before its sign-in (story 8m), so the two cannot disagree about
+    whether a row would build.
     """
-    client_id = entry.get(CLIENT_ID_KEY)
-    if not isinstance(client_id, str) or not client_id.strip():
-        _unbuilt(instance, f"it carries no usable {CLIENT_ID_KEY!r}. {_CLIENT_ID_REASON}")
-        return None
     try:
-        policy = graph_window_policy(entry)
-        categories = graph_category_scopes(entry, registered=registered)
-    except (MissingGraphSetting, UnknownProject, ValueError) as refused:
-        # The refusals this row is *expected* to produce, each of which composed
-        # a sentence naming what to change. `ValueError` is
-        # `WindowPolicy.__post_init__`'s: CAP-2's 240-minute floor, and a
-        # reach-back shorter than the width every later run covers anyway.
+        judged = _judged_graph_row(entry, registered=registered)
+    except _RowRefused as refused:
         _unbuilt(instance, str(refused))
         return None
-    except Exception as unexpected:  # noqa: BLE001 — `build()` composes regardless
-        # And everything else, for the reason the rest of this module swallows:
-        # the row is plaintext and hand-editable, and no hand edit may stop
-        # `build()` composing — `pm-ai doctor` is the command that diagnoses a
-        # bad row, and it cannot run if the daemon will not compose. The live
-        # instance was `OverflowError` from an absurd minute count, which is
-        # bounded in `_minutes` now; this clause is what stops the next one
-        # being found the same way. The **type** and not just the message,
-        # because an unclassified fault's message rarely says what file it is
-        # about.
+    client_id, named_tenant, policy = judged.client_id, judged.tenant, judged.policy
+    categories = judged.categories
+    if categories is None:
+        # Unreachable: judged with `registered`, so the mapping was read. Said
+        # rather than asserted, so `python -O` cannot remove it.
         _unbuilt(
             instance,
-            f"reading it raised {type(unexpected).__name__}: {unexpected}. That "
-            f"is a row pm-ai could not classify rather than a setting it can "
-            f"name — report it.",
+            "its category mapping was not read, which is a fault in pm-ai — report it.",
         )
         return None
-
-    tenant = entry.get(TENANT_KEY)
-    named_tenant = tenant.strip() if isinstance(tenant, str) and tenant.strip() else None
-    if named_tenant is not None:
-        # The check `pm-ai connector add graph` applies to the typed answer
-        # (story 8l), applied to the row as well: the value becomes the last
-        # segment of the sign-in address, so a hand edit holding a space or a
-        # `/` would ask somewhere else.
-        unusable = tenant_refusal(named_tenant)
-        if unusable is not None:
-            _unbuilt(instance, f"its {TENANT_KEY!r} cannot be used: {unusable}")
-            return None
     auth = GraphDeviceCodeAuth(
-        client_id=client_id.strip(),
+        client_id=client_id,
         # The fifth setting, and the one that *is* defaulted — to the adapter's
         # own value, read off the field rather than copied. A literal here would
         # be a second place `organizations` is decided, and the two would agree
@@ -973,6 +1065,24 @@ class GraphSignedIn:
     answer: str
     healthy: bool
     settings: Mapping[str, object]
+    secrets: frozenset[str] = field(default=frozenset(), repr=False)
+    """Every refresh token the sign-in and its check saw (story 8m).
+
+    For redacting a message composed later — from a failed write, say — the
+    way the check's own sentences already are.
+    """
+
+
+@dataclass(frozen=True)
+class GraphSignInReplaced:
+    """What `pm-ai connector sign-in` replaced (story 8m): no credential, ever.
+
+    The health check's sentence, redacted, and whether it answered `OK` or
+    only warned. The new sign-in itself stays in the sealed store.
+    """
+
+    answer: str
+    healthy: bool
 
 
 @dataclass(frozen=True)
@@ -997,6 +1107,11 @@ class GraphEnrolment:
     refusing the app id or tenant, a declined, partial or expired sign-in, a
     failed check, a missing `msal`. Each carries the adapter's own sentence,
     with every refresh token this sign-in saw withheld from it.
+
+    `pm-ai connector sign-in` (story 8m) uses the same sign-in for a connector
+    already enrolled: `enrolled` judges its row before anything is asked, and
+    `replace` signs in with the row's app id and tenant, checks the result, and
+    replaces that connector's stored sign-in and nothing else.
     """
 
     storage: StorageService
@@ -1007,6 +1122,20 @@ class GraphEnrolment:
     """The bound on each step nobody is acting on: asking for a code, and the check."""
 
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    claim_sleep: Callable[[float], None] = time.sleep
+    """How `replace` waits between tries for the credentials file's claim.
+
+    The wait itself is `SealedRefreshTokenStore`'s — the one wait a rotation
+    write gets (AD-5) — and this is only its sleep, injectable for a test.
+    """
+
+    announce: Callable[[], None] = lambda: None
+    """Said once before a sign-in touches the sealed store (story 8m).
+
+    The composition root passes `warn_if_encryption_disabled` when it built no
+    daemon: `build()` prints that warning, and with no daemon nothing else did.
+    """
 
     @property
     def minimum_window_minutes(self) -> int:
@@ -1187,10 +1316,10 @@ class GraphEnrolment:
         # credential that does not decode is its own failure and is not folded
         # into that one: it propagates as the adapter's refusal.
         try:
-            user_id = SealedCredential.decode(credential).user_id
+            user_id = SealedCredential.decode(credential, instance=instance).user_id
         except GraphAuthError as undecodable:
             raise ProbeFailed(_nothing_saved(str(undecodable))) from undecodable
-        if user_id is None:
+        if user_id is None or not user_id.strip():
             raise ProbeFailed(
                 "the sign-in completed and the credential it left does not name "
                 "the signed-in user's Graph user id, which is a fault in pm-ai "
@@ -1210,7 +1339,239 @@ class GraphEnrolment:
                 REACH_BACK_KEY: reach_back,
                 USER_ID_KEY: user_id,
             },
+            secrets=frozenset(secrets),
         )
+
+
+    # ── `pm-ai connector sign-in` (story 8m) ─────────────────────────────────
+
+    def enrolled(self, instance: str) -> None:
+        """Refuse, before anything is asked, an instance a new sign-in cannot replace.
+
+        In the order an operator can act on: a name that cannot be a row
+        (`MalformedInstanceName`); no row of that name
+        (`ConnectorNotConfigured`); a row that is not JSON or not an object
+        (`MalformedSettings`); a row whose `system` is missing, not text or not
+        `graph` (`NotAGraphRow`); a row that would not build — the checks every
+        start applies — (`MalformedSettings`, naming the key); then the sealed
+        store, whose entry under another system is `CredentialNotHeld`, whose
+        malformed document is `MalformedSettings` naming `config.json`, and
+        whose master key, fetched here, is `KeyNotFound` on a machine with
+        none. An `enabled` switched off is not refused: it governs harvesting,
+        not enrolment. Nothing is written.
+
+        `announce` runs first: with no daemon, nothing else said that
+        encryption is off.
+        """
+        self.announce()
+        self._judged_row(instance)
+        assert_replaceable(self.storage, system="graph", instance=instance)
+
+    def replace(
+        self, *, instance: str, present: Callable[[str], None]
+    ) -> GraphSignInReplaced:
+        """Redo `instance`'s sign-in and replace its stored one, and nothing else.
+
+        The row is read and judged once, and its app id, tenant and widths are
+        what is signed in with, through `sign_in`'s bounded steps and its
+        health check. Any authenticated account is accepted (Andrei,
+        2026-10-12): identity and access are Microsoft's to guard, so neither
+        the user nor the tenant is compared with what the row recorded.
+
+        Then, under the credentials file's claim with the wait a rotation write
+        gets, the row is read and judged **again**: a row removed, switched to
+        another system, or naming another app id, tenant or width than the
+        sign-in used is refused (`ConnectorRowChanged` names what changed) —
+        that is about the settings the sign-in was made with. Only then is the
+        credential replaced — written when the entry or the file is absent —
+        and the row's `user_id` set to the signed-in user through
+        `record_user_id`, which replaces whatever was recorded and keeps every
+        other key, a `categories` mapping hand-added during the sign-in
+        included.
+
+        A file still busy after the wait is `ArtifactBusy`; one whose claim
+        cannot be taken at all is `CredentialStoreUnclaimable`; both name
+        `config.json` and write nothing. A row write that fails after the
+        credential landed is `UserNotRecorded`, carrying the check's answer.
+        Every message composed here from another exception is redacted against
+        the refresh tokens the sign-in saw.
+        """
+        judged = self._judged_row(instance)
+        signed = self.sign_in(
+            instance=instance,
+            client_id=judged.client_id,
+            tenant=judged.tenant or "",
+            width=judged.width,
+            reach_back=judged.reach_back,
+            present=present,
+        )
+
+        def withheld(text: str, instead: str) -> str:
+            for secret in signed.secrets:
+                text = redacted(text, secret, instead=instead)
+            return text
+
+        user_id = signed.settings.get(USER_ID_KEY)
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ProbeFailed(
+                "the sign-in completed and does not name the signed-in user's "
+                "Graph user id, which is a fault in pm-ai rather than anything "
+                "Microsoft said. Nothing was saved."
+            )
+
+        store = SealedRefreshTokenStore(
+            storage=self.storage, instance=instance, system="graph", sleep=self.claim_sleep
+        )
+        untouched = f"The new sign-in was not saved and {instance}'s stored one is untouched."
+        try:
+            with store.exclusive():
+                self._assert_unchanged(instance, judged)
+                replace_credential(
+                    self.storage,
+                    system="graph",
+                    instance=instance,
+                    credential=signed.credential,
+                    claimed=True,
+                    configured=True,
+                )
+                try:
+                    record_user_id(
+                        self.storage, instance=instance, user_id=user_id, claimed=True
+                    )
+                except Exception as unwritten:  # noqa: BLE001 — reported, never silent
+                    raise UserNotRecorded(
+                        withheld(
+                            _joined(
+                                f"{instance}: sign-in replaced; the user id was not "
+                                f"recorded — writing {CONNECTORS}{instance}.json "
+                                f"failed ({type(unwritten).__name__}: {unwritten})",
+                                "The new sign-in is the one in use from now on",
+                                f"Run `pm-ai connector sign-in {instance}` again to "
+                                f"record the user id",
+                            ),
+                            instead=(
+                                f"{instance}: sign-in replaced; the user id was not "
+                                f"recorded — writing {CONNECTORS}{instance}.json "
+                                f"failed, and its message is withheld because it "
+                                f"quoted the sign-in token. Run `pm-ai connector "
+                                f"sign-in {instance}` again to record the user id."
+                            ),
+                        ),
+                        answer=signed.answer,
+                    ) from unwritten
+        except StoreBusy as busy:
+            raise ArtifactBusy(
+                withheld(
+                    _joined(
+                        f"the credentials file {CREDENTIAL_STORE} was busy past the "
+                        f"wait: {busy}",
+                        untouched,
+                    ),
+                    instead=f"the credentials file {CREDENTIAL_STORE} was busy past "
+                    f"the wait. {untouched}",
+                )
+            ) from None
+        except StoreUnavailable as unavailable:
+            raise CredentialStoreUnclaimable(
+                withheld(
+                    _joined(
+                        f"the claim on the credentials file {CREDENTIAL_STORE} could "
+                        f"not be taken — this is not another command holding it: "
+                        f"{unavailable}",
+                        untouched,
+                    ),
+                    instead=f"the claim on the credentials file {CREDENTIAL_STORE} "
+                    f"could not be taken. {untouched}",
+                )
+            ) from None
+        return GraphSignInReplaced(answer=signed.answer, healthy=signed.healthy)
+
+    def _row(self, instance: str) -> dict[str, object]:
+        """`instance`'s row, with a missing or malformed one worded for a sign-in."""
+        try:
+            return connector_row(
+                self.storage, instance=instance, purpose="its sign-in redone"
+            )
+        except ConnectorNotConfigured:
+            raise ConnectorNotConfigured(
+                f"no connector named {instance!r} is configured — {CONNECTORS} has "
+                f"no row for it — so there is no sign-in to redo. Nothing was "
+                f"asked and nothing was saved."
+            ) from None
+        except MalformedSettings as malformed:
+            raise MalformedSettings(
+                f"{_sentence(str(malformed).removesuffix(' Nothing was written.'))} "
+                f"Nothing was asked and nothing was saved."
+            ) from None
+
+    def _judged_row(self, instance: str) -> _JudgedGraphRow:
+        """`instance`'s row, judged by every start's checks, or the refusal naming why."""
+        row = self._row(instance)
+        system = row.get("system")
+        if system is None:
+            reason = "names no `system`"
+        elif not isinstance(system, str):
+            reason = f"has a `system` that is a {type(system).__name__}, not text"
+        elif system != "graph":
+            reason = f"is configured as a {system!r} connector, not a Graph one"
+        else:
+            reason = None
+        if reason is not None:
+            raise NotAGraphRow(
+                f"the row for {instance!r} in {CONNECTORS} {reason}, so there is no "
+                f"Microsoft sign-in to redo. Nothing was asked and nothing was "
+                f"saved."
+            )
+        try:
+            return _judged_graph_row(row)
+        except _RowRefused as refused:
+            raise MalformedSettings(
+                f"the row for {instance!r} in {CONNECTORS} would not build a "
+                f"connector: {_sentence(str(refused))} Nothing was asked and "
+                f"nothing was saved."
+            ) from None
+
+    def _assert_unchanged(self, instance: str, signed_with: _JudgedGraphRow) -> None:
+        """Refuse when the row no longer says what the sign-in was made with."""
+        try:
+            now = self._judged_row(instance)
+        except (ConnectorNotConfigured, NotAGraphRow, MalformedSettings) as changed:
+            raise ConnectorRowChanged(
+                f"the row for {instance!r} changed during the sign-in: "
+                f"{_sentence(str(changed).removesuffix(' Nothing was asked and nothing was saved.'))} "
+                f"The sign-in was not saved and {instance}'s stored one is "
+                f"untouched."
+            ) from None
+        differs = [
+            f"{key} {before!r} is now {after!r}"
+            for key, before, after in (
+                (CLIENT_ID_KEY, signed_with.client_id, now.client_id),
+                (TENANT_KEY, signed_with.tenant, now.tenant),
+                (WIDTH_KEY, signed_with.width, now.width),
+                (REACH_BACK_KEY, signed_with.reach_back, now.reach_back),
+            )
+            if before != after
+        ]
+        if differs:
+            raise ConnectorRowChanged(
+                f"the row for {instance!r} changed during the sign-in — "
+                f"{'; '.join(differs)} — so a sign-in made with the earlier "
+                f"settings was not saved and {instance}'s stored one is "
+                f"untouched. Run `pm-ai connector sign-in {instance}` again."
+            )
+
+
+def _sentence(text: str) -> str:
+    """`text` as a whole sentence, ending in one full stop or other end mark."""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    return stripped if stripped[-1] in ".!?" else f"{stripped}."
+
+
+def _joined(*parts: str) -> str:
+    """Sentences joined with one space, each ended once, so none run together."""
+    return " ".join(sentence for sentence in map(_sentence, parts) if sentence)
 
 
 def _refresh_token(credential: str | None) -> str | None:

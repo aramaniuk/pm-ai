@@ -128,7 +128,7 @@ GRAPH_RESOURCE_SCOPES = frozenset(
 Not for this wave — four of these belong to 33d and two to 33e, and none is
 called in wave 1. They are declared here because consent happens **once**, at
 enrolment, and the partial-consent rule below turns a scope added later into a
-forced re-enrolment rather than a degradation. One consent, asked for once.
+a forced new sign-in rather than a degradation. One consent, asked for once.
 
 The cost is real and accepted: an app registration must carry all seven before
 anyone can enrol at all.
@@ -164,7 +164,7 @@ CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 """How far this machine's clock may sit from the provider's before it is reported.
 
 Skew is its own state, not a stale credential: the remedy is fixing the clock,
-and telling the PM to sign in again would send them in a circle. Measured only
+and telling the PM to redo the sign-in would send them in a circle. Measured only
 when the provider actually hands over a timestamp to compare against — an
 unmeasured skew is reported as nothing at all rather than as zero.
 """
@@ -191,7 +191,7 @@ class CredentialStale(GraphAuthError):
 
     The remedy is a fresh interactive sign-in. Deliberately distinct from
     `GraphUnreachable`, which needs waiting, and from `InteractionRequired`,
-    which needs a sign-in for a reason re-enrolment does not fix on its own.
+    which needs a sign-in for a reason a fresh token alone does not fix.
 
     Also raised when nothing has been enrolled at all. The two states are
     different facts and the *health probe* keeps them apart — `ABSENT` versus
@@ -224,8 +224,8 @@ class GraphUnreachable(GraphAuthError):
 
     Unknown is not a verdict — the reading `ProbeUnreachable`,
     `KeychainUnavailable` and `VcsUnavailable` all take. Reporting an
-    unreachable network as a stale credential sends the PM to re-enrol a token
-    that is perfectly good.
+    unreachable network as a stale credential sends the PM to redo the sign-in
+    for a token that is perfectly good.
     """
 
 
@@ -382,39 +382,48 @@ class SealedCredential:
         )
 
     @classmethod
-    def decode(cls, raw: str) -> SealedCredential:
+    def decode(cls, raw: str, *, instance: str | None = None) -> SealedCredential:
         """Read one back, refusing anything that is not one.
 
         `CredentialStale` for every malformed shape, and deliberately not a
         `ValueError` or a `json.JSONDecodeError`: what a caller can do about a
         credential it cannot interpret is exactly what it can do about one the
         provider rejected, and the refusal must not quote the bytes it failed on.
+
+        `instance` names the connector, so the refusal names the command that
+        redoes its sign-in (story 8m); a caller that has none gets the command
+        without an instance.
         """
+        redo = (
+            f"The sign-in has to be redone: run {_sign_in_command(instance)}."
+            if instance
+            else "The sign-in has to be redone with `pm-ai connector sign-in` for "
+            "this connector."
+        )
         try:
             document = json.loads(raw)
         except (TypeError, ValueError):
             raise CredentialStale(
                 "the sealed Graph credential is not the document this adapter "
-                "writes, so it cannot be used to refresh anything. Enrol the "
-                "Graph connector again."
+                f"writes, so it cannot be used to refresh anything. {redo}"
             ) from None
         if not isinstance(document, dict):
             raise CredentialStale(
-                "the sealed Graph credential decoded to something that is not an "
-                "object. Enrol the Graph connector again."
+                f"the sealed Graph credential decoded to something that is not an "
+                f"object. {redo}"
             )
         token = document.get("refresh_token")
         account = document.get("home_account_id")
         if not isinstance(token, str) or not token:
             raise CredentialStale(
                 "the sealed Graph credential carries no refresh token, so there "
-                "is nothing to refresh from. Enrol the Graph connector again."
+                f"is nothing to refresh from. {redo}"
             )
         if not isinstance(account, str) or not account:
             raise CredentialStale(
                 "the sealed Graph credential does not say which account it "
                 "belongs to, so the enrolled account cannot be identified among "
-                "MSAL's cached ones. Enrol the Graph connector again."
+                f"MSAL's cached ones. {redo}"
             )
         return cls(refresh_token=token, home_account_id=account)
 
@@ -497,12 +506,18 @@ _CUSTODY_REMEDY = (
     "not the same as bad."
 )
 
-_REDO_SIGN_IN = (
-    "The stored sign-in has to be redone: Microsoft has retired the token this "
-    "machine holds, and the replacement it issued was not saved. pm-ai has no "
-    "command yet that redoes the sign-in for a connector that is already "
-    "enrolled."
-)
+def _sign_in_command(instance: str) -> str:
+    """The command that redoes `instance`'s sign-in, as an operator types it (story 8m)."""
+    return f"`pm-ai connector sign-in {instance}`"
+
+
+def _redo_sign_in(instance: str) -> str:
+    """The remedy for a rotated token that could not be saved, naming the command."""
+    return (
+        f"The stored sign-in has to be redone: Microsoft has retired the token "
+        f"this machine holds, and the replacement it issued was not saved. Run "
+        f"{_sign_in_command(instance)} to redo it."
+    )
 
 
 def _sentence(text: str) -> str:
@@ -560,8 +575,8 @@ class — an operator told to report a bug for a rate limit.
 _APP_REGISTRATION = frozenset({"unauthorized_client"})
 """The app registration is wrong, which is nobody's credential.
 
-`unauthorized_client` used to sit in `_STALE`, which produced "Sign in again;
-this is the credential, not the network" for a registration that does not permit
+`unauthorized_client` used to sit in `_STALE`, which told the operator to redo
+the sign-in ("this is the credential, not the network") for a registration that does not permit
 the device-code grant at all — the misdiagnosis class this slice exists to
 prevent, since no number of sign-ins fixes it. It is not one of the five auth
 states for the same reason the missing-`msal` refusal is not: the remedy is on
@@ -685,9 +700,11 @@ def tenant_refusal(tenant: str) -> str | None:
     anything else — a space, a `/`, a whole URL — would ask some other address.
     Three shapes are accepted: a tenant id (a GUID), a domain such as
     `contoso.onmicrosoft.com`, or one of Microsoft's own words,
-    `organizations`, `common` and `consumers`.
+    `organizations`, `common` and `consumers` in any case.
     """
-    if tenant in _TENANT_WORDS or _TENANT_GUID.fullmatch(tenant):
+    # The words are matched ignoring case, as Microsoft matches them; the value
+    # is kept as typed.
+    if tenant.casefold() in _TENANT_WORDS or _TENANT_GUID.fullmatch(tenant):
         return None
     labels = tenant.split(".")
     if (
@@ -763,6 +780,14 @@ class GraphDeviceCodeAuth:
     _access_token: str | None = field(default=None, init=False, repr=False)
     _expires_at: datetime | None = field(default=None, init=False, repr=False)
     _skew: timedelta | None = field(default=None, init=False, repr=False)
+    _lineage: str | None = field(default=None, init=False, repr=False)
+    """The refresh token this object last redeemed or was issued (story 8m).
+
+    MSAL's in-process cache holds the refresh token of *that* lineage. When the
+    store holds a different one — `pm-ai connector sign-in` replaced it, or
+    another run rotated it — the cache is not asked: it would refresh the old
+    lineage, which the new sign-in exists to leave behind.
+    """
 
     # ── The port ─────────────────────────────────────────────────────────────
 
@@ -825,7 +850,9 @@ class GraphDeviceCodeAuth:
                 f"the sign-in returned an access token and no refresh token, so "
                 f"{OFFLINE_ACCESS!r} was not granted. Without it pm-ai would "
                 f"have to prompt for a sign-in every hour, which is not a "
-                f"connector. Grant it on the app registration and enrol again."
+                f"connector. Grant it on the app registration, then run "
+                f"{_sign_in_command(self.instance)} — or, for a connector not "
+                f"added yet, `pm-ai connector add graph {self.instance}`."
             )
         if not isinstance(refresh_token, str) or not refresh_token.strip():
             # Truthy and not a string — a list, a number, a nested object. Sealed
@@ -849,6 +876,7 @@ class GraphDeviceCodeAuth:
         self._adopt(result)
         with self.store.exclusive():
             self.store.write(credential)
+        self._lineage = refresh_token
         return credential
 
     def access_token(self, *, force_refresh: bool = False) -> str:
@@ -907,7 +935,28 @@ class GraphDeviceCodeAuth:
             # leaves the file alone, and a claim taken for nothing is a claim
             # another run can be refused over.
             with self._claimed(rotated=True):
-                self._rotate(sealed, result)
+                superseded = self._superseding(sealed)
+                if superseded is None:
+                    self._rotate(sealed, result)
+            if superseded is not None:
+                # Compare-and-set lost (story 8m): the store no longer holds the
+                # token this refresh started from — `pm-ai connector sign-in`
+                # replaced it, or another run rotated it, while this request was
+                # in flight. Writing this lineage's successor would overwrite
+                # theirs, so it is dropped, and the stored one is used instead.
+                sealed = superseded
+                result = self._redeem(app, sealed)
+                if "error" in result:
+                    self._refuse(
+                        result,
+                        during="refreshing the Graph credential",
+                        secret=sealed.refresh_token,
+                    )
+                if self._replacement(sealed, result) is not None:
+                    with self._claimed(rotated=True):
+                        if self._superseding(sealed) is None:
+                            self._rotate(sealed, result)
+        self._lineage = self._replacement(sealed, result) or sealed.refresh_token
         self._assert_granted(result)
         return self._adopt(result)
 
@@ -918,10 +967,10 @@ class GraphDeviceCodeAuth:
         wrong and three of them are not "the credential is bad":
 
         - `ABSENT` — nothing enrolled. A fresh install, not a broken machine.
-        - `FAILING`, stale — sign in again.
-        - `FAILING`, interaction required — sign in again *interactively*,
-          because a conditional-access challenge needs a human and a re-enrolment
-          alone will not necessarily clear it.
+        - `FAILING`, stale — redo the sign-in, `pm-ai connector sign-in
+          <instance>` (story 8m).
+        - `FAILING`, interaction required — the same command, because a
+          conditional-access challenge needs a human at an interactive sign-in.
         - `FAILING`, unreachable — wait, or look at the network. Telling an
           operator to re-issue a good token here sends them in a circle.
 
@@ -964,7 +1013,9 @@ class GraphDeviceCodeAuth:
                 Health.ABSENT,
                 f"no Microsoft credential is stored for {self.instance}",
                 f"Enrol one with `pm-ai connector add graph {self.instance}` and "
-                f"complete the sign-in it prints. Harvests are skipped until "
+                f"complete the sign-in it prints — or, when {self.instance} is "
+                f"already configured in connectors/, run "
+                f"{_sign_in_command(self.instance)}. Harvests are skipped until "
                 f"then, which is a setup step outstanding rather than a fault.",
             )
         try:
@@ -979,27 +1030,30 @@ class GraphDeviceCodeAuth:
                 self.instance,
                 Health.FAILING,
                 f"{self.instance}'s stored credential is stale: {stale}",
-                "Sign in again — the credential expired or was revoked. This is "
-                "not a network problem and waiting will not clear it.",
+                f"Run {_sign_in_command(self.instance)} — the credential expired "
+                f"or was revoked. This is not a network problem and waiting will "
+                f"not clear it.",
             )
         except InteractionRequired as challenge:
             return Probe(
                 self.instance,
                 Health.FAILING,
                 f"{self.instance} needs an interactive sign-in: {challenge}",
-                "Conditional access wants a human — complete the challenge (MFA, "
-                "a compliant device) by enrolling again. Neither waiting nor a "
-                "silent refresh clears this one.",
+                f"Conditional access wants a human — run "
+                f"{_sign_in_command(self.instance)} and complete the challenge "
+                f"(MFA, a compliant device) in the browser. Neither waiting nor a "
+                f"silent refresh clears this one.",
             )
         except AuthDeclined as declined:
             return Probe(
                 self.instance,
                 Health.FAILING,
                 f"{self.instance} does not hold every permission it declares: {declined}",
-                "Grant the missing permission on the app registration, then "
-                "enrol again. pm-ai refuses rather than running with part of the "
-                "set, because a connector that works for some resources and 403s "
-                "on others reports coverage it does not have.",
+                f"Grant the missing permission on the app registration, then run "
+                f"{_sign_in_command(self.instance)}. pm-ai refuses rather than "
+                f"running with part of the set, because a connector that works "
+                f"for some resources and 403s on others reports coverage it does "
+                f"not have.",
             )
         except AuthTimedOut as unfinished:
             # Reachable from a refresh, not only from a sign-in: AAD answers
@@ -1010,31 +1064,33 @@ class GraphDeviceCodeAuth:
                 self.instance,
                 Health.FAILING,
                 f"{self.instance}'s sign-in was never completed: {unfinished}",
-                "Enrol again and finish the sign-in while the code it prints is "
-                "still live. Nothing is broken on this machine — the flow was "
-                "started and abandoned.",
+                f"Run {_sign_in_command(self.instance)} and finish the sign-in "
+                f"while the code it prints is still live. Nothing is broken on "
+                f"this machine — the flow was started and abandoned.",
             )
         except CredentialStoreBusy as busy:
             return Probe(
                 self.instance,
                 Health.FAILING,
                 f"{self.instance}'s credentials file was busy: {busy}",
-                _REDO_SIGN_IN if busy.rotated else "Run this again once the other "
-                "pm-ai command has finished. Nothing is wrong with the credential.",
+                _redo_sign_in(self.instance)
+                if busy.rotated
+                else "Run this again once the other pm-ai command has finished. "
+                "Nothing is wrong with the credential.",
             )
         except CredentialEntryMissing as missing:
             return Probe(
                 self.instance,
                 Health.FAILING,
                 f"{self.instance}'s rotated credential had nowhere to go: {missing}",
-                _REDO_SIGN_IN,
+                _redo_sign_in(self.instance),
             )
         except CustodyFailed as custody:
             return Probe(
                 self.instance,
                 Health.FAILING,
                 f"{self.instance}'s credential store failed: {custody}",
-                _REDO_SIGN_IN if custody.rotated else _CUSTODY_REMEDY,
+                _redo_sign_in(self.instance) if custody.rotated else _CUSTODY_REMEDY,
             )
         except GraphUnreachable as silent:
             return Probe(
@@ -1231,14 +1287,49 @@ class GraphDeviceCodeAuth:
         path: MSAL's cache is per-process and a freshly started daemon's is
         empty, which is precisely the case the sealed refresh token exists for.
         """
+        if self._lineage is not None and self._lineage != sealed.refresh_token:
+            # The store was replaced underneath this object (story 8m): the cache
+            # holds the old lineage, so the stored token is redeemed directly.
+            return self._redeem(app, sealed)
         account = self._cached_account(app, sealed)
         if account is not None:
             cached = self._call_silent(app, account, force_refresh=force_refresh)
             if cached:
                 return cached
+        return self._redeem(app, sealed)
+
+    def _redeem(self, app: Any, sealed: SealedCredential) -> dict[str, Any]:
+        """Redeem the sealed refresh token itself, never MSAL's cache."""
         return self._call(
             app.acquire_token_by_refresh_token, sealed.refresh_token, self._resource_scopes()
         )
+
+    def _superseding(self, used: SealedCredential) -> SealedCredential | None:
+        """The stored credential, when it is no longer the one `used` (story 8m).
+
+        Read inside the write-back's claim, which is what makes the write-back a
+        compare-and-set. `None` when the store still holds `used` — or holds
+        nothing, or something unreadable as a credential, which the write that
+        follows reports or replaces as before.
+        """
+        try:
+            raw = self.store.read()
+        except Exception as unreadable:  # noqa: BLE001 — custody, typed here
+            raise CustodyFailed(
+                f"Microsoft issued a replacement credential for {self.instance} "
+                f"and it could not be saved: the store could not be read to "
+                f"check it still held the token refreshed from — "
+                f"{type(unreadable).__name__}: "
+                f"{_sentence(str(unreadable)) or 'no detail given.'}",
+                rotated=True,
+            ) from None
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        try:
+            stored = SealedCredential.decode(raw, instance=self.instance)
+        except GraphAuthError:
+            return None
+        return None if stored.refresh_token == used.refresh_token else stored
 
     def _call_silent(
         self, app: Any, account: Mapping[str, Any], *, force_refresh: bool
@@ -1274,7 +1365,8 @@ class GraphDeviceCodeAuth:
                 f"of them are the one {self.instance} was enrolled for, so the "
                 f"account to refresh cannot be identified. Refusing rather than "
                 f"picking one: the wrong identity would harvest somebody else's "
-                f"calendar. Enrol {self.instance} again."
+                f"calendar. Run {_sign_in_command(self.instance)} to redo the "
+                f"sign-in as the one account."
             )
         return matching[0]
 
@@ -1284,16 +1376,15 @@ class GraphDeviceCodeAuth:
         The id token's claims are preferred because they describe *this* result:
         `<oid>.<tid>`, whose first part is the signed-in user's Graph user id
         (story 8q, `SealedCredential.user_id`). MSAL's account list is the
-        fallback, and is accepted only when it holds exactly one account whose
-        id has MSAL's two-part `<user>.<tenant>` shape and whose tenant part is
-        this sign-in's tenant: a guest account's id names its *home* tenant,
-        not this one, so its user part is not this tenant's user id. A row
-        tenant that is not a tenant id (`organizations`, a domain) cannot be
-        compared, so the fallback is refused there too, saying so. The claims
-        are sealed as they arrived; an `oid` or `tid` that is blank, padded or
-        dotted counts as not carried. Anything else is refused naming the
-        missing identifier, before anything is sealed — an account pm-ai cannot
-        name is not one it can harvest for.
+        fallback, and is accepted when it holds exactly one account whose id
+        has MSAL's two-part `<user>.<tenant>` shape: those two rules decide
+        which user id is recorded, not whether the sign-in is allowed. Its
+        tenant part is not compared with the row's — pm-ai trusts any
+        authenticated sign-in, identity and access being Microsoft's to guard
+        (Andrei, 2026-10-12). The claims are sealed as they arrived; an `oid`
+        or `tid` that is blank, padded or dotted counts as not carried.
+        Anything else is refused naming the missing identifier, before anything
+        is sealed — an account pm-ai cannot name is not one it can refresh.
         """
         claims = result.get("id_token_claims")
         claims = claims if isinstance(claims, Mapping) else {}
@@ -1337,25 +1428,6 @@ class GraphDeviceCodeAuth:
                 f"`<user>.<tenant>` id a Graph user id can be read from. Nothing "
                 f"was stored."
             )
-        home_tenant = account.partition(".")[2]
-        if not _TENANT_GUID.fullmatch(self.tenant):
-            raise CredentialStale(
-                f"the sign-in succeeded and did not say which account it was for: "
-                f"it carried no {missing}, and {self.tenant!r}, the tenant "
-                f"{self.instance} signs in through, is not a tenant id (a GUID), "
-                f"so the one account in MSAL's cache, of the tenant "
-                f"{home_tenant!r}, cannot be matched to it. Nothing was stored. "
-                f"Enrol again with the tenant id as the tenant."
-            )
-        if home_tenant.casefold() != self.tenant.casefold():
-            raise CredentialStale(
-                f"the sign-in succeeded and did not say which account it was for: "
-                f"it carried no {missing}, and the one account in MSAL's cache "
-                f"belongs to the tenant {home_tenant!r}, not to {self.tenant!r} "
-                f"that {self.instance} signs in through — a guest account's id "
-                f"names its home tenant, so its user part is not a user id in "
-                f"this one. Nothing was stored."
-            )
         return account
 
     def _sealed(self) -> SealedCredential:
@@ -1364,7 +1436,8 @@ class GraphDeviceCodeAuth:
         if stored is None:
             raise CredentialStale(
                 f"no Microsoft credential is stored for {self.instance}, so there "
-                f"is nothing to refresh. Enrol it and complete the sign-in."
+                f"is nothing to refresh. Run {_sign_in_command(self.instance)} "
+                f"and complete the sign-in."
             )
         return stored
 
@@ -1393,7 +1466,7 @@ class GraphDeviceCodeAuth:
             ) from None
         if raw is None or (isinstance(raw, str) and not raw.strip()):
             return None
-        return SealedCredential.decode(raw)
+        return SealedCredential.decode(raw, instance=self.instance)
 
     @staticmethod
     def _replacement(used: SealedCredential, result: Mapping[str, Any]) -> str | None:
@@ -1574,7 +1647,8 @@ class GraphDeviceCodeAuth:
                 f"{len(declared) - len(missing)} of {len(declared)} permissions, "
                 f"and refuses to start on a partial set rather than working for "
                 f"some resources and failing at others. Grant the missing "
-                f"permission(s) and enrol again. Note especially: a missing "
+                f"permission(s), then redo the sign-in with "
+                f"{_sign_in_command(self.instance)}. Note especially: a missing "
                 f"OnlineMeetings.Read reads later as a 403 that looks like a "
                 f"tenant with transcripts switched off, which it is not."
             )
@@ -1631,8 +1705,9 @@ class GraphDeviceCodeAuth:
         if code in _STALE:
             raise CredentialStale(
                 f"Microsoft rejected the stored credential during {during} — "
-                f"{said}{detail}. Sign in again; this is the credential, not the "
-                f"network."
+                f"{said}{detail}. Redo the sign-in with "
+                f"{_sign_in_command(self.instance)}; this is the credential, not "
+                f"the network."
             )
         if code in _APP_REGISTRATION:
             raise GraphAuthError(

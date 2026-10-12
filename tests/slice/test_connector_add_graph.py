@@ -388,10 +388,11 @@ def test_a_sign_in_naming_no_account_is_refused_and_seals_nothing(
         assert token not in captured.out and token not in captured.err
 
 
-def test_the_fallback_account_id_from_another_tenant_is_refused(
+def test_the_fallback_account_id_from_another_tenant_is_accepted(
     machine, monkeypatch, capsys
 ):
-    """A guest account's id names its home tenant, not the one signed in through."""
+    """pm-ai trusts any authenticated sign-in (2026-10-12): a guest's account id
+    names its home tenant, and its user part is the user id recorded."""
     home, _ = machine
     provider = Microsoft(
         device=_no_oid(), accounts=[{"home_account_id": f"a-guest.{GUEST_HOME}"}]
@@ -400,22 +401,16 @@ def test_the_fallback_account_id_from_another_tenant_is_refused(
 
     code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
 
-    captured = capsys.readouterr()
-    assert code == EXIT_REFUSAL, captured.err
-    assert "Graph user id" in captured.err
-    assert GUEST_HOME in captured.err and ROW_TENANT in captured.err, "both tenants named"
-    _nothing_saved(home)
-    assert SIGNED_IN not in captured.err and SIGNED_IN not in captured.out
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert _row(home)["user_id"] == "a-guest"
 
 
 @pytest.mark.parametrize(
     "tenant", ["", "contoso.onmicrosoft.com"], ids=["organizations", "a domain"]
 )
-def test_a_fallback_against_a_tenant_that_is_not_an_id_says_so(
+def test_a_fallback_against_a_tenant_that_is_not_an_id_takes_the_one_account(
     machine, monkeypatch, capsys, tenant
 ):
-    """`organizations` or a domain cannot be compared with an account's tenant
-    id; the refusal says that, and does not blame a guest account."""
     home, _ = machine
     provider = Microsoft(
         device=_no_oid(), accounts=[{"home_account_id": f"the-cached-user.{ROW_TENANT}"}]
@@ -424,12 +419,24 @@ def test_a_fallback_against_a_tenant_that_is_not_an_id_says_so(
 
     code, _ = _add(monkeypatch, [CLIENT_ID, tenant, "1440", "10080"])
 
-    captured = capsys.readouterr()
-    assert code == EXIT_REFUSAL, captured.err
-    assert "is not a tenant id" in captured.err
-    assert "cannot be matched" in captured.err
-    assert "guest" not in captured.err
-    _nothing_saved(home)
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert _row(home)["user_id"] == "the-cached-user"
+
+
+@pytest.mark.parametrize("typed", ["Organizations", "COMMON"])
+def test_a_tenant_word_in_any_case_is_accepted_and_stored_as_typed(
+    machine, monkeypatch, capsys, typed
+):
+    home, _ = machine
+    provider = Microsoft()
+    _microsoft(monkeypatch, provider)
+
+    code, terminal = _add(monkeypatch, [CLIENT_ID, typed, "1440", "10080"])
+
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert len(_prompts(terminal, "Tenant")) == 1, "asked again"
+    assert _row(home)["tenant"] == typed
+    assert provider.authorities == [f"https://login.microsoftonline.com/{typed}"]
 
 
 UNUSABLE = [
@@ -508,7 +515,7 @@ def test_a_credential_that_does_not_decode_is_its_own_failure(
 
     class Undecodable:
         @staticmethod
-        def decode(raw: str):
+        def decode(raw: str, **kwargs):
             raise wiring.GraphAuthError("the sealed Graph credential is not the document this adapter writes.")
 
     monkeypatch.setattr(wiring, "SealedCredential", Undecodable)

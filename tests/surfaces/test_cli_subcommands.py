@@ -760,7 +760,7 @@ def test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own(tmp_path):
 
 @pytest.mark.parametrize(
     "argv",
-    [["key", "enrol"], ["config", "show"], ["connector", "check"]],
+    [["key", "enrol"], ["config", "show"], ["connector", "check"], ["connector", "sign-in"]],
     ids=lambda argv: " ".join(argv),
 )
 def test_every_leaf_is_reachable_from_the_table(argv):
