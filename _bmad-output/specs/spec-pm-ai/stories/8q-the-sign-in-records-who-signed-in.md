@@ -28,7 +28,7 @@ A Graph connector's settings row holds the app id, the tenant and the harvest wi
 - **One row update sets `user_id` and nothing else.** It re-reads the row at write time and changes only that key, so every other key — a category mapping hand-added since the row was first written included — is kept as it was. This is the writer `connector sign-in` uses.
 - **A row whose `user_id` is missing, blank, whitespace or not text has no recorded user.** Any user may sign in for it and is recorded. A reader treats such a value as absent and never compares it — the rule 23c applies when it reads the key.
 - **A sign-in by a different user than the row records is refused by name, saving nothing**, wherever a sign-in is run against an existing row: a different person is a different connector, and accepting it would harvest another person's calendar into the PM's tree. Today only `connector sign-in` runs against an existing row, so the refusal is exercised there.
-- **A claim is never taken twice by one process** (AD-5, 2026-10-11). The one-key row update and any other write here run under the claim their caller already holds rather than taking it again; a second claim on a path this process already holds raises a programming error naming the path, never `ArtifactBusy` — a busy refusal would blame another process that does not exist, and a retry would meet itself forever.
+- **A claim is never taken twice by one thread** (AD-5, 2026-10-11; per thread since 2026-10-12). The one-key row update and any other write here run under the claim their caller already holds rather than taking it again; a second claim on a path the same thread already holds raises a programming error naming the path, never `ArtifactBusy` — a busy refusal would blame another process that does not exist, and a retry would meet itself forever. A claim held by another thread of this process is ordinary contention and refused as `ArtifactBusy`.
 - **The user id is not a secret** and may appear in the row, in `doctor`'s row problems and in refusals; the sign-in token still never appears anywhere.
 
 **Ask First:** Nothing.
@@ -46,7 +46,7 @@ A Graph connector's settings row holds the app id, the tenant and the harvest wi
 | User id from the account list | the sign-in carries no user id; MSAL reports exactly one account with a two-part id | `user_id` is the first part of that id | N/A |
 | Account without a user id | no user id in the sign-in; no account, several, or an id that is not two-part | refused naming the missing identifier; nothing sealed or written | exit 3 |
 | Account from another tenant | no user id in the sign-in; one two-part account id whose tenant part differs from the row's tenant | refused naming the missing identifier and the two tenants; nothing sealed or written | exit 3 |
-| A claim taken twice | a write here run while this process already holds the claim on the same path | a programming error naming the path, never `ArtifactBusy`; nothing written | the error propagates; not a refusal |
+| A claim taken twice | a write here run while the same thread already holds the claim on the same path | a programming error naming the path, never `ArtifactBusy`; nothing written | the error propagates; not a refusal |
 | The row update | a row with a hand-added `categories` mapping; `user_id` set | the row afterwards carries the mapping, every other key as it was, and the new `user_id`; a second update with the same id changes no bytes | N/A |
 | Row with no usable `user_id` | key absent, `""`, `"  "`, or a number | read as absent; a sign-in by any user is accepted and the id recorded | N/A |
 | Different user | row `user_id` set; a sign-in's user id differs | refused naming the recorded and the signed-in user; nothing written | exit 3 |
@@ -78,7 +78,7 @@ A Graph connector's settings row holds the app id, the tenant and the harvest wi
 - [x] `tests/slice/test_connector_add_graph.py` -- the valid-add test asserts `user_id`; `test_a_sign_in_without_oid_takes_the_one_cached_account_id`; `test_a_sign_in_naming_no_account_is_refused_and_seals_nothing` (no claims; two accounts; a one-part id) -- the add rows
 - [x] `tests/core/test_connector_enrolment.py` -- the one-key update keeps a hand-added mapping and is byte-stable on repeat; the absent rule over `""`, whitespace, a number and a missing key; the comparison refuses a different user and accepts the same -- the writer rows
 - [x] `tests/slice/test_every_enrolled_project.py` or `tests/app/` -- a pre-slice row without `user_id` still builds -- the start is untouched
-- [x] `pm_ai/storage/service.py` (`exclusive`) and `pm_ai/platform/claims.py` -- a second claim on a path this process already holds raises a programming error naming the path, never `ArtifactBusy`; a test holding a claim and taking it again -- AD-5's re-entry rule, which `8m`'s sign-in would otherwise hit through this slice's row update
+- [x] `pm_ai/storage/service.py` (`exclusive`) and `pm_ai/platform/claims.py` -- a second claim on a path the same thread already holds raises a programming error naming the path, never `ArtifactBusy`; a test holding a claim and taking it again -- AD-5's re-entry rule, which `8m`'s sign-in would otherwise hit through this slice's row update
 - [x] `tests/slice/test_connector_add_graph.py` -- the fallback account id from another tenant is refused -- the guest case
 
 **Acceptance Criteria:**
@@ -102,6 +102,7 @@ The user id is the `oid` claim of the sign-in's id token: Microsoft documents it
 ## Spec Change Log
 
 - **2026-10-11, frozen block amended by Andrei** (architecture review gate of the same day, AD-5). Added: the fallback account id is accepted only when its tenant part equals the row's tenant — a guest account's id names its home tenant; and a second claim on a path this process already holds is a programming error, never `ArtifactBusy` — `8m`'s sign-in runs this slice's row update while holding the claim, and a busy refusal would blame a process that does not exist and retry forever. Two matrix rows and two tasks follow.
+- **2026-10-12, frozen block amended by Andrei** (after PR #46). Claim re-entry is per thread, as built: another thread of the same process holding the claim is ordinary contention, refused as `ArtifactBusy`, and its wait ends when that thread lets go; `test_rotated_tokens_are_kept.py` relies on it. AD-5 amended the same day through `bmad-architecture`.
 
 ## Suggested Review Order
 
