@@ -938,11 +938,17 @@ APPLICATION_SCOPE = DataScope(ScopeKind.APPLICATION)
 
 
 def _held(home: Path, artifact: str):
-    """The platform lock on `artifact`, held directly — the same lock the façade takes."""
+    """The platform lock on `artifact`, held directly — the same lock the façade takes.
+
+    Held by another thread: this thread taking a claim it already holds is a
+    programming error, not a busy file (AD-5, story 8q).
+    """
+    from claim_fakes import held_by_another_thread
     from pm_ai.platform.claims import exclusive
     from pm_ai.platform.paths import ScopePaths
 
-    return exclusive(ScopePaths.production().resolve(APPLICATION_SCOPE, artifact).resolve())
+    target = ScopePaths.production().resolve(APPLICATION_SCOPE, artifact).resolve()
+    return held_by_another_thread(lambda: exclusive(target))
 
 
 def test_connector_add_with_the_credentials_file_held_is_refused_by_name(

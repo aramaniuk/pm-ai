@@ -410,7 +410,10 @@ class ClaimPort(Protocol):
         another holder has it — never waits — and `OSError` for anything that
         is not "busy": a filesystem with no lock semantics, a permission fault,
         a sidecar that is not a plain file. Released however the body leaves.
-        Not re-entrant: a caller holding the claim that asks again is refused.
+        Not re-entrant: the thread holding the claim that asks again gets
+        `pm_ai.domain.claims.ClaimReentered`, a programming error naming the
+        path — never `ClaimHeld`, which would blame another holder that does
+        not exist (AD-5, story 8q). Another thread holding it is `ClaimHeld`.
         """
 
 
@@ -735,6 +738,19 @@ class StoragePort(Protocol):
         permission error on the sidecar — is an `OSError`, reported as such.
 
         The claim is released however the body leaves.
+
+        Not re-entrant: the thread already holding it that asks again gets
+        `pm_ai.domain.claims.ClaimReentered`, never `ArtifactBusy` (AD-5,
+        story 8q).
+        """
+
+    def holds_claim(self, *, scope: DataScope, artifact: str) -> bool:
+        """Whether *this thread* holds `exclusive`'s claim on `artifact` now (story 8q).
+
+        For a writer told `claimed=True` to check it rather than trust it: a
+        caller that said so without holding the claim would write unserialized.
+        Per thread, as the re-entry guard is; it cannot see asyncio tasks that
+        share one thread.
         """
 
 

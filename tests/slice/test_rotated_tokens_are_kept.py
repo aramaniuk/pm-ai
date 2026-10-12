@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from claim_fakes import held_by_another_thread
 from pm_ai.app.wiring import SealedRefreshTokenStore, build
 from pm_ai.connectors.graph import CLIENT_ID_KEY, REACH_BACK_KEY, WIDTH_KEY
 from pm_ai.connectors.graph.auth import (
@@ -27,6 +28,7 @@ from pm_ai.connectors.graph.auth import (
     StoreBusy,
 )
 from pm_ai.core.connector_enrolment import enrol_connector, stored_credentials
+from pm_ai.domain.claims import ClaimReentered
 from pm_ai.domain.health import Health
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import KeyAlreadyEnrolled, KeyNotFound
@@ -264,6 +266,18 @@ def test_a_run_started_after_another_rotated_reads_the_new_token(tmp_path):
 
 # ── Credentials file busy ────────────────────────────────────────────────────
 
+
+def _held_elsewhere(storage):
+    """The credentials file's claim, held by another thread — "another run".
+
+    Not this thread: a claim taken again by its own holder is a programming
+    error rather than a busy file (AD-5, story 8q), so contention is staged
+    from a thread that holds the claim until the context closes.
+    """
+    return held_by_another_thread(
+        lambda: storage.exclusive(scope=APPLICATION, artifact="config.json")
+    )
+
 REDO = (
     "The stored sign-in has to be redone: Microsoft has retired the token this "
     "machine holds, and the replacement it issued was not saved. pm-ai has no "
@@ -281,7 +295,7 @@ def test_a_busy_file_is_waited_for_and_then_used(tmp_path):
     keychain = _Keychain()
     storage = _enrol(tmp_path, keychain)
     other_run = ExitStack()
-    other_run.enter_context(storage.exclusive(scope=APPLICATION, artifact="config.json"))
+    other_run.enter_context(_held_elsewhere(storage))
     waited: list[float] = []
 
     def sleep(seconds: float) -> None:
@@ -305,7 +319,7 @@ def test_a_file_busy_past_the_wait_is_reported_busy_not_as_a_bug(tmp_path):
     waited: list[float] = []
     provider = Provider(ENROLLED, issue=ROTATED)
 
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+    with _held_elsewhere(storage):
         _, connector = _compose(tmp_path, keychain, provider, sleep=waited.append)
         probe = connector.check_health()
 
@@ -330,7 +344,7 @@ def test_a_file_busy_at_write_back_says_the_stored_sign_in_must_be_redone(tmp_pa
     other_run = ExitStack()
 
     def another_run_takes_the_file() -> None:
-        other_run.enter_context(storage.exclusive(scope=APPLICATION, artifact="config.json"))
+        other_run.enter_context(_held_elsewhere(storage))
 
     provider = Provider(ENROLLED, issue=ROTATED, during=another_run_takes_the_file)
     _, connector = _compose(tmp_path, keychain, provider, sleep=lambda seconds: None)
@@ -353,7 +367,7 @@ def test_a_write_back_waits_for_a_busy_file_and_then_saves(tmp_path):
     waited: list[float] = []
 
     def another_run_takes_the_file() -> None:
-        other_run.enter_context(storage.exclusive(scope=APPLICATION, artifact="config.json"))
+        other_run.enter_context(_held_elsewhere(storage))
 
     def sleep(seconds: float) -> None:
         waited.append(seconds)
@@ -376,7 +390,7 @@ def test_without_a_rotation_a_busy_file_at_write_back_is_never_claimed(tmp_path)
     waited: list[float] = []
 
     def another_run_takes_the_file() -> None:
-        other_run.enter_context(storage.exclusive(scope=APPLICATION, artifact="config.json"))
+        other_run.enter_context(_held_elsewhere(storage))
 
     provider = Provider(ENROLLED, during=another_run_takes_the_file)
     _, connector = _compose(tmp_path, keychain, provider, sleep=waited.append)
@@ -530,6 +544,18 @@ def test_a_write_outside_the_claim_is_refused_and_writes_nothing(tmp_path):
     assert _sealed_file(tmp_path).read_bytes() == before
 
 
+def test_the_holder_asking_again_is_a_programming_error_and_never_waits(tmp_path):
+    """AD-5 (story 8q): re-entry is `ClaimReentered`, not busy, and not retried."""
+    waited: list[float] = []
+    store, _ = _store(tmp_path, sleep=waited.append)
+
+    with store.exclusive():
+        with pytest.raises(ClaimReentered):
+            with store.exclusive():
+                raise AssertionError("granted")
+    assert waited == [], "a re-entry was waited on as if it were busy"
+
+
 def test_a_second_thread_waits_for_the_first_and_then_writes(tmp_path):
     first_inside = threading.Event()
     first_may_leave = threading.Event()
@@ -602,7 +628,7 @@ def test_no_attempts_still_tries_the_claim_once(tmp_path):
         store.write(_sealed(ROTATED))
     assert _held_token(storage) == ROTATED
 
-    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+    with _held_elsewhere(storage):
         with pytest.raises(StoreBusy):
             with store.exclusive():
                 pass

@@ -29,8 +29,8 @@ from pathlib import Path
 import pytest
 
 from ledger_fixtures import entry as _entry
-from claim_fakes import InMemoryClaims
-from pm_ai.domain.claims import LOCK_SUFFIX, ClaimHeld
+from claim_fakes import InMemoryClaims, held_by_another_thread
+from pm_ai.domain.claims import LOCK_SUFFIX, ClaimHeld, ClaimReentered
 from pm_ai.domain.disclosure import DISCLOSURE_LEDGER_ARTIFACT, DisclosureRecord
 from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType
 from pm_ai.domain.handles import person_handle
@@ -328,8 +328,13 @@ def test_a_second_claim_on_one_artifact_is_refused_naming_no_file_to_delete(lock
 
     The refusal names the artifact and its scope and nothing to remove — a kill
     releases a kernel lock, so there is no orphan for an operator to find.
+
+    The holder is another thread: the same thread asking again is a bug, not a
+    busy file (AD-5, story 8q — the re-entry tests below).
     """
-    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+    with held_by_another_thread(
+        lambda: locked.exclusive(scope=APPLICATION, artifact="config.json")
+    ):
         with pytest.raises(ArtifactBusy) as held:
             with locked.exclusive(scope=APPLICATION, artifact="config.json"):
                 raise AssertionError("a second claim was granted")
@@ -388,7 +393,9 @@ def test_two_spellings_of_one_file_share_one_lock(tmp_path):
     link.symlink_to(real, target_is_directory=True)
     plain, linked = _locked(real), _locked(link)
 
-    with plain.exclusive(scope=APPLICATION, artifact="config.json"):
+    with held_by_another_thread(
+        lambda: plain.exclusive(scope=APPLICATION, artifact="config.json")
+    ):
         with pytest.raises(ArtifactBusy):
             with linked.exclusive(scope=APPLICATION, artifact="config.json"):
                 raise AssertionError("two spellings took two locks")
@@ -397,7 +404,7 @@ def test_two_spellings_of_one_file_share_one_lock(tmp_path):
 def test_the_platform_lock_on_the_resolved_path_is_the_same_claim(locked):
     """Two doors, one file: the platform lock held directly refuses the façade."""
     target = locked.paths.resolve(APPLICATION, "projects.toml")
-    with platform_claims.exclusive(target.resolve()):
+    with held_by_another_thread(lambda: platform_claims.exclusive(target.resolve())):
         with pytest.raises(ArtifactBusy):
             with locked.exclusive(scope=APPLICATION, artifact="projects.toml"):
                 raise AssertionError("the façade took a second lock")
@@ -406,13 +413,110 @@ def test_the_platform_lock_on_the_resolved_path_is_the_same_claim(locked):
 def test_a_refused_inner_claim_names_the_inner_file(locked):
     """A refusal inside a claimed body is the inner file's, never re-reported as
     the outer one being busy: `config.json` claimed inside a `meetings/` claim."""
-    with platform_claims.exclusive(locked.paths.resolve(APPLICATION, "config.json")):
+    config = locked.paths.resolve(APPLICATION, "config.json")
+    with held_by_another_thread(lambda: platform_claims.exclusive(config)):
         with pytest.raises(ArtifactBusy) as inner:
             with locked.exclusive(scope=PERSONAL, artifact="meetings/"):
                 with locked.exclusive(scope=APPLICATION, artifact="config.json"):
                     raise AssertionError("the inner claim was granted")
     assert str(inner.value).startswith("config.json in application")
     assert "meetings" not in str(inner.value)
+
+
+# ── A claim is never taken twice by one process (AD-5, story 8q) ─────────────
+
+
+def test_a_second_claim_by_the_holder_is_a_programming_error_naming_the_path(locked):
+    """Re-entry is a bug, never `ArtifactBusy`: a busy refusal would blame a
+    process that does not exist, and a retry would meet itself forever."""
+    target = locked.paths.resolve(APPLICATION, "config.json")
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+        with pytest.raises(ClaimReentered) as reentered:
+            with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("a second claim was granted")
+        assert not isinstance(reentered.value, (ArtifactBusy, ClaimHeld))
+        # The holder's claim survives the refused re-entry: another thread is busy.
+        with pytest.raises(ArtifactBusy):
+            with held_by_another_thread(
+                lambda: locked.exclusive(scope=APPLICATION, artifact="config.json")
+            ):
+                raise AssertionError("the holder's claim was lost")
+    assert str(target.parent.resolve() / target.name) in str(reentered.value)
+    assert not target.exists(), "nothing was written"
+    with locked.exclusive(scope=APPLICATION, artifact="config.json"):
+        pass  # released on the way out, and claimable again
+
+
+def test_a_re_entry_through_another_writer_is_the_same_programming_error(tmp_path):
+    """Keyed on the file across every writer in the process, not per writer."""
+    first, second = _locked(tmp_path), _locked(tmp_path)
+    with first.exclusive(scope=APPLICATION, artifact="projects.toml"):
+        with pytest.raises(ClaimReentered):
+            with second.exclusive(scope=APPLICATION, artifact="projects.toml"):
+                raise AssertionError("granted")
+
+
+def test_a_re_entry_is_refused_whichever_claim_port_is_wired(storage):
+    """The façade checks before the port is asked, so an in-memory port — which
+    answers a second claim with `ClaimHeld` — cannot turn re-entry into busy."""
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        with pytest.raises(ClaimReentered):
+            with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("granted")
+
+
+def test_the_platform_lock_taken_twice_by_one_thread_names_the_path(tmp_path):
+    target = tmp_path / "projects.toml"
+    with platform_claims.exclusive(target):
+        with pytest.raises(ClaimReentered) as reentered:
+            with platform_claims.exclusive(tmp_path / "." / "projects.toml"):
+                raise AssertionError("granted")
+    assert str(target.parent.resolve() / target.name) in str(reentered.value)
+    with platform_claims.exclusive(target):
+        pass  # released on the way out
+
+
+def test_the_platform_lock_held_by_the_facade_refuses_a_direct_re_entry(locked):
+    """Two doors, one file, one thread: the platform lock knows its own holder."""
+    target = locked.paths.resolve(APPLICATION, "projects.toml")
+    with locked.exclusive(scope=APPLICATION, artifact="projects.toml"):
+        with pytest.raises(ClaimReentered):
+            with platform_claims.exclusive(target):
+                raise AssertionError("granted")
+
+
+def test_a_re_entry_creates_no_directory(storage, tmp_path):
+    """Checked before anything is made, so "nothing was changed" is true —
+    through the façade and through the platform door alike."""
+    import shutil
+
+    target = storage.paths.resolve(APPLICATION, "config.json")
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        shutil.rmtree(target.parent)
+        with pytest.raises(ClaimReentered):
+            with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+                raise AssertionError("granted")
+        assert not target.parent.exists(), "the re-entry recreated the enclave"
+
+    guarded = tmp_path / "elsewhere" / "nested" / "file.toml"
+    with platform_claims.exclusive(guarded):
+        shutil.rmtree(tmp_path / "elsewhere")
+        with pytest.raises(ClaimReentered):
+            with platform_claims.exclusive(guarded):
+                raise AssertionError("granted")
+        assert not (tmp_path / "elsewhere").exists(), "the re-entry made a directory"
+
+
+def test_holds_claim_answers_for_this_thread_only(storage):
+    assert not storage.holds_claim(scope=APPLICATION, artifact="config.json")
+    with storage.exclusive(scope=APPLICATION, artifact="config.json"):
+        assert storage.holds_claim(scope=APPLICATION, artifact="config.json")
+        assert not storage.holds_claim(scope=APPLICATION, artifact="projects.toml")
+    assert not storage.holds_claim(scope=APPLICATION, artifact="config.json")
+    with held_by_another_thread(
+        lambda: storage.exclusive(scope=APPLICATION, artifact="config.json")
+    ):
+        assert not storage.holds_claim(scope=APPLICATION, artifact="config.json")
 
 
 # ── A marker left by an older build ──────────────────────────────────────────
@@ -437,8 +541,9 @@ def test_the_marker_is_reported_before_a_refused_claim_too(locked, tmp_path, cap
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()
     other = _locked(tmp_path)
+    config = locked.paths.resolve(APPLICATION, "config.json")
 
-    with platform_claims.exclusive(locked.paths.resolve(APPLICATION, "config.json")):
+    with held_by_another_thread(lambda: platform_claims.exclusive(config)):
         with pytest.raises(ArtifactBusy):
             with other.exclusive(scope=APPLICATION, artifact="config.json"):
                 raise AssertionError("granted")

@@ -2,7 +2,8 @@
 title: 'A Graph sign-in records which Microsoft user signed in'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '35f83c16afe67de49bdb94d9a2423006a98a15f5'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -70,15 +71,15 @@ A Graph connector's settings row holds the app id, the tenant and the harvest wi
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/__init__.py` -- add `USER_ID_KEY` -- one spelling for the row key
-- [ ] `pm_ai/connectors/graph/auth.py` -- `sign_in`'s result exposes the user id: `oid` when the claims carry it, else the first part of the one cached `home_account_id` when it is two-part, else the existing `CredentialStale` refusal naming the missing identifier -- the source rule in one place
-- [ ] `pm_ai/app/wiring.py` -- `GraphSignedIn.settings` carries `USER_ID_KEY` -- `connector add graph` writes it with no surface change
-- [ ] `pm_ai/core/connector_enrolment.py` -- `record_user_id(storage, instance=, user_id=)`: re-read, set one key, write, report whether bytes changed; `recorded_user_id(row) -> str | None` applying the absent rule; `assert_same_user(recorded, signed_in)` raising a typed refusal naming both -- the writer and the comparison 8m and 23c share
-- [ ] `tests/slice/test_connector_add_graph.py` -- the valid-add test asserts `user_id`; `test_a_sign_in_without_oid_takes_the_one_cached_account_id`; `test_a_sign_in_naming_no_account_is_refused_and_seals_nothing` (no claims; two accounts; a one-part id) -- the add rows
-- [ ] `tests/core/test_connector_enrolment.py` -- the one-key update keeps a hand-added mapping and is byte-stable on repeat; the absent rule over `""`, whitespace, a number and a missing key; the comparison refuses a different user and accepts the same -- the writer rows
-- [ ] `tests/slice/test_every_enrolled_project.py` or `tests/app/` -- a pre-slice row without `user_id` still builds -- the start is untouched
-- [ ] `pm_ai/storage/service.py` (`exclusive`) and `pm_ai/platform/claims.py` -- a second claim on a path this process already holds raises a programming error naming the path, never `ArtifactBusy`; a test holding a claim and taking it again -- AD-5's re-entry rule, which `8m`'s sign-in would otherwise hit through this slice's row update
-- [ ] `tests/slice/test_connector_add_graph.py` -- the fallback account id from another tenant is refused -- the guest case
+- [x] `pm_ai/connectors/graph/__init__.py` -- add `USER_ID_KEY` -- one spelling for the row key
+- [x] `pm_ai/connectors/graph/auth.py` -- `sign_in`'s result exposes the user id: `oid` when the claims carry it, else the first part of the one cached `home_account_id` when it is two-part, else the existing `CredentialStale` refusal naming the missing identifier -- the source rule in one place
+- [x] `pm_ai/app/wiring.py` -- `GraphSignedIn.settings` carries `USER_ID_KEY` -- `connector add graph` writes it with no surface change
+- [x] `pm_ai/core/connector_enrolment.py` -- `record_user_id(storage, instance=, user_id=)`: re-read, set one key, write, report whether bytes changed; `recorded_user_id(row) -> str | None` applying the absent rule; `assert_same_user(recorded, signed_in)` raising a typed refusal naming both -- the writer and the comparison 8m and 23c share
+- [x] `tests/slice/test_connector_add_graph.py` -- the valid-add test asserts `user_id`; `test_a_sign_in_without_oid_takes_the_one_cached_account_id`; `test_a_sign_in_naming_no_account_is_refused_and_seals_nothing` (no claims; two accounts; a one-part id) -- the add rows
+- [x] `tests/core/test_connector_enrolment.py` -- the one-key update keeps a hand-added mapping and is byte-stable on repeat; the absent rule over `""`, whitespace, a number and a missing key; the comparison refuses a different user and accepts the same -- the writer rows
+- [x] `tests/slice/test_every_enrolled_project.py` or `tests/app/` -- a pre-slice row without `user_id` still builds -- the start is untouched
+- [x] `pm_ai/storage/service.py` (`exclusive`) and `pm_ai/platform/claims.py` -- a second claim on a path this process already holds raises a programming error naming the path, never `ArtifactBusy`; a test holding a claim and taking it again -- AD-5's re-entry rule, which `8m`'s sign-in would otherwise hit through this slice's row update
+- [x] `tests/slice/test_connector_add_graph.py` -- the fallback account id from another tenant is refused -- the guest case
 
 **Acceptance Criteria:**
 - Given a fresh `connector add graph` with an approved sign-in, when the row is read back, then it carries `user_id` equal to the sign-in's `oid`, and the sealed credential's shape is unchanged.
@@ -101,3 +102,12 @@ The user id is the `oid` claim of the sign-in's id token: Microsoft documents it
 ## Spec Change Log
 
 - **2026-10-11, frozen block amended by Andrei** (architecture review gate of the same day, AD-5). Added: the fallback account id is accepted only when its tenant part equals the row's tenant — a guest account's id names its home tenant; and a second claim on a path this process already holds is a programming error, never `ArtifactBusy` — `8m`'s sign-in runs this slice's row update while holding the claim, and a busy refusal would blame a process that does not exist and retry forever. Two matrix rows and two tasks follow.
+
+## Suggested Review Order
+
+1. Where the user id comes from: [`_enrolling_account`](../../../../pm_ai/connectors/graph/auth.py#L1281) — `oid`, else the one cached account in the row's tenant, else refused; [`_unusable_claim`](../../../../pm_ai/connectors/graph/auth.py#L437) decides when an `oid` counts as not carried.
+2. How it is read back from the sealed credential: [`SealedCredential.user_id`](../../../../pm_ai/connectors/graph/auth.py#L422).
+3. `connector add graph` writing it: [`GraphEnrolment.sign_in`](../../../../pm_ai/app/wiring.py#L1191); the key itself in [`connector_rows.py`](../../../../pm_ai/domain/connector_rows.py).
+4. The writer and comparison `8m` and `23c` share: [`record_user_id`](../../../../pm_ai/core/connector_enrolment.py#L534), [`recorded_user_id`](../../../../pm_ai/core/connector_enrolment.py#L621), [`assert_same_user`](../../../../pm_ai/core/connector_enrolment.py#L634).
+5. A claim taken twice: [`ClaimReentered`](../../../../pm_ai/domain/claims.py#L45), raised in [`platform/claims.py`](../../../../pm_ai/platform/claims.py#L113) and in the storage façade, which also gains [`holds_claim`](../../../../pm_ai/storage/service.py#L1465) (new on [`StoragePort`](../../../../pm_ai/ports/__init__.py#L747)).
+6. Tests: `tests/slice/test_connector_add_graph.py`, `tests/core/test_connector_enrolment.py`, `tests/connectors/test_graph_auth.py`, `tests/architecture/test_storage_capabilities.py`; the contention helper [`held_by_another_thread`](../../../../tests/architecture/claim_fakes.py#L48) replaces same-thread re-claims in about 20 existing tests.

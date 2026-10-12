@@ -468,6 +468,46 @@ def test_an_unidentifiable_enrolling_account_is_stale_and_not_declined():
     assert auth.store.read() is None
 
 
+def test_the_sealed_account_names_the_signed_in_users_graph_user_id():
+    """Story 8q: the user id is the first part of the two-part account id."""
+    client = FakeMsal()
+    auth = _auth(client)
+    credential = auth.sign_in(lambda message: None)
+
+    sealed = SealedCredential.decode(credential)
+    assert sealed.home_account_id == ACCOUNT
+    assert sealed.user_id == "an-object-id"
+
+
+@pytest.mark.parametrize("account", ["one-part", "a.b.c", ".tenant", "user."])
+def test_an_account_id_of_another_shape_names_no_user(account):
+    assert SealedCredential(refresh_token=REFRESH, home_account_id=account).user_id is None
+
+
+def test_the_fallback_account_must_belong_to_the_tenant_signed_in_through():
+    """A guest's account id names its home tenant; its user part is not ours."""
+    tenant = "11111111-2222-3333-4444-555555555555"
+    client = FakeMsal(
+        device_result=_token(id_token_claims={}),
+        accounts=[{"home_account_id": "a-guest.99999999-8888-7777-6666-555555555555"}],
+    )
+    auth = _auth(client, tenant=tenant)
+
+    with pytest.raises(CredentialStale) as refused:
+        auth.sign_in(lambda message: None)
+
+    assert tenant in str(refused.value)
+    assert "99999999-8888-7777-6666-555555555555" in str(refused.value)
+    assert auth.store.read() is None
+
+    matching = FakeMsal(
+        device_result=_token(id_token_claims={}),
+        accounts=[{"home_account_id": f"the-pm.{tenant.upper()}"}],
+    )
+    credential = _auth(matching, tenant=tenant).sign_in(lambda message: None)
+    assert SealedCredential.decode(credential).user_id == "the-pm"
+
+
 # ── Silent refresh ───────────────────────────────────────────────────────────
 
 

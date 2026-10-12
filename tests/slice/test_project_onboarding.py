@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from claim_fakes import held_by_another_thread
 from pm_ai.app import entry
 from pm_ai.app.wiring import onboard_project
 from pm_ai.core.project_registry import (
@@ -380,11 +381,13 @@ def test_a_second_run_refuses_while_the_claim_is_held(home, tmp_path):
     with both commands reporting success.
 
     Two doors, one file (story `1r`): the platform lock held directly on the
-    resolved registry path refuses onboarding through the storage façade."""
+    resolved registry path, by another thread, refuses onboarding through the
+    storage façade. (This thread taking it twice is a bug, not a busy file —
+    AD-5, story 8q.)"""
     (tmp_path / "alpha").mkdir()
     registry = ScopePaths.production().project_registry.resolve()
 
-    with exclusive(registry):
+    with held_by_another_thread(lambda: exclusive(registry)):
         with pytest.raises(ArtifactBusy) as refused:
             onboard_project(Keychain(), str(tmp_path / "alpha"))
 

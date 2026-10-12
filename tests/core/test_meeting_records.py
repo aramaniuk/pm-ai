@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from claim_fakes import InMemoryClaims
+from claim_fakes import InMemoryClaims, held_by_another_thread
 from pm_ai.core.meeting_records import (
     MEETINGS,
     NOTES_HEADING,
@@ -1012,7 +1012,9 @@ def test_put_takes_an_exclusive_claim_over_the_collection(records, storage):
     The claim does not cover a *human's* editor, which honours nothing of
     pm-ai's; that window is stated on `put` rather than implied to be closed.
     """
-    with storage.exclusive(scope=PROJECT, artifact=MEETINGS):
+    with held_by_another_thread(
+        lambda: storage.exclusive(scope=PROJECT, artifact=MEETINGS)
+    ):
         with pytest.raises(ArtifactBusy):
             records.put(meeting())
 

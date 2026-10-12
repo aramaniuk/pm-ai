@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from pm_ai.domain.connector_rows import USER_ID_KEY
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
     CredentialProbePort,
@@ -70,19 +71,26 @@ __all__ = [
     "_default_project",
     "CONNECTORS",
     "CREDENTIAL_STORE",
+    "ConnectorNotConfigured",
     "CredentialNotHeld",
+    "DifferentUser",
     "DuplicateConnector",
     "MalformedInstanceName",
     "MalformedSettings",
+    "NotAGraphRow",
     "OrphanedCredential",
     "ProbeFailed",
     "ProbeUnreachable",
     "RESERVED_ROW_KEYS",
+    "USER_ID_KEY",
     "UnknownConnectorSystem",
     "assert_enrollable",
+    "assert_same_user",
     "connector_configurations",
     "credential_for",
     "enrol_connector",
+    "record_user_id",
+    "recorded_user_id",
     "redacted",
     "replace_credential",
     "stored_credentials",
@@ -177,6 +185,46 @@ class CredentialNotHeld(LookupError):
     different connector wearing the same name. Nothing is written, and the
     instance is named.
     """
+
+
+class ConnectorNotConfigured(LookupError):
+    """`connectors/` holds no row for this instance, so there is nothing to update.
+
+    Raised by `record_user_id`, which changes one key of an enrolled row and
+    never creates one. Nothing is written, and the instance is named.
+    """
+
+
+class NotAGraphRow(ValueError):
+    """The row is not a Graph connector's, so it records no Graph user (story 8q).
+
+    `record_user_id` writes a Graph user id; written into another system's row
+    it would name a user that system never signed in. Nothing is written, and
+    the instance is named.
+    """
+
+
+class ClaimNotHeld(RuntimeError):
+    """A caller said it held the claim and does not — a bug, not a refusal (story 8q).
+
+    `claimed=True` means "I hold the sealed store's claim on this thread";
+    trusted without checking, a caller that was wrong would write unserialized.
+    """
+
+
+class DifferentUser(ValueError):
+    """A sign-in was by a different user than the one the row records (story 8q).
+
+    A different person is a different connector: accepting the sign-in would
+    harvest another person's calendar into the PM's tree. Raised by
+    `assert_same_user` before anything is sealed or written; names both user
+    ids, which are not secrets. `recorded` and `signed_in` carry them.
+    """
+
+    def __init__(self, message: str, *, recorded: str, signed_in: str) -> None:
+        super().__init__(message)
+        self.recorded = recorded
+        self.signed_in = signed_in
 
 
 def _sealed_under(entry: Mapping[str, object], system: str) -> bool:
@@ -481,6 +529,140 @@ def replace_credential(
     document[CREDENTIALS_KEY] = credentials
     storage.write_artifact(_encode(document), scope=APPLICATION, artifact=CREDENTIAL_STORE)
     return True
+
+
+def record_user_id(
+    storage: StoragePort,
+    *,
+    instance: str,
+    user_id: str,
+    claimed: bool = False,
+) -> bool:
+    """Set `instance`'s row `user_id` to `user_id`, and change nothing else (story 8q).
+
+    The writer `connector sign-in` (story 8m) uses after a sign-in: the row is
+    re-read at write time, the one key is set, and every other key — a
+    `categories` mapping hand-added since enrolment included — is written back
+    as it was read. `connector add graph` does not call this; it writes the key
+    in the row it composes, in the same write as everything else.
+
+    **It overwrites a different recorded user.** It does not compare: a caller
+    signing in against an existing row runs `assert_same_user` against
+    `recorded_user_id(row)` first, and calls this only when that accepts.
+
+    Runs under the claim enrolment writes rows under, the sealed store's.
+    `claimed` says the caller already holds it, as `replace_credential`'s does:
+    a claim is never taken twice by one process (AD-5), and a caller that holds
+    it and asks again gets a programming error, not a busy refusal. `claimed`
+    is checked, not trusted: `ClaimNotHeld` when this thread does not hold it.
+
+    Returns whether the file was written. A row already recording this user —
+    compared ignoring case, a Graph user id being a GUID — is not rewritten, so
+    a repeat sign-in changes no bytes. Refused, writing nothing, with
+    `ConnectorNotConfigured` when no row exists, `MalformedSettings` when the
+    row is not a JSON object, `NotAGraphRow` when its `system` is not `graph`,
+    and `ValueError` for a blank or non-text `user_id`.
+    """
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError(
+            f"no user id was given to record for {instance!r}; a blank one would "
+            f"read as no recorded user. Nothing was written."
+        )
+    _assert_nameable(instance)
+    if not claimed:
+        with storage.exclusive(scope=APPLICATION, artifact=CREDENTIAL_STORE):
+            return record_user_id(
+                storage, instance=instance, user_id=user_id, claimed=True
+            )
+    if not storage.holds_claim(scope=APPLICATION, artifact=CREDENTIAL_STORE):
+        raise ClaimNotHeld(
+            f"record_user_id was told the claim on {CREDENTIAL_STORE} is held "
+            f"for {instance!r}, and this thread does not hold it. That is a bug "
+            f"in pm-ai; nothing was written."
+        )
+    name = f"{instance}.json"
+    # Read inside the claim, so a key another writer set a moment ago is kept.
+    raw = storage.read_artifact(scope=APPLICATION, artifact=CONNECTORS, name=name)
+    if raw is None:
+        raise ConnectorNotConfigured(
+            f"{CONNECTORS} has no row for {instance!r}, so there is no user id to "
+            f"record. Nothing was written."
+        )
+    try:
+        row = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as unreadable:
+        raise MalformedSettings(
+            f"{CONNECTORS}{name} is not valid JSON ({unreadable}), so its user id "
+            f"cannot be recorded without discarding it. Nothing was written."
+        ) from None
+    if not isinstance(row, dict):
+        raise MalformedSettings(
+            f"{CONNECTORS}{name} holds a {type(row).__name__} rather than an "
+            f"object, so its user id cannot be recorded without discarding it. "
+            f"Nothing was written."
+        )
+    if row.get("system") != "graph":
+        raise NotAGraphRow(
+            f"{instance!r} is configured as a {row.get('system')!r} connector, "
+            f"not a Graph one, so it records no Graph user id. Nothing was "
+            f"written."
+        )
+    user_id = user_id.strip()
+    recorded = recorded_user_id(row)
+    if recorded is not None and recorded.casefold() == user_id.casefold():
+        return False
+    row[USER_ID_KEY] = user_id
+    storage.write_artifact(
+        _encode(row, strict=True), scope=APPLICATION, artifact=CONNECTORS, name=name
+    )
+    return True
+
+
+def recorded_user_id(row: Mapping[str, object]) -> str | None:
+    """The user a connector row records, or `None` when it records none (story 8q).
+
+    A `user_id` that is missing, blank, whitespace or not text is absent: any
+    user may sign in for such a row, and nothing compares against it. The rule
+    every reader of the key applies — story 23c's included.
+    """
+    value = row.get(USER_ID_KEY)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def assert_same_user(
+    recorded: str | None, signed_in: str, *, instance: str | None = None
+) -> None:
+    """Refuse a sign-in by a different user than the row records (story 8q).
+
+    `recorded` is `recorded_user_id`'s answer; absent (or blank, read the same
+    way) accepts any user. A blank or non-text `signed_in` is a `ValueError`,
+    a programming error, whatever is recorded. Otherwise the two ids must
+    match, compared ignoring case — a Graph user id is a GUID — or
+    `DifferentUser` names both. Pure:
+    run it before anything is sealed or written, so a refusal saves nothing.
+    """
+    if not isinstance(signed_in, str) or not signed_in.strip():
+        raise ValueError(
+            f"no signed-in user id was given to compare ({signed_in!r}); a sign-in "
+            f"pm-ai cannot name is refused before this is asked. This is a bug in "
+            f"pm-ai."
+        )
+    if recorded is None or not recorded.strip():
+        return
+    if recorded.strip().casefold() == signed_in.strip().casefold():
+        return
+    connector = "this connector" if instance is None else repr(instance)
+    raise DifferentUser(
+        f"{connector} was enrolled for the user {recorded.strip()!r}, and this "
+        f"sign-in was by {signed_in.strip()!r}. A different person is a different "
+        f"connector: accepting it would harvest their calendar into this one's "
+        f"tree. Nothing was saved. Sign in as {recorded.strip()!r}, or enrol the "
+        f"other account under another instance name.",
+        recorded=recorded.strip(),
+        signed_in=signed_in.strip(),
+    )
 
 
 # ── Everything below is pure, and none of it ever sees a path ────────────────

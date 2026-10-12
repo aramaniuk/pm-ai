@@ -1107,3 +1107,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/2n-people-are-written-as-handles.md`
   summary: Meeting-record attendees are not parsed as person handles when read, while event-log person fields are; a hand-edited `attendees=actor_unresolved` reads back without complaint.
   evidence: `_parse_attendees` in `pm_ai/core/meeting_records.py` accepts any text and `Meeting.attendees` stays `Actor`. The event log and the meeting record now follow two person rules; whichever slice next reads attendees as people (`2o`) should parse them through `parse_person_handle`.
+
+## Surfaced by the story-8q review (2026-10-11)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: The architecture spine's AD-5 does not state the re-entry rule (a second claim on a path the process already holds is a programming error, never `ArtifactBusy`); only the 8q spec does, and the code's docstrings cite "AD-5 (2026-10-11, story 8q)".
+  evidence: A search of `ARCHITECTURE-SPINE.md` for re-entry finds nothing about claims. The spine changes only through `bmad-architecture`. The rule as built is per thread, not per process, and cannot see asyncio tasks sharing one thread; the spine amendment should say which.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
+  summary: With the default tenant `organizations` (or `common`, `consumers`, or a domain name), the cached-account fallback for a sign-in without `oid` can never succeed, because a cached account's tenant part is always a tenant id.
+  evidence: The frozen rule compares the cached tenant part with the row's tenant. A normal work-account sign-in carries `oid`, so no sign-in seen so far reaches the fallback. Whether the fallback should accept the id token's `tid` in place of a tenant word is a product decision for whoever next touches the sign-in.

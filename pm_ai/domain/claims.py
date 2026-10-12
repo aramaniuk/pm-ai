@@ -17,7 +17,7 @@ from every layer without a cycle and without a dependency.
 
 from __future__ import annotations
 
-__all__ = ["ClaimHeld", "LOCK_SUFFIX"]
+__all__ = ["ClaimHeld", "ClaimReentered", "LOCK_SUFFIX"]
 
 LOCK_SUFFIX = ".lock"
 """The suffix of the empty sidecar a claim is taken on: `<name>.lock`.
@@ -39,4 +39,22 @@ class ClaimHeld(RuntimeError):
     Refused rather than waited on. A CLI command that blocks with no output
     looks hung, and the holder is a command that takes milliseconds — so "run it
     again" is both true and quick.
+    """
+
+
+class ClaimReentered(RuntimeError):
+    """This thread already holds the claim it asked for again — a bug, not a busy file.
+
+    AD-5 (2026-10-11, story 8q): a claim is never taken twice by one process. A
+    caller already inside a claim runs every write under it — `claimed=True`
+    on `replace_credential` and `record_user_id` — rather than taking it again.
+    Asking again used to meet the process's own lock and come back as
+    `ClaimHeld`, which `StorageService.exclusive` turns into `ArtifactBusy`:
+    a refusal blaming another process that does not exist, and a retry that
+    would meet itself forever.
+
+    Deliberately not a subclass of `ClaimHeld`, so nothing translates it into a
+    refusal and no command catches it. Names the path. Raised before anything
+    is written. Another *thread* holding the claim is still contention and
+    still `ClaimHeld`: it releases, and a retry can succeed.
     """

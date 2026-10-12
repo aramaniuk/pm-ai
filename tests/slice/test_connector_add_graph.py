@@ -82,7 +82,7 @@ class Microsoft:
     The other knobs make one step misbehave: `build` raises at construction,
     `start` is what asking for a code answers or raises, `hold_start` and
     `hold_refresh` make a step wait, `device` is the sign-in's answer or what
-    it raises.
+    it raises, `accounts` is MSAL's cached account list (story 8q's fallback).
     """
 
     def __init__(
@@ -96,7 +96,9 @@ class Microsoft:
         start: dict | BaseException | None = None,
         hold_start: threading.Event | None = None,
         hold_refresh: threading.Event | None = None,
+        accounts: list[dict] | None = None,
     ) -> None:
+        self.accounts = list(accounts or [])
         self.live = live
         self.device = device if device is not None else _token(SIGNED_IN)
         self.issue = issue
@@ -154,7 +156,7 @@ class Microsoft:
         return None
 
     def get_accounts(self, username=None):
-        return []
+        return [dict(account) for account in self.accounts]
 
 
 class Keychain:
@@ -297,6 +299,7 @@ def test_a_valid_add_saves_the_settings_and_the_sealed_sign_in_together(
     assert row["client_id"] == CLIENT_ID
     assert row["window_width_minutes"] == 1440
     assert row["first_run_reach_back_minutes"] == 10080
+    assert row["user_id"] == ACCOUNT_CLAIMS["oid"], "the signed-in user is recorded (8q)"
     assert "categories" not in row, "category mapping is not asked"
 
     assert provider.refreshed_with == [SIGNED_IN], (
@@ -305,6 +308,239 @@ def test_a_valid_add_saves_the_settings_and_the_sealed_sign_in_together(
     assert _sealed_token(home, keychain) == ROTATED, (
         "the token the health check rotated to is the one sealed, not the retired one"
     )
+
+
+# ── Story 8q — the row records which Microsoft user signed in ────────────────
+
+GUEST_HOME = "99999999-8888-7777-6666-555555555555"
+ROW_TENANT = "11111111-2222-3333-4444-555555555555"
+"""A tenant id typed at the tenant question, so the fallback can match it."""
+
+
+def _no_oid() -> dict:
+    """A sign-in whose id token carries no `oid`."""
+    return {**_token(SIGNED_IN), "id_token_claims": {"tid": ROW_TENANT}}
+
+
+def _sealed_document(home: Path, keychain: Keychain) -> dict:
+    daemon = build(home, "alpha", keychain=keychain)
+    return json.loads(stored_credentials(daemon.storage)[INSTANCE]["credential"])
+
+
+def test_the_sealed_sign_in_keeps_its_two_fields(machine, monkeypatch, capsys):
+    """The user id lives in the row, not beside the token."""
+    home, keychain = machine
+    _microsoft(monkeypatch, Microsoft())
+    assert _add(monkeypatch, VALID)[0] == EXIT_OK, capsys.readouterr().err
+
+    document = _sealed_document(home, keychain)
+    assert sorted(document) == ["home_account_id", "refresh_token"]
+    assert document["home_account_id"] == "an-object-id.a-tenant-id"
+    assert "user_id" not in document
+
+
+def test_a_sign_in_without_oid_takes_the_one_cached_account_id(
+    machine, monkeypatch, capsys
+):
+    home, _ = machine
+    provider = Microsoft(
+        device=_no_oid(), accounts=[{"home_account_id": f"the-cached-user.{ROW_TENANT}"}]
+    )
+    _microsoft(monkeypatch, provider)
+
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert _row(home)["user_id"] == "the-cached-user"
+
+
+@pytest.mark.parametrize(
+    ("accounts", "said"),
+    [
+        ([], "0 accounts"),
+        (
+            [
+                {"home_account_id": f"one-user.{ROW_TENANT}"},
+                {"home_account_id": f"another-user.{ROW_TENANT}"},
+            ],
+            "2 accounts",
+        ),
+        ([{"home_account_id": "an-adfs-shaped-id"}], "'an-adfs-shaped-id'"),
+    ],
+    ids=["no account", "two accounts", "a one-part id"],
+)
+def test_a_sign_in_naming_no_account_is_refused_and_seals_nothing(
+    machine, monkeypatch, capsys, accounts, said
+):
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft(device=_no_oid(), accounts=accounts))
+
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL, captured.err
+    assert "Graph user id" in captured.err and "`oid`" in captured.err, (
+        "the refusal names the missing identifier"
+    )
+    assert said in captured.err
+    _nothing_saved(home)
+    for token in (SIGNED_IN, ROTATED):
+        assert token not in captured.out and token not in captured.err
+
+
+def test_the_fallback_account_id_from_another_tenant_is_refused(
+    machine, monkeypatch, capsys
+):
+    """A guest account's id names its home tenant, not the one signed in through."""
+    home, _ = machine
+    provider = Microsoft(
+        device=_no_oid(), accounts=[{"home_account_id": f"a-guest.{GUEST_HOME}"}]
+    )
+    _microsoft(monkeypatch, provider)
+
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL, captured.err
+    assert "Graph user id" in captured.err
+    assert GUEST_HOME in captured.err and ROW_TENANT in captured.err, "both tenants named"
+    _nothing_saved(home)
+    assert SIGNED_IN not in captured.err and SIGNED_IN not in captured.out
+
+
+@pytest.mark.parametrize(
+    "tenant", ["", "contoso.onmicrosoft.com"], ids=["organizations", "a domain"]
+)
+def test_a_fallback_against_a_tenant_that_is_not_an_id_says_so(
+    machine, monkeypatch, capsys, tenant
+):
+    """`organizations` or a domain cannot be compared with an account's tenant
+    id; the refusal says that, and does not blame a guest account."""
+    home, _ = machine
+    provider = Microsoft(
+        device=_no_oid(), accounts=[{"home_account_id": f"the-cached-user.{ROW_TENANT}"}]
+    )
+    _microsoft(monkeypatch, provider)
+
+    code, _ = _add(monkeypatch, [CLIENT_ID, tenant, "1440", "10080"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL, captured.err
+    assert "is not a tenant id" in captured.err
+    assert "cannot be matched" in captured.err
+    assert "guest" not in captured.err
+    _nothing_saved(home)
+
+
+UNUSABLE = [
+    ({"oid": "", "tid": ROW_TENANT}, "`oid` claim is blank"),
+    ({"oid": "  ", "tid": ROW_TENANT}, "`oid` claim is blank"),
+    ({"oid": " the-pm ", "tid": ROW_TENANT}, "padded with whitespace"),
+    ({"oid": "a.b", "tid": ROW_TENANT}, "`oid` claim 'a.b' contains a `.`"),
+    ({"oid": "the-pm", "tid": f"{ROW_TENANT}.extra"}, "`tid` claim"),
+]
+UNUSABLE_IDS = ["empty oid", "whitespace oid", "padded oid", "dotted oid", "dotted tid"]
+
+
+def _with_claims(claims: dict) -> dict:
+    return {**_token(SIGNED_IN), "id_token_claims": claims}
+
+
+@pytest.mark.parametrize(("claims", "said"), UNUSABLE, ids=UNUSABLE_IDS)
+def test_an_unusable_oid_falls_back_to_the_one_cached_account(
+    machine, monkeypatch, capsys, claims, said
+):
+    """Never trimmed into what is sealed: the cached account is sealed as MSAL holds it."""
+    home, keychain = machine
+    cached = f"the-cached-user.{ROW_TENANT}"
+    _microsoft(
+        monkeypatch,
+        Microsoft(device=_with_claims(claims), accounts=[{"home_account_id": cached}]),
+    )
+
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert _row(home)["user_id"] == "the-cached-user"
+    assert _sealed_document(home, keychain)["home_account_id"] == cached
+
+
+@pytest.mark.parametrize(("claims", "said"), UNUSABLE, ids=UNUSABLE_IDS)
+def test_an_unusable_oid_with_no_cached_account_is_refused_as_unusable(
+    machine, monkeypatch, capsys, claims, said
+):
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft(device=_with_claims(claims), accounts=[]))
+
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL, captured.err
+    assert "no usable Graph user id" in captured.err, "unusable, not absent"
+    assert said in captured.err
+    assert "absent" not in captured.err
+    _nothing_saved(home)
+
+
+def test_a_sealed_credential_naming_no_user_is_refused_and_saves_nothing(
+    machine, monkeypatch, capsys
+):
+    """The backstop after the health check: unreachable through the adapter,
+    which refuses first, so reached here by making the read-back name no one."""
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+    monkeypatch.setattr(SealedCredential, "user_id", property(lambda self: None))
+
+    code, _ = _add(monkeypatch, VALID)
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL, captured.err
+    assert "does not name the signed-in user's Graph user id" in captured.err
+    _nothing_saved(home)
+
+
+def test_a_credential_that_does_not_decode_is_its_own_failure(
+    machine, monkeypatch, capsys
+):
+    """Not folded into "names no user": the decode refusal is what is reported."""
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    class Undecodable:
+        @staticmethod
+        def decode(raw: str):
+            raise wiring.GraphAuthError("the sealed Graph credential is not the document this adapter writes.")
+
+    monkeypatch.setattr(wiring, "SealedCredential", Undecodable)
+
+    code, _ = _add(monkeypatch, VALID)
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL, captured.err
+    assert "not the document this adapter writes" in captured.err
+    assert "does not name the signed-in user" not in captured.err
+    _nothing_saved(home)
+    for token in (SIGNED_IN, ROTATED):
+        assert token not in captured.err and token not in captured.out
+
+
+def test_a_row_enrolled_before_8q_still_builds_without_a_word_about_it(
+    machine, monkeypatch, capsys
+):
+    """No `user_id` in the row: the connector builds and nothing warns."""
+    home, keychain = machine
+    _microsoft(monkeypatch, Microsoft())
+    assert _add(monkeypatch, VALID)[0] == EXIT_OK
+    row = _row(home)
+    del row["user_id"]
+    _settings_file(home).write_text(json.dumps(row))
+    capsys.readouterr()
+
+    daemon = build(home, "alpha", keychain=keychain)
+
+    assert isinstance(daemon.connectors.get(INSTANCE), GraphConnector)
+    captured = capsys.readouterr()
+    assert "user_id" not in captured.err and "user id" not in captured.err
 
 
 def test_the_settings_file_is_written_at_0600(machine, monkeypatch, capsys):
