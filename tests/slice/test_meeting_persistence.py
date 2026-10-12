@@ -39,7 +39,6 @@ from pm_ai.domain.transcripts import Transcript, TranscriptSource, Utterance
 from pm_ai.platform.paths import ScopePaths
 
 NOW = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
-PM = "andrei@example.com"
 PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="alex")
@@ -64,8 +63,8 @@ GRAPH_ID = "AAMkAGI2" + "Zm9vYmFyLWJheg_-" * 12 + "=="
 
 
 def _daemon(tmp_path: Path):
-    """A daemon over `tmp_path`, with the PM stated (there is no default since 4a)."""
-    return build(tmp_path, "alpha", now=lambda: NOW, config=Config(pm_handle=PM))
+    """A daemon over `tmp_path`."""
+    return build(tmp_path, "alpha", now=lambda: NOW, config=Config())
 
 
 def _transcript(meeting: Meeting) -> Transcript:

@@ -24,7 +24,7 @@ from pm_ai.domain.events import (
     ObservedEventType,
     WorkItemPayload,
 )
-from pm_ai.domain.handles import NO_PERSON, person_handle
+from pm_ai.domain.handles import NO_PERSON, UNRESOLVED_SENTINEL, person_handle
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef
 from pm_ai.domain.payload_fields import UnencodablePayload, decode_payload
 from pm_ai.platform.paths import ScopePaths
@@ -198,7 +198,7 @@ def test_a_sender_and_a_mention_of_one_person_are_joinable_on_the_line():
     assert f"actor=graph:{DANA_GUID} " in text
     assert f"p.mentions=graph:{DANA_GUID}" in text
     assert decode_payload(entry).mentions == (str(DANA),)  # type: ignore[attr-defined]
-    assert "actor_unresolved" not in text
+    assert UNRESOLVED_SENTINEL not in text
 
 
 def test_no_person_as_an_assignee_is_refused_before_anything_is_written():

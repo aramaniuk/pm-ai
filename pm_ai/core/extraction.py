@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from pm_ai.core.command_authorization import EXECUTE, classify
 from pm_ai.core.sanitize import sanitize
+from pm_ai.domain.handles import NEVER_A_PERSON, PersonHandle
 from pm_ai.domain.identity import SourceRef
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.transcripts import Transcript
@@ -30,9 +31,39 @@ class Extraction:
     detail: dict
 
 
-def extract(transcript: Transcript, meeting: Meeting, *, pm_handle: str, provider: str) -> list[Extraction]:
+def extract(
+    transcript: Transcript,
+    meeting: Meeting,
+    *,
+    identity: frozenset[PersonHandle],
+    provider: str,
+) -> list[Extraction]:
+    """Every explicit command and implicit promise in `transcript`.
+
+    `identity` is the PM's handles, read once per ingestion by
+    `pm_ai.app.wiring.read_pm_identity` (story 2o). An utterance is the PM's
+    only when its `speaker` handle is in it — never by its label — so an empty
+    identity matches nobody and an utterance with no handle is nobody's.
+    """
+    if not isinstance(identity, frozenset):
+        raise TypeError(
+            f"extract takes the PM's identity as a frozenset of handles, not "
+            f"{identity!r}: it is read once per ingestion and must not change "
+            f"while the transcript is read."
+        )
+    for member in identity:
+        if not isinstance(member, PersonHandle):
+            raise TypeError(
+                f"the PM's identity holds {member!r}, which is not a PersonHandle."
+            )
     out: list[Extraction] = []
     for u in transcript.utterances:
+        if u.speaker is not None and not isinstance(u.speaker, PersonHandle):
+            raise TypeError(
+                f"an utterance's speaker is {u.speaker!r}, which is neither None "
+                f"nor a PersonHandle. A label belongs in `speaker_handle` and is "
+                f"never parsed as a handle."
+            )
         # **A producer-side pass, kept on purpose, and not the AD-12 guard.**
         # Story 8e deleted the one in `pipelines.py` because it discarded its
         # result and protected nothing; this one is used, so it is worth having
@@ -54,16 +85,15 @@ def extract(transcript: Transcript, meeting: Meeting, *, pm_handle: str, provide
                 kind="explicit_command",
                 disposition=classify(
                     source_authenticated=transcript.source.speaker_identity_is_authenticated,
-                    # `bool(pm_handle)` first, deliberately. An unconfigured
-                    # `pm_handle` is `""` (`core.config`) and nothing validates
-                    # the handles a transcript arrives with, so a GRAPH
-                    # transcript can carry an empty one. A bare equality would
-                    # then make an *unattributed* utterance the PM on a machine
-                    # nobody has configured yet — an unconfigured install
-                    # granting execution authority, the one direction AD-32 must
-                    # never fail in. `Config` refuses a whitespace handle, which
-                    # is why `bool` suffices here and no `.strip()` follows it.
-                    speaker_is_pm=bool(pm_handle) and u.speaker_handle == pm_handle,
+                    # The handle, never the label: a label is a display name
+                    # anyone in the meeting can share (AD-32, AD-34). A bot
+                    # sender or absence is never the PM, whatever `identity`
+                    # holds.
+                    speaker_is_pm=(
+                        u.speaker is not None
+                        and u.speaker.system not in NEVER_A_PERSON
+                        and u.speaker in identity
+                    ),
                     provider=provider,
                     verb=verb,
                 ),

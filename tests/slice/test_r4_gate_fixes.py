@@ -182,7 +182,7 @@ def test_the_composition_root_declares_no_bot_accounts(daemon):
 def test_mechanism_three_through_run_harvest_reads_no_alias(daemon, monkeypatch):
     """Acceptance: an event carrying an own handle persists `authored_by=pm_ai`,
     and the alias table is never read on the way."""
-    import pm_ai.domain.identity as identity
+    import pm_ai.domain.handles as handles
 
     class _Unreadable(dict):
         def _refuse(self, *_args, **_kwargs):
@@ -190,7 +190,7 @@ def test_mechanism_three_through_run_harvest_reads_no_alias(daemon, monkeypatch)
 
         get = __getitem__ = __contains__ = __iter__ = __len__ = items = keys = values = _refuse
 
-    monkeypatch.setattr(identity, "ALIASES", _Unreadable())
+    monkeypatch.setattr(handles, "ALIASES", _Unreadable())
     bot = person_handle("email", "pm-ai-bot@example.com")
     daemon = dataclasses.replace(daemon, own_handles=frozenset({bot}))
     daemon.connectors["gitlab:alpha"]._fake_api = [

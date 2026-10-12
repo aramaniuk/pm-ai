@@ -25,6 +25,7 @@ import pytest
 
 from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType
 from pm_ai.domain.handles import (
+    UNRESOLVED_SENTINEL,
     HANDLE_SYSTEMS,
     NO_PERSON,
     InvalidPersonHandle,
@@ -89,7 +90,7 @@ def test_none_naming_something_is_refused():
 
 @pytest.mark.parametrize(
     "value",
-    ["Dana Smith", "actor_unresolved", "dana@example.com", "gitlab:dana", "unresolved:gitlab:x", "meeting:m1"],
+    ["Dana Smith", UNRESOLVED_SENTINEL, "dana@example.com", "gitlab:dana", "unresolved:gitlab:x", "meeting:m1"],
 )
 def test_a_refused_value_is_not_built_and_the_error_names_it(value):
     with pytest.raises(InvalidPersonHandle) as caught:
@@ -205,7 +206,7 @@ def _event(actor: object) -> NormalizedEvent:
 
 
 @pytest.mark.parametrize(
-    "actor", ["email:dana@example.com", Actor("actor_unresolved"), None], ids=["str", "Actor", "None"]
+    "actor", ["email:dana@example.com", Actor(UNRESOLVED_SENTINEL), None], ids=["str", "Actor", "None"]
 )
 def test_an_envelope_actor_that_is_not_a_handle_is_refused_at_runtime(actor):
     """A value from `row.get` is `Any`, so mypy cannot catch this."""

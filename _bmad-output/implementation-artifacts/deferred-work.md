@@ -1132,3 +1132,11 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: The Graph health probe runs on a thread `run_bounded` abandons at its timeout, and it takes the `config.json` claim with the keychain fetch inside it; AD-5 now forbids a claim taken by abandonable work and puts the keychain fetch before the claim.
   evidence: Worked out from the code, not reproduced (`reviews/review-adversarial-2026-10-12.md` finding 2). In the CLI the process exits; in the daemon (`4e`) an abandoned holder would keep `config.json` claimed for the daemon's life.
 
+## Surfaced by the story-2o review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2o-people-are-read-as-people.md`
+  summary: Nothing tells the PM why every spoken command now stages: doctor's `pm_handle` warning is gone with nothing in its place, and `run_transcript_ingestion` discards `read_pm_identity(...).unusable`.
+  evidence: 2o removes doctor's check by design and both transcript adapters leave `Utterance.speaker` as `None`, so no utterance is the PM's until a transcript adapter carries a handle. `23c`'s sign-in line is the planned consumer of `unusable`; a doctor probe over `read_pm_identity` (WARNING when the identity is empty or a row is unusable) would close the gap for the CLI.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2o-people-are-read-as-people.md`
+  summary: Older story specs (`4a`, `4g`, `4h`, `4i`) still describe `pm_handle` as a current config key.
+  evidence: They are done specs, kept as history; a reader of the contract meets a key 2o now refuses. A superseded-by note through `bmad-spec` would stop that.

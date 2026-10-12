@@ -201,7 +201,7 @@ def daemon(tmp_path: Path, *calendars: object, zone: str = ZONE):
         "alpha",
         now=lambda: NOW,
         keychain=_NoKey(),
-        config=Config(display_timezone=zone, pm_handle="andrei@example.com"),
+        config=Config(display_timezone=zone),
     )
     built.connectors = {
         getattr(calendar, "instance"): calendar  # type: ignore[misc]

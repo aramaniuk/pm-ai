@@ -80,7 +80,7 @@ def _daemon(tmp_path: Path, monkeypatch, *, busy_at: int, failure=None):
     own holder is a programming error, not a busy file (AD-5, story 8q). Yields
     the daemon; the lock is released after the test.
     """
-    daemon = build(tmp_path, "alpha", now=lambda: NOW, config=Config(pm_handle="pm@x"))
+    daemon = build(tmp_path, "alpha", now=lambda: NOW, config=Config())
     daemon.connectors[INSTANCE] = _ThreeRecords(failure)
     daemon.storage.save_cursor(INSTANCE, LOADED, EARLIER, None)
 

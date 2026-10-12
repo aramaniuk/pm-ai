@@ -37,7 +37,7 @@ from pm_ai.domain.events import (
     WorkItemPayload,
 )
 from pm_ai.domain.handles import NO_PERSON, person_handle
-from pm_ai.domain.identity import UNRESOLVED_ACTOR
+from pm_ai.domain.handles import UNRESOLVED_SENTINEL as UNRESOLVED_ACTOR
 from pm_ai.domain.payload_fields import (
     NoPayload,
     UnencodablePayload,

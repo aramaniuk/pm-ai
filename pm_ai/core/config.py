@@ -30,7 +30,10 @@ architecture forbids, and answering that with "unknown key" would be a shrug.
 
 **An unknown key is refused, not ignored.** TOML readers usually ignore extras,
 which is how `verbose_loging = true` reads as configured forever. The accepted
-vocabulary is four keys, so a closed set costs nothing.
+vocabulary is three keys, so a closed set costs nothing. `pm_handle` was a
+fourth until story 2o removed it: who the PM is comes from the Graph connector
+rows (`pm_identity`), so a file still setting it is refused like any other
+unknown key.
 
 Absent and empty are both ordinary first-run states returning defaults — a
 missing optional config is not a failure.
@@ -195,12 +198,11 @@ def _refuse_zone(value: object, cause: Exception) -> ConfigRefused:
 class Config:
     """The wave-1 vocabulary. Every field's default is its unconfigured state.
 
-    `blended_hourly_rate` at `0.0` and `pm_handle` at `""` are *unset*, not
-    values: no `config.toml` may set either to those (see `_number`/`_text`),
-    so "absent" and "explicitly zero" cannot be confused. Both fail in the safe
-    direction — an unset rate reports a cost of zero rather than a plausible
-    wrong figure, and an unset handle matches no speaker, so nothing spoken
-    auto-executes (AD-32).
+    `blended_hourly_rate` at `0.0` and `display_timezone` at `""` are *unset*,
+    not values: no `config.toml` may set either to those (see
+    `_number`/`_text`), so "absent" and "explicitly zero" cannot be confused.
+    An unset rate fails in the safe direction — it reports a cost of zero
+    rather than a plausible wrong figure.
 
     `__post_init__` is what makes the paragraph above true of the class rather
     than only of the loader.
@@ -209,14 +211,11 @@ class Config:
     # CAP-3's Man-Hour Cost: `Meeting.man_hour_cost` takes this and, until now,
     # nothing supplied it.
     blended_hourly_rate: float = 0.0
-    # `extract()` takes this. Hardcoded as a literal in `wiring.py` until this
-    # module existed.
-    pm_handle: str = ""
     # The one setting `pm_ai.platform.environment`'s docstring explicitly
     # sanctions for this file, in the same breath as refusing the encryption
     # toggle: "Verbose logging may live there; encryption may not."
     verbose_logging: bool = False
-    # The fourth and last key, reserved to the human by `4a` and answered on
+    # The last key, reserved to the human by `4a` and answered on
     # 2026-09-03. `23a`'s renderer and the live read that selects the day both
     # take a timezone, and nothing in wave 1 supplied one. `""` is the unset
     # state: a caller needing a day boundary refuses rather than assuming UTC,
@@ -229,9 +228,7 @@ class Config:
         `load_config` is not the only way in and never was: `build(config=...)`
         takes one directly, tests construct them, and `4c` will too. Leaving
         these rules in the loader would have made them true of files and false
-        of the class — `Config(pm_handle="   ")` constructed happily, and a
-        whitespace handle both defeats `extract()`'s `bool(pm_handle)` guard and
-        matches any speaker carrying the same whitespace. Checked here for the
+        of the class. Checked here for the
         same reason `File`/`Dir`/`Collection` check themselves: everything a
         value can know about itself, it knows at construction.
 
@@ -268,34 +265,23 @@ class Config:
                 f"the file: TOML has a real boolean type, and a stand-in is an "
                 f"author guessing."
             )
-        if self.pm_handle and not self.pm_handle.strip():
-            raise ConfigRefused(
-                f"pm_handle is {self.pm_handle!r} — whitespace, which is neither "
-                f"unset nor a handle. `\"\"` is the unset state and matches "
-                f"nobody; whitespace matches a speaker whose handle is the same "
-                f"whitespace, which would hand that speaker the PM's execution "
-                f"authority (AD-32)."
-            )
-        # A lone surrogate has no UTF-8 encoding, so a handle carrying one
+        # The zone's refusals run in a fixed order: its type first, so a
+        # non-string — `0` and `None` included, which are falsy and would
+        # otherwise skip every check below — is named as a type; then an
+        # unpaired surrogate; then the zone database.
+        if not isinstance(self.display_timezone, str):
+            raise _refuse_zone(self.display_timezone, TypeError())
+        # A lone surrogate has no UTF-8 encoding, so a zone name carrying one
         # could be *held* by a `Config` and never written to `config.toml` —
-        # `render_config`'s final `.encode("utf-8")` raised `UnicodeEncodeError`
-        # out of a module that promises `ConfigRefused` and nothing else.
-        # Refused here rather than escaped there, because escaping is not
-        # available: no TOML string can carry an unpaired surrogate, so the
-        # round-trip rule holds only if such a handle is inadmissible.
-        #
-        # Not a theoretical input. POSIX argv is decoded with `surrogateescape`,
-        # so any byte sequence the shell hands `pm-ai` that is not valid UTF-8
-        # arrives as surrogates. `4h` reads `pm_handle` from a terminal prompt,
-        # and a stdin decoded with `surrogateescape` delivers such bytes the
-        # same way.
-        if _has_surrogates(self.pm_handle):
+        # `render_config`'s final `.encode("utf-8")` would raise
+        # `UnicodeEncodeError` out of a module that promises `ConfigRefused`.
+        # POSIX argv and a `surrogateescape` stdin deliver undecodable bytes
+        # exactly this way.
+        if _has_surrogates(self.display_timezone):
             raise ConfigRefused(
-                f"pm_handle is {self.pm_handle!r}, which contains an unpaired "
-                f"surrogate and therefore has no UTF-8 encoding — config.toml "
-                f"could not be written with it at all. This is what a command "
-                f"line argument looks like when the bytes the shell passed were "
-                f"not valid UTF-8; re-enter the handle."
+                f"display_timezone is {self.display_timezone!r}, which contains "
+                f"an unpaired surrogate and therefore has no UTF-8 encoding — "
+                f"config.toml could not be written with it at all. Re-enter it."
             )
         if self.display_timezone:
             # Validated against the zone database rather than by shape. A
@@ -341,7 +327,6 @@ def load_config(raw: bytes | None) -> Config:
     supplied = {path[0]: value for path, value in paths if len(path) == 1}
     defaults = Config()
     rate = supplied.get("blended_hourly_rate")
-    handle = supplied.get("pm_handle")
     verbose = supplied.get("verbose_logging")
     zone = supplied.get("display_timezone")
     return Config(
@@ -350,7 +335,6 @@ def load_config(raw: bytes | None) -> Config:
             if rate is None
             else _number("blended_hourly_rate", rate)
         ),
-        pm_handle=defaults.pm_handle if handle is None else _text("pm_handle", handle),
         verbose_logging=(
             defaults.verbose_logging
             if verbose is None
@@ -392,8 +376,8 @@ exists to drift — `pm-ai config show` prints the live one.
 """
 
 # TOML basic-string escapes, verbatim from the specification's table. `\b` and
-# `\f` are in it and are easy to forget: `Config.__post_init__` admits any
-# non-blank handle, so a control character in one is admissible input, and an
+# `\f` are in it and are easy to forget: a string value reaching the renderer
+# may carry a control character, and an
 # unescaped one produces a file the loader on the other side of this module
 # cannot parse.
 _ESCAPES = {
@@ -428,7 +412,7 @@ def render_config(config: Config) -> bytes:
 
     **A key at its unset default is omitted.** Compared against `Config()`'s own
     field defaults, which is the definition `pm-ai config show` already uses for
-    the word. For the rate and the handle the loader would refuse the explicit
+    the word. For the rate and the zone the loader would refuse the explicit
     unset value anyway; for `verbose_logging` it would not — `false` is a
     perfectly acceptable flag — so this rule is the only thing that keeps a
     first-run file from stating a setting nobody chose.
@@ -488,7 +472,7 @@ def _basic_string(value: str) -> str:
 
     Written out rather than borrowed from `json.dumps`. The escapes overlap
     almost entirely, but JSON's encoder escapes every non-ASCII character by
-    default, and a handle spelled back as `\\u00e9` in a file whose whole promise
+    default, and a value spelled back as `\\u00e9` in a file whose whole promise
     is that a human can edit it is a worse file for no gain.
 
     U+007F earns its own branch: `tomllib` refuses it raw — `Illegal character
@@ -683,11 +667,11 @@ def _number(key: str, value: object) -> float:
 
 
 def _text(key: str, value: object) -> str:
-    """A non-blank string, kept exactly as written.
+    """A non-blank string, kept exactly as written — today only `display_timezone`.
 
-    Not stripped: a handle with a stray space is compared against speaker
-    identities for equality, and silently trimming it would hide the edit that
-    made the comparison start working.
+    Not stripped: a zone written with stray whitespace reaches
+    `Config.__post_init__` as written, where the zone database refuses it by
+    name, rather than being corrected silently here.
     """
     if not isinstance(value, str):
         raise ConfigRefused(

@@ -2,7 +2,8 @@
 title: 'People on event-log lines are read as people, and the PM is one function'
 type: 'feature'
 created: '2026-10-11'
-status: 'draft'
+status: 'done'
+baseline_commit: '57320f4adfbca18bdca441fb11ad5fafdb36c066'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -83,16 +84,16 @@ Line numbers measured 2026-10-11; `2n` and `8q` edit several of these files firs
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/identity.py` (or `handles.py`) -- remove `resolve_actor`, `UNRESOLVED_ACTOR` and `UNRESOLVED` and update their remaining test callers; `person_for`, the new `register_alias`, `pm_identity(rows, aliased)`, the usable-user-id rule and key constant
-- [ ] `pm_ai/core/connector_enrolment.py`, `pm_ai/connectors/graph/__init__.py` -- delegate to `domain`'s rule and constant
-- [ ] `pm_ai/app/wiring.py` -- `read_pm_identity(storage)`: one read, identity plus unusable rows; `pm_handle` property gone
-- [ ] `pm_ai/domain/transcripts.py`, `pm_ai/core/extraction.py`, `pm_ai/app/pipelines.py`, `pm_ai/ports/__init__.py` -- `Utterance.speaker`; `extract` takes the frozen identity; the pipeline reads it once per ingestion
-- [ ] `pm_ai/core/config.py`, `pm_ai/platform/doctor.py`, `pm_ai/surfaces/cli/dispatch.py` -- remove `pm_handle`, setup's question and doctor's check
-- [ ] `tests/conftest.py` -- an autouse fixture restoring `ALIASES` after each test: the dict lives for the whole process and `register_alias` now refuses a remap, so one test's alias would fail or colour the next
-- [ ] `tests/domain/test_people.py` (new, name suggested) -- one test per matrix row above the speaker rows; `USER_ID_KEY is` `domain`'s constant; `recorded_user_id` delegates (a value only `domain`'s rule refuses is refused by both)
-- [ ] `tests/slice/test_transcript_slice.py` -- the speaker rows through the pipeline with one enrolled Graph row; the irreversible-verb and unregistered-verb tests give their utterances the PM's handle so they still test the verb; both adapters leave `speaker` `None`
-- [ ] `tests/architecture/test_people_readers.py` (new) -- AST scan over `pm_ai/`, not `tests/`, resolving import aliases and `getattr`: `register_alias` the one writer of `ALIASES`, `person_for` its one reader; `pm_identity` called only by `read_pm_identity`; subscript or `.get` reads of the user-id key only in `domain`'s rule, `connector_enrolment` and `read_pm_identity`
-- [ ] removal tests -- `test_doctor.py:718`, `test_first_run.py:460-464`, `test_config.py` rewritten; `pm_handle` asserted refused as unknown
+- [x] `pm_ai/domain/identity.py` (or `handles.py`) -- remove `resolve_actor`, `UNRESOLVED_ACTOR` and `UNRESOLVED` and update their remaining test callers; `person_for`, the new `register_alias`, `pm_identity(rows, aliased)`, the usable-user-id rule and key constant
+- [x] `pm_ai/core/connector_enrolment.py`, `pm_ai/connectors/graph/__init__.py` -- delegate to `domain`'s rule and constant
+- [x] `pm_ai/app/wiring.py` -- `read_pm_identity(storage)`: one read, identity plus unusable rows; `pm_handle` property gone
+- [x] `pm_ai/domain/transcripts.py`, `pm_ai/core/extraction.py`, `pm_ai/app/pipelines.py`, `pm_ai/ports/__init__.py` -- `Utterance.speaker`; `extract` takes the frozen identity; the pipeline reads it once per ingestion
+- [x] `pm_ai/core/config.py`, `pm_ai/platform/doctor.py`, `pm_ai/surfaces/cli/dispatch.py` -- remove `pm_handle`, setup's question and doctor's check
+- [x] `tests/conftest.py` -- an autouse fixture restoring `ALIASES` after each test: the dict lives for the whole process and `register_alias` now refuses a remap, so one test's alias would fail or colour the next
+- [x] `tests/domain/test_people.py` (new, name suggested) -- one test per matrix row above the speaker rows; `USER_ID_KEY is` `domain`'s constant; `recorded_user_id` delegates (a value only `domain`'s rule refuses is refused by both)
+- [x] `tests/slice/test_transcript_slice.py` -- the speaker rows through the pipeline with one enrolled Graph row; the irreversible-verb and unregistered-verb tests give their utterances the PM's handle so they still test the verb; both adapters leave `speaker` `None`
+- [x] `tests/architecture/test_people_readers.py` (new) -- AST scan over `pm_ai/`, not `tests/`, resolving import aliases and `getattr`: `register_alias` the one writer of `ALIASES`, `person_for` its one reader; `pm_identity` called only by `read_pm_identity`; subscript or `.get` reads of the user-id key only in `domain`'s rule, `connector_enrolment` and `read_pm_identity`
+- [x] removal tests -- `test_doctor.py:718`, `test_first_run.py:460-464`, `test_config.py` rewritten; `pm_handle` asserted refused as unknown
 
 **Acceptance Criteria:**
 - Given two Graph rows saved under `connectors/`, one with `enabled: false`, when `read_pm_identity` is called, then both handles come back; and given a third row added while the daemon runs, then the next call includes it.
@@ -113,3 +114,12 @@ Line numbers measured 2026-10-11; `2n` and `8q` edit several of these files firs
 - `uv run pytest tests/architecture/test_people_readers.py -rs -q` -- expected: its tests reported passed, none skipped
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept; run on its own, since the layering test skips silently when it is missing
+
+## Suggested Review Order
+
+1. The two ways from a handle to a person: [`person_for`](../../../../pm_ai/domain/handles.py#L400) and [`register_alias`](../../../../pm_ai/domain/handles.py#L371) (refuses `graph_app`/`none` and a reassignment).
+2. Who the PM is: [`usable_user_id`](../../../../pm_ai/domain/handles.py#L420), the one user-id rule, and [`pm_identity`](../../../../pm_ai/domain/handles.py#L437); 8q's [`recorded_user_id`](../../../../pm_ai/core/connector_enrolment.py#L632) delegates, and [`record_user_id`](../../../../pm_ai/core/connector_enrolment.py#L535) now refuses what that rule reads as absent.
+3. The one caller: [`read_pm_identity`](../../../../pm_ai/app/wiring.py#L1471) — one read, identity plus unusable rows.
+4. The spoken-command check: [`extract`](../../../../pm_ai/core/extraction.py#L34) compares `Utterance.speaker` with the identity; the pipeline reads it once per ingestion in [`pipelines.py`](../../../../pm_ai/app/pipelines.py#L273).
+5. `pm_handle` removed: config, doctor, the daemon property, and setup's [`_setup_config`](../../../../pm_ai/surfaces/cli/dispatch.py#L1377), which now asks only what a partial file leaves unset.
+6. Tests: `tests/domain/test_people.py`, `tests/slice/test_read_pm_identity.py`, and the AST scan `tests/architecture/test_people_readers.py`.
