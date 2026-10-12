@@ -54,7 +54,7 @@ from pm_ai.domain.harvest import (
     UnreadCalendar,
 )
 from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
-from pm_ai.ports import ArtifactBusy
+from pm_ai.ports import ArtifactBusy, CalendarReadPort
 
 _log = logging.getLogger(__name__)
 
@@ -551,7 +551,10 @@ def _todays_calendar(
 
 
 def _ask(daemon: Daemon, instance: str) -> HarvestResult:
-    """One connector's harvest, with a contract breach costing only that one.
+    """One connector's calendar read, with a contract breach costing only that one.
+
+    `CalendarReadPort.read_calendar` when the connector offers it, and its
+    `harvest` otherwise — so Graph's listed channels are not walked on a render.
 
     `ConnectorPort.harvest` reports rather than raises, and both connectors in
     this build honour it. The guard is here anyway because the whole point of
@@ -564,7 +567,13 @@ def _ask(daemon: Daemon, instance: str) -> HarvestResult:
     unexamined `repr` is how a token ends up in a file.
     """
     try:
-        return daemon.connectors[instance].harvest(Cursor())
+        connector = daemon.connectors[instance]
+        # The calendar alone when the connector offers it (2026-10-12): a live
+        # read of the day walks no Teams channel, so a channel it did not need
+        # cannot cost a render time or mark this calendar unread.
+        if isinstance(connector, CalendarReadPort):
+            return connector.read_calendar(Cursor())
+        return connector.harvest(Cursor())
     except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
         return HarvestResult(
             events=(),

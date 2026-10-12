@@ -668,11 +668,14 @@ def test_no_message_entries_names_the_window():
     # rather than check that the render names it.
 
 
-def test_the_empty_section_says_nothing_writes_the_category_yet():
-    """Matrix row 12 — the second knowingly empty section in wave 1."""
+def test_an_empty_section_no_longer_says_nothing_writes_the_category():
+    """Story 33d — the Graph connector writes `message_posted`, so the build
+    note is deleted: a render with zero message entries states the window it
+    searched and nothing about the build."""
     body = sections(render(entries=()))["Proactive Enablement"]
-    assert "33d" in body
-    assert "No connector in this build writes `message_posted`" in body
+    assert "No connector in this build writes" not in body
+    assert "33d" not in body
+    assert "event log between" in body
 
 
 def test_an_entry_with_no_ingested_at_is_counted_not_dated_from_now():
@@ -785,21 +788,6 @@ def test_a_message_outside_the_window_is_not_a_signal():
     body = sections(render(entries=(stale,)))["Proactive Enablement"]
     assert "u_old" not in body
     assert "event log between" in body
-
-
-def test_the_build_note_is_dropped_once_the_log_holds_a_message_entry():
-    """The wave-1 sentence is conditional, and the condition is computed.
-
-    "No connector in this build writes `message_posted`" printed beside a log
-    that plainly holds one — outside the window, or unplaceable — would be this
-    module's own honesty rule broken in the other direction.
-    """
-    stale = message(at=NOW - MESSAGE_WINDOW - timedelta(minutes=1))
-    assert "33d" not in sections(render(entries=(stale,)))["Proactive Enablement"]
-    assert "33d" not in sections(render(entries=(message(at=None),)))[
-        "Proactive Enablement"
-    ]
-    assert "33d" in sections(render(entries=()))["Proactive Enablement"]
 
 
 def test_non_message_categories_are_ignored_and_the_section_says_which_it_reads():

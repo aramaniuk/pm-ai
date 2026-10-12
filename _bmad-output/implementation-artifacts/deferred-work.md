@@ -1116,3 +1116,15 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
   summary: With the default tenant `organizations` (or `common`, `consumers`, or a domain name), the cached-account fallback for a sign-in without `oid` can never succeed, because a cached account's tenant part is always a tenant id.
   evidence: The frozen rule compares the cached tenant part with the row's tenant. A normal work-account sign-in carries `oid`, so no sign-in seen so far reaches the fallback. Whether the fallback should accept the id token's `tid` in place of a tenant word is a product decision for whoever next touches the sign-in.
+
+## Surfaced by the story-33d review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: A root post's `subject` (often the most informative line of a Teams announcement) reaches neither the excerpt nor the payload.
+  evidence: The spec names only the body for the excerpt; `MessageRow` drops `subject`. Deciding whether it joins the excerpt is a product call for the next message slice.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: A channel removed from the settings list keeps its stored position in the cursor forever; listed again months later it resumes from that old position and likely hits the page cap on its first run.
+  evidence: `_Positions.advanced` keeps positions for unlisted channels. Dropping them would make a re-listed channel start from the first-run reach-back instead.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: The channel-messages fixture is hand-written from Microsoft's published example, not recorded from a real tenant; the redacted real-tenant page the spec requires is owed.
+  evidence: Accepted for now by Andrei on 2026-10-12. Recording it needs the PM's sign-in and a channel id the PM picks. Still unconfirmed against a real tenant: whether replies arrive newest first (the code does not depend on it) and the up-to-200 inline-replies figure.

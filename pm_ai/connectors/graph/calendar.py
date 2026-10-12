@@ -808,6 +808,20 @@ class CalendarFetch:
     window that does not start at it.
     """
 
+    deadline: datetime | None = None
+    """The run's time budget ends here: the instant this fetch was told, or
+    computed from its own start (`33d`). Handed on so every channel the
+    connector walks after the calendar spends the same one budget."""
+
+    signed_out: bool = False
+    """Whether the failure was the sign-in itself — a stale credential, a
+    declined consent, any `GraphAuthError` but `GraphUnreachable` (`33d`).
+
+    Carried beside `failure` because the connector reads it as a stop: every
+    later resource in the run would spend the same credential, so a harvest
+    whose calendar could not sign in attempts no channel.
+    """
+
     walked_through: datetime | None = None
     """The calendar instant the next run may start from: the end of the last
     span walked to completion, or `None` when none was.
@@ -846,7 +860,9 @@ class GraphCalendarFetch:
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     max_span: timedelta = MAX_SERVABLE_SPAN
 
-    def fetch(self, *, since: datetime | None = None) -> CalendarFetch:
+    def fetch(
+        self, *, since: datetime | None = None, deadline: datetime | None = None
+    ) -> CalendarFetch:
         """Walk every span of the window, and report what actually happened.
 
         Three things are derived only from what came back:
@@ -867,10 +883,16 @@ class GraphCalendarFetch:
         - **`refusals`** name the rows that could not be read, one by one, so a
           calendar that is empty and a calendar pm-ai cannot parse are
           distinguishable.
+
+        `deadline` is the run's, when a caller hands one in. Without one the
+        fetch takes the client's whole budget from its own start, as before, and
+        returns the instant on `CalendarFetch.deadline` so the connector's
+        channels spend the same budget (`33d`).
         """
         started = self.now()
         window = self.windows.window(now=started, since=since)
-        deadline = started + self.client.budget
+        if deadline is None:
+            deadline = started + self.client.budget
 
         rows: list[CalendarRow] = []
         refusals: list[RowRefusal] = []
@@ -878,6 +900,7 @@ class GraphCalendarFetch:
         reached_at: datetime | None = None
         walked_through: datetime | None = None
         failure: HarvestFailure | None = None
+        signed_out = False
         # Whether the cursor may still advance. It stops for good at the first
         # span that was asked for and not fully answered: `walked_through` is
         # one high-water mark, so advancing past a *later* span would carry the
@@ -923,6 +946,7 @@ class GraphCalendarFetch:
                 # so all five say no, and all five name a remedy a human
                 # performs.
                 failure = self._failure(span, str(unauthenticated), retryable=False)
+                signed_out = True
                 break
             except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
                 # Broad on purpose: anything a transport or a mapping can throw
@@ -1004,6 +1028,8 @@ class GraphCalendarFetch:
             pages=pages,
             walked_through=walked_through,
             answered_at=reached_at,
+            signed_out=signed_out,
+            deadline=deadline,
         )
 
     # ── One page, one row ────────────────────────────────────────────────────
