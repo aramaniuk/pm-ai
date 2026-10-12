@@ -461,13 +461,11 @@ def test_an_empty_project_log_names_the_window():
     assert "2026-09-09 12:30" in body
 
 
-def test_an_empty_window_states_that_nothing_writes_these_yet():
-    """Matrix row 5 — knowingly empty in wave 1, exactly as in `23a`."""
+def test_an_empty_window_no_longer_says_nothing_writes_these():
+    """Matrix row 5 — the build note went with story `33d`, which writes them."""
     body = sections(render(entries=()))["Proactive Enablement"]
-    assert "33d" in body
-    # And not when the log holds one that merely fell outside the window: the
-    # build note is a claim about producers, and printing it beside two entries
-    # would be the invented evidence in the other direction.
+    assert "No connector in this build writes" not in body
+    assert "33d" not in body
     stale = message(at=NOW - MESSAGE_WINDOW - timedelta(minutes=1))
     assert "33d" not in sections(render(entries=(stale,)))["Proactive Enablement"]
 

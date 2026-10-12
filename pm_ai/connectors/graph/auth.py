@@ -112,8 +112,10 @@ GRAPH_RESOURCE_SCOPES = frozenset(
         "ChannelMessage.Read.All",
         # 33d again — reading a channel message does not permit *finding* one.
         # Enumeration is a separate grant, measured as two separate refusals.
-        # Declaring these forecloses 33d's alternative (explicit team and
-        # channel ids in configuration), deliberately.
+        # 33d took the other path — the PM lists team and channel ids by hand
+        # and pm-ai never enumerates — so these two are unused. They stay
+        # declared: dropping them changes the consented set for nothing, and
+        # every PM would be asked to consent again.
         "Team.ReadBasic.All",
         "Channel.ReadBasic.All",
         # 33e — the transcripts, and resolving a join URL to the meeting that

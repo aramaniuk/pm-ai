@@ -112,7 +112,7 @@ class Machine:
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_bytes(
             render_config(
-                Config(pm_handle="pm@example.com", display_timezone="Europe/Warsaw")
+                Config(display_timezone="Europe/Warsaw")
             )
         )
 
@@ -777,7 +777,7 @@ def test_config_show_runs_outside_every_project(machine, composed_in, capsys):
 
     assert entry.main(["config", "show"]) == EXIT_OK
 
-    assert "pm_handle" in capsys.readouterr().out
+    assert "display_timezone" in capsys.readouterr().out
     assert composed_in == [APPLICATION]
 
 

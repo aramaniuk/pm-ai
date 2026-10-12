@@ -1132,3 +1132,23 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: The Graph health probe runs on a thread `run_bounded` abandons at its timeout, and it takes the `config.json` claim with the keychain fetch inside it; AD-5 now forbids a claim taken by abandonable work and puts the keychain fetch before the claim.
   evidence: Worked out from the code, not reproduced (`reviews/review-adversarial-2026-10-12.md` finding 2). In the CLI the process exits; in the daemon (`4e`) an abandoned holder would keep `config.json` claimed for the daemon's life.
 
+## Surfaced by the story-2o review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2o-people-are-read-as-people.md`
+  summary: Nothing tells the PM why every spoken command now stages: doctor's `pm_handle` warning is gone with nothing in its place, and `run_transcript_ingestion` discards `read_pm_identity(...).unusable`.
+  evidence: 2o removes doctor's check by design and both transcript adapters leave `Utterance.speaker` as `None`, so no utterance is the PM's until a transcript adapter carries a handle. `23c`'s sign-in line is the planned consumer of `unusable`; a doctor probe over `read_pm_identity` (WARNING when the identity is empty or a row is unusable) would close the gap for the CLI.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2o-people-are-read-as-people.md`
+  summary: Older story specs (`4a`, `4g`, `4h`, `4i`) still describe `pm_handle` as a current config key.
+  evidence: They are done specs, kept as history; a reader of the contract meets a key 2o now refuses. A superseded-by note through `bmad-spec` would stop that.
+
+## Surfaced by the story-33d review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: A root post's `subject` (often the most informative line of a Teams announcement) reaches neither the excerpt nor the payload.
+  evidence: The spec names only the body for the excerpt; `MessageRow` drops `subject`. Deciding whether it joins the excerpt is a product call for the next message slice.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: A channel removed from the settings list keeps its stored position in the cursor forever; listed again months later it resumes from that old position and likely hits the page cap on its first run.
+  evidence: `_Positions.advanced` keeps positions for unlisted channels. Dropping them would make a re-listed channel start from the first-run reach-back instead.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
+  summary: The channel-messages fixture is hand-written from Microsoft's published example, not recorded from a real tenant; the redacted real-tenant page the spec requires is owed.
+  evidence: Accepted for now by Andrei on 2026-10-12. Recording it needs the PM's sign-in and a channel id the PM picks. Still unconfirmed against a real tenant: whether replies arrive newest first (the code does not depend on it) and the up-to-200 inline-replies figure.

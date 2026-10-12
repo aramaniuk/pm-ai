@@ -558,12 +558,12 @@ def test_a_different_user_is_accepted_and_recorded(enrolled, monkeypatch, capsys
     home, keychain = enrolled
     row = _row(home)
 
-    code, _ = _sign_in(monkeypatch, _provider(oid="someone-else"))
+    code, _ = _sign_in(monkeypatch, _provider(oid="6f1c2b3a-0000-4000-8000-000000000002"))
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
     assert "sign-in replaced; healthy" in captured.out
-    assert _row(home) == {**row, "user_id": "someone-else"}
+    assert _row(home) == {**row, "user_id": "6f1c2b3a-0000-4000-8000-000000000002"}
     assert _token_of(home, keychain) == NEW_ROTATED
     _no_token_printed(captured)
 
@@ -573,11 +573,11 @@ def test_a_different_tenant_is_accepted_and_its_user_recorded(machine, monkeypat
     _add(monkeypatch, answers=[CLIENT_ID, ROW_TENANT, "1440", "10080"])
     capsys.readouterr()
 
-    code, _ = _sign_in(monkeypatch, _provider(oid="a-guest", tid=OTHER_TENANT))
+    code, _ = _sign_in(monkeypatch, _provider(oid="6f1c2b3a-0000-4000-8000-000000000003", tid=OTHER_TENANT))
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
-    assert _row(home)["user_id"] == "a-guest"
+    assert _row(home)["user_id"] == "6f1c2b3a-0000-4000-8000-000000000003"
     assert _row(home)["tenant"] == ROW_TENANT, "the row's settings are untouched"
     assert _token_of(home, keychain) == NEW_ROTATED
 
@@ -737,7 +737,7 @@ def test_an_auth_built_before_the_sign_in_refreshes_from_the_new_one(
     """What the closing line promises: no restart, and the old lineage in MSAL's
     cache is not what the next refresh uses."""
     home, keychain = enrolled
-    provider = _Lineages(accounts=[{"home_account_id": "an-object-id.a-tenant-id"}])
+    provider = _Lineages(accounts=[{"home_account_id": "6f1c2b3a-0000-4000-8000-000000000001.a-tenant-id"}])
     auth = _connector_auth(home, keychain, provider)
     auth.access_token(force_refresh=True)
     assert provider.cached == f"successor-of-{ROTATED}"
@@ -808,7 +808,7 @@ def test_a_user_recorded_during_the_sign_in_is_replaced_by_the_one_who_signed_in
     _write_row(home, row)
 
     def another_user_recorded() -> None:
-        _write_row(home, {**row, "user_id": "someone-else"})
+        _write_row(home, {**row, "user_id": "6f1c2b3a-0000-4000-8000-000000000002"})
 
     code, _ = _sign_in(monkeypatch, _DuringTheDeviceFlow(another_user_recorded))
 
@@ -831,7 +831,7 @@ def test_a_category_mapping_added_during_the_sign_in_survives(
     code, _ = _sign_in(monkeypatch, _DuringTheDeviceFlow(mapped))
 
     assert code == EXIT_OK, capsys.readouterr().err
-    assert _row(home) == {**row, "categories": {"Platform": "alpha"}, "user_id": "an-object-id"}
+    assert _row(home) == {**row, "categories": {"Platform": "alpha"}, "user_id": "6f1c2b3a-0000-4000-8000-000000000001"}
     assert _token_of(home, keychain) == NEW_ROTATED
 
 

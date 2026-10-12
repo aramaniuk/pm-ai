@@ -11,8 +11,11 @@ Four modules now, in the order they were built and in the order they depend:
   whose instants are aware UTC and the coverage the fetch actually earned.
 - this module (story 33c) — `GraphConnector`, the `ConnectorPort` that turns
   those rows into `Meeting` records and `CALENDAR_EVENT_HELD` events.
+- `channels` (story 33d) — the Teams channels the PM listed by hand, walked
+  newest first; this module turns each message and reply into one
+  `MESSAGE_POSTED` event in the channel's project log.
 
-Chat and channel messages are 33d and transcripts are 33e.
+Chats are the next slice and transcripts are 33e.
 
 ## The one modelling decision, and why it could not be deferred
 
@@ -52,7 +55,9 @@ untagged row is the PM's own meeting rather than a row to drop.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import json
+import unicodedata
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
@@ -64,14 +69,24 @@ from pm_ai.connectors.graph.calendar import (
     GraphCalendarFetch,
     WindowPolicy,
 )
+from pm_ai.connectors.graph.channels import (
+    EXCERPT_LENGTH,
+    ChannelFetch,
+    ChannelListing,
+    GraphChannelFetch,
+    MessageRow,
+    unusable_id_character,
+)
 from pm_ai.domain.connector_rows import USER_ID_KEY
 from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, render_value
 from pm_ai.domain.events import (
     MeetingHeldPayload,
+    MessagePayload,
     NormalizedEvent,
     ObservedEventType,
     Provenance,
 )
+from pm_ai.domain.handles import EMAIL, GRAPH, GRAPH_APP, NO_PERSON, usable_handle
 from pm_ai.domain.harvest import (
     UNCLASSIFIED_FAULT_IS_RETRYABLE,
     Cursor,
@@ -88,17 +103,20 @@ from pm_ai.domain.identity import (
     ScopeKind,
     SourceRef,
 )
-from pm_ai.domain.handles import EMAIL, NO_PERSON, usable_handle
+from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
 
 __all__ = [
     "ALL_DAY_MINUTES",
     "AuthProbe",
     "CATEGORIES_KEY",
+    "CHANNELS_KEY",
     "CLIENT_ID_KEY",
     "MAX_SETTING_MINUTES",
     "TENANT_KEY",
     "CategoryScopes",
+    "ChannelListRefused",
+    "ChannelListing",
     "GraphConnector",
     "GraphRowRefused",
     "MissingGraphSetting",
@@ -109,6 +127,7 @@ __all__ = [
     "USER_ID_KEY",
     "WIDTH_KEY",
     "graph_category_scopes",
+    "graph_channel_listings",
     "graph_window_policy",
 ]
 
@@ -215,6 +234,21 @@ class MissingGraphSetting(LookupError):
     """
 
 
+class ChannelListRefused(ValueError):
+    """The row's `channels` list cannot be read, so no connector was built.
+
+    A list that is not a list, an entry that is not an object, an entry missing
+    its team or channel id, a label that is not text, and one channel id listed
+    twice under any team or project. Each names the entry, because the operator
+    repairing it is holding `connectors/<instance>.json` open. An entry naming a
+    project no registry knows is `UnknownProject` instead, the refusal the
+    category mapping already uses for the same fact.
+
+    A `ValueError`, so `_graph_connector`'s handler reports it like every other
+    row refusal and `build()` composes regardless.
+    """
+
+
 # ── Where a record lands ─────────────────────────────────────────────────────
 
 WIDTH_KEY = "window_width_minutes"
@@ -222,6 +256,7 @@ REACH_BACK_KEY = "first_run_reach_back_minutes"
 CLIENT_ID_KEY = "client_id"
 TENANT_KEY = "tenant"
 CATEGORIES_KEY = "categories"
+CHANNELS_KEY = "channels"
 """The keys a Graph enrolment row carries, spelled once.
 
 They live in `connectors/<instance>.json` — application scope, Tier 1,
@@ -391,6 +426,127 @@ def graph_category_scopes(
     return CategoryScopes(projects=raw, registered=registered)
 
 
+def graph_channel_listings(
+    entry: Mapping[str, object], *, registered: Callable[[str], bool]
+) -> tuple[ChannelListing, ...]:
+    """The channels this row lists by hand, or a refusal naming the entry (`33d`).
+
+    Each entry is `{"team": …, "channel": …, "project": …, "label": …}`, the
+    label optional. pm-ai never lists teams or channels: what is read is what
+    the PM wrote here. No list means calendar only, as before this slice.
+
+    Refused, and the connector not built: a value that is not a list; an entry
+    that is not an object; a team or channel id missing, not text, padded, or
+    holding whitespace or a `/` — the ids become a request path and a
+    reference; a label that is present and not text; a project no registry
+    knows (`UnknownProject`); and a channel id listed twice under any team or
+    project, compared ignoring case, because one channel cannot belong to two
+    projects' logs.
+    """
+    raw = entry.get(CHANNELS_KEY)
+    if raw is None:
+        return ()
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise ChannelListRefused(
+            f"{CHANNELS_KEY!r} in this Graph enrolment row is a "
+            f"{type(raw).__name__}, not a list of channel entries. Each entry is "
+            f'an object: {{"team": …, "channel": …, "project": …, "label": …}}.'
+        )
+    listings: list[ChannelListing] = []
+    first: dict[str, int] = {}
+    for position, item in enumerate(raw, start=1):
+        where = f"channel entry {position} in {CHANNELS_KEY!r}"
+        if not isinstance(item, Mapping):
+            raise ChannelListRefused(
+                f"{where} is a {type(item).__name__}, not an object with a "
+                f"team id, a channel id and a project."
+            )
+        team = _listed_id(item, "team", where=where)
+        channel = _listed_id(item, "channel", where=where)
+        project = item.get("project")
+        if not isinstance(project, str) or not project.strip():
+            raise UnknownProject(
+                f"{where} (channel {channel!r}) names no project. A channel's "
+                f"messages belong to one enrolled project's event log, and there "
+                f"is no default."
+            )
+        project = project.strip()
+        if not registered(project):
+            raise UnknownProject(
+                f"{where} (channel {channel!r}) belongs to project {project!r}, "
+                f"which no registry knows. Projects enter the system through "
+                f"`pm-ai project add` (AD-11); this is a removed project or a "
+                f"typo in an id."
+            )
+        label = item.get("label")
+        if label is not None and (not isinstance(label, str) or not label.strip()):
+            raise ChannelListRefused(
+                f"{where} (channel {channel!r}) has the label {label!r}, which "
+                f"is not text. Leave the label out to show the channel id."
+            )
+        if isinstance(label, str) and len(label.strip()) > MAX_LABEL_LENGTH:
+            raise ChannelListRefused(
+                f"{where} (channel {channel!r}) has a label of "
+                f"{len(label.strip())} characters, past the {MAX_LABEL_LENGTH} a "
+                f"label may be. It is the channel's name on every message line "
+                f"and on the dashboard; shorten it."
+            )
+        if isinstance(label, str) and any(
+            ord(character) < 32
+            or ord(character) == 127
+            or unicodedata.category(character) in ("Cc", "Cf")
+            for character in label
+        ):
+            raise ChannelListRefused(
+                f"{where} (channel {channel!r}) has a label holding a control or "
+                f"format character ({label!r}). It would reach every message "
+                f"line and the dashboard unseen; remove it."
+            )
+        folded = channel.casefold()
+        if folded in first:
+            raise ChannelListRefused(
+                f"the channel id {channel!r} is listed twice in "
+                f"{CHANNELS_KEY!r}, in entries {first[folded]} and {position}. "
+                f"One channel's messages belong to one project's log; delete "
+                f"one entry."
+            )
+        first[folded] = position
+        listings.append(
+            ChannelListing(
+                team=team,
+                channel=channel,
+                project=project,
+                label=label.strip() if isinstance(label, str) else None,
+            )
+        )
+    return tuple(listings)
+
+
+MAX_LABEL_LENGTH = 100
+"""The longest channel label a row may give, in characters (`33d`).
+
+A choice, not a measurement: a label is a channel's display name on every
+message line and on the dashboard, and a hundred characters is longer than any
+name a person reads at a glance while leaving each ledger line far under
+`MAX_ENTRY_LENGTH`.
+"""
+
+
+def _listed_id(item: Mapping[object, object], key: str, *, where: str) -> str:
+    """One team or channel id off a channel entry, or the refusal naming it."""
+    value = item.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ChannelListRefused(f"{where} has no {key} id ({value!r}).")
+    if value != value.strip() or any(unusable_id_character(c) for c in value):
+        raise ChannelListRefused(
+            f"{where} has the {key} id {value!r}, which holds whitespace, a "
+            f"control or format character or one of `/`, `\\`, `?`, `#`. The id becomes "
+            f"part of a request path and of every message's reference, so it is "
+            f"refused rather than repaired."
+        )
+    return value
+
+
 MAX_SETTING_MINUTES = 10 * 366 * 24 * 60
 """The far end of a harvest width, and it is a guard rather than a preference.
 
@@ -480,6 +636,26 @@ buy.
 """
 
 
+SAMPLE_CHANNEL = ChannelListing(
+    team="00000000-0000-0000-0000-00000000000a",
+    channel="19:sample@thread.tacv2",
+    project="sample",
+    label="a sample channel",
+)
+SAMPLE_MESSAGE = MessageRow(
+    message_id="1600000000000",
+    created_at=datetime(2026, 1, 15, 9, 30, tzinfo=timezone.utc),
+    text="a sample message, mapped by the same code path as a real one",
+    sender_user="00000000-0000-0000-0000-00000000000b",
+    mentions=("00000000-0000-0000-0000-00000000000c",),
+)
+"""The message `sample_events` maps, for the AD-34 minted-id gate (`33d`).
+
+Fixed values and no clock, as `SAMPLE_ROW`. Its project is a name and not a
+lookup: nothing is written, and the gate asks only that no id is minted.
+"""
+
+
 # ── The connector ────────────────────────────────────────────────────────────
 
 
@@ -507,10 +683,12 @@ class AuthProbe(Protocol):
 
 @dataclass
 class GraphConnector:
-    """`ConnectorPort` over `calendarView` — one method, and no cadence (AD-9).
+    """`ConnectorPort` over `calendarView` and the listed Teams channels, with no
+    cadence (AD-9).
 
     Holds no schedule, no cursor of its own and no HTTP: `33b`'s
-    `GraphCalendarFetch` owns the wire, this owns the modelling. What it decides
+    `GraphCalendarFetch` and `33d`'s `GraphChannelFetch` own the wire, this owns
+    the modelling. What it decides
     is which rows become Tier-1 records, which become events, and what scope each
     lands in — and it decides nothing about provenance, which is AD-36's and
     `pm_ai.core.normalize`'s.
@@ -544,6 +722,12 @@ class GraphConnector:
     name: str = "graph"
     system: str = "graph"
 
+    channels: tuple[ChannelListing, ...] = ()
+    """The Teams channels the PM listed by hand (`33d`). Empty: calendar only."""
+
+    messages: GraphChannelFetch | None = None
+    """The channel fetcher. `None` builds one over the calendar's client."""
+
     @property
     def instance(self) -> str:
         """This connector's registry identity, taken from the fetch it owns.
@@ -556,12 +740,17 @@ class GraphConnector:
         return self.calendar.instance
 
     def emits(self) -> frozenset[ObservedEventType]:
-        """Exactly one member of the core taxonomy (AD-27).
+        """Exactly two members of the core taxonomy (AD-27).
 
-        `MESSAGE_POSTED` joins it in `33d`, which is a deliberate change here
-        rather than something a connector may mint.
+        `MESSAGE_POSTED` joined `CALENDAR_EVENT_HELD` in `33d`, a deliberate
+        change here rather than something a connector may mint. Declared
+        whether or not this row lists a channel: the declaration is what the
+        connector can produce, and a row edited to list one is the same
+        connector.
         """
-        return frozenset({ObservedEventType.CALENDAR_EVENT_HELD})
+        return frozenset(
+            {ObservedEventType.CALENDAR_EVENT_HELD, ObservedEventType.MESSAGE_POSTED}
+        )
 
     def check_health(self) -> Probe:
         """Whether this machine can currently obtain a Graph token.
@@ -599,29 +788,53 @@ class GraphConnector:
         executing one assertion.
         """
         meeting = self._meeting(SAMPLE_ROW)
-        return (self._to_event(meeting, SAMPLE_ROW),)
+        return (
+            self._to_event(meeting, SAMPLE_ROW),
+            self._message_event(SAMPLE_CHANNEL, SAMPLE_MESSAGE),
+        )
 
     # ── The harvest ──────────────────────────────────────────────────────────
 
     def harvest(self, since: Cursor) -> HarvestResult:
-        """Fetch the window, map every row, and report what actually happened.
+        """The calendar, then every listed channel, under one budget (`33d`).
 
-        The order of the two halves of the result is the whole contract:
-        `records` are the meetings `pm_ai.app.pipelines` writes through `11a`
-        **before** it persists `events`, because every event here cites
-        `meeting:<id>` and one emitted ahead of a failed record write leaves an
-        unresolvable AD-33 citation.
+        The order of the two halves of the result is the whole contract for the
+        calendar's part: `records` are the meetings `pm_ai.app.pipelines` writes
+        through `11a` **before** it persists `events`, because every held event
+        cites `meeting:<id>` and one emitted ahead of a failed record write
+        leaves an unresolvable AD-33 citation. A message event cites the
+        channel message itself and needs no record.
 
-        Coverage is passed through from the fetch and then withheld unless
-        something was actually mapped. A window whose every row was cancelled or
-        declined reached the provider and produced no meeting, and coverage arms
-        AD-35's fail-closed reading — within a covered window, absence of
-        evidence is evidence of absence. Claiming it there would let a mapping
-        decision read as a kept-or-broken promise.
+        **One time budget per harvest**, read once here and shared by the
+        calendar and every channel. **Failures are per resource**: a channel
+        that cannot be read costs that channel and nothing else — except a
+        calendar sign-in failure, which ends the run before any channel is
+        attempted, because every channel would spend the same credential.
+
+        Coverage is one window for the whole run and is withheld when any listed
+        resource failed — see `_result`.
         """
+        return self._read(since, channels=self.channels)
+
+    def read_calendar(self, since: Cursor) -> HarvestResult:
+        """The calendar alone, read exactly as `harvest` reads it (`CalendarReadPort`).
+
+        What the dashboard's live read calls (Andrei, 2026-10-12): meetings not
+        yet held are never stored, so the day ahead is a live read — and a live
+        read must not walk every listed channel on each render, nor let a
+        channel it did not need mark the calendar unread. No channel is
+        attempted or named. The scheduled harvest (`harvest`) still reads the
+        calendar and every listed channel.
+        """
+        return self._read(since, channels=())
+
+    def _read(
+        self, since: Cursor, *, channels: tuple[ChannelListing, ...]
+    ) -> HarvestResult:
+        """The calendar, then `channels`, as one result. See `harvest`."""
         try:
-            walked_from = _calendar_position(since)
-        except ValueError:
+            positions = _Positions.read(since)
+        except (ValueError, TypeError):
             return HarvestResult(
                 events=(),
                 cursor=since,
@@ -629,10 +842,11 @@ class GraphConnector:
                 failure=HarvestFailure(
                     reason=(
                         f"{self.instance} was handed a stored cursor of "
-                        f"{len(since.token)} byte(s) that is not an aware-UTC "
-                        f"calendar instant, so there is no position to resume "
-                        f"from. Nothing was fetched and the cursor is unchanged; "
-                        f"a cursor this connector did not write needs clearing "
+                        f"{len(since.token)} byte(s) that is neither an aware-UTC "
+                        f"calendar instant nor this connector's per-resource "
+                        f"positions, so there is no position to resume from. "
+                        f"Nothing was fetched and the cursor is unchanged; a "
+                        f"cursor this connector did not write needs clearing "
                         f"rather than waiting."
                     ),
                     retryable=False,
@@ -640,7 +854,9 @@ class GraphConnector:
             )
 
         try:
-            fetched = self.calendar.fetch(since=walked_from)
+            # The run's one budget is read by the calendar fetch when it starts,
+            # and handed back on `fetched.deadline` for every channel to share.
+            fetched = self.calendar.fetch(since=positions.calendar)
         except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
             # `GraphCalendarFetch.fetch` converts every transport and auth
             # refusal into a `CalendarFetch.failure` itself, so this catches what
@@ -657,13 +873,36 @@ class GraphConnector:
                         f"{self.instance} could not start a calendar fetch: the "
                         f"fetcher raised {type(unexpected).__name__}, which "
                         f"pm-ai cannot classify"
+                        f"{_not_attempted(channels)}"
                     ),
                     retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
                 ),
             )
 
+        walked: list[ChannelFetch] = []
         try:
-            return self._result(fetched, since=since)
+            if channels and not fetched.signed_out:
+                deadline = fetched.deadline
+                if deadline is None:
+                    # A fetch that did not say (one built by hand): the run's
+                    # budget from now, rather than no channel read at all.
+                    deadline = self.now() + self.calendar.client.budget
+                for listing in channels:
+                    walked.append(
+                        self._walk_channel(listing, positions, deadline=deadline)
+                    )
+                    if walked[-1].signed_out:
+                        # The credential failed mid-run: every later channel
+                        # would spend the same one.
+                        break
+            skipped = channels[len(walked) :]
+            return self._result(
+                fetched,
+                tuple(walked),
+                since=since,
+                positions=positions,
+                skipped=skipped,
+            )
         except Exception as unexpected:  # noqa: BLE001 — the port promises a value
             # Everything `_result` does can fault: `NormalizedEvent`'s
             # constructor validates, the clock is injected and the cursor is an
@@ -677,10 +916,10 @@ class GraphConnector:
             # The reason says what actually happened (`8p`): with no page read
             # there was no page to map, and a walk that ended without raising
             # and without a body reaches here as an EMPTY with no instant.
-            read = fetched.answered_at
+            read = _first_answer(fetched, tuple(walked))
             happened = (
-                f"fetched a calendar page and then raised "
-                f"{type(unexpected).__name__} while mapping it"
+                f"fetched a {'calendar' if fetched.answered_at else 'channel'} "
+                f"page and then raised {type(unexpected).__name__} while mapping it"
                 if read is not None
                 else f"read no calendar page — the walk ended without one and "
                 f"without a fault — and then raised "
@@ -713,8 +952,55 @@ class GraphConnector:
                 ),
             )
 
-    def _result(self, fetched: CalendarFetch, *, since: Cursor) -> HarvestResult:
-        """One `CalendarFetch` as the `HarvestResult` the port promises.
+    def _walk_channel(
+        self, listing: ChannelListing, positions: _Positions, *, deadline: datetime
+    ) -> ChannelFetch:
+        """One channel's walk, with a contract breach costing only that channel."""
+        try:
+            return self._messages().fetch(
+                listing,
+                since=positions.channels.get(listing.channel.casefold()),
+                deadline=deadline,
+            )
+        except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
+            return ChannelFetch(
+                listing=listing,
+                failure=HarvestFailure(
+                    reason=(
+                        f"{self.instance} could not start walking channel "
+                        f"{listing.name!r}: the fetcher raised "
+                        f"{type(unexpected).__name__}, which pm-ai cannot classify"
+                    ),
+                    retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
+                ),
+            )
+
+    def _messages(self) -> GraphChannelFetch:
+        """The channel fetcher: the one composed, or one over the calendar's client.
+
+        Over the calendar's client by default because the two share one
+        credential, one host check and one budget; a separate client would be a
+        second place any of those is decided.
+        """
+        if self.messages is not None:
+            return self.messages
+        return GraphChannelFetch(
+            client=self.calendar.client,
+            instance=self.instance,
+            reach_back=self.calendar.windows.first_run_reach_back,
+            now=self.now,
+        )
+
+    def _result(
+        self,
+        fetched: CalendarFetch,
+        walked: tuple[ChannelFetch, ...],
+        *,
+        since: Cursor,
+        positions: _Positions,
+        skipped: tuple[ChannelListing, ...] = (),
+    ) -> HarvestResult:
+        """Every resource's answer as the one `HarvestResult` the port promises.
 
         **A FAILED fetch still carries the rows it did reach, and `run_harvest`
         writes them.** A partial walk is page one succeeded and page two did not:
@@ -727,7 +1013,17 @@ class GraphConnector:
         the start day, and `put` replaces the fields while carrying `## Notes`
         through. The trade is a record written twice rather than a meeting lost,
         which is the same direction every other fail-closed reading in AD-35
-        takes.
+        takes. A channel that failed likewise hands over the messages it read,
+        and its position rule is `channels.py`'s.
+
+        **One coverage window for the whole run**: from the first resource's
+        answer instant to the end of the last resource's walk, and withheld
+        entirely when any listed resource failed — or when any resource's own
+        reading would have withheld it (a calendar whose rows had no credible
+        clock, a resource whose every row was refused). Stricter on purpose than
+        "a partial walk keeps its window": the connector may not vouch for a
+        resource it could not read, and the calendar's window is not separable
+        while the result carries one.
         """
         now = self.now()
         records: list[Meeting] = []
@@ -769,37 +1065,156 @@ class GraphConnector:
             else:
                 live.append(meeting)
 
+        calendar_mapped = bool(events or records or live)
+        calendar_outcome = HarvestOutcome.of(
+            mapped=calendar_mapped,
+            refused=bool(refusals),
+            failed=fetched.failure is not None,
+        )
+        # The calendar's own reading of whether it earned its window, exactly as
+        # it stood before channels joined the run.
+        vouched = fetched.coverage is not None and (
+            calendar_mapped or calendar_outcome is HarvestOutcome.EMPTY
+        )
+
+        for channel in walked:
+            emitted = 0
+            for message in channel.rows:
+                try:
+                    events.append(self._message_event(channel.listing, message))
+                    emitted += 1
+                except GraphRowRefused as refused:
+                    refusals.append(
+                        RowRefusal(
+                            identifier=f"{channel.listing.channel}/{message.message_id}",
+                            reason=str(refused),
+                        )
+                    )
+                except Exception as unexpected:  # noqa: BLE001 — costs the row only
+                    # Event validation on provider data (a `ValueError`, a
+                    # `TypeError`) costs this message, never the run. The type,
+                    # not the message: the reason reaches Tier 2.
+                    refusals.append(
+                        RowRefusal(
+                            identifier=f"{channel.listing.channel}/{message.message_id}",
+                            reason=(
+                                f"channel {channel.listing.name!r} message "
+                                f"{message.message_id!r} could not become an "
+                                f"event: {type(unexpected).__name__} was raised "
+                                f"building it."
+                            ),
+                        )
+                    )
+            refusals.extend(channel.refusals)
+            if (
+                channel.failure is not None
+                or channel.unread_pages
+                or channel.unread_replies
+                or (channel.refusals and not emitted)
+            ):
+                vouched = False
+
+        failures = tuple(
+            failure
+            for failure in (fetched.failure, *(channel.failure for channel in walked))
+            if failure is not None
+        )
         mapped = bool(events or records or live)
         outcome = HarvestOutcome.of(
-            mapped=mapped, refused=bool(refusals), failed=fetched.failure is not None
+            mapped=mapped, refused=bool(refusals), failed=bool(failures)
+        )
+        answered_at = _first_answer(fetched, walked)
+        ended = (
+            walked[-1].finished
+            if walked
+            else (fetched.coverage.end if fetched.coverage is not None else None)
+        )
+        coverage = (
+            CoverageWindow(connector_instance=self.instance, start=answered_at, end=ended)
+            if vouched
+            and not failures
+            and (mapped or outcome is HarvestOutcome.EMPTY)
+            and answered_at is not None
+            and ended is not None
+            # A clock that stepped backwards between the first answer and the
+            # last walk's end leaves no honest interval (`CoverageWindow`
+            # refuses a reversed one).
+            and ended >= answered_at
+            else None
         )
 
         return HarvestResult(
             events=tuple(events),
-            cursor=(
-                Cursor(fetched.walked_through.isoformat().encode("utf-8"))
-                if fetched.walked_through is not None
-                else since
+            cursor=positions.advanced(
+                since,
+                calendar=fetched.walked_through,
+                channels={
+                    channel.listing.channel.casefold(): channel.position
+                    for channel in walked
+                    if channel.position is not None
+                },
             ),
             outcome=outcome,
-            # Two ways a window is earned, and they are the two `HarvestResult`
-            # admits: something was mapped, or the fetch completed and the
-            # calendar held nothing for us — `8i`, without which a quiet
-            # calendar recorded no coverage ever and no promise against it could
-            # be reported broken. Spelled against `outcome`, which is
-            # `HarvestOutcome.of`'s answer here, in `gitlab.harvest` and in
-            # `GraphCalendarFetch.fetch`, so the three cannot drift: a FAILED
-            # walk whose every row we filtered out keeps claiming nothing.
-            coverage=(
-                fetched.coverage if mapped or outcome is HarvestOutcome.EMPTY else None
-            ),
-            failure=fetched.failure,
+            coverage=coverage,
+            failure=_with_skipped(_one_failure(failures), skipped),
             refusals=tuple(refusals),
             records=tuple(records),
             live=tuple(live),
-            # Passed through beside the window it starts, never re-read here
-            # (`8p`): the fetch took the one reading when the first page arrived.
-            answered_at=fetched.answered_at,
+            # Passed through, never re-read here (`8p`): each resource took its
+            # one reading when its first page arrived, and the result's is the
+            # first resource that answered.
+            answered_at=answered_at,
+        )
+
+    # ── One message ──────────────────────────────────────────────────────────
+
+    def _message_event(self, listing: ChannelListing, row: MessageRow) -> NormalizedEvent:
+        """The `MESSAGE_POSTED` one channel message or reply emits.
+
+        The sender is a person handle around Microsoft's own user id —
+        `graph:<user id>`, never resolved through the alias table here (AD-34):
+        a person is matched only when read. A bot sender is
+        `graph_app:<application id>`; a sender Microsoft names neither way is
+        `none:`. Each mention with a user id is a `graph:` handle; no display
+        name is recorded anywhere but in the text a person typed.
+        """
+        reference = f"graph:{listing.project}:message:{listing.channel}/{row.message_id}"
+        try:
+            source = SourceRef.parse(reference)
+        except MalformedReference as unparsed:
+            raise GraphRowRefused(
+                f"channel {listing.name!r} message {row.message_id!r} cannot be "
+                f"cited as {reference!r} under AD-34's grammar ({unparsed})."
+            ) from unparsed
+        mentions: tuple[str, ...] | None = None
+        if row.mentions is not None:
+            handles: list[str] = []
+            for user_id in row.mentions:
+                handle = usable_handle(GRAPH, user_id)
+                if handle is not None and str(handle) not in handles:
+                    handles.append(str(handle))
+            mentions = tuple(handles)
+        return NormalizedEvent(
+            # AD-4 — the channel's project, never the personal scope.
+            scope=listing.scope,
+            type=ObservedEventType.MESSAGE_POSTED,
+            source_ref=source,
+            actor=usable_handle(GRAPH, row.sender_user)
+            or usable_handle(GRAPH_APP, row.sender_application)
+            or NO_PERSON,
+            # The provider clock (AD-35), carried as sent: implausible is
+            # flagged at persist, never replaced.
+            occurred_at=row.created_at,
+            payload=MessagePayload(
+                channel=listing.name,
+                # Cut, never cleaned (AD-29): sanitized at the model boundary
+                # (AD-12), not here.
+                excerpt=row.text[:EXCERPT_LENGTH] or None,
+                mentions=mentions,
+            ),
+            # AD-36 — a connector may never assert `external`.
+            authored_by=Provenance.UNKNOWN,
+            # no `id`: the storage service mints the surrogate (AD-34)
         )
 
     # ── One row ──────────────────────────────────────────────────────────────
@@ -934,24 +1349,145 @@ class GraphConnector:
 # ── Reading one row's fields ─────────────────────────────────────────────────
 
 
-def _calendar_position(since: Cursor) -> datetime | None:
-    """The calendar instant a previous run walked through, or `None` for a first run.
+@dataclass(frozen=True)
+class _Positions:
+    """Where each resource's last walk got to: the cursor, read (`33d`).
 
-    Calendar time, not an `ingested_at` watermark — the two clocks AD-35 keeps
-    apart, and `GraphCalendarFetch` takes the first. Encoded as the ISO string of
-    `CalendarFetch.walked_through`, so the cursor a run writes is the position
-    the next one resumes from with nothing in between to interpret it.
+    The cursor is one JSON object — `calendar` (an ISO instant, or absent) and
+    `channels` (channel id to ISO instant); chats join it in a later slice. A
+    stored bare ISO string is a cursor written before this slice and reads as
+    calendar only, so every channel starts from a first run. An empty token is
+    a first run for everything. Channel keys are case-folded channel ids, read
+    back case-insensitively.
 
-    Raises `ValueError` for a token that is not one. An empty token is a first
-    run and is the ordinary state of a clean machine.
+    **Anything else is refused, never partly read**: a token that is not
+    UTF-8, JSON that is not an object, `channels` that is not an object,
+    `calendar` or a channel stamp that is not an ISO string, or an instant
+    that is naive or not UTC. The harvest is then FAILED, not retryable, with
+    the cursor unchanged — a cursor this connector did not write needs
+    clearing, and guessing which half of it to trust would be guessing where
+    to resume. A `channels` of `null` reads as no channel positions.
+
+    Calendar time and channel creation time, never an `ingested_at` watermark —
+    the two clocks AD-35 keeps apart.
     """
-    token = since.token
-    if not token:
-        return None
-    parsed = datetime.fromisoformat(token.decode("utf-8"))
+
+    calendar: datetime | None = None
+    channels: Mapping[str, datetime] = field(default_factory=dict)
+
+    @classmethod
+    def read(cls, since: Cursor) -> _Positions:
+        """Raises `ValueError` for a token this connector did not write."""
+        token = since.token
+        if not token:
+            return cls()
+        text = token.decode("utf-8")
+        if not text.lstrip().startswith("{"):
+            return cls(calendar=_aware(datetime.fromisoformat(text)))
+        document = json.loads(text)
+        if not isinstance(document, dict):
+            raise ValueError("a Graph cursor is an object of positions")
+        calendar = document.get("calendar")
+        channels = document.get("channels", {})
+        if channels is None:
+            channels = {}
+        if not isinstance(channels, dict):
+            raise ValueError("a Graph cursor's channels are an object")
+        return cls(
+            calendar=(
+                None if calendar is None else _aware(datetime.fromisoformat(calendar))
+            ),
+            # Keyed by the case-folded channel id, the comparison the duplicate
+            # check makes; a key written in any case reads back the same.
+            channels={
+                str(channel).casefold(): _aware(datetime.fromisoformat(stamp))
+                for channel, stamp in channels.items()
+            },
+        )
+
+    def advanced(
+        self, since: Cursor, *, calendar: datetime | None, channels: Mapping[str, datetime]
+    ) -> Cursor:
+        """The next cursor: each resource moved where it moved, kept where not.
+
+        When nothing moved the stored cursor comes back byte for byte, so "the
+        position does not move" stays observable as an unchanged cursor. A
+        channel no longer listed keeps its position: listing it again resumes
+        rather than reaching back, and the natural key drops anything twice.
+        """
+        if calendar is None and not channels:
+            return since
+        moved_calendar = calendar if calendar is not None else self.calendar
+        merged = {**self.channels, **channels}
+        document = {
+            "calendar": None if moved_calendar is None else moved_calendar.isoformat(),
+            "channels": {
+                channel: stamp.isoformat() for channel, stamp in sorted(merged.items())
+            },
+        }
+        return Cursor(json.dumps(document, sort_keys=True).encode("utf-8"))
+
+
+def _aware(parsed: datetime) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
-        raise ValueError("a calendar cursor is aware UTC or it is not a position")
+        raise ValueError("a Graph position is aware UTC or it is not a position")
     return parsed
+
+
+def _first_answer(
+    fetched: CalendarFetch, walked: tuple[ChannelFetch, ...]
+) -> datetime | None:
+    """The answer instant of the first resource that answered (AD-9, `8p`).
+
+    The calendar is asked first, so its reading wins when it has one; a run
+    whose calendar answered only with an error takes the first channel's.
+    """
+    if fetched.answered_at is not None:
+        return fetched.answered_at
+    for channel in walked:
+        if channel.answered_at is not None:
+            return channel.answered_at
+    return None
+
+
+def _not_attempted(channels: tuple[ChannelListing, ...]) -> str:
+    """The sentence naming the listed channels this run did not attempt."""
+    if not channels:
+        return ""
+    named = ", ".join(repr(channel.name) for channel in channels)
+    return f". Not attempted this run: channel(s) {named}"
+
+
+def _with_skipped(
+    failure: HarvestFailure | None, skipped: tuple[ChannelListing, ...]
+) -> HarvestFailure | None:
+    """The run's failure, naming each listed channel a sign-in failure skipped."""
+    if failure is None or not skipped:
+        return failure
+    return HarvestFailure(
+        reason=f"{failure.reason.rstrip('.')}{_not_attempted(skipped)}.",
+        retryable=failure.retryable,
+        retry_after=failure.retry_after,
+    )
+
+
+def _one_failure(failures: tuple[HarvestFailure, ...]) -> HarvestFailure | None:
+    """Every resource's failure as the run's one, honest about all of them.
+
+    One passes through verbatim. Several are joined in the order the resources
+    were walked — each reason names its resource — and are retryable only if
+    every one is, carrying the largest retry hint any of them was given.
+    """
+    if not failures:
+        return None
+    if len(failures) == 1:
+        return failures[0]
+    hints = [failure.retry_after for failure in failures if failure.retry_after is not None]
+    return HarvestFailure(
+        reason="; ".join(failure.reason for failure in failures),
+        retryable=all(failure.retryable for failure in failures),
+        retry_after=max(hints) if hints else None,
+    )
 
 
 def _assert_citable(event_id: str) -> str:

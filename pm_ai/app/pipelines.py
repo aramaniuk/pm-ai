@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pm_ai.app.wiring import Daemon
+from pm_ai.app.wiring import Daemon, read_pm_identity
 from pm_ai.core.config import ConfigRefused
 from pm_ai.core.event_log import EventLog
 from pm_ai.core.extraction import extract
@@ -54,7 +54,7 @@ from pm_ai.domain.harvest import (
     UnreadCalendar,
 )
 from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
-from pm_ai.ports import ArtifactBusy
+from pm_ai.ports import ArtifactBusy, CalendarReadPort
 
 _log = logging.getLogger(__name__)
 
@@ -268,7 +268,10 @@ def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: s
     # owned by `personal` or `people` cannot be cited from the project scope,
     # and every extraction below will cite this meeting (AD-33).
     assert_citation_legal(cited=meeting.scope, into=daemon.scope)
-    results = extract(transcript, meeting, pm_handle=daemon.pm_handle, provider=provider)
+    # Who the PM is, read once for this ingestion, so every utterance in it is
+    # judged against the same answer (story 2o, AD-32).
+    identity = read_pm_identity(daemon.storage).identity
+    results = extract(transcript, meeting, identity=identity, provider=provider)
     # The Tier-1 record, and the citation root every extraction above points at
     # (AD-33). Through the accessor since story 11a: this was an assignment into
     # a process-lifetime dict, so the record a citation resolved against was gone
@@ -551,7 +554,10 @@ def _todays_calendar(
 
 
 def _ask(daemon: Daemon, instance: str) -> HarvestResult:
-    """One connector's harvest, with a contract breach costing only that one.
+    """One connector's calendar read, with a contract breach costing only that one.
+
+    `CalendarReadPort.read_calendar` when the connector offers it, and its
+    `harvest` otherwise — so Graph's listed channels are not walked on a render.
 
     `ConnectorPort.harvest` reports rather than raises, and both connectors in
     this build honour it. The guard is here anyway because the whole point of
@@ -564,7 +570,13 @@ def _ask(daemon: Daemon, instance: str) -> HarvestResult:
     unexamined `repr` is how a token ends up in a file.
     """
     try:
-        return daemon.connectors[instance].harvest(Cursor())
+        connector = daemon.connectors[instance]
+        # The calendar alone when the connector offers it (2026-10-12): a live
+        # read of the day walks no Teams channel, so a channel it did not need
+        # cannot cost a render time or mark this calendar unread.
+        if isinstance(connector, CalendarReadPort):
+            return connector.read_calendar(Cursor())
+        return connector.harvest(Cursor())
     except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
         return HarvestResult(
             events=(),

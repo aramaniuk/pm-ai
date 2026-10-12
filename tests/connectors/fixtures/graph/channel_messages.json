@@ -1,0 +1,260 @@
+{
+  "_provenance": "NOT captured from a tenant. Story 33d asks for this page to be a real tenant's answer, redacted, from a spike re-run against one listed channel; that re-run has not happened (it needs the PM's sign-in and a channel id the PM chooses). This page is written by hand in the shape of Microsoft's published v1.0 'List channel messages' response with $expand=replies (learn.microsoft.com/graph/api/channel-list-messages). Every id, name and text is invented. Replace it with the redacted real page when the spike is re-run, and confirm there that replies arrive newest first.",
+  "page": {
+    "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#teams('00000000-0000-0000-0000-0000000000aa')/channels('19%3Afixture%40thread.tacv2')/messages(replies())",
+    "@odata.count": 4,
+    "value": [
+      {
+        "id": "1700000000300",
+        "replyToId": null,
+        "etag": "1700000000300",
+        "messageType": "message",
+        "createdDateTime": "2026-10-09T09:00:00.123Z",
+        "lastModifiedDateTime": "2026-10-09T10:30:00.456Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": null,
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://teams.microsoft.com/l/message/19%3Afixture%40thread.tacv2/1700000000300?groupId=00000000-0000-0000-0000-0000000000aa",
+        "policyViolation": null,
+        "eventDetail": null,
+        "from": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "11111111-1111-1111-1111-111111111111",
+            "displayName": "Sam Sender",
+            "userIdentityType": "aadUser",
+            "tenantId": "00000000-0000-0000-0000-0000000000ff"
+          }
+        },
+        "body": {
+          "contentType": "html",
+          "content": "<div><div>Hi <at id=\"0\">Jane Doe</at>, the build is green &amp; ready.</div><div>Ship it?</div></div>"
+        },
+        "channelIdentity": {
+          "teamId": "00000000-0000-0000-0000-0000000000aa",
+          "channelId": "19:fixture@thread.tacv2"
+        },
+        "attachments": [],
+        "mentions": [
+          {
+            "id": 0,
+            "mentionText": "Jane Doe",
+            "mentioned": {
+              "application": null,
+              "device": null,
+              "conversation": null,
+              "tag": null,
+              "user": {
+                "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                "id": "2222AAAA-2222-2222-2222-222222222222",
+                "displayName": "Jane Doe",
+                "userIdentityType": "aadUser",
+                "tenantId": "00000000-0000-0000-0000-0000000000ff"
+              }
+            }
+          }
+        ],
+        "reactions": [],
+        "replies@odata.context": "https://graph.microsoft.com/v1.0/$metadata#teams('00000000-0000-0000-0000-0000000000aa')/channels('19%3Afixture%40thread.tacv2')/messages('1700000000300')/replies",
+        "replies": [
+          {
+            "id": "1700000000302",
+            "replyToId": "1700000000300",
+            "etag": "1700000000302",
+            "messageType": "message",
+            "createdDateTime": "2026-10-09T10:30:00.456Z",
+            "lastModifiedDateTime": "2026-10-09T10:30:00.456Z",
+            "lastEditedDateTime": null,
+            "deletedDateTime": null,
+            "subject": null,
+            "summary": null,
+            "chatId": null,
+            "importance": "normal",
+            "locale": "en-us",
+            "webUrl": null,
+            "policyViolation": null,
+            "eventDetail": null,
+            "from": {
+              "application": null,
+              "device": null,
+              "user": {
+                "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                "id": "2222aaaa-2222-2222-2222-222222222222",
+                "displayName": "Jane Doe",
+                "userIdentityType": "aadUser",
+                "tenantId": "00000000-0000-0000-0000-0000000000ff"
+              }
+            },
+            "body": {
+              "contentType": "html",
+              "content": "<p>Telling <at id=\"0\">General</at> now.</p>"
+            },
+            "channelIdentity": {
+              "teamId": "00000000-0000-0000-0000-0000000000aa",
+              "channelId": "19:fixture@thread.tacv2"
+            },
+            "attachments": [],
+            "mentions": [
+              {
+                "id": 0,
+                "mentionText": "General",
+                "mentioned": {
+                  "application": null,
+                  "device": null,
+                  "user": null,
+                  "tag": null,
+                  "conversation": {
+                    "id": "19:fixture@thread.tacv2",
+                    "displayName": "General",
+                    "conversationIdentityType": "channel"
+                  }
+                }
+              }
+            ],
+            "reactions": []
+          },
+          {
+            "id": "1700000000301",
+            "replyToId": "1700000000300",
+            "etag": "1700000000301",
+            "messageType": "message",
+            "createdDateTime": "2026-10-09T09:15:00.000Z",
+            "lastModifiedDateTime": "2026-10-09T09:15:00.000Z",
+            "lastEditedDateTime": null,
+            "deletedDateTime": null,
+            "subject": null,
+            "summary": null,
+            "chatId": null,
+            "importance": "normal",
+            "locale": "en-us",
+            "webUrl": null,
+            "policyViolation": null,
+            "eventDetail": null,
+            "from": {
+              "application": null,
+              "device": null,
+              "user": {
+                "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                "id": "33333333-3333-3333-3333-333333333333",
+                "displayName": "Pat Replier",
+                "userIdentityType": "aadUser",
+                "tenantId": "00000000-0000-0000-0000-0000000000ff"
+              }
+            },
+            "body": {
+              "contentType": "text",
+              "content": "plain reply, sent as text"
+            },
+            "channelIdentity": {
+              "teamId": "00000000-0000-0000-0000-0000000000aa",
+              "channelId": "19:fixture@thread.tacv2"
+            },
+            "attachments": [],
+            "mentions": [],
+            "reactions": []
+          }
+        ]
+      },
+      {
+        "id": "1700000000200",
+        "replyToId": null,
+        "etag": "1700000000200",
+        "messageType": "systemEventMessage",
+        "createdDateTime": "2026-10-09T08:00:00.000Z",
+        "lastModifiedDateTime": "2026-10-09T08:00:00.000Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": null,
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": null,
+        "policyViolation": null,
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.membersAddedEventMessageDetail",
+          "visibleHistoryStartDateTime": "0001-01-01T00:00:00Z",
+          "members": [
+            {
+              "id": "44444444-4444-4444-4444-444444444444",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "00000000-0000-0000-0000-0000000000ff"
+            }
+          ],
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "id": "11111111-1111-1111-1111-111111111111",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "00000000-0000-0000-0000-0000000000ff"
+            }
+          }
+        },
+        "from": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "channelIdentity": {
+          "teamId": "00000000-0000-0000-0000-0000000000aa",
+          "channelId": "19:fixture@thread.tacv2"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "replies@odata.context": "https://graph.microsoft.com/v1.0/$metadata#teams('00000000-0000-0000-0000-0000000000aa')/channels('19%3Afixture%40thread.tacv2')/messages('1700000000200')/replies",
+        "replies": []
+      },
+      {
+        "id": "1700000000100",
+        "replyToId": null,
+        "etag": "1700000000100",
+        "messageType": "message",
+        "createdDateTime": "2026-10-09T07:00:00.000Z",
+        "lastModifiedDateTime": "2026-10-09T07:00:00.000Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": "Nightly build",
+        "summary": null,
+        "chatId": null,
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": null,
+        "policyViolation": null,
+        "eventDetail": null,
+        "from": {
+          "application": {
+            "@odata.type": "#microsoft.graph.teamworkApplicationIdentity",
+            "id": "55555555-5555-5555-5555-555555555555",
+            "displayName": "Build Bot",
+            "applicationIdentityType": "bot"
+          },
+          "device": null,
+          "user": null
+        },
+        "body": {
+          "contentType": "html",
+          "content": "<p>Nightly build <b>passed</b>.</p><p>Logs attached.</p>"
+        },
+        "channelIdentity": {
+          "teamId": "00000000-0000-0000-0000-0000000000aa",
+          "channelId": "19:fixture@thread.tacv2"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "replies@odata.context": "https://graph.microsoft.com/v1.0/$metadata#teams('00000000-0000-0000-0000-0000000000aa')/channels('19%3Afixture%40thread.tacv2')/messages('1700000000100')/replies",
+        "replies": []
+      }
+    ]
+  }
+}

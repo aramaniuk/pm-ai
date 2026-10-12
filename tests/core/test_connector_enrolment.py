@@ -1189,7 +1189,7 @@ def test_redaction_can_say_something_other_than_accepted():
 # ── Story 8q — the row records which user signed in ──────────────────────────
 
 GRAPH = "graph:work"
-PM = "a-graph-user-id"
+PM = "0d9e3c4f-1a2b-4c3d-8e9f-a0b1c2d3e4f5"  # a Graph user id is a GUID
 
 
 def _graph_row_file(root: Path) -> Path:
@@ -1317,6 +1317,24 @@ def test_a_row_without_a_usable_user_id_records_no_user(row):
     assert recorded_user_id(row) is None
 
 
+@pytest.mark.parametrize("not_a_guid", ["a-graph-user-id", "pm@example.com", "0d9e3c4f"])
+def test_a_user_id_the_reader_ignores_is_not_recorded(storage, tmp_path, not_a_guid):
+    """Story 2o: the writer refuses what `recorded_user_id` reads as absent, or a
+    row would record a user id no reader can use."""
+    row_file = _enrol_graph(storage, tmp_path)
+    before = row_file.read_bytes()
+    with pytest.raises(ValueError) as refused:
+        record_user_id(storage, instance=GRAPH, user_id=not_a_guid)
+    assert repr(not_a_guid) in str(refused.value)
+    assert row_file.read_bytes() == before
+
+
+def test_a_recorded_value_that_is_not_a_guid_reads_as_no_recorded_user():
+    """A hand-edited or pre-2o row whose `user_id` is not a Graph user id reads as
+    no recorded user, by `domain`'s one rule."""
+    assert recorded_user_id({USER_ID_KEY: "a-graph-user-id"}) is None
+
+
 def test_a_recorded_user_id_is_read_back():
     assert recorded_user_id({USER_ID_KEY: PM}) == PM
 
@@ -1326,8 +1344,9 @@ def test_recording_another_user_replaces_the_recorded_one(storage, tmp_path):
     signed in last, and nothing compares."""
     row_file = _enrol_graph(storage, tmp_path)
     assert record_user_id(storage, instance=GRAPH, user_id=PM) is True
-    assert record_user_id(storage, instance=GRAPH, user_id="somebody-else") is True
-    assert json.loads(row_file.read_text())[USER_ID_KEY] == "somebody-else"
+    somebody_else = "6f1c2b3a-0000-4000-8000-000000000002"
+    assert record_user_id(storage, instance=GRAPH, user_id=somebody_else) is True
+    assert json.loads(row_file.read_text())[USER_ID_KEY] == somebody_else
 
 
 def test_a_repeat_sign_in_in_another_case_changes_no_bytes(storage, tmp_path):

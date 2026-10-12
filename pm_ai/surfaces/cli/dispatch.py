@@ -711,7 +711,7 @@ def _config_show(context: Context) -> int:
     be exactly the reimplementation this slice may not do. The one case it reads
     conservatively is `verbose_logging = false` written out longhand — a
     setting that agrees with its default, reported as a default. Neither the
-    rate nor the handle can reach that state: `config.toml` refuses both unset
+    rate nor the zone can reach that state: `config.toml` refuses both unset
     values outright, so writing one is an error rather than a mislabelled row.
 
     No file is opened. The daemon already holds the interpreted `Config`,
@@ -1376,10 +1376,12 @@ def _answer[T](
     """Ask until `interpret` accepts an answer, at most `SETUP_ATTEMPTS` times.
 
     `interpret` raises `_Inadmissible` or `ConfigRefused` for an answer it will
-    not take, and both are printed and asked again. `ConfigRefused` is the one
-    that matters: `Config.__post_init__` is where a whitespace handle or a
-    negative rate is refused, and letting it escape here would be a traceback
-    after the key and the project are already done.
+    not take, and both are printed and asked again. `_Inadmissible` is the
+    prompt's own refusal — a rate that is not a number, a flag that is not y or
+    n. `ConfigRefused` comes from `Config.__post_init__` when the interpreted
+    answer is built into a `Config`: a negative or non-finite rate, an unknown
+    zone, a zone carrying an unpaired surrogate. Letting it escape here would
+    be a traceback after the key and the project are already done.
     """
     prompt = f"{question} [{default}]: " if default else f"{question}: "
     for _ in range(SETUP_ATTEMPTS):
@@ -1459,22 +1461,6 @@ def _setup_project(context: Context) -> None:
         print(f"      {outcome.project_id} is registered at {outcome.repository}")
 
 
-def _handle(current: Config) -> Callable[[str], Config]:
-    def interpret(raw: str) -> Config:
-        # Stripped unless that leaves nothing: an all-whitespace answer reaches
-        # `Config` as typed, so its own refusal names it, rather than being
-        # folded into the empty answer and reported as missing.
-        handle = raw.strip() or raw
-        if not handle:
-            raise _Inadmissible(
-                "pm_handle is required. An unset handle matches no speaker, so "
-                "nothing spoken to pm-ai would ever be attributed to the PM."
-            )
-        return replace(current, pm_handle=handle)
-
-    return interpret
-
-
 def _rate(current: Config) -> Callable[[str], Config]:
     def interpret(raw: str) -> Config:
         text = raw.strip()
@@ -1516,50 +1502,54 @@ def _verbose(current: Config) -> Callable[[str], Config]:
     return interpret
 
 
-def _empty_means(has_default: bool) -> str:
-    """What an empty answer does, which depends on whether a value exists."""
-    return "empty to keep it" if has_default else "empty to leave unset"
-
-
 def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) -> None:
     """Step 3: `config.toml` — asked for, rendered by `4g`, written once.
 
-    Last because it is the only step whose absence is survivable: a machine
-    with no handle runs and attributes nothing to the PM. A config that already
-    parses and names a handle is a completed step, as an enrolled key is, and
-    nothing is asked or written. Otherwise every question is `4a`'s closed
-    vocabulary and nothing else; each answer is a `Config` before it is
-    accepted, so `__post_init__` refuses it at the prompt that asked.
+    Last because it is the only step whose absence is survivable: every key is
+    optional. Which keys are asked is decided from what `load_config` read, not
+    from the bytes, so a file holding only a BOM, comments or whitespace is a
+    first-run file:
+
+    - **first run** — `load_config` gives `Config()`: every key is asked;
+    - **partial** — the rate or the zone is still at its unset state (`0.0`,
+      `""`): only those are asked, and every key the file sets is kept as it
+      is. `verbose_logging` is not asked again: `false` is a value, not an
+      unset state, so a file cannot be told apart from one that chose it;
+    - **complete** — neither is unset: a completed step, as an enrolled key
+      is, and nothing is asked or written.
+
+    Each answer is a `Config` before it is accepted, so `__post_init__` refuses
+    it at the prompt that asked. Who the PM is is not asked: it comes from the
+    Graph connector rows (story 2o).
     """
     print("[3/3] config.toml — last, because it is the only step a machine survives without")
-    if current.pm_handle:
-        print(f"      already configured (pm_handle is {current.pm_handle}); nothing was written.")
+    first_run_file = current == Config()
+    ask_rate = not current.blended_hourly_rate
+    ask_zone = not current.display_timezone
+    if not first_run_file and not ask_rate and not ask_zone:
+        print("      already configured; nothing was written.")
         return
     step = "step 3 (config.toml)"
-    settled = _answer("pm_handle (who is the PM)", _handle(current), step=step)
-    # `0.0` is the rate's unset state, not a value: `config.toml` refuses an
-    # explicit zero, so a rate that reads back as `0.0` was never set, and
-    # offering it as a default to keep would describe a setting nobody chose.
-    rate = settled.blended_hourly_rate
-    settled = _answer(
-        f"blended_hourly_rate ({_empty_means(bool(rate))})",
-        _rate(settled),
-        step=step,
-        default=repr(rate) if rate else None,
-    )
-    zone = settled.display_timezone
-    settled = _answer(
-        f"display_timezone, e.g. Europe/Warsaw ({_empty_means(bool(zone))})",
-        _zone(settled),
-        step=step,
-        default=zone or None,
-    )
-    settled = _answer(
-        "verbose_logging (y/n)",
-        _verbose(settled),
-        step=step,
-        default="y" if settled.verbose_logging else "n",
-    )
+    settled = current
+    if ask_rate:
+        # `0.0` is the rate's unset state, not a value: `config.toml` refuses
+        # an explicit zero, so there is never a current rate to offer here.
+        settled = _answer(
+            "blended_hourly_rate (empty to leave unset)", _rate(settled), step=step
+        )
+    if ask_zone:
+        settled = _answer(
+            "display_timezone, e.g. Europe/Warsaw (empty to leave unset)",
+            _zone(settled),
+            step=step,
+        )
+    if first_run_file:
+        settled = _answer(
+            "verbose_logging (y/n)",
+            _verbose(settled),
+            step=step,
+            default="y" if settled.verbose_logging else "n",
+        )
     try:
         written = first_run.write_config(render_config(settled), expected=existing)
     except ConfigRefused as refused:

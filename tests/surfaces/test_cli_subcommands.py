@@ -448,13 +448,13 @@ def test_config_shown_with_a_file_marks_what_the_file_set(registered, capsys):
     """One key written, one key inherited, and the output has to tell them apart."""
     path = registered / ".pm-ai" / "config.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('pm_handle = "pm@example.com"\n', encoding="utf-8")
+    path.write_text('display_timezone = "Europe/Warsaw"\n', encoding="utf-8")
     assert entry.main(["config", "show"]) == EXIT_OK
     printed = capsys.readouterr().out
     rows = {line.split(" ")[0]: line for line in printed.splitlines() if line.split(" ")[0] in ACCEPTED_KEYS}
     assert set(rows) == set(ACCEPTED_KEYS)
-    assert "(set)" in rows["pm_handle"]
-    assert "pm@example.com" in rows["pm_handle"]
+    assert "(set)" in rows["display_timezone"]
+    assert "Europe/Warsaw" in rows["display_timezone"]
     assert "(default)" in rows["blended_hourly_rate"]
     assert "(default)" in rows["verbose_logging"]
 

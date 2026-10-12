@@ -33,6 +33,7 @@ from pm_ai.connectors.graph import (
     MissingGraphSetting,
     UnknownProject,
     graph_category_scopes,
+    graph_channel_listings,
     graph_window_policy,
 )
 from pm_ai.connectors.graph.auth import (
@@ -52,21 +53,13 @@ from pm_ai.connectors.graph.calendar import (
     GraphCalendarFetch,
     WindowPolicy,
 )
+from pm_ai.connectors.graph.channels import GraphChannelFetch
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.connectors.probe import CREDENTIAL_PROBE_SECONDS
 from pm_ai.connectors.registry import run_bounded
 from pm_ai.connectors.transcripts.graph import GraphTranscriptAdapter
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core.config import Config
-from pm_ai.core.project_registry import (
-    DuplicateProject,
-    ProjectEntry,
-    ProjectPathUnusable,
-    RegistryRefused,
-    parse_registry,
-    render_registry,
-)
-from pm_ai.core.project_scaffold import render_gitignore
 from pm_ai.core.connector_enrolment import (
     CONNECTORS,
     CREDENTIAL_STORE,
@@ -86,28 +79,44 @@ from pm_ai.core.connector_enrolment import (
     stored_credentials,
 )
 from pm_ai.core.meeting_records import MeetingRecords
+from pm_ai.core.project_registry import (
+    DuplicateProject,
+    ProjectEntry,
+    ProjectPathUnusable,
+    RegistryRefused,
+    parse_registry,
+    render_registry,
+)
+from pm_ai.core.project_scaffold import render_gitignore
 from pm_ai.domain.claims import ClaimReentered
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
-from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
-from pm_ai.domain.handles import PersonHandle, own_handle_set
+from pm_ai.domain.handles import (
+    GRAPH,
+    PersonHandle,
+    own_handle_set,
+    pm_identity,
+    usable_user_id,
+)
 from pm_ai.domain.health import ArtifactState, Health, Presence
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
+from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
+from pm_ai.platform.claims import FlockClaims
+from pm_ai.platform.environment import encryption_disabled as encryption_off
+from pm_ai.platform.keychain import MacOSKeychainAdapter
+from pm_ai.platform.paths import ScopePaths
+from pm_ai.platform.vcs import GitVcs
 from pm_ai.ports import (
     MASTER_KEY_NAME,
     ArtifactBusy,
     ConnectorPort,
     CryptoPort,
+    DecryptionFailed,
     KeychainPort,
     ProbeFailed,
     ProbeUnreachable,
     VcsPort,
 )
-from pm_ai.platform.environment import encryption_disabled as encryption_off
-from pm_ai.platform.claims import FlockClaims
-from pm_ai.platform.keychain import MacOSKeychainAdapter
-from pm_ai.platform.paths import ScopePaths
-from pm_ai.platform.vcs import GitVcs
 from pm_ai.skills.gitlab import PostComment
 from pm_ai.skills.registry import SkillRegistry
 from pm_ai.storage.crypto import LazyKeyCrypto, PlaintextCrypto
@@ -128,6 +137,9 @@ __all__ = [
     "onboard_project",
     "Onboarded",
     "warn_if_encryption_disabled",
+    "PmIdentityReading",
+    "UnusableRow",
+    "read_pm_identity",
 ]
 
 REGISTRY_ARTIFACT = "projects.toml"
@@ -239,18 +251,6 @@ class Daemon:
                 f"acting in a project nothing watches writes where no harvest "
                 f"ever runs."
             )
-
-    @property
-    def pm_handle(self) -> str:
-        """Who the daemon treats as the PM, per `config.toml`.
-
-        A property rather than a field, so `Config` stays the single place the
-        value lives. It was a literal default here — one developer's own email
-        address, compiled into the package — until `pm_ai.core.config` existed
-        to be asked. Unset by default now, and an unset handle matches no
-        speaker, so nothing spoken auto-executes (AD-32).
-        """
-        return self.config.pm_handle
 
 
 def build(
@@ -968,7 +968,8 @@ def _graph_connector(
     `GraphDeviceCodeAuth`'s own value rather than to a copy of it. This docstring
     said "four settings and none of them is defaulted" while the code beside it
     defaulted `tenant` to a literal, which is two claims one file apart that
-    could not both be true.
+    could not both be true. A sixth, `channels` (story 33d), lists the Teams
+    channels read; absent, the connector reads the calendar only.
 
     They live in `connectors/<instance>.json` — per-machine, gitignored,
     hand-editable — rather than in `config.toml`, whose vocabulary stays closed
@@ -992,7 +993,14 @@ def _graph_connector(
     """
     try:
         judged = _judged_graph_row(entry, registered=registered)
-    except _RowRefused as refused:
+        # The channels the PM listed by hand (`33d`). No list is calendar only;
+        # a list that cannot be read builds nothing and names the entry. Read
+        # here, at the start, and not in `_judged_graph_row`: a sign-in judges
+        # nothing that names a project, as with the category mapping.
+        channels = graph_channel_listings(entry, registered=registered)
+    except (_RowRefused, UnknownProject, ValueError) as refused:
+        # `ChannelListRefused` is a `ValueError`; `UnknownProject` a channel
+        # mapped to a project no registry knows (`33d`).
         _unbuilt(instance, str(refused))
         return None
     client_id, named_tenant, policy = judged.client_id, judged.tenant, judged.policy
@@ -1021,26 +1029,37 @@ def _graph_connector(
         instance=instance,
         now=clock,
     )
+    client = GraphClient(
+        auth=auth,
+        now=clock,
+        # The real one, supplied here because `GraphClient` defaults to a
+        # wait that does not wait — a blocking sleep as the default is
+        # what makes a forgotten injection cost ten minutes inside a test
+        # suite. Its 429 branch compares this against that default by
+        # identity and refuses rather than spinning, so the composition
+        # root is the only place the honoured hint can come from.
+        wait=time.sleep,
+    )
     return GraphConnector(
         auth=auth,
         calendar=GraphCalendarFetch(
-            client=GraphClient(
-                auth=auth,
-                now=clock,
-                # The real one, supplied here because `GraphClient` defaults to a
-                # wait that does not wait — a blocking sleep as the default is
-                # what makes a forgotten injection cost ten minutes inside a test
-                # suite. Its 429 branch compares this against that default by
-                # identity and refuses rather than spinning, so the composition
-                # root is the only place the honoured hint can come from.
-                wait=time.sleep,
-            ),
+            client=client,
             instance=instance,
             windows=policy,
             now=clock,
         ),
         categories=categories,
         now=clock,
+        channels=channels,
+        # One client for the calendar and every channel: one credential, one
+        # host check, and the run's one budget (`33d`). A channel with no
+        # stored position reaches back as far as the calendar's first run.
+        messages=GraphChannelFetch(
+            client=client,
+            instance=instance,
+            reach_back=policy.first_run_reach_back,
+            now=clock,
+        ),
     )
 
 
@@ -1411,12 +1430,16 @@ class GraphEnrolment:
                 text = redacted(text, secret, instead=instead)
             return text
 
-        user_id = signed.settings.get(USER_ID_KEY)
-        if not isinstance(user_id, str) or not user_id.strip():
+        # Read through the one rule every reader of the key applies (story
+        # 2o): blank, non-text or not a Graph user id is absent, refused here
+        # before anything is saved rather than by `record_user_id` after the
+        # credential has landed.
+        user_id = usable_user_id(signed.settings)
+        if user_id is None:
             raise ProbeFailed(
-                "the sign-in completed and does not name the signed-in user's "
-                "Graph user id, which is a fault in pm-ai rather than anything "
-                "Microsoft said. Nothing was saved."
+                "the sign-in completed and does not name a usable Graph user id "
+                "for the signed-in user, which is a fault in pm-ai rather than "
+                "anything Microsoft said. Nothing was saved."
             )
 
         store = SealedRefreshTokenStore(
@@ -1808,6 +1831,105 @@ def _enrolled_configurations(
         if isinstance(decoded, dict):
             entries.append(decoded)
     return tuple(entries)
+
+
+@dataclass(frozen=True, slots=True)
+class UnusableRow:
+    """A connector row `read_pm_identity` could not use, and why."""
+
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PmIdentityReading:
+    """Who the PM is, and which rows could not say, from one read at one instant.
+
+    `identity` is what `pm_identity` answered; `unusable` lists every row that
+    could not be read, and every enabled Graph row with no usable user id, so
+    `23c`'s sign-in line and its marking come from the same read.
+    """
+
+    identity: frozenset[PersonHandle]
+    unusable: tuple[UnusableRow, ...]
+
+
+def read_pm_identity(storage: StorageService) -> PmIdentityReading:
+    """Read every `connectors/` row once, now, and ask `pm_identity` (story 2o).
+
+    The one caller of `pm_identity`: `23c` and the transcript pipeline call
+    this, never `pm_identity`. Nothing is cached, so a row added while the
+    daemon runs is in the next call's answer. A row is replaced whole by
+    `write_artifact`, so a read during `8q`'s write sees a whole row.
+
+    A row that cannot be used is listed, never raised and never dropped:
+    a storage-read failure (`OSError`, `DecryptionFailed`), bytes that are not
+    UTF-8 JSON, a document that is not an object, a row removed between the
+    listing and its read, and a Graph row with no usable user id that is
+    enabled — or whose `enabled` is neither `true` nor `false`, which is named.
+    A failure to list `connectors/` is one entry for the collection. Anything
+    else is a defect in pm-ai and propagates.
+
+    `aliased` is empty: no row names the PM's person, and a test-filled alias
+    table is not a record. The slice that saves the table fills it here and
+    changes no caller.
+    """
+    application = DataScope(ScopeKind.APPLICATION)
+    try:
+        names = storage.list_collection(scope=application, artifact="connectors/")
+    except (OSError, DecryptionFailed) as unlisted:
+        return PmIdentityReading(
+            identity=pm_identity((), aliased=frozenset()),
+            unusable=(
+                UnusableRow("connectors/", f"could not be listed ({unlisted})"),
+            ),
+        )
+    rows: list[Mapping[str, object]] = []
+    unusable: list[UnusableRow] = []
+    for name in names:
+        try:
+            raw = storage.read_artifact(
+                scope=application, artifact="connectors/", name=name
+            )
+        except (OSError, DecryptionFailed) as unreadable:
+            unusable.append(UnusableRow(name, f"could not be read ({unreadable})"))
+            continue
+        if raw is None:
+            unusable.append(UnusableRow(name, "was removed while it was read"))
+            continue
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            unusable.append(UnusableRow(name, "is not UTF-8"))
+            continue
+        except json.JSONDecodeError:
+            unusable.append(UnusableRow(name, "is not valid JSON"))
+            continue
+        if not isinstance(decoded, dict):
+            unusable.append(
+                UnusableRow(name, f"holds a {type(decoded).__name__}, not an object")
+            )
+            continue
+        rows.append(decoded)
+        if decoded.get("system") != GRAPH or usable_user_id(decoded) is not None:
+            continue
+        enabled = decoded.get("enabled")
+        if enabled is True:
+            unusable.append(
+                UnusableRow(name, "is an enabled Graph row with no usable user id")
+            )
+        elif enabled is not False:
+            unusable.append(
+                UnusableRow(
+                    name,
+                    f"is a Graph row with no usable user id whose `enabled` is "
+                    f"{enabled!r}, neither true nor false",
+                )
+            )
+    return PmIdentityReading(
+        identity=pm_identity(rows, aliased=frozenset()),
+        unusable=tuple(unusable),
+    )
 
 
 @dataclass(frozen=True, slots=True)

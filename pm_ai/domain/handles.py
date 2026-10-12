@@ -4,8 +4,9 @@ A provider's account is not a person. One person has a Graph account, a commit
 email and a calendar address, and the pm-ai person is what joins them. So an
 observed event's line records **what the provider said** — a handle
 `<system>:<handle>` — and a reader decides **who that is**, through the one
-mapping function over the alias table (`2o`). The line is never rewritten, so an
-alias added or corrected later applies to every past line.
+mapping function over the alias table, `person_for` (story 2o). The line is
+never rewritten, so an alias added or corrected later applies to every past line.
+Which handles are the PM is the one function `pm_identity`, below.
 
 This module is the only place a `PersonHandle` is constructed. Before it, two
 connectors called `resolve_actor` in three places, each choosing its own system
@@ -35,32 +36,42 @@ parsed back through it when a line is read (story 2n): a reader gets the text.
 The set is kept apart from the scopeless reference systems (`meeting`, `goal`),
 checked at import by a `raise` so the guard holds under `python -O`.
 
-Imports only sibling `pm_ai.domain` modules (AD-30).
+Imports only sibling `pm_ai.domain` modules (AD-30), so connector rows arrive
+here as plain mappings.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
-from pm_ai.domain.identity import SCOPELESS_SYSTEMS, UNRESOLVED_ACTOR
+from pm_ai.domain.connector_rows import USER_ID_KEY
+from pm_ai.domain.identity import SCOPELESS_SYSTEMS, Actor
 from pm_ai.domain.invariants import InconsistentModel
 
 __all__ = [
+    "ALIASES",
     "EMAIL",
     "GRAPH",
     "GRAPH_APP",
     "HANDLE_SYSTEMS",
+    "NEVER_A_PERSON",
     "NONE",
     "NO_PERSON",
+    "UNRESOLVED_SENTINEL",
+    "AliasRefused",
     "InconsistentHandleModel",
     "InvalidPersonHandle",
     "PersonHandle",
     "own_handle_set",
     "parse_person_handle",
+    "person_for",
     "person_handle",
+    "pm_identity",
+    "register_alias",
     "usable_handle",
+    "usable_user_id",
 ]
 
 GRAPH = "graph"
@@ -73,6 +84,13 @@ HANDLE_SYSTEMS: frozenset[str] = frozenset({GRAPH, GRAPH_APP, EMAIL, NONE})
 change here, with its handle kind and case rule stated (AD-34)."""
 
 _SEPARATOR = ":"
+
+UNRESOLVED_SENTINEL = "actor_unresolved"
+"""The bare sentinel `pm_ai.domain.identity` once resolved an unknown handle to.
+
+Nothing produces it since story 2o removed that code; it is kept so a line still
+carrying it is refused by name (`parse_person_handle`) rather than as text with
+no system, and so tests can name the value the parser refuses."""
 
 
 class InvalidPersonHandle(ValueError):
@@ -252,7 +270,7 @@ def parse_person_handle(text: str) -> PersonHandle:
     """
     if not isinstance(text, str):
         raise InvalidPersonHandle(f"{text!r} is not text, so it is not a handle.")
-    if text == UNRESOLVED_ACTOR:
+    if text == UNRESOLVED_SENTINEL:
         raise InvalidPersonHandle(
             f"{text!r} is the bare unresolved sentinel. A line records what the "
             f"provider said, as `<system>:<handle>`, or `none:` when it said "
@@ -313,4 +331,145 @@ def own_handle_set(handles: Iterable[PersonHandle]) -> frozenset[PersonHandle]:
                 "cannot be one of pm-ai's own accounts."
             )
         out.add(handle)
+    return frozenset(out)
+
+
+# ── People: who a handle is, decided when a line is read (story 2o) ─────────
+#
+# AD-34: a person is resolved when a line is read, never when it is written.
+# Two functions are the only way from a handle to a person: `person_for` maps
+# one handle through the alias table, and `pm_identity` answers which handles
+# are the PM. `tests/architecture/test_people_readers.py` keeps `register_alias`
+# the one writer of `ALIASES`, `person_for` its one reader, and
+# `pm_ai.app.wiring.read_pm_identity` the one caller of `pm_identity`.
+
+NEVER_A_PERSON: frozenset[str] = frozenset({GRAPH_APP, NONE})
+"""Handle systems no alias maps to a person: a bot sender, and absence."""
+
+ALIASES: dict[PersonHandle, Actor] = {}
+"""Handle to pm-ai person. A module dict that only tests fill.
+
+Not saved anywhere: the slice that saves the table owns its home, its row
+shape, and correcting an alias (Open Risks, AD-34). Until then nothing in
+`pm_ai/` registers an alias, so every handle reads as written.
+"""
+
+
+class AliasRefused(ValueError):
+    """`register_alias` will not store this mapping. Names the reason."""
+
+
+def _require_handle(value: object, *, where: str) -> PersonHandle:
+    if not isinstance(value, PersonHandle):
+        raise TypeError(
+            f"{where} takes a PersonHandle, not {value!r}. A person value read "
+            f"from a line is parsed with `parse_person_handle` first."
+        )
+    return value
+
+
+def register_alias(handle: PersonHandle, person: Actor) -> None:
+    """Map `handle` to the pm-ai person `person`.
+
+    Refused, storing nothing, with `AliasRefused` for a `graph_app` or `none`
+    handle (naming the system: a bot sender and absence are never a person)
+    and for a handle already mapped to a different person (naming both).
+    Registering the mapping the table already holds changes nothing.
+    Correcting an alias belongs to the slice that saves the table.
+    """
+    handle = _require_handle(handle, where="register_alias")
+    if not isinstance(person, Actor):
+        raise TypeError(f"register_alias maps a handle to an Actor, not {person!r}.")
+    if handle.system in NEVER_A_PERSON:
+        raise AliasRefused(
+            f"{handle} is a `{handle.system}` handle, which never maps to a "
+            f"person: `graph_app` is a bot sender and `none` is absence (AD-34). "
+            f"Nothing was stored."
+        )
+    held = ALIASES.get(handle)
+    if held is not None and held != person:
+        raise AliasRefused(
+            f"{handle} is already mapped to {held.actor_id!r}; mapping it to "
+            f"{person.actor_id!r} would change who every past line names. "
+            f"Correcting an alias belongs to the slice that saves the table. "
+            f"{held.actor_id!r} was kept."
+        )
+    ALIASES[handle] = person
+
+
+def person_for(handle: PersonHandle) -> Actor | None:
+    """The pm-ai person `handle` is, or `None` for "no known person".
+
+    A reader given `None` shows the handle as written. `graph_app` and `none`
+    handles answer `None` whatever the table holds — this does not rely on
+    `register_alias` having refused them. Nothing rewrites a line, so an alias
+    added later applies to every past line.
+
+    A reader holding a `mentions` member parses it with `parse_person_handle`
+    before asking. Self-action lines (actor `pm-ai`) are never asked about: a
+    reader tells them apart by the entry's vocabulary, not by this function.
+    """
+    handle = _require_handle(handle, where="person_for")
+    if handle.system in NEVER_A_PERSON:
+        return None
+    return ALIASES.get(handle)
+
+
+# ── The PM ───────────────────────────────────────────────────────────────────
+
+def usable_user_id(row: Mapping[str, object]) -> str | None:
+    """The user id a connector row records, or `None` when it records none.
+
+    The one rule every reader of `USER_ID_KEY` applies (story 2o): a value that
+    is not text, is blank, or that the producer refuses as a Graph user id is
+    absent. Surrounding whitespace is stripped before the producer is asked,
+    and the stripped text is returned as the provider cased it.
+    """
+    value = row.get(USER_ID_KEY)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or usable_handle(GRAPH, stripped) is None:
+        return None
+    return stripped
+
+
+def pm_identity(
+    rows: Iterable[Mapping[str, object]], aliased: Iterable[PersonHandle]
+) -> frozenset[PersonHandle]:
+    """The handles that are the PM (AD-34).
+
+    `graph:<user_id>` for every row whose `system` is exactly `"graph"`,
+    enabled or disabled — disabling a row does not unmark past lines — plus
+    every handle in `aliased`. A row with no usable user id, and any row that
+    is not a Graph row, adds nothing. An `aliased` handle of system `graph_app`
+    or `none` is refused with `AliasRefused`, naming it.
+
+    `aliased` is the alias table's handles for the PM's person once that table
+    is saved; until then the composition root passes an empty set. Called only
+    by `pm_ai.app.wiring.read_pm_identity`, which reads the rows.
+    """
+    if isinstance(rows, Mapping):
+        raise TypeError(
+            "pm_identity takes the connector rows, not one row: a mapping "
+            "iterates as its keys."
+        )
+    out: set[PersonHandle] = set()
+    for handle in aliased:
+        handle = _require_handle(handle, where="pm_identity's aliased")
+        if handle.system in NEVER_A_PERSON:
+            raise AliasRefused(
+                f"pm_identity's aliased holds {handle}, a `{handle.system}` "
+                f"handle: a bot sender or absence is never the PM (AD-34)."
+            )
+        out.add(handle)
+    for row in rows:
+        # Exactly `"graph"`: a row's `system` names its connector family, which
+        # is spelled like the handle system it signs in as. `"Graph"` is not it.
+        if row.get("system") != GRAPH:
+            continue
+        user_id = usable_user_id(row)
+        if user_id is None:
+            continue
+        out.add(person_handle(GRAPH, user_id))
     return frozenset(out)

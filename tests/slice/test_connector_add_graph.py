@@ -44,7 +44,7 @@ from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL
 
 INSTANCE = "graph:work"
 CLIENT_ID = "00000000-0000-0000-0000-00000000008l"
-ACCOUNT_CLAIMS = {"oid": "an-object-id", "tid": "a-tenant-id"}
+ACCOUNT_CLAIMS = {"oid": "6f1c2b3a-0000-4000-8000-000000000001", "tid": "a-tenant-id"}
 SIGNED_IN = "the-refresh-token-the-sign-in-returned"
 ROTATED = "the-refresh-token-the-health-check-was-issued"
 KEY = b"K" * 32
@@ -335,7 +335,7 @@ def test_the_sealed_sign_in_keeps_its_two_fields(machine, monkeypatch, capsys):
 
     document = _sealed_document(home, keychain)
     assert sorted(document) == ["home_account_id", "refresh_token"]
-    assert document["home_account_id"] == "an-object-id.a-tenant-id"
+    assert document["home_account_id"] == "6f1c2b3a-0000-4000-8000-000000000001.a-tenant-id"
     assert "user_id" not in document
 
 
@@ -395,14 +395,15 @@ def test_the_fallback_account_id_from_another_tenant_is_accepted(
     names its home tenant, and its user part is the user id recorded."""
     home, _ = machine
     provider = Microsoft(
-        device=_no_oid(), accounts=[{"home_account_id": f"a-guest.{GUEST_HOME}"}]
+        device=_no_oid(),
+        accounts=[{"home_account_id": f"6f1c2b3a-0000-4000-8000-000000000003.{GUEST_HOME}"}],
     )
     _microsoft(monkeypatch, provider)
 
     code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
 
     assert code == EXIT_OK, capsys.readouterr().err
-    assert _row(home)["user_id"] == "a-guest"
+    assert _row(home)["user_id"] == "6f1c2b3a-0000-4000-8000-000000000003"
 
 
 @pytest.mark.parametrize(

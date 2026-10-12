@@ -836,8 +836,9 @@ def test_story_4a_no_developer_address_is_compiled_into_the_package():
     assert not holders, format_violations(
         holders,
         f"Story 4a: {RETIRED_PM_LITERAL} was one developer's address as a "
-        f"shipped default. It comes from config.toml now; a literal here is a "
-        f"machine configured by whoever wrote it.",
+        f"shipped default. Who the PM is comes from the Graph connector rows "
+        f"now (story 2o); a literal here is a machine configured by whoever "
+        f"wrote it.",
     )
 
 

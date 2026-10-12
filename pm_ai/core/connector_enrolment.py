@@ -57,6 +57,7 @@ import json
 from collections.abc import Mapping
 
 from pm_ai.domain.connector_rows import USER_ID_KEY
+from pm_ai.domain.handles import usable_user_id
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
     CredentialProbePort,
@@ -644,12 +645,21 @@ def record_user_id(
     a repeat sign-in changes no bytes. Refused, writing nothing, with
     `ConnectorNotConfigured` when no row exists, `MalformedSettings` when the
     row is not a JSON object, `NotAGraphRow` when its `system` is not `graph`,
-    and `ValueError` for a blank or non-text `user_id`.
+    and `ValueError` for a blank or non-text `user_id`, or one
+    `usable_user_id` reads as absent (not a GUID): a value the reader ignores
+    is never written.
     """
     if not isinstance(user_id, str) or not user_id.strip():
         raise ValueError(
             f"no user id was given to record for {instance!r}; a blank one would "
             f"read as no recorded user. Nothing was written."
+        )
+    if usable_user_id({USER_ID_KEY: user_id}) is None:
+        # The writer refuses what its reader ignores: a value `recorded_user_id`
+        # reads as absent would record a user id no reader can use.
+        raise ValueError(
+            f"{user_id!r} is not a Graph user id (a GUID), so {instance!r} would "
+            f"read back as having no recorded user. Nothing was written."
         )
     _assert_nameable(instance)
     if not claimed:
@@ -721,13 +731,12 @@ def connector_row(
 def recorded_user_id(row: Mapping[str, object]) -> str | None:
     """The user a connector row records, or `None` when it records none (story 8q).
 
-    A `user_id` that is missing, blank, whitespace or not text is absent. The
-    rule every reader of the key applies — story 23c's included.
+    `domain`'s one rule (`usable_user_id`, story 2o): a `user_id` that is
+    missing, blank, whitespace, not text, or not a Graph user id the producer
+    accepts is absent — the rule every reader of the key applies, story 23c's
+    included. Stripped, and as the provider cased it.
     """
-    value = row.get(USER_ID_KEY)
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return value.strip()
+    return usable_user_id(row)
 
 
 # ── Everything below is pure, and none of it ever sees a path ────────────────

@@ -87,7 +87,7 @@ def daemon(tmp_path: Path):
         "alpha",
         now=lambda: NOW,
         keychain=_NoKey(),
-        config=Config(pm_handle="andrei@example.com"),
+        config=Config(),
     )
 
 
