@@ -16,6 +16,7 @@ returns re-attributed events, so it is testable without a daemon.
 from __future__ import annotations
 
 from pm_ai.domain.events import NormalizedEvent, Provenance
+from pm_ai.domain.handles import PersonHandle, own_handle_set
 from pm_ai.domain.identity import PM_AI_MINTED
 
 # The ledger records an execution whose provider returned no usable identifier
@@ -54,12 +55,21 @@ def own_artifact_index(
     return frozenset(artifacts), frozenset(blind)
 
 
-def attribute(event: NormalizedEvent, artifacts, blind) -> Provenance:
+def attribute(
+    event: NormalizedEvent,
+    artifacts,
+    blind,
+    *,
+    own_handles: frozenset[PersonHandle],
+) -> Provenance:
     """Decide one event's provenance. Never returns EXTERNAL on a guess.
 
     Three outcomes, in the order AD-36 states them:
 
-    1. the actor resolves to pm-ai's own bot identity  -> PM_AI
+    1. the actor handle is one of pm-ai's own         -> PM_AI
+       (mechanism 3: an exact match on the handle,
+       with no alias lookup — AD-34 resolves people
+       only when read)
     2. the artifact is one we recorded creating        -> PM_AI
     3. otherwise external, unless we hold an unmatched
        mutation in the same scope, in which case we
@@ -80,7 +90,7 @@ def attribute(event: NormalizedEvent, artifacts, blind) -> Provenance:
     answer has to come from a declaration. `PM_AI_MINTED` is that declaration,
     closed in `domain` beside the scopeless set it partitions.
     """
-    if event.actor.is_pm_ai:
+    if event.actor in own_handles:
         return Provenance.PM_AI
     ref = event.source_ref
     if ref.scope is None:
@@ -93,17 +103,27 @@ def attribute(event: NormalizedEvent, artifacts, blind) -> Provenance:
 
 
 def attribute_all(
-    events: tuple[NormalizedEvent, ...], executed: dict[str, tuple[str, str]]
+    events: tuple[NormalizedEvent, ...],
+    executed: dict[str, tuple[str, str]],
+    *,
+    own_handles: frozenset[PersonHandle],
 ) -> tuple[NormalizedEvent, ...]:
     """Re-attribute a harvest. Runs before persistence, never after.
 
     A connector may not assert `external` (AD-36): provenance is decided here,
     the only layer that can see the ledger. A connector emits `unknown` and this
     resolves it.
+
+    `own_handles` is pm-ai's own bot accounts (AD-36 mechanism 3), required with
+    no default: an omitted set would read as "pm-ai has no bot accounts", which
+    is a claim the caller must make, not one this function may assume. Refused
+    when a member is not a `PersonHandle` or is `none:`.
     """
     from dataclasses import replace
 
+    own = own_handle_set(own_handles)
     artifacts, blind = own_artifact_index(executed)
     return tuple(
-        replace(event, authored_by=attribute(event, artifacts, blind)) for event in events
+        replace(event, authored_by=attribute(event, artifacts, blind, own_handles=own))
+        for event in events
     )

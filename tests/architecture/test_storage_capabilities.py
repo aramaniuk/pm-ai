@@ -33,7 +33,8 @@ from claim_fakes import InMemoryClaims, held_by_another_thread
 from pm_ai.domain.claims import LOCK_SUFFIX, ClaimHeld, ClaimReentered
 from pm_ai.domain.disclosure import DISCLOSURE_LEDGER_ARTIFACT, DisclosureRecord
 from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType
-from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
+from pm_ai.domain.handles import person_handle
+from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef
 from pm_ai.domain.storage_tiers import (
     EVENT_LOG,
     NotACollection,
@@ -912,7 +913,7 @@ def _event(n: int) -> NormalizedEvent:
         scope=PROJECT,
         type=ObservedEventType.COMMIT_PUSHED,
         source_ref=SourceRef.parse(f"gitlab:alpha:commit:{n:08x}"),
-        actor=Actor(actor_id="u_42", display_name="Ada"),
+        actor=person_handle("email", "ada@example.com"),
         occurred_at=datetime(2026, 9, 2, 17, 30, tzinfo=timezone.utc),
         payload=CommitPayload(sha=f"{n:08x}", message=f"change {n}", branch="main"),
     )

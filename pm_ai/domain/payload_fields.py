@@ -17,19 +17,24 @@ annotation text):
 - text — the value as it is;
 - a count (`int`) — ASCII digits; a negative count is refused at encode, and
   anything but digits is refused at decode;
-- a person (`Actor`) — its `actor_id` alone (AD-34). The display name is an
-  alias and never reaches a line, so decoding gives a person with that id and
-  no name — the one deliberate loss the round trip allows. A person pm-ai could
-  not name carries the handle it came with under the reserved spelling
-  `unresolved:<system>:<handle>`, which passes through unchanged; the bare
-  `actor_unresolved` sentinel and an empty id are refused both ways — at encode
-  as an unencodable payload, at decode as a corrupted line — because neither
-  keeps anything a later alias entry could resolve;
+- a person (`PersonHandle`) — the handle's text, `<system>:<handle>` (AD-34).
+  `none:` is refused here both ways: absence of an assignee is `None`, and
+  `none:` is legal only as an envelope actor. On decode the text must be the
+  canonical form the producer writes — `email:Dana@X.com` is a corrupted line,
+  which keeps a round trip byte-stable. This covers payload fields only: the
+  envelope `actor=` column of an observed line is **not** checked as a handle
+  when it is read (story 2n excludes it), so `ledger.parse_line` hands it back
+  as the text on the line, whatever it holds;
 - a list (`tuple[str, ...] | None`) — its elements joined by `,`, with `,` and
   `\\` inside an element escaped by `\\`. An empty element is refused at encode.
   The list layer sits inside the line layer: the joined text is one value that
   `render_entry` then quotes and escapes by its own rules, and a reader undoes
-  the line layer first (`scan_fields`), then splits here.
+  the line layer first (`scan_fields`), then splits here. A list declared in
+  `PERSON_LIST_FIELDS` (today `MessagePayload.mentions`) is a list of person
+  handles: each member is checked as a handle's canonical text, both ways, and
+  `none:` is refused as a member. A handle never holds a comma, so no member
+  is split wrongly; an `email:` handle may hold a backslash, which the list
+  layer escapes like any other element's.
 
 **Absent and empty differ.** `None` is left off the line — "not recorded". An
 empty list is a present, empty value. On decode, a missing field with a default
@@ -56,8 +61,8 @@ from pm_ai.domain.event_entries import (
     MalformedEntry,
     SelfActionType,
 )
-from pm_ai.domain.events import PAYLOAD_FOR, ObservedEventType
-from pm_ai.domain.identity import UNRESOLVED_ACTOR, Actor
+from pm_ai.domain.events import PAYLOAD_FOR, PERSON_LIST_FIELDS, ObservedEventType
+from pm_ai.domain.handles import InvalidPersonHandle, PersonHandle, parse_person_handle
 
 __all__ = [
     "PREFIX",
@@ -109,10 +114,23 @@ _TEXT = "text"
 _COUNT = "count"
 _PERSON = "person"
 _LIST = "list"
+_PERSON_LIST = "person_list"
 
 
 def _kind(owner: type, name: str, hint: object) -> str:
-    """Which of the four grammars a resolved annotation takes."""
+    """Which of the five grammars a resolved annotation takes."""
+    kind = _base_kind(owner, name, hint)
+    if name in PERSON_LIST_FIELDS.get(owner, frozenset()):
+        if kind != _LIST:
+            raise TypeError(
+                f"{owner.__name__}.{name} is declared a person list in "
+                f"PERSON_LIST_FIELDS and is not a list field."
+            )
+        return _PERSON_LIST
+    return kind
+
+
+def _base_kind(owner: type, name: str, hint: object) -> str:
     if get_origin(hint) in (Union, UnionType):
         members = [a for a in get_args(hint) if a is not type(None)]
     else:
@@ -123,7 +141,7 @@ def _kind(owner: type, name: str, hint: object) -> str:
             return _TEXT
         if member is int:
             return _COUNT
-        if member is Actor:
+        if member is PersonHandle:
             return _PERSON
         if get_origin(member) is tuple and get_args(member) == (str, ...):
             return _LIST
@@ -188,21 +206,46 @@ def _encode_value(name: str, kind: str, value: object) -> str:
             )
         return str(value)
     if kind == _PERSON:
-        if not isinstance(value, Actor):
-            raise UnencodablePayload(f"`{name}` holds {value!r}, which is not an Actor.")
-        if not value.actor_id:
+        if not isinstance(value, PersonHandle):
             raise UnencodablePayload(
-                f"`{name}` holds a person with an empty id. A person on a line is "
-                f"its id alone (AD-34), so an empty one records nobody."
+                f"`{name}` holds {value!r}, which is not a PersonHandle."
             )
-        _refuse_sentinel(name, value.actor_id)
-        return value.actor_id
-    # _LIST
+        if value.is_absent:
+            raise UnencodablePayload(_absent_refusal(name))
+        return str(value)
+    # _LIST and _PERSON_LIST
     if not isinstance(value, tuple):
         raise UnencodablePayload(
             f"`{name}` holds {type(value).__name__}; a list field is a tuple of text."
         )
+    if kind == _PERSON_LIST:
+        for element in value:
+            _person_member(name, element, refusal=UnencodablePayload)
     return LIST_SEPARATOR.join(_encode_element(name, element) for element in value)
+
+
+def _absent_refusal(name: str) -> str:
+    return (
+        f"`{name}` holds `none:`. The absence value is legal only as an envelope "
+        f"actor (AD-34); an absent person here is no value at all."
+    )
+
+
+def _person_member(
+    name: str, element: object, *, refusal: type[MalformedEntry]
+) -> PersonHandle:
+    """One person-list member, checked as a handle's canonical text."""
+    if not isinstance(element, str):
+        raise refusal(f"`{name}` holds the element {element!r}, which is not text.")
+    try:
+        handle = parse_person_handle(element)
+    except InvalidPersonHandle as invalid:
+        raise refusal(
+            f"`{name}` holds {element!r}, which is not a person handle: {invalid}"
+        ) from invalid
+    if handle.is_absent:
+        raise refusal(_absent_refusal(name))
+    return handle
 
 
 def _encode_element(name: str, element: object) -> str:
@@ -216,20 +259,9 @@ def _encode_element(name: str, element: object) -> str:
             f"empty string must never share bytes (AD-27), so an element may "
             f"not be empty."
         )
-    _refuse_sentinel(name, element)
     return element.replace(_LIST_ESCAPE, _LIST_ESCAPE * 2).replace(
         LIST_SEPARATOR, _LIST_ESCAPE + LIST_SEPARATOR
     )
-
-
-def _refuse_sentinel(name: str, identity: str) -> None:
-    if identity == UNRESOLVED_ACTOR:
-        raise UnencodablePayload(
-            f"`{name}` holds the bare `{UNRESOLVED_ACTOR}` sentinel. A person "
-            f"pm-ai could not name keeps the handle it came with, as "
-            f"`unresolved:<system>:<handle>` (AD-27 / AD-34), so a later alias "
-            f"entry can resolve it; the sentinel keeps nothing."
-        )
 
 
 # ── Decode ───────────────────────────────────────────────────────────────────
@@ -315,26 +347,21 @@ def _decode_value(key: str, kind: str, raw: str) -> object:
                 f"read as a number."
             ) from refusal
     if kind == _PERSON:
-        if not raw:
+        try:
+            handle = parse_person_handle(raw)
+        except InvalidPersonHandle as invalid:
             raise MalformedEntry(
-                f"`{key}` is empty. A person on a line is its id, and the writer "
-                f"never writes an empty one."
-            )
-        _corrupt_if_sentinel(key, raw)
-        return Actor(raw)
+                f"`{key}` holds {raw!r}, which is not a person handle in "
+                f"canonical form: {invalid}"
+            ) from invalid
+        if handle.is_absent:
+            raise MalformedEntry(_absent_refusal(key))
+        return handle
     elements = _split(key, raw)
-    for element in elements:
-        _corrupt_if_sentinel(key, element)
+    if kind == _PERSON_LIST:
+        for element in elements:
+            _person_member(key, element, refusal=MalformedEntry)
     return elements
-
-
-def _corrupt_if_sentinel(key: str, identity: str) -> None:
-    if identity == UNRESOLVED_ACTOR:
-        raise MalformedEntry(
-            f"`{key}` holds the bare `{UNRESOLVED_ACTOR}` sentinel, which the "
-            f"writer never writes: an unresolved person is "
-            f"`unresolved:<system>:<handle>` (AD-27 / AD-34)."
-        )
 
 
 def _split(key: str, raw: str) -> tuple[str, ...]:

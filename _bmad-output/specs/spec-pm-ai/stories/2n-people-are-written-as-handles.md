@@ -2,7 +2,8 @@
 title: 'People are written to the event log as handles'
 type: 'feature'
 created: '2026-10-11'
-status: 'draft'
+status: 'done'
+baseline_commit: '35f83c16afe67de49bdb94d9a2423006a98a15f5'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -109,16 +110,16 @@ Line numbers measured 2026-10-11.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/handles.py` -- systems and shapes, `PersonHandle`, producer, parse, disjointness guard
-- [ ] `pm_ai/domain/events.py`, `identity.py`, `__init__.py` -- actor and assignee types, runtime actor check, restated reason and comments, retirements
-- [ ] `pm_ai/domain/payload_fields.py` -- `_kind` learns `PersonHandle`; person fields and named person-list members through parse; canonical form enforced; sentinel messages replaced
-- [ ] `pm_ai/domain/event_entries.py`, `pm_ai/skills/registry.py` -- the `pm-ai` actor rule; `skill` field and its grammar
-- [ ] `pm_ai/storage/service.py` -- envelope writes the handle text
-- [ ] `pm_ai/core/normalize.py`, `pm_ai/app/pipelines.py`, `pm_ai/app/wiring.py` -- `own_handles` required and carried on `Daemon`, empty at the composition root with a comment saying why
-- [ ] `pm_ai/connectors/gitlab.py`, `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py`, `pm_ai/core/meeting_records.py` -- handles per the matrix; producer errors caught per row; attendee de-duplication; `attendee_count` stored and priced
-- [ ] `tests/domain/test_handles.py` (new) and the listed test files -- one test per matrix row; connector-level tests for every commit, organizer and attendee row; fixtures switched to `pm-ai`
-- [ ] `tests/architecture/test_handle_construction.py` (new) -- an AST scan for `PersonHandle(...)` or `dataclasses.replace` on one outside the producer's module, and for any call of `resolve_actor` in `pm_ai/`. The scan follows import aliases and attribute calls (`identity.resolve_actor`) and skips the definitions in `identity.py`
-- [ ] `tests/architecture/test_guards_survive_o.py` -- the disjointness guard joins `CASES`
+- [x] `pm_ai/domain/handles.py` -- systems and shapes, `PersonHandle`, producer, parse, disjointness guard
+- [x] `pm_ai/domain/events.py`, `identity.py`, `__init__.py` -- actor and assignee types, runtime actor check, restated reason and comments, retirements
+- [x] `pm_ai/domain/payload_fields.py` -- `_kind` learns `PersonHandle`; person fields and named person-list members through parse; canonical form enforced; sentinel messages replaced
+- [x] `pm_ai/domain/event_entries.py`, `pm_ai/skills/registry.py` -- the `pm-ai` actor rule; `skill` field and its grammar
+- [x] `pm_ai/storage/service.py` -- envelope writes the handle text
+- [x] `pm_ai/core/normalize.py`, `pm_ai/app/pipelines.py`, `pm_ai/app/wiring.py` -- `own_handles` required and carried on `Daemon`, empty at the composition root with a comment saying why
+- [x] `pm_ai/connectors/gitlab.py`, `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py`, `pm_ai/core/meeting_records.py` -- handles per the matrix; producer errors caught per row; attendee de-duplication; `attendee_count` stored and priced
+- [x] `tests/domain/test_handles.py` (new) and the listed test files -- one test per matrix row; connector-level tests for every commit, organizer and attendee row; fixtures switched to `pm-ai`
+- [x] `tests/architecture/test_handle_construction.py` (new) -- an AST scan for `PersonHandle(...)` or `dataclasses.replace` on one outside the producer's module, and for any call of `resolve_actor` in `pm_ai/`. The scan follows import aliases and attribute calls (`identity.resolve_actor`) and skips the definitions in `identity.py`
+- [x] `tests/architecture/test_guards_survive_o.py` -- the disjointness guard joins `CASES`
 
 **Acceptance Criteria:**
 - Given a GitLab commit and a Graph meeting harvested through `run_harvest`, when the lines are read back, then each `actor=` is an `email:` or `none:` handle and no line holds `actor_unresolved`.
@@ -143,3 +144,14 @@ Line numbers measured 2026-10-11.
 - `uv run pytest -q` -- expected: all pass, 24 skipped
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept. Run it separately: `tests/architecture/test_layering.py` skips silently when the tool is missing.
+
+## Suggested Review Order
+
+1. The handle type and its one producer: [`PersonHandle`](../../../../pm_ai/domain/handles.py#L176), [`person_handle`](../../../../pm_ai/domain/handles.py#L218), [`parse_person_handle`](../../../../pm_ai/domain/handles.py#L244), [`usable_handle`](../../../../pm_ai/domain/handles.py#L277) (connectors; never raises), [`own_handle_set`](../../../../pm_ai/domain/handles.py#L293).
+2. The envelope actor checked at runtime: [`ActorNotAHandle`](../../../../pm_ai/domain/events.py#L519); written as text in [`storage/service.py`](../../../../pm_ai/storage/service.py#L1702).
+3. Person fields on a line: [`_person_member`](../../../../pm_ai/domain/payload_fields.py#L234) — canonical form or a corrupted line.
+4. Self-action lines and `skill`: [`check_skill_name`](../../../../pm_ai/domain/event_entries.py#L188) and the `pm-ai` actor rule in [`EventEntry.__post_init__`](../../../../pm_ai/domain/event_entries.py#L329).
+5. AD-36 mechanism 3: [`attribute_all`](../../../../pm_ai/core/normalize.py#L105); the empty set at the composition root in [`wiring.py`](../../../../pm_ai/app/wiring.py#L172).
+6. Connectors: the GitLab commit author in [`gitlab.py`](../../../../pm_ai/connectors/gitlab.py#L261); Graph organizer and [`_attendees_of`](../../../../pm_ai/connectors/graph/__init__.py#L1114).
+7. Meetings: [`check_attendee_count`](../../../../pm_ai/domain/meetings.py#L21) and [`man_hour_cost`](../../../../pm_ai/domain/meetings.py#L117).
+8. Tests: `tests/domain/test_handles.py` (its docstring maps matrix rows to test files) and the AST scan `tests/architecture/test_handle_construction.py`.

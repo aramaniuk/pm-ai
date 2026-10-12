@@ -46,8 +46,10 @@ would be a second place it could be wrong.
 **Man-Hour Cost is never stored.** CAP-1 puts it in the summary card's header,
 which is a rendered surface, and it derives from `blended_hourly_rate` in
 `config.toml` — so a stored value is wrong the moment the rate changes. The
-record stores `attendees` and `duration_minutes`; `Meeting.man_hour_cost`
-multiplies.
+record stores `attendees`, `attendee_count` and `duration_minutes`;
+`Meeting.man_hour_cost` multiplies. `attendees` is who pm-ai could name, as
+person handles (`email:<address>`, AD-34); `attendee_count` is how many the
+provider listed, named or not (story 2n), and is what the cost counts.
 
 ## Only meetings that have happened are recorded
 
@@ -108,7 +110,7 @@ from pm_ai.domain.event_entries import (
     scan_fields,
 )
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
-from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.meetings import InvalidAttendeeCount, Meeting
 from pm_ai.ports import StoragePort
 
 __all__ = [
@@ -161,6 +163,7 @@ _TITLE = "title"
 _START = "start"
 _DURATION = "duration_minutes"
 _ATTENDEES = "attendees"
+_ATTENDEE_COUNT = "attendee_count"
 _SCOPE = "scope"
 _CALENDAR_REF = "calendar_event_ref"
 
@@ -170,6 +173,7 @@ _FIELDS: tuple[str, ...] = (
     _START,
     _DURATION,
     _ATTENDEES,
+    _ATTENDEE_COUNT,
     _SCOPE,
     _CALENDAR_REF,
 )
@@ -360,6 +364,7 @@ def render_record(record: MeetingRecord) -> str:
         _START: start.isoformat(),
         _DURATION: str(duration),
         _ATTENDEES: _render_attendees(meeting.attendees),
+        _ATTENDEE_COUNT: str(meeting.attendee_count),
         _SCOPE: str(scope),
     }
     if meeting.calendar_event_ref is not None:
@@ -433,18 +438,27 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
             f"edit that removed one is a repair to make rather than a default "
             f"to invent."
         )
-    return MeetingRecord(
-        meeting=Meeting(
-            meeting_id=_assert_recordable_id(fields[_MEETING_ID]),
-            title=_assert_recordable_text(fields[_TITLE], where=f"{source}: title"),
-            start=_parse_start(fields[_START], source=source),
-            duration_minutes=_parse_duration(fields[_DURATION], source=source),
-            attendees=_parse_attendees(fields[_ATTENDEES], source=source),
-            scope=_parse_scope(fields[_SCOPE], source=source),
+    meeting_id = _assert_recordable_id(fields[_MEETING_ID])
+    title = _assert_recordable_text(fields[_TITLE], where=f"{source}: title")
+    start = _parse_start(fields[_START], source=source)
+    duration = _parse_duration(fields[_DURATION], source=source)
+    attendees = _parse_attendees(fields[_ATTENDEES], source=source)
+    attendee_count = _parse_attendee_count(fields[_ATTENDEE_COUNT], source=source)
+    scope = _parse_scope(fields[_SCOPE], source=source)
+    try:
+        meeting = Meeting(
+            meeting_id=meeting_id,
+            title=title,
+            start=start,
+            duration_minutes=duration,
+            attendees=attendees,
+            scope=scope,
             calendar_event_ref=fields.get(_CALENDAR_REF),
-        ),
-        notes=notes,
-    )
+            attendee_count=attendee_count,
+        )
+    except InvalidAttendeeCount as contradiction:
+        raise MalformedMeeting(f"{source}: {contradiction}") from contradiction
+    return MeetingRecord(meeting=meeting, notes=notes)
 
 
 # ── The accessor ─────────────────────────────────────────────────────────────
@@ -798,6 +812,22 @@ def _parse_attendees(value: str, *, source: str) -> tuple[Actor, ...]:
             f"in for the reason it is refused on the way out."
         )
     return tuple(Actor(actor_id=handle) for handle in handles)
+
+
+def _parse_attendee_count(value: str, *, source: str) -> int:
+    """`attendee_count`'s spelling: canonical digits, the `duration_minutes` rule.
+
+    Only the spelling is checked here. Whether the number agrees with the named
+    attendees is `Meeting`'s rule (`check_attendee_count`), which `parse_record`
+    maps to `MalformedMeeting` when it builds the meeting.
+    """
+    if not _DECIMAL.match(value):
+        raise MalformedMeeting(
+            f"{source}: attendee_count={value!r} is not a decimal integer. It "
+            f"is written as digits with no sign, no underscore and no leading "
+            f"zero."
+        )
+    return int(value)
 
 
 def _parse_scope(value: str, *, source: str) -> DataScope:

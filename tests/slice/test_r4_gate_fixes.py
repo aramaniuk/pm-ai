@@ -11,6 +11,7 @@ exist. These drive the real path.
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 from datetime import datetime, timedelta, timezone
 
@@ -29,12 +30,15 @@ from pm_ai.domain.events import (
     Provenance,
 )
 from pm_ai.domain.harvest import Cursor
-from pm_ai.domain.identity import PM_AI, DataScope, ScopeKind, SourceRef, TargetRef, resolve_actor
+from pm_ai.domain.handles import NO_PERSON, InvalidPersonHandle, person_handle
+from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import CommitmentState, evaluate_commitment
 from pm_ai.storage.service import ReconciliationRequired
 
 NOW = datetime(2026, 8, 19, 9, 0, tzinfo=timezone.utc)
 PROJECT = DataScope(ScopeKind.PROJECT, "alpha")
+ALEX = person_handle("email", "alex@example.com")
+BOT_GUID = "0000b07a-0000-4000-8000-000000000001"
 
 
 @pytest.fixture
@@ -48,7 +52,7 @@ def _commit_event(sha: str, scope: DataScope = PROJECT) -> NormalizedEvent:
         scope=scope,
         type=ObservedEventType.COMMIT_PUSHED,
         source_ref=SourceRef.parse(f"gitlab:alpha:commit:{sha}"),
-        actor=resolve_actor(system="gitlab", handle="alex@example.com"),
+        actor=ALEX,
         occurred_at=NOW,
         payload=CommitPayload(sha=sha, message="work"),
     )
@@ -89,13 +93,13 @@ def test_our_own_write_harvested_back_is_not_evidence(daemon):
             scope=PROJECT,
             type=ObservedEventType.MESSAGE_POSTED,
             source_ref=SourceRef.parse(f"gitlab:alpha:note:{invocation.external_id}"),
-            actor=resolve_actor(system="gitlab", handle="alex@example.com"),
+            actor=ALEX,
             occurred_at=NOW,
             payload=MessagePayload(channel="WI-108"),
         ),
     )
 
-    attributed = attribute_all(harvested, daemon.storage.executed_mutations())
+    attributed = attribute_all(harvested, daemon.storage.executed_mutations(), own_handles=frozenset())
     assert attributed[0].authored_by is Provenance.PM_AI
     assert not attributed[0].authored_by.admissible_as_evidence
 
@@ -110,24 +114,93 @@ def test_our_own_write_harvested_back_is_not_evidence(daemon):
 
 def test_a_genuine_external_write_still_counts(daemon):
     """The guard must not swallow real evidence — otherwise nothing ever FULFILS."""
-    attributed = attribute_all((_commit_event("9f2a1c"),), daemon.storage.executed_mutations())
+    attributed = attribute_all(
+        (_commit_event("9f2a1c"),), daemon.storage.executed_mutations(), own_handles=frozenset()
+    )
     assert attributed[0].authored_by is Provenance.EXTERNAL
     assert evaluate_commitment(overdue=True, evidence_admissible=True, covered=True, harvest_failed=False) is (
         CommitmentState.FULFILLED
     )
 
 
-def test_bot_identity_attributes_independently(daemon):
-    """AD-36 mechanism 3 — two mechanisms, because one of them will have gaps."""
-    event = NormalizedEvent(
+def _event_by(actor) -> NormalizedEvent:
+    return NormalizedEvent(
         scope=PROJECT,
         type=ObservedEventType.COMMIT_PUSHED,
         source_ref=SourceRef.parse("gitlab:alpha:commit:deadbe"),
-        actor=PM_AI,
+        actor=actor,
         occurred_at=NOW,
         payload=CommitPayload(sha="deadbe", message="automated"),
     )
-    assert attribute_all((event,), {})[0].authored_by is Provenance.PM_AI
+
+
+def test_bot_identity_attributes_independently(daemon):
+    """AD-36 mechanism 3 — two mechanisms, because one of them will have gaps.
+
+    Matrix: own bot — actor `graph_app:<g>` in `own_handles` is `pm_ai`.
+    """
+    bot = person_handle("graph_app", BOT_GUID)
+    attributed = attribute_all((_event_by(bot),), {}, own_handles=frozenset({bot}))
+    assert attributed[0].authored_by is Provenance.PM_AI
+
+
+def test_the_same_id_under_another_system_is_not_pm_ais_own(daemon):
+    """Matrix: same id, other system — compared on the whole handle, exactly."""
+    bot = person_handle("graph_app", BOT_GUID)
+    user = person_handle("graph", BOT_GUID)
+    attributed = attribute_all((_event_by(user),), {}, own_handles=frozenset({bot}))
+    assert attributed[0].authored_by is Provenance.EXTERNAL
+
+
+def test_no_person_in_the_own_handle_set_is_refused():
+    """Matrix: `none:` out of place — the absence value is nobody."""
+    with pytest.raises(InvalidPersonHandle) as caught:
+        attribute_all((_event_by(NO_PERSON),), {}, own_handles=frozenset({NO_PERSON}))
+    assert "own_handles" in str(caught.value)
+
+
+def test_own_handles_has_no_default():
+    with pytest.raises(TypeError):
+        attribute_all((), {})  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    "own", [frozenset({NO_PERSON}), "email:bot@example.com"], ids=["none:", "a string"]
+)
+def test_a_daemon_built_with_a_bad_own_handle_set_is_refused(daemon, own):
+    """Checked at construction: `none:` is nobody, and a string is not a set."""
+    with pytest.raises(InvalidPersonHandle) as caught:
+        dataclasses.replace(daemon, own_handles=own)
+    assert "own_handles" in str(caught.value)
+
+
+def test_the_composition_root_declares_no_bot_accounts(daemon):
+    """Graph signs in as the user and GitLab uses the user's token: empty today."""
+    assert daemon.own_handles == frozenset()
+
+
+def test_mechanism_three_through_run_harvest_reads_no_alias(daemon, monkeypatch):
+    """Acceptance: an event carrying an own handle persists `authored_by=pm_ai`,
+    and the alias table is never read on the way."""
+    import pm_ai.domain.identity as identity
+
+    class _Unreadable(dict):
+        def _refuse(self, *_args, **_kwargs):
+            raise AssertionError("the alias table was read on the write path")
+
+        get = __getitem__ = __contains__ = __iter__ = __len__ = items = keys = values = _refuse
+
+    monkeypatch.setattr(identity, "ALIASES", _Unreadable())
+    bot = person_handle("email", "pm-ai-bot@example.com")
+    daemon = dataclasses.replace(daemon, own_handles=frozenset({bot}))
+    daemon.connectors["gitlab:alpha"]._fake_api = [
+        {"sha": "9f2a1c", "message": "x", "author_email": "PM-AI-Bot@example.com", "committed_at": NOW}
+    ]
+    run_harvest(daemon, "gitlab:alpha")
+    segment = daemon.storage.paths.resolve(PROJECT, "event_log/") / "2026-08.md"
+    (line,) = segment.read_text(encoding="utf-8").splitlines()
+    assert " actor=email:pm-ai-bot@example.com " in line
+    assert " authored_by=pm_ai" in line
 
 
 def test_unrecognisable_mutation_makes_its_scope_uncertain(daemon):
@@ -137,7 +210,8 @@ def test_unrecognisable_mutation_makes_its_scope_uncertain(daemon):
     honest answer for that scope is UNKNOWN rather than a confident EXTERNAL.
     """
     ledger = {"idem_x": ("gitlab:alpha:issue:WI-108", "")}
-    assert attribute_all((_commit_event("9f2a1c"),), ledger)[0].authored_by is Provenance.UNKNOWN
+    attributed = attribute_all((_commit_event("9f2a1c"),), ledger, own_handles=frozenset())
+    assert attributed[0].authored_by is Provenance.UNKNOWN
 
 
 # ── Defect 2: AD-20's crash window ───────────────────────────────────────────

@@ -24,7 +24,8 @@ from pm_ai.domain.events import (
     ObservedEventType,
     WorkItemPayload,
 )
-from pm_ai.domain.identity import UNRESOLVED_ACTOR, Actor, DataScope, ScopeKind, SourceRef
+from pm_ai.domain.handles import NO_PERSON, person_handle
+from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef
 from pm_ai.domain.payload_fields import UnencodablePayload, decode_payload
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.platform.vcs import GitVcs
@@ -32,6 +33,10 @@ from pm_ai.storage.crypto import AesGcmCrypto
 from pm_ai.storage.service import StorageService
 
 NOW = datetime(2026, 8, 30, 9, 0, tzinfo=timezone.utc)
+DANA_GUID = "0000da4a-0000-4000-8000-000000000001"
+DANA = person_handle("graph", DANA_GUID)
+U1 = "graph:00000001-0000-4000-8000-000000000001"
+U2 = "graph:00000002-0000-4000-8000-000000000002"
 SCOPE = DataScope(ScopeKind.PERSONAL)
 BODY = "Fix the auth refactor\n\nThe token was refreshed twice."
 
@@ -49,7 +54,7 @@ def _commit(**kw):
     return NormalizedEvent(
         scope=SCOPE, type=ObservedEventType.COMMIT_PUSHED,
         source_ref=SourceRef.parse("gitlab:alpha:commit:9f2a1c"),
-        actor=Actor(actor_id="u_42", display_name="Ada"),
+        actor=person_handle("email", "ada@example.com"),
         occurred_at=datetime(2026, 8, 30, 8, 0, tzinfo=timezone.utc),
         payload=payload,
     )
@@ -147,7 +152,7 @@ def _persist_in(scope: DataScope, *events: NormalizedEvent) -> tuple[str, tuple[
 def _event(type_: ObservedEventType, ref: str, payload: object) -> NormalizedEvent:
     return NormalizedEvent(
         scope=PROJECT, type=type_, source_ref=SourceRef.parse(ref),
-        actor=Actor(actor_id="u_dana", display_name="Dana"),
+        actor=DANA,
         occurred_at=datetime(2026, 8, 30, 8, 0, tzinfo=timezone.utc),
         payload=payload,
     )
@@ -155,10 +160,11 @@ def _event(type_: ObservedEventType, ref: str, payload: object) -> NormalizedEve
 
 def test_a_message_with_mentions_is_persisted_parsed_decoded_and_rendered():
     """The first acceptance criterion: what the connector supplied comes back,
-    and the dashboard line shows channel and excerpt."""
+    and the dashboard line shows channel and excerpt. Until `23c` and `2o` the
+    sender is printed as the handle text (accepted interim display, story 2n)."""
     supplied = MessagePayload(
         channel="#payments", excerpt="Cache TTL is still 60s in staging",
-        mentions=("u_1", "u_2"),
+        mentions=(U1, U2),
     )
     _, (entry,) = _persist_in(
         PROJECT, _event(ObservedEventType.MESSAGE_POSTED, "graph:alpha:message:m1", supplied)
@@ -166,46 +172,40 @@ def test_a_message_with_mentions_is_persisted_parsed_decoded_and_rendered():
     assert decode_payload(entry) == supplied
 
     rendered = render_project_dashboard((), (entry,), NOW + timedelta(hours=1), tz=DISPLAY)
-    assert "- **11:00** u_dana in #payments — Cache TTL is still 60s in staging" in rendered
+    assert (
+        f"- **11:00** graph:{DANA_GUID} in #payments — Cache TTL is still 60s in staging"
+        in rendered
+    )
 
 
-def test_an_assignee_with_a_display_name_reaches_the_line_as_its_id_alone():
-    supplied = WorkItemPayload(work_item_id="PAY-102", assignee=Actor("u_1", "Dana"))
+def test_an_assignee_reaches_the_line_as_its_handle_text_and_decodes_equal():
+    """Matrix: assignee — `p.assignee=email:dana@example.com`; decodes the equal handle."""
+    handle = person_handle("email", " Dana@Example.com ")
+    supplied = WorkItemPayload(work_item_id="PAY-102", assignee=handle)
     text, (entry,) = _persist_in(
         PROJECT, _event(ObservedEventType.WORK_ITEM_UPDATED, "gitlab:alpha:issue:PAY-102", supplied)
     )
-    assert "p.assignee=u_1" in text
-    assert "Dana" not in text.split(" p.", 1)[1], "a display name reached the payload"
-    decoded = decode_payload(entry)
-    assert decoded.assignee == Actor("u_1")  # type: ignore[attr-defined]
-    assert decoded.assignee.display_name is None  # type: ignore[attr-defined]
+    assert "p.assignee=email:dana@example.com" in text
+    assert decode_payload(entry).assignee == handle  # type: ignore[attr-defined]
 
 
-def test_an_unresolved_person_keeps_its_handle_on_both_lines():
-    """A sender and a mention of one person are joinable on the line."""
-    work_item = WorkItemPayload(
-        work_item_id="PAY-102", assignee=Actor("unresolved:gitlab:dana@example.com")
+def test_a_sender_and_a_mention_of_one_person_are_joinable_on_the_line():
+    """The envelope actor and a `mentions` member are the same handle text."""
+    message = MessagePayload(channel="#payments", mentions=(str(DANA),))
+    text, (entry,) = _persist_in(
+        PROJECT, _event(ObservedEventType.MESSAGE_POSTED, "graph:alpha:message:m1", message)
     )
-    message = MessagePayload(
-        channel="#payments", mentions=("unresolved:graph:dana@example.com",)
-    )
-    text, entries = _persist_in(
-        PROJECT,
-        _event(ObservedEventType.WORK_ITEM_UPDATED, "gitlab:alpha:issue:PAY-102", work_item),
-        _event(ObservedEventType.MESSAGE_POSTED, "graph:alpha:message:m1", message),
-    )
-    assert "p.assignee=unresolved:gitlab:dana@example.com" in text
-    assert "p.mentions=unresolved:graph:dana@example.com" in text
-    decoded = {type(p): p for p in map(decode_payload, entries)}
-    assert decoded[WorkItemPayload].assignee == Actor("unresolved:gitlab:dana@example.com")  # type: ignore[attr-defined]
-    assert decoded[MessagePayload].mentions == ("unresolved:graph:dana@example.com",)  # type: ignore[attr-defined]
+    assert f"actor=graph:{DANA_GUID} " in text
+    assert f"p.mentions=graph:{DANA_GUID}" in text
+    assert decode_payload(entry).mentions == (str(DANA),)  # type: ignore[attr-defined]
+    assert "actor_unresolved" not in text
 
 
-def test_the_bare_sentinel_as_an_assignee_is_refused_before_anything_is_written():
+def test_no_person_as_an_assignee_is_refused_before_anything_is_written():
     st = _storage()
     event = _event(
         ObservedEventType.WORK_ITEM_UPDATED, "gitlab:alpha:issue:PAY-102",
-        WorkItemPayload(work_item_id="PAY-102", assignee=Actor(UNRESOLVED_ACTOR)),
+        WorkItemPayload(work_item_id="PAY-102", assignee=NO_PERSON),
     )
     with pytest.raises(UnencodablePayload) as caught:
         st.persist_events((event,), scope=PROJECT)
@@ -214,7 +214,7 @@ def test_the_bare_sentinel_as_an_assignee_is_refused_before_anything_is_written(
     assert not segment.exists() or segment.read_text() == ""
 
 
-@pytest.mark.parametrize("mentions", [("u_1", "a,b", "c\\d", "e f"), ()], ids=["four", "empty"])
+@pytest.mark.parametrize("mentions", [(U1, U2, "email:a@x.com"), ()], ids=["three", "empty"])
 def test_a_mentions_list_survives_the_writer_and_the_parser(mentions):
     supplied = MessagePayload(channel="#payments", mentions=mentions)
     _, (entry,) = _persist_in(
@@ -224,20 +224,20 @@ def test_a_mentions_list_survives_the_writer_and_the_parser(mentions):
 
 
 def test_a_batch_with_one_unencodable_event_writes_nothing():
-    """All or nothing: three good events and one with the bare sentinel as its
+    """All or nothing: three good events and one with `none:` as its
     assignee leave no segment line and no `seen` row, so the good three are
     still new to the next harvest."""
     st = _storage()
     good = tuple(
         _event(
             ObservedEventType.MESSAGE_POSTED, f"graph:alpha:message:m{n}",
-            MessagePayload(channel="#payments", mentions=("u_1",)),
+            MessagePayload(channel="#payments", mentions=(U1,)),
         )
         for n in range(3)
     )
     bad = _event(
         ObservedEventType.WORK_ITEM_UPDATED, "gitlab:alpha:issue:PAY-102",
-        WorkItemPayload(work_item_id="PAY-102", assignee=Actor(UNRESOLVED_ACTOR)),
+        WorkItemPayload(work_item_id="PAY-102", assignee=NO_PERSON),
     )
     with pytest.raises(UnencodablePayload):
         st.persist_events(good + (bad,), scope=PROJECT)

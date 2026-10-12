@@ -43,7 +43,7 @@ def entry(marker: str) -> EventEntry:
     """
     return EventEntry(
         category=SelfActionType.SECURITY,
-        actor="test",
+        actor="pm-ai",
         fields=(("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("detail", marker)),
     )
 

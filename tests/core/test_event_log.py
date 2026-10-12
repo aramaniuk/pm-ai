@@ -28,7 +28,7 @@ def _line(entry_id: str, ingested_at: str, marker: str) -> str:
         EventEntry(
             entry_id=entry_id,
             category=SelfActionType.SECURITY,
-            actor="test",
+            actor="pm-ai",
             fields=(("ingested_at", ingested_at), ("protection", "encryption-at-rest"), ("disabled_by", "env-var"), ("detail", marker)),
         )
     )
@@ -135,7 +135,7 @@ def test_an_empty_log_reads_empty_and_opens_nothing():
 def test_a_truncated_tail_is_dropped_not_raised():
     log, _ = _log(
         {SCOPE: {"2026-08.md": _line("evt_1", "2026-08-01T00:00:00+00:00", "whole") + "\n"
-                 + "- [evt_2] security actor=test ingested"}}
+                 + "- [evt_2] security actor=pm-ai ingested"}}
     )
     assert [e.entry_id for e in log.read(scope=SCOPE)] == ["evt_1"]
 
@@ -185,7 +185,7 @@ def test_an_entry_without_an_ingestion_time_is_excluded_from_a_range():
     """Not silently included: a range asks a question it cannot answer for that
     entry, and guessing either way is worse than leaving it out."""
     line = render_entry(
-        EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY, actor="test",
+        EventEntry(entry_id="evt_1", category=SelfActionType.SECURITY, actor="pm-ai",
                    fields=(("protection", "p"), ("disabled_by", "d")))
     )
     log, _ = _log({SCOPE: {"2026-08.md": line + "\n"}})

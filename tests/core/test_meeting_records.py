@@ -58,7 +58,7 @@ UTC = timezone.utc
 TOKYO = timezone(timedelta(hours=9))
 WELL_FORMED = (
     "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-    "duration_minutes=45\nattendees=x\nscope=project:alpha\n"
+    "duration_minutes=45\nattendees=x\nattendee_count=1\nscope=project:alpha\n"
 )
 """A minimal record body, for the hand-edit cases that vary one field of it."""
 
@@ -621,6 +621,31 @@ def test_a_well_formed_hand_edit_is_read_back(records, tmp_path):
     assert records.get("mtg_01HX", scope=PROJECT).meeting.title == "retitled-by-hand"
 
 
+ATTENDEE_COUNT_DAMAGE = [
+    pytest.param(
+        WELL_FORMED.replace("attendee_count=1", f"attendee_count={raw}"),
+        id=f"attendee-count-{name}",
+    )
+    for raw, name in (
+        ("1_0", "in-python-integer-syntax"),
+        ("+2", "signed"),
+        ("01", "with-a-leading-zero"),
+        ("٤", "in-arabic-indic-digits"),
+        ("0", "below-the-one-named-attendee"),
+    )
+]
+"""Story 2n: `attendee_count` follows `duration_minutes`'s spelling, and a count
+below the named attendees contradicts the list."""
+
+
+@pytest.mark.parametrize("damage", ATTENDEE_COUNT_DAMAGE)
+def test_a_damaged_attendee_count_is_refused_naming_the_field(damage):
+    """The rows above, read directly, so each is shown to fail for the count
+    rather than for something else in the record."""
+    with pytest.raises(MalformedMeeting, match="attendee_count"):
+        parse_record(damage, source="under-test.md")
+
+
 @pytest.mark.parametrize(
     "damage",
     [
@@ -629,12 +654,12 @@ def test_a_well_formed_hand_edit_is_read_back(records, tmp_path):
         pytest.param("meeting_id=a meeting_id=b\n", id="two-pairs-on-one-line"),
         pytest.param(
             'meeting_id=mtg_01HX\ntitle=a\ntitle=b\nstart=2026-09-04T09:00:00+00:00\n'
-            "duration_minutes=45\nattendees=x\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=x\nattendee_count=1\nscope=project:alpha\n",
             id="duplicate-key",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=x\nscope=project:alpha\n"
+            "duration_minutes=45\nattendees=x\nattendee_count=1\nscope=project:alpha\n"
             "man_hour_cost=900\n",
             id="unknown-key",
         ),
@@ -645,32 +670,32 @@ def test_a_well_formed_hand_edit_is_read_back(records, tmp_path):
             # No record pm-ai wrote can carry it: the field left the module before
             # `put` had a production caller.
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=x\nscope=project:alpha\ntentative=false\n",
+            "duration_minutes=45\nattendees=x\nattendee_count=1\nscope=project:alpha\ntentative=false\n",
             id="retired-tentative-key",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00\n"
-            "duration_minutes=45\nattendees=x\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=x\nattendee_count=1\nscope=project:alpha\n",
             id="naive-start",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=not-a-time\n"
-            "duration_minutes=45\nattendees=x\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=x\nattendee_count=1\nscope=project:alpha\n",
             id="unparseable-start",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=half an hour\nattendees=x\nscope=project:alpha\n",
+            "duration_minutes=half an hour\nattendees=x\nattendee_count=1\nscope=project:alpha\n",
             id="duration-not-a-number",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=a,,b\nscope=project:alpha\n",
+            "duration_minutes=45\nattendees=a,,b\nattendee_count=3\nscope=project:alpha\n",
             id="empty-attendee",
         ),
         pytest.param(
             "meeting_id=mtg_01HX\ntitle=a\nstart=2026-09-04T09:00:00+00:00\n"
-            "duration_minutes=45\nattendees=x\nscope=nowhere\n",
+            "duration_minutes=45\nattendees=x\nattendee_count=1\nscope=nowhere\n",
             id="unknown-scope",
         ),
         pytest.param(
@@ -721,6 +746,7 @@ def test_a_well_formed_hand_edit_is_read_back(records, tmp_path):
             id="path-unsafe-id-disagreeing-with-its-name",
         ),
         pytest.param('title="unclosed\n', id="unclosed-quote"),
+        *ATTENDEE_COUNT_DAMAGE,
     ],
 )
 def test_a_malformed_hand_edit_is_surfaced_never_skipped(records, tmp_path, damage):

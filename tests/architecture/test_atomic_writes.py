@@ -356,7 +356,7 @@ def test_appends_are_still_appends(tmp_path):
     segment = storage.paths.resolve(PERSONAL, "event_log/") / f"{NOW:%Y-%m}.md"
     body = mask_ids(segment.read_text(encoding="utf-8"))
     assert body == (
-        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=first\n"
-        f"- [evt_ID] security actor=test ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=second\n"
+        f"- [evt_ID] security actor=pm-ai ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=first\n"
+        f"- [evt_ID] security actor=pm-ai ingested_at={NOW.isoformat()} protection=encryption-at-rest disabled_by=env-var detail=second\n"
     )
     assert not list(segment.parent.glob("*.part")), "an append was staged; it must not be"

@@ -26,6 +26,7 @@ from pm_ai.domain import (
 )
 from pm_ai.domain.harvest import Cursor
 from pm_ai.domain.identity import UNRESOLVED_ACTOR, Actor, register_alias
+from pm_ai.core.ledger import parse_segment
 from pm_ai.skills.registry import MissingIdempotencyKey, SkillNotAuthorized
 
 NOW = datetime(2026, 8, 19, 9, 0, tzinfo=timezone.utc)
@@ -115,20 +116,36 @@ def test_harvest_records_a_coverage_window(daemon):
     )
 
 
-def test_unresolved_author_does_not_become_an_identity(daemon, tmp_path):
-    """AD-34 — the failure that splits one engineer into four in FR-30."""
-    result_before = run_harvest(daemon, "gitlab:alpha")
-    assert result_before.persisted == 2
-    # No alias registered, so the commit email resolves to UNRESOLVED, not itself.
+def test_a_commit_author_is_written_as_the_handle_the_provider_gave(daemon, monkeypatch):
+    """AD-34 — a line records what the provider said; a reader decides who.
 
+    Matrix: commit author — `author_email` set, absent, or not an address gives
+    `email:<address>`, `none:`, `none:`; every row is kept. An alias registered
+    before the harvest changes nothing on the line, because nothing on the write
+    path reads the alias table.
+    """
+    import pm_ai.domain.identity as identity
+
+    monkeypatch.setattr(identity, "ALIASES", {})
     register_alias("gitlab", "alex@example.com", Actor("actor_alex", "Alex"))
-    # A second root, so the events are new to its dedup ledger rather than duplicates.
-    d2 = build(tmp_path / "second", "alpha", now=lambda: NOW)
-    d2.connectors["gitlab:alpha"]._fake_api = daemon.connectors["gitlab:alpha"]._fake_api
-    run_harvest(d2, "gitlab:alpha")
-    body = next(d2.storage.paths.resolve(d2.scope, EVENT_LOG).glob("*.md")).read_text()
-    assert "actor=actor_alex" in body
+    daemon.connectors["gitlab:alpha"]._fake_api = [
+        {"sha": "9f2a1c", "message": "a", "author_email": "Alex@Example.com",
+         "committed_at": NOW - timedelta(hours=3)},
+        {"sha": "3b7e02", "message": "b", "committed_at": NOW - timedelta(hours=2)},
+        {"sha": "77aa00", "message": "c", "author_email": "not-an-address",
+         "committed_at": NOW - timedelta(hours=1)},
+    ]
+    result = run_harvest(daemon, "gitlab:alpha")
+    assert result.persisted == 3, "an unusable address costs the person, never the row"
+
+    body = next(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md")).read_text()
+    actors = {
+        dict(entry.fields)["src"].rsplit(":", 1)[1]: entry.actor
+        for entry in parse_segment(body)
+    }
+    assert actors == {"9f2a1c": "email:alex@example.com", "3b7e02": "none:", "77aa00": "none:"}
     assert UNRESOLVED_ACTOR not in body
+    assert "actor_alex" not in body
 
 
 # ── Class-M mutation ─────────────────────────────────────────────────────────
@@ -174,6 +191,33 @@ def test_unlisted_skill_is_refused(daemon):
         )
 
 
+@pytest.mark.parametrize(
+    ("system", "name"),
+    [("gitlab", "post comment"), ("git.lab", "post_comment"), ("gitlab", ""), ("gitlab", "a=b")],
+)
+def test_a_skill_whose_name_the_line_cannot_carry_is_refused_at_register(daemon, system, name):
+    """Refused before it can run: otherwise the external change would happen and
+    only then would the AD-1 line fail to write."""
+    from pm_ai.domain.event_entries import MalformedEntry
+    from pm_ai.domain.identity import SkillPermission
+
+    class _Skill:
+        permission = SkillPermission.COMMENT
+
+        def __init__(self) -> None:
+            self.system, self.name, self.ran = system, name, False
+
+        def execute(self, target, payload):
+            self.ran = True
+            return "n_1"
+
+    skill = _Skill()
+    with pytest.raises(MalformedEntry) as caught:
+        daemon.skills.register(skill)
+    assert "skill=" in str(caught.value)
+    assert not skill.ran
+
+
 def test_mutation_writes_one_event_log_entry(daemon):
     """AD-1 class M — one entry per invocation, in the owning scope."""
     daemon.skills.invoke(
@@ -183,7 +227,8 @@ def test_mutation_writes_one_event_log_entry(daemon):
         idempotency_key="idem_log",
     )
     body = next(daemon.storage.paths.resolve(daemon.scope, EVENT_LOG).glob("*.md")).read_text()
-    assert body.count("skill_invoked actor=gitlab.post_comment") == 1
+    assert body.count("skill_invoked actor=pm-ai ") == 1
+    assert body.count(" skill=gitlab.post_comment ") == 1
 
 
 def test_sub_resource_target_is_rejected_so_the_lock_is_real(daemon):

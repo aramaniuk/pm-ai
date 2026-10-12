@@ -1753,7 +1753,7 @@ class StorageService:
                     EventEntry(
                         entry_id=_ulid(),
                         category=stamped.type,
-                        actor=stamped.actor.actor_id,
+                        actor=str(stamped.actor),
                         fields=(
                             ("ingested_at", at.isoformat()),
                             ("src", str(stamped.source_ref)),

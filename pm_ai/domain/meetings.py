@@ -14,6 +14,27 @@ from datetime import datetime
 from pm_ai.domain.identity import Actor, DataScope, SourceRef
 
 
+class InvalidAttendeeCount(ValueError):
+    """An attendee count that is not a whole number at least the named list."""
+
+
+def check_attendee_count(count: object, *, named: int, meeting_id: str) -> int:
+    """The attendee-count rule, stated once: a whole number, never below `named`.
+
+    `named` is how many attendees pm-ai could name, a subset of every attendee
+    the provider listed — so a count below it contradicts the list. Raised by
+    `Meeting` and, through it, mapped to `MalformedMeeting` by the record parser.
+    """
+    if not isinstance(count, int) or isinstance(count, bool) or count < named:
+        raise InvalidAttendeeCount(
+            f"meeting {meeting_id!r} has attendee_count={count!r} and {named} "
+            f"named attendees. The count is every attendee the provider listed, "
+            f"so it is a whole number no smaller than the list of those pm-ai "
+            f"could name."
+        )
+    return count
+
+
 @dataclass(frozen=True, slots=True)
 class Meeting:
     """Tier-1, durable, and the citation root for everything said in it."""
@@ -63,6 +84,22 @@ class Meeting:
     # because absence has to stay absent — two meetings that both lack it are
     # not the same meeting, and a `""` default would make them look it.
     ical_uid: str | None = None
+    # How many attendee entries the provider listed — every attendee, named or
+    # not (story 2n, 2026-10-11). `attendees` says *who* pm-ai could name, as
+    # handles; this says *how many* there were, and is what the Man-Hour Cost
+    # multiplies. An attendee with no usable address is left out of the list
+    # and still counted here.
+    #
+    # `None` at construction means the list is the whole count — a meeting
+    # whose attendees were all named, such as a manual record — and is replaced
+    # by `len(attendees)` in `__post_init__`, so every `Meeting` carries a
+    # number. Stored in the meeting record.
+    attendee_count: int | None = None
+
+    def __post_init__(self) -> None:
+        count = len(self.attendees) if self.attendee_count is None else self.attendee_count
+        check_attendee_count(count, named=len(self.attendees), meeting_id=self.meeting_id)
+        object.__setattr__(self, "attendee_count", count)
 
     @property
     def source_ref(self) -> SourceRef:
@@ -78,5 +115,10 @@ class Meeting:
         return self.scope
 
     def man_hour_cost(self, blended_hourly_rate: float) -> float:
-        """FR-03. A single PM-configured rate, never per-attendee salary data."""
-        return len(self.attendees) * (self.duration_minutes / 60) * blended_hourly_rate
+        """FR-03. A single PM-configured rate, never per-attendee salary data.
+
+        Multiplies by `attendee_count`, not `len(attendees)`: the list holds only
+        the attendees pm-ai could name, and the cost counts every attendee.
+        """
+        count = len(self.attendees) if self.attendee_count is None else self.attendee_count
+        return count * (self.duration_minutes / 60) * blended_hourly_rate

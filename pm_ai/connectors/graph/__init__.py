@@ -87,8 +87,8 @@ from pm_ai.domain.identity import (
     MalformedReference,
     ScopeKind,
     SourceRef,
-    resolve_actor,
 )
+from pm_ai.domain.handles import EMAIL, NO_PERSON, usable_handle
 from pm_ai.domain.meetings import Meeting
 
 __all__ = [
@@ -665,12 +665,12 @@ class GraphConnector:
         try:
             return self._result(fetched, since=since)
         except Exception as unexpected:  # noqa: BLE001 — the port promises a value
-            # Everything `_result` does can fault: `resolve_actor` reads the
-            # alias table, `NormalizedEvent`'s constructor validates, the clock
-            # is injected and the cursor is an encode. A raise here would leave
-            # `run_harvest` — whose only call has no `except` — propagating out
-            # of the scheduler with the fetched page, its coverage and its
-            # cursor all lost, which is exactly the shape `HarvestOutcome.FAILED`
+            # Everything `_result` does can fault: `NormalizedEvent`'s
+            # constructor validates, the clock is injected and the cursor is an
+            # encode. (The actor handle cannot: `usable_handle` never raises.)
+            # A raise here would leave `run_harvest` — whose only call has no
+            # `except` — propagating out of the scheduler with the fetched page,
+            # its coverage and its cursor all lost, which is exactly the shape `HarvestOutcome.FAILED`
             # exists to make expressible. The rows are not carried out with it:
             # whatever broke, this run cannot say which half of them it mapped.
             #
@@ -747,10 +747,12 @@ class GraphConnector:
                 continue
             # `_to_event` is inside this `try` and not after it, which is the
             # difference between one refused row and a raise out of a method the
-            # port says never raises. It resolves an actor, parses a reference
-            # and runs `NormalizedEvent`'s validation — all of it on data the
-            # provider sent — so it can refuse the same row `_meeting` accepted,
-            # and a refusal there must cost the row rather than the batch.
+            # port says never raises. It parses a reference and runs
+            # `NormalizedEvent`'s validation — on data the provider sent — so it
+            # can refuse the same row `_meeting` accepted, and a refusal there
+            # must cost the row rather than the batch. The actor handle is not
+            # among the faults: `usable_handle` answers `None` for an unusable
+            # address and never raises, so a bad address costs only the person.
             try:
                 meeting = self._meeting(row)
                 held = row.end <= now
@@ -861,6 +863,10 @@ class GraphConnector:
             start=row.start,
             duration_minutes=_minutes_of(row),
             attendees=_attendees_of(row),
+            # Every attendee entry the provider sent, named or not — what the
+            # Man-Hour Cost multiplies (story 2n). `attendees` above holds only
+            # the ones with a usable address, de-duplicated.
+            attendee_count=len(row.attendees),
             # The only honest source of a pm-ai scope for a Graph event.
             scope=self.categories.scope_for(row.categories),
             # The Graph event id, which `33e` resolves a join URL from when it
@@ -884,13 +890,14 @@ class GraphConnector:
         """The `CALENDAR_EVENT_HELD` an ended meeting emits.
 
         `attendee_count` is the number of attendee entries the provider sent,
-        which is deliberately not `len(meeting.attendees)`. The record holds
-        *distinct actors* and AD-34 collapses every handle pm-ai cannot resolve
-        onto one `UNRESOLVED`, so a five-person meeting whose attendees are all
-        strangers has one attendee in the record and five on the wire. The event
-        carries the measured number; the record carries who could be named. The
-        consequence for FR-03's Man-Hour Cost is real and is recorded in the
-        story rather than papered over here.
+        which is deliberately not `len(meeting.attendees)`: the list holds
+        *distinct handles*, and an attendee with no usable address is left out
+        of it. The meeting record stores the same count as `attendee_count`,
+        and the Man-Hour Cost multiplies by it.
+
+        The actor is the organizer's address as an `email:` handle (AD-34), or
+        `none:` when the organizer has none pm-ai can use. The organizer is not
+        added to the attendees.
         """
         return NormalizedEvent(
             scope=meeting.scope,
@@ -898,15 +905,14 @@ class GraphConnector:
             # AD-34's scopeless grammar — a meeting belongs to no project, and
             # `_assert_citable` has already proved this parses.
             source_ref=meeting.source_ref,
-            # AD-34 — a native handle resolves to an Actor or to UNRESOLVED,
-            # never to itself. The organizer, because they are the one person a
-            # calendar row always attributes; an absent one is what UNRESOLVED
-            # is for, and a meeting whose organizer pm-ai cannot name is still a
-            # meeting that happened.
-            actor=resolve_actor(
-                system="graph",
-                handle=row.organizer.email if row.organizer is not None else None,
-            ),
+            # AD-34 — what the provider said, as a person handle. The
+            # organizer, because they are the one person a calendar row always
+            # attributes; an absent or unusable address is `none:`, and a meeting
+            # whose organizer pm-ai cannot name is still a meeting that happened.
+            actor=usable_handle(
+                EMAIL, row.organizer.email if row.organizer is not None else None
+            )
+            or NO_PERSON,
             # The provider clock (AD-35), carried as sent. A row `33b` flagged as
             # implausible is emitted anyway and `persist_events` counts it in
             # `PersistResult.flagged`: a timestamp replaced from the local clock
@@ -1113,37 +1119,32 @@ def _minutes_of(row: CalendarRow) -> int:
 
 
 def _attendees_of(row: CalendarRow) -> tuple[Actor, ...]:
-    """The row's attendees as resolved actors, distinct, in the order Graph sent.
+    """The row's attendees as `email:` handles, distinct, in the order Graph sent.
 
-    Three matrix rows meet here and each keeps its answer:
+    Each `Actor` holds the handle's text (`email:<address>`, AD-34) and no
+    display name — a reader decides who a handle is (`2o`). Four matrix rows
+    meet here and each keeps its answer:
 
-    - a null `emailAddress` resolves to `UNRESOLVED` (AD-34) rather than to the
-      raw handle, because one engineer arriving as a commit email and a calendar
-      address must not become two people in a metric that feeds a review;
+    - an attendee with no usable address — a null `emailAddress`, or one the
+      producer refuses — is left out of the list. It is still counted:
+      `Meeting.attendee_count` is every entry the provider sent;
+    - duplicates are removed on the handle text after lowercasing, so
+      `Dana@x.com` and `dana@x.com` are one handle — and two in the count;
     - a distribution list arrives as one attendee entry and is counted as one.
       Graph does not expand a group in `calendarView`, so pm-ai cannot know how
-      many people it names, and inventing a number is worse than under-counting
-      one that is visibly a list;
+      many people it names;
     - zero attendees is recorded as zero. A room booking really has none, and an
       invented organizer-as-attendee would price it at one.
-
-    **Distinct, and that is a loss worth stating.** `11a` refuses a repeated
-    handle in a record — one person listed twice is two people in the Man-Hour
-    Cost — and every attendee pm-ai cannot resolve collapses onto the single
-    `UNRESOLVED` actor, so a meeting of five strangers has one attendee here. The
-    alternative was refusing every such meeting, which on a machine with an empty
-    alias table is every meeting. The event carries the provider's own count
-    beside it, and the divergence is recorded rather than hidden.
     """
-    resolved: list[Actor] = []
+    named: list[Actor] = []
     seen: set[str] = set()
     for attendee in row.attendees:
-        actor = resolve_actor(system="graph", handle=attendee.email)
-        if actor.actor_id in seen:
+        handle = usable_handle(EMAIL, attendee.email)
+        if handle is None:
             continue
-        seen.add(actor.actor_id)
-        # Handle only. `11a` stores `actor_id` and never a display name — AD-34
-        # makes a display name an alias rather than an identity, and a record
-        # carrying one would be a second place it could be wrong.
-        resolved.append(Actor(actor_id=actor.actor_id))
-    return tuple(resolved)
+        text = str(handle)
+        if text in seen:
+            continue
+        seen.add(text)
+        named.append(Actor(actor_id=text))
+    return tuple(named)

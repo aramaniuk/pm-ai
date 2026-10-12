@@ -684,7 +684,7 @@ def test_event_payloads_are_typed_per_event_type():
             scope=d.DataScope(d.ScopeKind.PROJECT, "alpha"),
             type=d.ObservedEventType.WORK_ITEM_CLOSED,
             source_ref=d.SourceRef.parse("gitlab:alpha:issue:102"),
-            actor=d.UNRESOLVED,
+            actor=mod("pm_ai.domain.handles").NO_PERSON,
             occurred_at=None,
             payload=ev.CommitPayload(sha="x", message="y"),
         )
@@ -985,12 +985,10 @@ def _scopeless_event(raw: str):
     unrelated field it happens to require today.
     """
     identity = mod("pm_ai.domain.identity")
-
-    class _Actor:
-        is_pm_ai = False
+    handles = mod("pm_ai.domain.handles")
 
     class _Event:
-        actor = _Actor()
+        actor = handles.NO_PERSON
         source_ref = identity.SourceRef.parse(raw)
 
     return _Event()
@@ -1007,7 +1005,9 @@ def test_ad36_a_goal_reference_is_never_admissible_as_evidence():
     normalize = mod("pm_ai.core.normalize")
     events = mod("pm_ai.domain.events")
 
-    verdict = normalize.attribute(_scopeless_event("goal:goal_01HX"), frozenset(), frozenset())
+    verdict = normalize.attribute(
+        _scopeless_event("goal:goal_01HX"), frozenset(), frozenset(), own_handles=frozenset()
+    )
     assert verdict is events.Provenance.PM_AI, (
         "AD-41 rule 2 has storage mint a goal id, so a goal reference names our "
         "own artifact."
@@ -1025,7 +1025,9 @@ def test_ad36_a_meeting_reference_stays_external():
     normalize = mod("pm_ai.core.normalize")
     events = mod("pm_ai.domain.events")
 
-    verdict = normalize.attribute(_scopeless_event("meeting:mtg_01HX"), frozenset(), frozenset())
+    verdict = normalize.attribute(
+        _scopeless_event("meeting:mtg_01HX"), frozenset(), frozenset(), own_handles=frozenset()
+    )
     assert verdict is events.Provenance.EXTERNAL
     assert verdict.admissible_as_evidence
 
@@ -1038,8 +1040,8 @@ def test_ad34_every_scopeless_system_is_classified():
     falls on would repeat it exactly, so the decision is forced here.
     """
     identity = mod("pm_ai.domain.identity")
-    assert identity.PM_AI_MINTED <= identity._SCOPELESS
-    assert identity._SCOPELESS == frozenset({"meeting", "goal"}), (
+    assert identity.PM_AI_MINTED <= identity.SCOPELESS_SYSTEMS
+    assert identity.SCOPELESS_SYSTEMS == frozenset({"meeting", "goal"}), (
         "a scopeless system was added or removed; classify it in PM_AI_MINTED "
         "and extend the two attribution tests above before updating this literal."
     )

@@ -74,6 +74,7 @@ from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.domain.claims import ClaimReentered
 from pm_ai.domain.event_entries import DAEMON_ACTOR, EventEntry, SelfActionType
 from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
+from pm_ai.domain.handles import PersonHandle, own_handle_set
 from pm_ai.domain.health import ArtifactState, Health, Presence
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
@@ -170,6 +171,18 @@ class Daemon:
     a `tuple` annotation rather than `Sequence` so a bare `"alpha"` cannot be
     accepted as five single-character projects.
     """
+    own_handles: frozenset[PersonHandle]
+    """pm-ai's own bot accounts, as handles (AD-36 mechanism 3).
+
+    `run_harvest` hands it to `attribute_all`, which marks an event `pm_ai`
+    when its actor is in the set — an exact handle match, no alias lookup.
+    Required, so a daemon cannot be built without saying whether it has any.
+    Checked in `__post_init__`, **at construction only**: every member a
+    `PersonHandle`, none `none:`, and a bare string refused. `Daemon` is not
+    frozen — `connectors` and `config` are reassigned after construction by
+    the CLI and its tests — so an assignment to this field afterwards is not
+    re-checked. Change it through `dataclasses.replace`, which constructs anew.
+    """
     # The clock the whole daemon was built with, held rather than re-read. A
     # pipeline that needs an instant — `23b`'s render takes one — would otherwise
     # compose a second `datetime.now()` in whatever layer happened to call it,
@@ -194,6 +207,7 @@ class Daemon:
         name because `"alpha"` is a perfectly good `Sequence[str]` of five
         one-character ids, which would pass every later check.
         """
+        self.own_handles = own_handle_set(self.own_handles)
         if isinstance(self.watched, str):
             raise TypeError(
                 f"Daemon.watched is every project this daemon watches, not one "
@@ -401,6 +415,12 @@ def build(
         scope=scope,
         keychain=custody,
         watched=tuple(spans),
+        # Empty, and that is accurate: no enrolment records a bot account
+        # today. Graph signs in as the user (`8m`) and GitLab uses the user's
+        # personal access token (`8o`), so every event they harvest is the
+        # user's own account, never a distinct pm-ai bot. Where bot handles are
+        # stored is decided by the first enrolment that records one.
+        own_handles=frozenset(),
         # The same callable the single writer stamps from, so nothing downstream
         # has to build a second one.
         clock=clock,

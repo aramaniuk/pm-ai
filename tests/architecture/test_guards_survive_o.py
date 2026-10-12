@@ -138,6 +138,22 @@ CASES = {
         "_assert_vocabularies_agree",
         "m.SELF_ACTION_FIELDS = {}",
     ),
+    "a_handle_system_that_is_also_a_scopeless_reference": (
+        "pm_ai.domain.handles",
+        "_assert_handle_systems_agree",
+        # Story 2n: `meeting:m1` must never read as a person. Doctored by adding
+        # a scopeless reference system to the handle systems — *with* a shape,
+        # so only the overlap check can fire.
+        "m.HANDLE_SYSTEMS = m.HANDLE_SYSTEMS | {'meeting'};"
+        " m._SHAPES = {**m._SHAPES, 'meeting': m._none}",
+    ),
+    "a_handle_system_with_no_shape": (
+        "pm_ai.domain.handles",
+        "_assert_handle_systems_agree",
+        # Story 2n: every handle system states its handle's shape. Doctored with
+        # a system outside the scopeless set, so only the shape check can fire.
+        "m.HANDLE_SYSTEMS = m.HANDLE_SYSTEMS | {'jira'}",
+    ),
     "two_lifecycles_sharing_a_member_name": (
         "pm_ai.domain.lifecycle",
         "_assert_lifecycles_are_distinct",
@@ -156,6 +172,15 @@ def _run_optimized(program: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+# The message each case must refuse with, where one checker holds several
+# checks: asserting it is what proves the doctored state fired the check the
+# case names, rather than a neighbour.
+EXPECTED_MESSAGE = {
+    "a_handle_system_that_is_also_a_scopeless_reference": "scopeless reference system",
+    "a_handle_system_with_no_shape": "shape check",
+}
 
 
 @pytest.mark.parametrize("case", sorted(CASES), ids=sorted(CASES))
@@ -179,12 +204,17 @@ def test_each_guard_still_refuses_under_optimization(case):
         f"\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "REFUSED:" in result.stdout
+    if case in EXPECTED_MESSAGE:
+        assert EXPECTED_MESSAGE[case] in result.stdout, (
+            f"{case}: refused by another check: {result.stdout}"
+        )
 
 
 def test_a_coherent_model_still_imports_silently_under_optimization():
     """The fix must not make optimized mode noisy — only wrong models fail."""
     result = _run_optimized(
         "import pm_ai.domain.scope_model, pm_ai.domain.storage_tiers\n"
+        "import pm_ai.domain.handles\n"
         "import pm_ai.domain.lifecycle\n"
         "assert not __debug__\n"
         "print('OK')\n"
