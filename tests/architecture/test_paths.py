@@ -151,6 +151,9 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.pm-ai/private/people",
     (ScopeKind.APPLICATION, "operational.db"):
         "/home/pm/.pm-ai/private/operational.db",
+    # Story 4e: the loopback API's token, beside the store, owner-only.
+    (ScopeKind.APPLICATION, "api_token"):
+        "/home/pm/.pm-ai/private/api_token",
     (ScopeKind.APPLICATION, "event_index.db"):
         "/home/pm/.pm-ai/private/event_index.db",
     (ScopeKind.APPLICATION, "commitment_index.db"):

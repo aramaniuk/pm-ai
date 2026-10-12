@@ -136,6 +136,7 @@ __all__ = [
     "MASTER_KEY_NAME",
     "REGISTRY_ARTIFACT",
     "application_storage",
+    "artifact_state",
     "bootstrap",
     "build",
     "onboard_project",
@@ -2065,6 +2066,16 @@ def application_storage(
         vcs=GitVcs(),
         crypto=_choose_crypto(keychain, encryption_disabled=encryption_off()),
     )
+
+
+def artifact_state(storage: StorageService, artifact: str) -> ArtifactState:
+    """`_artifact_state`, for the daemon's status endpoint (story 4e).
+
+    The daemon re-reads `config.toml` and `projects.toml` through its own one
+    writer on every status request, so a hand-edit shows up without a restart
+    and nothing is composed per request.
+    """
+    return _artifact_state(storage, artifact)
 
 
 def _artifact_state(storage: StorageService, artifact: str) -> ArtifactState:

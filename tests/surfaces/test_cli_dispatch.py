@@ -128,7 +128,7 @@ def registered(tmp_path, monkeypatch):
 
 
 def test_a_bare_invocation_prints_usage_and_exits_2(capsys):
-    """CAP-18's REPL is `4e`; until then a silent success reads as a working install."""
+    """CAP-18's REPL is `4f`; until then a silent success reads as a working install."""
     assert entry.main([]) == EXIT_USAGE
     assert "usage: pm-ai" in capsys.readouterr().err
 

@@ -1153,6 +1153,21 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: The channel-messages fixture is hand-written from Microsoft's published example, not recorded from a real tenant; the redacted real-tenant page the spec requires is owed.
   evidence: Accepted for now by Andrei on 2026-10-12. Recording it needs the PM's sign-in and a channel id the PM picks. Still unconfirmed against a real tenant: whether replies arrive newest first (the code does not depend on it) and the up-to-200 inline-replies figure.
 
+## Surfaced by the story-4e review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4e-daemon-and-loopback-api.md`
+  summary: `GET /v1/status` runs every probe synchronously on the event loop's thread, including a keychain fetch and a `git` call bounded at 10 s, so a slow keychain stalls the whole daemon and can push past AD-21's 5 s.
+  evidence: The frozen block allows no worker threads until `4r`. Recorded in the spine as an enforcement-gap row; `4r` moves the probes off the loop before `9a` attaches anything.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4e-daemon-and-loopback-api.md`
+  summary: The daemon's concurrency rules for `4r` and `9a` are undecided. These include how the writer lock is ordered against AD-5's claim, one SQLite connection shared across worker threads, deadlines that abandon claimed work, blocking calls on the loop, and how fresh the daemon's composed state is.
+  evidence: The adversarial gate review `reviews/review-adversarial-4e-2026-10-12.md` built pairs of later units that each obey every AD and still conflict. It is recorded as a spine Open Risk and a memlog question for Andrei; `4r` and `9a` must not start until it is resolved.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4e-daemon-and-loopback-api.md`
+  summary: Story 4e's frozen block quotes IANA's range as "8732-8749 Unassigned"; the live registry has 8732 and 8733 assigned and 8734-8749 unassigned.
+  evidence: Checked by the currency review on 2026-10-12. Port 8747 is still unassigned, so nothing built changes. The code comment is corrected; the frozen text needs `bmad-spec`.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4e-daemon-and-loopback-api.md`
+  summary: The spine assigns the sole-writer cutover to story 10, but story 10's `stories.yaml` description does not mention it.
+  evidence: Rubric review F4. Recording it needs Story Breakdown to be re-run through `bmad-spec`.
+
 ## Surfaced by the story-33e review (2026-10-12)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`

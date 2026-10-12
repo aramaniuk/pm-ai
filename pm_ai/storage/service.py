@@ -30,18 +30,22 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import logging
+import logging.handlers
 import os
 import re
 import sqlite3
 import stat
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from pm_ai.domain import clocks
+from pm_ai.domain.api_token import MAX_TOKEN_FILE_BYTES, check_api_token, symlinked
 from pm_ai.domain.claims import ClaimHeld, ClaimReentered
 from pm_ai.domain.disclosure import (
     DISCLOSURE_LEDGER_ARTIFACT,
@@ -66,6 +70,7 @@ from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX
 from pm_ai.domain.transcripts import TranscriptState, TranscriptStateKind
 from pm_ai.domain.storage_tiers import (
+    API_TOKEN,
     CAPTURES,
     CAPTURE_STAGING,
     EVENT_LOG,
@@ -493,6 +498,122 @@ class OperationalStoreUnavailable(RuntimeError):
     """
 
 
+class OperationalStoreBusy(OperationalStoreUnavailable, sqlite3.OperationalError):
+    """Another connection held `operational.db`'s write lock past the busy wait (4e).
+
+    The daemon and a thin client can meet on the store: in this wave the CLI
+    still writes directly rather than through the daemon (AD-5). The connection
+    waits for a busy database for the standard library's default — pm-ai sets
+    no timeout of its own — and WAL mode means readers never wait for the
+    writer. A write refused as busy — after the wait, or at once because its
+    snapshot went stale, which WAL refuses without waiting — is refused with
+    this, saying which of the two was measured, naming the store and the wait
+    that was configured, after its open transaction is rolled back — rather than surfacing as a bare "database is locked" that
+    names nothing, and rather than waiting again.
+
+    A subclass of `OperationalStoreUnavailable`, so every caller that already
+    catches an unusable store sees it, and of `sqlite3.OperationalError`, so
+    every caller that catches the library's error does too.
+    """
+
+
+_BUSY = "database is locked"  # SQLITE_BUSY: the busy wait ran out
+_LOCKED = "database table is locked"  # SQLITE_LOCKED: no wait applies
+_NO_WAIT_MS = 10  # below this a busy refusal did not wait, whatever was configured
+
+
+class _OperationalConnection(sqlite3.Connection):
+    """The operational store's connection, with a busy refusal that names the file.
+
+    Built by `sqlite3.connect(..., factory=...)` and otherwise the library's own
+    connection: the busy wait is the library's default, untouched. The three
+    methods the writer calls are the ones overridden, because they are where the
+    lock is taken — a cursor's `fetchone` reads rows a statement already ran.
+    """
+
+    def __init__(self, database: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        super().__init__(database, *args, **kwargs)  # type: ignore[arg-type]
+        self.store = os.fspath(database)
+
+    def _busy(self, exc: sqlite3.OperationalError, started: float) -> sqlite3.OperationalError:
+        message = str(exc).lower()
+        if _BUSY not in message and _LOCKED not in message:
+            return exc
+        waited = (time.monotonic() - started) * 1000
+        rolled_back = self._roll_back()
+        undone = (
+            "its open transaction was rolled back, so nothing from it was kept"
+            if rolled_back
+            else "the statement was not applied"
+        )
+        if _LOCKED in message:
+            return OperationalStoreBusy(
+                f"a table in the operational store at {self.store} is locked by "
+                f"another statement on the same connection ({exc}); {undone}. "
+                f"This is not a busy wait running out — no wait applies to it."
+            )
+        # Said as measured. Under WAL a transaction whose snapshot went stale
+        # is refused busy at once, with no wait at all, so the wait is never
+        # assumed from the setting.
+        when = (
+            "at once, without waiting"
+            if waited < _NO_WAIT_MS
+            else f"after waiting {waited:.0f} ms"
+        )
+        return OperationalStoreBusy(
+            f"the operational store at {self.store} was refused as busy {when} "
+            f"— another connection holds its write lock ({exc}; busy wait "
+            f"configured: {self._wait()}); {undone}. Run the command again "
+            f"once the other one finishes."
+        )
+
+    def _wait(self) -> str:
+        try:
+            millis = int(super().execute("PRAGMA busy_timeout").fetchone()[0])
+        except sqlite3.Error:
+            return "the configured busy wait"
+        return f"{millis} ms"
+
+    def _roll_back(self) -> bool:
+        if not self.in_transaction:
+            return False
+        try:
+            super().rollback()
+        except sqlite3.Error:
+            return False
+        return True
+
+    def execute(self, *args: object, **kwargs: object) -> sqlite3.Cursor:  # type: ignore[override]
+        started = time.monotonic()
+        try:
+            return super().execute(*args, **kwargs)  # type: ignore[arg-type]
+        except sqlite3.OperationalError as exc:
+            refused = self._busy(exc, started)
+            if refused is exc:
+                raise
+            raise refused from exc
+
+    def executescript(self, sql_script: str, /) -> sqlite3.Cursor:
+        started = time.monotonic()
+        try:
+            return super().executescript(sql_script)
+        except sqlite3.OperationalError as exc:
+            refused = self._busy(exc, started)
+            if refused is exc:
+                raise
+            raise refused from exc
+
+    def commit(self) -> None:
+        started = time.monotonic()
+        try:
+            super().commit()
+        except sqlite3.OperationalError as exc:
+            refused = self._busy(exc, started)
+            if refused is exc:
+                raise
+            raise refused from exc
+
+
 class SchemaVersionTooNew(RuntimeError):
     """The store was written by a later version of pm-ai than this one.
 
@@ -532,6 +653,13 @@ class CoverageInstanceMismatch(ValueError):
     and an absence assertion over the intended key passes with a real row on
     disk. Refused at the write, where both names are still in scope.
     """
+
+
+# AD-24's rotating diagnostic log: the `logs/` collection in the application
+# scope, a few files of a few megabytes, oldest dropped first.
+DIAGNOSTIC_LOGS = "logs/"
+_DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024
+_DIAGNOSTIC_LOG_BACKUPS = 3
 
 
 # The artifacts this thread holds a claim on, by canonical path, across every
@@ -609,7 +737,13 @@ class StorageService:
         # cannot reach this, which is the structural guarantee AD-3 asks for.
         store = paths.resolve(APPLICATION, OPERATIONAL_DB, create=True)
         try:
-            self._db = sqlite3.connect(store, check_same_thread=False)
+            # No `timeout=`: the standard library's five-second busy wait is
+            # the one pm-ai relies on when the daemon and a thin client meet on
+            # this file (story 4e), and `_OperationalConnection` is what turns
+            # waiting it out into a refusal that names the store.
+            self._db = sqlite3.connect(
+                store, check_same_thread=False, factory=_OperationalConnection
+            )
         except sqlite3.Error as exc:
             raise OperationalStoreUnavailable(
                 f"could not open the operational store at {store}: {exc}. Tier 2 "
@@ -644,6 +778,11 @@ class StorageService:
             self._db.executescript(_SCHEMA)
             self._db.commit()
             self._migrate(preexisting=preexisting)
+        except OperationalStoreBusy:
+            # Busy is not "could not prepare": the store is fine and another
+            # connection is writing to it. Its own sentence already names the file.
+            self._db.close()
+            raise
         except sqlite3.Error as exc:
             self._db.close()
             # Worded as what failed — preparing, not opening. A migration that
@@ -1002,7 +1141,14 @@ class StorageService:
             exclusive=True,
         )
 
-    def _replace(self, path: Path, payload: bytes, *, declared_mode: int | None) -> None:
+    def _replace(
+        self,
+        path: Path,
+        payload: bytes,
+        *,
+        declared_mode: int | None,
+        exclusive: bool = False,
+    ) -> None:
         """Write an artifact whole, sealing it if declared. Credentials live here.
 
         Distinct from `_append` because a credential store *is* replaced — it has
@@ -1028,7 +1174,9 @@ class StorageService:
             staging=path.parent,
             mode=ENCRYPTED_FILE_MODE if sealed else declared_mode,
             enclave=sealed,
-            exclusive=False,
+            # `write_artifact(exclusive=True)` (story 4e): publish by link, so a
+            # name already taken raises `FileExistsError` and is left alone.
+            exclusive=exclusive,
         )
 
     def _read(self, path: Path) -> bytes:
@@ -1228,7 +1376,13 @@ class StorageService:
         return target
 
     def write_artifact(
-        self, payload: bytes, *, scope: DataScope, artifact: str, name: str | None = None
+        self,
+        payload: bytes,
+        *,
+        scope: DataScope,
+        artifact: str,
+        name: str | None = None,
+        exclusive: bool = False,
     ) -> Path:
         """Write a declared artifact whole, sealed or not as the model says.
 
@@ -1255,6 +1409,11 @@ class StorageService:
         artifact on a machine that cannot seal — leaves neither the file nor the
         directory behind (story 1f). `_publish` creates what the successful
         write actually needs.
+
+        `exclusive` (story 4e) publishes with `O_EXCL` semantics instead of
+        replacing: a name already taken raises `FileExistsError` and the file
+        there is left exactly as it was. The API token is the caller — two
+        daemons starting at once must never replace each other's token.
         """
         if is_append_only(scope.kind, artifact):
             raise AppendOnlyArtifact(
@@ -1269,8 +1428,90 @@ class StorageService:
         target = self._paths.resolve(scope, artifact)
         if name is not None:
             target = target / name
-        self._replace(target, payload, declared_mode=restricted_mode(scope.kind, artifact))
+        self._replace(
+            target,
+            payload,
+            declared_mode=restricted_mode(scope.kind, artifact),
+            exclusive=exclusive,
+        )
         return target
+
+    def read_api_token(self) -> str | None:
+        """The loopback API's token, `None` when no file exists (story 4e).
+
+        `read_artifact`'s resolution and its one translation — absence is a
+        value — plus the check `pm_ai.domain.api_token` states: a symlink, a
+        file that is not regular, one readable by group or others, one over
+        4 KiB, empty, carrying whitespace or control characters, or shorter
+        than 32 characters is `ApiTokenRefused`, naming the file and never the
+        token. The mode is read
+        off the descriptor the bytes come from, so the answer describes the file
+        that was read rather than whatever is at the name a moment later.
+        """
+        target = self._paths.resolve(APPLICATION, API_TOKEN)
+        try:
+            # `O_NOFOLLOW` refuses a symlink (`ELOOP`); `O_NONBLOCK` keeps a
+            # FIFO planted at the name from hanging the open.
+            descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        except OSError as refused:
+            if refused.errno == errno.ELOOP:
+                raise symlinked(str(target)) from refused
+            raise
+        try:
+            mode = os.fstat(descriptor).st_mode
+            raw = b""
+            if stat.S_ISREG(mode):
+                # One byte past the cap, so an oversized file is detected
+                # without reading it whole.
+                limit = MAX_TOKEN_FILE_BYTES + 1
+                while len(raw) < limit and (chunk := os.read(descriptor, limit - len(raw))):
+                    raw += chunk
+        finally:
+            os.close(descriptor)
+        return check_api_token(raw, mode=mode, where=str(target))
+
+    def api_token_path(self) -> Path:
+        """Where the token file is, for a refusal that has to name it (4e)."""
+        return self._paths.resolve(APPLICATION, API_TOKEN)
+
+    def create_api_token(self, token: str) -> Path:
+        """Publish a freshly minted token, refusing a name already taken (4e).
+
+        `write_artifact(..., exclusive=True)`: a token file found already
+        present raises `FileExistsError` and is left untouched, so the caller
+        reads it instead of replacing it.
+        """
+        return self.write_artifact(
+            token.encode("ascii"), scope=APPLICATION, artifact=API_TOKEN, exclusive=True
+        )
+
+    def diagnostic_log(self, name: str) -> logging.Handler:
+        """A rotating handler on `~/.pm-ai/logs/<name>`, AD-24's diagnostic log.
+
+        Outside the tier model and never the event log: what goes here is
+        operational noise — the daemon's request log first (story 4e) — and the
+        file rotates rather than growing for ever. Built here because this
+        service owns every write; the caller attaches it to a logger and
+        removes and closes it when it stops. `name` is validated as a capture's
+        is, since it becomes a path component.
+        """
+        directory = self._paths.resolve(APPLICATION, DIAGNOSTIC_LOGS, create=True)
+        target = directory / _capture_name(name)
+        return logging.handlers.RotatingFileHandler(
+            target, maxBytes=_DIAGNOSTIC_LOG_BYTES, backupCount=_DIAGNOSTIC_LOG_BACKUPS,
+            encoding="utf-8",
+        )
+
+    def close(self) -> None:
+        """Close the operational store's connection — the daemon's last act (4e).
+
+        A writer is otherwise closed by the process exiting. The daemon is the
+        one owner that outlives its commands, so its shutdown closes the writer
+        explicitly once the listener has stopped. Idempotent.
+        """
+        self._db.close()
 
     def read_artifact(
         self, *, scope: DataScope, artifact: str, name: str | None = None

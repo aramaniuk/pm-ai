@@ -75,6 +75,7 @@ from pm_ai.ports import (
     ArtifactBusy,
     CredentialProbePort,
     DaemonPort,
+    DaemonRefused,
     DuplicateConnector,
     KeychainPort,
     KeychainUnavailable,
@@ -506,6 +507,17 @@ class Context:
     goals: GoalBook | None = None
     """`strategic_goals.md`'s reader and writer. `None` refuses `goal set`."""
 
+    serve: Callable[[], int] | None = None
+    """Runs the daemon in the foreground until it is stopped (story 4e).
+
+    Injected for `dashboard`'s reason: binding, the token and the server live
+    in `pm_ai.app`, which sits above this package. The composition root binds
+    it to the daemon it composed — or, with no project enrolled, to one acting
+    in pm-ai's own scope and watching none. `None` means no daemon could be
+    composed for any other reason, and `daemon run` refuses through
+    `require_daemon()`, the one sentence for that.
+    """
+
     unavailable: str | None = None
     """Why there is no daemon, in the composition root's own words.
 
@@ -656,6 +668,30 @@ def _doctor(context: Context) -> int:
     report = context.diagnose()
     print(report)
     return EXIT_OK if report.healthy else EXIT_UNHEALTHY
+
+
+def _daemon_run(context: Context) -> int:
+    """`pm-ai daemon run` — story 4e: the daemon, in the foreground, until stopped.
+
+    Everything is the composition root's: this maps its `DaemonRefused` onto
+    exit 3, unedited. It is raised for a missing runtime extra; an unreadable
+    or refused `config.toml` (on a machine with no project enrolled); an
+    operational store that cannot be opened or stays busy, or an unreachable
+    keychain, while composing; a taken port or one it cannot listen on; an
+    unusable or unreadable token file; a request log that cannot be opened; and
+    a server that bound the port but failed to start serving.
+    A clean stop (Ctrl-C, a stop signal, the terminal closing) is exit 0.
+    """
+    if context.serve is None:
+        context.require_daemon()
+        raise Refusal(
+            "no daemon lifecycle was supplied to the CLI, so nothing was "
+            "started. This is a wiring fault in pm-ai, not this machine's."
+        )
+    try:
+        return context.serve()
+    except DaemonRefused as refused:
+        raise Refusal(str(refused)) from refused
 
 
 def _key_enrol(context: Context) -> int:
@@ -1713,6 +1749,19 @@ TABLE: Mapping[str, Command] = {
         target=_dashboard_target,
     ),
     "doctor": Command("check this machine and report what is wrong with it", _doctor),
+    # `4e`: the long-lived daemon. Foreground only — starting it at login under
+    # launchd is a later slice, and the help says so.
+    "daemon": Command(
+        "the long-lived daemon; foreground only, starting at login is a later slice",
+        leaves={
+            "run": Command(
+                "serve on 127.0.0.1:<daemon_port> (default 8747) in the "
+                "foreground until Ctrl-C",
+                _daemon_run,
+                target=_application,
+            ),
+        },
+    ),
     # `4h`: the one command that sequences the three below it on a new machine.
     "setup": Command(
         "first run: enrol the key, register a project, write config.toml, then probe",
@@ -1891,7 +1940,7 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
     library below here may still raise one.)
     """
     if not argv:
-        # A bare `pm-ai` will open a REPL (CAP-18) and that is `4e`. Until then
+        # A bare `pm-ai` will open a REPL (CAP-18) and that is `4f`. Until then
         # it must not exit 0: a bare call that silently succeeded is how a broken
         # install reads as a working one.
         return Answered(EXIT_USAGE, usage())
@@ -1982,6 +2031,7 @@ def dispatch(
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     first_run: FirstRun | None = None,
     goals: GoalBook | None = None,
+    serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
 ) -> int:
@@ -2005,6 +2055,7 @@ def dispatch(
         dashboard=dashboard,
         first_run=first_run,
         goals=goals,
+        serve=serve,
         unavailable=unavailable,
         undecided=undecided,
         arguments=parsed.arguments,
