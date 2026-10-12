@@ -179,13 +179,20 @@ def registered(tmp_path, monkeypatch, keychain):
 
 
 @pytest.fixture
-def unregistered(monkeypatch, keychain):
-    """A machine with no project enrolled, so `build()` never runs.
+def unregistered(tmp_path, monkeypatch, keychain):
+    """A machine with no project enrolled — the first run.
 
-    The first-run machine: no daemon, and `connector check` reports that no
-    connectors are registered rather than refusing.
+    Since story 4o a command aimed at the person or at pm-ai itself still
+    composes here, on a daemon that watches no project, so `HOME` is redirected
+    as `registered` redirects it: without it those commands would read and
+    write the real `~/.pm-ai`. A test that sets `HOME` itself overrides this.
+    `connector check` reports that no connectors are registered rather than
+    refusing.
     """
     keychain()
+    home = tmp_path / "unregistered-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(entry, "_bootstrap", enrolled())
 
 
@@ -373,14 +380,20 @@ def test_a_key_that_does_not_read_back_is_a_refusal(
     assert "do not treat this machine as set up" in capsys.readouterr().err
 
 
-def test_enrolment_without_a_daemon_is_a_refusal_that_names_the_reason(
-    unregistered, capsys
-):
-    """Key custody belongs to the daemon, so an uncomposed machine has none to offer."""
-    assert entry.main(["key", "enrol"]) == EXIT_REFUSAL
-    printed = capsys.readouterr().err
-    assert "no project is enrolled" in printed
-    assert "Traceback" not in printed
+def test_enrolment_with_no_project_enrolled_runs(unregistered, keychain, capsys):
+    """Story 4o: `key enrol` is aimed at pm-ai itself, so no project is needed.
+
+    It was refused here for the lack of one until 4o. The key lands in the
+    keychain the daemon holds, and the closing line names the entry it went
+    under — and never the key.
+    """
+    custody = keychain()
+    assert entry.main(["key", "enrol"]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert f"a master key is enrolled under {MASTER_KEY_NAME!r}" in captured.out
+    assert custody.stored is not None
+    assert "no project is enrolled" not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_no_stream_carries_the_key_that_was_just_enrolled(registered, keychain, capsys):

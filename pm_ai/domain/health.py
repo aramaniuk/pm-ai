@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-__all__ = ["ArtifactState", "Health", "Presence", "Probe", "Report"]
+__all__ = ["ArtifactState", "Health", "Presence", "Probe", "Report", "UnbuiltConnector"]
 
 
 class Health(Enum):
@@ -85,6 +85,24 @@ class Report:
     def __str__(self) -> str:
         verdict = "healthy" if self.healthy else "NOT healthy"
         return "\n".join([*(str(p) for p in self.probes), "", f"pm-ai is {verdict}."])
+
+
+@dataclass(frozen=True, slots=True)
+class UnbuiltConnector:
+    """An enrolled connector row the daemon did not build, and why (story 4o).
+
+    Not a `Probe`: nothing was asked, so there is no health to report and no
+    verdict to contribute. `pm-ai connector check` lists it beside the probed
+    connectors, so that `doctor`'s count of enrolled rows (slice `4n`, not yet
+    built) and this one can be one count, with any difference a stated reason
+    (AD-39).
+    """
+
+    instance: str
+    reason: str
+
+    def __str__(self) -> str:
+        return f"[unbuilt] {self.instance}: enrolled, not built: {self.reason}"
 
 
 class Presence(Enum):

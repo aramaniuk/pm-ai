@@ -631,17 +631,27 @@ def test_the_registry_reader_reads_the_file_and_nothing_else(tmp_path, monkeypat
     assert read.registry.presence is Presence.READ
 
 
-def test_a_real_machine_reaches_doctor_and_refuses_the_rest(capsys):
-    """End to end through the real reader, with nothing stubbed.
+def test_a_fresh_machine_reaches_doctor_and_runs_what_needs_no_project(
+    tmp_path, monkeypatch, capsys
+):
+    """End to end through the real reader, over an empty home.
 
-    This is the state every operator is actually in today, and no test covered
-    it: composition fails, `doctor` still reports, and the other leaves refuse
-    rather than crashing.
+    `doctor` still reports nothing enrolled. Since story 4o a command aimed at
+    pm-ai itself runs there, and only a command aimed at a project is refused.
+    `HOME` and the keychain are stood in: this row once ran against the real
+    ones, which was harmless only while every leaf refused — `key enrol` would
+    now mint a key in the developer's own keychain.
     """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: _Keychain())
     assert entry.main(["doctor"]) == EXIT_UNHEALTHY
     assert "project" in capsys.readouterr().out
-    assert entry.main(["config", "show"]) == EXIT_REFUSAL
-    assert entry.main(["key", "enrol"]) == EXIT_REFUSAL
+    assert entry.main(["config", "show"]) == EXIT_OK
+    capsys.readouterr()
+    assert entry.main(["key", "enrol"]) == EXIT_OK
+    assert "a master key is enrolled under" in capsys.readouterr().out
+    assert entry.main(["dashboard", "--scope", "project:alpha"]) == EXIT_REFUSAL
+    assert "no project is enrolled" in capsys.readouterr().err
 
 
 # ── Story 23b — `pm-ai dashboard`, and the optional argument it brought ───────
@@ -757,10 +767,35 @@ def test_a_command_declaring_no_options_still_refuses_trailing_words(capsys):
     assert "takes no arguments" in capsys.readouterr().err
 
 
-def test_dashboard_needs_a_daemon_and_says_so(monkeypatch, capsys):
+def test_a_project_dashboard_with_nothing_enrolled_is_refused_naming_project_add(
+    tmp_path, monkeypatch, capsys
+):
+    """With nothing enrolled only a project target is refused (story 4o)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: _Keychain())
     monkeypatch.setattr(entry, "_bootstrap", enrolled())
+    assert entry.main(["dashboard", "--scope", "project:alpha"]) == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert (
+        "alpha is not an enrolled project: no project is enrolled. "
+        "Run `pm-ai project add <path>`."
+    ) in err
+
+
+def test_dashboard_needs_a_daemon_and_says_so(tmp_path, monkeypatch, capsys):
+    """The personal dashboard on a machine where no daemon can be built.
+
+    Before story 4o an empty registry was this case; now it runs there, so a
+    registry nothing can parse stands in for "no daemon".
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: _Keychain())
+    registry = tmp_path / ".pm-ai" / "projects.toml"
+    registry.parent.mkdir(parents=True)
+    registry.write_bytes(b"[[[ this is not toml")
     assert entry.main(["dashboard"]) == EXIT_REFUSAL
-    assert "could not build a daemon" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "could not build a daemon" in err and "projects.toml" in err
 
 
 @pytest.mark.parametrize(

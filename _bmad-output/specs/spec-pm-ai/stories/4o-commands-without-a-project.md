@@ -2,7 +2,8 @@
 title: 'Personal and application commands run with no project enrolled'
 type: 'bugfix'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '585ee4fad781b0c3387d0fd9c4e4b4568ff7dee8'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -91,13 +92,13 @@ Verified against `ddcb9aa` on 2026-10-09.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/app/entry.py` -- in `_compose`, when the registry is absent or empty and the target is personal or application, build with `watched=()`; keep the failure return for no target, a project target, and any other registry state; the root and config branches answer as they do with projects; retire `nothing_enrolled` and the empty-report branch of `_probe_connectors` if nothing reaches them -- the target is read before "nothing enrolled" is answered
-- [ ] `pm_ai/app/wiring.py` -- reword `_enrolment_scope`'s zero-project sentence; assert `build` with a non-project scope and no watched project -- the daemon that runs these commands
-- [ ] `pm_ai/app/wiring.py`, `pm_ai/app/entry.py`, `pm_ai/surfaces/cli/dispatch.py` -- the build records every enrolled row it did not build with its reason (the sentence `_unplaced` or `_unbuilt` prints), the daemon carries them, and `_probe_connectors` and `_connector_check` list each beside the probed connectors as "enrolled, not built: <reason>", contributing no health verdict -- one count with `doctor`
-- [ ] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- correct the docstrings that say no project means no daemon -- they would be false
-- [ ] `tests/` -- one test per matrix row through `entry.main` under a temporary home: the piped `goal set`, the keychain fake with no key, the config and root faults, two starts printing the GitLab warning twice, the Graph `connector check` exit code, the unbuilt GitLab row and the key-short Graph row each listed by `connector check` with their reason and exit 0; rename `test_nothing_enrolled_is_unchanged`; turn the `key enrol` refusal into a run asserting exit 0 and the keychain-entry line; update the `unregistered` fixture's docstring -- the matrix is the contract
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/4l-every-enrolled-project.md` -- append a dated Spec Change Log entry: the nothing-enrolled row is renegotiated by 4o for non-project targets -- the frozen row must not read as still true
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the 4m-review entry resolved
+- [x] `pm_ai/app/entry.py` -- in `_compose`, when the registry is absent or empty and the target is personal or application, build with `watched=()`; keep the failure return for no target, a project target, and any other registry state; the root and config branches answer as they do with projects; retire `nothing_enrolled` and the empty-report branch of `_probe_connectors` if nothing reaches them -- the target is read before "nothing enrolled" is answered
+- [x] `pm_ai/app/wiring.py` -- reword `_enrolment_scope`'s zero-project sentence; assert `build` with a non-project scope and no watched project -- the daemon that runs these commands
+- [x] `pm_ai/app/wiring.py`, `pm_ai/app/entry.py`, `pm_ai/surfaces/cli/dispatch.py` -- the build records every enrolled row it did not build with its reason (the sentence `_unplaced` or `_unbuilt` prints), the daemon carries them, and `_probe_connectors` and `_connector_check` list each beside the probed connectors as "enrolled, not built: <reason>", contributing no health verdict -- one count with `doctor`
+- [x] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- correct the docstrings that say no project means no daemon -- they would be false
+- [x] `tests/` -- one test per matrix row through `entry.main` under a temporary home: the piped `goal set`, the keychain fake with no key, the config and root faults, two starts printing the GitLab warning twice, the Graph `connector check` exit code, the unbuilt GitLab row and the key-short Graph row each listed by `connector check` with their reason and exit 0; rename `test_nothing_enrolled_is_unchanged`; turn the `key enrol` refusal into a run asserting exit 0 and the keychain-entry line; update the `unregistered` fixture's docstring -- the matrix is the contract
+- [x] `_bmad-output/specs/spec-pm-ai/stories/4l-every-enrolled-project.md` -- append a dated Spec Change Log entry: the nothing-enrolled row is renegotiated by 4o for non-project targets -- the frozen row must not read as still true
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the 4m-review entry resolved
 
 **Acceptance Criteria:**
 - Given a fresh home with no project enrolled, when `pm-ai dashboard` runs, then it exits 0 and the personal dashboard file exists.
@@ -116,3 +117,43 @@ Verified against `ddcb9aa` on 2026-10-09.
 
 **Manual check:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai dashboard` in an empty scratch home -- expected: exit 0 and the written path printed; then `config show` exits 0 and `dashboard --scope project:alpha` exits 3.
+
+## Suggested Review Order
+
+**Composition reads the target before "nothing enrolled"**
+
+- An absent or empty registry with a personal or application target builds a daemon watching nothing.
+  [`entry.py:930`](../../../../pm_ai/app/entry.py#L930)
+
+- A project target on an empty registry gets its own short refusal naming `project add`.
+  [`entry.py:1022`](../../../../pm_ai/app/entry.py#L1022)
+
+**Every enrolled row is built or listed with why**
+
+- The build walks each enabled row; anything it cannot build is recorded, never dropped.
+  [`wiring.py:684`](../../../../pm_ai/app/wiring.py#L684)
+
+- GitLab placement is decided before the keychain is touched; the no-project sentence.
+  [`wiring.py:868`](../../../../pm_ai/app/wiring.py#L868)
+
+- The unbuilt record and how it prints beside probes.
+  [`health.py:91`](../../../../pm_ai/domain/health.py#L91)
+
+- The daemon carries the unbuilt rows.
+  [`wiring.py:228`](../../../../pm_ai/app/wiring.py#L228)
+
+**`connector check` lists them without changing the exit code**
+
+- Unbuilt rows are printed and counted; the verdict comes from probes only.
+  [`dispatch.py:1168`](../../../../pm_ai/surfaces/cli/dispatch.py#L1168)
+
+**Tests**
+
+- One test per matrix row through `entry.main` under a temporary home.
+  [`test_every_enrolled_project.py:1058`](../../../../tests/slice/test_every_enrolled_project.py#L1058)
+
+- Built and unbuilt rows together on a two-project machine.
+  [`test_every_enrolled_project.py:467`](../../../../tests/slice/test_every_enrolled_project.py#L467)
+
+- Tests that used the real HOME and keychain now use a temporary home and a fake keychain.
+  [`test_cli_dispatch.py`](../../../../tests/surfaces/test_cli_dispatch.py)
