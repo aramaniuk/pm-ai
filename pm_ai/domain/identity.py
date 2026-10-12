@@ -310,51 +310,21 @@ class TargetRef:
 
 # ── Actors ───────────────────────────────────────────────────────────────────
 
-# The alias-table resolution below stays until `2o`, with no caller on the write
-# path: since 2026-10-11 (AD-34) an observed event's line records a person
-# handle (`pm_ai.domain.handles`) and a reader decides who that is.
-UNRESOLVED_ACTOR = "actor_unresolved"
-
 
 @dataclass(frozen=True, slots=True)
 class Actor:
-    """A resolved person or system (AD-34).
+    """A person, as `handles.person_for` returns one (AD-34).
 
-    Connectors supply native handles — a commit email, a tenant account, a VTT
-    speaker label. Those are aliases, never identities. An unresolvable handle
-    becomes UNRESOLVED_ACTOR explicitly, because silently using the raw string is
-    how one engineer becomes four people in a metric that feeds a review.
+    No `Actor` is written on an observed event's line: since story 2n a line
+    records a person handle (`pm_ai.domain.handles`), and a reader maps it to a
+    pm-ai person through `handles.person_for` (story 2o) — the `Actor` it
+    returns carries a pm-ai person id as `actor_id`. A handle with no alias is
+    shown as written, never turned into an `Actor`.
+
+    One other use remains and is not a person: `Meeting.attendees` holds each
+    attendee's handle text (`email:<address>`) in `actor_id`, with no display
+    name, until a slice retypes that field.
     """
 
     actor_id: str
     display_name: str | None = None
-
-    @property
-    def is_resolved(self) -> bool:
-        return self.actor_id != UNRESOLVED_ACTOR
-
-
-UNRESOLVED = Actor(actor_id=UNRESOLVED_ACTOR, display_name="unresolved")
-
-
-# The alias table maps a provider's native handle to a stable actor. Seeded at
-# configuration time and persisted as Tier-1 data; the resolution *rule* lives
-# here because getting it wrong splits one person across a metric (AD-34).
-ALIASES: dict[tuple[str, str], Actor] = {}
-
-
-def register_alias(system: str, handle: str, actor: Actor) -> None:
-    ALIASES[(system, handle.lower())] = actor
-
-
-def resolve_actor(*, system: str, handle: str | None) -> Actor:
-    """Resolve a native handle to an Actor, or to UNRESOLVED — never to itself.
-
-    Returning a bare handle as an identity is the failure this exists to
-    prevent: the same engineer arrives as a commit email from GitLab and a
-    speaker label from a transcript, and becomes two people in a metric that
-    feeds a performance review.
-    """
-    if not handle:
-        return UNRESOLVED
-    return ALIASES.get((system, handle.lower()), UNRESOLVED)

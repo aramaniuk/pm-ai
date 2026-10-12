@@ -1116,3 +1116,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
   summary: With the default tenant `organizations` (or `common`, `consumers`, or a domain name), the cached-account fallback for a sign-in without `oid` can never succeed, because a cached account's tenant part is always a tenant id.
   evidence: The frozen rule compares the cached tenant part with the row's tenant. A normal work-account sign-in carries `oid`, so no sign-in seen so far reaches the fallback. Whether the fallback should accept the id token's `tid` in place of a tenant word is a product decision for whoever next touches the sign-in.
+
+## Surfaced by the story-2o review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2o-people-are-read-as-people.md`
+  summary: Nothing tells the PM why every spoken command now stages: doctor's `pm_handle` warning is gone with nothing in its place, and `run_transcript_ingestion` discards `read_pm_identity(...).unusable`.
+  evidence: 2o removes doctor's check by design and both transcript adapters leave `Utterance.speaker` as `None`, so no utterance is the PM's until a transcript adapter carries a handle. `23c`'s sign-in line is the planned consumer of `unusable`; a doctor probe over `read_pm_identity` (WARNING when the identity is empty or a row is unusable) would close the gap for the CLI.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/2o-people-are-read-as-people.md`
+  summary: Older story specs (`4a`, `4g`, `4h`, `4i`) still describe `pm_handle` as a current config key.
+  evidence: They are done specs, kept as history; a reader of the contract meets a key 2o now refuses. A superseded-by note through `bmad-spec` would stop that.

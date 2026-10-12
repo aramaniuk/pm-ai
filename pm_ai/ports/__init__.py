@@ -879,9 +879,6 @@ class ConfigPort(Protocol):
     def blended_hourly_rate(self) -> float: ...
 
     @property
-    def pm_handle(self) -> str: ...
-
-    @property
     def verbose_logging(self) -> bool: ...
 
     @property

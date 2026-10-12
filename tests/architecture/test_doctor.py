@@ -333,7 +333,7 @@ def test_a_fully_healthy_machine_reports_healthy(monkeypatch, tmp_path):
 
     report = run_all(
         keychain=Keychain(secret=SECRET),
-        config=ArtifactState.read(b'pm_handle = "@ana"\n'),
+        config=ArtifactState.read(b'display_timezone = "Europe/Warsaw"\n'),
         registry=ArtifactState.read(f'[projects.alpha]\npath = "{enrolled}"\n'.encode()),
     )
 
@@ -696,28 +696,29 @@ def test_an_unobtainable_config_is_distinct_from_both():
 
 def test_an_unparseable_config_carries_the_loaders_own_message():
     """Not a traceback and not a paraphrase — the loader names the key."""
-    probe = doctor.config_readable(ArtifactState.read(b"pm_handle = 7\n"))
+    probe = doctor.config_readable(ArtifactState.read(b"verbose_logging = 7\n"))
 
     assert probe.health is Health.FAILING
-    assert "pm_handle" in probe.detail
+    assert "verbose_logging" in probe.detail
 
 
-def test_a_readable_config_without_a_handle_warns_rather_than_passes():
-    """Nobody is the PM, so no spoken command can execute (`4a`).
+def test_a_readable_config_passes_and_no_line_mentions_pm_handle():
+    """Story 2o: `pm_handle` is gone, so a config that parses is healthy, and
+    no doctor line — detail or remediation — names the removed key."""
+    for raw in (b"verbose_logging = true\n", b'display_timezone = "Europe/Warsaw"\n'):
+        probe = doctor.config_readable(ArtifactState.read(raw))
+        assert probe.health is Health.OK
+        assert "pm_handle" not in str(probe)
+    absent = doctor.config_readable(ArtifactState.absent())
+    assert "pm_handle" not in str(absent) and "PM handle" not in str(absent)
 
-    `4h` never produces this state, so reaching it means a hand-edit removed the
-    handle — exactly the kind of thing a diagnostic exists to notice, and
-    exactly the kind that is invisible until a command is ignored.
-    """
-    probe = doctor.config_readable(ArtifactState.read(b"verbose_logging = true\n"))
 
-    assert probe.health is Health.WARNING
+def test_an_old_config_setting_pm_handle_is_refused_as_an_unknown_key():
+    """Matrix: old setting — a `config.toml` still setting `pm_handle` is refused."""
+    probe = doctor.config_readable(ArtifactState.read(b'pm_handle = "x"\n'))
 
-
-def test_a_healthy_config_passes():
-    probe = doctor.config_readable(ArtifactState.read(b'pm_handle = "@ana"\n'))
-
-    assert probe.health is Health.OK
+    assert probe.health is Health.FAILING
+    assert "`pm_handle` is not a setting config.toml accepts" in probe.detail
 
 
 def test_an_absent_registry_is_a_first_run_and_names_project_add():
@@ -791,7 +792,7 @@ def test_both_probes_run_when_the_other_one_fails(tmp_path):
     """
     report = run_all(
         keychain=Keychain(secret=SECRET),
-        config=ArtifactState.read(b"pm_handle = 7\n"),
+        config=ArtifactState.read(b"verbose_logging = 7\n"),
         registry=ArtifactState.unreadable("Is a directory"),
     )
 

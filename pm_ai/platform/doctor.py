@@ -412,14 +412,13 @@ def config_readable(state: ArtifactState) -> Probe:
             name, Health.ABSENT,
             "no config.toml, so every setting is at its default",
             "Run `pm-ai setup`. A first run has no config and that is not a "
-            "fault — but nothing has chosen a PM handle, so no spoken command "
-            "will execute until something does.",
+            "fault.",
         ),
     )
     if isinstance(answer, Probe):
         return answer
     try:
-        config = load_config(answer)
+        load_config(answer)
     except ConfigRefused as refused:
         return Probe(
             name, Health.FAILING,
@@ -428,16 +427,7 @@ def config_readable(state: ArtifactState) -> Probe:
             "rather than ignored, because a setting that reads as configured "
             "while having no effect stays wrong forever.",
         )
-    if not config.pm_handle:
-        return Probe(
-            name, Health.WARNING,
-            "config.toml parses, but no pm_handle is set, so nobody is the PM",
-            "Set `pm_handle`. Without it no speaker matches, so every spoken "
-            "command is quietly ignored while the daemon otherwise runs "
-            "normally — `pm-ai setup` never leaves it unset, so this is a "
-            "hand-edit.",
-        )
-    return Probe(name, Health.OK, f"config.toml parses; pm_handle is {config.pm_handle}")
+    return Probe(name, Health.OK, "config.toml parses")
 
 
 def registry_readable(state: ArtifactState) -> Probe:

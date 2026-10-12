@@ -62,7 +62,8 @@ from pm_ai.core.meeting_records import (
 from pm_ai.domain.events import ObservedEventType, Provenance
 from pm_ai.domain.harvest import Cursor, HarvestOutcome
 from pm_ai.domain.health import Health, Probe
-from pm_ai.domain.identity import UNRESOLVED_ACTOR, DataScope, ScopeKind
+from pm_ai.domain.handles import UNRESOLVED_SENTINEL
+from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.core.ledger import parse_segment
 from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
@@ -613,7 +614,7 @@ def test_a_null_email_address_is_left_out_of_the_list_and_still_counted():
     (record,) = result.records
     assert [actor.actor_id for actor in record.attendees] == ["email:c@x.com"]
     assert record.attendee_count == 2
-    assert UNRESOLVED_ACTOR not in [actor.actor_id for actor in record.attendees]
+    assert UNRESOLVED_SENTINEL not in [actor.actor_id for actor in record.attendees]
 
 
 def test_an_address_the_producer_refuses_is_left_out_and_still_counted():
@@ -1368,10 +1369,11 @@ def test_the_config_vocabulary_stays_closed_and_holds_no_connector_setting():
     Pinned as the whole set rather than as an absence, so a width key added to
     `Config` fails here instead of passing a `not in` check that only ever knew
     the two spellings this file happened to think of. Story 4g added the fourth
-    and last member; the reason it is *four* is stated in `pm_ai.core.config`.
+    member and story 2o removed `pm_handle`; the reason it is *three* is stated
+    in `pm_ai.core.config`.
     """
     assert ACCEPTED_KEYS == frozenset(
-        {"blended_hourly_rate", "pm_handle", "verbose_logging", "display_timezone"}
+        {"blended_hourly_rate", "verbose_logging", "display_timezone"}
     )
 
 
@@ -1426,7 +1428,7 @@ def test_a_harvested_meeting_writes_handles_and_the_count_and_reads_them_back(tm
     log = _log(daemon, PERSONAL)
     (entry,) = parse_segment(log)
     assert entry.actor == "email:a@example.invalid"
-    assert "actor_unresolved" not in log
+    assert UNRESOLVED_SENTINEL not in log
 
     (member,) = daemon.storage.list_collection(scope=PERSONAL, artifact=MEETINGS)
     text = daemon.storage.read_artifact(scope=PERSONAL, artifact=MEETINGS, name=member).decode()

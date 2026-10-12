@@ -14,8 +14,9 @@ that from coming back, scanned over every module in `pm_ai/`:
   `assignee` or holds `handle`. A heuristic: the scan has no types, so a
   `replace` on a handle held under some other name is not seen. The runtime
   check in `PersonHandle.__post_init__` still refuses a non-canonical result;
-- any call of `resolve_actor`. The alias code stays until `2o` with no caller;
-  `identity.py` holds only its definition, which is not a call.
+- any call of `resolve_actor`. Story 2o removed it — `person_for` is the one
+  reader of the alias table, and it runs when a line is read — and the scan stays
+  so a write-path resolver cannot come back under the old name.
 
 Import aliases are followed (`from ... import PersonHandle as PH`), and so are
 attribute calls (`handles.PersonHandle(...)`, `identity.resolve_actor(...)`).

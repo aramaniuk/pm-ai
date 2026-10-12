@@ -63,6 +63,33 @@ EXPECTED_SKIPS = 24
 _VERDICT = pytest.StashKey[str]()
 
 
+@pytest.fixture(autouse=True)
+def _restore_alias_table():
+    """Put the contents of `pm_ai.domain.handles.ALIASES` back after every test.
+
+    The table is a module dict that lives for the whole process, and
+    `register_alias` refuses a remap (story 2o), so one test's alias would fail
+    the next test's registration or colour its reading. Autouse because it
+    costs one copy of a dict that is empty outside tests, and because a test
+    that registers an alias without asking for a fixture is exactly the one
+    that would leak.
+
+    It restores the dict's *contents*, in place, through the reference taken
+    before the test. A test that swaps the attribute with
+    `monkeypatch.setattr(handles, "ALIASES", ...)` is undone by monkeypatch,
+    which puts this same dict object back: autouse fixtures are set up first
+    and so torn down last, after monkeypatch's teardown, and anything written
+    into the replacement never touched this dict.
+    """
+    from pm_ai.domain import handles
+
+    table = handles.ALIASES
+    saved = dict(table)
+    yield
+    table.clear()
+    table.update(saved)
+
+
 def _is_whole_suite(config: pytest.Config) -> bool:
     """True only for a full, unfiltered run — the one this ratchet can judge.
 

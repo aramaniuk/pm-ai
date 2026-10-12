@@ -47,7 +47,6 @@ from pm_ai.core.config import (
 # default would fail loudly rather than quietly halve the coverage.
 SET_VALUES: dict[str, object] = {
     "blended_hourly_rate": 85.5,
-    "pm_handle": "pm@example.org",
     "verbose_logging": True,
     "display_timezone": "Europe/Warsaw",
 }
@@ -196,10 +195,10 @@ def test_the_header_opens_every_rendered_file_not_only_the_empty_one(config: Con
 
 def test_a_partially_set_config_emits_one_key_and_omits_the_unset_one():
     """The unset rate is absent, not written out as zero."""
-    rendered = render_config(Config(pm_handle="pm@example.org")).decode("utf-8")
-    assert 'pm_handle = "pm@example.org"' in rendered
+    rendered = render_config(Config(display_timezone="Europe/Warsaw")).decode("utf-8")
+    assert 'display_timezone = "Europe/Warsaw"' in rendered
     assert "blended_hourly_rate" not in rendered
-    assert tomllib.loads(rendered) == {"pm_handle": "pm@example.org"}
+    assert tomllib.loads(rendered) == {"display_timezone": "Europe/Warsaw"}
 
 
 def test_an_integral_rate_reads_back_as_a_float_not_an_int():
@@ -284,7 +283,7 @@ def test_the_timezone_refusal_reaches_the_loader_too():
 def test_an_unset_timezone_is_omitted_rather_than_defaulted_to_utc():
     """`Config()`'s default is the unset state, and a caller needing a day
     boundary refuses rather than assuming — so nothing here may write one in."""
-    rendered = render_config(Config(pm_handle="pm@example.org")).decode("utf-8")
+    rendered = render_config(Config(blended_hourly_rate=85.5)).decode("utf-8")
     assert "display_timezone" not in rendered
     assert load_config(rendered.encode("utf-8")).display_timezone == ""
 
@@ -293,7 +292,7 @@ def test_an_unset_timezone_is_omitted_rather_than_defaulted_to_utc():
 
 
 @pytest.mark.parametrize(
-    "handle",
+    "value",
     [
         pytest.param('a"b', id="double-quote"),
         pytest.param("a\\b", id="backslash"),
@@ -311,64 +310,52 @@ def test_an_unset_timezone_is_omitted_rather_than_defaulted_to_utc():
         pytest.param("\U0001f600\U0001f600", id="two-astral-in-a-row"),
     ],
 )
-def test_a_handle_needing_escapes_parses_back_byte_identical(handle: str):
-    """`Config.__post_init__` admits any non-blank handle, control chars included.
+def test_a_string_needing_escapes_parses_back_byte_identical(value: str):
+    """Every string `render_config` writes is a TOML basic string `tomllib` reads back.
 
-    So an unescaped one is not a hypothetical: `"a\\nb"` is an admissible handle
-    and an unescaped newline inside a basic string produces a file this
-    module's own loader cannot parse. Asserted as a round trip rather than
-    against expected bytes, because the claim is that the loader gets the same
-    string back, not that this renderer picked any particular escape for it.
+    Since story 2o removed `pm_handle`, no free-text key remains — the one string
+    key is a zone the database must hold — so the escaper is exercised directly.
+    An unescaped newline inside a basic string produces a file this module's own
+    loader cannot parse, so the claim is that `tomllib` gets the same string back.
     """
-    config = Config(pm_handle=handle)
-    assert load_config(render_config(config)) == config
-    assert load_config(render_config(config)).pm_handle == handle
+    literal = config_module._basic_string(value)
+    assert tomllib.loads(f"k = {literal}\n")["k"] == value
 
 
-def test_a_non_ascii_handle_is_written_as_itself_rather_than_escaped():
+def test_a_non_ascii_string_is_written_as_itself_rather_than_escaped():
     """The file is UTF-8 and a human may edit it; `\\u00e9` helps nobody."""
-    rendered = render_config(Config(pm_handle="café")).decode("utf-8")
-    assert 'pm_handle = "café"' in rendered
+    assert config_module._basic_string("café") == '"café"'
 
 
 @pytest.mark.parametrize(
-    "handle",
+    "zone",
     [
         pytest.param("\ud800", id="lone-high-surrogate"),
         pytest.param("\ud800x", id="surrogate-then-text"),
-        pytest.param("pm@ex\udcffample.org", id="surrogateescape-byte"),
+        pytest.param("Europe/War\udcffsaw", id="surrogateescape-byte"),
     ],
 )
-def test_a_handle_with_an_unpaired_surrogate_is_inadmissible(handle: str):
+def test_a_zone_with_an_unpaired_surrogate_is_inadmissible(zone: str):
     """The one string no escape can rescue, so it cannot be an admissible `Config`.
 
     A lone surrogate has no UTF-8 encoding at all, so `render_config`'s final
-    `.encode("utf-8")` raised `UnicodeEncodeError` — the wrong exception type
-    out of a module that promises `ConfigRefused` and nothing else, and a hole
-    in the frozen "round trip or nothing" rule, since such a `Config` was
-    admissible and could not be rendered.
-
-    Reachable rather than theoretical: POSIX argv is decoded with
-    `surrogateescape`, so bytes the shell passes that are not valid UTF-8
-    arrive as exactly these code points, and `4h` sets `pm_handle` from the
-    command line. Refused at construction, which is where the round-trip rule
-    stays true as written.
+    `.encode("utf-8")` would raise `UnicodeEncodeError` — the wrong exception
+    out of a module that promises `ConfigRefused`. POSIX argv and a
+    `surrogateescape` stdin deliver undecodable bytes as exactly these code
+    points, and `pm-ai setup` reads the zone from a terminal prompt.
     """
     with pytest.raises(ConfigRefused) as exc:
-        Config(pm_handle=handle)
-    assert "pm_handle" in str(exc.value)
+        Config(display_timezone=zone)
+    assert "display_timezone" in str(exc.value)
     assert "surrogate" in str(exc.value)
 
 
 def test_no_admissible_config_can_fail_to_encode():
-    """The claim the refusal above buys, stated over the whole escape matrix.
-
-    `render_config` promises bytes for every admissible `Config`; anything that
-    would raise on the way out has to have been refused before it got here.
-    """
-    for handle in ("\ud800", "\udcff", "a\ud800b"):
+    """The claim the refusal above buys: anything that would raise on the way
+    out of `render_config` is refused before it gets there."""
+    for zone in ("\ud800", "\udcff", "a\ud800b"):
         with pytest.raises(ConfigRefused):
-            Config(pm_handle=handle)
+            Config(display_timezone=zone)
 
 
 # ── Values the class must refuse so the renderer never meets them ────────────
@@ -411,6 +398,18 @@ def test_a_non_string_timezone_is_refused_as_a_type_not_as_a_missing_zone():
     assert "display_timezone" in message
     assert "must be a string" in message
     assert "does not hold" not in message
+
+
+@pytest.mark.parametrize("value", [0, None, False, 5, 1.5, ["Europe/Warsaw"]])
+def test_a_non_string_timezone_is_refused_by_type_before_any_other_check(value):
+    """The order is stated in `Config.__post_init__`: type, then surrogate, then
+    the zone database. Falsy non-strings included — `0` and `None` once skipped
+    every check, because only a truthy zone was looked up."""
+    with pytest.raises(ConfigRefused) as exc:
+        Config(display_timezone=value)  # type: ignore[arg-type]
+    message = str(exc.value)
+    assert "must be a string" in message
+    assert "surrogate" not in message and "does not hold" not in message
 
 
 def test_the_missing_database_refusal_names_tzdata_rather_than_blaming_the_name(
@@ -487,7 +486,7 @@ def test_a_value_no_toml_literal_can_carry_is_refused_rather_than_dropped():
 
 def test_the_renderer_returns_bytes_ending_in_a_newline():
     """A text file ends with one, and the caller writes these bytes verbatim."""
-    rendered = render_config(Config(pm_handle="pm@example.org"))
+    rendered = render_config(Config(display_timezone="Europe/Warsaw"))
     assert isinstance(rendered, bytes)
     assert rendered.endswith(b"\n")
     assert rendered.decode("utf-8")  # valid UTF-8, which is what the loader decodes
@@ -498,7 +497,7 @@ def test_the_key_order_is_the_dataclass_order():
     and two renders of the same `Config` cannot differ.
 
     Read off the starts of the key lines rather than with `str.index`, which
-    would happily find `pm_handle = ` inside a quoted value the moment a
+    would happily find `display_timezone = ` inside a quoted value the moment a
     fixture gained one and report an order the file does not have.
     """
     every = Config(**SET_VALUES)  # type: ignore[arg-type]

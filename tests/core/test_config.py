@@ -45,7 +45,6 @@ def test_defaults_are_the_unconfigured_states():
     """Named here so a later change to any default is a deliberate one."""
     assert Config() == Config(
         blended_hourly_rate=0.0,
-        pm_handle="",
         verbose_logging=False,
         display_timezone="",
     )
@@ -56,11 +55,11 @@ def test_defaults_are_the_unconfigured_states():
 
 def test_a_declared_key_at_its_declared_type_is_carried():
     config = load_config(
-        b'blended_hourly_rate = 85.5\npm_handle = "pm@example.org"\nverbose_logging = true\n'
+        b'blended_hourly_rate = 85.5\ndisplay_timezone = "Europe/Warsaw"\nverbose_logging = true\n'
     )
     assert config == Config(
         blended_hourly_rate=85.5,
-        pm_handle="pm@example.org",
+        display_timezone="Europe/Warsaw",
         verbose_logging=True,
     )
 
@@ -70,7 +69,7 @@ def test_an_omitted_key_keeps_its_default_while_others_load():
     config = load_config(b"verbose_logging = true\n")
     assert config.verbose_logging is True
     assert config.blended_hourly_rate == Config().blended_hourly_rate
-    assert config.pm_handle == Config().pm_handle
+    assert config.display_timezone == Config().display_timezone
 
 
 def test_an_integer_rate_is_accepted_and_widened():
@@ -166,7 +165,6 @@ def test_the_accepted_set_is_the_dataclass():
     assert ACCEPTED_KEYS == {field.name for field in fields(Config)}
     assert ACCEPTED_KEYS == {
         "blended_hourly_rate",
-        "pm_handle",
         "verbose_logging",
         "display_timezone",
     }
@@ -184,7 +182,7 @@ def test_the_port_declares_every_field_config_carries():
     `display_timezone` was in exactly that state when story 4g first added it.
 
     Read off each property's return annotation rather than off `dir()`, so the
-    types are compared too: a member declared `pm_handle: float` is present by
+    types are compared too: a member declared `display_timezone: float` is present by
     name and wrong in the way that actually reaches a caller.
     """
     from typing import get_type_hints
@@ -208,10 +206,10 @@ def test_the_port_declares_every_field_config_carries():
         pytest.param(b"blended_hourly_rate = true\n", "number", "a boolean", id="bool-for-number"),
         pytest.param(b'verbose_logging = "yes"\n', "true", "a string", id="string-for-bool"),
         pytest.param(b"verbose_logging = 1\n", "false", "a number", id="number-for-bool"),
-        pytest.param(b"pm_handle = 42\n", "string", "a number", id="number-for-string"),
-        pytest.param(b"[pm_handle]\nvalue = 1\n", "string", "a table", id="table-for-string"),
-        pytest.param(b'pm_handle = ["a"]\n', "string", "an array", id="array-for-string"),
-        pytest.param(b"pm_handle = 1979-05-27\n", "string", "a date", id="date-for-string"),
+        pytest.param(b"display_timezone = 42\n", "string", "a number", id="number-for-string"),
+        pytest.param(b"[display_timezone]\nvalue = 1\n", "string", "a table", id="table-for-string"),
+        pytest.param(b'display_timezone = ["a"]\n', "string", "an array", id="array-for-string"),
+        pytest.param(b"display_timezone = 1979-05-27\n", "string", "a date", id="date-for-string"),
     ],
 )
 def test_a_wrong_type_is_refused_naming_both_the_expected_and_the_given(
@@ -276,18 +274,28 @@ def test_an_unusable_rate_is_refused_with_its_admissible_range(raw: bytes):
 
 @pytest.mark.parametrize(
     "raw",
-    [pytest.param(b'pm_handle = ""\n', id="empty"), pytest.param(b'pm_handle = "  "\n', id="blank")],
+    [
+        pytest.param(b'display_timezone = ""\n', id="empty"),
+        pytest.param(b'display_timezone = "  "\n', id="blank"),
+    ],
 )
-def test_a_blank_handle_is_refused_naming_the_key(raw: bytes):
+def test_a_blank_zone_is_refused_naming_the_key(raw: bytes):
     """Absent means unset; writing an empty value states a setting that matches nothing."""
     with pytest.raises(ConfigRefused) as exc:
         load_config(raw)
-    assert "pm_handle" in str(exc.value)
+    assert "display_timezone" in str(exc.value)
 
 
-def test_a_handle_is_kept_exactly_as_written():
-    """Not stripped — a silent trim hides the edit that made equality start working."""
-    assert load_config(b'pm_handle = " pm@example.org "\n').pm_handle == " pm@example.org "
+@pytest.mark.parametrize(
+    "raw", [b'pm_handle = "x"\n', b'pm_handle = "pm@example.org"\nverbose_logging = true\n']
+)
+def test_the_removed_pm_handle_is_refused_as_an_unknown_key(raw: bytes):
+    """Story 2o: who the PM is comes from the Graph connector rows, so a file
+    still setting `pm_handle` is refused like any other unknown key."""
+    with pytest.raises(ConfigRefused) as exc:
+        load_config(raw)
+    message = str(exc.value)
+    assert "`pm_handle` is not a setting config.toml accepts" in message
 
 
 # ── Encoding and syntax ──────────────────────────────────────────────────────
@@ -295,7 +303,7 @@ def test_a_handle_is_kept_exactly_as_written():
 
 def test_a_utf8_bom_is_stripped_before_parsing():
     """An editor-added BOM must not make a valid file read as malformed."""
-    assert load_config(b'\xef\xbb\xbfpm_handle = "a@b.c"\n') == Config(pm_handle="a@b.c")
+    assert load_config(b'\xef\xbb\xbfverbose_logging = true\n') == Config(verbose_logging=True)
 
 
 def test_a_bom_only_file_is_an_empty_one():
@@ -305,7 +313,7 @@ def test_a_bom_only_file_is_an_empty_one():
 def test_non_utf8_bytes_are_refused_at_decode_distinctly_from_bad_syntax():
     """An encoding fault and a syntax fault are different fixes."""
     with pytest.raises(ConfigRefused) as exc:
-        load_config(b'pm_handle = "\xff\xfe"\n')
+        load_config(b'display_timezone = "\xff\xfe"\n')
     message = str(exc.value)
     assert "UTF-8" in message
     assert "TOML" not in message
@@ -313,7 +321,7 @@ def test_non_utf8_bytes_are_refused_at_decode_distinctly_from_bad_syntax():
 
 def test_malformed_toml_is_refused_naming_the_line():
     with pytest.raises(ConfigRefused) as exc:
-        load_config(b'pm_handle = "a@b.c"\n[truncated\n')
+        load_config(b'display_timezone = "UTC"\n[truncated\n')
     message = str(exc.value)
     assert "TOML" in message
     assert "line 2" in message
@@ -362,11 +370,11 @@ def test_a_decode_offset_is_reported_against_the_file_not_the_stripped_buffer():
     files it went out of its way to tolerate — an off-by-three in the one number
     the message exists to carry.
     """
-    body = b'pm_handle = "\xff"\n'
+    body = b'display_timezone = "\xff"\n'
     without = str(pytest.raises(ConfigRefused, lambda: load_config(body)).value)
     with_bom = str(pytest.raises(ConfigRefused, lambda: load_config(b"\xef\xbb\xbf" + body)).value)
-    assert "byte 13" in without
-    assert "byte 16" in with_bom
+    assert "byte 20" in without
+    assert "byte 23" in with_bom
 
 
 # ── Invariants the class holds, not only the loader ──────────────────────────
@@ -375,8 +383,6 @@ def test_a_decode_offset_is_reported_against_the_file_not_the_stripped_buffer():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        pytest.param({"pm_handle": "   "}, id="whitespace-handle"),
-        pytest.param({"pm_handle": "\t"}, id="tab-handle"),
         pytest.param({"blended_hourly_rate": -5.0}, id="negative-rate"),
         pytest.param({"blended_hourly_rate": float("nan")}, id="nan-rate"),
         pytest.param({"blended_hourly_rate": float("inf")}, id="inf-rate"),
@@ -389,10 +395,8 @@ def test_a_nonsense_value_is_refused_at_construction(kwargs: dict):
     """`load_config` is not the only way in, so the rules cannot live only there.
 
     `build(config=...)` takes a `Config` directly, this suite constructs them,
-    and `4c` will too. Until the class checked itself, `Config(pm_handle="   ")`
-    constructed happily — and a whitespace handle both defeats `extract()`'s
-    `bool(pm_handle)` guard and matches any speaker carrying the same
-    whitespace, which is an AD-32 fail-open reachable without any file at all.
+    and `4c` will too, so a value no file may hold is refused by the class
+    itself, however it was constructed.
     """
     with pytest.raises(ConfigRefused):
         Config(**kwargs)
@@ -400,7 +404,7 @@ def test_a_nonsense_value_is_refused_at_construction(kwargs: dict):
 
 def test_the_unset_states_are_constructible():
     """The class permits what the *file* may not write: absent is not a mistake."""
-    assert Config(pm_handle="", blended_hourly_rate=0.0) == Config()
+    assert Config(display_timezone="", blended_hourly_rate=0.0) == Config()
 
 
 # ── The vocabulary is bound to what the loader consumes ──────────────────────
@@ -408,7 +412,6 @@ def test_the_unset_states_are_constructible():
 
 ROUND_TRIP = {
     "blended_hourly_rate": (b"blended_hourly_rate = 42.5\n", 42.5),
-    "pm_handle": (b'pm_handle = "pm@example.org"\n', "pm@example.org"),
     "verbose_logging": (b"verbose_logging = true\n", True),
     "display_timezone": (b'display_timezone = "Europe/Warsaw"\n', "Europe/Warsaw"),
 }
