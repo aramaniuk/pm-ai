@@ -186,6 +186,8 @@ class Transport:
 class Auth:
     """As much of `33a`'s adapter as the client and the health probe touch."""
 
+    instance = INSTANCE
+
     def __init__(self, probe: Probe | None = None, raises: Exception | None = None) -> None:
         self.probe = probe or Probe(INSTANCE, Health.OK, "graph answered")
         self.raises = raises

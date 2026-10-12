@@ -158,6 +158,8 @@ class Auth:
     not.
     """
 
+    instance = INSTANCE
+
     def __init__(self, *tokens: str) -> None:
         self.tokens = list(tokens) or ["token-1", "token-2"]
         self.index = 0
@@ -933,6 +935,10 @@ def test_a_second_401_is_credential_stale_and_the_walked_pages_survive():
     assert result.failure is not None
     assert result.failure.retryable is False
     assert "401" in result.failure.reason
+    assert f"`pm-ai connector sign-in {INSTANCE}`" in result.failure.reason, (
+        "the remedy names the command that redoes the sign-in (story 8m)"
+    )
+    assert "Sign in again" not in result.failure.reason
     assert result.walked_through is None
 
 

@@ -225,9 +225,10 @@ class GraphAuthPort(Protocol):
     **custody** is `pm_ai.platform`'s keychain and the sealed store behind it.
 
     The three refusals this protocol's implementations raise are deliberately
-    distinct, because their remedies are: a stale credential needs the PM to
-    sign in again, an unreachable endpoint needs waiting, and conditional access
-    needs an interactive sign-in that neither of the other two would produce.
+    distinct, because their remedies are: a stale credential needs a new
+    sign-in (`pm-ai connector sign-in <instance>`, story 8m), an unreachable
+    endpoint needs waiting, and conditional access needs an interactive sign-in
+    that neither of the other two would produce.
     The concrete classes live beside the adapter — a caller that needs to tell
     them apart imports them from there, exactly as `ScopePathPort`'s callers
     catch `pm_ai.domain.ScopeResolutionError` rather than the resolver's own
@@ -235,6 +236,13 @@ class GraphAuthPort(Protocol):
 
     Nothing here returns, logs or formats a refresh token except `sign_in`,
     whose whole purpose is to hand one to enrolment for sealing.
+    """
+
+    instance: str
+    """The connector instance this auth signs in for (story 8m).
+
+    What a remedy names: `pm-ai connector sign-in <instance>`. Declared here so
+    the port still satisfies the Graph client's narrower `TokenSource`.
     """
 
     scopes: frozenset[str]

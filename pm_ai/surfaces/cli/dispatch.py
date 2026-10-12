@@ -59,9 +59,15 @@ from pm_ai.core.project_registry import RegistryRefused
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.core.connector_enrolment import (
+    ConnectorNotConfigured,
+    ConnectorRowChanged,
+    CredentialNotHeld,
+    CredentialStoreUnclaimable,
     MalformedInstanceName,
     MalformedSettings,
+    NotAGraphRow,
     OrphanedCredential,
+    UserNotRecorded,
     assert_enrollable,
     enrol_connector,
 )
@@ -92,6 +98,7 @@ __all__ = [
     "GoalOutcome",
     "GraphSignIn",
     "GraphSignInOutcome",
+    "GraphSignInReplacement",
     "HealthReport",
     "Parsed",
     "Refusal",
@@ -267,8 +274,29 @@ class GraphSignInOutcome(Protocol):
 
 
 @runtime_checkable
+class GraphSignInReplacement(Protocol):
+    """What `pm-ai connector sign-in` replaced — `pm_ai.app.wiring.GraphSignInReplaced`."""
+
+    @property
+    def answer(self) -> str:
+        """The health check's sentence, for the operator."""
+        ...
+
+    @property
+    def healthy(self) -> bool:
+        """`True` when the check answered `OK`; `False` when it only warned."""
+        ...
+
+
+@runtime_checkable
 class GraphSignIn(Protocol):
     """`pm-ai connector add graph`'s sign-in and answer checks (story 8l).
+
+    And `pm-ai connector sign-in`'s row reader and keyed replacement (story
+    8m): `enrolled` refuses an instance a new sign-in cannot replace, and
+    `replace` signs in with the row's own settings and replaces that
+    connector's stored sign-in. Their refusals are `pm_ai.core
+    .connector_enrolment`'s and `pm_ai.ports`' (AD-49), never the adapter's.
 
     `pm_ai.app.wiring.GraphEnrolment` is the real one. Named structurally
     because both halves reach `pm_ai.connectors` — the checks a composition
@@ -318,6 +346,16 @@ class GraphSignIn(Protocol):
         present: Callable[[str], None],
     ) -> GraphSignInOutcome:
         """Run Microsoft's sign-in through `present`, then the bounded check."""
+        ...
+
+    def enrolled(self, instance: str) -> None:
+        """Refuse an instance whose row or sealed entry a new sign-in cannot replace."""
+        ...
+
+    def replace(
+        self, *, instance: str, present: Callable[[str], None]
+    ) -> GraphSignInReplacement:
+        """Sign in with the row's settings, check, and replace this connector's sign-in."""
         ...
 
 
@@ -448,12 +486,13 @@ class Context:
     """
 
     graph_sign_in: GraphSignIn | None = None
-    """What `pm-ai connector add graph` uses to check its answers and sign in.
+    """What `pm-ai connector add graph` and `connector sign-in` sign in through.
 
-    It judges each typed answer, runs Microsoft's sign-in, and runs the health
-    check after it. The composition root supplies it whenever it built a
-    daemon. It is `None` when there is no daemon, and in tests that do not
-    need it; a Graph add then refuses before asking anything.
+    It judges each typed answer or the enrolled row, runs Microsoft's sign-in,
+    and runs the health check after it. The composition root always supplies
+    it — over the application scope's writer when no daemon was built, since
+    `connector sign-in` needs no project (story 8m). It is `None` in tests that
+    do not need it; a Graph add or sign-in then refuses before asking anything.
     """
 
     first_run: FirstRun | None = None
@@ -769,8 +808,9 @@ def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) ->
     2. **A terminal**, for the same reason: the questions and the sign-in wait
        on a human.
     3. **Four questions**: the app (client) id, required; the tenant, where
-       Enter keeps the default and anything typed must be a tenant id, a
-       domain or one of Microsoft's words; the harvest window, with its
+       Enter keeps the default and a typed answer is accepted when it is a
+       tenant id (a GUID), a domain, or one of `organizations`, `common` and
+       `consumers` in any case, and stored as typed; the harvest window, with its
        minimum stated and no default; the first-run reach-back, at least the
        window. An answer
        that would not build a connector is refused with its reason and asked
@@ -929,8 +969,16 @@ def _ask_minutes(prompt: str, *, judge: Callable[[int], str | None]) -> int:
 
 
 @contextmanager
-def _enrolment_refusals() -> Iterator[None]:
-    """Every refusal an enrolment can meet, as the sentence `Refusal` carries."""
+def _enrolment_refusals(
+    *,
+    command: str = "connector add",
+    then: str = "then enrol the connector",
+) -> Iterator[None]:
+    """Every refusal an enrolment can meet, as the sentence `Refusal` carries.
+
+    `command` and `then` word the two sentences composed here for the command
+    meeting them: `connector add` and `connector sign-in` share the rest.
+    """
     try:
         yield
     except (DuplicateConnector, MalformedInstanceName, MalformedSettings) as refused:
@@ -952,7 +1000,7 @@ def _enrolment_refusals() -> Iterator[None]:
         # which needs the master key.
         raise Refusal(
             f"no master key is enrolled on this machine, so a credential cannot "
-            f"be sealed. Run `pm-ai key enrol` first, then enrol the connector. "
+            f"be sealed. Run `pm-ai key enrol` first, {then}. "
             f"({keyless})"
         ) from keyless
     except KeychainUnavailable as unreachable:
@@ -969,7 +1017,87 @@ def _enrolment_refusals() -> Iterator[None]:
         # The claim's lock file is a directory or unreadable, or the filesystem
         # has no locks (story `1r`) — or any other fault the operating system
         # names. Its own message names the file; a traceback would read as a bug.
-        raise Refusal(f"connector add stopped: {failed}") from failed
+        raise Refusal(f"{command} stopped: {failed}") from failed
+
+
+def _connector_sign_in(context: Context) -> int:
+    """`pm-ai connector sign-in <instance>`: redo an enrolled Graph connector's sign-in (8m).
+
+    For a connector whose stored sign-in has gone bad — a rotated token that
+    could not be saved, one Microsoft expired or revoked, conditional access
+    wanting a human, a permission granted after enrolment. It asks nothing but
+    the sign-in: the app id and tenant are the row's own, judged first by the
+    checks every start applies.
+
+    1. **What can be known without asking**: the row exists, says `graph` and
+       would build; the sealed entry, if any, is Graph's; the master key is
+       reachable; `msal` is installed. Then a terminal.
+    2. **Microsoft's sign-in, then the bounded health check**, as `connector
+       add graph` runs them. Either failing saves nothing.
+    3. **The credential, then the row's user id**, under the credentials
+       file's claim, after the row is judged again. Any authenticated account
+       is accepted — identity is Microsoft's to guard — and whoever signed in
+       is recorded. A row write that fails after the credential landed says
+       exactly that and exits 3.
+
+    Needs no daemon and no enrolled project: every artifact it touches is in
+    the application scope. `enabled` is neither read nor written — it governs
+    harvesting, not enrolment. The daemon never runs this on its own (AD-39).
+    """
+    (instance,) = context.arguments
+    graph = context.graph_sign_in
+    if graph is None:
+        raise Refusal(
+            "no Graph sign-in was supplied to the CLI, so a Graph connector's "
+            "sign-in cannot be redone. That is a wiring fault in pm-ai, not "
+            "anything about this machine; nothing was asked and nothing was saved."
+        )
+    with _sign_in_refusals():
+        graph.enrolled(instance)
+        graph.ready()
+        if not sys.stdin.isatty():
+            raise Refusal(
+                "redoing a sign-in waits for a Microsoft sign-in in a browser, so "
+                "it needs a terminal. stdin is not a TTY here — this is a pipe, a "
+                "cron job or a CI step. Nothing was asked and nothing was saved. "
+                f"Run `pm-ai connector sign-in {instance}` from an interactive "
+                f"shell."
+            )
+        replaced = graph.replace(instance=instance, present=print)
+
+    print(replaced.answer)
+    state = "healthy" if replaced.healthy else "warned (above)"
+    print(
+        f"{instance}: sign-in replaced; {state}. No restart is needed: a running "
+        f"daemon reads the new sign-in on its next refresh."
+    )
+    return EXIT_OK
+
+
+@contextmanager
+def _sign_in_refusals() -> Iterator[None]:
+    """`connector sign-in`'s refusals: enrolment's, plus the six only it meets.
+
+    `UserNotRecorded` is the one after which something was saved: the new
+    sign-in landed, so the check's answer is printed before the refusal, which
+    still exits 3 as the story's matrix gives it.
+    """
+    try:
+        with _enrolment_refusals(
+            command="connector sign-in", then="then run this command again"
+        ):
+            yield
+    except UserNotRecorded as unrecorded:
+        print(unrecorded.answer)
+        raise Refusal(str(unrecorded)) from unrecorded
+    except (
+        ConnectorNotConfigured,
+        ConnectorRowChanged,
+        CredentialNotHeld,
+        CredentialStoreUnclaimable,
+        NotAGraphRow,
+    ) as refused:
+        raise Refusal(str(refused)) from refused
 
 
 def _connector_check(context: Context) -> int:
@@ -1646,6 +1774,12 @@ TABLE: Mapping[str, Command] = {
             "check": Command(
                 "probe every connector, within 10s in total",
                 _connector_check,
+                target=_application,
+            ),
+            "sign-in": Command(
+                "redo the Microsoft sign-in for an enrolled Graph connector",
+                _connector_sign_in,
+                takes=("instance",),
                 target=_application,
             ),
         },

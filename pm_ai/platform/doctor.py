@@ -476,7 +476,7 @@ def registry_readable(state: ArtifactState) -> Probe:
             name, Health.FAILING,
             f"{len(projects)} project(s) enrolled; the repository is gone for "
             f"{', '.join(missing)}",
-            "Restore the directory, or re-enrol the project at its new path. "
+            "Restore the directory, or enrol the project afresh at its new path. "
             "Every artifact already written for it resolves under the old one, "
             "so moving a repository is not something pm-ai can follow on its "
             "own.",

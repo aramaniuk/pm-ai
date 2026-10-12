@@ -16,7 +16,9 @@ against msal 1.38.0 rather than remembered: `initiate_device_flow` returns
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -484,28 +486,24 @@ def test_an_account_id_of_another_shape_names_no_user(account):
     assert SealedCredential(refresh_token=REFRESH, home_account_id=account).user_id is None
 
 
-def test_the_fallback_account_must_belong_to_the_tenant_signed_in_through():
-    """A guest's account id names its home tenant; its user part is not ours."""
-    tenant = "11111111-2222-3333-4444-555555555555"
+@pytest.mark.parametrize(
+    "tenant",
+    ["11111111-2222-3333-4444-555555555555", "organizations", "contoso.onmicrosoft.com"],
+)
+def test_the_one_fallback_account_is_taken_whatever_its_tenant(tenant):
+    """pm-ai trusts any authenticated sign-in (2026-10-12): the fallback account's
+    tenant part — a guest's home tenant, say — is not compared with the row's.
+    Exactly one account, of the two-part shape, decides which user id is read."""
     client = FakeMsal(
         device_result=_token(id_token_claims={}),
         accounts=[{"home_account_id": "a-guest.99999999-8888-7777-6666-555555555555"}],
     )
     auth = _auth(client, tenant=tenant)
 
-    with pytest.raises(CredentialStale) as refused:
-        auth.sign_in(lambda message: None)
+    credential = auth.sign_in(lambda message: None)
 
-    assert tenant in str(refused.value)
-    assert "99999999-8888-7777-6666-555555555555" in str(refused.value)
-    assert auth.store.read() is None
-
-    matching = FakeMsal(
-        device_result=_token(id_token_claims={}),
-        accounts=[{"home_account_id": f"the-pm.{tenant.upper()}"}],
-    )
-    credential = _auth(matching, tenant=tenant).sign_in(lambda message: None)
-    assert SealedCredential.decode(credential).user_id == "the-pm"
+    assert SealedCredential.decode(credential).user_id == "a-guest"
+    assert auth.store.read() == credential
 
 
 # ── Silent refresh ───────────────────────────────────────────────────────────
@@ -1289,7 +1287,10 @@ def test_a_malformed_sealed_credential_is_refused_without_quoting_it():
         auth.access_token()
 
     assert "not a credential document" not in str(refused.value)
-    assert "again" in str(refused.value)
+    assert "`pm-ai connector sign-in graph`" in str(refused.value), (
+        "the remedy names the command and the real instance"
+    )
+    assert "<instance>" not in str(refused.value)
 
 
 # ── Conformance ──────────────────────────────────────────────────────────────
@@ -1422,3 +1423,118 @@ def test_an_msal_call_that_fails_is_unreachable_rather_than_a_pm_ai_bug():
     with pytest.raises(GraphUnreachable):
         unbuildable.access_token()
     assert "bug in pm-ai" not in unbuildable.check_health().detail
+
+
+# ── Story 8m: every remedy that asks for a new sign-in names the command ─────
+
+SIGN_IN_INSTANCE = "graph:work"
+SIGN_IN_COMMAND = f"`pm-ai connector sign-in {SIGN_IN_INSTANCE}`"
+
+
+@pytest.mark.parametrize(
+    ("client", "said"),
+    [
+        (FakeMsal(refresh_results=[{"error": "invalid_grant"}]), "stale"),
+        (
+            FakeMsal(refresh_results=[{"error": "invalid_grant", "suberror": "basic_action"}]),
+            "interactive sign-in",
+        ),
+        (FakeMsal(refresh_results=[_token(scope="Calendars.Read")]), "permission"),
+        (FakeMsal(refresh_results=[{"error": "expired_token"}]), "never completed"),
+        (
+            FakeMsal(accounts=[{"home_account_id": "someone-else.another-tenant"}]),
+            "cannot be identified",
+        ),
+    ],
+    ids=["stale", "interactive", "declined", "abandoned", "unidentifiable account"],
+)
+def test_a_credential_needing_a_new_sign_in_names_the_command(client, said):
+    """Stale, conditional access, a permission granted late, an abandoned sign-in,
+    an account that cannot be identified: each remedy is the one command."""
+    auth = _auth(client, credential=_enrolled(), instance=SIGN_IN_INSTANCE)
+
+    probe = auth.check_health()
+
+    assert probe.health is Health.FAILING
+    assert said in probe.detail
+    assert SIGN_IN_COMMAND in probe.remediation
+    for retired in ("Sign in again", "enrol again", "Enrol again", "enrolling again"):
+        assert retired not in probe.remediation and retired not in probe.detail
+
+
+
+
+RETIRED = re.compile(r"sign in again|enrol again|enrol \S+ again|re-enrol", re.IGNORECASE)
+
+EXEMPT = {
+    "core/enrolment.py": (
+        "story 8m's Never list: the master-key wording there is unchanged, and its "
+        "\"enrol again\" means `pm-ai key enrol`"
+    ),
+}
+
+
+def test_the_retired_remedy_wording_appears_nowhere_in_the_package():
+    """"Sign in again", "enrol … again" and "re-enrol" cannot come back (8m).
+
+    A source scan of all of `pm_ai/` rather than a probe walk, so a remedy no
+    test reaches is held to the rule too — matched ignoring case. One file is
+    exempt by name, and the reason is the spec's, not a convenience.
+    """
+    import pm_ai as package
+
+    root = Path(package.__file__).parent
+    found: list[str] = []
+    for source in sorted(root.rglob("*.py")):
+        relative = source.relative_to(root).as_posix()
+        if relative in EXEMPT:
+            continue
+        for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+            if RETIRED.search(line) or "has no command" in line.casefold():
+                found.append(f"{relative}:{number}: {line.strip()}")
+    assert not found, "\n".join(found)
+
+
+def test_the_exempt_file_still_exists_so_the_exemption_is_not_stale():
+    import pm_ai as package
+
+    root = Path(package.__file__).parent
+    for relative in EXEMPT:
+        assert (root / relative).is_file(), relative
+
+
+# ── Story 8m: tenant words, and the write-back's compare-and-set ─────────────
+
+
+@pytest.mark.parametrize("word", ["organizations", "Organizations", "COMMON", "Consumers"])
+def test_microsoft_s_tenant_words_are_accepted_in_any_case(word):
+    from pm_ai.connectors.graph.auth import tenant_refusal
+
+    assert tenant_refusal(word) is None
+
+
+def test_a_write_back_that_lost_the_race_keeps_the_stored_credential_and_uses_it():
+    """Compare-and-set, at the adapter: another writer replaced the store between
+    the read and the write-back, so its credential is kept and redeemed."""
+    store = InMemoryRefreshTokenStore(_enrolled())
+    newer = SealedCredential(refresh_token="the-new-sign-in", home_account_id=ACCOUNT).encode()
+
+    class Racing(FakeMsal):
+        def acquire_token_by_refresh_token(self, refresh_token, scopes):
+            self.refreshed_with.append((refresh_token, list(scopes)))
+            if refresh_token == REFRESH:
+                store.write(newer)
+                return _token(refresh_token=ROTATED)
+            return _token(refresh_token="successor-of-the-new-sign-in")
+
+    client = Racing()
+    auth = GraphDeviceCodeAuth(
+        client_id=CLIENT_ID,
+        store=store,
+        client_factory=lambda client_id, authority: client,
+        now=lambda: NOW,
+    )
+
+    assert auth.access_token() == ACCESS
+    assert [token for token, _ in client.refreshed_with] == [REFRESH, "the-new-sign-in"]
+    assert SealedCredential.decode(store.read()).refresh_token == "successor-of-the-new-sign-in"

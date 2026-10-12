@@ -66,6 +66,7 @@ from pm_ai.app.wiring import (
     bootstrap,
     build,
     onboard_project,
+    warn_if_encryption_disabled,
 )
 from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import Config, ConfigRefused, load_config
@@ -153,8 +154,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             # `pm-ai connector add graph`'s questions are judged, and its
             # sign-in and health check run, behind this (story 8l): both reach
             # `pm_ai.connectors`, which the CLI may not import. Bound to this
-            # daemon's single writer, which is also where the row lands.
-            graph_sign_in=None if daemon is None else GraphEnrolment(storage=daemon.storage),
+            # daemon's single writer, which is also where the row lands. With no
+            # daemon — no project enrolled, say — it is bound to the writer over
+            # the application scope alone, which is every artifact a sign-in
+            # touches: `pm-ai connector sign-in` needs no project (story 8m),
+            # and `connector add` still refuses through `require_daemon()`.
+            graph_sign_in=(
+                GraphEnrolment(storage=daemon.storage)
+                if daemon is not None
+                else GraphEnrolment(
+                    storage=application_storage(keychain),
+                    announce=warn_if_encryption_disabled,
+                )
+            ),
             # `pm-ai connector check`'s probes, run from the one layer permitted
             # to reach `pm_ai.connectors` — `surfaces-through-core` forbids the
             # CLI from importing the registry, exactly as `os-behind-platform`
@@ -939,7 +951,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
             Probe(
                 "project", Health.FAILING,
                 f"the enrolled project cannot be resolved to a directory: {unresolvable}",
-                "Re-enrol the repository. Every subcommand but `doctor` needs a "
+                "Enrol the repository afresh. Every subcommand but `doctor` needs a "
                 "scope to act in, and pm-ai will not guess at one.",
             ),
             config,

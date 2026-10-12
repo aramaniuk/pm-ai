@@ -52,8 +52,8 @@ during it. `33a`'s `access_token(force_refresh=True)` is asked once and the page
 is retried once; a second 401 is `CredentialStale`. A **403** is deliberately
 not on that path at all — an administrator revoking `Calendars.Read` is a
 consent change, and sending it through the refresh path would report a perfectly
-good credential as stale and send the PM to re-enrol against a permission
-nobody has granted.
+good credential as stale and send the PM to redo the sign-in, over a
+permission nobody has granted.
 
 ## The request this client sends, and what it deliberately omits
 
@@ -388,6 +388,13 @@ class TokenSource(Protocol):
     `check_health` to prove that page three retries after a 401.
     """
 
+    instance: str
+    """The connector instance the token is for (story 8m).
+
+    A request Graph refuses twice names `pm-ai connector sign-in <instance>`,
+    and this is where the instance comes from.
+    """
+
     def access_token(self, *, force_refresh: bool = False) -> str: ...
 
 
@@ -679,8 +686,9 @@ class GraphClient:
                     raise CredentialStale(
                         f"Graph refused {self._named(url)} with 401 twice — once "
                         f"on the token the walk started with, and again on a "
-                        f"freshly refreshed one. Sign in again; this is the "
-                        f"credential rather than the network."
+                        f"freshly refreshed one. Redo the sign-in with "
+                        f"`pm-ai connector sign-in {self.auth.instance}`; this is "
+                        f"the credential rather than the network."
                     )
                 refreshed = True
                 token = self.auth.access_token(force_refresh=True)

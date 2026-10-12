@@ -280,10 +280,10 @@ def _held_elsewhere(storage):
 
 REDO = (
     "The stored sign-in has to be redone: Microsoft has retired the token this "
-    "machine holds, and the replacement it issued was not saved. pm-ai has no "
-    "command yet that redoes the sign-in for a connector that is already "
-    "enrolled."
+    "machine holds, and the replacement it issued was not saved. Run "
+    f"`pm-ai connector sign-in {INSTANCE}` to redo it."
 )
+"""Story 8m: the remedy names the command, which exists now."""
 CUSTODY = (
     "That is custody, not auth — check the master key is enrolled and the "
     "keychain is unlocked. Whether the credential is good is unknown, which is "

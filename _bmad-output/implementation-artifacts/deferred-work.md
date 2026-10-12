@@ -1114,8 +1114,8 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: The re-entry rule in AD-5 said "one process" and 8q built it per thread.
   evidence: Resolved 2026-10-12: Andrei kept per thread; AD-5 is amended through `bmad-architecture` and the 8q spec's change log records it. (The original entry said the spine did not state the rule at all; it did, as an item owed by 8q.)
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8q-the-sign-in-records-who-signed-in.md`
-  summary: With the default tenant `organizations` (or `common`, `consumers`, or a domain name), the cached-account fallback for a sign-in without `oid` can never succeed, because a cached account's tenant part is always a tenant id.
-  evidence: The frozen rule compares the cached tenant part with the row's tenant. A normal work-account sign-in carries `oid`, so no sign-in seen so far reaches the fallback. Whether the fallback should accept the id token's `tid` in place of a tenant word is a product decision for whoever next touches the sign-in.
+  summary: The cached-account fallback could never succeed for a word or domain tenant, because it required the account's tenant part to equal the row's tenant.
+  evidence: Resolved 2026-10-12 in 8m: Andrei withdrew the tenant-equality rule (any authenticated sign-in is valid), so the one cached account is taken whatever its tenant.
 
 ## Surfaced by the AD-5 re-entry gate (2026-10-12)
 

@@ -73,8 +73,9 @@ __all__ = [
     "CONNECTORS",
     "CREDENTIAL_STORE",
     "ConnectorNotConfigured",
+    "ConnectorRowChanged",
+    "CredentialStoreUnclaimable",
     "CredentialNotHeld",
-    "DifferentUser",
     "DuplicateConnector",
     "MalformedInstanceName",
     "MalformedSettings",
@@ -85,9 +86,11 @@ __all__ = [
     "RESERVED_ROW_KEYS",
     "USER_ID_KEY",
     "UnknownConnectorSystem",
+    "UserNotRecorded",
     "assert_enrollable",
-    "assert_same_user",
+    "assert_replaceable",
     "connector_configurations",
+    "connector_row",
     "credential_for",
     "enrol_connector",
     "record_user_id",
@@ -180,11 +183,47 @@ class OrphanedCredential(RuntimeError):
 class CredentialNotHeld(LookupError):
     """The sealed store holds no credential for this instance under this system.
 
-    Raised by `replace_credential`, which updates an enrolled credential and
-    never creates one. Either the instance has no entry — never enrolled, or
-    removed since — or its entry is recorded under another system, which is a
-    different connector wearing the same name. Nothing is written, and the
-    instance is named.
+    Raised by `replace_credential`. Either the instance has no entry — never
+    enrolled, or removed since — and the caller did not say a row configures
+    it, or its entry is recorded under another system, which is a different
+    connector wearing the same name. Nothing is written, and the instance is
+    named.
+    """
+
+
+class UserNotRecorded(RuntimeError):
+    """The new sign-in is sealed and the row's user id was not written (story 8m).
+
+    `pm-ai connector sign-in` replaces the credential first and then records
+    the signed-in user in the row; this is the second write failing after the
+    first landed. Reported rather than rolled back, for `OrphanedCredential`'s
+    reason: the credential is good and in use from now on, and running the
+    command again records the user. Never silent.
+
+    `answer` is the health check's sentence, redacted: the sign-in did land,
+    so the surface prints it before the refusal.
+    """
+
+    def __init__(self, message: str, *, answer: str) -> None:
+        super().__init__(message)
+        self.answer = answer
+
+
+class ConnectorRowChanged(RuntimeError):
+    """The row changed while its sign-in ran, so the sign-in was not saved (story 8m).
+
+    A sign-in is made with the row's app id, tenant and widths as they were
+    read before it; a row edited meanwhile to name others would be saved
+    beside a credential obtained for the old ones. Nothing is written, and
+    what changed is named.
+    """
+
+
+class CredentialStoreUnclaimable(RuntimeError):
+    """The credentials file's claim could not be taken at all — not busy (story 8m).
+
+    The lock path is a directory or unreadable, or the filesystem has no locks.
+    Nothing is written, and `config.json` is named.
     """
 
 
@@ -211,21 +250,6 @@ class ClaimNotHeld(RuntimeError):
     `claimed=True` means "I hold the sealed store's claim on this thread";
     trusted without checking, a caller that was wrong would write unserialized.
     """
-
-
-class DifferentUser(ValueError):
-    """A sign-in was by a different user than the one the row records (story 8q).
-
-    A different person is a different connector: accepting the sign-in would
-    harvest another person's calendar into the PM's tree. Raised by
-    `assert_same_user` before anything is sealed or written; names both user
-    ids, which are not secrets. `recorded` and `signed_in` carry them.
-    """
-
-    def __init__(self, message: str, *, recorded: str, signed_in: str) -> None:
-        super().__init__(message)
-        self.recorded = recorded
-        self.signed_in = signed_in
 
 
 def _sealed_under(entry: Mapping[str, object], system: str) -> bool:
@@ -324,6 +348,36 @@ def assert_enrollable(storage: StoragePort, *, system: str, instance: str) -> No
     # git's question for `connectors/`, and the master key for the sealed
     # store, which on a fresh machine has never been read and so has never
     # asked for it.
+    storage.assert_writable(scope=APPLICATION, artifact=CONNECTORS)
+    storage.assert_writable(scope=APPLICATION, artifact=CREDENTIAL_STORE)
+
+
+def assert_replaceable(storage: StoragePort, *, system: str, instance: str) -> None:
+    """Refuse an instance whose stored credential a new sign-in may not replace (story 8m).
+
+    `assert_enrollable`'s counterpart for `pm-ai connector sign-in`, run before
+    the sign-in for the same reason: nobody should finish one only to learn the
+    result cannot be saved. The row itself is the caller's to judge; this asks
+    the sealed store. An entry recorded under another system is refused —
+    another connector wearing this name — while no entry at all, or no file,
+    is not: `replace_credential(configured=True)` writes one. Then both writes
+    are pre-flighted, which fetches the master key: `KeyNotFound` on a machine
+    with none, before anything is asked.
+
+    Raises `MalformedInstanceName`, `CredentialNotHeld`, and whatever reading
+    the sealed store or pre-flighting the writes raises.
+    """
+    _assert_nameable(instance)
+    _assert_nameable(system, label="system name")
+    held = stored_credentials(storage).get(instance)
+    if held is not None and not _sealed_under(held, system):
+        raise CredentialNotHeld(
+            f"the entry for {instance!r} in {CREDENTIAL_STORE} is recorded under "
+            f"the system {held.get('system')!r}, and its row says {system!r}. "
+            f"That is a different connector under the same instance name, so a "
+            f"{system} sign-in will not replace it. Nothing was asked and nothing "
+            f"was saved."
+        )
     storage.assert_writable(scope=APPLICATION, artifact=CONNECTORS)
     storage.assert_writable(scope=APPLICATION, artifact=CREDENTIAL_STORE)
 
@@ -460,7 +514,8 @@ def enrol_connector(
                 f"{instance!r}'s credential is sealed and its configuration was "
                 f"not written, so this machine holds a credential nothing refers "
                 f"to. The connector is NOT enrolled and will not harvest. Fix "
-                f"what the write failed on and enrol {instance!r} again — the "
+                f"what the write failed on and run `pm-ai connector add` for "
+                f"{instance!r} once more — the "
                 f"next attempt will refuse as a duplicate and name this "
                 f"credential, which is how it is found."
             ) from unwritten
@@ -475,6 +530,7 @@ def replace_credential(
     instance: str,
     credential: str,
     claimed: bool = False,
+    configured: bool = False,
 ) -> bool:
     """Replace one enrolled instance's credential, and nothing else (story 8j).
 
@@ -495,6 +551,16 @@ def replace_credential(
     `CredentialNotHeld`, writing nothing, when the instance has no entry or its
     entry is sealed under another system.
 
+    `configured` is the one exception to "an existing entry is required"
+    (story 8m): the caller says `connectors/` configures this instance, so an
+    absent entry — none for the name, or no credentials file at all — is
+    written rather than refused. `pm-ai connector sign-in` is that caller: a
+    rotated token that had nowhere to go would otherwise have no remedy. The
+    row is read here, inside the claim: its absence is
+    `ConnectorNotConfigured`, a row that is not an object `MalformedSettings`,
+    and a row recording another `system` than `system` is `CredentialNotHeld`;
+    an entry under another system is still refused.
+
     Returns whether the file was written. The same credential is not written
     again: a rewrite that changes nothing is a write that can still fail.
     """
@@ -506,12 +572,28 @@ def replace_credential(
                 instance=instance,
                 credential=credential,
                 claimed=True,
+                configured=configured,
             )
     # Read inside the claim, for the reason enrolment does: a mapping read
     # before it may be missing another process's write.
     document = _decode(storage.read_artifact(scope=APPLICATION, artifact=CREDENTIAL_STORE))
     credentials = _credentials_in(document)
     held = credentials.get(instance)
+    if configured:
+        row = connector_row(storage, instance=instance, purpose="a credential written")
+        if row.get("system") != system:
+            raise CredentialNotHeld(
+                f"the row for {instance!r} in {CONNECTORS} is configured as a "
+                f"{row.get('system')!r} connector, not {system!r}, so a {system} "
+                f"credential will not be written for it. Nothing was written."
+            )
+    if held is None and configured:
+        credentials[instance] = {"system": system, "credential": credential}
+        document[CREDENTIALS_KEY] = credentials
+        storage.write_artifact(
+            _encode(document), scope=APPLICATION, artifact=CREDENTIAL_STORE
+        )
+        return True
     if held is None:
         raise CredentialNotHeld(
             f"{CREDENTIAL_STORE} has no entry for {instance!r}, so there is "
@@ -547,9 +629,10 @@ def record_user_id(
     as it was read. `connector add graph` does not call this; it writes the key
     in the row it composes, in the same write as everything else.
 
-    **It overwrites a different recorded user.** It does not compare: a caller
-    signing in against an existing row runs `assert_same_user` against
-    `recorded_user_id(row)` first, and calls this only when that accepts.
+    **It overwrites a different recorded user.** It does not compare, and no
+    caller does: pm-ai trusts any authenticated Graph sign-in, since identity
+    and access are Microsoft's to guard (Andrei, 2026-10-12). The row records
+    whoever signed in last.
 
     Runs under the claim enrolment writes rows under, the sealed store's.
     `claimed` says the caller already holds it, as `replace_credential`'s does:
@@ -573,11 +656,10 @@ def record_user_id(
         )
     if usable_user_id({USER_ID_KEY: user_id}) is None:
         # The writer refuses what its reader ignores: a value `recorded_user_id`
-        # reads as absent would leave a row any account may sign in for.
+        # reads as absent would record a user id no reader can use.
         raise ValueError(
-            f"{user_id!r} is not a Graph user id (a GUID), so it would read back "
-            f"as no recorded user and any account could sign in for "
-            f"{instance!r}. Nothing was written."
+            f"{user_id!r} is not a Graph user id (a GUID), so {instance!r} would "
+            f"read back as having no recorded user. Nothing was written."
         )
     _assert_nameable(instance)
     if not claimed:
@@ -593,25 +675,7 @@ def record_user_id(
         )
     name = f"{instance}.json"
     # Read inside the claim, so a key another writer set a moment ago is kept.
-    raw = storage.read_artifact(scope=APPLICATION, artifact=CONNECTORS, name=name)
-    if raw is None:
-        raise ConnectorNotConfigured(
-            f"{CONNECTORS} has no row for {instance!r}, so there is no user id to "
-            f"record. Nothing was written."
-        )
-    try:
-        row = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as unreadable:
-        raise MalformedSettings(
-            f"{CONNECTORS}{name} is not valid JSON ({unreadable}), so its user id "
-            f"cannot be recorded without discarding it. Nothing was written."
-        ) from None
-    if not isinstance(row, dict):
-        raise MalformedSettings(
-            f"{CONNECTORS}{name} holds a {type(row).__name__} rather than an "
-            f"object, so its user id cannot be recorded without discarding it. "
-            f"Nothing was written."
-        )
+    row = connector_row(storage, instance=instance, purpose="its user id recorded")
     if row.get("system") != "graph":
         raise NotAGraphRow(
             f"{instance!r} is configured as a {row.get('system')!r} connector, "
@@ -629,54 +693,50 @@ def record_user_id(
     return True
 
 
+def connector_row(
+    storage: StoragePort, *, instance: str, purpose: str = "it read"
+) -> dict[str, object]:
+    """`connectors/<instance>.json` as a mapping, or the refusal naming why not.
+
+    The one reader of a single row (stories 8q, 8m). `ConnectorNotConfigured`
+    when there is no row; `MalformedSettings` when it is not JSON or not an
+    object — refused rather than read as empty, because a writer handed `{}`
+    would discard whatever the file holds. `purpose` finishes the refusal's
+    sentence ("…cannot have {purpose}"), so each caller says what it was for.
+    """
+    _assert_nameable(instance)
+    name = f"{instance}.json"
+    raw = storage.read_artifact(scope=APPLICATION, artifact=CONNECTORS, name=name)
+    if raw is None:
+        raise ConnectorNotConfigured(
+            f"{CONNECTORS} has no row for {instance!r}: no connector of that name "
+            f"is configured, so it cannot have {purpose}. Nothing was written."
+        )
+    try:
+        row = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as unreadable:
+        raise MalformedSettings(
+            f"{CONNECTORS}{name} is not valid JSON ({unreadable}), so it cannot "
+            f"have {purpose} without discarding it. Nothing was written."
+        ) from None
+    if not isinstance(row, dict):
+        raise MalformedSettings(
+            f"{CONNECTORS}{name} holds a {type(row).__name__} rather than an "
+            f"object, so it cannot have {purpose} without discarding it. Nothing "
+            f"was written."
+        )
+    return row
+
+
 def recorded_user_id(row: Mapping[str, object]) -> str | None:
     """The user a connector row records, or `None` when it records none (story 8q).
 
     `domain`'s one rule (`usable_user_id`, story 2o): a `user_id` that is
     missing, blank, whitespace, not text, or not a Graph user id the producer
-    accepts is absent — any user may sign in for such a row, and nothing
-    compares against it. Stripped, and as the provider cased it.
+    accepts is absent — the rule every reader of the key applies, story 23c's
+    included. Stripped, and as the provider cased it.
     """
     return usable_user_id(row)
-
-
-def assert_same_user(
-    recorded: str | None, signed_in: str, *, instance: str | None = None
-) -> None:
-    """Refuse a sign-in by a different user than the row records (story 8q).
-
-    `recorded` is `recorded_user_id`'s answer; absent (or blank, read the same
-    way) accepts any user. **This fails open, stated rather than hidden:** a
-    recorded value that is not a Graph user id (a GUID) — hand-edited, or
-    written before story 2o — reaches here from `recorded_user_id` as `None`,
-    so it too accepts any user. `record_user_id` refuses to write one.
-
-    A blank or non-text `signed_in` is a `ValueError`, a programming error,
-    whatever is recorded. Otherwise the two ids must
-    match, compared ignoring case — a Graph user id is a GUID — or
-    `DifferentUser` names both. Pure:
-    run it before anything is sealed or written, so a refusal saves nothing.
-    """
-    if not isinstance(signed_in, str) or not signed_in.strip():
-        raise ValueError(
-            f"no signed-in user id was given to compare ({signed_in!r}); a sign-in "
-            f"pm-ai cannot name is refused before this is asked. This is a bug in "
-            f"pm-ai."
-        )
-    if recorded is None or not recorded.strip():
-        return
-    if recorded.strip().casefold() == signed_in.strip().casefold():
-        return
-    connector = "this connector" if instance is None else repr(instance)
-    raise DifferentUser(
-        f"{connector} was enrolled for the user {recorded.strip()!r}, and this "
-        f"sign-in was by {signed_in.strip()!r}. A different person is a different "
-        f"connector: accepting it would harvest their calendar into this one's "
-        f"tree. Nothing was saved. Sign in as {recorded.strip()!r}, or enrol the "
-        f"other account under another instance name.",
-        recorded=recorded.strip(),
-        signed_in=signed_in.strip(),
-    )
 
 
 # ── Everything below is pure, and none of it ever sees a path ────────────────
@@ -752,9 +812,19 @@ def _decode(raw: bytes | None) -> dict[str, object]:
     """
     if raw is None or not raw.strip():
         return {}
-    document = json.loads(raw.decode("utf-8"))
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as unreadable:
+        # `MalformedSettings` (a `ValueError`) so every command meeting it
+        # refuses naming the file rather than raising a traceback (story 8m).
+        raise MalformedSettings(
+            f"{CREDENTIAL_STORE} decrypted to something that is not JSON "
+            f"({type(unreadable).__name__}). Enrolment will not replace it: "
+            f"something else wrote this file, and rewriting it whole would "
+            f"destroy whatever that was."
+        ) from None
     if not isinstance(document, dict):
-        raise ValueError(
+        raise MalformedSettings(
             f"{CREDENTIAL_STORE} decrypted to a "
             f"{type(document).__name__} rather than an object. Enrolment will "
             f"not replace it: something else wrote this file, and rewriting it "
@@ -767,7 +837,7 @@ def _credentials_in(document: Mapping[str, object]) -> dict[str, dict[str, str]]
     """The connector half of the sealed store, defaulted and type-checked."""
     held = document.get(CREDENTIALS_KEY, {})
     if not isinstance(held, dict):
-        raise ValueError(
+        raise MalformedSettings(
             f"{CREDENTIAL_STORE}'s {CREDENTIALS_KEY!r} is a "
             f"{type(held).__name__} rather than an object keyed by instance "
             f"name. Enrolment will not replace it."
@@ -780,7 +850,7 @@ def _credentials_in(document: Mapping[str, object]) -> dict[str, dict[str, str]]
         # credential entries it merely did not recognise. They are also
         # invisible to both duplicate checks while filtered, so the instance
         # would be silently overwritten rather than refused.
-        raise ValueError(
+        raise MalformedSettings(
             f"{CREDENTIAL_STORE} holds entries under {CREDENTIALS_KEY!r} that "
             f"are not objects: {', '.join(unrecognised)}. Enrolment will not "
             f"rewrite the store while it holds something it cannot interpret, "

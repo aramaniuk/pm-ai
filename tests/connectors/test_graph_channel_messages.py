@@ -162,6 +162,9 @@ class Routes:
 
 
 class Auth:
+    instance = INSTANCE
+    """`TokenSource` declares it: a request refused twice names its sign-in command."""
+
     def access_token(self, *, force_refresh: bool = False) -> str:
         return "token-1"
 
