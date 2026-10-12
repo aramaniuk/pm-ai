@@ -116,7 +116,6 @@ from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import (
     ArtifactBusy,
-    DaemonRefused,
     KeychainPort,
     KeychainUnavailable,
     StoragePort,
@@ -299,46 +298,19 @@ def _probe_connectors(
 def _serve(keychain: KeychainPort, composed: _Composition) -> Callable[[], int] | None:
     """`pm-ai daemon run`, bound to this process's daemon (story 4e).
 
-    Three cases:
+    Two cases:
 
     - **a daemon was composed** — the command targets the application scope,
-      so it acts there and watches every enrolled project;
-    - **nothing is enrolled** (D-4o) — the daemon still runs, acting in pm-ai's
-      own scope and watching no project. Composed when the command runs and not
-      before, so no other command on a fresh machine pays for it;
+      so it acts there and watches every enrolled project. With nothing
+      enrolled (D-4o) that is a daemon watching no project, composed by
+      `_compose` like any other command aimed at no project (story 4o);
     - **anything else** — `None`, and the CLI refuses through
       `require_daemon()`, carrying the composition root's reason.
     """
     daemon = composed.daemon
     if daemon is not None:
         return lambda: serve_daemon(daemon, probes=_status_probes(keychain, daemon))
-    if composed.nothing_enrolled:
-        return lambda: _serve_unenrolled(keychain, composed)
     return None
-
-
-def _serve_unenrolled(keychain: KeychainPort, composed: _Composition) -> int:
-    """The daemon on a machine with no project enrolled: pm-ai's own scope, watching none."""
-    config = composed.config
-    if config.presence is Presence.UNREADABLE:
-        raise DaemonRefused(config_readable(config).detail)
-    try:
-        settings = load_config(config.raw)
-    except ConfigRefused as refused:
-        raise DaemonRefused(str(refused)) from refused
-    try:
-        daemon = build(
-            None,
-            APPLICATION,
-            paths=ScopePaths.production(),
-            keychain=keychain,
-            config=settings,
-        )
-    except (OperationalStoreUnavailable, KeychainUnavailable) as unbuildable:
-        # `OperationalStoreBusy` is an `OperationalStoreUnavailable`. Each
-        # sentence names its own cause; the daemon refuses with it, exit 3.
-        raise DaemonRefused(str(unbuildable)) from unbuildable
-    return serve_daemon(daemon, probes=_status_probes(keychain, daemon))
 
 
 def _status_probes(keychain: KeychainPort, daemon: Daemon) -> Callable[[], Report]:
@@ -1052,6 +1024,29 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
                 f"the enrolled project cannot be resolved to a directory: {unresolvable}",
                 "Enrol the repository afresh. Every subcommand but `doctor` needs a "
                 "scope to act in, and pm-ai will not guess at one.",
+            ),
+            config,
+            registry,
+        )
+    except OperationalStoreUnavailable as unopenable:
+        # Busy (`OperationalStoreBusy` is one) or unpreparable: named by its own
+        # sentence, so the command refuses with exit 3 rather than a traceback.
+        return _Composition(
+            None,
+            Probe(
+                "operational store", Health.FAILING, str(unopenable),
+                "Run the command again once the other pm-ai process has finished; "
+                "if it persists, run `pm-ai doctor`.",
+            ),
+            config,
+            registry,
+        )
+    except KeychainUnavailable as locked:
+        return _Composition(
+            None,
+            Probe(
+                "keychain", Health.FAILING, str(locked),
+                "Unlock the login keychain and run the command again.",
             ),
             config,
             registry,
