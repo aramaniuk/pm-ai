@@ -34,10 +34,39 @@ from __future__ import annotations
 
 import pytest
 
+RUNTIME_EXTRA = "uv sync --extra runtime"
+RUNTIME_MODULES = ("starlette", "fastapi", "uvicorn")
+
+
+def _require_runtime_extra() -> None:
+    """Fail collection, naming the fix, when the runtime extra is not installed.
+
+    From story 4e the suite needs it: the loopback API is served by `starlette`
+    (through `fastapi`), and `test_ad8_*` and the daemon's slice exercise it. A
+    missing extra used to be something the suite tolerated by importing extras
+    lazily; for the API that would mean a skip, and a skip reads as coverage.
+    So the run stops here instead, before a single test is collected.
+    """
+    import importlib
+
+    for name in RUNTIME_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError as missing:
+            raise ImportError(
+                f"the pm-ai test suite needs the runtime extra since story 4e, and "
+                f"`{name}` is not importable. Run `{RUNTIME_EXTRA}` and try again "
+                f"— the suite does not skip what it cannot import."
+            ) from missing
+
+
+_require_runtime_extra()
+
 # Every one of these is a `pm_ai.*` module that does not exist yet. There are no
 # environment-dependent skips: the optional runtime dependencies (`keyring`,
 # `sqlite_vec`) are imported inside the functions that use them precisely so a
-# missing extra cannot turn a test into a skip that reads as coverage. If this
+# missing extra cannot turn a test into a skip that reads as coverage — and
+# since story 4e a missing extra fails collection outright. If this
 # number ever has to rise, the reason belongs in the commit message.
 # Each story states its own delta, and states it in the past tense once landed.
 # The number below is the sum of them, so a story that has shipped must never
@@ -58,9 +87,40 @@ import pytest
 # Deltas rather than absolutes on purpose: two stories in flight at once would
 # otherwise each hard-code a number that assumes it lands first, and whichever
 # merged second would quietly overwrite the other's subtraction.
-EXPECTED_SKIPS = 24
+# 24 → 23, story 4e: `pm_ai.surfaces.api.app` exists, so
+# `test_ad8_loopback_api_rejects_unauthenticated_requests` runs instead of
+# skipping. From the same story the runtime extra is required to collect at
+# all (`_require_runtime_extra` above), so no skip here depends on it.
+EXPECTED_SKIPS = 23
 
 _VERDICT = pytest.StashKey[str]()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_daemon_port(monkeypatch):
+    """`pm-ai doctor` in-process asks a port nothing can be listening on (story 4e).
+
+    Its `daemon` probe connects to `127.0.0.1:<daemon_port>`, 8747 by default,
+    so a `doctor` row would otherwise depend on whatever the developer has
+    running there. The composition root's probe is wrapped to ask a port this
+    fixture bound and closed a moment ago instead — every other argument is the
+    real one, and the probe itself is the real function. Tests that exercise
+    the probe against a real listener call `pm_ai.platform.doctor` directly or
+    run `pm-ai` as a separate process, which this does not reach.
+    """
+    import socket
+
+    from pm_ai.app import entry
+
+    real = entry.daemon_reachable
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        closed = reserved.getsockname()[1]
+
+    def unreachable(port, token_path, **options):
+        return real(closed, token_path, **options)
+
+    monkeypatch.setattr(entry, "daemon_reachable", unreachable)
 
 
 @pytest.fixture(autouse=True)

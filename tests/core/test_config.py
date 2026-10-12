@@ -167,6 +167,7 @@ def test_the_accepted_set_is_the_dataclass():
         "blended_hourly_rate",
         "verbose_logging",
         "display_timezone",
+        "daemon_port",
     }
 
 
@@ -414,6 +415,7 @@ ROUND_TRIP = {
     "blended_hourly_rate": (b"blended_hourly_rate = 42.5\n", 42.5),
     "verbose_logging": (b"verbose_logging = true\n", True),
     "display_timezone": (b'display_timezone = "Europe/Warsaw"\n', "Europe/Warsaw"),
+    "daemon_port": (b"daemon_port = 9000\n", 9000),
 }
 
 
@@ -449,3 +451,41 @@ def test_nan_and_inf_are_what_toml_calls_them():
 
     assert math.isnan(tomllib.loads("x = nan")["x"])
     assert math.isinf(tomllib.loads("x = inf")["x"])
+
+
+# ── `daemon_port`, story 4e ──────────────────────────────────────────────────
+
+
+def test_the_daemon_port_defaults_to_8747():
+    """IANA's registry (read 2026-10-12): inside "8734-8749 Unassigned"."""
+    assert Config().daemon_port == 8747
+    assert load_config(None).daemon_port == 8747
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"daemon_port = 80\n",
+        b"daemon_port = 1023\n",
+        b"daemon_port = 65536\n",
+        b"daemon_port = 8747.0\n",
+        b'daemon_port = "8747"\n',
+        b"daemon_port = true\n",
+    ],
+    ids=["80", "1023", "65536", "float", "string", "boolean"],
+)
+def test_an_unusable_daemon_port_is_refused_by_the_loader(raw: bytes):
+    with pytest.raises(ConfigRefused) as refused:
+        load_config(raw)
+    assert "daemon_port" in str(refused.value)
+
+
+@pytest.mark.parametrize("port", [1024, 8747, 65535])
+def test_the_port_range_is_inclusive_at_both_ends(port: int):
+    assert load_config(f"daemon_port = {port}\n".encode()).daemon_port == port
+
+
+@pytest.mark.parametrize("port", [80, 8747.0, "8747", True])
+def test_the_class_refuses_what_the_file_may_not_say(port: object):
+    with pytest.raises(ConfigRefused):
+        Config(daemon_port=port)  # type: ignore[arg-type]

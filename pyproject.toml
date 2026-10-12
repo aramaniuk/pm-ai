@@ -37,6 +37,11 @@ runtime = [
     "ollama",
     "sqlite-vec==0.1.9",           # pre-1.0; a minor bump is a reindex event (AD-3)
     "fastapi==0.141.1",
+    # Pinned beside fastapi (story 4e review): fastapi declares only a floor
+    # (`starlette>=0.46.0`), so a re-lock could move the ASGI layer the API
+    # is served through across a major version with nothing in this file
+    # saying so. 1.6.0 is the version the lock already held.
+    "starlette==1.6.0",
     "uvicorn==0.52.3",
     "keyring==25.7.0",
     # PINNED EXACTLY 2026-09-06, resolved against PyPI and introspected in a

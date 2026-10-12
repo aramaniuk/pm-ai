@@ -29,11 +29,14 @@ key is a typo; an encryption key is a deliberate attempt at the thing the
 architecture forbids, and answering that with "unknown key" would be a shrug.
 
 **An unknown key is refused, not ignored.** TOML readers usually ignore extras,
-which is how `verbose_loging = true` reads as configured forever. The accepted
-vocabulary is three keys, so a closed set costs nothing. `pm_handle` was a
-fourth until story 2o removed it: who the PM is comes from the Graph connector
-rows (`pm_identity`), so a file still setting it is refused like any other
-unknown key.
+which is how `verbose_loging = true` reads as configured forever. A closed set
+costs nothing here.
+
+The accepted keys are `blended_hourly_rate`, `verbose_logging`,
+`display_timezone` and `daemon_port`. `daemon_port` was added by story 4e.
+`pm_handle` was a key until story 2o removed it. Who the PM is now comes from
+the Graph connector rows (`pm_identity`). A file that still sets `pm_handle` is
+refused like any other unknown key.
 
 Absent and empty are both ordinary first-run states returning defaults — a
 missing optional config is not a failure.
@@ -194,6 +197,40 @@ def _refuse_zone(value: object, cause: Exception) -> ConfigRefused:
     )
 
 
+DEFAULT_DAEMON_PORT = 8747
+"""The loopback port the daemon listens on when `config.toml` names none (4e)."""
+
+DAEMON_PORT_MIN = 1024
+DAEMON_PORT_MAX = 65535
+
+
+def _refuse_port(port: object) -> None:
+    """Refuse a `daemon_port` no daemon could listen on — the one validator.
+
+    Called by `Config.__post_init__`, which every way in passes through, the
+    loader included, so the file and a direct construction get one wording.
+
+    `bool` first, because `True` is an `int` and would otherwise be port 1 —
+    refused by the range anyway, but named as what it is. A float is refused
+    even when integral: `8747.0` is a file whose author typed a number of a
+    different kind, and the renderer writes a port as a whole number so the
+    round trip holds on the field's own terms.
+    """
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise ConfigRefused(
+            f"`daemon_port` must be a whole number, but it is {_type_name(port)} "
+            f"({port!r}). Write it in config.toml without quotes or a decimal "
+            f"point, e.g. `daemon_port = {DEFAULT_DAEMON_PORT}`."
+        )
+    if not DAEMON_PORT_MIN <= port <= DAEMON_PORT_MAX:
+        raise ConfigRefused(
+            f"`daemon_port` must be a whole number from {DAEMON_PORT_MIN} to "
+            f"{DAEMON_PORT_MAX}, not {port}. Ports below {DAEMON_PORT_MIN} need "
+            f"privileges the daemon never asks for. Omit the key for the default, "
+            f"{DEFAULT_DAEMON_PORT}."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """The wave-1 vocabulary. Every field's default is its unconfigured state.
@@ -221,6 +258,14 @@ class Config:
     # state: a caller needing a day boundary refuses rather than assuming UTC,
     # because assuming is how a meeting lands on the wrong day silently.
     display_timezone: str = ""
+    # Story 4e: the loopback port `pm-ai daemon run` listens on and `pm-ai
+    # doctor` asks. IANA's registry (last updated 2026-10-09, read 2026-10-12)
+    # has 8732 Reserved (udp `dtp-net`), 8733 `ibus`, then "8734-8749
+    # Unassigned" — 8747 is unassigned. Unassigned means unregistered, not
+    # unused on this machine; a taken port is refused by name. A whole number from
+    # `DAEMON_PORT_MIN` to `DAEMON_PORT_MAX`: below 1024 needs privileges the
+    # daemon never asks for, and a float is not a port.
+    daemon_port: int = DEFAULT_DAEMON_PORT
 
     def __post_init__(self) -> None:
         """Refuse a value no `Config` may hold, however it was constructed.
@@ -283,6 +328,7 @@ class Config:
                 f"an unpaired surrogate and therefore has no UTF-8 encoding — "
                 f"config.toml could not be written with it at all. Re-enter it."
             )
+        _refuse_port(self.daemon_port)
         if self.display_timezone:
             # Validated against the zone database rather than by shape. A
             # typo'd zone is not a syntax error — it is a silent shift in which
@@ -329,6 +375,7 @@ def load_config(raw: bytes | None) -> Config:
     rate = supplied.get("blended_hourly_rate")
     verbose = supplied.get("verbose_logging")
     zone = supplied.get("display_timezone")
+    port = supplied.get("daemon_port")
     return Config(
         blended_hourly_rate=(
             defaults.blended_hourly_rate
@@ -347,6 +394,11 @@ def load_config(raw: bytes | None) -> Config:
             # than the zone database's opinion of it; `__post_init__` then does
             # the lookup, so the class holds the rule and not only the loader.
             else _text("display_timezone", zone)
+        ),
+        daemon_port=(
+            # Passed through as written: `Config.__post_init__` holds the one
+            # validator, so the file and a direct construction get one wording.
+            defaults.daemon_port if port is None else port  # type: ignore[arg-type]
         ),
     )
 
@@ -455,6 +507,10 @@ def _literal(key: str, value: object) -> str:
     """
     if isinstance(value, bool):
         return "true" if value else "false"
+    if key in _WHOLE_NUMBER_KEYS and isinstance(value, int):
+        # A port is a whole number in the file, never `8747.0`, which its
+        # reader refuses — so it is the one `int` this function does not widen.
+        return str(value)
     if isinstance(value, (int, float)):
         return repr(float(value))
     if isinstance(value, str):
@@ -683,6 +739,10 @@ def _text(key: str, value: object) -> str:
             f"writing an empty value states a setting that cannot match anything."
         )
     return value
+
+
+_WHOLE_NUMBER_KEYS = frozenset({"daemon_port"})
+"""The keys rendered as TOML integers rather than widened to floats (story 4e)."""
 
 
 def _flag(key: str, value: object) -> bool:

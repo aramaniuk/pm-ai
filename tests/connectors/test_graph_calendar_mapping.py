@@ -1377,11 +1377,12 @@ def test_the_config_vocabulary_stays_closed_and_holds_no_connector_setting():
     Pinned as the whole set rather than as an absence, so a width key added to
     `Config` fails here instead of passing a `not in` check that only ever knew
     the two spellings this file happened to think of. Story 4g added the fourth
-    member and story 2o removed `pm_handle`; the reason it is *three* is stated
-    in `pm_ai.core.config`.
+    member, story 2o removed `pm_handle`, and story 4e added `daemon_port` — a
+    daemon setting, not a connector's; the vocabulary is stated in
+    `pm_ai.core.config`.
     """
     assert ACCEPTED_KEYS == frozenset(
-        {"blended_hourly_rate", "verbose_logging", "display_timezone"}
+        {"blended_hourly_rate", "verbose_logging", "display_timezone", "daemon_port"}
     )
 
 
