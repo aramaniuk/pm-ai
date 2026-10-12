@@ -869,7 +869,7 @@ class GraphCalendarFetch:
 
         - **coverage exists at all** when the walk completed and either nothing
           came back at all or at least one row that did can be placed in time —
-          the same rule `gitlab.py`'s `_bounded_by_a_credible_clock` applies,
+          the same rule `pm_ai.connectors.gitlab`'s `_plausible_dates` feeds,
           because both connectors write the same `CoverageWindow | None` slot
           and the matrix answers the question once for both: rows with no usable
           clock claim no coverage (`8a`), and a calendar that answered with
@@ -1144,7 +1144,7 @@ class GraphCalendarFetch:
 def _any_credible_clock(rows: Sequence[CalendarRow]) -> bool:
     """Whether any emitted row can be placed in time at all (AD-35, `8a`).
 
-    The Graph half of the rule `gitlab.py._bounded_by_a_credible_clock` states
+    The Graph half of the rule `pm_ai.connectors.gitlab._plausible_dates` feeds
     for GitLab, and deliberately the same rule: both connectors fill the same
     `CoverageWindow | None` slot, and `8a`'s matrix answers this once — *rows
     returned, no usable clock → harvested something, no coverage claimed*. Graph

@@ -51,9 +51,17 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from gitlab_fakes import TOKEN, Pages, commit
+
 from pm_ai.app.pipelines import run_harvest
 from pm_ai.app.wiring import build
-from pm_ai.connectors.gitlab import GitLabConnectorAdapter, Page, PageUnavailable
+from pm_ai.connectors.gitlab import (
+    FETCH_BUDGET,
+    CommitQuery,
+    GitLabConnectorAdapter,
+    Page,
+    PageUnavailable,
+)
 from pm_ai.domain.harvest import (
     Cursor,
     HarvestFailure,
@@ -89,19 +97,12 @@ does about events.
 """
 
 ROWS = [
-    {
-        "sha": "9f2a1c",
-        "message": "Fix auth refactor",
-        "author_email": "alex@example.com",
-        "committed_at": NOW - timedelta(hours=2),
-    },
-    {
-        "sha": "3b7e02",
-        "message": "Add Redis benchmark",
-        "author_email": "alex@example.com",
-        "committed_at": NOW - timedelta(hours=1),
-    },
+    commit("9f2a1c", "Fix auth refactor", at=NOW - timedelta(hours=2)),
+    commit("3b7e02", "Add Redis benchmark", at=NOW - timedelta(hours=1)),
 ]
+
+NEWEST = Cursor(b"2026-08-19T08:00:00Z")
+"""The cursor a finished walk over `ROWS` leaves: the newer commit's date."""
 
 
 class Ticking:
@@ -112,6 +113,9 @@ class Ticking:
     the *first* page came back and `end` the instant fetching stopped, and a
     constant satisfies any pair of instants. Every reading is recorded, so a row
     can assert which reading a bound came from rather than that it looks recent.
+
+    On a first run the harvest's first reading is the one it asks from (now −
+    the first-run reach-back), so the first page's reading is the second.
     """
 
     def __init__(self, start: datetime = NOW, step: timedelta = TICK) -> None:
@@ -128,57 +132,37 @@ class Ticking:
 
 def connector(**kwargs) -> GitLabConnectorAdapter:
     kwargs.setdefault("now", lambda: NOW)
-    return GitLabConnectorAdapter(project="alpha", scope=SCOPE, **kwargs)
+    kwargs.setdefault("credential", TOKEN)
+    return GitLabConnectorAdapter(instance=INSTANCE, project="alpha", scope=SCOPE, **kwargs)
 
 
-def daemon(tmp_path, *, rows=None, page_size: int = 100, now=None, fetch_page=None):
+def paging(*pages: tuple[dict, ...], fails_at: PageUnavailable | None = None) -> Pages:
+    """A page fetch handing back exactly these pages, then optionally refusing.
+
+    Injected at the page seam, because the row that matters most is the one
+    where a *later* page fails — which no arrangement of rows can express.
+    """
+    return Pages(*pages, fails_at=fails_at)
+
+
+def daemon(tmp_path, *, rows=None, now=None, fetch_page=None):
     """A wired daemon whose GitLab connector is the one under test.
 
-    Storage keeps the frozen `NOW` — its clock names event-log segments and
-    stamps `ingested_at` — while the connector gets whatever clock the row needs.
-    Two clocks on purpose: coverage is the *connector's* reading, and sharing one
-    would let a row pass because storage happened to agree.
+    The built-in holds no token, so it is given one, and `rows` become one page
+    unless a fetch is supplied. Storage keeps the frozen `NOW` — its clock names
+    event-log segments and stamps `ingested_at` — while the connector gets
+    whatever clock the row needs. Two clocks on purpose: coverage is the
+    *connector's* reading, and sharing one would let a row pass because storage
+    happened to agree.
     """
     shutil.rmtree(tmp_path, ignore_errors=True)
     wired = build(tmp_path, "alpha", now=lambda: NOW)
     gitlab = wired.connectors[INSTANCE]
-    gitlab._fake_api = list(rows or [])
-    gitlab.page_size = page_size
+    gitlab.credential = TOKEN
+    gitlab.fetch_page = fetch_page if fetch_page is not None else paging(tuple(rows or ()))
     if now is not None:
         gitlab.now = now
-    if fetch_page is not None:
-        gitlab.fetch_page = fetch_page
     return wired
-
-
-def paging(*pages: tuple[dict, ...], fails_at: PageUnavailable | None = None):
-    """A transport handing back exactly these pages, then optionally refusing.
-
-    Injected rather than simulated by trimming `_fake_api`, because the row that
-    matters most is the one where a *later* page fails — which no arrangement of
-    rows can express. The last supplied page ends the walk when nothing is set to
-    fail, and points at one more page when something is: that next fetch is where
-    `fails_at` is raised.
-    """
-    boundaries: dict[int, Page] = {}
-    offset = 0
-    for index, rows in enumerate(pages):
-        last = index == len(pages) - 1
-        following = offset + len(rows)
-        boundaries[offset] = Page(
-            rows=rows,
-            next_offset=None if last and fails_at is None else following,
-        )
-        offset = following
-
-    def fetch(at: int) -> Page:
-        if at in boundaries:
-            return boundaries[at]
-        if fails_at is not None:
-            raise fails_at
-        return Page()
-
-    return fetch
 
 
 # ── Rows that returned something ─────────────────────────────────────────────
@@ -187,24 +171,24 @@ def paging(*pages: tuple[dict, ...], fails_at: PageUnavailable | None = None):
 def test_two_pages_bound_the_window_with_the_connectors_own_clock():
     """Row: *fetch returns rows* — coverage spans first page back to fetch end."""
     clock = Ticking()
-    result = connector(now=clock, page_size=1, _fake_api=list(ROWS)).harvest(Cursor())
+    result = connector(now=clock, fetch_page=paging((ROWS[0],), (ROWS[1],))).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.HARVESTED
     assert len(result.events) == 2
     assert result.failure is None
     assert result.coverage == CoverageWindow(
         connector_instance=INSTANCE,
-        start=clock.readings[0],
+        start=clock.readings[1],
         end=clock.readings[-1],
     )
-    # Named, not merely "distinct": the first reading is taken when page one
-    # comes back and the last when the walk finishes, so a connector that read
-    # its clock once and subtracted an interval cannot produce this pair. The
-    # middle reading is the wall-clock budget check, taken once per page the
-    # walk decides to continue past.
-    assert clock.readings == [NOW, NOW + TICK, NOW + 2 * TICK]
-    assert result.cursor == Cursor(b"2")
-    assert result.answered_at == clock.readings[0], (
+    # Named, not merely "distinct": the first reading is where a first run
+    # asks from, the second is taken when page one comes back, the third is the
+    # wall-clock budget check before page two, and the last when the walk
+    # finishes — so a connector that read its clock once and subtracted an
+    # interval cannot produce this pair.
+    assert clock.readings == [NOW, NOW + TICK, NOW + 2 * TICK, NOW + 3 * TICK]
+    assert result.cursor == NEWEST, "the newest commit date the walk saw"
+    assert result.answered_at == clock.readings[1], (
         "page one's reading is the instant, not the budget check after it (8p)"
     )
 
@@ -218,32 +202,33 @@ def test_two_pages_read_back_exactly_one_window_bounded_by_the_fetch(tmp_path):
     mismatched key.
     """
     clock = Ticking()
-    wired = daemon(tmp_path, rows=ROWS, page_size=1, now=clock)
+    wired = daemon(tmp_path, fetch_page=paging((ROWS[0],), (ROWS[1],)), now=clock)
     persisted = run_harvest(wired, INSTANCE)
 
     assert persisted.persisted == 2
-    assert wired.storage.coverage_windows(INSTANCE) == [(NOW, NOW + 2 * TICK)]
+    assert wired.storage.coverage_windows(INSTANCE) == [(NOW + TICK, NOW + 3 * TICK)]
     assert wired.storage.harvest_failure(INSTANCE) is None
+    assert wired.storage.load_cursor(INSTANCE) == NEWEST
 
 
 def test_rows_whose_clocks_cannot_be_believed_claim_no_coverage(tmp_path):
     """Row: *rows returned, no usable clock* — harvested, and no window claimed.
 
-    One row has no `committed_at` at all and the other carries the zero-value
+    One row has no `committed_date` at all and the other carries the zero-value
     parse (`EARLIEST_PLAUSIBLE` exists for exactly that). Something arrived and
     nothing says when, and an unknowable start is not a guessable one — so the
-    events persist and the coverage claim does not.
+    events persist and the coverage claim does not. Nor does the cursor move:
+    no date here may set it.
     """
     unplaceable = [
-        {"sha": "aaaaaa", "message": "no clock", "author_email": "a@example.com",
-         "committed_at": None},
-        {"sha": "bbbbbb", "message": "epoch", "author_email": "a@example.com",
-         "committed_at": datetime(1970, 1, 1, tzinfo=timezone.utc)},
+        commit("aaaaaa", "no clock", at=None, email="a@example.com"),
+        commit("bbbbbb", "epoch", at=datetime(1970, 1, 1, tzinfo=timezone.utc)),
     ]
-    result = connector(_fake_api=list(unplaceable)).harvest(Cursor())
+    result = connector(fetch_page=paging(tuple(unplaceable))).harvest(Cursor())
     assert result.outcome is HarvestOutcome.HARVESTED
     assert len(result.events) == 2
     assert result.coverage is None
+    assert result.cursor == Cursor()
 
     wired = daemon(tmp_path, rows=unplaceable)
     run_harvest(wired, INSTANCE)
@@ -260,18 +245,13 @@ def test_a_refused_rows_clock_cannot_earn_coverage_for_the_rows_that_survived(tm
     row that was thrown away: no event that persists can be placed in time, so
     no window may be claimed.
     """
-    emitted_but_unplaceable = {
-        "sha": "aaaaaa", "message": "from the future",
-        "author_email": "a@example.com",
-        "committed_at": datetime(2126, 9, 7, 12, 0, tzinfo=timezone.utc),
-    }
-    refused_but_well_dated = {
-        "sha": "bbbbbb", "message": None,  # refused: `message` is not a string
-        "author_email": "a@example.com", "committed_at": NOW,
-    }
-    rows = [emitted_but_unplaceable, refused_but_well_dated]
+    emitted_but_unplaceable = commit(
+        "aaaaaa", "from the future", at=datetime(2126, 9, 7, 12, 0, tzinfo=timezone.utc)
+    )
+    refused_but_well_dated = commit("bbbbbb", None, at=NOW)  # refused: no message
+    rows = (emitted_but_unplaceable, refused_but_well_dated)
 
-    result = connector(_fake_api=[dict(r) for r in rows]).harvest(Cursor())
+    result = connector(fetch_page=paging(rows)).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.HARVESTED
     assert len(result.events) == 1
@@ -292,14 +272,9 @@ def test_a_surviving_rows_clock_still_earns_coverage_beside_a_refusal(tmp_path):
     A refusal beside a placeable event withholds nothing: rows arrived, one of
     them persists and can be placed in time, and that is what coverage records.
     """
-    rows = [
-        {"sha": "cccccc", "message": "readable", "author_email": "a@example.com",
-         "committed_at": NOW},
-        {"sha": "dddddd", "message": None, "author_email": "a@example.com",
-         "committed_at": NOW},
-    ]
+    rows = (commit("cccccc", "readable", at=NOW), commit("dddddd", None, at=NOW))
 
-    result = connector(_fake_api=[dict(r) for r in rows]).harvest(Cursor())
+    result = connector(fetch_page=paging(rows)).harvest(Cursor())
 
     assert len(result.events) == 1
     assert len(result.refusals) == 1
@@ -313,51 +288,52 @@ def test_a_cursor_advances_even_when_no_coverage_was_earned(tmp_path):
 
     `save_cursor` takes `CoverageWindow | None` by signature, so `None` travels
     through as itself instead of being read off an object through `getattr` and
-    silently becoming "no coverage" for any reason at all.
+    silently becoming "no coverage" for any reason at all. Reached here by this
+    machine's clock stepping back a second per reading: the walk finished, so
+    the cursor moves to the newest commit date, and there is no honest interval
+    to call the window.
     """
-    unplaceable = [
-        {"sha": "cccccc", "message": "no clock", "author_email": "a@example.com",
-         "committed_at": None},
-    ]
-    wired = daemon(tmp_path, rows=unplaceable)
+    wired = daemon(tmp_path, rows=ROWS, now=Ticking(step=-TICK))
     assert wired.storage.load_cursor(INSTANCE) == Cursor()
 
     run_harvest(wired, INSTANCE)
-    assert wired.storage.load_cursor(INSTANCE) == Cursor(b"1"), "the cursor did not advance"
+    assert wired.storage.load_cursor(INSTANCE) == NEWEST, "the cursor did not advance"
     assert wired.storage.coverage_windows(INSTANCE) == []
 
 
-def test_the_cursor_stops_where_the_rows_stopped_not_where_the_provider_said():
-    """One definition of "where to resume", and it is the rows that were received.
+def test_the_next_page_header_decides_what_is_asked_and_nothing_else():
+    """GitLab's offset paging always answers `page + 1`, and nothing else is walked.
 
-    The loop had two. The terminal and non-advancing branches resumed from rows
-    actually received; the ordinary branch resumed from `page.next_offset` — the
-    provider's *claim*. So a provider that returns two rows while announcing
-    that the next page begins at offset 5 advanced the cursor past rows 2, 3 and
-    4, and no later run revisits a position the cursor has passed.
-
-    The page after the gap is still *asked* for, because `next_offset` is a
-    perfectly good thing to ask; what it may not do is decide what was walked.
+    A provider jumping from page 1 to page 5 would skip pages 2 to 4 and still
+    read as a complete walk — coverage claimed over rows nobody fetched. Refused,
+    not retryable, as a page that does not advance is; page 1 keeps its events
+    and the cursor does not move.
     """
     pages = {
-        0: Page(rows=(ROWS[0], ROWS[1]), next_offset=5),
-        5: Page(rows=(), next_offset=None),
+        1: Page(rows=(ROWS[0], ROWS[1]), next_page=5),
+        5: Page(rows=(), next_page=None),
     }
-    result = connector(now=Ticking(), fetch_page=lambda at: pages[at]).harvest(Cursor())
+    asked: list[CommitQuery] = []
 
-    assert result.outcome is HarvestOutcome.HARVESTED
+    def fetch(query: CommitQuery) -> Page:
+        asked.append(query)
+        return pages[query.page]
+
+    result = connector(now=Ticking(), fetch_page=fetch).harvest(Cursor())
+
+    assert [query.page for query in asked] == [1], "page 5 was asked for"
+    assert result.outcome is HarvestOutcome.FAILED
+    assert result.failure is not None and result.failure.retryable is False
+    assert "skips" in result.failure.reason
     assert len(result.events) == 2
-    assert result.cursor == Cursor(b"2"), (
-        "the cursor advanced to the offset the provider announced, so rows 2 "
-        "through 4 are behind it and nothing will ever fetch them"
-    )
+    assert result.cursor == Cursor(), "a walk that skipped pages is not complete"
 
 
 def test_a_page_loop_is_bounded_by_a_cap_and_keeps_what_it_walked():
-    """The bound "next_offset must increase" does not give.
+    """The bound "the next page must advance" does not give.
 
-    A provider advancing one row per page satisfies that condition forever, so
-    the walk is capped, and the cap is a refusal rather than a quiet stop: a
+    A provider advancing one page at a time satisfies that condition forever,
+    so the walk is capped, and the cap is a refusal rather than a quiet stop: a
     silent stop would report a harvest as complete.
     """
     fetch = paging((ROWS[0],), (ROWS[1],))
@@ -365,9 +341,12 @@ def test_a_page_loop_is_bounded_by_a_cap_and_keeps_what_it_walked():
 
     assert result.outcome is HarvestOutcome.FAILED
     assert result.failure is not None and "cap" in result.failure.reason
-    assert [event.payload.sha for event in result.events] == [ROWS[0]["sha"]]
+    assert [event.payload.sha for event in result.events] == [ROWS[0]["id"]]
     assert result.coverage is not None, "the page that was walked still covers"
-    assert result.cursor == Cursor(b"1"), "and the cursor stops where the rows did"
+    assert result.cursor == Cursor(), (
+        "a walk that did not finish moves the cursor nothing: GitLab lists "
+        "newest first, so the pages not walked are the older ones"
+    )
 
 
 def test_a_walk_that_outlives_its_budget_returns_what_it_has():
@@ -385,6 +364,19 @@ def test_a_walk_that_outlives_its_budget_returns_what_it_has():
     assert result.failure.retryable is True, "the rest of the window is the next run's"
     assert len(result.events) == 1
     assert result.coverage is not None
+    assert result.cursor == Cursor()
+
+
+def test_the_budget_deadline_travels_to_every_page_after_the_first():
+    """The client honours a throttle hint only when it fits what is left, so it
+    has to be told what is left: the first page measures its own, and every
+    later page carries the deadline the first page's reading set.
+    """
+    fetch = paging((ROWS[0],), (ROWS[1],))
+    clock = Ticking()
+    connector(now=clock, fetch_page=fetch).harvest(Cursor())
+
+    assert [query.deadline for query in fetch.asked] == [None, clock.readings[1] + FETCH_BUDGET]
 
 
 def test_a_transport_that_answers_with_something_other_than_a_page_is_a_value():
@@ -395,27 +387,25 @@ def test_a_transport_that_answers_with_something_other_than_a_page_is_a_value():
     page one's events, page one's real coverage and the outcome went up the
     stack together, which is the partial-page row's whole prohibition.
     """
-    pages: dict[int, object] = {0: Page(rows=(ROWS[0],), next_offset=1), 1: None}
-    result = connector(now=Ticking(), fetch_page=lambda at: pages[at]).harvest(Cursor())  # type: ignore[arg-type]
+    pages: dict[int, object] = {1: Page(rows=(ROWS[0],), next_page=2), 2: None}
+    result = connector(now=Ticking(), fetch_page=lambda query: pages[query.page]).harvest(Cursor())  # type: ignore[arg-type,return-value]
 
     assert result.outcome is HarvestOutcome.FAILED
     assert result.failure is not None
     assert "NoneType" in result.failure.reason and "Page" in result.failure.reason
     assert result.failure.retryable is False, "a wiring fault in pm-ai does not clear by waiting"
-    assert [event.payload.sha for event in result.events] == [ROWS[0]["sha"]]
-    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW + 2 * TICK)
+    assert [event.payload.sha for event in result.events] == [ROWS[0]["id"]]
+    assert result.coverage == CoverageWindow(INSTANCE, NOW + TICK, NOW + 3 * TICK)
 
 
 def test_a_stored_cursor_this_connector_did_not_write_is_a_failure_value():
-    """`int(since.token)` on a token that is not a decimal offset raised.
-
-    A cursor is opaque to everything but its own connector, which cuts both
-    ways: a token written by another connector, or by an older encoding, is not
-    a position here. `harvest` promises a value for every outcome, and a
-    `ValueError` out of its first line is not one.
+    """A cursor is opaque to everything but its own connector, which cuts both
+    ways: a token written by another connector is not a position here, and
+    `harvest` promises a value for every outcome rather than a raise.
     """
     stale = Cursor(b"page-2-token")
-    result = connector(_fake_api=list(ROWS)).harvest(stale)
+    fetch = paging(tuple(ROWS))
+    result = connector(fetch_page=fetch).harvest(stale)
 
     assert result.outcome is HarvestOutcome.FAILED
     assert result.events == ()
@@ -425,6 +415,24 @@ def test_a_stored_cursor_this_connector_did_not_write_is_a_failure_value():
     assert "page-2-token" not in result.failure.reason, (
         "a cursor is opaque provider state and this reason is written to Tier 2"
     )
+    assert fetch.asked == [], "nothing was asked"
+
+
+def test_the_old_decimal_cursor_is_refused_by_name():
+    """Row: *old cursor* — the offset the in-memory stub wrote is not a date.
+
+    Refused, named, and left as it was: there is no position in a newest-first
+    list that a decimal offset could still mean.
+    """
+    old = Cursor(b"7")
+    fetch = paging(tuple(ROWS))
+    result = connector(fetch_page=fetch).harvest(old)
+
+    assert result.outcome is HarvestOutcome.FAILED
+    assert result.cursor is old
+    assert result.failure is not None and result.failure.retryable is False
+    assert "decimal" in result.failure.reason
+    assert fetch.asked == []
 
 
 def test_a_duplicate_row_across_pages_counts_its_span_once(tmp_path):
@@ -434,9 +442,198 @@ def test_a_duplicate_row_across_pages_counts_its_span_once(tmp_path):
     persisted = run_harvest(wired, INSTANCE)
 
     assert (persisted.persisted, persisted.duplicates) == (1, 1)
-    assert wired.storage.coverage_windows(INSTANCE) == [(NOW, NOW + 2 * TICK)], (
+    assert wired.storage.coverage_windows(INSTANCE) == [(NOW + TICK, NOW + 3 * TICK)], (
         "the span is one window regardless of how many pages carried the row"
     )
+
+
+# ── The cursor is a commit date (story 8n) ───────────────────────────────────
+
+
+def test_one_page_of_three_commits_sets_the_cursor_to_the_newest(tmp_path):
+    """Row: *one page* — three events, the cursor is the newest date, one window."""
+    rows = [
+        commit("a1", "one", at=NOW - timedelta(hours=3)),
+        commit("a3", "three", at=NOW - timedelta(minutes=30)),
+        commit("a2", "two", at=NOW - timedelta(hours=2)),
+    ]
+    wired = daemon(tmp_path, rows=rows)
+    persisted = run_harvest(wired, INSTANCE)
+
+    assert persisted.persisted == 3
+    assert wired.storage.load_cursor(INSTANCE) == Cursor(b"2026-08-19T08:30:00Z")
+    assert wired.storage.coverage_windows(INSTANCE) == [(NOW, NOW)]
+
+
+def test_an_empty_answer_leaves_the_cursor_where_it_was():
+    """Row: *empty* — no events, a window, and the cursor unchanged."""
+    result = connector(fetch_page=paging(())).harvest(NEWEST)
+
+    assert result.outcome is HarvestOutcome.EMPTY
+    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW)
+    assert result.cursor is NEWEST
+
+
+def test_the_next_run_asks_from_thirty_days_before_the_cursor(tmp_path):
+    """Row: *merge lag* — asked from T − 30 days; re-seen commits are duplicates.
+
+    A commit keeps the date it was made when its branch is merged, so asking
+    from the cursor alone would miss a commit merged after the cursor passed
+    its date. Re-asking thirty days brings back what was already recorded, and
+    the natural key drops it.
+    """
+    wired = daemon(tmp_path, rows=ROWS)
+    run_harvest(wired, INSTANCE)
+    assert wired.storage.load_cursor(INSTANCE) == NEWEST
+
+    again = paging(tuple(ROWS))
+    wired.connectors[INSTANCE].fetch_page = again
+    second = run_harvest(wired, INSTANCE)
+
+    assert again.since == [datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)]
+    assert (second.persisted, second.duplicates) == (0, 2)
+    assert wired.storage.load_cursor(INSTANCE) == NEWEST
+
+
+def test_a_stored_cursor_in_the_future_is_read_as_now():
+    """The clock was moved back: a cursor past now would ask for nothing, so it
+    is read as now before the merge lag is subtracted, and the next finished
+    walk sets it to the newest date it saw."""
+    future = Cursor(b"2027-01-01T00:00:00Z")
+    fetch = paging(tuple(ROWS))
+    result = connector(fetch_page=fetch).harvest(future)
+
+    assert fetch.since == [NOW - timedelta(days=30)]
+    assert result.cursor == NEWEST
+
+
+def test_a_token_is_stripped_and_a_blank_one_is_no_credential():
+    """`has_credential` and what is sent read one value: surrounding whitespace
+    is not part of the token, and a token of only whitespace is none at all."""
+    padded = connector(credential=f"  {TOKEN}\n", fetch_page=paging(()))
+    assert padded.has_credential and padded.token == TOKEN
+    assert padded.harvest(Cursor()).outcome is HarvestOutcome.EMPTY
+
+    fetch = paging(())
+    blank = connector(credential=" \t\n", fetch_page=fetch)
+    assert not blank.has_credential
+    assert blank.harvest(Cursor()).outcome is HarvestOutcome.FAILED
+    assert fetch.asked == []
+
+
+@pytest.mark.parametrize("reach_back", [timedelta(0), timedelta(minutes=-5), timedelta(days=3700)])
+def test_the_adapter_refuses_a_reach_back_outside_its_bounds(reach_back):
+    with pytest.raises(ValueError, match="reach-back"):
+        connector(first_run_reach_back=reach_back)
+
+
+def test_a_bug_in_mapping_is_not_recorded_as_a_provider_row_fault(monkeypatch):
+    """Only `RowRefused` is a refused row. Any other error out of the mapping is
+    pm-ai's, and it is not filed against GitLab's data."""
+    adapter = connector(fetch_page=paging((ROWS[0],)))
+
+    def broken(row):
+        raise ValueError("a pm-ai bug")
+
+    monkeypatch.setattr(adapter, "_to_event", broken)
+    with pytest.raises(ValueError, match="a pm-ai bug"):
+        adapter.harvest(Cursor())
+
+
+def test_a_cursor_never_moves_backwards():
+    """A re-asked span that no longer holds the commit that set the cursor must
+    not send the next run further back than the last one."""
+    stored = Cursor(b"2026-08-19T08:30:00Z")
+    result = connector(fetch_page=paging((ROWS[0],))).harvest(stored)
+
+    assert result.cursor is stored
+
+
+def test_a_future_dated_commit_is_flagged_and_never_sets_the_cursor(tmp_path):
+    """Row: *future date* — flagged at persist, and the cursor is the newest
+    plausible date, never tomorrow."""
+    rows = [
+        commit("f1", "from tomorrow", at=NOW + timedelta(days=1)),
+        commit("f2", "an hour ago", at=NOW - timedelta(hours=1)),
+    ]
+    wired = daemon(tmp_path, rows=rows)
+    persisted = run_harvest(wired, INSTANCE)
+
+    assert (persisted.persisted, persisted.flagged) == (2, 1)
+    assert wired.storage.load_cursor(INSTANCE) == NEWEST
+
+
+def test_a_cursor_within_the_skew_tolerance_is_never_past_now():
+    """A date a few minutes ahead is plausible (AD-35's skew tolerance), and the
+    cursor still stops at this machine's now."""
+    ahead = commit("s1", "slightly ahead", at=NOW + timedelta(minutes=2))
+    result = connector(fetch_page=paging((ahead,))).harvest(Cursor())
+
+    assert result.cursor == Cursor(b"2026-08-19T09:00:00Z")
+
+
+def test_a_first_run_reaches_back_seven_days_or_the_rows_override():
+    """Row: *first run* — now − 7 days, or the override the row sets."""
+    default = paging(())
+    connector(fetch_page=default).harvest(Cursor())
+    assert default.since == [NOW - timedelta(days=7)]
+
+    overridden = paging(())
+    connector(fetch_page=overridden, first_run_reach_back=timedelta(minutes=90)).harvest(Cursor())
+    assert overridden.since == [NOW - timedelta(minutes=90)]
+
+
+def test_page_two_failing_twice_asks_from_the_same_instant_both_times(tmp_path):
+    """Acceptance: a walk that did not finish moves the cursor nothing, so the
+    run after it asks exactly what this one asked."""
+    wired = daemon(tmp_path, rows=ROWS)
+    run_harvest(wired, INSTANCE)
+
+    failing = paging((ROWS[0],), fails_at=PageUnavailable("GitLab answered 503", retryable=True))
+    wired.connectors[INSTANCE].fetch_page = failing
+    run_harvest(wired, INSTANCE)
+    run_harvest(wired, INSTANCE)
+
+    first, _, second, _ = failing.asked
+    assert (first.page, second.page) == (1, 1)
+    assert first.since == second.since == datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+    assert wired.storage.load_cursor(INSTANCE) == NEWEST
+
+
+def test_a_connector_with_no_credential_asks_nothing():
+    """Row: *adapter, no credential* — no socket, a failure, not retryable."""
+    fetch = paging(tuple(ROWS))
+    result = connector(credential=None, fetch_page=fetch).harvest(NEWEST)
+
+    assert fetch.asked == []
+    assert result.outcome is HarvestOutcome.FAILED
+    assert result.failure is not None and result.failure.retryable is False
+    assert "not set up" in result.failure.reason
+    assert result.coverage is None
+    assert result.cursor is NEWEST
+
+
+def test_a_built_in_with_no_credential_is_not_harvested_and_records_nothing(tmp_path):
+    """Row: *built-in, no credential* — nothing asked, nothing recorded.
+
+    Not set up is not a fault, so no failure row may say otherwise — and no
+    window may say pm-ai looked.
+    """
+    wired = build(tmp_path, "alpha", now=lambda: NOW)
+    builtin = wired.connectors[INSTANCE]
+    fetch = paging(tuple(ROWS))
+    builtin.fetch_page = fetch
+    assert builtin.credential is None
+
+    persisted = run_harvest(wired, INSTANCE)
+
+    assert fetch.asked == []
+    assert (persisted.persisted, persisted.duplicates) == (0, 0)
+    assert wired.storage.load_cursor(INSTANCE) == Cursor()
+    assert wired.storage.coverage_windows(INSTANCE) == []
+    assert wired.storage.harvest_failure(INSTANCE) is None
+    probe = builtin.check_health()
+    assert probe.health.value == "absent" and "not set up yet" in probe.detail
 
 
 # ── Rows that came back and could not be read ────────────────────────────────
@@ -444,21 +641,19 @@ def test_a_duplicate_row_across_pages_counts_its_span_once(tmp_path):
 # Not a matrix row of its own, and the reason it belongs in this file anyway:
 # the matrix's *partial-page* row says a page that arrived keeps its events and
 # its earned coverage even when something else went wrong. `_to_event`
-# subscripted `row["sha"]`, `row["message"]` and `row["author_email"]`, and the
-# mapping ran outside every `try` in `harvest` — so one row missing one field
-# raised out of the method and took page one's events, page one's real coverage
-# and the outcome with it, one field lower than the row that forbids exactly
-# that.
+# subscripted its fields and the mapping ran outside every `try` in `harvest`
+# — so one row missing one field raised out of the method and took page one's
+# events, page one's real coverage and the outcome with it, one field lower than
+# the row that forbids exactly that.
 
-UNREADABLE = {
-    "sha": "3b7e02",
+UNREADABLE = commit(
+    "3b7e02",
     # Not a string, which is the one shape `_to_event` refuses outright: the
     # message is the evidence a verifier reads, and an invented empty body reads
     # as a commit that said nothing.
-    "message": None,
-    "author_email": "alex@example.com",
-    "committed_at": NOW - timedelta(hours=1),
-}
+    None,
+    at=NOW - timedelta(hours=1),
+)
 
 
 def test_one_unreadable_row_costs_that_row_and_nothing_beside_it(tmp_path):
@@ -469,13 +664,13 @@ def test_one_unreadable_row_costs_that_row_and_nothing_beside_it(tmp_path):
     is indistinguishable, later, from a window never earned: AD-35's fail-closed
     guard reads both as "we never looked".
     """
-    result = connector(_fake_api=[dict(ROWS[0]), dict(UNREADABLE)]).harvest(Cursor())
+    result = connector(fetch_page=paging((ROWS[0], UNREADABLE))).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.HARVESTED
     assert len(result.events) == 1
-    assert result.events[0].payload.sha == ROWS[0]["sha"]
+    assert result.events[0].payload.sha == ROWS[0]["id"]
     (refusal,) = result.refusals
-    assert refusal.identifier == UNREADABLE["sha"], (
+    assert refusal.identifier == UNREADABLE["id"], (
         "the refusal names the row, or nobody can go and look at it"
     )
     assert "message" in refusal.reason
@@ -492,55 +687,60 @@ def test_one_unreadable_row_costs_that_row_and_nothing_beside_it(tmp_path):
     assert wired.storage.harvest_failure(INSTANCE) is None
 
 
-def test_a_committed_at_that_arrives_as_a_string_refuses_one_row_not_the_harvest():
-    """The shape real GitLab sends, and the exception it used to raise.
+def test_a_committed_date_that_will_not_parse_refuses_that_row_alone():
+    """Row: *unparseable date* — that row refused by sha, the rest kept.
 
-    `committed_at` on the wire is an ISO **string**. Passed on unparsed it
-    reaches `validate_occurred_at`, whose `_assert_comparable` asks a `str` for
-    `.tzinfo` — an `AttributeError` out of the coverage check, out of `harvest`,
-    and out of `run_harvest`, none of which catch it. So the whole harvest died
-    on a field that is present and well-formed at the provider.
-
-    Refused by name instead, and the credible row beside it keeps its coverage.
+    Everything downstream compares the provider clock as an aware datetime, so
+    a date that cannot be read is refused by name rather than passed on.
     """
-    stringly = {
-        "sha": "5c1d4e",
-        "message": "committed_at as GitLab really sends it",
-        "author_email": "alex@example.com",
-        "committed_at": "2026-08-19T07:00:00+00:00",
-    }
-    result = connector(_fake_api=[dict(ROWS[0]), stringly]).harvest(Cursor())
+    unreadable = commit("5c1d4e", "dated in words", at="yesterday")
+    naive = commit("6d2e5f", "no offset", at="2026-08-19T07:00:00")
+    result = connector(fetch_page=paging((ROWS[0], unreadable, naive))).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.HARVESTED
-    assert [event.payload.sha for event in result.events] == [ROWS[0]["sha"]]
-    (refusal,) = result.refusals
-    assert refusal.identifier == "5c1d4e"
-    assert "str" in refusal.reason and "datetime" in refusal.reason
+    assert [event.payload.sha for event in result.events] == [ROWS[0]["id"]]
+    assert [refusal.identifier for refusal in result.refusals] == ["5c1d4e", "6d2e5f"]
+    assert all("committed_date" in refusal.reason for refusal in result.refusals)
     assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW)
 
 
-def test_a_refused_row_advances_the_cursor_past_itself(tmp_path):
-    """Otherwise the same unreadable row is re-fetched and re-refused forever.
+def test_gitlabs_date_string_becomes_an_aware_utc_instant():
+    """GitLab's `committed_date` carries the committer's offset and milliseconds."""
+    row = commit("7e3f60", "east of Greenwich", at="2026-08-19T10:30:00.000+03:00")
+    (event,) = connector(fetch_page=paging((row,))).harvest(Cursor()).events
 
-    A refusal is a decision about the row, not a reason to come back for it:
-    re-asking would refuse it identically, and a cursor held back on it would
-    never reach the rows behind it.
-    """
+    assert event.occurred_at == datetime(2026, 8, 19, 7, 30, tzinfo=timezone.utc)
+    assert event.occurred_at.utcoffset() == timedelta(0)
+
+
+def test_a_refused_row_does_not_hold_the_cursor_back(tmp_path):
+    """A refusal is a decision about the row, not a reason to come back for it:
+    the cursor is the kept rows' newest date, as though the refused one was not
+    there."""
     wired = daemon(tmp_path, rows=[dict(ROWS[0]), dict(UNREADABLE)])
     run_harvest(wired, INSTANCE)
-    assert wired.storage.load_cursor(INSTANCE) == Cursor(b"2")
+    assert wired.storage.load_cursor(INSTANCE) == Cursor(b"2026-08-19T07:00:00Z")
 
 
 def test_a_page_whose_every_row_is_refused_is_harvested_not_empty():
     """Rows arrived and pm-ai could not read them, which is the one of the two
     silences that needs somebody to look — so it cannot collapse into EMPTY.
     """
-    result = connector(_fake_api=[dict(UNREADABLE)]).harvest(Cursor())
+    result = connector(fetch_page=paging((UNREADABLE,))).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.HARVESTED
     assert result.events == ()
     assert len(result.refusals) == 1
     assert result.coverage is None, "no event survived, so there is nothing to cover"
+
+
+def test_a_row_that_is_not_an_object_is_refused_not_raised():
+    """A commit list holding something other than commit objects costs that item."""
+    result = connector(fetch_page=paging((ROWS[0], "not a commit"))).harvest(Cursor())  # type: ignore[arg-type]
+
+    assert len(result.events) == 1
+    (refusal,) = result.refusals
+    assert refusal.identifier is None and "str" in refusal.reason
 
 
 # ── Rows that returned nothing ───────────────────────────────────────────────
@@ -558,31 +758,30 @@ def test_an_empty_200_is_ran_and_learned_nothing_and_says_it_ran(tmp_path):
     was unreachable there permanently.
 
     What the earlier row was really defending is asserted below rather than
-    dropped: the bounds are the two clock readings this fetch actually took,
+    dropped: the bounds are the two clock readings either side of the request,
     one tick apart, and not `now() - 4h` to `now()`. A fabricated window and a
     measured one are told apart by their *provenance*, which is what the
     `Ticking` clock makes visible — not by whether any row came back.
     """
     clock = Ticking()
-    result = connector(now=clock, _fake_api=[]).harvest(Cursor())
+    result = connector(now=clock, fetch_page=paging(())).harvest(Cursor())
     assert result.outcome is HarvestOutcome.EMPTY
     assert result.events == ()
     assert result.failure is None
-    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW + TICK), (
+    assert result.coverage == CoverageWindow(INSTANCE, NOW + TICK, NOW + 2 * TICK), (
         "the window is the two readings either side of the request"
     )
-    assert clock.readings == [NOW, NOW + TICK], (
-        "and those are the only two readings the fetch took"
+    assert clock.readings == [NOW, NOW + TICK, NOW + 2 * TICK], (
+        "where a first run asks from, then the two readings around the fetch"
     )
-    assert result.answered_at == clock.readings[0], (
-        "the instant the empty page was read is the first reading, and the "
-        "window starts there (8p)"
+    assert result.answered_at == clock.readings[1], (
+        "the instant the empty page was read, and the window starts there (8p)"
     )
 
     ticking = Ticking()
     wired = daemon(tmp_path, rows=[], now=ticking)
     run_harvest(wired, INSTANCE)
-    assert wired.storage.coverage_windows(INSTANCE) == [(NOW, NOW + TICK)], (
+    assert wired.storage.coverage_windows(INSTANCE) == [(NOW + TICK, NOW + 2 * TICK)], (
         "a provider that answered with nothing was still asked, and the record "
         "of having asked survives the write"
     )
@@ -603,26 +802,24 @@ def test_a_quiet_project_accumulates_the_coverage_that_makes_broken_reachable(tm
     input — a due instant that falls inside one of the recorded checks is
     enclosed by a window, and the verdict that follows is then reachable.
 
-    **What this does not prove.** `Ticking` steps a second per reading, so
-    consecutive windows here abut and a due instant lands inside one. Real
-    windows are the milliseconds a request took, hours apart, and a due
-    instant will almost always fall in a gap — which the negative case below
-    pins deliberately. Deciding that a whole *period* was watched therefore
-    needs a union with a gap tolerance, which `lifecycle.py` already says and
-    story 16 owns. Read this as: the evidence now exists and carries honest
-    bounds. It is what makes `BROKEN` representable, not what makes it
-    reachable.
+    **What this does not prove.** Real windows are the milliseconds a request
+    took, hours apart, and a due instant will almost always fall in a gap —
+    which the negative case below pins deliberately. Deciding that a whole
+    *period* was watched needs a union with a gap tolerance, which
+    `lifecycle.py` already says and story 16 owns.
     """
     ticking = Ticking()
     wired = daemon(tmp_path, rows=[], now=ticking)
     for _ in range(3):
         run_harvest(wired, INSTANCE)
 
+    # Three readings a run: where a first run asks from (an empty answer moves
+    # no cursor, so every run is a first run), and the two around the fetch.
     windows = wired.storage.coverage_windows(INSTANCE)
     assert windows == [
-        (NOW, NOW + TICK),
-        (NOW + 2 * TICK, NOW + 3 * TICK),
+        (NOW + TICK, NOW + 2 * TICK),
         (NOW + 4 * TICK, NOW + 5 * TICK),
+        (NOW + 7 * TICK, NOW + 8 * TICK),
     ], "three checks that found nothing are three records of having checked"
 
     def covers(instant: datetime) -> bool:
@@ -636,7 +833,7 @@ def test_a_quiet_project_accumulates_the_coverage_that_makes_broken_reachable(tm
             harvest_failed=False,
         )
 
-    inside = NOW + 2 * TICK
+    inside = NOW + 4 * TICK
     assert covers(inside), "the instant a T-dated event would have arrived in is checked"
     assert verdict(inside) is CommitmentState.BROKEN, (
         "which is the whole point: on a quiet project, BROKEN is reachable at all"
@@ -647,7 +844,7 @@ def test_a_quiet_project_accumulates_the_coverage_that_makes_broken_reachable(tm
     # let adjacent windows merge across it would make a laptop that was closed
     # between two harvests indistinguishable from a promise nobody kept. FR-26
     # nudges are irreversible, so this gap fails closed.
-    between = NOW + TICK + timedelta(milliseconds=500)
+    between = NOW + 2 * TICK + timedelta(milliseconds=500)
     assert not covers(between), "an instant between two checks is not a checked instant"
     assert verdict(between) is CommitmentState.UNKNOWN, (
         "8i widens what counts as having looked; it does not widen when"
@@ -661,27 +858,19 @@ def test_an_empty_first_page_and_a_failed_second_claims_nothing_and_still_return
     nothing failed. Drop that requirement and this fetch builds `FAILED` +
     coverage + nothing mapped, which `HarvestResult.__post_init__` refuses with
     a `ValueError` — raised from `harvest`, which the port documents as
-    reporting rather than raising, and which `run_harvest` calls with no
-    `except`. A harvest that reported a provider outage would take the process
-    down instead.
-
-    Written with its own transport because `paging(fails_at=...)` cannot express
-    it: every existing call site passes zero pages, so the *first* fetch raises,
-    `reached_at` stays `None`, and no window is in the running at all. The shape
-    that reaches the conjunct needs a page that answers, holds nothing, and
-    points at another.
+    reporting rather than raising.
     """
 
-    def empty_then_gone(offset: int) -> Page:
-        if offset == 0:
-            return Page(rows=(), next_offset=1)
+    def empty_then_gone(query: CommitQuery) -> Page:
+        if query.page == 1:
+            return Page(rows=(), next_page=2)
         raise PageUnavailable("the provider went away", retryable=True)
 
     clock = Ticking()
     result = connector(now=clock, fetch_page=empty_then_gone).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.FAILED
-    assert result.answered_at == clock.readings[0], (
+    assert result.answered_at == clock.readings[1], (
         "page one was read, so the provider answered — the failure on page two "
         "does not undo when (8p)"
     )
@@ -705,7 +894,7 @@ def test_a_5xx_is_a_value_and_moves_nothing(tmp_path):
     than raising, because a raise on page two would take page one's coverage with
     it.
     """
-    since = Cursor(b"7")
+    since = NEWEST
     refused = PageUnavailable("GitLab answered 502", retryable=True)
     result = connector(fetch_page=paging(fails_at=refused)).harvest(since)
 
@@ -729,8 +918,8 @@ def test_page_two_failing_returns_page_ones_events_coverage_and_the_failure(tmp_
     """Row: *partial page failure* — all three, in one value.
 
     The shape an exception cannot express, and the reason the outcome is a value
-    rather than a raise. The cursor advances to page one's end only, so page two
-    is fetched again next time instead of skipped.
+    rather than a raise. The cursor does not move: the pages not walked are the
+    older ones, so the next run asks from the same instant.
     """
     clock = Ticking()
     fetch = paging((ROWS[0],), fails_at=PageUnavailable("page two refused", retryable=False))
@@ -738,16 +927,16 @@ def test_page_two_failing_returns_page_ones_events_coverage_and_the_failure(tmp_
 
     assert result.outcome is HarvestOutcome.FAILED
     assert len(result.events) == 1
-    assert result.coverage == CoverageWindow(INSTANCE, clock.readings[0], clock.readings[-1])
-    assert result.answered_at == clock.readings[0], "page one's reading, not a later one"
+    assert result.coverage == CoverageWindow(INSTANCE, clock.readings[1], clock.readings[-1])
+    assert result.answered_at == clock.readings[1], "page one's reading, not a later one"
     assert result.failure is not None and "page two refused" in result.failure.reason
-    assert result.cursor == Cursor(b"1"), "the cursor advanced past page two"
+    assert result.cursor == Cursor(), "the cursor moved on a walk that did not finish"
 
     wired = daemon(tmp_path, now=Ticking(), fetch_page=fetch)
     persisted = run_harvest(wired, INSTANCE)
     assert persisted.persisted == 1
-    assert wired.storage.coverage_windows(INSTANCE) == [(NOW, NOW + 2 * TICK)]
-    assert wired.storage.load_cursor(INSTANCE) == Cursor(b"1")
+    assert wired.storage.coverage_windows(INSTANCE) == [(NOW + TICK, NOW + 3 * TICK)]
+    assert wired.storage.load_cursor(INSTANCE) == Cursor()
     assert wired.storage.harvest_failure(INSTANCE) is not None
 
 
@@ -762,7 +951,7 @@ def test_a_429_surfaces_its_retry_hint_and_keeps_what_it_walked(tmp_path):
     result = connector(now=Ticking(), fetch_page=fetch).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.FAILED
-    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW + 2 * TICK)
+    assert result.coverage == CoverageWindow(INSTANCE, NOW + TICK, NOW + 3 * TICK)
     assert result.failure is not None
     assert result.failure.retryable is True
     assert result.failure.retry_after == timedelta(seconds=90)
@@ -784,7 +973,7 @@ def test_a_transport_that_throws_something_unclassified_still_returns():
     precisely what the partial-page row forbids.
     """
 
-    def explode(offset: int) -> Page:
+    def explode(query: CommitQuery) -> Page:
         raise TimeoutError("the socket gave up on https://gitlab.example/api?private_token=s3cret")
 
     result = connector(fetch_page=explode).harvest(Cursor())
@@ -802,20 +991,22 @@ def test_a_transport_that_throws_something_unclassified_still_returns():
 
 
 def test_a_provider_position_that_does_not_advance_is_reported_not_looped():
-    """Also not a matrix row — the walk must terminate.
+    """Row: *next page does not advance* — reported, not walked again.
 
-    A transport handing back a next offset at or behind the one just fetched
-    would re-harvest the same rows forever. Reported as a failure so the pages
-    already walked keep their coverage.
+    A next-page header repeating the page just fetched would re-harvest the
+    same rows forever. Reported as a failure so the page already walked keeps
+    its coverage.
     """
     result = connector(
-        now=Ticking(), fetch_page=lambda offset: Page(rows=(ROWS[0],), next_offset=0)
+        now=Ticking(), fetch_page=lambda query: Page(rows=(ROWS[0],), next_page=query.page)
     ).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.FAILED
     assert result.failure is not None and "does not advance" in result.failure.reason
+    assert result.failure.retryable is False
     assert len(result.events) == 1
-    assert result.coverage == CoverageWindow(INSTANCE, NOW, NOW + TICK)
+    assert result.coverage == CoverageWindow(INSTANCE, NOW + TICK, NOW + 2 * TICK)
+    assert result.cursor == Cursor()
 
 
 # ── What survives the process ────────────────────────────────────────────────
@@ -846,7 +1037,9 @@ def test_a_failed_harvest_is_still_a_failure_after_a_restart(tmp_path):
     # The other half of the distinction: an empty harvest, read back the same
     # way, is not a failure. Without this the assertion above passes for a
     # reader that answers "failed" to everything. The freshly built connector
-    # holds no rows and no injected transport, so this run is an empty `200`.
+    # is given a token and an empty page, so this run is an empty `200`.
+    restarted.connectors[INSTANCE].credential = TOKEN
+    restarted.connectors[INSTANCE].fetch_page = paging(())
     run_harvest(restarted, INSTANCE)
 
     again = build(tmp_path, "alpha", now=lambda: NOW)
@@ -1085,13 +1278,13 @@ def test_a_clock_that_steps_backwards_mid_harvest_claims_no_coverage():
     happened and there is no honest interval to say it happened in.
     """
     backwards = Ticking(step=-timedelta(hours=1))
-    result = connector(now=backwards, _fake_api=list(ROWS)).harvest(Cursor())
+    result = connector(now=backwards, fetch_page=paging(tuple(ROWS))).harvest(Cursor())
 
     assert result.outcome is HarvestOutcome.HARVESTED
     assert len(result.events) == 2
     assert backwards.readings[-1] < backwards.readings[0], "the premise of the row"
     assert result.coverage is None
-    assert result.answered_at == backwards.readings[0], (
+    assert result.answered_at == backwards.readings[1], (
         "the window is withheld, but the first page was still read at this "
         "instant, and that fact stays (8p)"
     )

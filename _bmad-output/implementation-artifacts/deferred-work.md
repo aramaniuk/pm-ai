@@ -570,6 +570,7 @@ transcript.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33b-graph-calendar-fetch.md`
   summary: **NOTE 2026-10-09:** slice `8n` widens this (a second standard-library HTTP client). `urllib.request` is now one of this codebase's HTTP clients and the `http-confined-to-adapters` contract cannot name it, so a misplaced adapter could speak HTTP from `pm_ai.platform` and pass the gate.
   evidence: `pm_ai/connectors/graph/client.py._urllib_transport` reaches Graph over the standard library rather than a declared client, which adds no pinned dependency and sits in a layer the contract already permits. Adding `urllib.request` to the contract was attempted and refused by import-linter: "Invalid forbidden module urllib.request: subpackages of external packages are not valid." Forbidding the parent `urllib` would forbid `urllib.parse` — a URL parser — in `surfaces`, `storage` and `platform`, which is an overreach that would be worked around rather than obeyed. Nothing in those three layers imports `urllib` at all today (measured: `grep -rn urllib pm_ai/` finds only the Graph client), and `core-is-io-free` does forbid `urllib` in `pm_ai.core`. The residual hole needs an AST check of the kind `tests/architecture/test_static_rules.py` already applies to `open()` and `subprocess` — a call-level rule, since this is exactly the class of gap the msal entry in that contract was added to close.
+  widened (`8n`, built 2026-10-12): `pm_ai/connectors/gitlab/client.py._urllib_transport` is the second standard-library HTTP client, reaching GitLab's list-commits call the same way — `urllib.request` imported at call time, inside `pm_ai.connectors`, with redirects refused by its own opener. Two call sites now sit behind the same unenforced confinement (measured: `grep -rln urllib.request pm_ai/` finds `connectors/graph/client.py` and `connectors/gitlab/client.py`), and the AST rule above would cover both.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33b-graph-calendar-fetch.md`
   summary: **ASSIGNED 2026-10-09 to `33d and 33f (message bodies; the calendar body stays open)`** — spec written, not built. The story's Design Notes ask for recorded real Graph payloads as fixtures; the shapes are recorded and no captured response body is.
@@ -1152,3 +1153,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
   summary: The channel-messages fixture is hand-written from Microsoft's published example, not recorded from a real tenant; the redacted real-tenant page the spec requires is owed.
   evidence: Accepted for now by Andrei on 2026-10-12. Recording it needs the PM's sign-in and a channel id the PM picks. Still unconfirmed against a real tenant: whether replies arrive newest first (the code does not depend on it) and the up-to-200 inline-replies figure.
+
+## Surfaced by the story-8n review (2026-10-12)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md`
+  summary: A GitLab walk that always hits the page cap or the ten-minute budget never moves its cursor, so a very large project, or a connector whose cursor is months old, asks from the same instant every run and never finishes.
+  evidence: The frozen block decides that an unfinished walk moves the cursor nothing, since the pages not walked are the older ones. `_asked_from` puts no limit on how far back `stored - MERGE_LAG_DAYS` reaches. A cap on the request window, or a rule for advancing after repeated cap hits, is a design change for its own slice.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md`
+  summary: `pm_ai/connectors/probe.py` still says GitLab's transport is a stub and refuses every GitLab token, and the remedies `8n` writes point at `pm-ai connector add gitlab`, which cannot succeed until `8o` lands.
+  evidence: The frozen block puts the probe and the CLI change in the next slice; `8o`'s spec owns the probe, the host and project questions and token stripping at enrolment.

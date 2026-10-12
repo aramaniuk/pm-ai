@@ -11,6 +11,7 @@ import shutil
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from gitlab_fakes import install
 
 from pm_ai.app.pipelines import run_harvest
 from pm_ai.app.wiring import build
@@ -37,12 +38,12 @@ NOW = datetime(2026, 8, 19, 9, 0, tzinfo=timezone.utc)
 def daemon(tmp_path):
     shutil.rmtree(tmp_path, ignore_errors=True)
     d = build(tmp_path, "alpha", now=lambda: NOW)
-    d.connectors["gitlab:alpha"]._fake_api = [
-        {"sha": "9f2a1c", "message": "Fix auth refactor", "author_email": "alex@example.com",
-         "committed_at": NOW - timedelta(hours=2)},
-        {"sha": "3b7e02", "message": "Add Redis benchmark", "author_email": "alex@example.com",
-         "committed_at": NOW - timedelta(hours=1)},
-    ]
+    install(d, [
+        {"id": "9f2a1c", "message": "Fix auth refactor", "author_email": "alex@example.com",
+         "committed_date": (NOW - timedelta(hours=2)).isoformat()},
+        {"id": "3b7e02", "message": "Add Redis benchmark", "author_email": "alex@example.com",
+         "committed_date": (NOW - timedelta(hours=1)).isoformat()},
+    ])
     return d
 
 
@@ -88,7 +89,7 @@ def test_dedup_survives_a_restart(daemon, tmp_path):
     assert first.persisted == 2
 
     restarted = build(tmp_path, "alpha", now=lambda: NOW)
-    restarted.connectors["gitlab:alpha"]._fake_api = daemon.connectors["gitlab:alpha"]._fake_api
+    install(restarted, fetch=daemon.connectors["gitlab:alpha"].fetch_page)
     restarted.storage.save_cursor("gitlab:alpha", Cursor(), None, None)  # replay the window
 
     second = run_harvest(restarted, "gitlab:alpha")
@@ -126,13 +127,13 @@ def test_a_commit_author_is_written_as_the_handle_the_provider_gave(daemon):
     path reads the alias table.
     """
     register_alias(person_handle("email", "alex@example.com"), Actor("actor_alex", "Alex"))
-    daemon.connectors["gitlab:alpha"]._fake_api = [
-        {"sha": "9f2a1c", "message": "a", "author_email": "Alex@Example.com",
-         "committed_at": NOW - timedelta(hours=3)},
-        {"sha": "3b7e02", "message": "b", "committed_at": NOW - timedelta(hours=2)},
-        {"sha": "77aa00", "message": "c", "author_email": "not-an-address",
-         "committed_at": NOW - timedelta(hours=1)},
-    ]
+    install(daemon, [
+        {"id": "9f2a1c", "message": "a", "author_email": "Alex@Example.com",
+         "committed_date": (NOW - timedelta(hours=3)).isoformat()},
+        {"id": "3b7e02", "message": "b", "committed_date": (NOW - timedelta(hours=2)).isoformat()},
+        {"id": "77aa00", "message": "c", "author_email": "not-an-address",
+         "committed_date": (NOW - timedelta(hours=1)).isoformat()},
+    ])
     result = run_harvest(daemon, "gitlab:alpha")
     assert result.persisted == 3, "an unusable address costs the person, never the row"
 

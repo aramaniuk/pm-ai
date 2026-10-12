@@ -25,6 +25,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pm_ai.app.wiring import Daemon, read_pm_identity
+from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.core.config import ConfigRefused
 from pm_ai.core.event_log import EventLog
 from pm_ai.core.extraction import extract
@@ -72,6 +73,14 @@ PERSONAL = DataScope(ScopeKind.PERSONAL)
 
 def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     connector = daemon.connectors[instance]
+    if isinstance(connector, GitLabConnectorAdapter) and not connector.has_credential:
+        # Not set up, which is not a fault (story 8n): the built-in each watched
+        # project gets holds no token until an enrolment replaces it. Nothing is
+        # asked and nothing is recorded — no cursor, no window, no failure — so
+        # an unconfigured connector cannot read as a broken one (AD-35, AD-39).
+        # The empty write is the single writer's clock read, as for an empty
+        # harvest below; it writes no line.
+        return daemon.storage.persist_events((), scope=daemon.scope)
     cursor = daemon.storage.load_cursor(instance)  # scheduler owns the cursor (AD-9)
 
     result = connector.harvest(cursor)

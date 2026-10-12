@@ -20,7 +20,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+from pm_ai.connectors.gitlab import (
+    DEFAULT_HOST as GITLAB_DEFAULT_HOST,
+    HOST_KEY as GITLAB_HOST_KEY,
+    PROJECT_KEY as GITLAB_PROJECT_KEY,
+    MAX_REACH_BACK_MINUTES as GITLAB_MAX_REACH_BACK_MINUTES,
+    REACH_BACK_KEY as GITLAB_REACH_BACK_KEY,
+    GitLabConnectorAdapter,
+    host_refusal,
+    project_refusal,
+)
 from pm_ai.connectors.graph import (
     CLIENT_ID_KEY,
     MAX_SETTING_MINUTES,
@@ -391,8 +400,15 @@ def build(
     connectors: dict[str, ConnectorPort] = {}
     builtin_scopes: dict[str, DataScope] = {}
     for watched_id, watched_scope in spans.items():
+        # Named `gitlab:<project id>` by composition, not by the adapter, and
+        # holding no credential: it is not harvested and records nothing until
+        # an enrolment replaces it (story 8n).
         builtin = GitLabConnectorAdapter(
-            project=watched_id, scope=watched_scope, now=clock
+            instance=f"gitlab:{watched_id}",
+            project=watched_id,
+            scope=watched_scope,
+            now=clock,
+            wait=time.sleep,
         )
         connectors[builtin.instance] = builtin
         builtin_scopes[builtin.instance] = watched_scope
@@ -756,19 +772,6 @@ def _enrolled_connectors(
             if graph is not None:
                 built.append((instance, graph))
             continue
-        # The connector's own declared project, not one re-derived from its
-        # name. The instance is a path component and may not contain `/`, while
-        # a real GitLab project is `group/project` — deriving one from the other
-        # built an adapter for the wrong path and said nothing. The fallback is
-        # for entries written before 8b recorded it.
-        declared = entry.get("project")
-        project = (
-            declared
-            if isinstance(declared, str) and declared
-            else (instance.split(":", 1)[1] if ":" in instance else instance)
-        )
-        if not project:
-            continue
         # The credential the sealed store holds for *this* instance, or `None`
         # when there is none. `None`, absent and blank are one state to the
         # adapter's health probe — no usable credential — so a half-finished
@@ -779,21 +782,93 @@ def _enrolled_connectors(
         filed = _enrolment_scope(instance, scopes=scopes)
         if filed is None:
             continue
-        try:
-            built.append(
-                (
-                    instance,
-                    GitLabConnectorAdapter(
-                        project=project,
-                        scope=filed,
-                        now=clock,
-                        credential=held,
-                    ),
-                )
-            )
-        except Exception:
-            continue
+        gitlab = _gitlab_connector(
+            entry, instance=instance, scope=filed, credential=held, clock=clock
+        )
+        if gitlab is not None:
+            built.append((instance, gitlab))
     return tuple(built)
+
+
+def _gitlab_connector(
+    entry: Mapping[str, object],
+    *,
+    instance: str,
+    scope: DataScope,
+    credential: str | None,
+    clock: Callable[[], datetime],
+) -> GitLabConnectorAdapter | None:
+    """One GitLab enrolment row as a connector, or `None` with the key named (story 8n).
+
+    Three settings come off the row. `project` is the GitLab path and is
+    required — read from the row and never derived from the instance name,
+    which cannot hold the `/` a grouped project has. `host` defaults to
+    `https://gitlab.com`, the one defaulted key, and may carry a path for a
+    self-managed instance. `first_run_reach_back_minutes` is optional and
+    checked as Graph's minute settings are.
+
+    A value that cannot be used builds nothing and the key is named on stderr,
+    as `_graph_connector` does: a connector that silently fails to appear is
+    indistinguishable from one that was never enrolled. `time.sleep` is
+    injected as the throttle wait, because the client's default does not wait.
+    """
+    project = entry.get(GITLAB_PROJECT_KEY)
+    unusable = project_refusal(project)
+    if unusable is not None:
+        _unbuilt(
+            instance,
+            f"its {GITLAB_PROJECT_KEY!r} cannot be used: {unusable}.",
+            family="GitLab",
+        )
+        return None
+    host = entry.get(GITLAB_HOST_KEY, GITLAB_DEFAULT_HOST)
+    unusable = host_refusal(host)
+    if unusable is not None:
+        _unbuilt(
+            instance,
+            f"its {GITLAB_HOST_KEY!r} cannot be used: {unusable}.",
+            family="GitLab",
+        )
+        return None
+    reach_back = entry.get(GITLAB_REACH_BACK_KEY)
+    extra: dict[str, Any] = {}
+    if reach_back is not None:
+        if (
+            isinstance(reach_back, bool)
+            or not isinstance(reach_back, int)
+            or not 0 < reach_back <= GITLAB_MAX_REACH_BACK_MINUTES
+        ):
+            _unbuilt(
+                instance,
+                f"its {GITLAB_REACH_BACK_KEY!r} is {reach_back!r}, which is not a "
+                f"whole number of minutes from 1 to {GITLAB_MAX_REACH_BACK_MINUTES}.",
+                family="GitLab",
+            )
+            return None
+        extra["first_run_reach_back"] = timedelta(minutes=reach_back)
+    if not isinstance(project, str) or not isinstance(host, str):
+        # Unreachable: both refusals above answer for anything but a string.
+        # Said rather than asserted, so `python -O` cannot remove it.
+        return None
+    try:
+        return GitLabConnectorAdapter(
+            instance=instance,
+            project=project,
+            scope=scope,
+            host=host,
+            now=clock,
+            credential=credential,
+            wait=time.sleep,
+            **extra,
+        )
+    except Exception as unexpected:  # noqa: BLE001 — `build()` composes regardless
+        _unbuilt(
+            instance,
+            f"building it raised {type(unexpected).__name__}, which pm-ai could "
+            f"not classify — report it.",
+            family="GitLab",
+        )
+        return None
 
 
 def _enrolment_scope(
@@ -1001,7 +1076,7 @@ def _graph_connector(
     except (_RowRefused, UnknownProject, ValueError) as refused:
         # `ChannelListRefused` is a `ValueError`; `UnknownProject` a channel
         # mapped to a project no registry knows (`33d`).
-        _unbuilt(instance, str(refused))
+        _unbuilt(instance, str(refused), family="Graph")
         return None
     client_id, named_tenant, policy = judged.client_id, judged.tenant, judged.policy
     categories = judged.categories
@@ -1011,6 +1086,7 @@ def _graph_connector(
         _unbuilt(
             instance,
             "its category mapping was not read, which is a fault in pm-ai — report it.",
+            family="Graph",
         )
         return None
     auth = GraphDeviceCodeAuth(
@@ -1748,7 +1824,7 @@ class SealedRefreshTokenStore:
         self._holder = None
 
 
-def _unbuilt(instance: str, reason: str) -> None:
+def _unbuilt(instance: str, reason: str, *, family: str) -> None:
     """Say why a connector this machine is configured for was not constructed.
 
     stderr, and nothing else: the daemon has not composed yet, so there is no
@@ -1756,7 +1832,7 @@ def _unbuilt(instance: str, reason: str) -> None:
     the thing that failed.
     """
     print(
-        f"WARNING: the Graph connector {instance!r} was not built — {reason}",
+        f"WARNING: the {family} connector {instance!r} was not built — {reason}",
         file=sys.stderr,
     )
 

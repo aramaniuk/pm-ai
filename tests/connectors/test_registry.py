@@ -19,8 +19,10 @@ import threading
 import time
 
 import pytest
+from gitlab_fakes import TOKEN, Wire, page
 
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
+from pm_ai.connectors.gitlab.client import GitLabResponse
 from pm_ai.connectors.registry import ConnectorRegistry, DuplicateConnector
 from pm_ai.domain.events import ObservedEventType
 from pm_ai.domain.health import Health, Probe
@@ -31,7 +33,9 @@ SCOPE = DataScope(ScopeKind.PROJECT, "alpha")
 
 
 def gitlab(project: str = "alpha", **kwargs) -> GitLabConnectorAdapter:
-    return GitLabConnectorAdapter(project=project, scope=SCOPE, **kwargs)
+    return GitLabConnectorAdapter(
+        instance=f"gitlab:{project}", project=project, scope=SCOPE, **kwargs
+    )
 
 
 class FakeConnector:
@@ -211,32 +215,31 @@ def test_a_gitlab_adapter_satisfies_the_connector_port():
 
 
 def test_a_reachable_provider_is_healthy_and_fast():
-    """`reach` is supplied, because the default one does not reach anything.
-
-    Constructing this with the stubbed transport and calling the result
-    `reachable` is how a report comes to carry an `OK` nothing measured — the
-    adapter now answers `WARNING` in that state, and the row below covers it.
-    """
+    """A transport is supplied, so the probe's `OK` is GitLab's 200 answer to a
+    request that was recorded — not a socket this test opened."""
+    wire = Wire(page())
     reg = ConnectorRegistry()
-    reg.register(
-        gitlab("alpha", credential="t", reach=lambda: "gitlab answered"),
-        instance="gitlab:alpha",
-    )
+    reg.register(gitlab("alpha", credential=TOKEN, transport=wire), instance="gitlab:alpha")
     started = time.monotonic()
     report = reg.check_health()
     assert report.healthy
     assert [p.health for p in report.probes] == [Health.OK]
     assert time.monotonic() - started < 10.0
+    assert len(wire.sent) == 1, "OK is a measurement: one request was sent"
 
 
-def test_a_stubbed_transport_will_not_claim_reachability():
-    """A credential is configuration; `OK` would be a measurement."""
+def test_a_token_that_cannot_be_sent_is_failing_without_a_socket():
+    """A credential is configuration; whether it can travel is checked before
+    any request, and a token holding a line break never reaches a header."""
+    wire = Wire()
     reg = ConnectorRegistry()
-    reg.register(gitlab("alpha", credential="t"), instance="gitlab:alpha")
+    reg.register(
+        gitlab("alpha", credential="glpat-a\nb", transport=wire), instance="gitlab:alpha"
+    )
     (probe,) = reg.check_health().probes
-    assert probe.health is Health.WARNING
-    assert "stub" in probe.detail
-    assert not reg.check_health().healthy
+    assert probe.health is Health.FAILING
+    assert "line break" in probe.detail
+    assert wire.sent == []
 
 
 def test_no_credential_is_absent_not_failing():
@@ -250,11 +253,10 @@ def test_no_credential_is_absent_not_failing():
 
 
 def test_a_refusing_provider_is_failing_and_distinct_from_absent():
-    def refuse() -> str:
-        raise ConnectionError("401 Unauthorized")
+    refuse = Wire(GitLabResponse(status=401, body={"message": "401 Unauthorized"}))
 
     reg = ConnectorRegistry()
-    reg.register(gitlab("alpha", credential="t", reach=refuse), instance="gitlab:alpha")
+    reg.register(gitlab("alpha", credential=TOKEN, transport=refuse), instance="gitlab:alpha")
     (probe,) = reg.check_health().probes
     assert probe.health is Health.FAILING
     assert "401" in probe.detail
@@ -352,7 +354,7 @@ def test_a_blank_credential_is_absent_not_configured(blank):
 def test_the_sample_event_carries_a_plausible_provider_clock():
     """AD-35's path, represented in the fixture the architecture gates read.
 
-    `committed_at` was `None`, so the one event those gates inspect had no
+    The sample's date was `None`, so the one event those gates inspect had no
     `occurred_at` at all and the provider-clock rule was the single thing the
     sample could not exercise. Fixed and in the past, so it is deterministic
     and stays plausible as the real clock moves.

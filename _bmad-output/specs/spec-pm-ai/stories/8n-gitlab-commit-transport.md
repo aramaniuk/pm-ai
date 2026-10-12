@@ -2,7 +2,8 @@
 title: 'The GitLab connector reads commits from a real GitLab'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '585ee4fad781b0c3387d0fd9c4e4b4568ff7dee8'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -94,12 +95,12 @@ Two more faults hid behind the stub: the connector names itself after the GitLab
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/gitlab/client.py` -- the transport: one `GET`, https only, the token header, redirects refused, the 30 s socket timeout, status dispatch, throttle hints within the budget through an injected wait, next-page paging and its refusals -- the wire the connector lacked
-- [ ] `pm_ai/connectors/gitlab/__init__.py` -- `instance` and `host` as fields; GitLab's row shape; the reference from the scope's project id; the date cursor, merge lag and first-run reach-back; no credential means no socket; `check_health` through the client; fake list and stub removed -- the harvest becomes honest
-- [ ] `pm_ai/app/wiring.py`, `pm_ai/app/pipelines.py` -- pass the row's instance name, validated `host`, `project` and reach-back; inject `time.sleep`; skip a credential-less built-in -- composition owns the settings
-- [ ] `tests/connectors/test_gitlab_transport.py` -- the transport against a replaced opener -- every status reading pinned
-- [ ] `tests/connectors/test_coverage_honesty.py`, `tests/connectors/test_registry.py`, the three slice files above -- convert the fake-list rows; one test per matrix row, including a hand-written row with `host: https://git.internal/gitlab` and a reach-back composed through `build()`, asserting the first recorded request's host and `since` -- the matrix is the contract
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- note the second stdlib HTTP client under the `:573` entry
+- [x] `pm_ai/connectors/gitlab/client.py` -- the transport: one `GET`, https only, the token header, redirects refused, the 30 s socket timeout, status dispatch, throttle hints within the budget through an injected wait, next-page paging and its refusals -- the wire the connector lacked
+- [x] `pm_ai/connectors/gitlab/__init__.py` -- `instance` and `host` as fields; GitLab's row shape; the reference from the scope's project id; the date cursor, merge lag and first-run reach-back; no credential means no socket; `check_health` through the client; fake list and stub removed -- the harvest becomes honest
+- [x] `pm_ai/app/wiring.py`, `pm_ai/app/pipelines.py` -- pass the row's instance name, validated `host`, `project` and reach-back; inject `time.sleep`; skip a credential-less built-in -- composition owns the settings
+- [x] `tests/connectors/test_gitlab_transport.py` -- the transport against a replaced opener -- every status reading pinned
+- [x] `tests/connectors/test_coverage_honesty.py`, `tests/connectors/test_registry.py`, the three slice files above -- convert the fake-list rows; one test per matrix row, including a hand-written row with `host: https://git.internal/gitlab` and a reach-back composed through `build()`, asserting the first recorded request's host and `since` -- the matrix is the contract
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- note the second stdlib HTTP client under the `:573` entry
 
 **Acceptance Criteria:**
 - Given a row enrolled as `gitlab:alpha` for `acme/web` on a single-project machine, when the daemon composes and a harvest runs against a two-page injected transport, then both pages' events persist under `gitlab:alpha`, one window is saved under that name, and the cursor holds the newest commit date.
@@ -122,3 +123,49 @@ The health check asks for a commit rather than the signed-in user because a `rea
 - `uv run pytest -q` -- expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**The wire**
+
+- One GET for a page of commits; the token header to one host; redirects refused.
+  [`client.py:508`](../../../../pm_ai/connectors/gitlab/client.py#L508)
+
+- Each status's reading, the throttle wait inside the run's budget, and the re-ask guard.
+  [`client.py:567`](../../../../pm_ai/connectors/gitlab/client.py#L567)
+
+- Throttle hints, clamped by length before conversion.
+  [`client.py:709`](../../../../pm_ai/connectors/gitlab/client.py#L709)
+
+- The standard-library transport: body cap, read faults classified, per-request timeout.
+  [`client.py:382`](../../../../pm_ai/connectors/gitlab/client.py#L382)
+
+**The connector**
+
+- The harvest: next page must be page + 1; a row refusal affects only that row; the cursor moves only on a finished walk.
+  [`__init__.py:422`](../../../../pm_ai/connectors/gitlab/__init__.py#L422)
+
+- Where a run asks from: cursor minus the merge lag, a future cursor clamped, a first run.
+  [`__init__.py:385`](../../../../pm_ai/connectors/gitlab/__init__.py#L385)
+
+- GitLab's row shape and the reference under the pm-ai project id.
+  [`__init__.py:262`](../../../../pm_ai/connectors/gitlab/__init__.py#L262)
+
+- Health check through the client, and each status's remedy.
+  [`__init__.py:339`](../../../../pm_ai/connectors/gitlab/__init__.py#L339)
+
+**Composition**
+
+- Row settings validated: `project`, `host`, the reach-back; `time.sleep` injected.
+  [`wiring.py:793`](../../../../pm_ai/app/wiring.py#L793)
+
+- A built-in with no credential is not harvested and records nothing.
+  [`pipelines.py:76`](../../../../pm_ai/app/pipelines.py#L76)
+
+**Tests**
+
+- Every status reading against a replaced opener, plus the composed harvest through a 429.
+  [`test_gitlab_transport.py`](../../../../tests/connectors/test_gitlab_transport.py)
+
+- The matrix rows on the harvest.
+  [`test_coverage_honesty.py`](../../../../tests/connectors/test_coverage_honesty.py)
