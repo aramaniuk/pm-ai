@@ -17,17 +17,17 @@ context:
 
 A Graph connector's settings row holds the app id, the tenant and the harvest widths, and the sealed store holds the token — but neither says whose calendar and messages this is. Story 23c, which marks the messages that mention the PM, needs the PM's own Graph user id to tell a mention of the PM from any other; without it the mark cannot be made at all. And the re-sign-in command of story 8m needs the same id to refuse a sign-in by a different person than the one the connector was enrolled for.
 
-**Approach:** Every Graph sign-in reports the signed-in user's Graph user id, and the connector's settings row records it under `user_id`. `connector add graph` writes it at enrolment; `connector sign-in` (story 8m, which lands after this one) writes it through the same one-key row update. The consumers are 23c, which reads the key from the row, and 8m, which compares it.
+**Approach:** Every Graph sign-in reports the signed-in user's Graph user id, and the connector's settings row records it under `user_id`. `connector add graph` writes it at enrolment; `connector sign-in` (story 8m, which lands after this one) writes it through the same one-key row update. The consumers are 23c and `2o`'s identity, which read the key from the row.
 
 ## Boundaries & Constraints
 
 **Always:**
 - **The user id is Microsoft's immutable identifier of the signed-in account**, the value Graph returns as a user's `id`, taken from the sign-in itself — not the per-application subject, not the sign-in name, both of which can differ or change.
-- **When the sign-in does not carry that identifier**, the first part of the two-part account id MSAL reports is used, and only when MSAL reports exactly one account, its id has the two-part `<user>.<tenant>` shape, and its tenant part equals the row's tenant — a guest account's id names its home tenant, not this one (2026-10-11). Otherwise the sign-in is refused naming the missing identifier, and nothing is sealed or written: an account pm-ai cannot name is not a Graph user it can harvest for.
+- **When the sign-in does not carry that identifier**, the first part of the two-part account id MSAL reports is used, and only when MSAL reports exactly one account and its id has the two-part `<user>.<tenant>` shape (the tenant-equality rule of 2026-10-11 withdrawn 2026-10-12). Otherwise the sign-in is refused naming the missing identifier, and nothing is sealed or written: an account pm-ai cannot name is not a Graph user it can harvest for.
 - **`connector add graph` records it** beside the app id, tenant and widths it already writes, in the same row, in the same write.
 - **One row update sets `user_id` and nothing else.** It re-reads the row at write time and changes only that key, so every other key — a category mapping hand-added since the row was first written included — is kept as it was. This is the writer `connector sign-in` uses.
-- **A row whose `user_id` is missing, blank, whitespace or not text has no recorded user.** Any user may sign in for it and is recorded. A reader treats such a value as absent and never compares it — the rule 23c applies when it reads the key.
-- **A sign-in by a different user than the row records is refused by name, saving nothing**, wherever a sign-in is run against an existing row: a different person is a different connector, and accepting it would harvest another person's calendar into the PM's tree. Today only `connector sign-in` runs against an existing row, so the refusal is exercised there.
+- **A row whose `user_id` is missing, blank, whitespace or not text has no recorded user.** A reader treats such a value as absent — the rule 23c applies when it reads the key.
+- **A sign-in is never refused for its user** (Andrei, 2026-10-12): any authenticated Graph sign-in is valid, and a later sign-in records its own user id in place of the earlier one.
 - **A claim is never taken twice by one thread** (AD-5, 2026-10-11; per thread since 2026-10-12). The one-key row update and any other write here run under the claim their caller already holds rather than taking it again; a second claim on a path the same thread already holds raises a programming error naming the path, never `ArtifactBusy` — a busy refusal would blame another process that does not exist, and a retry would meet itself forever. A claim held by another thread of this process is ordinary contention and refused as `ArtifactBusy`.
 - **The user id is not a secret** and may appear in the row, in `doctor`'s row problems and in refusals; the sign-in token still never appears anywhere.
 
@@ -45,11 +45,10 @@ A Graph connector's settings row holds the app id, the tenant and the harvest wi
 | `connector add graph` | a fresh add, the sign-in carries the user id | the row carries `user_id` equal to it, beside the app id, tenant and widths | N/A |
 | User id from the account list | the sign-in carries no user id; MSAL reports exactly one account with a two-part id | `user_id` is the first part of that id | N/A |
 | Account without a user id | no user id in the sign-in; no account, several, or an id that is not two-part | refused naming the missing identifier; nothing sealed or written | exit 3 |
-| Account from another tenant | no user id in the sign-in; one two-part account id whose tenant part differs from the row's tenant | refused naming the missing identifier and the two tenants; nothing sealed or written | exit 3 |
 | A claim taken twice | a write here run while the same thread already holds the claim on the same path | a programming error naming the path, never `ArtifactBusy`; nothing written | the error propagates; not a refusal |
 | The row update | a row with a hand-added `categories` mapping; `user_id` set | the row afterwards carries the mapping, every other key as it was, and the new `user_id`; a second update with the same id changes no bytes | N/A |
-| Row with no usable `user_id` | key absent, `""`, `"  "`, or a number | read as absent; a sign-in by any user is accepted and the id recorded | N/A |
-| Different user | row `user_id` set; a sign-in's user id differs | refused naming the recorded and the signed-in user; nothing written | exit 3 |
+| Row with no usable `user_id` | key absent, `""`, `"  "`, or a number | read as absent; a sign-in records its id | N/A |
+| Different user | row `user_id` set; a sign-in's user id differs | accepted; the new user id recorded | N/A |
 | Same user again | row `user_id` set; the sign-in's matches | accepted; the row's `user_id` unchanged | N/A |
 | Daemon start | a row enrolled before this slice, no `user_id` | the connector still builds; no warning about the key | N/A |
 | Token never on screen | every row above | the sign-in token in no output | N/A |
@@ -103,6 +102,7 @@ The user id is the `oid` claim of the sign-in's id token: Microsoft documents it
 
 - **2026-10-11, frozen block amended by Andrei** (architecture review gate of the same day, AD-5). Added: the fallback account id is accepted only when its tenant part equals the row's tenant — a guest account's id names its home tenant; and a second claim on a path this process already holds is a programming error, never `ArtifactBusy` — `8m`'s sign-in runs this slice's row update while holding the claim, and a busy refusal would blame a process that does not exist and retry forever. Two matrix rows and two tasks follow.
 - **2026-10-12, frozen block amended by Andrei** (after PR #46). Claim re-entry is per thread, as built: another thread of the same process holding the claim is ordinary contention, refused as `ArtifactBusy`, and its wait ends when that thread lets go; `test_rotated_tokens_are_kept.py` relies on it. AD-5 amended the same day through `bmad-architecture`.
+- **2026-10-12, frozen block amended by Andrei** (reviewing 8m). Any authenticated Graph sign-in is valid: the different-user refusal and the fallback's tenant-equality rule are withdrawn, since identity and access are Microsoft's to guard and comparing ids protects nothing. The user id is still recorded, for reading. Matrix rows "Account from another tenant" (removed) and "Different user" (accepted) follow; `assert_same_user` and `DifferentUser` are removed in 8m.
 
 ## Suggested Review Order
 
