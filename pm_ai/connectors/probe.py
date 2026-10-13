@@ -6,16 +6,21 @@ package. `pm_ai.core.connector_enrolment` receives this as a parameter typed
 `CredentialProbePort`, which is the same arrangement that makes story 8d's
 health probes legal in this package and illegal one layer down.
 
-**No Graph entry, and none is owed.** A Graph credential is not typed, so
-there is nothing to hand a probe: `pm-ai connector add graph` signs in and runs
-the connector's own bounded health check behind the composition root
-(`pm_ai.app.wiring.GraphEnrolment`, story 8l), with this module's
-`CREDENTIAL_PROBE_SECONDS` as its bound. GitLab's transport is still a stub.
-A system pm-ai has no probe for is refused by name — `UnknownConnectorSystem`
-— rather than passed, because a probe that returned
-"fine" without asking anything would put a credential on disk on the strength of
-a check that never happened. That is the failure this whole slice is ordered to
-prevent, and it would be introduced by the probe itself.
+**No entries, and none is owed.** Neither system pm-ai builds types its
+credential into this table. `pm-ai connector add graph` signs in and runs the
+connector's own bounded health check behind the composition root
+(`pm_ai.app.wiring.GraphEnrolment`, story 8l); `pm-ai connector add gitlab`
+asks for the host and the project path, takes the token at a hidden prompt and
+runs the GitLab transport's own health check — one commit of that project —
+behind the composition root too (`pm_ai.app.wiring.GitLabEnrolment`, story 8o).
+Both bound their check at this module's `CREDENTIAL_PROBE_SECONDS`.
+
+So `PROBES` is empty, and `pm-ai connector add <any other system>` meets it
+and is refused by name — `UnknownConnectorSystem` — rather than passed, because
+a probe that returned "fine" without asking anything would put a credential on
+disk on the strength of a check that never happened. That is the failure this
+whole slice is ordered to prevent, and it would be introduced by the probe
+itself.
 """
 
 from __future__ import annotations
@@ -23,11 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from pm_ai.connectors.registry import run_bounded
-from pm_ai.ports import (
-    ProbeFailed,
-    ProbeUnreachable,
-    UnknownConnectorSystem,
-)
+from pm_ai.ports import ProbeUnreachable, UnknownConnectorSystem
 
 #: CAP-35's ten seconds, over the credential probe as well as the health one.
 #: Named separately from `HEALTH_PROBE_SECONDS` because they bound different
@@ -38,27 +39,9 @@ CREDENTIAL_PROBE_SECONDS = 10.0
 __all__ = ["CREDENTIAL_PROBE_SECONDS", "PROBES", "probe_credential"]
 
 
-def _gitlab(credential: str) -> str:
-    """GitLab's answer, once there is a transport to hear it.
-
-    `GitLabConnectorAdapter.reach` is still a stub that opens no socket, so
-    there is nothing here that could honestly answer. Refusing is the only
-    option that does not lie: accepting would seal a credential nobody checked.
-    """
-    raise ProbeFailed(
-        "pm-ai cannot yet check a GitLab credential: the GitLab connector's "
-        "transport is still a stub that opens no socket, so there is nothing "
-        "to ask. Enrolment refuses rather than sealing a credential on the "
-        "strength of a check that did not happen. GitLab's real transport is "
-        "still outstanding; story 33a built Microsoft Graph's, not this one's."
-    )
-
-
 #: The systems pm-ai can ask about, by name. A system absent from this mapping
 #: is refused rather than assumed good.
-PROBES: Mapping[str, Callable[[str], str]] = {
-    "gitlab": _gitlab,
-}
+PROBES: Mapping[str, Callable[[str], str]] = {}
 
 
 def probe_credential(system: str, credential: str) -> str:

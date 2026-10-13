@@ -866,16 +866,38 @@ def test_connector_add_refuses_when_stdin_is_not_a_terminal(
     assert "TTY" in capsys.readouterr().err
 
 
+def _gitlab_answers(monkeypatch, token: str = "glpat-typed-at-the-prompt-99", status: int = 200):
+    """`connector add gitlab`'s questions answered and GitLab faked (story 8o).
+
+    Enter for the host, `acme/web` for the path, `token` at the hidden prompt,
+    and every request answered `status` — a commit list for a 2xx. No socket.
+    """
+    import functools
+
+    from pm_ai.app.wiring import GitLabEnrolment
+    from pm_ai.connectors.gitlab.client import GitLabResponse
+
+    answers = ["", "acme/web"]
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": answers.pop(0))
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": token)
+    body = [] if 200 <= status < 300 else {"message": str(status)}
+    monkeypatch.setattr(
+        entry,
+        "GitLabEnrolment",
+        functools.partial(
+            GitLabEnrolment, transport=lambda request: GitLabResponse(status, body)
+        ),
+    )
+
+
 def test_connector_add_never_echoes_the_credential(
-    registered, monkeypatch, capsys
+    registered, keychain, monkeypatch, capsys
 ):
     """The prompt is `getpass`, and nothing prints what it returned."""
+    keychain(secret=b"K" * 32)
     secret = "glpat-typed-at-the-prompt-99"
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": secret)
-    monkeypatch.setattr(
-        cli, "enrol_connector", lambda *a, **k: "gitlab accepted the credential"
-    )
+    _gitlab_answers(monkeypatch, secret)
 
     assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_OK
     captured = capsys.readouterr()
@@ -884,19 +906,22 @@ def test_connector_add_never_echoes_the_credential(
     assert "next start" in captured.out, "the activation promise 8d requires"
 
 
-def test_an_unprobeable_system_is_refused_rather_than_sealed(
-    registered, keychain, monkeypatch, capsys
+@pytest.mark.parametrize("system", ["jira", "nosuch", "GitLab", "GRAPH"])
+def test_an_unsupported_system_is_refused_by_name_before_any_prompt(
+    registered, keychain, monkeypatch, capsys, system
 ):
-    """The default probe refuses; a system pm-ai cannot ask about is not enrolled.
-
-    A master key is enrolled: since story 8l the key is fetched before the
-    probe, so a keyless machine would refuse over the key first.
-    """
+    """Story 8o: only `graph` and `gitlab`, spelled exactly; nothing is asked."""
     keychain(secret=b"K" * 32)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
-    assert entry.main(["connector", "add", "nosuch", "nosuch:one"]) == EXIT_REFUSAL
-    assert "no credential probe" in capsys.readouterr().err.lower()
+    asked: list[str] = []
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": asked.append(prompt) or "x")
+    monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt) or "x")
+
+    assert entry.main(["connector", "add", system, "one:alpha"]) == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert asked == [], "a prompt was shown for a system pm-ai cannot enrol"
+    assert repr(system) in err
+    assert "'gitlab'" in err and "'graph'" in err, "the supported systems are named"
 
 
 def test_a_keyless_machine_gets_a_refusal_not_a_traceback(
@@ -907,32 +932,24 @@ def test_a_keyless_machine_gets_a_refusal_not_a_traceback(
     Enrolment reads the sealed store for its duplicate check, which needs the
     master key. `_run` re-raises everything it does not name, so `KeyNotFound`
     reached the operator as a traceback and exit 1 — indistinguishable from a
-    bug — instead of the one instruction that fixes it.
+    bug — instead of the one instruction that fixes it. `registered` enrols
+    no key.
     """
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
-
-    def keyless(*args, **kwargs):
-        raise KeyNotFound("master")
-
-    monkeypatch.setattr(cli, "enrol_connector", keyless)
+    _gitlab_answers(monkeypatch)
     assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_REFUSAL
     assert "pm-ai key enrol" in capsys.readouterr().err
 
 
 def test_a_silent_provider_is_not_reported_as_a_bad_credential(
-    registered, monkeypatch, capsys
+    registered, keychain, monkeypatch, capsys
 ):
     """Otherwise the operator reissues a token that was never the problem."""
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
-
-    def silent(*args, **kwargs):
-        raise ProbeUnreachable("gitlab did not answer within 10s")
-
-    monkeypatch.setattr(cli, "enrol_connector", silent)
+    keychain(secret=b"K" * 32)
+    _gitlab_answers(monkeypatch, status=503)
     assert entry.main(["connector", "add", "gitlab", "gitlab:alpha"]) == EXIT_REFUSAL
-    assert "not the credential" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "the token was not judged" in err
+    assert "refused the token" not in err
 
 
 # ── Story 1r — a busy file, refused by name at every command that claims one ──
@@ -968,9 +985,7 @@ def test_connector_add_with_the_credentials_file_held_is_refused_by_name(
     registered, keychain, monkeypatch, capsys
 ):
     keychain(secret=b"K" * 32)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
-    monkeypatch.setattr(entry, "probe_credential", lambda system, credential: "accepted")
+    _gitlab_answers(monkeypatch)
 
     with _held(registered, "config.json"):
         code = entry.main(["connector", "add", "gitlab", "gitlab:alpha"])
@@ -1021,9 +1036,7 @@ def test_connector_add_with_an_unusable_sidecar_is_refused_by_name(
     """`config.json.lock` a directory: the OS fault is a refusal, not a traceback."""
     keychain(secret=b"K" * 32)
     (registered / ".pm-ai" / "private" / "config.json.lock").mkdir(parents=True)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
-    monkeypatch.setattr(entry, "probe_credential", lambda system, credential: "accepted")
+    _gitlab_answers(monkeypatch)
 
     code = entry.main(["connector", "add", "gitlab", "gitlab:alpha"])
 

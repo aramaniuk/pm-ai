@@ -67,8 +67,10 @@ from pm_ai.core.connector_enrolment import (
     MalformedSettings,
     NotAGraphRow,
     OrphanedCredential,
+    UnplacedConnector,
     UserNotRecorded,
     assert_enrollable,
+    assert_unconfigured,
     enrol_connector,
 )
 from pm_ai.ports import (
@@ -97,6 +99,8 @@ __all__ = [
     "FirstRun",
     "GoalBook",
     "GoalOutcome",
+    "GitLabCheck",
+    "GitLabCheckOutcome",
     "GraphSignIn",
     "GraphSignInOutcome",
     "GraphSignInReplacement",
@@ -360,6 +364,67 @@ class GraphSignIn(Protocol):
         ...
 
 
+@runtime_checkable
+class GitLabCheckOutcome(Protocol):
+    """What a GitLab check that passed produced — `pm_ai.app.wiring.GitLabChecked`."""
+
+    @property
+    def answer(self) -> str:
+        """The check's sentence, for the operator."""
+        ...
+
+    @property
+    def project(self) -> str:
+        """The GitLab project path the row records as its `project`."""
+        ...
+
+    @property
+    def settings(self) -> Mapping[str, object]:
+        """The row's other keys, spelled by the connector — written, never read here."""
+        ...
+
+
+@runtime_checkable
+class GitLabCheck(Protocol):
+    """`pm-ai connector add gitlab`'s checks (story 8o).
+
+    `pm_ai.app.wiring.GitLabEnrolment` is the real one. Named structurally for
+    `GraphSignIn`'s reason: judging a host or path with the transport's rules,
+    placing a name among the watched projects and asking GitLab all reach
+    `pm_ai.connectors`, which `surfaces-through-core` forbids this package.
+    Its refusals are `pm_ai.core.connector_enrolment`'s and `pm_ai.ports`'
+    (AD-49): `ProbeFailed` for an answer that refused, `ProbeUnreachable` for
+    a GitLab that could not be heard from.
+    """
+
+    @property
+    def default_host(self) -> str:
+        """What Enter keeps at the host question."""
+        ...
+
+    def settings_file(self, instance: str) -> Path:
+        """The row the closing message names."""
+        ...
+
+    def ready(self, instance: str) -> None:
+        """Refuse what needs the keychain, and a name no start would build."""
+        ...
+
+    def assert_placed(self, instance: str) -> None:
+        """Refuse a name no start would build, against the projects watched now."""
+        ...
+
+    def refusal(self, *, host: str | None = None, project: str | None = None) -> str | None:
+        """Why a typed host or project path would not build a connector, or `None`."""
+        ...
+
+    def check(
+        self, *, instance: str, host: str, project: str, credential: str
+    ) -> GitLabCheckOutcome:
+        """Ask GitLab for one commit of `project`, bounded at ten seconds."""
+        ...
+
+
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
     """The `Context` default: no onboarding sequence was injected.
 
@@ -494,6 +559,11 @@ class Context:
     rather than passing — a probe that answered "fine" without asking would seal
     an unchecked credential, which is the failure 8b's whole ordering exists to
     prevent.
+
+    **No command consults it since story 8o**: `connector add` enrols `graph`
+    and `gitlab` through their own checks and refuses every other system by
+    name before asking. Kept as the injection point for a future system whose
+    credential is typed and checked through `pm_ai.connectors.probe`.
     """
 
     graph_sign_in: GraphSignIn | None = None
@@ -504,6 +574,15 @@ class Context:
     it — over the application scope's writer when no daemon was built, since
     `connector sign-in` needs no project (story 8m). It is `None` in tests that
     do not need it; a Graph add or sign-in then refuses before asking anything.
+    """
+
+    gitlab_enrolment: GitLabCheck | None = None
+    """What `pm-ai connector add gitlab` judges its answers and asks GitLab through.
+
+    The composition root supplies it whenever it built a daemon, bound to that
+    daemon's writer and watched projects. `None` — a test that does not need
+    it, or a CLI composed without it — refuses a GitLab add by name before
+    anything is asked.
     """
 
     first_run: FirstRun | None = None
@@ -787,61 +866,39 @@ def _config_show(context: Context) -> int:
 
 
 
+SUPPORTED_SYSTEMS = ("gitlab", "graph")
+"""The systems `pm-ai connector add` enrols, spelled exactly as typed."""
+
+
 def _connector_add(context: Context) -> int:
     """`pm-ai connector add <system> <instance>` — story 8b's surface.
 
-    The credential is prompted for, never taken as an argument: an argument is
+    A credential is prompted for, never taken as an argument: an argument is
     in the process table while it runs and in shell history afterwards, which
     are two places a token outlives the command that used it.
 
-    Nothing here decides anything. The order — probe, seal, configure — and
-    every refusal belong to `pm_ai.core.connector_enrolment`; this reads two
-    words and a secret, hands them over, and maps what comes back onto 4c's
-    table. The probe arrives as a value for the same reason `connector check`'s
-    does: `surfaces-through-core` forbids this package from importing
-    `pm_ai.connectors`.
-
-    `graph` is not typed at all (story 8l): it is four questions and
-    Microsoft's sign-in, in `_connector_add_graph`.
+    Two systems, each with its own path. `graph` is not typed at all (story
+    8l): it is four questions and Microsoft's sign-in, in
+    `_connector_add_graph`. `gitlab` is two questions, a hidden prompt and a
+    live check, in `_connector_add_gitlab` (story 8o). Any other word —
+    `GitLab` included, since the system is a key spelled exactly — is refused
+    by name before anything is asked: no other system has a check, and
+    prompting for a credential nothing can check would only invite one to be
+    typed for nothing.
     """
-    daemon = context.require_daemon()
     system, instance = context.arguments
+    if system not in SUPPORTED_SYSTEMS:
+        raise Refusal(
+            f"pm-ai cannot enrol a {system!r} connector: the systems it enrols "
+            f"are {' and '.join(repr(s) for s in SUPPORTED_SYSTEMS)}, spelled "
+            f"exactly so. Nothing was asked and nothing was saved."
+        )
+    daemon = context.require_daemon()
 
     with _enrolment_refusals():
         if system == "graph":
             return _connector_add_graph(context, daemon, instance)
-
-        if not sys.stdin.isatty():
-            # `getpass` falls back to reading an echoing stdin when there is no
-            # terminal, so a piped or cron-driven run would put the credential
-            # in shell history and in the terminal scrollback. Refusing is the
-            # only answer that keeps the promise the prompt makes.
-            raise Refusal(
-                "a credential can only be typed at a terminal. stdin is not a "
-                "TTY here — this is a pipe, a cron job or a CI step — and "
-                "prompting would echo the secret and leave it in history. Run "
-                "`pm-ai connector add` from an interactive shell."
-            )
-
-        credential = getpass.getpass(f"{system} credential for {instance}: ")
-        if not credential.strip():
-            raise Refusal("no credential was typed, so nothing was enrolled.")
-
-        answer = enrol_connector(
-            daemon.storage,
-            system=system,
-            instance=instance,
-            credential=credential,
-            probe=context.probe_credential,
-        )
-
-    print(answer)
-    print(
-        f"{instance} is enrolled. It becomes active at the next start — "
-        f"connectors are registered when the daemon is composed, so nothing is "
-        f"harvesting from it yet."
-    )
-    return EXIT_OK
+        return _connector_add_gitlab(context, daemon, instance)
 
 
 def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) -> int:
@@ -957,6 +1014,141 @@ def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) ->
     return EXIT_OK
 
 
+def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -> int:
+    """`pm-ai connector add gitlab <instance>`: questions, token, check, save (8o).
+
+    1. **What can be known without asking**, in this order: a CLI with no
+       GitLab check; the name's shape and a row already using it; a terminal;
+       then the keychain — no master key, one that cannot be read, or a
+       credential sealed with no row (half-enrolled); then, on a machine
+       watching several projects, a name no start would build.
+    2. **Two questions**: the host, where Enter keeps the default and a typed
+       answer must be an https address with no query, fragment, user info or
+       trailing slash; the project path, required, as `group/project`. An
+       answer that would not build a connector is asked again with its reason.
+    3. **The token**, at a hidden prompt, stripped; blank is refused, and
+       Ctrl-C or Ctrl-D ends the command with nothing saved.
+    4. **The check**: one commit of that project on that host, behind
+       `context.gitlab_enrolment`, bounded at ten seconds. Any refusal saves
+       nothing.
+    5. **The name is placed again**, against the projects watched now, since
+       one may have been enrolled meanwhile.
+    6. **Enrolment**, which seals the token and writes the row — `project`
+       and `host` with it — together.
+
+    Ctrl-C during the keychain read or the check ends the command saying
+    nothing was saved, as it does at a question.
+
+    The token is never printed: it goes to the check and to enrolment, and
+    both redact what they say.
+    """
+    gitlab = context.gitlab_enrolment
+    if gitlab is None:
+        raise Refusal(
+            "no GitLab check was supplied to the CLI, so a GitLab connector "
+            "cannot be enrolled. That is a wiring fault in pm-ai, not anything "
+            "about this machine; nothing was asked and nothing was saved."
+        )
+
+    assert_unconfigured(daemon.storage, system="gitlab", instance=instance)
+    if not sys.stdin.isatty():
+        raise Refusal(
+            "adding a GitLab connector asks two questions and takes a token at "
+            "a hidden prompt, so it needs a terminal. stdin is not a TTY here — "
+            "this is a pipe, a cron job or a CI step — and prompting would echo "
+            "the token and leave it in history. Nothing was asked and nothing "
+            "was saved. Run `pm-ai connector add gitlab` from an interactive "
+            "shell."
+        )
+    with _interruptible():
+        gitlab.ready(instance)
+
+    host = (
+        _ask_until(
+            f"GitLab host [Enter keeps {gitlab.default_host}]: ",
+            judge=lambda answer: gitlab.refusal(host=answer) if answer else None,
+        )
+        or gitlab.default_host
+    )
+    project = _ask_until(
+        "GitLab project path, as group/project (required): ",
+        judge=lambda answer: gitlab.refusal(project=answer),
+    )
+    token = _hidden(
+        "GitLab personal access token with the read_api scope (not shown as "
+        "you type): "
+    )
+    if not token:
+        raise Refusal("no token was typed, so nothing was saved.")
+
+    with _interruptible():
+        try:
+            checked = gitlab.check(
+                instance=instance, host=host, project=project, credential=token
+            )
+        except ProbeUnreachable as silent:
+            # Its sentence already says the token was not judged, so it is not
+            # given `_enrolment_refusals`' suffix saying so a second time.
+            raise Refusal(str(silent)) from silent
+    # Projects may have been enrolled while the questions were answered, so
+    # the name is placed again against the registry as it is now: a
+    # credential is never sealed for a name a start would not build.
+    gitlab.assert_placed(instance)
+    # The check has answered; enrolment re-runs the name check under its own
+    # reading of the stores and seals. Its "probe" is the check that just ran,
+    # so it is reported rather than repeated.
+    answer = enrol_connector(
+        daemon.storage,
+        system="gitlab",
+        instance=instance,
+        credential=token,
+        probe=lambda system, credential: checked.answer,
+        settings=checked.settings,
+        project=checked.project,
+    )
+
+    print(answer)
+    print(
+        f"{instance} is enrolled and healthy. It becomes active at the next "
+        f"start — connectors are registered when the daemon is composed, so "
+        f"nothing is harvesting from it yet. Its settings are in "
+        f"{gitlab.settings_file(instance)}."
+    )
+    return EXIT_OK
+
+
+_INTERRUPTED = "interrupted before every question was answered, so nothing was saved."
+
+
+@contextmanager
+def _interruptible() -> Iterator[None]:
+    """Ctrl-C during a step nobody is typing at — a keychain read, a check.
+
+    Ends the command with the sentence an interrupted question gives, rather
+    than a traceback: nothing has been saved before enrolment's own writes.
+    """
+    try:
+        yield
+    except KeyboardInterrupt as stopped:
+        raise Refusal("interrupted; nothing was saved.") from stopped
+
+
+def _hidden(prompt: str) -> str:
+    """One line typed at the terminal without echo, stripped.
+
+    Ctrl-D and Ctrl-C end the command with `_typed`'s refusal: nothing has
+    been saved at any question. An answer that is not text in the terminal's
+    encoding is asked again, as `_ask_until` asks.
+    """
+    while True:
+        try:
+            return getpass.getpass(prompt).strip()
+        except UnicodeDecodeError:
+            print(f"  {_NOT_TEXT}", file=sys.stderr)
+        except (EOFError, KeyboardInterrupt) as closed:
+            raise Refusal(_INTERRUPTED) from closed
+
+
 def _typed(prompt: str) -> str | None:
     """One line typed at the terminal, stripped; `None` for one that was not text.
 
@@ -968,10 +1160,7 @@ def _typed(prompt: str) -> str | None:
     except UnicodeDecodeError:
         return None
     except (EOFError, KeyboardInterrupt) as closed:
-        raise Refusal(
-            "interrupted before every question was answered, so nothing was "
-            "saved."
-        ) from closed
+        raise Refusal(_INTERRUPTED) from closed
 
 
 _NOT_TEXT = "that answer was not valid text in this terminal's encoding."
@@ -1030,7 +1219,12 @@ def _enrolment_refusals(
     """
     try:
         yield
-    except (DuplicateConnector, MalformedInstanceName, MalformedSettings) as refused:
+    except (
+        DuplicateConnector,
+        MalformedInstanceName,
+        MalformedSettings,
+        UnplacedConnector,
+    ) as refused:
         raise Refusal(str(refused)) from refused
     except UnknownConnectorSystem as unknown:
         raise Refusal(str(unknown)) from unknown
@@ -2061,6 +2255,7 @@ def dispatch(
     probe_connectors: Callable[[], Report] | None,
     probe_credential: CredentialProbePort = _no_probe,
     graph_sign_in: GraphSignIn | None = None,
+    gitlab_enrolment: GitLabCheck | None = None,
     onboard: Callable[[str, str | None], OnboardOutcome] = _no_onboarding,
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     first_run: FirstRun | None = None,
@@ -2086,6 +2281,7 @@ def dispatch(
         probe_connectors=probe_connectors,
         probe_credential=probe_credential,
         graph_sign_in=graph_sign_in,
+        gitlab_enrolment=gitlab_enrolment,
         onboard=onboard,
         dashboard=dashboard,
         first_run=first_run,

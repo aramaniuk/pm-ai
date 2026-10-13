@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from pm_ai.connectors.gitlab import (
     DEFAULT_HOST as GITLAB_DEFAULT_HOST,
@@ -29,6 +30,14 @@ from pm_ai.connectors.gitlab import (
     GitLabConnectorAdapter,
     host_refusal,
     project_refusal,
+)
+from pm_ai.connectors.gitlab.client import (
+    API_PATH,
+    GitLabClient,
+    GitLabRequest,
+    GitLabResponse,
+    PageUnavailable,
+    token_refusal,
 )
 from pm_ai.connectors.graph import (
     CLIENT_ID_KEY,
@@ -81,7 +90,9 @@ from pm_ai.core.connector_enrolment import (
     CredentialStoreUnclaimable,
     MalformedSettings,
     NotAGraphRow,
+    UnplacedConnector,
     UserNotRecorded,
+    assert_enrollable,
     assert_replaceable,
     connector_row,
     credential_for,
@@ -139,6 +150,8 @@ __all__ = [
     "Bootstrap",
     "CONFIG_ARTIFACT",
     "Daemon",
+    "GitLabChecked",
+    "GitLabEnrolment",
     "GraphEnrolment",
     "GraphSignInReplaced",
     "GraphSignedIn",
@@ -429,7 +442,7 @@ def build(
         # holding no credential: it is not harvested and records nothing until
         # an enrolment replaces it (story 8n).
         builtin = GitLabConnectorAdapter(
-            instance=f"gitlab:{watched_id}",
+            instance=_builtin_instance(watched_id),
             project=watched_id,
             scope=watched_scope,
             now=clock,
@@ -1014,6 +1027,16 @@ def _enrolment_scope(
     holds the *provider's* path (`group/project`), not a pm-ai project id, and
     reading a pm-ai id out of it is the same mistake in a new place.
     """
+    placed = _placement(instance, scopes=scopes)
+    return _unplaced(instance, placed) if isinstance(placed, str) else placed
+
+
+def _placement(instance: str, *, scopes: Mapping[str, DataScope]) -> DataScope | str:
+    """`_enrolment_scope`'s rule, saying nothing: the scope, or why there is none.
+
+    Pure, so `pm-ai connector add gitlab` can ask it before anything is asked
+    of the operator (story 8o) without printing the start-up warning.
+    """
     placed = scopes.get(instance)
     if placed is not None:
         return placed
@@ -1021,21 +1044,28 @@ def _enrolment_scope(
         (only,) = scopes.values()
         return only
     if not scopes:
-        return _unplaced(
-            instance,
+        return (
             "no project is enrolled, so there is no project's tree for its "
             "harvest to file into. It is saved, and it is built once a single "
             "project is enrolled with `pm-ai project add <path>`; with more "
-            "than one enrolled, its instance name must name its project.",
+            "than one enrolled, its instance name must name its project."
         )
-    return _unplaced(
-        instance,
+    return (
         f"it is not one of the enrolled projects' connectors "
         f"({', '.join(sorted(scopes))}), and this daemon watches "
         f"{len(scopes)} projects — so nothing says which project's tree its "
         f"harvest belongs in. Enrol it afresh under the instance name of the "
-        f"project it covers, or remove the row.",
+        f"project it covers, or remove the row."
     )
+
+
+def _builtin_instance(project_id: str) -> str:
+    """The built-in GitLab connector's name for one watched project: `gitlab:<id>`.
+
+    One spelling for `build()`, which keys the built-in by it, and for the
+    placement check `pm-ai connector add gitlab` makes up front (story 8o).
+    """
+    return f"gitlab:{project_id}"
 
 
 def _unplaced(instance: str, reason: str) -> UnbuiltConnector:
@@ -1777,6 +1807,352 @@ class GraphEnrolment:
                 f"settings was not saved and {instance}'s stored one is "
                 f"untouched. Run `pm-ai connector sign-in {instance}` again."
             )
+
+
+# ── `pm-ai connector add gitlab` (story 8o) ──────────────────────────────────
+
+GITLAB_PATH_FORM = "group/project"
+"""How the project question names the form it wants — the path in the
+project's GitLab address."""
+
+
+@dataclass(frozen=True)
+class GitLabChecked:
+    """What a GitLab check that passed hands to enrolment (story 8o).
+
+    No token: the CLI already holds the one it typed, and enrolment seals that.
+    `project` travels apart from `settings` because `project` is a key
+    enrolment writes itself (`RESERVED_ROW_KEYS`); `settings` carries the
+    row's other GitLab key, the host, spelled by the connector.
+    """
+
+    answer: str
+    project: str
+    settings: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class GitLabEnrolment:
+    """`pm-ai connector add gitlab`'s checks, behind the composition root (story 8o).
+
+    The CLI asks the questions and enrols; this does what it may not, because
+    it reaches `pm_ai.connectors`: judging the host, the project path and the
+    typed token with the transport's own rules, placing the instance name
+    among the watched projects, and asking GitLab for one commit of that
+    project — the transport's health check (`GitLabClient.check`) — bounded at
+    CAP-35's ten seconds, with the transport's thirty-second socket timeout
+    inside it.
+
+    Every refusal leaves as one of the two `pm_ai.ports` declares for a
+    credential check (AD-49): `ProbeUnreachable` only when GitLab could not be
+    heard from or asked to wait — an `OSError` on the wire, no answer within
+    the bound, 429 or a 5xx — so a good token is not reissued for a host that
+    was down; `ProbeFailed` for everything else — 401, 403 (no `read_api`),
+    404, a redirect, any other status, a 2xx whose body is not a list, and an
+    exception pm-ai cannot classify, named by type. No message carries the
+    token.
+    """
+
+    storage: StorageService
+    watching: Callable[[], Sequence[str]] = lambda: ()
+    """Every project watched *now* — read again each time a name is placed.
+
+    A callable rather than a value, because projects can be enrolled while
+    the questions are answered, and the placement is checked again just before
+    the save (`assert_placed`).
+    """
+
+    transport: Callable[[GitLabRequest], GitLabResponse] | None = None
+    """The wire, or `None` for the transport's own (a real `urllib` `GET`)."""
+
+    timeout: float = CREDENTIAL_PROBE_SECONDS
+    """CAP-35's bound on the check: whatever has not answered by then is unreachable."""
+
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    @property
+    def default_host(self) -> str:
+        """What Enter keeps at the host question — the transport's own default."""
+        return GITLAB_DEFAULT_HOST
+
+    def settings_file(self, instance: str) -> Path:
+        """Where `instance`'s row lands, named in the closing message."""
+        return (
+            self.storage.paths.resolve(DataScope(ScopeKind.APPLICATION), "connectors/")
+            / f"{instance}.json"
+        )
+
+    def ready(self, instance: str) -> None:
+        """Refuse now what no answer could fix: the keychain, and a name no start builds.
+
+        `assert_enrollable` reads the sealed store and fetches the master key —
+        `KeyNotFound` with none, `KeychainUnavailable` for one that cannot be
+        read, `DuplicateConnector` for a credential sealed with no row (the
+        half-enrolled state). Then `assert_placed`.
+        """
+        assert_enrollable(self.storage, system="gitlab", instance=instance)
+        self.assert_placed(instance)
+
+    def assert_placed(self, instance: str) -> None:
+        """Refuse a name no start would build, against the projects watched now.
+
+        The placement rule every start applies (`_placement`): on a machine
+        watching several projects, a name that is not `gitlab:<enrolled
+        project id>` is never built, so it is refused (`UnplacedConnector`).
+        With one project any name builds into it; with none, nothing is built
+        until one is enrolled, and the add is not refused.
+        """
+        scopes = {
+            _builtin_instance(project_id): DataScope(ScopeKind.PROJECT, project_id)
+            for project_id in sorted(set(self.watching()))
+        }
+        if scopes and isinstance(_placement(instance, scopes=scopes), str):
+            names = ", ".join(sorted(scopes))
+            raise UnplacedConnector(
+                f"pm-ai watches {len(scopes)} projects, and {instance!r} names "
+                f"none of them, so a GitLab connector enrolled under it would "
+                f"never be built: nothing says which project's tree its harvest "
+                f"files into. Name it gitlab:<enrolled project id> — one of "
+                f"{names}. Nothing was saved."
+            )
+
+    def refusal(self, *, host: str | None = None, project: str | None = None) -> str | None:
+        """Why a typed host or project path would not build a connector, or `None`.
+
+        The host is judged by the transport's `host_refusal`, plus one rule a
+        typed host adds: its path may not end in `/api/v4`, which the API is
+        reached under. The path is judged by the transport's
+        `project_refusal`, plus what a typed `group/project` must also be:
+        at least one `/`, no `://` (a pasted address), no trailing `/` and no
+        empty segment.
+        """
+        if host is not None:
+            refused = host_refusal(host)
+            if refused is None:
+                path = urlsplit(host).path.rstrip("/").casefold()
+                if path == API_PATH or path.endswith(API_PATH):
+                    refused = (
+                        f"it ends in {API_PATH!r}, which pm-ai adds itself; type "
+                        f"the address without it"
+                    )
+            if refused is not None:
+                return (
+                    f"{host!r} cannot be the GitLab host: {refused}. Type an "
+                    f"https address, optionally with a path "
+                    f"(https://git.internal/gitlab), or press Enter for "
+                    f"{self.default_host}."
+                )
+        if project is not None:
+            refused = project_refusal(project)
+            if refused is None:
+                if "://" in project:
+                    refused = "it is an address, not a path — type only the part after the host"
+                elif "/" not in project:
+                    refused = "it holds no '/'"
+                elif project.endswith("/"):
+                    refused = "it ends in '/'"
+                elif "" in project.split("/"):
+                    refused = "it has an empty segment ('//')"
+            if refused is not None:
+                return (
+                    f"{project!r} cannot be the project path: {refused}. Type "
+                    f"it as {GITLAB_PATH_FORM} — the path in the project's "
+                    f"GitLab address."
+                )
+        return None
+
+    def check(
+        self, *, instance: str, host: str, project: str, credential: str
+    ) -> GitLabChecked:
+        """Ask GitLab for one commit of `project` with the token, and judge the answer.
+
+        The host is saved and asked with its scheme and host name lower-cased.
+        The token is judged first by the transport's `token_refusal`, so a
+        token that could never travel in a header is refused without a request.
+
+        Raises `ProbeFailed` or `ProbeUnreachable`; returns what to save.
+
+        The ten-second bound abandons the *wait*, not the request: a socket
+        read cannot be cancelled, so the request may still be in flight when
+        this refuses. Nothing is saved either way — whatever it answers later
+        is discarded.
+        """
+        token = credential.strip()
+
+        def withheld(text: str) -> str:
+            return redacted(
+                text,
+                token,
+                instead=(
+                    "GitLab's answer is withheld because it quoted the token. "
+                    "Nothing was saved."
+                ),
+            )
+
+        refused = self.refusal(host=host, project=project)
+        if refused is not None:
+            raise ProbeFailed(f"{refused} Nothing was saved.")
+        if not token:
+            raise ProbeFailed("no token was typed, so nothing was saved.")
+        if token_refusal(token) is not None:
+            raise ProbeFailed(
+                "the token you typed holds a space, a line break, a control "
+                "character or a non-ASCII character, so it cannot travel in a "
+                "request header and is not a GitLab token; nothing was sent or "
+                "saved."
+            )
+        host = _lowered_origin(host)
+        client = GitLabClient(host=host, project=project, token=token, now=self.now)
+        heard: list[GitLabResponse | BaseException] = []
+        wire = client.transport if self.transport is None else self.transport
+
+        def recorded(request: GitLabRequest) -> GitLabResponse:
+            try:
+                answered = wire(request)
+            except BaseException as raised:
+                heard.append(raised)
+                raise
+            heard.append(answered)
+            return answered
+
+        client.transport = recorded
+        try:
+            run_bounded(client.check, timeout=self.timeout, label=f"{instance} health check")
+        except TimeoutError as silent:
+            raise ProbeUnreachable(
+                f"GitLab at {host} is unreachable: it did not answer within "
+                f"{self.timeout:g}s; try later; the token was not judged. "
+                f"Nothing was saved."
+            ) from silent
+        except PageUnavailable as answer:
+            raise _gitlab_verdict(
+                answer,
+                host=host,
+                project=project,
+                raw=heard[-1] if heard else None,
+                withheld=withheld,
+            ) from None
+        except Exception as unexpected:  # noqa: BLE001 — refused by type, never raised raw
+            raise ProbeFailed(
+                f"the check of {project!r} on {host} raised "
+                f"{type(unexpected).__name__}, which pm-ai cannot classify — "
+                f"report it. Nothing was saved."
+            ) from None
+        last = heard[-1] if heard else None
+        if not isinstance(last, GitLabResponse) or not isinstance(last.body, list):
+            status = last.status if isinstance(last, GitLabResponse) else "nothing"
+            raise ProbeFailed(
+                withheld(
+                    f"GitLab at {host} answered {status} for {project!r} with a "
+                    f"body that is not a list of commits, so it is not a GitLab "
+                    f"API answer. Check that the host is the GitLab instance "
+                    f"itself, with its path if it is served under one. Nothing "
+                    f"was saved."
+                )
+            )
+        return GitLabChecked(
+            answer=withheld(f"{host} answered for {project}"),
+            project=project,
+            settings={GITLAB_HOST_KEY: host},
+        )
+
+
+def _lowered_origin(host: str) -> str:
+    """`host` with its scheme and host name lower-cased, its path as typed.
+
+    Only called on a host `host_refusal` accepted, so there is no user info
+    to keep the case of.
+    """
+    parts = urlsplit(host)
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, parts.fragment)
+    )
+
+
+def _no_answer(raw: GitLabResponse | BaseException | None) -> BaseException | None:
+    """The `OSError` behind a request that got no answer, or `None`.
+
+    Raised by an injected transport itself, or carried as the cause of the
+    real transport's `PageUnavailable` — which is how `urllib`'s connection
+    and socket errors reach the client.
+    """
+    if isinstance(raw, OSError):
+        return raw
+    if isinstance(raw, PageUnavailable) and isinstance(raw.__cause__, OSError):
+        return raw.__cause__
+    return None
+
+
+def _gitlab_verdict(
+    answer: PageUnavailable,
+    *,
+    host: str,
+    project: str,
+    raw: GitLabResponse | BaseException | None,
+    withheld: Callable[[str], str],
+) -> ProbeFailed:
+    """The refusal one failed GitLab check is reported as (story 8o, AD-49).
+
+    By status and by what the wire raised, never by parsing the client's
+    sentence. Unreachable is exactly: 429, a 5xx, or an `OSError` on the
+    wire — a good token is not reissued for a bad hour or a typo in the
+    host. Everything else refuses, for its own reason.
+    """
+    status = answer.status
+    nothing = "Nothing was saved."
+    later = "try later; the token was not judged."
+    if status is not None and 300 <= status < 400:
+        return ProbeFailed(
+            withheld(
+                f"GitLab at {host} answered {status} with a redirect, and pm-ai "
+                f"does not follow one: the token would travel to whatever the "
+                f"redirect names. Give the final address — the one the redirect "
+                f"leads to — as the host. {nothing}"
+            )
+        )
+    if status == 401:
+        return ProbeFailed(
+            withheld(
+                f"GitLab refused the token (401): it is expired, revoked or "
+                f"mistyped. Create a personal access token with the `read_api` "
+                f"scope and run this again. {nothing}"
+            )
+        )
+    if status == 403:
+        return ProbeFailed(
+            withheld(
+                f"GitLab answered 403 for {project!r} on {host}: the token lacks "
+                f"the `read_api` scope, so a connector holding it could not "
+                f"harvest, and it is not enrolled. Give the token `read_api`, or "
+                f"create one that has it. {nothing}"
+            )
+        )
+    if status == 404:
+        return ProbeFailed(
+            withheld(
+                f"GitLab answered 404: no project is visible at {project!r} on "
+                f"{host}. The path, not the token, is the likely mistake — "
+                f"GitLab answers 404 for a project the token cannot see as well "
+                f"as for one that does not exist. {nothing}"
+            )
+        )
+    if status == 429:
+        return ProbeUnreachable(
+            withheld(f"GitLab answered 429 (it is rate-limiting this machine); {later} {nothing}")
+        )
+    if status is not None and status >= 500:
+        return ProbeUnreachable(
+            withheld(f"GitLab answered {status} (a server error); {later} {nothing}")
+        )
+    silent = _no_answer(raw)
+    if silent is not None:
+        return ProbeUnreachable(
+            withheld(
+                f"GitLab at {host} is unreachable: no answer came back "
+                f"({type(silent).__name__}); {later} {nothing}"
+            )
+        )
+    return ProbeFailed(withheld(f"{_sentence(answer.reason)} {nothing}"))
 
 
 def _sentence(text: str) -> str:
