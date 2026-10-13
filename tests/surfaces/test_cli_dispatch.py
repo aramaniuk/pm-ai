@@ -11,6 +11,7 @@ needs a subprocess and every branch is reachable.
 
 from __future__ import annotations
 
+import dataclasses
 import ast
 import tempfile
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ import pytest
 
 from pm_ai.core.project_registry import ProjectEntry, render_registry
 from pm_ai.platform.doctor import ArtifactState, Presence
-from pm_ai.app.wiring import Bootstrap, bootstrap
+from pm_ai.app.wiring import bootstrap
 from pm_ai.app import entry
 from pm_ai.core.config import Config
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -67,7 +68,9 @@ def enrolled(**projects: Path):
         # The real bootstrap for `config.toml`, the stub for the registry: the
         # fixtures write a config into the redirected `HOME` and expect it to be
         # honoured, and stubbing it flat would make those rows assert nothing.
-        return Bootstrap(entries, registry, bootstrap(keychain).config)
+        return dataclasses.replace(
+            bootstrap(keychain), projects=entries, registry=registry
+        )
 
     return read
 
@@ -127,10 +130,166 @@ def registered(tmp_path, monkeypatch):
 # ── Bare invocation, help, and the names that are not commands ───────────────
 
 
-def test_a_bare_invocation_prints_usage_and_exits_2(capsys):
-    """CAP-18's REPL is `4f`; until then a silent success reads as a working install."""
+def test_a_bare_invocation_prints_usage_and_exits_2(monkeypatch, capsys):
+    """Away from a terminal a bare `pm-ai` stays a usage error (story 4f).
+
+    The prompt opens only when standard input and output are both terminals;
+    from a pipe or cron a silent success would read as a working install. The
+    check is switched off explicitly rather than left to pytest's capture.
+    """
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
     assert entry.main([]) == EXIT_USAGE
     assert "usage: pm-ai" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("stdin_tty", "stdout_tty"), [(True, False), (False, True)])
+def test_a_bare_invocation_needs_both_ends_at_a_terminal(
+    stdin_tty, stdout_tty, monkeypatch, capsys
+):
+    """Output redirected to a file, or input from a pipe: usage, never the prompt."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: stdin_tty)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: stdout_tty)
+    assert entry.main([]) == EXIT_USAGE
+    assert "usage: pm-ai" in capsys.readouterr().err
+
+
+def test_a_bare_invocation_with_no_stdin_prints_usage(monkeypatch, capsys):
+    """A detached process has no descriptor 0 at all: the same fact as a pipe."""
+    monkeypatch.setattr("sys.stdin", None)
+    assert entry.main([]) == EXIT_USAGE
+    assert "usage: pm-ai" in capsys.readouterr().err
+
+
+def test_a_bare_invocation_with_stdout_gone_prints_usage(monkeypatch, capsys):
+    """Input at a terminal and no standard output at all: usage, never the prompt."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout", None)
+    assert entry.main([]) == EXIT_USAGE
+    assert "usage: pm-ai" in capsys.readouterr().err
+
+
+def test_a_bare_invocation_with_a_closed_stdin_prints_usage(monkeypatch, capsys):
+    """A closed stream's `isatty` raises; that is no terminal, not a traceback."""
+    import io
+
+    closed = io.StringIO()
+    closed.close()
+    monkeypatch.setattr("sys.stdin", closed)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    assert entry.main([]) == EXIT_USAGE
+    assert "usage: pm-ai" in capsys.readouterr().err
+
+
+def _at_the_prompt(monkeypatch, typed: str) -> None:
+    """Standard input and output at a terminal, with `typed` as what arrives."""
+    import io
+
+    lines = io.StringIO(typed)
+    lines.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.stdin", lines)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+
+def _statuses(printed: str) -> list[str]:
+    """The `exit <n>` lines. Fed input is not echoed, so a command that printed
+    nothing to stdout leaves its status on the prompt's own line."""
+    lines = (line.replace("pm-ai> ", "") for line in printed.splitlines())
+    return [line for line in lines if line.startswith("exit ")]
+
+
+def test_a_bare_invocation_at_a_terminal_runs_doctor_through_main(
+    registered, probes, monkeypatch, capsys
+):
+    """Story 4f: the prompt hands a typed command to the real `entry.main`.
+
+    Under the `probes` fixture every probe is healthy, so the code is pinned.
+    """
+    _at_the_prompt(monkeypatch, "doctor\nexit\n")
+    assert entry.main([]) == EXIT_OK
+    printed = capsys.readouterr().out
+    assert "pm-ai is healthy." in printed
+    assert _statuses(printed) == ["exit 0"]
+
+
+def test_opening_the_prompt_composes_nothing_and_starts_no_setup(
+    monkeypatch, capsys
+):
+    """No daemon, no keychain, no setup: `setup` is a command one types."""
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("composed to open the prompt")
+
+    monkeypatch.setattr(entry, "_compose", forbidden)
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", forbidden)
+    monkeypatch.setattr(entry, "_FirstRun", forbidden)
+    _at_the_prompt(monkeypatch, "exit\n")
+    assert entry.main([]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert captured.out == "pm-ai> "
+    assert captured.err == ""
+
+
+def test_a_secret_command_asks_at_this_terminal_and_ctrl_c_there_is_exit_3(
+    registered, monkeypatch, capsys
+):
+    """`connector add gitlab alpha` at the prompt asks its questions here.
+
+    Since `8o` the command asks for the GitLab host before the hidden token;
+    interrupted at that first question, before any probe or network: the
+    command's own interruption, `exit 3`, and the session continues.
+    """
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: _Keychain(b"k" * 32))
+    asked: list[str] = []
+
+    def interrupted(prompt=""):
+        asked.append(prompt)
+        raise KeyboardInterrupt
+
+    # The prompt reads `sys.stdin` through its own default; the command's
+    # questions call `input` by name, so only they meet this.
+    monkeypatch.setattr("builtins.input", interrupted)
+    monkeypatch.setattr("getpass.getpass", interrupted)
+    _at_the_prompt(monkeypatch, "connector add gitlab alpha\ndoctor --bogus\nexit\n")
+    assert entry.main([]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert len(asked) == 1 and "host" in asked[0].lower()
+    assert "interrupted" in captured.err
+    assert "nothing was saved" in captured.err
+    assert _statuses(captured.out) == ["exit 3", "exit 2"]
+
+
+def test_ctrl_c_during_setups_question_is_setups_own_interruption(
+    registered, monkeypatch, capsys
+):
+    """Through the real `main`: setup's sentence, `exit 3`, the session continues."""
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: _Keychain(b"enrolled"))
+    asked: list[str] = []
+
+    def interrupted(prompt=""):
+        asked.append(prompt)
+        raise KeyboardInterrupt
+
+    # The prompt reads `sys.stdin` through its own default; setup's questions
+    # call `input` by name, so only they meet this.
+    monkeypatch.setattr("builtins.input", interrupted)
+    _at_the_prompt(monkeypatch, "setup\nexit\n")
+    assert entry.main([]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert asked == ["project directory: "]
+    assert "setup was interrupted at a prompt" in captured.err
+    assert _statuses(captured.out) == ["exit 3"]
+
+
+def test_an_open_line_at_the_prompt_changes_nothing_under_home(
+    tmp_path, monkeypatch, capsys
+):
+    """Nothing is composed to open the prompt, and an open line reaches no file."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _at_the_prompt(monkeypatch, "what did I promise Laura\nquit\n")
+    assert entry.main([]) == EXIT_OK
+    assert "not sent anywhere" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_an_unknown_subcommand_exits_2(capsys):

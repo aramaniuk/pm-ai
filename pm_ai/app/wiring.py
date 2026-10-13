@@ -120,7 +120,14 @@ from pm_ai.domain.handles import (
     pm_identity,
     usable_user_id,
 )
-from pm_ai.domain.health import ArtifactState, Health, Presence, UnbuiltConnector
+from pm_ai.domain.health import (
+    CONNECTOR_SYSTEMS,
+    ArtifactState,
+    EnrolmentReading,
+    Health,
+    Presence,
+    UnbuiltConnector,
+)
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
@@ -149,6 +156,7 @@ from pm_ai.storage.service import StorageService
 __all__ = [
     "Bootstrap",
     "CONFIG_ARTIFACT",
+    "ConnectorRows",
     "Daemon",
     "GitLabChecked",
     "GitLabEnrolment",
@@ -162,6 +170,7 @@ __all__ = [
     "bootstrap",
     "build",
     "onboard_project",
+    "read_connector_rows",
     "Onboarded",
     "warn_if_encryption_disabled",
     "PmIdentityReading",
@@ -812,6 +821,10 @@ def _enrolled_connectors(
     4o): the instance and the sentence printed for it, so `pm-ai connector
     check` lists the row as enrolled and not built instead of omitting it
     (AD-39). A disabled row is skipped silently and is in neither half.
+
+    **Which rows count is `read_connector_rows`' rule**, which `doctor`'s
+    `connectors` line applies too (story 4n), so the line, the build and
+    `connector check` count the same rows as enrolled.
     """
     # Fetched on first need, not up front. Opening the sealed store costs a
     # master-key fetch from the keychain, and a machine with no connectors
@@ -820,50 +833,13 @@ def _enrolled_connectors(
     credentials: dict[str, dict[str, str]] | None = None
     built: list[tuple[str, ConnectorPort]] = []
     unbuilt: list[UnbuiltConnector] = []
-    for name, entry in _named_configurations(storage):
-        # Anything but an explicit `true` is off. The file is plaintext and
-        # hand-editable on purpose, so `"false"`, `0` and `null` are all things
-        # an operator will actually write meaning "not this one". A disabled
-        # row is the one enrolled row skipped without a word: the operator
-        # turned it off, and listing it as "not built" would report their own
-        # choice back to them as a fault.
-        if entry.get("enabled") is not True:
-            continue
-        instance = entry.get("instance")
-        system = entry.get("system")
-        if not isinstance(instance, str) or not instance:
-            # Named by its file, since the row cannot name itself (story 4o:
-            # an enabled row is listed, never dropped).
-            unbuilt.append(
-                _unplaced(
-                    f"connectors/{name}",
-                    "its 'instance' is missing or not text, so pm-ai cannot tell "
-                    "which connector it is. Repair the row or remove it.",
-                )
-            )
-            continue
-        if not isinstance(system, str) or not system:
-            unbuilt.append(
-                _unplaced(
-                    instance,
-                    "its 'system' is missing or not text, so pm-ai cannot tell "
-                    "which adapter to build. Repair the row or remove it.",
-                )
-            )
-            continue
-        if system not in ("gitlab", "graph"):
-            # An enrolled system pm-ai has no adapter for is not guessed at.
-            # Two families exist: `gitlab` below, and `graph` since story 33c,
-            # which is the connector `33a`'s token and `33b`'s calendar fetch
-            # were built for.
-            unbuilt.append(
-                _unplaced(
-                    instance,
-                    f"pm-ai has no adapter for the system {system!r}; the "
-                    f"systems it builds are 'gitlab' and 'graph'.",
-                )
-            )
-            continue
+    rows = read_connector_rows(storage)
+    # Every enabled row the rule refuses — no usable name or system, a system
+    # pm-ai has no adapter for, one name carried by several files — is listed,
+    # not dropped (story 4o). `doctor` refuses the same rows by the same rule;
+    # it words them for its own line.
+    unbuilt.extend(_unplaced(instance, reason) for instance, reason in rows.refused)
+    for instance, system, entry in rows.accepted:
         if system == "graph":
             # No credential is read here: the store reads the sealed file each
             # time the adapter asks, so a token another run rotated is the one
@@ -2378,36 +2354,206 @@ def _stored_credentials(storage: StorageService) -> dict[str, dict[str, str]]:
         return {}
 
 
-def _named_configurations(
-    storage: StorageService,
-) -> tuple[tuple[str, Mapping[str, object]], ...]:
-    """Every readable `connectors/<name>.json`, with the member name it was read from.
+@dataclass(frozen=True, slots=True)
+class ConnectorRows:
+    """Every `connectors/` row, sorted by the one rule (stories 8k, 4o, 4n).
 
-    The name is what a row that cannot name itself — no usable `instance` — is
-    listed under by `pm-ai connector check` (story 4o).
+    `accepted` is what the build iterates: `(instance, system, row)` for every
+    enabled row naming a system in `CONNECTOR_SYSTEMS`, with a printable text
+    name, whose name no other enabled row carries. `refused` is every other
+    enabled row that could be read, in listing order, with the sentence the
+    build prints and `connector check` lists. `reading` is the same rows as
+    names only, for `doctor`'s `connectors` line.
+
+    One rule, not one read: `bootstrap` and the build each read `connectors/`
+    for themselves, and apply this rule to what they find. The wording differs
+    by audience — `doctor` names a row that cannot be used by its file,
+    `connector check` names a refused row by its instance where it has one.
+    """
+
+    accepted: tuple[tuple[str, str, Mapping[str, object]], ...]
+    refused: tuple[tuple[str, str], ...]
+    reading: EnrolmentReading
+
+
+def _cause(error: BaseException) -> str:
+    """Why a read failed, without the path the caller already names, never blank."""
+    reason = getattr(error, "strerror", None)
+    return reason if isinstance(reason, str) and reason else type(error).__name__
+
+
+def _usable_name(value: object) -> str | None:
+    """A row's `instance`, if it is text that can stand as one name on one line.
+
+    Blank, or carrying a newline, an escape or any other unprintable character,
+    is no name: printed, it could split `doctor`'s line or spoof another row.
+    """
+    if isinstance(value, str) and value.strip() and value.isprintable():
+        return value
+    return None
+
+
+def _listed(files: Sequence[str]) -> str:
+    """`a and b`, `a, b and c` — the files carrying one name."""
+    return f"{', '.join(files[:-1])} and {files[-1]}"
+
+
+def read_connector_rows(storage: StorageService) -> ConnectorRows:
+    """Read `connectors/` now, contacting nothing (story 4n).
+
+    A row is a regular file named `*.json`. Anything else in the directory —
+    a subdirectory, an editor's `graph:work.json~` or a `.bak` copy — is not a
+    row and is ignored, so a backup beside a row can never make that row a
+    duplicate of itself.
+
+    Only the plaintext rows are read: the sealed credential store is not
+    opened, so the keychain is never asked for the master key here, and no
+    provider's client is imported. A row is replaced whole by `write_artifact`,
+    so a read during an enrolment sees a whole row.
+
+    Nothing raises. The build must compose on a broken machine so `doctor` can
+    say what is broken, so every failure is carried instead:
+
+    - a directory that cannot be listed is `reading.unlisted`, and nothing
+      else is reported — an unlisted directory is not an empty one;
+    - a file that cannot be read or decoded, or that is not an object, is a
+      problem for `doctor` and skipped by the build: it has no `enabled` to
+      read, so nothing says it was meant to run;
+    - a row removed between the listing and its read is skipped: a concurrent
+      removal is not a fault, and there is nothing left to name;
+    - an enabled row with no printable text name or no text system, or naming
+      a name another enabled row also names, is a problem for `doctor` and a
+      refused row for the build — several files carrying one name are one
+      problem naming them all, and none is built, since nothing says which
+      was meant;
+    - an enabled row naming a system pm-ai has no connector for is counted
+      as such by `doctor` and refused by the build.
+
+    Anything but an explicit `true` is off. The file is plaintext and
+    hand-editable on purpose, so `"false"`, `0` and `null` are all things an
+    operator will actually write meaning "not this one". A disabled row is
+    counted as disabled — once per name, and not at all when an enabled row
+    carries the name — and is in neither half the build sees: the operator
+    turned it off, and listing it as "not built" would report their own
+    choice back to them as a fault.
     """
     application = DataScope(ScopeKind.APPLICATION)
+    directory = storage.paths.resolve(application, "connectors/")
+    shown = str(directory)
     try:
         names = storage.list_collection(scope=application, artifact="connectors/")
-    except Exception:
-        return ()
-    entries: list[tuple[str, Mapping[str, object]]] = []
+    except Exception as unlisted:
+        return ConnectorRows(
+            (), (), EnrolmentReading(shown, (), (), (), (), _cause(unlisted))
+        )
+    problems: list[str] = []
+    disabled: list[str] = []
+    # Every enabled row in listing order: `(file, instance or None, row)`.
+    enabled: list[tuple[str, str | None, Mapping[str, object]]] = []
     for name in names:
+        if not name.endswith(".json") or not (directory / name).is_file():
+            continue
+        where = f"connectors/{name}" if name.isprintable() else f"connectors/{name!r}"
         try:
             raw = storage.read_artifact(
                 scope=application, artifact="connectors/", name=name
             )
-        except Exception:
+        except Exception as unreadable:
+            problems.append(f"{where} could not be read ({_cause(unreadable)})")
             continue
         if raw is None:
             continue
         try:
             decoded = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except UnicodeDecodeError:
+            problems.append(f"{where} is not UTF-8")
             continue
-        if isinstance(decoded, dict):
-            entries.append((name, decoded))
-    return tuple(entries)
+        except (ValueError, RecursionError):
+            # `JSONDecodeError` is a `ValueError`; so is an integer longer than
+            # the interpreter will convert, and nesting deep enough raises
+            # `RecursionError`. All three are a file that is not a row.
+            problems.append(f"{where} is not valid JSON")
+            continue
+        if not isinstance(decoded, dict):
+            problems.append(f"{where} holds a {type(decoded).__name__}, not an object")
+            continue
+        instance = _usable_name(decoded.get("instance"))
+        if decoded.get("enabled") is not True:
+            disabled.append(where if instance is None else instance)
+            continue
+        enabled.append((where, instance, decoded))
+    files_by_instance: dict[str, list[str]] = {}
+    for where, instance, _ in enabled:
+        if instance is not None:
+            files_by_instance.setdefault(instance, []).append(where)
+    refused: list[tuple[str, str]] = []
+    accepted: list[tuple[str, str, Mapping[str, object]]] = []
+    unknown: list[str] = []
+    for where, instance, decoded in enabled:
+        if instance is None:
+            # Named by its file, since the row cannot name itself (story 4o:
+            # an enabled row is listed, never dropped).
+            problems.append(f"{where} has no text 'instance'")
+            refused.append(
+                (
+                    where,
+                    "its 'instance' is missing, blank or not printable text, so "
+                    "pm-ai cannot tell which connector it is. Repair the row or "
+                    "remove it.",
+                )
+            )
+            continue
+        files = files_by_instance[instance]
+        if len(files) > 1:
+            # Said once, where the name first appears in the listing.
+            if files[0] == where:
+                problems.append(
+                    f"{instance} is named by {len(files)} rows: {_listed(files)}"
+                )
+                every = "both" if len(files) == 2 else "all"
+                refused.append(
+                    (
+                        instance,
+                        f"{_listed(files)} {every} name it, so pm-ai cannot "
+                        f"tell which row is meant. Remove all but one.",
+                    )
+                )
+            continue
+        system = decoded.get("system")
+        if not isinstance(system, str) or not system:
+            problems.append(f"{where} has no text 'system'")
+            refused.append(
+                (
+                    instance,
+                    "its 'system' is missing or not text, so pm-ai cannot tell "
+                    "which adapter to build. Repair the row or remove it.",
+                )
+            )
+            continue
+        if system not in CONNECTOR_SYSTEMS:
+            # An enrolled system pm-ai has no adapter for is not guessed at.
+            unknown.append(instance)
+            refused.append(
+                (
+                    instance,
+                    f"pm-ai has no adapter for the system {system!r}; the "
+                    f"systems it builds are 'gitlab' and 'graph'.",
+                )
+            )
+            continue
+        accepted.append((instance, system, decoded))
+    return ConnectorRows(
+        tuple(accepted),
+        tuple(refused),
+        EnrolmentReading(
+            directory=shown,
+            enrolled=tuple(sorted(instance for instance, _, _ in accepted)),
+            disabled=tuple(sorted(set(disabled) - set(files_by_instance))),
+            unknown=tuple(sorted(unknown)),
+            problems=tuple(problems),
+            unlisted=None,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2511,15 +2657,22 @@ def read_pm_identity(storage: StorageService) -> PmIdentityReading:
 
 @dataclass(frozen=True, slots=True)
 class Bootstrap:
-    """The two application artifacts `doctor` reports on, read before any daemon.
+    """The application artifacts `doctor` reports on, read before any daemon.
 
     One read each, from one `StorageService`, so `doctor` and the daemon cannot
     end up holding two different answers about the same file.
+
+    `connectors` is the `connectors/` rows as names (story 4n), read here
+    because the two places `doctor`'s `connectors` line matters most have no
+    daemon: `setup`'s closing report and a run from a folder inside none of
+    several projects. No default: a caller that did not read the rows must not
+    be able to report that there are none.
     """
 
     projects: Mapping[str, ProjectEntry]
     registry: ArtifactState
     config: ArtifactState
+    connectors: EnrolmentReading
 
 
 def bootstrap(keychain: KeychainPort, *, paths: ScopePaths | None = None) -> Bootstrap:
@@ -2566,16 +2719,19 @@ def bootstrap(keychain: KeychainPort, *, paths: ScopePaths | None = None) -> Boo
     storage = application_storage(keychain, paths=paths)
     registry = _artifact_state(storage, REGISTRY_ARTIFACT)
     config = _artifact_state(storage, CONFIG_ARTIFACT)
+    # Plaintext rows only: the sealed store is not opened, so this costs no
+    # master-key fetch and contacts nothing (story 4n).
+    connectors = read_connector_rows(storage).reading
     if registry.raw is None:
-        return Bootstrap({}, registry, config)
+        return Bootstrap({}, registry, config, connectors)
     try:
-        return Bootstrap(parse_registry(registry.raw), registry, config)
+        return Bootstrap(parse_registry(registry.raw), registry, config, connectors)
     except RegistryRefused:
         # Carried, not raised, and not logged here either: the state holds the
         # bytes, so `registry_readable` re-reads them and reports the parser's
         # own message — which names the project or the line, and is the only
         # form of this an operator can act on.
-        return Bootstrap({}, registry, config)
+        return Bootstrap({}, registry, config, connectors)
 
 
 def application_storage(

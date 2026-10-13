@@ -17,6 +17,7 @@ that needs "ready" asserts the three probes setup configures, by name.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -133,16 +134,20 @@ def installed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def reports(monkeypatch: pytest.MonkeyPatch) -> list[Report]:
-    """Every closing report setup produced, captured on its way out of `run_all`."""
-    seen: list[Report] = []
-    real = entry.run_all
+    """Every closing report setup produced, whole, as setup's verdict reads it.
 
-    def recording(*args, **kwargs) -> Report:
-        report = real(*args, **kwargs)
+    Captured on its way out of `_FirstRun.diagnose` rather than `run_all`, so it
+    carries the `connectors` line `run_all` does not (story 4n).
+    """
+    seen: list[Report] = []
+    real = entry._FirstRun.diagnose
+
+    def recording(self) -> Report:
+        report = real(self)
         seen.append(report)
         return report
 
-    monkeypatch.setattr(entry, "run_all", recording)
+    monkeypatch.setattr(entry._FirstRun, "diagnose", recording)
     return seen
 
 
@@ -186,6 +191,34 @@ def answers_for(repository: Path, *, project_id: str = "") -> tuple[str, ...]:
 
 def setup() -> int:
     return entry.main(["setup"])
+
+
+CONNECTORS_LINE = "] connectors: "
+"""How the `connectors` probe's line reads in a printed report (story 4n)."""
+
+
+def connectors_line(printed: str) -> str:
+    """The printed `connectors` line, with its remediation line if it has one."""
+    lines = printed.splitlines()
+    (at,) = [i for i, line in enumerate(lines) if CONNECTORS_LINE in line]
+    following = lines[at + 1 : at + 2]
+    remedy = [line for line in following if line.lstrip().startswith("→")]
+    return "\n".join([lines[at], *remedy])
+
+
+def assert_after_registry(printed: str) -> None:
+    assert printed.index("] project registry: ") < printed.index(CONNECTORS_LINE), printed
+
+
+def write_row(home: Path, instance: str, **row: object) -> Path:
+    """A `connectors/` row as `connector add` writes one, by hand."""
+    directory = pm_ai_root(home) / "connectors"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{instance}.json"
+    path.write_text(
+        json.dumps({"instance": instance, "enabled": True, **row}), encoding="utf-8"
+    )
+    return path
 
 
 # ── Clean machine ────────────────────────────────────────────────────────────
@@ -238,6 +271,73 @@ def test_an_unhealthy_probe_after_a_full_run_exits_four(
     assert keychain.secret is not None
     assert set(registry_of(home)) == {"alpha"}
     assert load_config(config_path(home).read_bytes()).display_timezone == "Europe/Warsaw"
+
+
+def test_a_clean_machine_closes_by_saying_no_connector_is_enrolled_and_how_to_add_one(
+    home, tmp_path, keychain, operator, reports, capsys
+):
+    """Story 4n: setup cannot end "healthy" without saying nothing will be harvested."""
+    operator.script(*answers_for(tmp_path / "alpha"))
+
+    code = setup()
+
+    printed = capsys.readouterr().out
+    line = connectors_line(printed)
+    assert "[     ok] connectors: none enrolled" in line, line
+    assert "pm-ai connector add graph <name>" in line
+    assert "pm-ai connector add gitlab <name>" in line
+    assert_after_registry(printed)
+    # The exit still comes from the probe verdict, and the line is OK here.
+    (report,) = reports
+    assert by_name(report)["connectors"].health is Health.OK
+    assert code == (EXIT_OK if report.healthy else EXIT_UNHEALTHY)
+
+
+def test_a_clean_machine_with_the_runtime_installed_still_exits_zero_with_no_connector(
+    home, tmp_path, keychain, operator, installed
+):
+    """Nothing enrolled is an ordinary state: the appended line does not fail setup."""
+    operator.script(*answers_for(tmp_path / "alpha"))
+
+    assert setup() == EXIT_OK
+
+
+def test_setup_exits_unhealthy_when_the_connectors_line_warns(
+    home, tmp_path, keychain, operator, installed, reports, capsys
+):
+    """The line is a probe like the others: a row that cannot be used fails setup."""
+    repository = tmp_path / "alpha"
+    operator.script(*answers_for(repository))
+    assert setup() == EXIT_OK
+    (pm_ai_root(home) / "connectors" / "broken.json").parent.mkdir(exist_ok=True)
+    (pm_ai_root(home) / "connectors" / "broken.json").write_text("{", encoding="utf-8")
+    capsys.readouterr()
+
+    operator.script(str(repository), "")
+    assert setup() == EXIT_UNHEALTHY
+
+    report = reports[-1]
+    assert by_name(report)["connectors"].health is Health.WARNING
+    assert [p.name for p in report.probes if not p.health.is_healthy] == ["connectors"]
+    assert "connectors/broken.json is not valid JSON" in connectors_line(
+        capsys.readouterr().out
+    )
+
+
+def test_setup_re_run_with_a_connector_enrolled_lists_it(
+    home, tmp_path, keychain, operator, installed, capsys
+):
+    repository = tmp_path / "alpha"
+    operator.script(*answers_for(repository))
+    assert setup() == EXIT_OK
+    write_row(home, "graph:work", system="graph")
+    capsys.readouterr()
+
+    operator.script(str(repository), "")
+    assert setup() == EXIT_OK
+
+    line = connectors_line(capsys.readouterr().out)
+    assert "[     ok] connectors: 1 enrolled: graph:work" in line, line
 
 
 # ── Second runs ──────────────────────────────────────────────────────────────
@@ -364,6 +464,13 @@ def test_setup_and_doctor_agree_on_a_machine_with_two_projects(
     # And the second project is not mentioned as a problem by either of them.
     assert "no way to choose" not in setup_said + doctor_said
     assert "2 project(s) enrolled: alpha, beta" in doctor_said
+    # Story 4n: both print the same `connectors` line, after the registry line
+    # and, in `doctor`, before `project selection`.
+    assert connectors_line(setup_said) == connectors_line(doctor_said)
+    assert "connectors: none enrolled" in connectors_line(doctor_said)
+    assert_after_registry(setup_said)
+    assert_after_registry(doctor_said)
+    assert doctor_said.index(CONNECTORS_LINE) < doctor_said.index("project selection")
 
 
 # ── Refusals ─────────────────────────────────────────────────────────────────

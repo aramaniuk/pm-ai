@@ -160,10 +160,12 @@ def _machine(tmp_path, monkeypatch, projects: tuple[str, ...]) -> tuple[Path, Ke
         entries[project] = ProjectEntry(path=repository)
 
     def read(chain):
+        read = bootstrap(chain)
         return Bootstrap(
             entries,
             ArtifactState.read(render_registry(entries)) if entries else ArtifactState.absent(),
-            bootstrap(chain).config,
+            read.config,
+            read.connectors,
         )
 
     monkeypatch.setattr(entry, "_bootstrap", read)
@@ -958,8 +960,12 @@ def test_a_project_enrolled_during_the_questions_is_placed_against_at_the_save(
     entries = {"alpha": ProjectEntry(path=tmp_path / "repo-alpha")}
 
     def read(chain):
+        read = bootstrap(chain)
         return Bootstrap(
-            dict(entries), ArtifactState.read(render_registry(entries)), bootstrap(chain).config
+            dict(entries),
+            ArtifactState.read(render_registry(entries)),
+            read.config,
+            read.connectors,
         )
 
     monkeypatch.setattr(entry, "_bootstrap", read)

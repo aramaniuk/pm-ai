@@ -15,6 +15,7 @@ needs a subprocess.
 
 from __future__ import annotations
 
+import dataclasses
 import ast
 import base64
 import threading
@@ -30,7 +31,7 @@ from pm_ai.app import entry
 from pm_ai.connectors import registry as connectors
 from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import ACCEPTED_KEYS, Config, ConfigRefused, load_config
-from pm_ai.domain.health import Health, Probe
+from pm_ai.domain.health import EnrolmentReading, Health, Probe
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.ports import (
@@ -52,6 +53,9 @@ from pm_ai.surfaces.cli.dispatch import (
 )
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
+
+NOTHING_READ = EnrolmentReading("connectors/", (), (), (), (), None)
+"""A `connectors/` reading for a hand-built composition; `connector check` ignores it."""
 
 
 
@@ -77,7 +81,9 @@ def enrolled(**projects: Path):
         # The real bootstrap for `config.toml`, the stub for the registry: the
         # fixtures write a config into the redirected `HOME` and expect it to be
         # honoured, and stubbing it flat would make those rows assert nothing.
-        return Bootstrap(entries, registry, bootstrap(keychain).config)
+        return dataclasses.replace(
+            bootstrap(keychain), projects=entries, registry=registry
+        )
 
     return read
 
@@ -632,7 +638,9 @@ def test_a_projects_toml_that_cannot_be_read_is_refused_not_a_first_run(
     """
     keychain()
     monkeypatch.setattr(
-        entry, "_bootstrap", lambda _: Bootstrap({}, state, ArtifactState.absent())
+        entry, "_bootstrap", lambda chain: Bootstrap(
+            {}, state, ArtifactState.absent(), bootstrap(chain).connectors
+        ),
     )
     assert entry.main(["connector", "check"]) == EXIT_REFUSAL
     _assert_refused_naming(capsys, *reason)
@@ -689,6 +697,7 @@ def test_a_config_that_will_not_load_is_refused_rather_than_probed(
                 projects.projects,
                 projects.registry,
                 ArtifactState.unreadable("config.toml: [Errno 13] Permission denied"),
+                projects.connectors,
             )
 
         monkeypatch.setattr(entry, "_bootstrap", read)
@@ -713,7 +722,9 @@ def test_a_daemon_built_earlier_still_probes_only_its_own(tmp_path):
     first = wiring.build(tmp_path / "one", "alpha")
     wiring.build(tmp_path / "two", "beta")
     probe = entry._probe_connectors(
-        entry._Composition(first, None, ArtifactState.absent(), ArtifactState.absent())
+        entry._Composition(
+            first, None, ArtifactState.absent(), ArtifactState.absent(), NOTHING_READ
+        )
     )
     assert probe is not None
     assert [row.name for row in probe().probes] == ["gitlab:alpha"]
@@ -760,7 +771,9 @@ def test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own(tmp_path):
 
     daemon = wiring.build(tmp_path, "alpha")
     probe = entry._probe_connectors(
-        entry._Composition(daemon, None, ArtifactState.absent(), ArtifactState.absent()),
+        entry._Composition(
+            daemon, None, ArtifactState.absent(), ArtifactState.absent(), NOTHING_READ
+        ),
         registry=Spy,
     )
     assert probe is not None

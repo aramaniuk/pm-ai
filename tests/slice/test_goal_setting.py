@@ -12,6 +12,7 @@ What the renderer produces is proven in `tests/core/test_goal_render.py`.
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,7 @@ import pytest
 
 from pm_ai.app import entry
 from pm_ai.app.entry import GoalBook
-from pm_ai.app.wiring import Bootstrap, bootstrap, build
+from pm_ai.app.wiring import bootstrap, build
 from pm_ai.core.config import Config
 from pm_ai.core.event_log import EventLog
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
@@ -408,7 +409,9 @@ def test_main_wires_goal_set_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(
         entry,
         "_bootstrap",
-        lambda keychain: Bootstrap(entries, registry, bootstrap(keychain).config),
+        lambda keychain: dataclasses.replace(
+            bootstrap(keychain), projects=entries, registry=registry
+        ),
     )
     monkeypatch.setattr(entry, "MacOSKeychainAdapter", _NoKey)
     terminal(monkeypatch, ["g_staff", "personal", "long", "Reach staff engineer"])

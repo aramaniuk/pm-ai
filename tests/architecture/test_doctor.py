@@ -22,11 +22,14 @@ from pathlib import Path
 
 import pytest
 
+from pm_ai.domain.health import EnrolmentReading, Report
 from pm_ai.platform import doctor
 from pm_ai.platform import vcs as vcs_module
 from pm_ai.platform.doctor import (
+    CONNECTORS_PROBE,
     ArtifactState,
     Health,
+    connectors_enrolled,
     encryption_toggle,
     git_available,
     keychain_reachable,
@@ -798,3 +801,128 @@ def test_both_probes_run_when_the_other_one_fails(tmp_path):
 
     names = {p.name for p in report.probes}
     assert "config.toml" in names and "project registry" in names
+
+
+# ── The enrolled connectors, story 4n ────────────────────────────────────────
+
+ADD_GRAPH = "pm-ai connector add graph <name>"
+ADD_GITLAB = "pm-ai connector add gitlab <name>"
+CONNECTORS_DIR = "/somewhere/.pm-ai/connectors"
+
+
+def reading(
+    enrolled=(), *, disabled=(), unknown=(), problems=(), unlisted=None
+) -> EnrolmentReading:
+    """A reading as `read_connector_rows` makes one: each list already sorted."""
+    return EnrolmentReading(
+        CONNECTORS_DIR,
+        tuple(sorted(enrolled)),
+        tuple(sorted(disabled)),
+        tuple(sorted(unknown)),
+        tuple(problems),
+        unlisted,
+    )
+
+
+def test_the_connectors_line_names_the_enrolled_rows_sorted_with_their_count():
+    probe = connectors_enrolled(reading(["graph:work", "gitlab:alpha"]))
+
+    assert probe.name == CONNECTORS_PROBE == "connectors"
+    assert probe.health is Health.OK
+    assert probe.detail == "2 enrolled: gitlab:alpha, graph:work"
+    assert "pm-ai connector check" in probe.remediation
+
+
+def test_one_enrolled_row_is_counted_in_the_singular():
+    probe = connectors_enrolled(reading(["graph:work"]))
+
+    assert probe.health is Health.OK
+    assert probe.detail == "1 enrolled: graph:work"
+
+
+def test_nothing_enrolled_is_ok_and_names_both_commands_that_add_one():
+    probe = connectors_enrolled(reading())
+
+    assert probe.health is Health.OK
+    assert probe.detail == "none enrolled"
+    assert ADD_GRAPH in probe.remediation and ADD_GITLAB in probe.remediation
+
+
+def test_only_disabled_rows_is_none_enabled_never_none_enrolled():
+    probe = connectors_enrolled(reading(disabled=["graph:work"]))
+
+    assert probe.health is Health.OK
+    assert probe.detail == "none enabled; 1 disabled: graph:work"
+    assert "none enrolled" not in str(probe)
+
+
+def test_rows_only_for_unknown_systems_are_named_with_the_supported_ones():
+    """Not "none enrolled": something is there, and it is not a connector pm-ai has."""
+    probe = connectors_enrolled(reading(unknown=["jira:x"]))
+
+    assert probe.health is Health.OK
+    assert probe.detail == (
+        "none for a system pm-ai supports; 1 for a system pm-ai has no "
+        "connector for: jira:x (it has connectors for gitlab and graph)"
+    )
+    assert probe.remediation == (
+        f"Correct the `system` of each row named, in {CONNECTORS_DIR}, to one of "
+        f"gitlab and graph, or add one with `pm-ai connector add graph <name>` "
+        f"(Microsoft 365) or `pm-ai connector add gitlab <name>`."
+    )
+
+
+def test_a_disabled_or_unknown_system_row_is_counted_not_listed_as_enrolled():
+    probe = connectors_enrolled(
+        reading(["graph:work"], disabled=["graph:old"], unknown=["jira:x"])
+    )
+
+    assert probe.health is Health.OK
+    assert probe.detail == (
+        "1 enrolled: graph:work; 1 disabled: graph:old; 1 for a system pm-ai has "
+        "no connector for: jira:x (it has connectors for gitlab and graph)"
+    )
+
+
+def test_each_unusable_row_is_a_warning_naming_it_beside_the_rows_that_could_be_used():
+    probe = connectors_enrolled(
+        reading(
+            ["graph:work"],
+            problems=[
+                "connectors/broken.json is not valid JSON",
+                "connectors/locked.json could not be read (Permission denied)",
+            ],
+        )
+    )
+
+    assert probe.health is Health.WARNING
+    assert probe.detail == (
+        "1 enrolled: graph:work; 2 rows could not be used: connectors/broken.json "
+        "is not valid JSON; connectors/locked.json could not be read "
+        "(Permission denied)"
+    )
+    assert CONNECTORS_DIR in probe.remediation, "the remedy names the directory read"
+    assert not Report((probe,)).healthy, "a warning changes the verdict"
+
+
+def test_a_directory_that_cannot_be_listed_fails_and_never_says_none_enrolled():
+    probe = connectors_enrolled(reading(unlisted="Permission denied"))
+
+    assert probe.health is Health.FAILING
+    assert probe.detail == (
+        "connectors/ could not be listed, so which connectors are enrolled is "
+        "unknown: Permission denied"
+    )
+    assert CONNECTORS_DIR in probe.remediation
+
+
+def test_the_line_carries_nothing_but_names():
+    """The reading holds names only, so the line's text is built from nothing else."""
+    probe = connectors_enrolled(
+        reading(["graph:work"], disabled=["gitlab:old"], unknown=["jira:x"])
+    )
+
+    assert probe.detail == (
+        "1 enrolled: graph:work; 1 disabled: gitlab:old; 1 for a system pm-ai has "
+        "no connector for: jira:x (it has connectors for gitlab and graph)"
+    )
