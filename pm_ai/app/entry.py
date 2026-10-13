@@ -56,6 +56,7 @@ caller. What the exception does *not* relax is
 
 from __future__ import annotations
 
+import functools
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
@@ -64,7 +65,7 @@ from enum import Enum
 from pathlib import Path
 
 from pm_ai.app.daemon import serve as serve_daemon
-from pm_ai.app.pipelines import run_dashboard
+from pm_ai.app.pipelines import drop_transcript, run_dashboard
 from pm_ai.app.wiring import (
     REGISTRY_ARTIFACT,
     Bootstrap,
@@ -244,6 +245,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             # daemon, and `goal set` asks `require_daemon()` first, so the
             # refusal it meets names why there is none.
             goals=None if daemon is None else GoalBook(daemon.storage, channel="cli"),
+            # `11c`'s drop, bound to this daemon as `dashboard` is: it reaches
+            # storage, the meeting records and the skill registry, which the
+            # CLI may not import. `None` with no daemon; `transcript drop`
+            # asks `require_daemon()` first.
+            transcript_drop=(
+                None
+                if daemon is None
+                else functools.partial(drop_transcript, daemon)
+            ),
             # `4e`'s `daemon run`, bound to the daemon this process composed —
             # composed once, here, and never again per request.
             serve=_serve(keychain, composed),
