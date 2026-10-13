@@ -128,6 +128,7 @@ from pm_ai.surfaces.cli.dispatch import (
     dispatch,
     parse,
 )
+from pm_ai.surfaces.cli import repl
 
 __all__ = ["CONFIG_ARTIFACT", "GoalBook", "GoalWritten", "main", "read_optional"]
 
@@ -152,6 +153,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
+        # Story 4f: a bare `pm-ai` at a terminal opens the prompt, before
+        # anything is parsed or composed. Each typed command comes back here
+        # with its words, composing afresh as the command line does. Anywhere
+        # else — a pipe, cron, no stdin, output to a file — it stays the usage
+        # error `parse` answers.
+        if not arguments and _at_a_terminal():
+            return repl.run(main, line_editing=True)
         # Parsed first, and once (story 4m, AD-11): the command's target decides
         # where the daemon acts, so it has to be known before anything about
         # projects is decided. Help and usage errors are answered here, with
@@ -253,6 +261,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return EXIT_UNEXPECTED
+
+
+def _at_a_terminal() -> bool:
+    """Standard input and standard output are both a terminal.
+
+    `None` is a detached process with no descriptor — the same fact as a pipe
+    — and a closed stream, whose `isatty` raises, is no terminal either.
+    """
+    stdin, stdout = sys.stdin, sys.stdout
+    if stdin is None or stdout is None:
+        return False
+    try:
+        return stdin.isatty() and stdout.isatty()
+    except (ValueError, OSError):
+        return False
 
 
 def _probe_connectors(
