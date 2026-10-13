@@ -669,8 +669,8 @@ class TranscriptSourcePort(Protocol):
     """AD-23 — where a meeting's transcript is acquired from (story 33e).
 
     Implemented by the Graph adapter here and by the manual adapter (`11c`'s
-    dropped file); both yield captures. Reading a capture's text is `11b`'s
-    separate contract.
+    dropped file); both yield captures. Reading a capture's text is
+    `pm_ai.core.transcripts`' separate contract (story 11b).
 
     Read-only and class H egress (AD-1) for a networked source.
     """
@@ -760,6 +760,9 @@ class StoragePort(Protocol):
     # The single-phase convenience over the two above. Kept because it has a
     # caller; not what the registry uses.
     def record_execution(self, idempotency_key: str, target: TargetRef, external_id: str) -> None: ...
+    # Story 11b: a skill that raises settles its key as failed rather than
+    # leaving it in flight, so ingestion can stage the extraction and go on.
+    def fail_execution(self, idempotency_key: str) -> None: ...
 
     # Artifacts, added with story 8f. This port declared nine methods and
     # neither the single writer nor the single reader, while `StorageService`
@@ -894,7 +897,28 @@ class StoragePort(Protocol):
         """
 
     def transcript_states(self, scope: DataScope) -> dict[str, TranscriptState]:
-        """Every recorded acquisition state in `scope`, by meeting id."""
+        """Every recorded acquisition and ingestion state in `scope`, by meeting id."""
+
+    def fetched_not_ingested(self, scope: DataScope) -> tuple[str, ...]:
+        """The meetings in `scope` whose capture still awaits ingestion (story 11b).
+
+        Fetched with no ingestion row, or whose ingestion failed fewer than
+        `pm_ai.domain.transcripts.MAX_INGEST_ATTEMPTS` times.
+        """
+
+    def ingestion_exhausted(self) -> tuple[tuple[DataScope, str, str], ...]:
+        """Every capture whose ingestion failed `MAX_INGEST_ATTEMPTS` times.
+
+        `(scope, meeting_id, last reason)`, across every scope. `pm-ai doctor`
+        names each (story 11b).
+        """
+
+    def remove_member(self, *, scope: DataScope, artifact: str, name: str) -> bool:
+        """Remove one member of a declared `Collection`; `True` if it was there.
+
+        For the one legitimate move of a meeting record between day files —
+        adoption by a calendar arrival (story 11b). Ledgers are refused.
+        """
 
 
 @runtime_checkable
@@ -931,10 +955,9 @@ class ModelPort(Protocol):
     `prompt: str` would be defeated by the ordinary way prompts are written:
     interpolating `for_model` into a template yields a plain `str`, and the port
     would have to accept it. Keeping the two sources apart in the signature is
-    what stops the type being flattened away one line before the call. The same
-    flattening is why the transcript path is *not* covered here — `Extraction`
-    declares `raw: str` and `for_model: str`, splitting the pair at its first
-    hop, and making it carry `Sanitized` belongs to story `11b`.
+    what stops the type being flattened away one line before the call. The
+    transcript path keeps the pair whole since story `11b`: every text field of
+    an `Extraction` is a `Sanitized`, and no model is on that path.
 
     Internally-sourced text may be `str`: `instructions` is prose pm-ai wrote
     about itself, and there is no outside author to distrust.

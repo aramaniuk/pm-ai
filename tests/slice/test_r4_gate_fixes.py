@@ -399,39 +399,85 @@ def _meeting(scope: DataScope, mid: str = "mtg_01HX"):
     )
 
 
-def test_a_committed_record_cannot_cite_a_personal_meeting(daemon):
+def _held(meeting) -> NormalizedEvent:
+    """The held-meeting event citing `meeting`, scoped as the meeting is."""
+    from pm_ai.domain.events import MeetingHeldPayload
+
+    return NormalizedEvent(
+        scope=meeting.scope,
+        type=ObservedEventType.CALENDAR_EVENT_HELD,
+        source_ref=meeting.source_ref,
+        actor=NO_PERSON,
+        occurred_at=NOW,
+        payload=MeetingHeldPayload(
+            meeting_id=meeting.meeting_id, attendee_count=1, duration_minutes=30
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [DataScope(ScopeKind.PERSONAL), DataScope(ScopeKind.PEOPLE, person_id="alex")],
+    ids=["personal", "people"],
+)
+def test_a_committed_record_cannot_cite_a_personal_or_people_meeting(daemon, owner):
     """AD-38 — the violation that was live in the spine until 2026-08-20.
 
     `meetings/` sat in the personal scope while AD-33 makes Meeting the citation
-    root and commitments live in the git-committed project ledger. Every
-    commitment extracted from a meeting therefore referenced personal-scope
-    material from a committed file, by `source_ref` — which AD-38 forbids in
-    those exact words.
+    root and commitments live in the project ledger. A record in the project
+    scope citing a personal meeting, or a direct report's 1:1, publishes by
+    reference what the scope wall exists to keep out.
+
+    Exercised against the storage-side guard directly (story 11b): every write
+    that cites another scope is checked by the single writer, and that check —
+    not one at the top of ingestion, which compared the meeting's scope with
+    itself — is what holds the wall.
     """
+    meeting = _meeting(owner, "mtg_owned")
+    with pytest.raises(CommittedScopeLeak):
+        daemon.storage.persist_events((_held(meeting),), scope=PROJECT)
+
+
+def _ingest_a_command(daemon, meeting):
     from pm_ai.domain.transcripts import Transcript, TranscriptSource, Utterance
 
-    personal_meeting = _meeting(DataScope(ScopeKind.PERSONAL))
     transcript = Transcript(
-        meeting_id=personal_meeting.meeting_id,
+        meeting_id=meeting.meeting_id,
         source=TranscriptSource.GRAPH,
-        utterances=(Utterance("andrei@example.com", "pm-ai, note this", 0),),
+        utterances=(
+            Utterance("andrei@example.com", "pm-ai, post_comment gitlab:alpha:issue:102 note this", 0),
+        ),
     )
-    with pytest.raises(CommittedScopeLeak):
-        run_transcript_ingestion(daemon, transcript, personal_meeting)
+    return run_transcript_ingestion(daemon, transcript, meeting)
 
 
-def test_a_report_1on1_cannot_be_cited_from_the_project_ledger(daemon):
-    """AD-4/AD-38 — a 1:1 with a direct report is `people`-scoped, not project."""
-    from pm_ai.domain.transcripts import Transcript, TranscriptSource, Utterance
+def test_a_personal_meetings_transcript_is_ingested_into_the_personal_tree(daemon):
+    """Story 11b — a personal meeting harvested while acting in a project is
+    ingested, not refused: the record and the proposals' citation are personal.
+    """
+    personal = DataScope(ScopeKind.PERSONAL)
+    personal_meeting = _meeting(personal)
+    assert daemon.scope == PROJECT
 
-    one_on_one = _meeting(DataScope(ScopeKind.PEOPLE, person_id="alex"), "mtg_1on1")
-    transcript = Transcript(
-        meeting_id=one_on_one.meeting_id,
-        source=TranscriptSource.GRAPH,
-        utterances=(Utterance("andrei@example.com", "pm-ai, note this", 0),),
-    )
-    with pytest.raises(CommittedScopeLeak):
-        run_transcript_ingestion(daemon, transcript, one_on_one)
+    out = _ingest_a_command(daemon, personal_meeting)
+
+    assert not out.executed and len(out.staged) == 1
+    assert str(out.staged[0].cites) == "meeting:mtg_01HX"
+    assert daemon.meetings.get("mtg_01HX", scope=personal).meeting.scope == personal
+    assert not daemon.storage.list_collection(scope=PROJECT, artifact="meetings/")
+
+
+def test_a_report_1on1s_transcript_is_ingested_into_the_people_tree(daemon):
+    """AD-4 — a 1:1 with a direct report is `people`-scoped, and its transcript's
+    record lands in the `people` tree, never the project's."""
+    people = DataScope(ScopeKind.PEOPLE, person_id="alex")
+    one_on_one = _meeting(people, "mtg_1on1")
+
+    out = _ingest_a_command(daemon, one_on_one)
+
+    assert len(out.staged) == 1 and str(out.staged[0].cites) == "meeting:mtg_1on1"
+    assert daemon.meetings.get("mtg_1on1", scope=people).meeting.scope == people
+    assert not daemon.storage.list_collection(scope=PROJECT, artifact="meetings/")
 
 
 def test_a_transcript_lives_in_its_meetings_scope():

@@ -19,10 +19,13 @@ because it decides where the record goes and whether the project scope may
 cite it, so the accessor honours the field and never guesses. `get` and
 `for_day` take a scope explicitly, because there is no `Meeting` to ask.
 
-Nothing here checks the *citation direction* — whether a project-scoped daemon
-may cite this meeting at all. `assert_citation_legal` owns that and is called by
-`pm_ai.app.pipelines` before extraction, which is before this accessor is
-reached; moving the record to disk does not move that check.
+Nothing here checks the *citation direction*. A record is written into its
+own scope, so it cites nothing across one; what guards AD-38 is the storage-side
+check on every write that cites another scope (`disclosure.assert_writable`).
+Transcript ingestion writes everything into the meeting's own scope (story
+11b), which is why it no longer asks `assert_citation_legal` first — that call
+compared the meeting's scope with the scope pm-ai was acting in, and refused a
+personal meeting's transcript for the wrong reason.
 
 ## The record is the ledger's field grammar, without the ledger's envelope
 
@@ -111,7 +114,12 @@ from pm_ai.domain.event_entries import (
     scan_fields,
 )
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
-from pm_ai.domain.meetings import InvalidAttendeeCount, Meeting
+from pm_ai.domain.meetings import (
+    MATCH_TOLERANCE,
+    InvalidAttendeeCount,
+    Meeting,
+    is_candidate,
+)
 from pm_ai.domain.transcripts import CaptureFormat
 from pm_ai.ports import StoragePort
 
@@ -120,6 +128,8 @@ __all__ = [
     "NOTES_HEADING",
     "SUMMARY_HEADING",
     "MalformedMeeting",
+    "DuplicateCalendarReference",
+    "KeptRecord",
     "MeetingDisplaced",
     "MeetingNotFound",
     "MeetingRecord",
@@ -171,6 +181,7 @@ _ATTENDEES = "attendees"
 _ATTENDEE_COUNT = "attendee_count"
 _SCOPE = "scope"
 _CALENDAR_REF = "calendar_event_ref"
+_MANUAL_ONLY = "manual_only"
 
 _FIELDS: tuple[str, ...] = (
     _MEETING_ID,
@@ -181,15 +192,22 @@ _FIELDS: tuple[str, ...] = (
     _ATTENDEE_COUNT,
     _SCOPE,
     _CALENDAR_REF,
+    _MANUAL_ONLY,
 )
 """Every key the record may carry, in render order.
 
-`calendar_event_ref` is the only optional one: it is omitted when `None` and
-rendered — possibly empty — otherwise, which is what distinguishes "no calendar
-event" from "an event whose reference is the empty string" across a round trip.
+`calendar_event_ref` is optional: it is omitted when `None` and rendered —
+possibly empty — otherwise, which is what distinguishes "no calendar event"
+from "an event whose reference is the empty string" across a round trip.
+
+`manual_only` (story 11b) is optional too, and has one spelling: `true`,
+written only for a record pm-ai minted from a dropped transcript. Absent means
+not manual-only, so every record written before it existed reads unchanged.
 """
 
-_REQUIRED: frozenset[str] = frozenset(_FIELDS) - {_CALENDAR_REF}
+_MANUAL_ONLY_VALUE = "true"
+
+_REQUIRED: frozenset[str] = frozenset(_FIELDS) - {_CALENDAR_REF, _MANUAL_ONLY}
 
 _DECIMAL = re.compile(r"^(?:0|[1-9][0-9]*)$")
 """The one spelling of `duration_minutes` this grammar reads or writes.
@@ -243,6 +261,15 @@ class MalformedMeeting(ValueError):
     """
 
 
+class DuplicateCalendarReference(ValueError):
+    """Two or more records in one scope carry the same calendar reference.
+
+    One calendar reference is one meeting (AD-33), so this is a state pm-ai
+    did not write and cannot pick between: the arriving row is refused, naming
+    every record, rather than written into whichever sorts first.
+    """
+
+
 class MeetingDisplaced(ValueError):
     """A record for this id already exists under another day's name.
 
@@ -268,6 +295,26 @@ class MeetingDisplaced(ValueError):
 
 
 # ── The record ───────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class KeptRecord:
+    """What `put` did with a meeting: the id the record is kept under (AD-33).
+
+    For a calendar-sourced meeting that is not necessarily the id it arrived
+    with — a connector's meeting id is a calendar reference, never a record id
+    — so `app` fills the held-meeting event's citation from `meeting_id`.
+    `adopted` says a manual-only record was adopted; `unadopted` names the
+    manual-only candidates when there were two or more and none was adopted.
+    `notices` are sentences for the harvest's refusals: records that could not
+    be read during the lookup and were skipped, and `## Notes` that differed
+    between two members of one record.
+    """
+
+    meeting_id: str
+    adopted: bool = False
+    unadopted: tuple[str, ...] = ()
+    notices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,6 +463,8 @@ def render_record(record: MeetingRecord) -> str:
     }
     if meeting.calendar_event_ref is not None:
         values[_CALENDAR_REF] = meeting.calendar_event_ref
+    if meeting.manual_only:
+        values[_MANUAL_ONLY] = _MANUAL_ONLY_VALUE
     lines = [
         _assert_readable_length(
             f"{key}={render_value(values[key], where=f'field {key!r}')}",
@@ -492,6 +541,12 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
     attendees = _parse_attendees(fields[_ATTENDEES], source=source)
     attendee_count = _parse_attendee_count(fields[_ATTENDEE_COUNT], source=source)
     scope = _parse_scope(fields[_SCOPE], source=source)
+    manual_only = fields.get(_MANUAL_ONLY)
+    if manual_only is not None and manual_only != _MANUAL_ONLY_VALUE:
+        raise MalformedMeeting(
+            f"{source}: manual_only={manual_only!r}. The field has one spelling, "
+            f"`manual_only={_MANUAL_ONLY_VALUE}`, and is absent otherwise."
+        )
     try:
         meeting = Meeting(
             meeting_id=meeting_id,
@@ -502,6 +557,7 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
             scope=scope,
             calendar_event_ref=fields.get(_CALENDAR_REF),
             attendee_count=attendee_count,
+            manual_only=manual_only is not None,
         )
     except InvalidAttendeeCount as contradiction:
         raise MalformedMeeting(f"{source}: {contradiction}") from contradiction
@@ -524,8 +580,8 @@ class MeetingRecords:
     def __init__(self, storage: StoragePort) -> None:
         self._storage = storage
 
-    def put(self, meeting: Meeting) -> None:
-        """Write one record into the scope that owns its subject.
+    def put(self, meeting: Meeting) -> KeptRecord:
+        """Write one record into the scope that owns its subject; say which id it kept.
 
         Only for a meeting that has already happened. A future meeting is not
         persisted at all (decided 2026-09-07) — the calendar is its source of
@@ -543,7 +599,26 @@ class MeetingRecords:
         such a file and it must not be the operation that raises on it.
 
         A record for this id already sitting under another day's name is refused
-        rather than duplicated — see `MeetingDisplaced`.
+        rather than duplicated — see `MeetingDisplaced` — with one exception,
+        adoption, below.
+
+        **A calendar-sourced meeting is looked up, not written blind** (D3,
+        AD-33, story 11b). One with a `calendar_event_ref` is matched first to a
+        record under its own id or carrying the same calendar reference, then to
+        a **manual-only** record whose title matches and whose start is within
+        `MATCH_TOLERANCE` (`find_candidates`'s rule). The reference is looked up
+        across every record in the scope, not only near the new start, so a
+        rescheduled meeting is still one record; an empty reference matches
+        nothing, and two records sharing one is `DuplicateCalendarReference`.
+        A record that cannot be read is skipped by the lookup and named in
+        `KeptRecord.notices`. One such manual-only record is
+        *adopted*: the calendar's fields replace the manual ones, the record's
+        id and `## Notes` survive, and the record is re-filed under the
+        calendar start's day — the one legitimate move between day files, so
+        no `MeetingDisplaced`. Two or more adopt neither: the meeting is written
+        under its own id and the candidates are named in `KeptRecord.unadopted`.
+        A meeting with no calendar reference — one bound by hand — is written
+        under its own id, unchanged.
 
         **This is a read-modify-write, and it is one step.** The previous member
         is listed and read, and the replacement written, inside
@@ -561,25 +636,32 @@ class MeetingRecords:
         on disk at publish time, which no artifact operation does today.
         """
         scope = _assert_records_meetings(meeting.scope, where="Meeting.scope")
-        name = record_name(meeting.meeting_id, meeting.start)
+        record_name(meeting.meeting_id, meeting.start)  # refuse an unrecordable id first
         with self._storage.exclusive(scope=scope, artifact=MEETINGS):
-            notes = ""
-            for member in self._members_for(meeting.meeting_id, scope=scope):
-                if member != name:
-                    raise MeetingDisplaced(
-                        f"{meeting.meeting_id} is already recorded in {scope} as "
-                        f"{member}, and its start now falls on another UTC day, so "
-                        f"this write would publish {name} and leave that one "
-                        f"behind. One id with two records is a citation nothing "
-                        f"can resolve; remove the stale member and write again."
-                    )
-                notes = _notes_of(self._repairable_text(member, scope=scope))
-            self._storage.write_artifact(
-                render_record(MeetingRecord(meeting, notes)).encode("utf-8"),
-                scope=scope,
-                artifact=MEETINGS,
-                name=name,
-            )
+            if meeting.calendar_event_ref is None:
+                notices = self._write(meeting, scope=scope)
+                return KeptRecord(meeting.meeting_id, notices=notices)
+            return self._put_calendar(meeting, scope=scope)
+
+    def find_candidates(
+        self, scope: DataScope, title: str, start: datetime
+    ) -> tuple[MeetingRecord, ...]:
+        """Every record in `scope` that a title and a start describe (D3, AD-33).
+
+        A record is a candidate when its start lies within `MATCH_TOLERANCE` of
+        `start`, either side, inclusive, and its title equals `title` after NFKC
+        normalisation, case-folding, trimming and collapsing runs of whitespace.
+        An empty title describes nothing, so it has no candidates.
+        Read across day files: a window straddling midnight UTC reads both
+        days. Ordered by `(start, meeting_id)`.
+        """
+        scope = _assert_records_meetings(scope, where="find_candidates(scope=…)")
+        start = _assert_utc(start, where="find_candidates(start=…)")
+        return tuple(
+            record
+            for record in self._window(scope, start)
+            if is_candidate(record.meeting, title=title, start=start)
+        )
 
     def get(self, meeting_id: str, *, scope: DataScope) -> MeetingRecord:
         """The record that id names, or `MeetingNotFound`.
@@ -687,6 +769,143 @@ class MeetingRecords:
         )
 
     # ── Internals ────────────────────────────────────────────────────────────
+
+    def _put_calendar(self, meeting: Meeting, *, scope: DataScope) -> KeptRecord:
+        """`put` for a calendar-sourced meeting: look up, adopt, or write. Claimed."""
+        if self._members_for(meeting.meeting_id, scope=scope):
+            return KeptRecord(meeting.meeting_id, notices=self._write(meeting, scope=scope))
+        records, skipped = self._scan(scope)
+        reference = meeting.calendar_event_ref or ""
+        by_reference = sorted(
+            record.meeting.meeting_id
+            for record in records
+            if reference.strip()
+            and record.meeting.calendar_event_ref == reference
+            and not record.meeting.manual_only
+        )
+        if len(by_reference) > 1:
+            raise DuplicateCalendarReference(
+                f"calendar meeting {reference} is recorded {len(by_reference)} times "
+                f"in {scope} — {', '.join(by_reference)} — and one reference is one "
+                f"meeting, so this row was not written. Remove all but one."
+            )
+        if by_reference:
+            kept = by_reference[0]
+            notices = self._write(
+                replace(meeting, meeting_id=kept, manual_only=False), scope=scope, adopting=True
+            )
+            return KeptRecord(kept, notices=(*skipped, *notices))
+        manual = sorted(
+            record.meeting.meeting_id
+            for record in records
+            if record.meeting.manual_only
+            and is_candidate(record.meeting, title=meeting.title, start=meeting.start)
+        )
+        if len(manual) == 1:
+            kept = manual[0]
+            notices = self._write(
+                replace(meeting, meeting_id=kept, manual_only=False), scope=scope, adopting=True
+            )
+            return KeptRecord(kept, adopted=True, notices=(*skipped, *notices))
+        notices = self._write(meeting, scope=scope)
+        return KeptRecord(
+            meeting.meeting_id,
+            unadopted=tuple(manual) if len(manual) > 1 else (),
+            notices=(*skipped, *notices),
+        )
+
+    def _write(
+        self, meeting: Meeting, *, scope: DataScope, adopting: bool = False
+    ) -> tuple[str, ...]:
+        """Write `meeting` under its own name, carrying `## Notes` over. Claimed.
+
+        A member for the same id under another day's name is `MeetingDisplaced`
+        — unless this write adopts a manual-only record (`adopting`) and that
+        member is manual-only: then it is the record being re-filed, and it is
+        removed once the new name is written. A crash between the two leaves
+        both; the next adoption of the same calendar meeting finds the new one
+        by reference and removes the old one then.
+
+        With more than one member, the hand-recorded (manual-only) member's
+        notes are kept, never whichever lists first; notes that differ between
+        members are named in the returned notices.
+        """
+        name = record_name(meeting.meeting_id, meeting.start)
+        notes_of: dict[str, str] = {}
+        manual: list[str] = []
+        moved: list[str] = []
+        for member in self._members_for(meeting.meeting_id, scope=scope):
+            text = self._repairable_text(member, scope=scope)
+            notes_of[member] = _notes_of(text)
+            hand_recorded = _is_manual_only(text)
+            if hand_recorded:
+                manual.append(member)
+            if member != name:
+                if not (adopting and hand_recorded):
+                    raise MeetingDisplaced(
+                        f"{meeting.meeting_id} is already recorded in {scope} as "
+                        f"{member}, and its start now falls on another UTC day, so "
+                        f"this write would publish {name} and leave that one "
+                        f"behind. One id with two records is a citation nothing "
+                        f"can resolve; remove the stale member and write again."
+                    )
+                moved.append(member)
+        kept_from = manual[0] if manual else name
+        notes = notes_of.get(kept_from, "")
+        notices: tuple[str, ...] = ()
+        if len({text for text in notes_of.values() if text}) > 1:
+            notices = (
+                f"{meeting.meeting_id} in {scope} had {len(notes_of)} records with "
+                f"different ## Notes ({', '.join(sorted(notes_of))}); the notes of "
+                f"{kept_from} were kept and the others were not carried over.",
+            )
+        self._storage.write_artifact(
+            render_record(MeetingRecord(meeting, notes)).encode("utf-8"),
+            scope=scope,
+            artifact=MEETINGS,
+            name=name,
+        )
+        for member in moved:
+            self._storage.remove_member(scope=scope, artifact=MEETINGS, name=member)
+        return notices
+
+    def _scan(self, scope: DataScope) -> tuple[list[MeetingRecord], tuple[str, ...]]:
+        """Every readable record in `scope`, and a sentence for each that is not.
+
+        For `put`'s lookup by calendar reference, which must see the whole
+        scope and must not stop a harvest over one hand-mangled file.
+        """
+        records: list[MeetingRecord] = []
+        skipped: list[str] = []
+        for member in self._storage.list_collection(scope=scope, artifact=MEETINGS):
+            if not _RECORD_NAME.match(member):
+                continue
+            try:
+                record = self._record(member, scope=scope)
+            except MalformedMeeting as unreadable:
+                skipped.append(
+                    f"{member} in {scope} could not be read and was left out of "
+                    f"the meeting lookup: {unreadable}"
+                )
+                continue
+            if record is not None:
+                records.append(record)
+        return records, tuple(skipped)
+
+    def _window(self, scope: DataScope, start: datetime) -> tuple[MeetingRecord, ...]:
+        """Every record whose start is within `MATCH_TOLERANCE` of `start`, inclusive."""
+        begin, end = start - MATCH_TOLERANCE, start + MATCH_TOLERANCE
+        days = _utc_days(begin, end + timedelta(microseconds=1))
+        found: list[MeetingRecord] = []
+        for member in self._storage.list_collection(scope=scope, artifact=MEETINGS):
+            if not _RECORD_NAME.match(member) or member[:10] not in days:
+                continue
+            record = self._record(member, scope=scope)
+            if record is not None and begin <= record.meeting.start <= end:
+                found.append(record)
+        return tuple(
+            sorted(found, key=lambda held: (held.meeting.start, held.meeting.meeting_id))
+        )
 
     def _members_for(self, meeting_id: str, *, scope: DataScope) -> tuple[str, ...]:
         """The collection members whose name carries this id's digest.
@@ -1200,6 +1419,20 @@ def _digest_suffix(meeting_id: str) -> str:
     what a write produced.
     """
     return f"-{hashlib.sha256(meeting_id.encode('utf-8')).hexdigest()}.md"
+
+
+def _is_manual_only(text: str) -> bool:
+    """Whether a member's text carries the manual-only mark in its field block.
+
+    Read off the raw text, as `_notes_of` reads the notes: the member is about
+    to be replaced, and a hand-mangled field elsewhere must not stop that.
+    """
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("##"):
+            return False
+        if line == f"{_MANUAL_ONLY}={_MANUAL_ONLY_VALUE}":
+            return True
+    return False
 
 
 def _notes_of(text: str) -> str:

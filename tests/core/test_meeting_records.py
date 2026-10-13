@@ -123,8 +123,14 @@ def meeting(
     duration_minutes: int = 45,
     attendees: tuple[Actor, ...] = (Actor("actor_andrei"), Actor("actor_alex")),
     title: str = "Project Alpha architecture sync",
-    calendar_event_ref: str | None = "outlook:evt_9931",
+    calendar_event_ref: str | None | object = ...,
 ) -> Meeting:
+    # One calendar reference is one meeting (story 11b), so each id gets its
+    # own unless a test names one; the default meeting keeps `evt_9931`.
+    if calendar_event_ref is ...:
+        calendar_event_ref = (
+            "outlook:evt_9931" if meeting_id == "mtg_01HX" else f"outlook:evt_{meeting_id}"
+        )
     return Meeting(
         meeting_id=meeting_id,
         title=title,
@@ -132,7 +138,7 @@ def meeting(
         duration_minutes=duration_minutes,
         attendees=attendees,
         scope=scope,
-        calendar_event_ref=calendar_event_ref,
+        calendar_event_ref=calendar_event_ref,  # type: ignore[arg-type]
     )
 
 
@@ -453,8 +459,10 @@ def test_tied_start_instants_are_ordered_by_meeting_id(records):
     """Matrix: `23a` requires a byte-identical re-render, so the tie cannot be
     broken by directory order.
     """
-    records.put(meeting("mtg_bbb"))
-    records.put(meeting("mtg_aaa"))
+    # Two calendar references: one reference is one meeting since story 11b,
+    # and `put` would keep the first id for the second.
+    records.put(meeting("mtg_bbb", calendar_event_ref="outlook:evt_bbb"))
+    records.put(meeting("mtg_aaa", calendar_event_ref="outlook:evt_aaa"))
 
     found = records.for_day(date(2026, 9, 4), tz=UTC, scope=PROJECT)
     assert [held.meeting.meeting_id for held in found] == ["mtg_aaa", "mtg_bbb"]
@@ -1030,8 +1038,8 @@ def test_a_member_listed_then_removed_is_absent_rather_than_malformed(
     calls produces on demand, so one member's read is intercepted while every
     other call goes to the real writer.
     """
-    records.put(meeting("mtg_gone"))
-    records.put(meeting("mtg_here"))
+    records.put(meeting("mtg_gone", calendar_event_ref="outlook:evt_gone"))
+    records.put(meeting("mtg_here", calendar_event_ref="outlook:evt_here"))
     vanished = next(name for name in members(tmp_path, PROJECT) if "mtg_gone" in name)
     racing = MeetingRecords(_MemberVanishes(storage, vanished))
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import errno
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,7 +30,15 @@ from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.graph import GraphConnector
 from pm_ai.core.config import ConfigRefused
 from pm_ai.core.event_log import EventLog
-from pm_ai.core.extraction import extract
+from pm_ai.core.command_authorization import EXECUTE
+from pm_ai.core.extraction import Extraction, SpokenCommand, extract
+from pm_ai.core.jobs import idempotency_key
+from pm_ai.core.meeting_records import (
+    DuplicateCalendarReference,
+    MeetingDisplaced,
+    capture_name,
+)
+from pm_ai.core.transcripts import MeetingDetails, bind_meeting, failure_reason, ingest
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import parse_goals
 from pm_ai.core.normalize import attribute_all
@@ -40,9 +48,8 @@ from pm_ai.core.rendering import (
     render_dashboard,
     render_project_dashboard,
 )
-from pm_ai.domain.disclosure import assert_citation_legal
-from pm_ai.domain.events import NormalizedEvent, ObservedEventType
-from pm_ai.domain.identity import DataScope, ScopeKind, TargetRef
+from pm_ai.domain.events import MeetingHeldPayload, NormalizedEvent, ObservedEventType
+from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.proposals import Proposal
@@ -58,8 +65,17 @@ from pm_ai.domain.harvest import (
     UnreadCalendar,
 )
 from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
-from pm_ai.domain.transcripts import TranscriptReport
+from pm_ai.domain.storage_tiers import CAPTURES
+from pm_ai.domain.transcripts import (
+    CaptureFormat,
+    Transcript,
+    TranscriptReport,
+    TranscriptSource,
+    TranscriptStateKind,
+)
 from pm_ai.ports import ArtifactBusy, CalendarReadPort
+from pm_ai.storage.service import OperationalStoreBusy
+from pm_ai.skills.registry import ExecutedButUnrecorded, Invocation
 
 _log = logging.getLogger(__name__)
 
@@ -136,17 +152,46 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # A `meetings/` claimed by another process fails this attempt by name
     # (story `1r`): recorded as a retryable failure with the position unchanged,
     # so the scheduled harvest has a row to back off from, and then raised on for
-    # the command at the terminal. Only the busy refusal — a displaced or
-    # malformed record keeps propagating as it always has.
+    # the command at the terminal. A malformed record keeps propagating as it
+    # always has; a displaced one, or a calendar reference recorded twice, is a
+    # named refusal for that row (story 11b), whose held-meeting event is then
+    # not persisted, since it would cite no record.
+    #
+    # **`put` returns the id it kept** (story 11b, AD-33, gates F2/F3). A
+    # connector's meeting id is a calendar reference, never a record id: the
+    # accessor looks the meeting up by calendar reference, then by title and
+    # start, and adopts a manual-only record it finds. So the held-meeting
+    # events are re-pointed at the kept id before they are persisted, and a
+    # held-meeting event can only cite a record that exists. A calendar row
+    # with two manual-only candidates adopts neither; both are named in the
+    # result's refusals and the row is kept.
     total = len(result.records)
+    kept_ids: dict[str, str] = {}
+    unrecorded: set[str] = set()
+    refusals: list[str] = []
     for index, meeting in enumerate(result.records, start=1):
         try:
-            daemon.meetings.put(meeting)
+            kept = daemon.meetings.put(meeting)
         except ArtifactBusy as busy:
             _record_busy_meetings(
                 daemon, instance, cursor, (index, meeting), total, busy, result.failure
             )
             raise
+        except (MeetingDisplaced, DuplicateCalendarReference) as refused:
+            unrecorded.add(meeting.meeting_id)
+            refusals.append(f"calendar meeting {meeting.meeting_id} was not recorded: {refused}")
+            continue
+        refusals.extend(kept.notices)
+        if kept.meeting_id != meeting.meeting_id:
+            kept_ids[meeting.meeting_id] = kept.meeting_id
+        if kept.unadopted:
+            refusals.append(
+                f"calendar meeting {meeting.meeting_id} ({meeting.title!r}) matches "
+                f"{len(kept.unadopted)} hand-recorded meetings in {meeting.scope} — "
+                f"{', '.join(kept.unadopted)} — so neither was adopted and it was "
+                f"recorded on its own. Merge them by hand if they are one meeting."
+            )
+    attributed = _cite_kept(_without_held(attributed, unrecorded), kept_ids)
 
     # Persist first, then record where the harvest got to. The order is the
     # matrix row about a persist that raises after page one: `persist_events` is
@@ -154,6 +199,8 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # one's cursor *and* its coverage together rather than leaving a cursor that
     # advanced past events nobody stored.
     persisted = _persist_by_scope(daemon, attributed)
+    if refusals:
+        persisted = replace(persisted, refusals=(*persisted.refusals, *refusals))
     # AD-35 — `result.coverage` is `CoverageWindow | None` and `None` is passed
     # through as itself. A harvest that asked and got an empty answer *does*
     # record a window (`8i`): the connector's own clock readings either side of
@@ -172,12 +219,172 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # the cursor and coverage are saved, so nothing in it can lose this harvest's
     # progress. It earns no coverage window and never touches a meeting record;
     # its report rides on `PersistResult` as a field. `9a` adds the `try/except`
-    # around the connector call above and `11b` the ingestion after this.
+    # around the connector call above.
+    #
+    # Story 11b — then every capture fetched and not yet ingested is ingested:
+    # this run's and any an earlier run left (a daemon killed between capture
+    # and ingestion), each recorded ingested or failed by name.
     if isinstance(connector, GraphConnector):
         report = _acquire_transcripts(daemon, instance, connector, result)
         if report is not None:
-            persisted = replace(persisted, transcripts=report)
+            persisted = replace(persisted, transcripts=ingest_captures(daemon, report))
     return persisted
+
+
+def _without_held(
+    events: tuple[NormalizedEvent, ...], meeting_ids: set[str]
+) -> tuple[NormalizedEvent, ...]:
+    """`events` less the held-meeting events of meetings whose record was refused."""
+    if not meeting_ids:
+        return events
+    return tuple(
+        event
+        for event in events
+        if not (
+            event.type is ObservedEventType.CALENDAR_EVENT_HELD
+            and isinstance(event.payload, MeetingHeldPayload)
+            and event.payload.meeting_id in meeting_ids
+        )
+    )
+
+
+def _cite_kept(
+    events: tuple[NormalizedEvent, ...], kept_ids: dict[str, str]
+) -> tuple[NormalizedEvent, ...]:
+    """Each held-meeting event re-pointed at the record id `put` kept (AD-33).
+
+    Only the events whose meeting was adopted or found under another id; every
+    other event is returned as it came.
+    """
+    if not kept_ids:
+        return events
+    cited: list[NormalizedEvent] = []
+    for event in events:
+        payload = event.payload
+        if (
+            event.type is ObservedEventType.CALENDAR_EVENT_HELD
+            and isinstance(payload, MeetingHeldPayload)
+            and payload.meeting_id in kept_ids
+        ):
+            kept = kept_ids[payload.meeting_id]
+            event = replace(
+                event,
+                source_ref=SourceRef.parse(f"meeting:{kept}"),
+                payload=replace(payload, meeting_id=kept),
+            )
+        cited.append(event)
+    return tuple(cited)
+
+
+def ingest_captures(daemon: Daemon, report: TranscriptReport) -> TranscriptReport:
+    """Ingest every capture `report` says is fetched and not ingested (story 11b).
+
+    Each is read from its meeting's scope as a `GRAPH` transcript and run
+    through `run_transcript_ingestion`; its row becomes `ingested`, or
+    `ingest_failed` with the failure's type and a bounded message. One
+    capture's failure is recorded by name and neither undoes its capture nor
+    stops the others; a failed one is offered again on later runs until it has
+    failed `MAX_INGEST_ATTEMPTS` times, after which `pm-ai doctor` names it. A
+    capture another process held busy is not an attempt: its row is left as it
+    is and the run names it. A row that cannot be written is named too. The
+    capture stays on disk either way — the 30-day purge is NFR-09's.
+    """
+    ingested: list[tuple[DataScope, str]] = []
+    failed: list[tuple[DataScope, str, str]] = []
+    refusals: list[str] = []
+    for scope, meeting_id in report.awaiting_ingestion:
+        try:
+            name, outcome = _ingest_capture(daemon, scope, meeting_id)
+        except (ArtifactBusy, OperationalStoreBusy) as busy:
+            refusals.append(
+                f"the transcript of meeting {meeting_id} in {scope} was not "
+                f"ingested: {type(busy).__name__} — another pm-ai process held what "
+                f"it needed. Not counted as an attempt; tried again next run."
+            )
+            continue
+        except Exception as failure:  # noqa: BLE001 — one capture, not the run
+            reason = (
+                f"the transcript of meeting {meeting_id} in {scope} could not be "
+                f"ingested: {failure_reason(failure)}"
+            )
+            failed.append((scope, meeting_id, reason))
+            refusals.extend(
+                _record_ingestion(daemon, scope, meeting_id, TranscriptStateKind.INGEST_FAILED, reason)
+            )
+            continue
+        ingested.append((scope, meeting_id))
+        refusals.extend(
+            _record_ingestion(
+                daemon, scope, meeting_id, TranscriptStateKind.INGESTED, _ingested(name, outcome)
+            )
+        )
+    return replace(
+        report,
+        ingested=tuple(ingested),
+        ingest_failed=tuple(failed),
+        refusals=(*report.refusals, *refusals),
+    )
+
+
+def _ingested(name: str, outcome: TranscriptIngestion) -> str:
+    """The `ingested` row's reason: what was staged and run, and what failed."""
+    reason = (
+        f"{name} ingested: {len(outcome.staged)} staged, {len(outcome.executed)} "
+        f"executed, {len(outcome.left)} left as the PM had acted on them."
+    )
+    if outcome.unrecorded:
+        reason += (
+            f" {len(outcome.unrecorded)} executed and could not be recorded: "
+            f"{'; '.join(outcome.unrecorded)}."
+        )
+    if outcome.failures:
+        reason += f" {len(outcome.failures)} skill call(s) failed: {'; '.join(outcome.failures)}."
+    return reason
+
+
+def _ingest_capture(
+    daemon: Daemon, scope: DataScope, meeting_id: str
+) -> tuple[str, TranscriptIngestion]:
+    record = daemon.meetings.get(meeting_id, scope=scope)
+    name = capture_name(meeting_id, record.meeting.start, CaptureFormat.GRAPH)
+    raw = daemon.storage.read_artifact(scope=scope, artifact=CAPTURES, name=name)
+    if raw is None:
+        raise FileNotFoundError(f"{name} is not in {scope}'s transcripts/")
+    transcript = ingest(
+        raw.decode("utf-8"), record.meeting, source=TranscriptSource.GRAPH, name=name
+    )
+    return name, run_transcript_ingestion(daemon, transcript, record.meeting)
+
+
+def _record_ingestion(
+    daemon: Daemon,
+    scope: DataScope,
+    meeting_id: str,
+    state: TranscriptStateKind,
+    reason: str,
+) -> tuple[str, ...]:
+    """Record where one capture's ingestion got to; a sentence if that failed.
+
+    A failure to record is returned for the report's refusals, not raised: the
+    ingestion already happened or already failed, and the next run repairs a
+    missing row — re-staging leaves any proposal the PM acted on as it is.
+    """
+    try:
+        daemon.storage.record_transcript_state(
+            scope,
+            meeting_id,
+            state,
+            reason,
+            retryable=state is TranscriptStateKind.INGEST_FAILED,
+        )
+    except Exception as unrecorded:  # noqa: BLE001 — named; the run goes on
+        _log.exception("could not record %s for meeting %s in %s", state.value, meeting_id, scope)
+        return (
+            f"meeting {meeting_id} in {scope} was {state.value} but the row saying "
+            f"so could not be written ({type(unrecorded).__name__}); the next run "
+            f"offers its capture again.",
+        )
+    return ()
 
 
 def _acquire_transcripts(
@@ -333,74 +540,167 @@ def _persist_by_scope(
     )
 
 
-def run_transcript_ingestion(daemon: Daemon, transcript, meeting, *, provider: str = "gitlab") -> dict:
+@dataclass(frozen=True, slots=True)
+class TranscriptIngestion:
+    """What one transcript's ingestion did (story 11b).
+
+    `failures` names each execution whose skill raised; its extraction is in
+    `staged` too. `unrecorded` names each execution that happened and could
+    not then be recorded — not a failure, and never staged again. `left` holds
+    the ids of proposals already approved, rejected or expired, which a
+    re-ingestion leaves exactly as they are.
+    """
+
+    executed: tuple[tuple[Extraction, Invocation], ...]
+    staged: tuple[Proposal, ...]
+    extractions: tuple[Extraction, ...]
+    failures: tuple[str, ...] = ()
+    unrecorded: tuple[str, ...] = ()
+    left: tuple[str, ...] = ()
+
+
+def bind_transcript(
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    meeting_id: str | None = None,
+    details: MeetingDetails | None = None,
+) -> Meeting:
+    """The meeting a transcript belongs to, in `scope` (D3, AD-23, AD-33).
+
+    A named id wins and must be recorded there; otherwise a title and start
+    bind to the one record they match, refuse naming every candidate when two
+    or more match, and mint a manual-only record when none does. Nothing is
+    written: `run_transcript_ingestion` writes the record.
+    """
+    return bind_meeting(daemon.meetings, scope=scope, meeting_id=meeting_id, details=details)
+
+
+def run_transcript_ingestion(
+    daemon: Daemon, transcript: Transcript, meeting: Meeting
+) -> TranscriptIngestion:
     """Ingest a bound transcript, extract, then execute or stage per AD-32.
 
-    Lives in `app` for the same reason the harvest pipeline does: it must reach a
-    connector, the core, storage, and the skill registry, which no single layer
-    below is permitted to do (AD-30).
+    Lives in `app` for the same reason the harvest pipeline does: it must reach
+    the core, storage, and the skill registry, which no single layer below is
+    permitted to do (AD-30).
+
+    **Everything lands in the meeting's scope** (story 11b) — the record, and
+    the citation every proposal carries — never the scope pm-ai is acting in. A
+    personal meeting harvested while acting in a project is ingested, not
+    refused: the check that refused it compared the meeting's scope with the
+    acting scope and went. What still guards AD-38 is the storage-side check on
+    every write that cites another scope.
     """
-    # AD-38 — check the citation direction BEFORE extracting anything. A meeting
-    # owned by `personal` or `people` cannot be cited from the project scope,
-    # and every extraction below will cite this meeting (AD-33).
-    assert_citation_legal(cited=meeting.scope, into=daemon.scope)
+    if transcript.meeting_id != meeting.meeting_id:
+        raise ValueError(
+            f"the transcript is bound to meeting {transcript.meeting_id} and was "
+            f"handed in with meeting {meeting.meeting_id}; every extraction would "
+            f"cite a meeting it was not said in."
+        )
     # Who the PM is, read once for this ingestion, so every utterance in it is
     # judged against the same answer (story 2o, AD-32).
     identity = read_pm_identity(daemon.storage).identity
-    results = extract(transcript, meeting, identity=identity, provider=provider)
+    extractions = extract(transcript, meeting, identity=identity)
     # The Tier-1 record, and the citation root every extraction above points at
-    # (AD-33). Through the accessor since story 11a: this was an assignment into
-    # a process-lifetime dict, so the record a citation resolved against was gone
-    # the moment the daemon stopped. `meeting.scope` decides which tree it lands
-    # in, which is why the legality check runs first.
+    # (AD-33), written into `meeting.scope`.
     #
-    # **After `extract` and before the first write that cites the meeting**, and
-    # both halves of that are the ordering rather than an accident. Moving the
-    # record to disk made this pipeline non-atomic in a way the dict could not
-    # be: a dict assignment cannot fail and does not survive a restart, while
-    # this line can raise and does. So:
-    #
-    # - `extract` runs first because it is the step that fails — a malformed
-    #   transcript, a provider verb it cannot parse — and it produces nothing
-    #   durable, so its failure leaves no record for an ingestion that minted no
-    #   citations. That was the state reachable when the write came first.
-    # - the record is written before the loop below, because everything the loop
-    #   writes cites this meeting: a staged proposal or an executed mutation
-    #   whose `cites` resolves to nothing is worse than one extraction lost, so a
-    #   failure part-way through staging leaves a record its partial proposals
-    #   can still be resolved against.
-    #
-    # What remains is a record for a transcript that extracted *nothing*, and
-    # that is deliberate: the meeting happened, `Meeting` is Tier-1 in its own
-    # right, and `33c` records meetings with no transcript at all.
+    # **After `extract` and before the first write that cites the meeting**:
+    # `extract` is the step that fails and writes nothing, so its failure leaves
+    # no record for an ingestion that minted no citations; and everything the
+    # loop below writes cites this meeting, so a failure part-way through
+    # staging leaves a record its partial proposals can still be resolved
+    # against. A transcript that extracts nothing still leaves its record: the
+    # meeting happened, and `33c` records meetings with no transcript at all.
     daemon.meetings.put(meeting)
 
-    executed, staged = [], []
-    for i, ex in enumerate(results):
-        if ex.disposition == "execute":
-            target = TargetRef.parse(ex.detail["target"])
-            from pm_ai.core.jobs import idempotency_key
-
-            key = idempotency_key(ex.detail["verb"], target.lock_key, ex.detail)
-            inv = daemon.skills.invoke(
-                f"{provider}.{ex.detail['verb']}",
-                target=target, payload={"comment": ex.detail["rest"]}, idempotency_key=key,
-            )
-            executed.append((ex, inv))
+    # **Nothing below may end the ingestion** except a staging write that
+    # fails: a target with no enrolled skill stages, a skill that raises has its
+    # key settled failed by the registry, is named here and stages, and one that
+    # ran and could not be recorded is named and never staged to run again.
+    #
+    # Proposal ids carry the transcript's source, so a meeting's Graph capture
+    # and a hand-dropped transcript of it never overwrite each other's
+    # proposals; and a proposal the PM has acted on is left as it is when the
+    # same transcript is ingested again.
+    executed: list[tuple[Extraction, Invocation]] = []
+    staged: list[Proposal] = []
+    failures: list[str] = []
+    unrecorded: list[str] = []
+    left: list[str] = []
+    for index, extraction in enumerate(extractions):
+        command = extraction.value
+        if (
+            extraction.disposition == EXECUTE
+            and isinstance(command, SpokenCommand)
+            and command.target is not None
+        ):
+            outcome = _execute(daemon, command, spoken_in=extraction.cites)
+            if isinstance(outcome, Invocation):
+                executed.append((extraction, outcome))
+                continue
+            if isinstance(outcome, ExecutedButUnrecorded):
+                unrecorded.append(f"extraction {index} ({outcome.qualified_name}, {outcome.external_id})")
+                continue
+            if outcome is not None:
+                failures.append(f"extraction {index}: {outcome}")
+        proposal = Proposal(
+            proposal_id=f"prp_{meeting.meeting_id}_{transcript.source.value}_{index}",
+            type=extraction.kind,
+            summary=extraction.for_model[:80],
+            payload=command.payload(),
+            # A promise names no work item, and a spoken target the grammar
+            # refused names none pm-ai can act on: both have no target.
+            target=command.target if isinstance(command, SpokenCommand) else None,
+            cites=extraction.cites,  # AD-33 — the meeting, never the transcript
+            created_at=meeting.start,
+            state=ProposalState.STAGED,
+        )
+        if daemon.storage.stage_unless_acted(proposal):
+            staged.append(proposal)
         else:
-            p = Proposal(
-                proposal_id=f"prp_{meeting.meeting_id}_{i}",
-                type=ex.kind,
-                summary=ex.for_model[:80],
-                payload=ex.detail,
-                target=TargetRef.parse(ex.detail.get("target", "gitlab:alpha:issue:0")),
-                cites=ex.cites,  # AD-33 — the meeting, never the transcript
-                created_at=meeting.start,
-                state=ProposalState.STAGED,
-            )
-            daemon.storage.stage_proposal(p)
-            staged.append(p)
-    return {"executed": executed, "staged": staged, "extractions": results}
+            left.append(proposal.proposal_id)
+    return TranscriptIngestion(
+        executed=tuple(executed),
+        staged=tuple(staged),
+        extractions=tuple(extractions),
+        failures=tuple(failures),
+        unrecorded=tuple(unrecorded),
+        left=tuple(left),
+    )
+
+
+def _execute(
+    daemon: Daemon, command: SpokenCommand, *, spoken_in: SourceRef
+) -> Invocation | ExecutedButUnrecorded | str | None:
+    """Invoke the command's skill.
+
+    The invocation; `ExecutedButUnrecorded` when the skill ran and recording
+    it failed; a failure's reason when the skill raised; or `None` when no
+    skill is enrolled for the target's provider and verb, or there are no
+    words to post — then the command stages and nothing is invoked.
+    """
+    target = command.target
+    if target is None or not command.remainder.raw:
+        return None
+    qualified = f"{target.system}.{command.verb}"
+    if not daemon.skills.is_registered(qualified):
+        return None
+    key = idempotency_key(command.verb, target.lock_key, command.rendering(spoken_in=spoken_in))
+    try:
+        return daemon.skills.invoke(
+            qualified,
+            target=target,
+            # The spoken words, posted as a quotation of what was said — never
+            # a prompt, so the original rather than the copy cleaned for a
+            # model's context (AD-29). Chosen here, where it can be seen.
+            payload={"comment": command.remainder.raw},
+            idempotency_key=key,
+        )
+    except ExecutedButUnrecorded as ran:
+        return ran
+    except Exception as failed:  # noqa: BLE001 — named, staged, and the loop goes on
+        return f"{qualified} on {target} raised {failure_reason(failed)}"
 
 
 # ── The dashboard pipeline (story 23b) ───────────────────────────────────────

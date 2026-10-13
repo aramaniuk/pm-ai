@@ -16,6 +16,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPO_ROOT / "pm_ai"
 
+# What `pm_ai.core` may never import (AD-1, AD-15): I/O clients and model
+# clients. `msal` is named directly because `include_external_packages` cannot
+# see it: grimp does not traverse third-party source, so `msal`'s own dependency
+# on `requests` never becomes an edge from `pm_ai.core`. Shared with
+# `test_transcript_path_boundary.py`, which holds the transcript path to it (story 11b).
+CORE_FORBIDDEN_IMPORTS = ("httpx", "requests", "msal", "sqlite3", "anthropic", "ollama")
+
 # Layer -> directory, mirroring the spine's Design Paradigm table.
 LAYERS = {
     "app": PACKAGE_ROOT / "app",

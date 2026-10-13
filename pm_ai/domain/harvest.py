@@ -519,3 +519,10 @@ class PersistResult:
     harvest that ran no acquisition — any connector but the Graph calendar, a
     harvest that failed outright, or a persist that never got that far.
     """
+
+    refusals: tuple[str, ...] = ()
+    """Rows the persist kept and could not settle cleanly, each named (story 11b).
+
+    A calendar meeting that matched two or more hand-recorded meetings adopts
+    neither: it is recorded on its own, and the candidates are named here.
+    """

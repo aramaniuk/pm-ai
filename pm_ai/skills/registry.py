@@ -34,6 +34,27 @@ class SkillNotAuthorized(PermissionError):
     """AD-18 — unlisted skill, or a call outside its declared permission."""
 
 
+class ExecutedButUnrecorded(RuntimeError):
+    """The skill returned — the change happened — and recording it then failed.
+
+    Not a failed execution, and never to be retried or staged as one: the
+    provider holds the change under `external_id`. What failed is settling the
+    key or appending the AD-1 line: the key is in flight (settling failed) or
+    settled with no event-log line (the append failed), and either way a
+    retry never calls the provider again (AD-20). The recording error is the
+    `__cause__` (story 11b).
+    """
+
+    def __init__(self, qualified_name: str, external_id: str, idempotency_key: str) -> None:
+        super().__init__(
+            f"{qualified_name} executed and returned {external_id!r}, and recording "
+            f"it then failed; key {idempotency_key} is not called again (AD-20)."
+        )
+        self.qualified_name = qualified_name
+        self.external_id = external_id
+        self.idempotency_key = idempotency_key
+
+
 @dataclass(frozen=True, slots=True)
 class Invocation:
     external_id: str
@@ -77,6 +98,15 @@ class SkillRegistry:
             )
         self._skills[qualified] = skill
 
+    def is_registered(self, qualified_name: str) -> bool:
+        """Whether a skill is on the allowlist under `qualified_name` (AD-18).
+
+        Asked before an invocation that may legitimately find nothing — a
+        spoken command naming a provider no skill is enrolled for stages
+        rather than raising (story 11b).
+        """
+        return qualified_name in self._skills
+
     def invoke(
         self, qualified_name: str, *, target: TargetRef, payload: dict, idempotency_key: str | None
     ) -> Invocation:
@@ -114,23 +144,45 @@ class SkillRegistry:
             # the ordinary path rather than the rare one. A key found in flight
             # is a reconciliation task, not a licence to re-execute.
             self._storage.begin_execution(idempotency_key, target)
-            external_id = skill.execute(target, payload)
-            self._storage.settle_execution(idempotency_key, external_id)  # AD-36
-            self._storage.append_event_log(  # AD-1
-                EventEntry(
-                    category=SelfActionType.SKILL_INVOKED,
-                    # pm-ai acted; which skill acted is its own field (AD-34).
-                    actor=DAEMON_ACTOR,
-                    fields=(
-                        (SKILL_FIELD, qualified_name),
-                        ("target", target.lock_key),
-                        ("external_id", external_id),
-                        # `idempotency_key`, not `key`: this name lands in a
-                        # line a human reads during an audit, and it is what the
-                        # category declares (story 2l).
-                        ("idempotency_key", idempotency_key),
+            try:
+                external_id = skill.execute(target, payload)
+            except Exception as failed:
+                # The skill raised: the call was made and did not return. The
+                # key is settled as failed rather than left in flight, so the
+                # attempt is recorded as over (story 11b); a retry is still
+                # refused as reconciliation, because whether the provider
+                # applied it is unknown (AD-20). The skill's exception is what
+                # the caller sees, even when settling it fails too.
+                try:
+                    self._storage.fail_execution(idempotency_key)
+                except Exception as unsettled:
+                    failed.add_note(
+                        f"settling {idempotency_key} as failed also raised "
+                        f"{type(unsettled).__name__}; the key is left in flight."
+                    )
+                    raise failed from unsettled
+                raise
+            try:
+                self._storage.settle_execution(idempotency_key, external_id)  # AD-36
+                self._storage.append_event_log(  # AD-1
+                    EventEntry(
+                        category=SelfActionType.SKILL_INVOKED,
+                        # pm-ai acted; which skill acted is its own field (AD-34).
+                        actor=DAEMON_ACTOR,
+                        fields=(
+                            (SKILL_FIELD, qualified_name),
+                            ("target", target.lock_key),
+                            ("external_id", external_id),
+                            # `idempotency_key`, not `key`: this name lands in a
+                            # line a human reads during an audit, and it is what
+                            # the category declares (story 2l).
+                            ("idempotency_key", idempotency_key),
+                        ),
                     ),
-                ),
-                scope=self._scope,
-            )
+                    scope=self._scope,
+                )
+            except Exception as unrecorded:
+                raise ExecutedButUnrecorded(
+                    qualified_name, external_id, idempotency_key
+                ) from unrecorded
         return Invocation(external_id=external_id, replayed=False)

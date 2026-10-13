@@ -57,6 +57,7 @@ from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.domain.storage_tiers import CAPTURES, UnprotectedCaptureDir
 from pm_ai.domain.transcripts import (
+    ACQUISITION_STATES,
     CaptureFormat,
     TranscriptAbsent,
     TranscriptCaptured,
@@ -153,7 +154,10 @@ def _select_in(
                 and state.state != TranscriptStateKind.FETCHED.value
             )):
                 # Written, and then the state write failed or the process
-                # died: the capture is on disk with no fetched row.
+                # died: the capture is on disk with no fetched row. Only an
+                # acquisition state is repaired: an `ingested` or
+                # `ingest_failed` row is ingestion's, and overwriting a failed
+                # one with `fetched` would sidestep its attempt cap (11b).
                 storage.record_transcript_state(
                     scope,
                     meeting.meeting_id,
@@ -339,15 +343,17 @@ def _stored(
 def _awaiting_ingestion(
     storage: StoragePort, scopes: Sequence[DataScope]
 ) -> tuple[tuple[tuple[DataScope, str], ...], tuple[str, ...]]:
-    """Every Graph capture on disk with no ingestion row — `11b`'s input.
+    """Every Graph capture on disk not yet ingested — `11b`'s input.
 
     Read from the captures, not the rows: a capture whose fetched row was never
     written is still handed on. A capture's record is found by name — the
     capture is the record's stem plus `-graph.vtt` — so this needs no reach-back.
-    `11b` adds the ingestion states to the same table; until then no capture has
-    one. Listed by every acquisition and by `9a`'s cycle, so a daemon killed
-    between capture and ingestion is repaired on the next run. A scope that
-    cannot be read is named and the others are still listed.
+    A capture with an `ingested` row is never offered again; one whose
+    ingestion failed is offered until it has failed `MAX_INGEST_ATTEMPTS` times
+    (`StoragePort.fetched_not_ingested`, story 11b). Listed by every
+    acquisition and by `9a`'s cycle, so a daemon killed between capture and
+    ingestion is repaired on the next run. A scope that cannot be read is named
+    and the others are still listed.
     """
     awaiting: list[tuple[DataScope, str]] = []
     refusals: list[str] = []
@@ -355,6 +361,7 @@ def _awaiting_ingestion(
     for scope in scopes:
         try:
             states = storage.transcript_states(scope)
+            pending = set(storage.fetched_not_ingested(scope))
             members = set(storage.list_collection(scope=scope, artifact=MEETINGS))
             found: list[tuple[DataScope, str]] = []
             for name in storage.list_collection(scope=scope, artifact=CAPTURES):
@@ -367,8 +374,7 @@ def _awaiting_ingestion(
                 if raw is None:
                     continue
                 meeting_id = parse_record(raw.decode("utf-8"), source=member).meeting.meeting_id
-                state = states.get(meeting_id)
-                if state is None or state.state in _ACQUISITION_STATES:
+                if meeting_id not in states or meeting_id in pending:
                     found.append((scope, meeting_id))
         except Exception as unreadable:  # noqa: BLE001 — one scope, not the run
             refusals.append(
@@ -380,7 +386,7 @@ def _awaiting_ingestion(
     return tuple(awaiting), tuple(refusals)
 
 
-_ACQUISITION_STATES = frozenset(kind.value for kind in TranscriptStateKind)
+_ACQUISITION_STATES = ACQUISITION_STATES
 """The states this slice writes. Any other is an ingestion state (`11b`)."""
 
 

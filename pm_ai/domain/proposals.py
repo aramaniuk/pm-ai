@@ -23,7 +23,7 @@ class Proposal:
     type: str
     summary: str
     payload: dict
-    target: TargetRef
+    target: TargetRef | None  # `None` for a promise, or a spoken target the grammar refused (11b)
     cites: SourceRef
     created_at: datetime
     state: ProposalState = ProposalState.STAGED

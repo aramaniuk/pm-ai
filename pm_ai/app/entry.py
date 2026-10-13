@@ -115,6 +115,7 @@ from pm_ai.platform.doctor import (
     run_all,
 )
 from pm_ai.domain.storage_tiers import API_TOKEN
+from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import (
@@ -1206,9 +1207,50 @@ def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
     # `4e`: whether a daemon answers. Appended here and not in `run_all`, so
     # the daemon's own `/v1/status`, which calls `run_all`, never asks itself.
     probes = (*probes, _daemon_probe(composed))
+    ingestion = _ingestion_probe(composed)
+    if ingestion is not None:
+        probes = (*probes, ingestion)
     if composed.failure is None or composed.failure.name in {p.name for p in probes}:
         return Report(probes)
     return Report((*probes, composed.failure))
+
+
+INGESTION_PROBE = "transcript ingestion"
+"""The probe naming captures whose ingestion failed too often to retry (11b)."""
+
+
+def _ingestion_probe(composed: _Composition) -> Probe | None:
+    """Every capture whose ingestion failed `MAX_INGEST_ATTEMPTS` times, or `None`.
+
+    The loud end of the retry (story 11b): a failed ingestion is offered again
+    on later runs, and once it has failed that many times it is not — so it is
+    named here, `FAILING`, rather than left as a row nobody reads. Absent when
+    nothing is exhausted, or when no daemon was composed to ask.
+    """
+    if composed.daemon is None:
+        return None
+    try:
+        exhausted = composed.daemon.storage.ingestion_exhausted()
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        return Probe(
+            INGESTION_PROBE,
+            Health.FAILING,
+            f"the operational store could not be asked which transcripts failed "
+            f"to ingest: {type(unreadable).__name__}.",
+        )
+    if not exhausted:
+        return None
+    named = "; ".join(
+        f"meeting {meeting_id} in {scope} ({reason})" for scope, meeting_id, reason in exhausted
+    )
+    return Probe(
+        INGESTION_PROBE,
+        Health.FAILING,
+        f"{len(exhausted)} transcript(s) failed to ingest {MAX_INGEST_ATTEMPTS} "
+        f"times and will not be tried again: {named}",
+        "the captures are still on disk. No command re-ingests a capture yet "
+        "(deferred), so pm-ai will not try these again on its own.",
+    )
 
 
 def _daemon_probe(composed: _Composition) -> Probe:

@@ -91,7 +91,10 @@ _require_runtime_extra()
 # `test_ad8_loopback_api_rejects_unauthenticated_requests` runs instead of
 # skipping. From the same story the runtime extra is required to collect at
 # all (`_require_runtime_extra` above), so no skip here depends on it.
-EXPECTED_SKIPS = 23
+# 23 → 21, story 11b: `pm_ai.core.transcripts` exists, so
+# `test_ad23_transcript_pipeline_works_without_a_live_tenant` and
+# `test_ad23_transcript_without_a_meeting_is_rejected` run instead of skipping.
+EXPECTED_SKIPS = 21
 
 _VERDICT = pytest.StashKey[str]()
 

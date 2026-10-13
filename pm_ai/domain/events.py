@@ -174,10 +174,11 @@ PAYLOAD_FOR: dict[ObservedEventType, type] = {
 #
 # One producer-side pass survives, in `core/extraction.py`, and it survives
 # deliberately: it *uses* its result, which the deleted line did not. It is not
-# the guard either — the transcript path flattens `Sanitized` into two bare
-# `str` fields one hop later, so nothing types it end to end, and story `11b`
-# owns that. "Moved to the consumer" describes where AD-12 is *enforced*, not a
-# claim that every call to `sanitize()` was removed.
+# the guard either. Since story `11b` the transcript path carries `Sanitized`
+# end to end — every text field of an extraction keeps the original and the
+# cleaned copy together — and reaches no model. "Moved to the consumer"
+# describes where AD-12 is *enforced*, not a claim that every call to
+# `sanitize()` was removed.
 #
 # These records are
 # what a caller gathering text for a prompt reads to know which fields to put

@@ -1218,3 +1218,24 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8o-connector-add-gitlab.md`
   summary: A master key of the wrong length in the keychain makes `connector add` (Graph and GitLab) end in a traceback with exit 1, not a refusal naming the key.
   evidence: `assert_enrollable` reaches `crypto.ready`, whose `KeyUnusable` no CLI path catches. Found while merging 4f's prompt test with 8o on 2026-10-13: a test keychain held an 8-byte key. Pre-existing on the Graph path.
+
+## Surfaced by the story-11b review (2026-10-13)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: A transcript capture is orphaned when its meeting record moves to another day (adoption re-files under the calendar start; a rescheduled meeting does too), because the capture name carries the record's day.
+  evidence: `_ingest_capture` derives the capture name from `record.meeting.start` and `_awaiting_ingestion` matches by stem. Shared with 33e's naming-rule entry; the fix is renaming the capture with the record, or matching on the id alone.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: `bind_transcript` reads candidates outside the `meetings/` claim and the record is written later, so two concurrent drops of one meeting can mint two manual-only records.
+  evidence: Check-then-act with no claim. Its first production caller is `11c`'s drop command, which should hold the claim across bind and put.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: A crash between writing an adopted record under the calendar day and removing the old manual-only file leaves two files under one id until the meeting is harvested again; that recovery is untested.
+  evidence: `MeetingRecords._write` writes then calls `remove_member`, two steps.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: Real transcripts can only stage commands: neither reader sets a speaker handle, and the spoken-command pattern needs the literal `pm-ai,`, which speech-to-text is unlikely to produce.
+  evidence: AD-34's alias table is unbuilt and no model is in the wave-2 path. A fixture with a realistic Teams rendering ("PM AI") would show the gap.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: The calendar-reference lookup reads every record in the scope, on a meeting's first arrival and on every harvest of an adopted meeting.
+  evidence: Needed so a meeting rescheduled by more than 15 minutes keeps one record. Cost grows with `meetings/`; an index by reference is the fix if it is measured to matter.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
+  summary: Story 8e's "Scoped out" paragraph still names the transcript path as a limit, though 11b retyped the carrier and removed the test that pinned it.
+  evidence: The paragraph is in a skill-derived spec file; it changes through `bmad-spec`.

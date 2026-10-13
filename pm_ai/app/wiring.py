@@ -80,6 +80,7 @@ from pm_ai.connectors.transcripts.graph_transcripts import (
     UnenrolledGraphTranscripts,
 )
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
+from pm_ai.core import transcripts as transcript_catalogue
 from pm_ai.core.config import Config
 from pm_ai.core.connector_enrolment import (
     CONNECTORS,
@@ -195,7 +196,7 @@ class Daemon:
     # the four methods `ConnectorPort` declares. Since story 8k this dict is the
     # only connector list pm-ai keeps: `pm-ai connector check` probes it too.
     connectors: dict[str, ConnectorPort]
-    transcripts: dict[str, object]
+    transcripts: dict[str, TranscriptSourcePort]
     # The Tier-1 accessor over `meetings/`, not a mapping. This was
     # `dict[str, object]` until story 11a, which meant every citation
     # `run_transcript_ingestion` minted resolved against process memory and died
@@ -531,15 +532,24 @@ def _transcript_sources(
     }
 
 
-def _transcript_families(sources: Mapping[str, TranscriptSourcePort]) -> dict[str, object]:
+def _transcript_families(
+    sources: Mapping[str, TranscriptSourcePort],
+) -> dict[str, TranscriptSourcePort]:
     """`Daemon.transcripts`: one source per family (AD-23).
 
     `"graph"` is the first enrolled Graph connector's adapter or, with none
-    enrolled, the stand-in that refuses by name. `"manual"` is the watched-folder
-    fallback, which joins the port with `11c`.
+    enrolled, the stand-in that refuses by name. `"manual"` is the dropped-file
+    fallback, which satisfies the port since `11b`.
     """
     graph: TranscriptSourcePort = next(iter(sources.values()), UnenrolledGraphTranscripts())
     return {"graph": graph, "manual": ManualTranscriptAdapter()}
+
+
+# The source kinds `pm_ai.core.transcripts` catalogues (AD-23, story 11b),
+# registered here because `core` imports no adapter (AD-30). Kinds, not
+# instances: a Graph adapter is built per connector instance, above.
+transcript_catalogue.register_adapter(GraphTranscriptAdapter)
+transcript_catalogue.register_adapter(ManualTranscriptAdapter)
 
 
 def _watched(
