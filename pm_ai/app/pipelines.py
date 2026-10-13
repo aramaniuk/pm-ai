@@ -45,9 +45,12 @@ from pm_ai.core.normalize import attribute_all
 from pm_ai.core.transcript_acquisition import acquire_transcripts
 from pm_ai.core.rendering import (
     CalendarAnswer,
+    EventLogAnswer,
+    PmHandles,
     render_dashboard,
     render_project_dashboard,
 )
+from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.events import MeetingHeldPayload, NormalizedEvent, ObservedEventType
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef
 from pm_ai.domain.lifecycle import ProposalState
@@ -73,7 +76,7 @@ from pm_ai.domain.transcripts import (
     TranscriptSource,
     TranscriptStateKind,
 )
-from pm_ai.ports import ArtifactBusy, CalendarReadPort
+from pm_ai.ports import ArtifactBusy, CalendarReadPort, DecryptionFailed
 from pm_ai.storage.service import OperationalStoreBusy
 from pm_ai.skills.registry import ExecutedButUnrecorded, Invocation
 
@@ -745,7 +748,16 @@ def run_dashboard(
     zone = _display_zone(daemon)
 
     meetings = _todays_calendar(daemon, scope=scope, now=now, zone=zone)
-    entries = EventLog(daemon.storage).read(scope=scope)
+    entries = _event_log(daemon, scope=scope)
+    # One read of the connector rows at one instant, for both the marking and
+    # the sign-in line (`23c`), whichever scope renders: the rows are pm-ai's
+    # own settings, not the personal store AD-25 walls off.
+    reading = read_pm_identity(daemon.storage)
+    pm = PmHandles(
+        handles=reading.identity,
+        unrecorded=reading.unrecorded,
+        unchecked=tuple((row.name, row.reason) for row in reading.unchecked),
+    )
 
     if scope.kind is ScopeKind.PERSONAL:
         # `read_artifact` answers `None` for an absent file, which `parse_goals`
@@ -760,13 +772,14 @@ def run_dashboard(
             ),
             now,
             tz=zone,
+            pm=pm,
         )
     else:
         # A different function, not a flag. `render_project_dashboard` has no
         # goals parameter, so this branch cannot hand it the personal register
         # even by mistake (AD-25) — and no personal-scope artifact is opened on
         # this path at all, which is the half a signature cannot enforce.
-        document = render_project_dashboard(meetings, entries, now, tz=zone)
+        document = render_project_dashboard(meetings, entries, now, tz=zone, pm=pm)
 
     try:
         return daemon.storage.write_artifact(
@@ -777,6 +790,32 @@ def run_dashboard(
         if named is None:
             raise
         raise named from blocked
+
+
+def _event_log(daemon: Daemon, *, scope: DataScope) -> EventLogAnswer:
+    """`scope`'s event log, or why it could not be read (story `23c`).
+
+    Four refusals become a `HarvestFailure` carrying the refusal's own text, which
+    names the segment: a line that is not a well-formed entry, an entry of a kind
+    pm-ai does not know, a segment that is not UTF-8 text, and a segment that
+    could not be read from disk — an `OSError`, or a `DecryptionFailed` for a
+    segment that is there and cannot be opened. The value goes to the renderer and nowhere else
+    — nothing saves it — so the other sections still render from their own
+    inputs and the command exits zero, as an unreachable calendar does.
+    """
+    try:
+        return EventLog(daemon.storage).read(scope=scope)
+    except (
+        MalformedEntry,
+        UnknownCategory,
+        UnicodeDecodeError,
+        OSError,
+        DecryptionFailed,
+    ) as refused:
+        # `retryable` is required by the type and read by nothing on this path:
+        # the section states the reason and gives no retry advice. False is not
+        # a finding that the read will keep failing — nothing here computed that.
+        return HarvestFailure(reason=str(refused), retryable=False)
 
 
 def _blocked_by_a_directory(

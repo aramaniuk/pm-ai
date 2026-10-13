@@ -256,3 +256,52 @@ def test_an_unreadable_row_during_ingestion_stages_the_command(daemon):
     out = run_transcript_ingestion(daemon, transcript, meeting)
 
     assert not out.executed and len(out.staged) == 1
+
+
+# ── Story 23c: `unrecorded` and `unchecked`, the dashboard's two lists ───────
+
+
+@pytest.mark.parametrize("user_id", [None, "", "  ", 42], ids=["absent", "blank", "whitespace", "not text"])
+def test_an_enabled_graph_row_with_no_usable_user_id_is_unrecorded(daemon, user_id):
+    _save(daemon, "graph:blank", _graph("graph:blank", user_id))
+
+    reading = read_pm_identity(daemon.storage)
+
+    assert reading.unrecorded == ("graph:blank",)
+    assert reading.unchecked == ()
+
+
+def test_unrecorded_names_the_rows_instance_not_its_file(daemon):
+    _save(daemon, "graph:file", _graph("graph:tenant-a", None))
+    assert read_pm_identity(daemon.storage).unrecorded == ("graph:tenant-a",)
+
+
+def test_unrecorded_falls_back_to_the_file_stem_when_the_row_names_no_instance(daemon):
+    _save(daemon, "graph:file", {"system": "graph", "enabled": True})
+    assert read_pm_identity(daemon.storage).unrecorded == ("graph:file",)
+
+
+def test_a_disabled_row_with_no_user_id_is_not_unrecorded(daemon):
+    _save(daemon, "graph:off", _graph("graph:off", None, enabled=False))
+    reading = read_pm_identity(daemon.storage)
+    assert reading.unrecorded == () and reading.unchecked == ()
+
+
+def test_an_enabled_value_that_is_not_a_boolean_is_unchecked_not_unrecorded(daemon):
+    row = _graph("graph:odd", None)
+    row["enabled"] = "yes"
+    _save(daemon, "graph:odd", row)
+
+    reading = read_pm_identity(daemon.storage)
+
+    assert reading.unrecorded == ()
+    assert [r.name for r in reading.unchecked] == ["graph:odd.json"]
+
+
+def test_an_unreadable_row_is_unchecked(daemon):
+    _save(daemon, "graph:broken", b"{not json")
+    reading = read_pm_identity(daemon.storage)
+    assert reading.unrecorded == ()
+    assert [(r.name, r.reason) for r in reading.unchecked] == [
+        ("graph:broken.json", "is not valid JSON")
+    ]

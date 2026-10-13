@@ -6,8 +6,8 @@
 
 ## Proactive Enablement
 
-- **08:15** u_dana in #payments — Cache TTL is still 60s in staging
 - **11:40** u_sam in #oncall
+- **08:15** u_dana in #payments — Cache TTL is still 60s in staging
 
 ## 3-Tier Strategic Milestones
 

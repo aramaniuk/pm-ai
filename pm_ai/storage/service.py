@@ -92,6 +92,7 @@ from pm_ai.ports import (
     CaptureAlreadyExists,
     ClaimPort,
     CryptoPort,
+    DecryptionFailed,
     EmptyCapture,
     MalformedCaptureName,
     ScopePathPort,
@@ -1876,7 +1877,15 @@ class StorageService:
         for one that has since vanished would fold a deleted month into "that
         month was empty", and a fold over an audit trail cannot tell those apart.
         """
-        text = self.read_artifact(scope=scope, artifact=EVENT_LOG, name=name)
+        try:
+            text = self.read_artifact(scope=scope, artifact=EVENT_LOG, name=name)
+        except DecryptionFailed as unopenable:
+            # The same type, with the segment and the log named (story `23c`):
+            # the dashboard states this refusal's text as a segment that could
+            # not be read from disk, and the crypto's own words name neither.
+            raise DecryptionFailed(
+                f"{name} in {scope}'s event log could not be decrypted: {unopenable}"
+            ) from unopenable
         if text is None:
             raise FileNotFoundError(
                 errno.ENOENT,
@@ -1884,7 +1893,20 @@ class StorageService:
                 f"event_log_segments() is what names the ones that are",
                 name,
             )
-        return text.decode("utf-8")
+        try:
+            return text.decode("utf-8")
+        except UnicodeDecodeError as undecodable:
+            # Re-raised as the same type with the segment named (story `23c`):
+            # the dashboard states this refusal's text, and the codec's own
+            # words say which byte but never which file.
+            raise UnicodeDecodeError(
+                undecodable.encoding,
+                undecodable.object,
+                undecodable.start,
+                undecodable.end,
+                f"{undecodable.reason}; {name} in {scope}'s event log is not "
+                f"valid UTF-8 text",
+            ) from undecodable
 
     # ── Raw captures: outside the tier model, inside a working tree ──────────
     # Not Tier 1 — no rebuild reconstructs a recording and nothing may depend on
