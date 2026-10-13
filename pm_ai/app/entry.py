@@ -69,6 +69,7 @@ from pm_ai.app.wiring import (
     REGISTRY_ARTIFACT,
     Bootstrap,
     Daemon,
+    GitLabEnrolment,
     GraphEnrolment,
     application_storage,
     artifact_state,
@@ -193,6 +194,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else GraphEnrolment(
                     storage=application_storage(keychain),
                     announce=warn_if_encryption_disabled,
+                )
+            ),
+            # `pm-ai connector add gitlab`'s answers are judged, its name placed
+            # and GitLab asked for one commit behind this (story 8o), for the
+            # Graph sign-in's reason: all three reach `pm_ai.connectors`. Bound
+            # to this daemon's single writer, where the row lands, and to a
+            # fresh read of the registry each time a name is placed — projects
+            # can be enrolled while the questions are answered, and the
+            # placement is checked again just before the save. With no daemon
+            # there is none, and `connector add` refuses through
+            # `require_daemon()` before it would be asked.
+            gitlab_enrolment=(
+                None
+                if daemon is None
+                else GitLabEnrolment(
+                    storage=daemon.storage,
+                    watching=lambda: tuple(_bootstrap(keychain).projects),
                 )
             ),
             # `pm-ai connector check`'s probes, run from the one layer permitted

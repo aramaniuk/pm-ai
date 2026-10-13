@@ -58,6 +58,29 @@ def accepts(system: str, credential: str) -> str:
     return f"{system} accepted the credential"
 
 
+def gitlab_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`connector add gitlab`'s two questions answered, and GitLab answering 200 (8o).
+
+    Enter for the host, `acme/web` for the path, `SECRET` at the hidden
+    prompt; GitLab faked at the transport, so no socket is opened.
+    """
+    import functools
+
+    from pm_ai.app.wiring import GitLabEnrolment
+    from pm_ai.connectors.gitlab.client import GitLabResponse
+
+    answers = ["", "acme/web"]
+    monkeypatch.setattr("builtins.input", lambda prompt="": answers.pop(0))
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": SECRET)
+    monkeypatch.setattr(
+        entry,
+        "GitLabEnrolment",
+        functools.partial(
+            GitLabEnrolment, transport=lambda request: GitLabResponse(200, [])
+        ),
+    )
+
+
 class Keychain:
     """A `KeychainPort` holding one key, so nothing here reaches the real one."""
 
@@ -825,10 +848,14 @@ def test_key_enrol_runs_outside_every_project(machine, monkeypatch, capsys):
 
 
 def test_connector_add_runs_outside_every_project(machine, monkeypatch, capsys):
-    """Stubbed as `test_connector_add_never_echoes_the_credential` stubs it."""
+    """Stubbed as `test_connector_add_never_echoes_the_credential` stubs it.
+
+    GitLab's questions answered and GitLab faked since story 8o; the name is
+    one of the enrolled projects', so it is placed (`gitlab:beta`).
+    """
     machine.enrol(alpha=machine.root / "alpha", beta=machine.root / "beta")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": "a-token")
+    gitlab_answers(monkeypatch)
     monkeypatch.setattr(
         cli, "enrol_connector", lambda *a, **k: "gitlab accepted the credential"
     )
@@ -1163,8 +1190,7 @@ def test_4o_a_gitlab_connector_added_with_nothing_enrolled_is_listed_not_built(
 ):
     """Saved, warned about on every start, listed by `connector check` with why."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": SECRET)
-    monkeypatch.setattr(entry, "probe_credential", accepts)
+    gitlab_answers(monkeypatch)
 
     assert entry.main(["connector", "add", "gitlab", "gitlab:x"]) == EXIT_OK
     capsys.readouterr()
@@ -1572,8 +1598,7 @@ def test_4o_a_project_enrolled_afterwards_is_watched_and_takes_the_saved_row(
     """
     machine.configure()
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": SECRET)
-    monkeypatch.setattr(entry, "probe_credential", accepts)
+    gitlab_answers(monkeypatch)
     assert entry.main(["connector", "add", "gitlab", "gitlab:x"]) == EXIT_OK
     assert machine.compose(PERSONAL).daemon.connectors == {}
 
