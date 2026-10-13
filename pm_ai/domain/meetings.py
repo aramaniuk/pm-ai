@@ -8,10 +8,71 @@ lookups across FR-03, FR-32, and UJ-8.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pm_ai.domain.identity import Actor, DataScope, SourceRef
+
+MATCH_TOLERANCE = timedelta(minutes=15)
+"""How far apart two starts may be and still be one meeting (D3, AD-33).
+
+Start to start, inclusive at both ends. It is not `33e`'s widening of a
+transcript's placement window: that one says where a provider's transcript may
+fall around a meeting, this one says when a dropped transcript and a calendar
+row describe the same meeting — two figures, not one rule.
+"""
+
+
+def tolerance_minutes() -> int:
+    """`MATCH_TOLERANCE` in whole minutes, for the sentences that name it."""
+    return int(MATCH_TOLERANCE.total_seconds() // 60)
+
+
+MEETING_RECORD_NAME = re.compile(r"\d{4}-\d{2}-\d{2}-[A-Za-z0-9._-]*-[0-9a-f]{64}\.md")
+"""The full spelling of a meeting record's filename: the UTC day, a lossy slug
+of the id, and the id's sha256 (`meeting_records.record_name`). Stated here so
+the single writer can hold a removal in `meetings/` to it (story 11b)."""
+
+
+def normalised_title(title: str) -> str:
+    """A meeting title as the one-record-per-meeting rule compares it (AD-33).
+
+    Unicode NFKC, case-folded, trimmed at both ends, and every run of
+    whitespace collapsed to one space — so "Weekly  Sync" and "weekly sync",
+    or a composed and a decomposed "Café", are one title. Normalised again after
+    folding, because `casefold` can leave a string NFKC would still change.
+    """
+    folded = unicodedata.normalize("NFKC", title).casefold()
+    return " ".join(unicodedata.normalize("NFKC", folded).split())
+
+
+def is_candidate(meeting: Meeting, *, title: str, start: datetime) -> bool:
+    """Whether `meeting` is the one a title and a start describe (AD-33).
+
+    An empty or whitespace-only title describes nothing, on either side: two
+    untitled meetings near one another are not thereby one meeting.
+    """
+    wanted = normalised_title(title)
+    return (
+        bool(wanted)
+        and abs(meeting.start - start) <= MATCH_TOLERANCE
+        and normalised_title(meeting.title) == wanted
+    )
+
+
+class AmbiguousMeeting(ValueError):
+    """Two or more recorded meetings match one title and start (AD-33).
+
+    Refused rather than guessed: binding a transcript to the wrong one of two
+    meetings would cite every extraction to a meeting it was not said in. The
+    message names every candidate's id so the caller can name one.
+    """
+
+    def __init__(self, message: str, candidates: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.candidates = candidates
 
 
 class InvalidAttendeeCount(ValueError):
@@ -95,6 +156,12 @@ class Meeting:
     # by `len(attendees)` in `__post_init__`, so every `Meeting` carries a
     # number. Stored in the meeting record.
     attendee_count: int | None = None
+    # Minted by pm-ai from a dropped transcript, with no calendar row behind it
+    # (story 11b, AD-33). The mark is what lets a later calendar harvest adopt
+    # this record instead of minting a second one for the same meeting: only a
+    # manual-only record is adopted, and adoption clears the mark. Stored in
+    # the record, written only when set.
+    manual_only: bool = False
 
     def __post_init__(self) -> None:
         count = len(self.attendees) if self.attendee_count is None else self.attendee_count

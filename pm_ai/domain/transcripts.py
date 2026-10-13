@@ -27,6 +27,16 @@ class UnboundTranscript(ValueError):
     """AD-23 — an unattributed file must not mint attributed provenance."""
 
 
+class UnreadableTranscript(ValueError):
+    """A file neither transcript reader accepts — not WebVTT, not `Speaker: words`.
+
+    The only reader answer a caller refuses on (story 11b): the readers decide
+    by content, never by extension, and a file with no `WEBVTT` header, no cue
+    timing line and no speaker-labelled line is not a transcript pm-ai can read.
+    The message names the file.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Utterance:
     """One line of a transcript.
@@ -169,14 +179,43 @@ TranscriptOutcome = TranscriptCaptured | TranscriptAbsent | TranscriptSkipped | 
 class TranscriptStateKind(Enum):
     """Where one meeting's acquisition got to, as the operational store keeps it.
 
-    `11b` adds the ingestion states to the same table. Until then a `fetched`
-    row is a capture nothing has ingested yet.
+    The first four are acquisition's (`33e`); `INGESTED` and `INGEST_FAILED`
+    are ingestion's (`11b`), written after a capture is read and extracted. A
+    `fetched` row is a capture nothing has ingested yet.
     """
 
     FETCHED = "fetched"
     REFUSED = "refused"
     ABSENT = "absent"
     SKIPPED = "skipped"
+    INGESTED = "ingested"
+    INGEST_FAILED = "ingest_failed"
+
+
+ACQUISITION_STATES: frozenset[str] = frozenset(
+    kind.value
+    for kind in (
+        TranscriptStateKind.FETCHED,
+        TranscriptStateKind.REFUSED,
+        TranscriptStateKind.ABSENT,
+        TranscriptStateKind.SKIPPED,
+    )
+)
+"""The states acquisition (`33e`) writes. A row in any other state has been
+through ingestion."""
+
+_AWAITING = frozenset(
+    {TranscriptStateKind.FETCHED.value, TranscriptStateKind.INGEST_FAILED.value}
+)
+"""The two states whose capture still awaits ingestion, under the cap."""
+
+MAX_INGEST_ATTEMPTS = 3
+"""How many failed ingestions a capture gets before it is left for `doctor`.
+
+A capture whose ingestion failed is offered again on later runs until it has
+failed this many times; after that it is not ingested again, and `pm-ai
+doctor` names it (story 11b).
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +234,25 @@ class TranscriptState:
     retryable: bool
     retry_after: timedelta | None
     at: datetime
+    attempts: int = 0
+    """How many times ingesting this meeting's capture has failed (story 11b)."""
+
+    @property
+    def awaits_ingestion(self) -> bool:
+        """Whether this meeting's capture should be offered to ingestion now.
+
+        Only a `fetched` capture, or one whose ingestion failed, and only while
+        it has failed fewer than `MAX_INGEST_ATTEMPTS` times. Never an absent,
+        refused or skipped meeting — there is no capture — and never an
+        ingested one. The attempt count is checked for `fetched` too, so a row
+        rewritten to `fetched` cannot reset the cap; ingesting clears it.
+        """
+        return self.state in _AWAITING and self.attempts < MAX_INGEST_ATTEMPTS
+
+    @property
+    def ingestion_exhausted(self) -> bool:
+        """Failed `MAX_INGEST_ATTEMPTS` times — not tried again; `doctor` names it."""
+        return self.state in _AWAITING and self.attempts >= MAX_INGEST_ATTEMPTS
 
     @property
     def closes(self) -> bool:
@@ -248,12 +306,16 @@ class TranscriptReport:
     Graph connector enrolled), a scope whose records could not be read, or a
     fault no meeting can be named for. `awaiting_ingestion` is every meeting
     whose capture is fetched and not ingested — handed to `11b`'s ingestion.
+    `ingested` and `ingest_failed` are what that ingestion did with them in
+    the same run; a failure carries its reason.
     """
 
     entries: tuple[TranscriptReportEntry, ...] = ()
     deferred: tuple[tuple[DataScope, str], ...] = ()
     refusals: tuple[str, ...] = ()
     awaiting_ingestion: tuple[tuple[DataScope, str], ...] = ()
+    ingested: tuple[tuple[DataScope, str], ...] = ()
+    ingest_failed: tuple[tuple[DataScope, str, str], ...] = ()
 
     def of(self, state: TranscriptStateKind) -> tuple[TranscriptReportEntry, ...]:
         return tuple(entry for entry in self.entries if entry.state is state)

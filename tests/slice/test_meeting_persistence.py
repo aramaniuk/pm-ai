@@ -32,7 +32,6 @@ from pm_ai.app.pipelines import run_transcript_ingestion
 from pm_ai.app.wiring import build
 from pm_ai.core.config import Config
 from pm_ai.core.meeting_records import MeetingRecords, MeetingNotFound, as_stored
-from pm_ai.domain.disclosure import CommittedScopeLeak
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.transcripts import Transcript, TranscriptSource, Utterance
@@ -126,8 +125,8 @@ def test_ingestion_persists_the_meeting_it_cites(tmp_path):
     """
     daemon = _daemon(tmp_path)
     result = run_transcript_ingestion(daemon, _transcript(MEETING), MEETING)
-    assert result["extractions"], "the fixture is meant to extract something"
-    for extraction in result["extractions"]:
+    assert result.extractions, "the fixture is meant to extract something"
+    for extraction in result.extractions:
         assert str(extraction.cites) == "meeting:mtg_01HX"
 
     assert _daemon(tmp_path).meetings.get("mtg_01HX", scope=PROJECT).meeting.title == (
@@ -176,7 +175,7 @@ def test_a_failure_while_staging_still_leaves_the_record_its_proposals_cite(
     def _explodes(proposal):
         raise RuntimeError("staging failed on the first proposal")
 
-    monkeypatch.setattr(daemon.storage, "stage_proposal", _explodes)
+    monkeypatch.setattr(daemon.storage, "stage_unless_acted", _explodes)
 
     with pytest.raises(RuntimeError):
         run_transcript_ingestion(daemon, _transcript(MEETING), MEETING)
@@ -205,9 +204,10 @@ def test_a_real_shaped_graph_id_is_accepted_and_read_back(tmp_path):
     assert reread.meeting == as_stored(graph_meeting)
 
 
-def test_a_personal_meeting_is_refused_before_any_file_is_written(tmp_path):
-    """Criterion: `assert_citation_legal` still gates ingestion, and it runs
-    before the accessor is reached — so the refusal leaves nothing behind.
+def test_a_personal_meeting_is_ingested_into_its_own_tree(tmp_path):
+    """Story 11b: a personal meeting's transcript is ingested while pm-ai acts
+    in a project, and everything it writes lands in the personal tree — the
+    check that refused it compared the meeting's scope with the acting scope.
     """
     daemon = _daemon(tmp_path)
     personal = Meeting(
@@ -219,14 +219,14 @@ def test_a_personal_meeting_is_refused_before_any_file_is_written(tmp_path):
         scope=PERSONAL,
     )
 
-    with pytest.raises(CommittedScopeLeak):
-        run_transcript_ingestion(daemon, _transcript(personal), personal)
+    result = run_transcript_ingestion(daemon, _transcript(personal), personal)
 
-    for scope in (PROJECT, PERSONAL):
-        directory = daemon.storage.paths.resolve(scope, "meetings/")
-        assert not directory.exists() or not list(directory.iterdir())
-    with pytest.raises(MeetingNotFound):
-        _daemon(tmp_path).meetings.get("mtg_own", scope=PERSONAL)
+    assert [str(p.cites) for p in result.staged] == ["meeting:mtg_own"]
+    directory = daemon.storage.paths.resolve(PROJECT, "meetings/")
+    assert not directory.exists() or not list(directory.iterdir())
+    assert _daemon(tmp_path).meetings.get("mtg_own", scope=PERSONAL).meeting.title == (
+        "Coaching session"
+    )
 
 
 @pytest.mark.skipif(
@@ -235,20 +235,16 @@ def test_a_personal_meeting_is_refused_before_any_file_is_written(tmp_path):
     "needs git to confirm there is not one",
 )
 @pytest.mark.parametrize("repository", [True, False], ids=["in-a-repo", "no-repo"])
-def test_a_people_meeting_is_refused_with_or_without_a_repository(tmp_path, repository):
+def test_a_people_meeting_lands_in_the_people_tree_with_or_without_a_repository(
+    tmp_path, repository
+):
     """AD-38 — the wall is the scope boundary, not the directory (story 1n).
 
-    Both conditions, because the guard read `is_git_committed` until 2026-09-15
-    and that predicate answered "PROJECT" without ever looking at a filesystem —
-    so the non-repository case passed for a reason that was about to become the
-    common one. Story 1n makes the project scope's `memory/` machine-local, which
-    is what broke the equivalence; a project directory outside any repository is
-    an ordinary configuration now, and a citation across the wall has to be
-    refused there too.
-
-    A direct report's 1:1 is the sharper subject than the PM's own coaching
-    session: the record a project citation would expose is readable by that
-    report's peers.
+    Both conditions, because whether the project directory sits in a repository
+    must not change where a 1:1's record goes. Since story 11b the 1:1's
+    transcript is ingested rather than refused, and nothing it writes reaches
+    the project tree: the record is the `people` tree's, and the project's
+    `meetings/` stays empty either way.
     """
     root = ScopePaths.rooted(tmp_path).repository("alpha")
     root.mkdir(parents=True, exist_ok=True)
@@ -270,12 +266,11 @@ def test_a_people_meeting_is_refused_with_or_without_a_repository(tmp_path, repo
         scope=PEOPLE,
     )
 
-    with pytest.raises(CommittedScopeLeak):
-        run_transcript_ingestion(daemon, _transcript(people), people)
+    run_transcript_ingestion(daemon, _transcript(people), people)
 
-    for scope in (PROJECT, PEOPLE):
-        directory = daemon.storage.paths.resolve(scope, "meetings/")
-        assert not directory.exists() or not list(directory.iterdir())
+    directory = daemon.storage.paths.resolve(PROJECT, "meetings/")
+    assert not directory.exists() or not list(directory.iterdir())
+    assert daemon.meetings.get("mtg_alex_1on1", scope=PEOPLE).meeting.scope == PEOPLE
 
 
 def _is_a_working_tree(root: Path) -> bool:

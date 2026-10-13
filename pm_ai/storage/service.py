@@ -68,7 +68,8 @@ from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.payload_fields import encode_payload
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX
-from pm_ai.domain.transcripts import TranscriptState, TranscriptStateKind
+from pm_ai.domain.meetings import MEETING_RECORD_NAME
+from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS, TranscriptState, TranscriptStateKind
 from pm_ai.domain.storage_tiers import (
     API_TOKEN,
     CAPTURES,
@@ -116,6 +117,15 @@ CAPTURE_NAME_LIMIT = 128
 # crash in between is a reconciliation task rather than a silent second write.
 IN_FLIGHT = "in_flight"
 SETTLED = "settled"
+# A skill that raised (story 11b): the call was made and did not return, so the
+# key is settled as failed rather than left in flight — the attempt is over.
+# Like an in-flight key it is never claimed again: whether the provider applied
+# the change is unknown, and a retry is reconciliation, not a second call.
+FAILED = "failed"
+
+# The collections a member may be removed from, each with its own name rule
+# (story 11b). Only `meetings/`: adoption re-files a record under another day.
+_REMOVABLE = {"meetings/": MEETING_RECORD_NAME}
 NO_EXTERNAL_ID = ""
 
 _SCHEMA = """
@@ -164,6 +174,12 @@ CREATE TABLE IF NOT EXISTS transcript_state (
     retryable   INTEGER NOT NULL,
     retry_after REAL,
     at          TEXT NOT NULL,
+    PRIMARY KEY (scope, meeting_id)
+);
+CREATE TABLE IF NOT EXISTS transcript_ingest_attempts (
+    scope       TEXT NOT NULL,
+    meeting_id  TEXT NOT NULL,
+    attempts    INTEGER NOT NULL,
     PRIMARY KEY (scope, meeting_id)
 );
 """
@@ -407,7 +423,9 @@ def _dump_proposal(p: Proposal) -> str:
             "type": p.type,
             "summary": p.summary,
             "payload": p.payload,
-            "target": str(p.target),
+            # `None` for a proposal with no work-item target — a promise, or a
+            # spoken command whose target the reference grammar refused (11b).
+            "target": None if p.target is None else str(p.target),
             "cites": str(p.cites),
             "created_at": p.created_at.isoformat(),
             "state": p.state.value,
@@ -425,7 +443,7 @@ def _load_proposal(body: str) -> Proposal:
         type=d["type"],
         summary=d["summary"],
         payload=d["payload"],
-        target=TargetRef.parse(d["target"]),
+        target=None if d.get("target") is None else TargetRef.parse(d["target"]),
         cites=SourceRef.parse(d["cites"]),
         created_at=datetime.fromisoformat(d["created_at"]),
         state=ProposalState(d["state"]),
@@ -1586,6 +1604,39 @@ class StorageService:
             )
         )
 
+    def remove_member(self, *, scope: DataScope, artifact: str, name: str) -> bool:
+        """Remove one member of a declared `Collection`; `True` if it was there.
+
+        Added with story 11b for the one legitimate move of a meeting record
+        between day files: a calendar arrival that adopts a manual-only record
+        re-files it under the calendar start's day, and the old name must not
+        stay behind as a second record of the same id. A ledger is refused —
+        its history is the artifact — and so is anything that is not a
+        collection member.
+        """
+        if is_append_only(scope.kind, artifact):
+            raise AppendOnlyArtifact(
+                f"{artifact} in {scope} is append-only; a member of it is never removed."
+            )
+        assert_is_collection(scope.kind, artifact)
+        rule = _REMOVABLE.get(artifact)
+        if rule is None:
+            raise MalformedCaptureName(
+                f"{artifact} declares no rule for removing a member, so {name!r} "
+                f"was not removed. Only a meeting record is ever re-filed."
+            )
+        if not rule.fullmatch(name):
+            raise MalformedCaptureName(
+                f"{name!r} is not a member name {artifact} holds, so it was not "
+                f"removed: a record there is `<day>-<slug>-<sha256>.md`."
+            )
+        target = self._paths.resolve(scope, artifact) / name
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
     def assert_writable(self, *, scope: DataScope, artifact: str) -> None:
         """Ask now what a write to `artifact` would ask, and write nothing (story 8b).
 
@@ -2241,10 +2292,27 @@ class StorageService:
                 self._at().isoformat(),
             ),
         )
+        if state is TranscriptStateKind.INGEST_FAILED:
+            # The attempt count lives beside the row rather than in it: the
+            # table shipped with `33e`, and `CREATE TABLE IF NOT EXISTS` cannot
+            # add a column to a store that already has it (see `SCHEMA_VERSION`).
+            self._db.execute(
+                "INSERT INTO transcript_ingest_attempts (scope, meeting_id, attempts) "
+                "VALUES (?, ?, 1) ON CONFLICT(scope, meeting_id) DO UPDATE SET "
+                "attempts = attempts + 1",
+                (str(scope), meeting_id),
+            )
+        elif state is TranscriptStateKind.INGESTED:
+            # Ingested: the count of failures before it is spent, and a later
+            # capture of the same meeting starts from none.
+            self._db.execute(
+                "DELETE FROM transcript_ingest_attempts WHERE scope = ? AND meeting_id = ?",
+                (str(scope), meeting_id),
+            )
         self._db.commit()
 
     def transcript_states(self, scope: DataScope) -> dict[str, TranscriptState]:
-        """Every acquisition row in `scope`, keyed by meeting id."""
+        """Every acquisition and ingestion row in `scope`, keyed by meeting id."""
         return {
             meeting_id: TranscriptState(
                 state=state,
@@ -2252,13 +2320,51 @@ class StorageService:
                 retryable=bool(retryable),
                 retry_after=timedelta(seconds=retry_after) if retry_after is not None else None,
                 at=datetime.fromisoformat(at),
+                attempts=attempts or 0,
             )
-            for meeting_id, state, reason, retryable, retry_after, at in self._db.execute(
-                "SELECT meeting_id, state, reason, retryable, retry_after, at "
-                "FROM transcript_state WHERE scope = ? ORDER BY meeting_id",
+            for meeting_id, state, reason, retryable, retry_after, at, attempts in self._db.execute(
+                "SELECT t.meeting_id, t.state, t.reason, t.retryable, t.retry_after, "
+                "t.at, a.attempts FROM transcript_state t "
+                "LEFT JOIN transcript_ingest_attempts a "
+                "ON a.scope = t.scope AND a.meeting_id = t.meeting_id "
+                "WHERE t.scope = ? ORDER BY t.meeting_id",
                 (str(scope),),
             )
         }
+
+    def fetched_not_ingested(self, scope: DataScope) -> tuple[str, ...]:
+        """Every meeting in `scope` whose capture still awaits ingestion (story 11b).
+
+        Only rows in `fetched` or `ingest_failed`, and only while their capture
+        has failed fewer than `MAX_INGEST_ATTEMPTS` times. Never an absent,
+        refused, skipped or ingested meeting, so nothing is ingested twice.
+        """
+        return tuple(
+            meeting_id
+            for meeting_id, state in self.transcript_states(scope).items()
+            if state.awaits_ingestion
+        )
+
+    def ingestion_exhausted(self) -> tuple[tuple[DataScope, str, str], ...]:
+        """Every capture, in any scope, whose ingestion failed too often to retry.
+
+        `(scope, meeting_id, reason)`, the reason being the last failure's.
+        Read by `pm-ai doctor`, which names each one (story 11b).
+        """
+        return tuple(
+            (DataScope.parse(scope), meeting_id, reason)
+            for scope, meeting_id, reason in self._db.execute(
+                "SELECT t.scope, t.meeting_id, t.reason FROM transcript_state t "
+                "JOIN transcript_ingest_attempts a "
+                "ON a.scope = t.scope AND a.meeting_id = t.meeting_id "
+                "WHERE t.state IN (?, ?) AND a.attempts >= ? ORDER BY t.scope, t.meeting_id",
+                (
+                    TranscriptStateKind.FETCHED.value,
+                    TranscriptStateKind.INGEST_FAILED.value,
+                    MAX_INGEST_ATTEMPTS,
+                ),
+            )
+        )
 
     def was_executed(self, idempotency_key: str) -> bool:
         """True only for a *settled* execution — an in-flight one proves nothing."""
@@ -2283,6 +2389,16 @@ class StorageService:
                 f"{idempotency_key} was claimed by an attempt that never settled. "
                 f"Its outcome at the provider is unknown, so a retry is not safe "
                 f"(AD-20). Reconcile against {target.lock_key} before proceeding."
+            )
+        if row and row[0] == FAILED:
+            # The skill raised: the call was made and did not return, so whether
+            # the provider applied it is unknown — the same reason an in-flight
+            # key is not retried. Settling it failed records that it ended; it
+            # is not a licence to call again (AD-20).
+            raise ReconciliationRequired(
+                f"{idempotency_key} was settled as failed: its skill raised, and "
+                f"whether the provider applied the change is unknown, so a retry "
+                f"is not safe (AD-20). Reconcile against {target.lock_key} first."
             )
         self._db.execute(
             "INSERT INTO executed (key, lock_key, external_id, state, at) VALUES (?, ?, ?, ?, ?)",
@@ -2319,10 +2435,53 @@ class StorageService:
             )
         self._db.commit()
 
+    def fail_execution(self, idempotency_key: str) -> None:
+        """Settle a claimed key as failed: the skill raised (story 11b).
+
+        Refused for a key nothing claimed, for `settle_execution`'s reason.
+        """
+        failed = self._db.execute(
+            "UPDATE executed SET state = ?, settled_at = ? WHERE key = ? AND state = ?",
+            (FAILED, self._at().isoformat(), idempotency_key, IN_FLIGHT),
+        )
+        if failed.rowcount == 0:
+            self._db.rollback()
+            raise ReconciliationRequired(
+                f"{idempotency_key} has no in-flight claim to settle as failed — "
+                f"begin_execution never recorded it, or it was already settled."
+            )
+        self._db.commit()
+
     def record_execution(self, idempotency_key: str, target: TargetRef, external_id: str) -> None:
         """Claim and settle in one step — for callers with no crash window."""
         self.begin_execution(idempotency_key, target)
         self.settle_execution(idempotency_key, external_id)
+
+    def stage_unless_acted(self, proposal: Proposal) -> bool:
+        """Stage `proposal` unless one under its id has left `staged` (story 11b).
+
+        For re-ingestion. `stage_proposal` writes over by id, so a second
+        ingestion of the same transcript would put a proposal the PM approved,
+        rejected or let expire back to `staged`. Here a row already past
+        `staged` is left exactly as it is; a `staged` one is replaced, which for
+        an identical proposal changes nothing. One statement, so no transition
+        can land between the check and the write. `True` when it was staged.
+        """
+        written = self._db.execute(
+            "INSERT INTO proposals (proposal_id, body, version, state) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(proposal_id) DO UPDATE SET body = excluded.body, "
+            "version = excluded.version, state = excluded.state "
+            "WHERE proposals.state = ?",
+            (
+                proposal.proposal_id,
+                _dump_proposal(proposal),
+                proposal.version,
+                proposal.state.value,
+                ProposalState.STAGED.value,
+            ),
+        )
+        self._db.commit()
+        return written.rowcount == 1
 
     def stage_proposal(self, proposal: Proposal) -> None:
         self._db.execute(

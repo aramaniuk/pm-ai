@@ -12,6 +12,7 @@ import pathlib
 import pytest
 
 from conftest import (
+    CORE_FORBIDDEN_IMPORTS,
     PACKAGE_ROOT,
     REPO_ROOT,
     calls,
@@ -402,17 +403,8 @@ def test_ad24_event_log_is_not_a_debug_sink():
 
 @pytest.mark.parametrize(
     "layer,forbidden",
-    [
-        ("core", "httpx"),
-        ("core", "requests"),
-        # Named directly because `include_external_packages` cannot see it: grimp
-        # does not traverse third-party source, so `msal`'s own dependency on
-        # `requests` never becomes an edge from `pm_ai.core`.
-        ("core", "msal"),
-        ("core", "sqlite3"),
-        ("core", "anthropic"),
-        ("core", "ollama"),
-    ],
+    # The list lives in the architecture conftest, which says why `msal` is on it.
+    [("core", forbidden) for forbidden in CORE_FORBIDDEN_IMPORTS],
 )
 def test_ad1_core_stays_io_free(layer, forbidden):
     """AD-1 — belt and braces alongside .importlinter, with a per-import failure.

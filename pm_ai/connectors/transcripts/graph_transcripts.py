@@ -1,7 +1,8 @@
 """Microsoft Graph transcript adapter — the primary path (AD-23, story 33e).
 
 Acquisition only: this finds a meeting's transcript, downloads it and hands it
-back verbatim. Reading it into utterances and speakers is `11b`'s.
+back verbatim. Reading it into utterances and speakers is
+`pm_ai.core.transcripts`' (story 11b).
 
 ## The path, as slice 0 measured it against a real tenant
 
@@ -102,7 +103,7 @@ __all__ = [
 PLACEMENT_SLACK = timedelta(minutes=15)
 """How far a transcript's created instant may fall outside its occurrence's slot.
 
-Widens a placement window, start to end. `11b`'s 15 minutes is a start-to-start
+Widens a placement window, start to end. `11b`'s `MATCH_TOLERANCE` is a start-to-start
 match tolerance for a dropped file — two figures that happen to agree, not one
 rule. A meeting that overran its slot by more than this is refused by name
 rather than guessed (an admitted limit; `11c`'s drop is the repair).

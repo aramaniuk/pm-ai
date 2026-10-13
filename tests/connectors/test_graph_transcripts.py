@@ -812,13 +812,16 @@ def test_acceptance_a_recorded_project_meeting_is_captured_beside_its_record(tmp
     capture = daemon.storage.paths.resolve(PROJECT, CAPTURES) / name
     assert capture.read_bytes() == VTT_BYTES
     assert capture.parent.parent.name == ".project-ai"
+    # Fetched, then ingested in the same run (story 11b).
     state = daemon.storage.transcript_states(PROJECT)["AAMk-one"]
-    assert state.state == TranscriptStateKind.FETCHED.value
+    assert state.state == TranscriptStateKind.INGESTED.value
     assert before and _record_bytes(daemon, PROJECT) == before, "the record is byte-identical"
     report = persisted.transcripts
     assert report is not None
     assert [entry.capture_name for entry in report.captured] == [name]
+    assert report.captured[0].state is TranscriptStateKind.FETCHED
     assert report.awaiting_ingestion == ((PROJECT, "AAMk-one"),)
+    assert report.ingested == ((PROJECT, "AAMk-one"),) and not report.ingest_failed
     assert len(daemon.storage.coverage_windows(INSTANCE)) == 1, "transcripts earn no coverage"
 
 

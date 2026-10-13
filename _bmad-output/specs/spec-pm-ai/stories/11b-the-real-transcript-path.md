@@ -2,7 +2,8 @@
 title: 'A real transcript reaches the extraction pipeline'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '00c653aa8a60333b44e8312e4f4c21a455c9c874'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -89,15 +90,15 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/extraction.py` -- typed values carrying `Sanitized` in place of `detail: dict`; parse the spoken target into `TargetRef` or stage as text; provider from the target; the PM-handle test skipped for `GRAPH` -- `8e`'s named limit and the Graph rule
-- [ ] `pm_ai/domain/proposals.py` -- `target: TargetRef | None`; `pm_ai/storage/service.py:373,391` serialise and load the absent target; `pm_ai/core/jobs.py` keys on the typed value's rendering -- no invented target
-- [ ] `pm_ai/core/transcripts.py` -- new: `registered_adapters()`, `get_adapter(name)` over a registry `app` fills at wiring (`core` imports no adapter), `ingest(payload, meeting)` raising `UnboundTranscript` on `None`; the reader contract with the VTT reader (BOM, CRLF, skipped blocks, multi-span cues, header-or-timing detection) and the text reader kept from `manual.py` -- the two file shapes; the skip count falls by two
-- [ ] `pm_ai/domain/meetings.py` / `pm_ai/core/meeting_records.py` -- manual-only mark; `find_candidates(scope, title, start)` over the window's day(s), titles compared after NFKC and `casefold()`; `put` looks up by calendar reference then title and start, adopts, re-files, returns the kept id -- D3, gates F2/F3
-- [ ] `pm_ai/storage/service.py` -- `ingested` and `ingest_failed` rows in `transcript_state` with an attempt count; `fetched_not_ingested(scope)` -- the ingestion record
-- [ ] `pm_ai/app/pipelines.py` -- a bind step (named id, match, mint); `run_transcript_ingestion` typed, the tautological guard removed, the loop surviving a missing or raising skill; `run_harvest` fills the held-meeting event's id from `put`'s return and ingests every fetched-not-ingested capture after acquisition -- one path
-- [ ] `pm_ai/surfaces/cli/dispatch.py:609` -- `_doctor` names captures whose ingestion failed three times -- the loud end of the retry
-- [ ] `tests/architecture/test_transcript_path.py` -- the import walk and the `Sanitized`-acceptor check -- the `8e` obligation
-- [ ] `tests/slice/test_transcript_path.py`, `tests/slice/test_r4_gate_fixes.py:327-359` -- one test per matrix row against a temporary root, the adoption rows including the midnight-straddling one, the Promise row ending with a load-back asserting `target is None`; the AD-38 tests rewritten as the Code Map says -- the matrix is the contract
+- [x] `pm_ai/core/extraction.py` -- typed values carrying `Sanitized` in place of `detail: dict`; parse the spoken target into `TargetRef` or stage as text; provider from the target; the PM-handle test skipped for `GRAPH` -- `8e`'s named limit and the Graph rule (the PM-handle comparison kept through the identity, per the 2026-10-11 change log: readers give no handle, so Graph stages)
+- [x] `pm_ai/domain/proposals.py` -- `target: TargetRef | None`; `pm_ai/storage/service.py:373,391` serialise and load the absent target; `pm_ai/core/jobs.py` keys on the typed value's rendering -- no invented target
+- [x] `pm_ai/core/transcripts.py` -- new: `registered_adapters()`, `get_adapter(name)` over a registry `app` fills at wiring (`core` imports no adapter), `ingest(payload, meeting)` raising `UnboundTranscript` on `None`; the reader contract with the VTT reader (BOM, CRLF, skipped blocks, multi-span cues, header-or-timing detection) and the text reader kept from `manual.py` -- the two file shapes; the skip count falls by two (the registry holds adapter kinds, registered when `app.wiring` is imported)
+- [x] `pm_ai/domain/meetings.py` / `pm_ai/core/meeting_records.py` -- manual-only mark; `find_candidates(scope, title, start)` over the window's day(s), titles compared after NFKC and `casefold()`; `put` looks up by calendar reference then title and start, adopts, re-files, returns the kept id -- D3, gates F2/F3
+- [x] `pm_ai/storage/service.py` -- `ingested` and `ingest_failed` rows in `transcript_state` with an attempt count; `fetched_not_ingested(scope)` -- the ingestion record (the attempt count is in a sibling table, `transcript_ingest_attempts`: `transcript_state` shipped with `33e`)
+- [x] `pm_ai/app/pipelines.py` -- a bind step (named id, match, mint); `run_transcript_ingestion` typed, the tautological guard removed, the loop surviving a missing or raising skill; `run_harvest` fills the held-meeting event's id from `put`'s return and ingests every fetched-not-ingested capture after acquisition -- one path
+- [x] `pm_ai/surfaces/cli/dispatch.py:609` -- `_doctor` names captures whose ingestion failed three times -- the loud end of the retry (built as a `transcript ingestion` probe in `pm_ai/app/entry.py`'s `_diagnose`, the report `_doctor` prints: the CLI layer cannot reach storage)
+- [x] `tests/architecture/test_transcript_path.py` -- the import walk and the `Sanitized`-acceptor check -- the `8e` obligation (as `tests/architecture/test_transcript_path_boundary.py`: the slice test's identical basename collides under pytest's default import mode)
+- [x] `tests/slice/test_transcript_path.py`, `tests/slice/test_r4_gate_fixes.py:327-359` -- one test per matrix row against a temporary root, the adoption rows including the midnight-straddling one, the Promise row ending with a load-back asserting `target is None`; the AD-38 tests rewritten as the Code Map says -- the matrix is the contract
 
 **Acceptance Criteria:**
 - Given a project meeting recorded in alpha and a VTT whose voice tag equals the PM's handle saying `pm-ai, post_comment gitlab:alpha:issue:102 ship it`, when it is ingested as `MANUAL` and again as `GRAPH`, then each time one proposal is staged citing `meeting:<id>` and nothing is executed.
@@ -122,3 +123,46 @@ context:
 
 - **2026-10-11, note from slices `2n` and `2o`** (Andrei, architecture AD-34 and AD-32). Who spoke is now decided by `pm_identity()` against the utterance's person handle, and a speaker label is never a handle. So a Graph transcript stages because its utterances carry no handle, not because of a source switch: this slice's "PM-handle test skipped for `GRAPH`" task becomes "the comparison through the identity is kept; Graph utterances carry no handle", and lands after `2o`. The frozen intent is unchanged: no Graph transcript auto-executes.
 
+
+## Suggested Review Order
+
+**Binding and the kept id**
+
+- A named id, or title and start within the tolerance, or a new manual-only record.
+  [`transcripts.py:321`](../../../../pm_ai/core/transcripts.py#L321)
+
+- Every calendar write looks up by reference across the scope, then adopts a single manual-only match.
+  [`meeting_records.py:773`](../../../../pm_ai/core/meeting_records.py#L773)
+
+- The harvest points held-meeting events at the kept id.
+  [`pipelines.py:251`](../../../../pm_ai/app/pipelines.py#L251)
+
+**Ingestion and its record**
+
+- Every fetched, not-ingested capture is ingested after acquisition; failures counted, busy not.
+  [`pipelines.py:279`](../../../../pm_ai/app/pipelines.py#L279)
+
+- What awaits ingestion: fetched, or failed under the cap.
+  [`transcripts.py:241`](../../../../pm_ai/domain/transcripts.py#L241)
+
+- One transcript through extraction; staging never regresses a proposal already acted on.
+  [`pipelines.py:579`](../../../../pm_ai/app/pipelines.py#L579)
+  [`service.py:2460`](../../../../pm_ai/storage/service.py#L2460)
+
+**Typed extractions**
+
+- Cleaned text and original together, in place of `detail: dict`.
+  [`extraction.py:60`](../../../../pm_ai/core/extraction.py#L60)
+
+**Readers**
+
+- Chosen by content: WebVTT cues, or `Speaker: words` text, or refused by name.
+  [`transcripts.py:125`](../../../../pm_ai/core/transcripts.py#L125)
+
+**Tests**
+
+- The path end to end, including adoption then capture and the retry cap.
+  [`test_transcript_path.py`](../../../../tests/slice/test_transcript_path.py)
+
+- No model client on the transcript path.
+  [`test_transcript_path_boundary.py`](../../../../tests/architecture/test_transcript_path_boundary.py)

@@ -66,7 +66,6 @@ from conftest import REPO_ROOT
 from claim_fakes import InMemoryClaims
 from pm_ai.core import ledger
 from pm_ai import ports
-from pm_ai.core.extraction import Extraction
 from pm_ai.core import sanitize as core_sanitize
 from pm_ai.domain import sanitize as domain_sanitize
 from pm_ai.domain import task_classes
@@ -843,56 +842,6 @@ def test_the_two_export_lists_stay_in_step():
     source rather than an ImportError somewhere downstream.
     """
     assert sorted(core_sanitize.__all__) == sorted(domain_sanitize.__all__)
-
-
-def test_the_transcript_path_is_a_named_limit_rather_than_a_covered_one():
-    """Scoped out on purpose, and recorded so the gap is not mistaken for cover.
-
-    `Extraction` declares `raw: str` and `for_model: str`, flattening the pair at
-    its first hop, so the one path that already sanitizes drops the type before
-    the chokepoint can see it. Making `Extraction` carry `Sanitized` is story
-    `11b`'s. This test fails when that lands, which is the point: the limit is
-    then no longer true and the prose saying so must go with it.
-
-    `detail` is pinned alongside them because it is the wider half of the same
-    hole, and 8e's spec names only the narrower one. `extraction.py` builds
-    `detail` from the **raw** utterance — `m["rest"]` comes off `u.text`, never
-    `clean.for_model` — and `pipelines.py` sends it outbound as
-    `payload={"comment": ex.detail["rest"]}`. An untyped `dict` is a route no
-    port signature can close, so `11b` has to retype the carrier rather than add
-    a second sanitization call.
-    """
-    declared = {f.name: f.type for f in dataclasses.fields(Extraction)}
-
-    # The names first. Indexing straight into the type map made a *rename* by
-    # story 11b a KeyError from inside an assertion about types, which reads as
-    # a broken test rather than as the limit having been lifted.
-    assert {"raw", "for_model", "detail"} <= set(declared), (
-        f"`Extraction` no longer declares the fields this limit is about; it has "
-        f"{sorted(declared)}. If story 11b retyped the carrier, delete this test "
-        f"and the `Scoped out` paragraph in 8e's spec that depends on it."
-    )
-
-    # `str` and `dict` as *strings* because `from __future__ import annotations`
-    # is in force in `extraction.py`, which makes every annotation a string.
-    # Comparing against the types themselves would silently stop asserting
-    # anything if that import were ever dropped, so the shape is checked both
-    # ways round.
-    assert all(isinstance(t, str) for t in declared.values()), (
-        "`extraction.py` no longer defers its annotations, so these comparisons "
-        "are against types rather than their names — update them together."
-    )
-    assert declared["raw"] == "str" and declared["for_model"] == "str", (
-        f"`Extraction` now carries {declared['raw']}/{declared['for_model']} "
-        f"rather than two bare `str` fields — if story 11b has given it "
-        f"`Sanitized`, this test and 8e's `Scoped out` paragraph both go."
-    )
-    assert declared["detail"] == "dict", (
-        f"`Extraction.detail` is now {declared['detail']}. It carried raw "
-        f"utterance text into an outbound payload, which is the part of the "
-        f"transcript gap no signature on `ModelPort` could reach; if 11b has "
-        f"closed it, this whole test goes."
-    )
 
 
 # ── The Tier-1 grammar did not move ──────────────────────────────────────────

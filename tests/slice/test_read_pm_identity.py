@@ -255,4 +255,4 @@ def test_an_unreadable_row_during_ingestion_stages_the_command(daemon):
 
     out = run_transcript_ingestion(daemon, transcript, meeting)
 
-    assert not out["executed"] and len(out["staged"]) == 1
+    assert not out.executed and len(out.staged) == 1
