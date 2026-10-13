@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from claim_fakes import InMemoryClaims, held_by_another_thread
+from gitlab_fakes import Wire, page
 from pm_ai.core.connector_enrolment import (
     USER_ID_KEY,
     ClaimNotHeld,
@@ -544,7 +545,12 @@ def test_a_composed_adapter_holds_the_credential_the_sealed_store_keeps(tmp_path
         "the adapter was built with no credential, so a freshly enrolled "
         "connector reports ABSENT on the very next start"
     )
-    assert connector.check_health().health is not Health.ABSENT
+    # A recorded answer stands in for GitLab: since story 8n a health check
+    # with a credential asks the real host, and no test opens a socket.
+    wire = Wire(page())
+    connector.transport = wire
+    assert connector.check_health().health is Health.OK
+    assert wire.sent[0].headers["PRIVATE-TOKEN"] == SECRET, "the sealed token is the one sent"
 
 
 def test_the_enrolled_adapter_wins_at_the_name_the_builtin_already_holds(tmp_path):
@@ -574,7 +580,8 @@ def test_the_enrolled_adapter_wins_at_the_name_the_builtin_already_holds(tmp_pat
         "the built-in adapter for this project shadowed the enrolled one, so the "
         "sealed credential never reached a connector"
     )
-    assert connector.check_health().health is not Health.ABSENT
+    connector.transport = Wire(page())
+    assert connector.check_health().health is Health.OK
 
 
 def test_a_credential_sealed_under_another_system_is_not_handed_to_gitlab(tmp_path):
@@ -598,7 +605,7 @@ def test_a_credential_sealed_under_another_system_is_not_handed_to_gitlab(tmp_pa
     )
     storage.write_artifact(
         json.dumps(
-            {"instance": "gitlab:crossed", "system": "gitlab", "enabled": True}
+            {"instance": "gitlab:crossed", "system": "gitlab", "enabled": True, "project": "demo"}
         ).encode(),
         scope=APPLICATION,
         artifact="connectors/",
@@ -632,7 +639,7 @@ def test_a_non_string_sealed_credential_does_not_reach_a_probe(tmp_path):
         artifact="config.json",
     )
     storage.write_artifact(
-        json.dumps({"instance": "gitlab:odd", "system": "gitlab", "enabled": True}).encode(),
+        json.dumps({"instance": "gitlab:odd", "system": "gitlab", "enabled": True, "project": "demo"}).encode(),
         scope=APPLICATION,
         artifact="connectors/",
         name="gitlab:odd.json",
@@ -687,7 +694,7 @@ def test_a_connector_with_no_sealed_credential_still_reports_absent(tmp_path):
     storage = _storage(tmp_path)
     storage.write_artifact(
         json.dumps(
-            {"instance": "gitlab:handwritten", "system": "gitlab", "enabled": True}
+            {"instance": "gitlab:handwritten", "system": "gitlab", "enabled": True, "project": "demo"}
         ).encode(),
         scope=APPLICATION,
         artifact="connectors/",

@@ -16,6 +16,7 @@ import shutil
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from gitlab_fakes import install
 
 from pm_ai.app.pipelines import run_harvest, run_transcript_ingestion
 from pm_ai.app.wiring import build
@@ -67,9 +68,9 @@ def test_connector_never_asserts_external(daemon):
     Hard-coding EXTERNAL here made the UNKNOWN default unreachable and every
     harvested row admissible as evidence.
     """
-    daemon.connectors["gitlab:alpha"]._fake_api = [
-        {"sha": "9f2a1c", "message": "x", "author_email": "alex@example.com", "committed_at": NOW}
-    ]
+    install(daemon, [
+        {"id": "9f2a1c", "message": "x", "author_email": "alex@example.com", "committed_date": NOW.isoformat()}
+    ])
     raw = daemon.connectors["gitlab:alpha"].harvest(Cursor())
     assert all(e.authored_by is Provenance.UNKNOWN for e in raw.events)
 
@@ -193,9 +194,9 @@ def test_mechanism_three_through_run_harvest_reads_no_alias(daemon, monkeypatch)
     monkeypatch.setattr(handles, "ALIASES", _Unreadable())
     bot = person_handle("email", "pm-ai-bot@example.com")
     daemon = dataclasses.replace(daemon, own_handles=frozenset({bot}))
-    daemon.connectors["gitlab:alpha"]._fake_api = [
-        {"sha": "9f2a1c", "message": "x", "author_email": "PM-AI-Bot@example.com", "committed_at": NOW}
-    ]
+    install(daemon, [
+        {"id": "9f2a1c", "message": "x", "author_email": "PM-AI-Bot@example.com", "committed_date": NOW.isoformat()}
+    ])
     run_harvest(daemon, "gitlab:alpha")
     segment = daemon.storage.paths.resolve(PROJECT, "event_log/") / "2026-08.md"
     (line,) = segment.read_text(encoding="utf-8").splitlines()

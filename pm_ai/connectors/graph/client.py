@@ -196,8 +196,8 @@ class GraphCallFailed(Exception):
     """A Graph request could not be completed, carrying what a caller must decide.
 
     The retry semantics ride on the exception rather than inside its message,
-    exactly as `gitlab.PageUnavailable`'s do: the fetcher turns this into a
-    `HarvestFailure`, and "wait 90 seconds" is a different instruction to an
+    exactly as `gitlab.client.PageUnavailable`'s do: the fetcher turns this
+    into a `HarvestFailure`, and "wait 90 seconds" is a different instruction to an
     operator than "an administrator revoked the permission".
 
     Never escapes the fetcher. A raise cannot carry the coverage the pages
@@ -595,7 +595,7 @@ def _urllib_transport(request: GraphRequest) -> GraphResponse:
 def _does_not_wait(seconds: float) -> None:
     """The default `GraphClient.wait`: it returns without waiting, by name.
 
-    Named rather than a lambda for the reason `gitlab._stubbed_reach` is: a
+    Named rather than a lambda, as `gitlab.client._does_not_wait` is: a
     lambda cannot be compared by identity, and the 429 branch needs to recognise
     "nobody supplied a real sleep" so it can refuse rather than re-ask a
     rate-limited provider immediately. A default that silently spins is the shape
@@ -687,11 +687,12 @@ class GraphClient:
     """The seam every test replaces, and the real thing by default.
 
     Defaulted rather than required, unlike `auth`: a client with no transport
-    could not reach Graph at all, and the gitlab connector records what a
-    stubbed default costs — a health probe that reports `OK` on a socket nobody
-    opened. Tests inject a recorded-payload transport, which is also what makes
-    "no network in any test" structural rather than a promise: the fixtures are
-    the only thing that answers.
+    could not reach Graph at all, and the gitlab connector's history records
+    what a stubbed default cost — a health probe that reported on a socket
+    nobody opened, until story 8n gave it a real transport. Tests inject a
+    recorded-payload transport, which is also what makes "no network in any
+    test" structural rather than a promise: the fixtures are the only thing
+    that answers.
     """
 
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
@@ -846,8 +847,8 @@ class GraphClient:
                         retry_after=hint,
                     )
                 if self.wait is _does_not_wait:
-                    # Loud rather than silent, exactly as `gitlab.check_health`
-                    # compares `self.reach is _stubbed_reach`. The default
+                    # Loud rather than silent, exactly as the GitLab client
+                    # compares its own `wait` to its default. The default
                     # `wait` does not wait, so honouring a hint through it would
                     # re-ask a rate-limited provider immediately — the behaviour
                     # that turns one 429 into a hundred — and nothing would say

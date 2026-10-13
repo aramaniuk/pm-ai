@@ -368,7 +368,7 @@ def test_rows_whose_clocks_cannot_be_believed_claim_no_coverage():
     """`8a`'s matrix row 2, which this connector omitted: *rows returned, no
     usable clock* → harvested something, and **no** coverage claimed.
 
-    The rule is `gitlab.py`'s `_bounded_by_a_credible_clock`, and it has to be
+    The rule is the GitLab connector's (`_plausible_dates`), and it has to be
     the same rule because both connectors fill the same `CoverageWindow | None`
     slot and `8a` answers the question once for both. Graph claimed a window for
     a page whose every timestamp was outside the range it had asked for —
@@ -1764,13 +1764,15 @@ def test_both_connectors_answer_the_unclassified_fault_question_identically():
     def explode_graph(request: GraphRequest) -> GraphResponse:
         raise RuntimeError("something nobody classified")
 
-    def explode_gitlab(offset: int):
+    def explode_gitlab(query):
         raise RuntimeError("something nobody classified")
 
     graph_fetch, _, _, _, _ = _fetcher(explode_graph)
     graph_failure = graph_fetch.fetch().failure
     gitlab_failure = GitLabConnectorAdapter(
+        instance="gitlab:alpha",
         project="alpha",
+        credential="glpat-test-token-not-real",
         scope=DataScope(ScopeKind.PROJECT, "alpha"),
         now=lambda: BASE,
         fetch_page=explode_gitlab,

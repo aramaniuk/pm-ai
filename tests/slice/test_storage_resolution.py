@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from gitlab_fakes import install
 
 from claim_fakes import InMemoryClaims
 from pm_ai.app.wiring import build
@@ -87,12 +88,12 @@ ALL_SCOPES = (PROJECT, PERSONAL, PEOPLE, APPLICATION)
 @pytest.fixture
 def daemon(tmp_path):
     d = build(tmp_path, "alpha", now=lambda: NOW)
-    d.connectors["gitlab:alpha"]._fake_api = [
-        {"sha": "9f2a1c", "message": "Fix auth refactor", "author_email": "alex@example.com",
-         "committed_at": NOW - timedelta(hours=2)},
-        {"sha": "3b7e02", "message": "Add Redis benchmark", "author_email": "alex@example.com",
-         "committed_at": NOW - timedelta(hours=1)},
-    ]
+    install(d, [
+        {"id": "9f2a1c", "message": "Fix auth refactor", "author_email": "alex@example.com",
+         "committed_date": (NOW - timedelta(hours=2)).isoformat()},
+        {"id": "3b7e02", "message": "Add Redis benchmark", "author_email": "alex@example.com",
+         "committed_date": (NOW - timedelta(hours=1)).isoformat()},
+    ])
     return d
 
 
@@ -156,10 +157,10 @@ def test_persisted_batches_accumulate_in_one_segment(daemon):
     first = daemon.storage.persist_events(_events(daemon), scope=daemon.scope)
     assert first.persisted == 2
 
-    daemon.connectors["gitlab:alpha"]._fake_api = [
-        {"sha": "cc31de", "message": "Later work", "author_email": "alex@example.com",
-         "committed_at": NOW},
-    ]
+    install(daemon, [
+        {"id": "cc31de", "message": "Later work", "author_email": "alex@example.com",
+         "committed_date": NOW.isoformat()},
+    ])
     second = daemon.storage.persist_events(_events(daemon), scope=daemon.scope)
     assert second.persisted == 1
 
@@ -333,10 +334,10 @@ def test_the_segment_filename_comes_from_the_injected_clock(tmp_path):
 def test_the_ingestion_stamp_comes_from_the_injected_clock(tmp_path):
     """AD-35 — the stamp assigned at persist time, in a month that is not now."""
     d = build(tmp_path, "alpha", now=lambda: ELSEWHEN)
-    d.connectors["gitlab:alpha"]._fake_api = [
-        {"sha": "9f2a1c", "message": "Fix auth refactor", "author_email": "a@example.com",
-         "committed_at": ELSEWHEN},
-    ]
+    install(d, [
+        {"id": "9f2a1c", "message": "Fix auth refactor", "author_email": "a@example.com",
+         "committed_date": ELSEWHEN.isoformat()},
+    ])
     result = d.storage.persist_events(_events(d), scope=d.scope)
 
     assert result.at == ELSEWHEN
@@ -728,14 +729,14 @@ def test_the_batch_path_is_guarded_too(tmp_path):
     d = build(tmp_path, "alpha", now=clock)
     d.storage.append_event_log(_test_entry("september"), scope=d.scope)
 
-    d.connectors["gitlab:alpha"]._fake_api = [
+    install(d, [
         {
-            "sha": "9f2a1c",
+            "id": "9f2a1c",
             "message": "Fix auth refactor",
             "author_email": "alex@example.com",
-            "committed_at": clock.at - timedelta(hours=2),
+            "committed_date": (clock.at - timedelta(hours=2)).isoformat(),
         }
-    ]
+    ])
     events = _events(d)
     assert events, "the fixture harvested nothing, so the guard was never reached"
 

@@ -1398,13 +1398,8 @@ def test_4o_a_graph_row_mapping_a_category_to_a_project_is_listed_not_built(
         ({"instance": None}, "connectors/gitlab:x", "'instance' is missing"),
         ({"system": None}, "gitlab:x", "'system' is missing"),
         ({"system": "jira"}, "gitlab:x", "no adapter for the system 'jira'"),
-        (
-            {"instance": "gitlab:", "project": None},
-            "gitlab:",
-            "names no GitLab project",
-        ),
     ],
-    ids=["no-instance", "no-system", "unknown-system", "no-project"],
+    ids=["no-instance", "no-system", "unknown-system"],
 )
 def test_4o_an_enabled_row_that_cannot_be_built_is_listed_with_why(
     machine, monkeypatch, capsys, changes, listed_as, reason
@@ -1441,13 +1436,31 @@ def test_4o_a_gitlab_adapter_that_will_not_construct_is_listed_with_its_reason(
     daemon = machine.compose(APPLICATION).daemon
 
     assert daemon is not None
+    # Named by the exception's type, never its text (story 8n: no failure
+    # sentence carries what a provider or an adapter said).
     assert [(row.instance, row.reason) for row in daemon.unbuilt] == [
         (
             "gitlab:alpha",
-            "its adapter could not be constructed: the adapter refused this "
-            "project path",
+            "building it raised ValueError, which pm-ai could not classify — "
+            "report it.",
         )
     ]
+
+
+def test_4o_a_gitlab_row_with_no_project_setting_is_listed_with_the_key_named(
+    machine, monkeypatch, capsys
+):
+    """Placed in a project, but its own `project` path is missing (8n): unbuilt, key named."""
+    machine.enrol(alpha=machine.root / "alpha")
+    machine.enrol_connector("gitlab:alpha")
+    _rewrite_row(machine, "gitlab:alpha", {"project": None})
+
+    daemon = machine.compose(APPLICATION).daemon
+
+    assert daemon is not None
+    [row] = daemon.unbuilt
+    assert row.instance == "gitlab:alpha"
+    assert "'project' cannot be used" in row.reason
 
 
 def test_4o_a_disabled_row_is_skipped_and_not_listed(machine, monkeypatch, capsys):
