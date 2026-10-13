@@ -14,8 +14,12 @@ Four modules now, in the order they were built and in the order they depend:
 - `channels` (story 33d) — the Teams channels the PM listed by hand, walked
   newest first; this module turns each message and reply into one
   `MESSAGE_POSTED` event in the channel's project log.
+- `chats` (story 33f) — the Teams chats the PM listed by hand, each with the
+  scope its messages go to, read from a server-side position; each message
+  becomes one `MESSAGE_POSTED` event through the channel mapping, in the
+  chat's listed scope.
 
-Chats are the next slice and transcripts are 33e.
+Transcripts are 33e.
 
 ## The one modelling decision, and why it could not be deferred
 
@@ -56,7 +60,6 @@ untagged row is the PM's own meeting rather than a row to drop.
 from __future__ import annotations
 
 import json
-import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -71,11 +74,19 @@ from pm_ai.connectors.graph.calendar import (
 )
 from pm_ai.connectors.graph.channels import (
     EXCERPT_LENGTH,
+    MAX_LABEL_LENGTH,
     ChannelFetch,
     ChannelListing,
     GraphChannelFetch,
     MessageRow,
+    label_problem,
     unusable_id_character,
+)
+from pm_ai.connectors.graph.chats import (
+    MAX_CHAT_ID_LENGTH,
+    ChatFetch,
+    ChatListing,
+    GraphChatFetch,
 )
 from pm_ai.domain.connector_rows import USER_ID_KEY
 from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, render_value
@@ -111,12 +122,17 @@ __all__ = [
     "AuthProbe",
     "CATEGORIES_KEY",
     "CHANNELS_KEY",
+    "CHATS_KEY",
     "CLIENT_ID_KEY",
+    "MAX_CHAT_ID_LENGTH",
+    "MAX_LABEL_LENGTH",
     "MAX_SETTING_MINUTES",
     "TENANT_KEY",
     "CategoryScopes",
     "ChannelListRefused",
     "ChannelListing",
+    "ChatListRefused",
+    "ChatListing",
     "GraphConnector",
     "GraphRowRefused",
     "MissingGraphSetting",
@@ -128,6 +144,7 @@ __all__ = [
     "WIDTH_KEY",
     "graph_category_scopes",
     "graph_channel_listings",
+    "graph_chat_listings",
     "graph_window_policy",
 ]
 
@@ -249,6 +266,20 @@ class ChannelListRefused(ValueError):
     """
 
 
+class ChatListRefused(ValueError):
+    """The row's `chats` list cannot be read, so no connector was built (`33f`).
+
+    A list that is not a list, an entry that is not an object, an entry
+    missing its chat id or scope, a scope that is neither personal nor a
+    project, a people scope, a label that is not text, and one chat id listed
+    twice. Each names the entry. An entry naming a project no registry knows
+    is `UnknownProject` instead, as for channels and categories.
+
+    A `ValueError`, so `_graph_connector`'s handler reports it like every other
+    row refusal and `build()` composes regardless.
+    """
+
+
 # ── Where a record lands ─────────────────────────────────────────────────────
 
 WIDTH_KEY = "window_width_minutes"
@@ -257,6 +288,7 @@ CLIENT_ID_KEY = "client_id"
 TENANT_KEY = "tenant"
 CATEGORIES_KEY = "categories"
 CHANNELS_KEY = "channels"
+CHATS_KEY = "chats"
 """The keys a Graph enrolment row carries, spelled once.
 
 They live in `connectors/<instance>.json` — application scope, Tier 1,
@@ -479,28 +511,11 @@ def graph_channel_listings(
                 f"typo in an id."
             )
         label = item.get("label")
-        if label is not None and (not isinstance(label, str) or not label.strip()):
+        problem = None if label is None else label_problem(label)
+        if problem is not None:
             raise ChannelListRefused(
-                f"{where} (channel {channel!r}) has the label {label!r}, which "
-                f"is not text. Leave the label out to show the channel id."
-            )
-        if isinstance(label, str) and len(label.strip()) > MAX_LABEL_LENGTH:
-            raise ChannelListRefused(
-                f"{where} (channel {channel!r}) has a label of "
-                f"{len(label.strip())} characters, past the {MAX_LABEL_LENGTH} a "
-                f"label may be. It is the channel's name on every message line "
-                f"and on the dashboard; shorten it."
-            )
-        if isinstance(label, str) and any(
-            ord(character) < 32
-            or ord(character) == 127
-            or unicodedata.category(character) in ("Cc", "Cf")
-            for character in label
-        ):
-            raise ChannelListRefused(
-                f"{where} (channel {channel!r}) has a label holding a control or "
-                f"format character ({label!r}). It would reach every message "
-                f"line and the dashboard unseen; remove it."
+                f"{where} (channel {channel!r}) has a label that {problem}. "
+                f"Leave the label out to show the channel id."
             )
         folded = channel.casefold()
         if folded in first:
@@ -522,16 +537,6 @@ def graph_channel_listings(
     return tuple(listings)
 
 
-MAX_LABEL_LENGTH = 100
-"""The longest channel label a row may give, in characters (`33d`).
-
-A choice, not a measurement: a label is a channel's display name on every
-message line and on the dashboard, and a hundred characters is longer than any
-name a person reads at a glance while leaving each ledger line far under
-`MAX_ENTRY_LENGTH`.
-"""
-
-
 def _listed_id(item: Mapping[object, object], key: str, *, where: str) -> str:
     """One team or channel id off a channel entry, or the refusal naming it."""
     value = item.get(key)
@@ -545,6 +550,165 @@ def _listed_id(item: Mapping[object, object], key: str, *, where: str) -> str:
             f"refused rather than repaired."
         )
     return value
+
+
+def graph_chat_listings(
+    entry: Mapping[str, object], *, registered: Callable[[str], bool]
+) -> tuple[ChatListing, ...]:
+    """The chats this row lists by hand, or a refusal naming the entry (`33f`).
+
+    Each entry is `{"chat": …, "scope": …, "label": …}`, the label optional.
+    The scope is `personal` or `project:<id>` naming an enrolled project — the
+    spelling a scope gives itself. pm-ai never lists chats: what is read is
+    what the PM wrote here. No list means no chat is read.
+
+    Refused, and the connector not built: a value that is not a list; an entry
+    that is not an object; a chat id missing, not text, padded, or holding
+    whitespace, a control or format character or one of `/`, `\\`, `?`, `#`,
+    `.` or `..`, or longer than `MAX_CHAT_ID_LENGTH`; a scope missing, padded,
+    or neither personal nor a project; a people scope in any case, with the
+    sentence that says why; a project no registry knows (`UnknownProject`); a
+    project named `personal` in any case, whose references would read as
+    personal ones; a project id the reference grammar cannot carry; a label
+    failing `label_problem`; and a chat id listed twice, compared ignoring
+    case, because one chat's messages go to one scope.
+    """
+    raw = entry.get(CHATS_KEY)
+    if raw is None:
+        return ()
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise ChatListRefused(
+            f"{CHATS_KEY!r} in this Graph enrolment row is a "
+            f"{type(raw).__name__}, not a list of chat entries. Each entry is an "
+            f'object: {{"chat": …, "scope": "personal" or "project:<id>", '
+            f'"label": …}}.'
+        )
+    listings: list[ChatListing] = []
+    first: dict[str, int] = {}
+    for position, item in enumerate(raw, start=1):
+        where = f"chat entry {position} in {CHATS_KEY!r}"
+        if not isinstance(item, Mapping):
+            raise ChatListRefused(
+                f"{where} is a {type(item).__name__}, not an object with a chat "
+                f"id and a scope."
+            )
+        chat = _listed_chat(item.get("chat"), where=where)
+        scope = _chat_scope(
+            item.get("scope"), where=f"{where} (chat {chat!r})", registered=registered
+        )
+        label = item.get("label")
+        problem = None if label is None else label_problem(label)
+        if problem is not None:
+            raise ChatListRefused(
+                f"{where} (chat {chat!r}) has a label that {problem}. Leave the "
+                f"label out to show the chat's topic or kind."
+            )
+        folded = chat.casefold()
+        if folded in first:
+            raise ChatListRefused(
+                f"the chat id {chat!r} is listed twice in {CHATS_KEY!r}, in "
+                f"entries {first[folded]} and {position}. One chat's messages go "
+                f"to one scope; delete one entry."
+            )
+        first[folded] = position
+        listings.append(
+            ChatListing(
+                chat=chat,
+                scope=scope,
+                label=label.strip() if isinstance(label, str) else None,
+            )
+        )
+    return tuple(listings)
+
+
+def _citable_scope(project: str) -> bool:
+    """Whether a project id survives as the scope segment of a reference."""
+    try:
+        parsed = SourceRef.parse(f"graph:{project}:message:x")
+    except MalformedReference:
+        return False
+    return parsed.scope == project
+
+
+NO_TEAM_MEMBER_REGISTRY = (
+    "pm-ai has no team-member registry yet, so a chat with a direct report "
+    "cannot be filed in that person's scope, where AD-4 says it belongs. Do not "
+    "list it until that registry exists"
+)
+"""Why a chat scoped to a person is refused (`33f`), spelled once."""
+
+
+def _listed_chat(value: object, *, where: str) -> str:
+    """One chat id off a chat entry, or the refusal naming the entry."""
+    if not isinstance(value, str) or not value.strip():
+        raise ChatListRefused(f"{where} has no chat id ({value!r}).")
+    if value != value.strip() or any(unusable_id_character(c) for c in value):
+        raise ChatListRefused(
+            f"{where} has the chat id {value!r}, which holds whitespace, a "
+            f"control or format character or one of `/`, `\\`, `?`, `#`. "
+            f"The id becomes part of a request path and of every message's "
+            f"reference, so it is refused rather than repaired."
+        )
+    if value in (".", ".."):
+        raise ChatListRefused(
+            f"{where} has the chat id {value!r}, which a request path reads as "
+            f"a directory step rather than a chat."
+        )
+    if len(value) > MAX_CHAT_ID_LENGTH:
+        raise ChatListRefused(
+            f"{where} has a chat id of {len(value)} characters, past the "
+            f"{MAX_CHAT_ID_LENGTH} a chat id may be (`MAX_CHAT_ID_LENGTH`). A "
+            f"chat id is about a hundred characters; this is likely a paste "
+            f"gone wrong."
+        )
+    return value
+
+
+def _chat_scope(
+    value: object, *, where: str, registered: Callable[[str], bool]
+) -> DataScope:
+    """A chat entry's scope: personal, or an enrolled project. Refused otherwise."""
+    if not isinstance(value, str) or not value.strip():
+        raise ChatListRefused(
+            f"{where} names no scope ({value!r}). A chat's messages go to "
+            f"`personal` or to `project:<id>`, and there is no default."
+        )
+    if value != value.strip():
+        raise ChatListRefused(
+            f"{where} has the scope {value!r}, padded with whitespace. Refused "
+            f"rather than trimmed, as a padded chat id is."
+        )
+    text = value
+    kind, _, subject = text.partition(":")
+    if kind.casefold() == ScopeKind.PEOPLE.value:
+        raise ChatListRefused(f"{where} is scoped {text!r}: {NO_TEAM_MEMBER_REGISTRY}.")
+    if text == ScopeKind.PERSONAL.value:
+        return PERSONAL
+    if kind == ScopeKind.PROJECT.value and subject.strip():
+        project = subject
+        if project.casefold() == ScopeKind.PERSONAL.value:
+            raise ChatListRefused(
+                f"{where} is scoped {text!r}. A project named 'personal' cites "
+                f"its messages exactly as the personal scope does, so the two "
+                f"could not be told apart; enrol the project under another id."
+            )
+        if not _citable_scope(project):
+            raise ChatListRefused(
+                f"{where} is scoped to project {project!r}, an id the message "
+                f"reference grammar `graph:<scope>:message:<id>` cannot carry "
+                f"(AD-34), so no message from it could be cited."
+            )
+        if not registered(project):
+            raise UnknownProject(
+                f"{where} is scoped to project {project!r}, which no registry "
+                f"knows. Projects enter the system through `pm-ai project add` "
+                f"(AD-11); this is a removed project or a typo in an id."
+            )
+        return DataScope(ScopeKind.PROJECT, project_id=project)
+    raise ChatListRefused(
+        f"{where} is scoped {text!r}, which is neither `personal` nor "
+        f"`project:<id>` naming an enrolled project."
+    )
 
 
 MAX_SETTING_MINUTES = 10 * 366 * 24 * 60
@@ -655,6 +819,14 @@ Fixed values and no clock, as `SAMPLE_ROW`. Its project is a name and not a
 lookup: nothing is written, and the gate asks only that no id is minted.
 """
 
+SAMPLE_CHAT = ChatListing(
+    chat="19:sample_chat@unq.gbl.spaces",
+    scope=PERSONAL,
+    label="a sample chat",
+)
+"""The chat `sample_events` maps `SAMPLE_MESSAGE` from (`33f`). Personal, the
+scope every machine holds."""
+
 
 # ── The connector ────────────────────────────────────────────────────────────
 
@@ -728,6 +900,12 @@ class GraphConnector:
     messages: GraphChannelFetch | None = None
     """The channel fetcher. `None` builds one over the calendar's client."""
 
+    chats: tuple[ChatListing, ...] = ()
+    """The Teams chats the PM listed by hand (`33f`). Empty: no chat is read."""
+
+    chat_messages: GraphChatFetch | None = None
+    """The chat fetcher. `None` builds one over the calendar's client."""
+
     @property
     def instance(self) -> str:
         """This connector's registry identity, taken from the fetch it owns.
@@ -791,12 +969,14 @@ class GraphConnector:
         return (
             self._to_event(meeting, SAMPLE_ROW),
             self._message_event(SAMPLE_CHANNEL, SAMPLE_MESSAGE),
+            self._chat_message_event(SAMPLE_CHAT, SAMPLE_CHAT.name, SAMPLE_MESSAGE),
         )
 
     # ── The harvest ──────────────────────────────────────────────────────────
 
     def harvest(self, since: Cursor) -> HarvestResult:
-        """The calendar, then every listed channel, under one budget (`33d`).
+        """The calendar, every listed channel, then every listed chat, under one
+        budget (`33d`, `33f`).
 
         The order of the two halves of the result is the whole contract for the
         calendar's part: `records` are the meetings `pm_ai.app.pipelines` writes
@@ -811,10 +991,14 @@ class GraphConnector:
         calendar sign-in failure, which ends the run before any channel is
         attempted, because every channel would spend the same credential.
 
+        Chats follow the channels (`33f`) with the same rules, and one more: a
+        throttle or a server error on a chat skips the run's remaining chats,
+        each named, carrying the provider's hint.
+
         Coverage is one window for the whole run and is withheld when any listed
         resource failed — see `_result`.
         """
-        return self._read(since, channels=self.channels)
+        return self._read(since, channels=self.channels, chats=self.chats)
 
     def read_calendar(self, since: Cursor) -> HarvestResult:
         """The calendar alone, read exactly as `harvest` reads it (`CalendarReadPort`).
@@ -822,16 +1006,20 @@ class GraphConnector:
         What the dashboard's live read calls (Andrei, 2026-10-12): meetings not
         yet held are never stored, so the day ahead is a live read — and a live
         read must not walk every listed channel on each render, nor let a
-        channel it did not need mark the calendar unread. No channel is
+        channel it did not need mark the calendar unread. No channel or chat is
         attempted or named. The scheduled harvest (`harvest`) still reads the
-        calendar and every listed channel.
+        calendar and every listed channel and chat.
         """
-        return self._read(since, channels=())
+        return self._read(since, channels=(), chats=())
 
     def _read(
-        self, since: Cursor, *, channels: tuple[ChannelListing, ...]
+        self,
+        since: Cursor,
+        *,
+        channels: tuple[ChannelListing, ...],
+        chats: tuple[ChatListing, ...],
     ) -> HarvestResult:
-        """The calendar, then `channels`, as one result. See `harvest`."""
+        """The calendar, then `channels`, then `chats`, as one result. See `harvest`."""
         try:
             positions = _Positions.read(since)
         except (ValueError, TypeError):
@@ -873,20 +1061,23 @@ class GraphConnector:
                         f"{self.instance} could not start a calendar fetch: the "
                         f"fetcher raised {type(unexpected).__name__}, which "
                         f"pm-ai cannot classify"
-                        f"{_not_attempted(channels)}"
+                        f"{_not_attempted(channels, chats)}"
                     ),
                     retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
                 ),
             )
 
         walked: list[ChannelFetch] = []
+        chatted: list[ChatFetch] = []
+        blocked: HarvestFailure | None = None
         try:
-            if channels and not fetched.signed_out:
+            if (channels or chats) and not fetched.signed_out:
                 deadline = fetched.deadline
                 if deadline is None:
                     # A fetch that did not say (one built by hand): the run's
                     # budget from now, rather than no channel read at all.
                     deadline = self.now() + self.calendar.client.budget
+                signed_out = False
                 for listing in channels:
                     walked.append(
                         self._walk_channel(listing, positions, deadline=deadline)
@@ -894,14 +1085,38 @@ class GraphConnector:
                     if walked[-1].signed_out:
                         # The credential failed mid-run: every later channel
                         # would spend the same one.
+                        signed_out = True
                         break
-            skipped = channels[len(walked) :]
+                busy = any(channel.busy for channel in walked)
+                if chats and not signed_out and not busy:
+                    if self.now() >= deadline:
+                        # Spent before any chat: one failure names them all.
+                        blocked = HarvestFailure(
+                            reason=(
+                                f"{self.instance} spent the run's time budget "
+                                f"before reading any chat"
+                            ),
+                            retryable=True,
+                        )
+                    else:
+                        for chat in chats:
+                            chatted.append(
+                                self._walk_chat(chat, positions, deadline=deadline)
+                            )
+                            if chatted[-1].signed_out or chatted[-1].stops_run:
+                                # The same credential, or a provider asking
+                                # pm-ai to wait: every later chat would meet
+                                # the same answer.
+                                break
             return self._result(
                 fetched,
                 tuple(walked),
+                tuple(chatted),
                 since=since,
                 positions=positions,
-                skipped=skipped,
+                skipped=channels[len(walked) :],
+                skipped_chats=chats[len(chatted) :],
+                blocked=blocked,
             )
         except Exception as unexpected:  # noqa: BLE001 — the port promises a value
             # Everything `_result` does can fault: `NormalizedEvent`'s
@@ -916,10 +1131,10 @@ class GraphConnector:
             # The reason says what actually happened (`8p`): with no page read
             # there was no page to map, and a walk that ended without raising
             # and without a body reaches here as an EMPTY with no instant.
-            read = _first_answer(fetched, tuple(walked))
+            read = _first_answer(fetched, tuple(walked), tuple(chatted))
             happened = (
-                f"fetched a {'calendar' if fetched.answered_at else 'channel'} "
-                f"page and then raised {type(unexpected).__name__} while mapping it"
+                f"fetched {_first_answering(fetched, tuple(walked), tuple(chatted))} "
+                f"and then raised {type(unexpected).__name__} while mapping the run"
                 if read is not None
                 else f"read no calendar page — the walk ended without one and "
                 f"without a fault — and then raised "
@@ -975,6 +1190,41 @@ class GraphConnector:
                 ),
             )
 
+    def _walk_chat(
+        self, listing: ChatListing, positions: _Positions, *, deadline: datetime
+    ) -> ChatFetch:
+        """One chat's walk, with a contract breach costing only that chat."""
+        try:
+            return self._chat_messages().fetch(
+                listing,
+                since=positions.chats.get(listing.chat.casefold()),
+                deadline=deadline,
+            )
+        except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
+            return ChatFetch(
+                listing=listing,
+                failure=HarvestFailure(
+                    reason=(
+                        f"{self.instance} could not start walking chat "
+                        f"{listing.name!r}: the fetcher raised "
+                        f"{type(unexpected).__name__}, which pm-ai cannot classify"
+                    ),
+                    retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
+                ),
+                finished=self.now(),
+            )
+
+    def _chat_messages(self) -> GraphChatFetch:
+        """The chat fetcher: the one composed, or one over the calendar's client."""
+        if self.chat_messages is not None:
+            return self.chat_messages
+        return GraphChatFetch(
+            client=self.calendar.client,
+            instance=self.instance,
+            reach_back=self.calendar.windows.first_run_reach_back,
+            now=self.now,
+        )
+
     def _messages(self) -> GraphChannelFetch:
         """The channel fetcher: the one composed, or one over the calendar's client.
 
@@ -995,10 +1245,13 @@ class GraphConnector:
         self,
         fetched: CalendarFetch,
         walked: tuple[ChannelFetch, ...],
+        chatted: tuple[ChatFetch, ...] = (),
         *,
         since: Cursor,
         positions: _Positions,
         skipped: tuple[ChannelListing, ...] = (),
+        skipped_chats: tuple[ChatListing, ...] = (),
+        blocked: HarvestFailure | None = None,
     ) -> HarvestResult:
         """Every resource's answer as the one `HarvestResult` the port promises.
 
@@ -1014,7 +1267,8 @@ class GraphConnector:
         through. The trade is a record written twice rather than a meeting lost,
         which is the same direction every other fail-closed reading in AD-35
         takes. A channel that failed likewise hands over the messages it read,
-        and its position rule is `channels.py`'s.
+        and its position rule is `channels.py`'s; a chat is read the same way,
+        and its position rule is `chats.py`'s (`33f`).
 
         **One coverage window for the whole run**: from the first resource's
         answer instant to the end of the last resource's walk, and withheld
@@ -1114,19 +1368,65 @@ class GraphConnector:
             ):
                 vouched = False
 
+        for chat in chatted:
+            emitted = 0
+            name = chat.name if chat.name is not None else chat.listing.name
+            for message in chat.rows:
+                try:
+                    events.append(
+                        self._chat_message_event(chat.listing, name, message)
+                    )
+                    emitted += 1
+                except Exception as unexpected:  # noqa: BLE001 — costs the row only
+                    refusals.append(
+                        RowRefusal(
+                            identifier=f"{chat.listing.chat}/{message.message_id}",
+                            reason=(
+                                str(unexpected)
+                                if isinstance(unexpected, GraphRowRefused)
+                                else f"chat {chat.listing.name!r} message "
+                                f"{message.message_id!r} could not become an "
+                                f"event: {type(unexpected).__name__} was raised "
+                                f"building it."
+                            ),
+                        )
+                    )
+            refusals.extend(chat.refusals)
+            if (
+                chat.failure is not None
+                or chat.unread_pages
+                or (chat.refusals and not emitted)
+            ):
+                vouched = False
+
         failures = tuple(
             failure
-            for failure in (fetched.failure, *(channel.failure for channel in walked))
+            for failure in (
+                fetched.failure,
+                *(channel.failure for channel in walked),
+                *(chat.failure for chat in chatted),
+                blocked,
+            )
             if failure is not None
         )
         mapped = bool(events or records or live)
         outcome = HarvestOutcome.of(
             mapped=mapped, refused=bool(refusals), failed=bool(failures)
         )
-        answered_at = _first_answer(fetched, walked)
+        answered_at = _first_answer(fetched, walked, chatted)
+        # The last resource that finished, so a walk that broke before it
+        # could read the clock does not erase the end the others earned.
+        finishes = [
+            finished
+            for finished in (
+                *(channel.finished for channel in walked),
+                *(chat.finished for chat in chatted),
+            )
+            if finished is not None
+        ]
         ended = (
-            walked[-1].finished
-            if walked
+            finishes[-1]
+            if finishes
             else (fetched.coverage.end if fetched.coverage is not None else None)
         )
         coverage = (
@@ -1153,10 +1453,15 @@ class GraphConnector:
                     for channel in walked
                     if channel.position is not None
                 },
+                chats={
+                    chat.listing.chat.casefold(): chat.position
+                    for chat in chatted
+                    if chat.position is not None
+                },
             ),
             outcome=outcome,
             coverage=coverage,
-            failure=_with_skipped(_one_failure(failures), skipped),
+            failure=_with_skipped(_one_failure(failures), skipped, skipped_chats),
             refusals=tuple(refusals),
             records=tuple(records),
             live=tuple(live),
@@ -1178,12 +1483,46 @@ class GraphConnector:
         `none:`. Each mention with a user id is a `graph:` handle; no display
         name is recorded anywhere but in the text a person typed.
         """
-        reference = f"graph:{listing.project}:message:{listing.channel}/{row.message_id}"
+        return self._posted(
+            scope=listing.scope,
+            reference=(
+                f"graph:{listing.project}:message:{listing.channel}/{row.message_id}"
+            ),
+            what=f"channel {listing.name!r}",
+            name=listing.name,
+            row=row,
+        )
+
+    def _chat_message_event(
+        self, listing: ChatListing, name: str, row: MessageRow
+    ) -> NormalizedEvent:
+        """The `MESSAGE_POSTED` one chat message emits (`33f`).
+
+        The channel mapping unchanged, in the chat's listed scope: the reference
+        is `graph:<scope>:message:<chat id>/<message id>`, the scope spelled
+        `personal` or as the project's id, and `channel` is `name` — the label,
+        the topic, or the chat kind's word (`chats.chat_name`).
+        """
+        return self._posted(
+            scope=listing.scope,
+            reference=(
+                f"graph:{listing.reference_scope}:message:"
+                f"{listing.chat}/{row.message_id}"
+            ),
+            what=f"chat {listing.name!r}",
+            name=name,
+            row=row,
+        )
+
+    def _posted(
+        self, *, scope: DataScope, reference: str, what: str, name: str, row: MessageRow
+    ) -> NormalizedEvent:
+        """One message as its event: the mapping channels and chats share."""
         try:
             source = SourceRef.parse(reference)
         except MalformedReference as unparsed:
             raise GraphRowRefused(
-                f"channel {listing.name!r} message {row.message_id!r} cannot be "
+                f"{what} message {row.message_id!r} cannot be "
                 f"cited as {reference!r} under AD-34's grammar ({unparsed})."
             ) from unparsed
         mentions: tuple[str, ...] | None = None
@@ -1195,8 +1534,8 @@ class GraphConnector:
                     handles.append(str(handle))
             mentions = tuple(handles)
         return NormalizedEvent(
-            # AD-4 — the channel's project, never the personal scope.
-            scope=listing.scope,
+            # AD-4 — a channel's project, or the scope a chat was listed under.
+            scope=scope,
             type=ObservedEventType.MESSAGE_POSTED,
             source_ref=source,
             actor=usable_handle(GRAPH, row.sender_user)
@@ -1206,7 +1545,7 @@ class GraphConnector:
             # flagged at persist, never replaced.
             occurred_at=row.created_at,
             payload=MessagePayload(
-                channel=listing.name,
+                channel=name,
                 # Cut, never cleaned (AD-29): sanitized at the model boundary
                 # (AD-12), not here.
                 excerpt=row.text[:EXCERPT_LENGTH] or None,
@@ -1353,20 +1692,21 @@ class GraphConnector:
 class _Positions:
     """Where each resource's last walk got to: the cursor, read (`33d`).
 
-    The cursor is one JSON object — `calendar` (an ISO instant, or absent) and
-    `channels` (channel id to ISO instant); chats join it in a later slice. A
-    stored bare ISO string is a cursor written before this slice and reads as
-    calendar only, so every channel starts from a first run. An empty token is
-    a first run for everything. Channel keys are case-folded channel ids, read
-    back case-insensitively.
+    The cursor is one JSON object — `calendar` (an ISO instant, or absent),
+    `channels` (channel id to ISO instant) and, from `33f`, `chats` (chat id to
+    ISO instant). A stored bare ISO string is a cursor written before `33d` and
+    reads as calendar only, so every channel and chat starts from a first run;
+    a cursor `33d` wrote has no `chats` and reads with every chat first-run. An
+    empty token is a first run for everything. Channel and chat keys are
+    case-folded ids, read back case-insensitively.
 
     **Anything else is refused, never partly read**: a token that is not
-    UTF-8, JSON that is not an object, `channels` that is not an object,
-    `calendar` or a channel stamp that is not an ISO string, or an instant
+    UTF-8, JSON that is not an object, `channels` or `chats` that is not an
+    object, `calendar` or a stamp that is not an ISO string, or an instant
     that is naive or not UTC. The harvest is then FAILED, not retryable, with
     the cursor unchanged — a cursor this connector did not write needs
     clearing, and guessing which half of it to trust would be guessing where
-    to resume. A `channels` of `null` reads as no channel positions.
+    to resume. A `channels` or `chats` of `null` reads as no positions.
 
     Calendar time and channel creation time, never an `ingested_at` watermark —
     the two clocks AD-35 keeps apart.
@@ -1374,6 +1714,7 @@ class _Positions:
 
     calendar: datetime | None = None
     channels: Mapping[str, datetime] = field(default_factory=dict)
+    chats: Mapping[str, datetime] = field(default_factory=dict)
 
     @classmethod
     def read(cls, since: Cursor) -> _Positions:
@@ -1393,6 +1734,11 @@ class _Positions:
             channels = {}
         if not isinstance(channels, dict):
             raise ValueError("a Graph cursor's channels are an object")
+        chats = document.get("chats", {})
+        if chats is None:
+            chats = {}
+        if not isinstance(chats, dict):
+            raise ValueError("a Graph cursor's chats are an object")
         return cls(
             calendar=(
                 None if calendar is None else _aware(datetime.fromisoformat(calendar))
@@ -1403,28 +1749,45 @@ class _Positions:
                 str(channel).casefold(): _aware(datetime.fromisoformat(stamp))
                 for channel, stamp in channels.items()
             },
+            chats={
+                str(chat).casefold(): _aware(datetime.fromisoformat(stamp))
+                for chat, stamp in chats.items()
+            },
         )
 
     def advanced(
-        self, since: Cursor, *, calendar: datetime | None, channels: Mapping[str, datetime]
+        self,
+        since: Cursor,
+        *,
+        calendar: datetime | None,
+        channels: Mapping[str, datetime],
+        chats: Mapping[str, datetime],
     ) -> Cursor:
         """The next cursor: each resource moved where it moved, kept where not.
 
         When nothing moved the stored cursor comes back byte for byte, so "the
         position does not move" stays observable as an unchanged cursor. A
         channel no longer listed keeps its position: listing it again resumes
-        rather than reaching back, and the natural key drops anything twice.
+        rather than reaching back, and the natural key drops anything twice. A
+        chat is kept the same way (`33f`).
         """
-        if calendar is None and not channels:
+        if calendar is None and not channels and not chats:
             return since
         moved_calendar = calendar if calendar is not None else self.calendar
         merged = {**self.channels, **channels}
-        document = {
+        merged_chats = {**self.chats, **chats}
+        document: dict[str, object] = {
             "calendar": None if moved_calendar is None else moved_calendar.isoformat(),
             "channels": {
                 channel: stamp.isoformat() for channel, stamp in sorted(merged.items())
             },
         }
+        if merged_chats:
+            # Only when a chat has a position: a connector with no chats keeps
+            # the bytes it wrote before `33f`.
+            document["chats"] = {
+                chat: stamp.isoformat() for chat, stamp in sorted(merged_chats.items())
+            }
         return Cursor(json.dumps(document, sort_keys=True).encode("utf-8"))
 
 
@@ -1435,37 +1798,70 @@ def _aware(parsed: datetime) -> datetime:
 
 
 def _first_answer(
-    fetched: CalendarFetch, walked: tuple[ChannelFetch, ...]
+    fetched: CalendarFetch,
+    walked: tuple[ChannelFetch, ...],
+    chatted: tuple[ChatFetch, ...] = (),
 ) -> datetime | None:
     """The answer instant of the first resource that answered (AD-9, `8p`).
 
     The calendar is asked first, so its reading wins when it has one; a run
-    whose calendar answered only with an error takes the first channel's.
+    whose calendar answered only with an error takes the first channel's, and
+    then the first chat's.
     """
     if fetched.answered_at is not None:
         return fetched.answered_at
-    for channel in walked:
-        if channel.answered_at is not None:
-            return channel.answered_at
+    for answered in (
+        *(channel.answered_at for channel in walked),
+        *(chat.answered_at for chat in chatted),
+    ):
+        if answered is not None:
+            return answered
     return None
 
 
-def _not_attempted(channels: tuple[ChannelListing, ...]) -> str:
-    """The sentence naming the listed channels this run did not attempt."""
-    if not channels:
+def _first_answering(
+    fetched: CalendarFetch,
+    walked: tuple[ChannelFetch, ...],
+    chatted: tuple[ChatFetch, ...],
+) -> str:
+    """Which resource answered first, named for a mapping fault's reason."""
+    if fetched.answered_at is not None:
+        return "a calendar page"
+    for channel in walked:
+        if channel.answered_at is not None:
+            return f"a page of channel {channel.listing.name!r}"
+    for chat in chatted:
+        if chat.answered_at is not None:
+            return f"a page of chat {chat.listing.name!r}"
+    return "a page"
+
+
+def _not_attempted(
+    channels: tuple[ChannelListing, ...], chats: tuple[ChatListing, ...] = ()
+) -> str:
+    """The sentence naming the listed channels and chats this run did not attempt."""
+    parts = []
+    if channels:
+        named = ", ".join(repr(channel.name) for channel in channels)
+        parts.append(f"channel(s) {named}")
+    if chats:
+        parts.append("chat(s) " + ", ".join(repr(chat.name) for chat in chats))
+    if not parts:
         return ""
-    named = ", ".join(repr(channel.name) for channel in channels)
-    return f". Not attempted this run: channel(s) {named}"
+    return f". Not attempted this run: {'; '.join(parts)}"
 
 
 def _with_skipped(
-    failure: HarvestFailure | None, skipped: tuple[ChannelListing, ...]
+    failure: HarvestFailure | None,
+    skipped: tuple[ChannelListing, ...],
+    skipped_chats: tuple[ChatListing, ...] = (),
 ) -> HarvestFailure | None:
-    """The run's failure, naming each listed channel a sign-in failure skipped."""
-    if failure is None or not skipped:
+    """The run's failure, naming each listed channel and chat the run skipped —
+    after a sign-in failure, or a chat throttled or answered with a server error."""
+    if failure is None or not (skipped or skipped_chats):
         return failure
     return HarvestFailure(
-        reason=f"{failure.reason.rstrip('.')}{_not_attempted(skipped)}.",
+        reason=f"{failure.reason.rstrip('.')}{_not_attempted(skipped, skipped_chats)}.",
         retryable=failure.retryable,
         retry_after=failure.retry_after,
     )

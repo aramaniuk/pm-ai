@@ -65,6 +65,8 @@ from pm_ai.connectors.graph.client import (
     GraphCallFailed,
     GraphClient,
     GraphRefused,
+    GraphThrottled,
+    GraphUnavailable,
     PageCapReached,
 )
 from pm_ai.domain.harvest import (
@@ -79,10 +81,16 @@ __all__ = [
     "ChannelFetch",
     "ChannelListing",
     "GraphChannelFetch",
+    "MAX_LABEL_LENGTH",
     "MESSAGE_TYPE",
     "MessageRow",
+    "MessageRowRefused",
+    "instant",
+    "label_problem",
     "plain_text",
+    "read_message",
     "unusable_id_character",
+    "usable_message_id",
 ]
 
 
@@ -174,6 +182,9 @@ class ChannelFetch:
     unread_pages: int = 0
     """Pages that answered 200 with no `value` array to read. The position
     does not move past one, and the run claims no coverage over it."""
+    busy: bool = False
+    """A throttle or a server error stopped the walk (`33f`): the provider is
+    asking pm-ai to wait, so the run reads no chat after it."""
     unread_replies: int = 0
     """Threads whose replies did not all arrive inline (`replies@odata.nextLink`).
     The run claims no coverage: the connector cannot vouch for replies it did
@@ -311,6 +322,7 @@ class GraphChannelFetch:
         pages = 0
         failure: HarvestFailure | None = None
         signed_out = False
+        busy = False
         cut: GraphCallFailed | None = None
 
         url = self.client.channel_messages(listing.team, listing.channel)
@@ -351,6 +363,7 @@ class GraphChannelFetch:
                 retryable=False,
             )
         except GraphCallFailed as refused:
+            busy = isinstance(refused, (GraphThrottled, GraphUnavailable))
             failure = HarvestFailure(
                 reason=(
                     f"{self.instance} could not finish channel {listing.name!r}: "
@@ -416,6 +429,7 @@ class GraphChannelFetch:
             finished=finished,
             position=moved,
             signed_out=signed_out,
+            busy=busy,
             pages=pages,
             unread_pages=state.unread_pages,
             unread_replies=state.unread_replies,
@@ -482,52 +496,22 @@ class GraphChannelFetch:
                 None, f"a thread carried a {type(raw).__name__} where a reply belongs."
             )
             return None
-        raw_id = raw.get("id")
-        identifier = _identifier(raw_id)
-        if raw.get("messageType") != MESSAGE_TYPE:
-            # A system event, a typing notice, a chat event or a type pm-ai does
-            # not know: skipped, neither emitted nor refused.
-            return identifier
-        if raw.get("deletedDateTime"):
-            # A tombstone, not a message: skipped, neither emitted nor refused.
-            return identifier
+        identifier = usable_message_id(raw.get("id"))
         try:
-            if identifier is None:
-                if isinstance(raw_id, str) and raw_id.strip():
-                    raise _Refused(
-                        f"a message row carries the id {raw_id!r}, which holds "
-                        f"whitespace, a control or format character, or one of "
-                        f"`/`, `\\`, `?`, `#`. The id becomes part of the "
-                        f"message's reference, so it is refused rather than "
-                        f"repaired."
-                    )
-                raise _Refused(
-                    "a message row carries no usable `id`, so nothing could "
-                    "cite it. Refused rather than emitted under an invented one."
-                )
-            created = _created(raw.get("createdDateTime"))
-            text = _body_text(raw.get("body"))
-        except _Refused as refused:
+            row = read_message(raw, reply_to=reply_to)
+        except MessageRowRefused as refused:
             state.refuse(identifier, str(refused))
+            return identifier
+        if row is None:
+            # Not a message, or a tombstone: skipped, neither emitted nor refused.
             return identifier
         # Only an accepted row moves the position: a refused one is read again
         # next run rather than skipped.
-        state.saw(created)
-        if created < state.position or identifier in state.seen:
+        state.saw(row.created_at)
+        if row.created_at < state.position or row.message_id in state.seen:
             return identifier
-        state.seen.add(identifier)
-        sender = raw.get("from")
-        state.rows.append(
-            MessageRow(
-                message_id=identifier,
-                created_at=created,
-                text=text,
-                sender_user=_nested_id(sender, "user"),
-                sender_application=_nested_id(sender, "application"),
-                mentions=_mentions(raw),
-                reply_to=reply_to,
-            )
-        )
+        state.seen.add(row.message_id)
+        state.rows.append(row)
         return identifier
 
     def _cut_short(
@@ -582,6 +566,104 @@ class GraphChannelFetch:
         )
 
 
+# ── One message row, for every walk that reads one ───────────────────────────
+
+
+class MessageRowRefused(ValueError):
+    """One message row no walk will return, and why. The page continues.
+
+    Public because the chat walk (`33f`) reads its rows through the same
+    `read_message` the channel walk does: which rows are messages, which are
+    refused and what a refusal says are this module's, once.
+    """
+
+
+def read_message(raw: Mapping[str, Any], *, reply_to: str | None) -> MessageRow | None:
+    """One provider row as a `MessageRow`, or `None` when it is not a message.
+
+    `None` for a row Microsoft does not type `message` — a system event, a
+    typing notice, a chat event, a type pm-ai does not know — and for a
+    tombstone: skipped, neither emitted nor refused. Raises `MessageRowRefused`
+    for a message row with no usable id, no body, a body neither HTML nor
+    text, or a creation time missing, unparseable or without a timezone.
+
+    Where the row stands against a position, and whether it was seen already,
+    is the calling walk's business.
+    """
+    raw_id = raw.get("id")
+    identifier = usable_message_id(raw_id)
+    if raw.get("messageType") != MESSAGE_TYPE:
+        return None
+    if raw.get("deletedDateTime"):
+        return None
+    try:
+        if identifier is None:
+            if isinstance(raw_id, str) and raw_id.strip():
+                raise _Refused(
+                    f"a message row carries the id {raw_id!r}, which holds "
+                    f"whitespace, a control or format character, or one of "
+                    f"`/`, `\\`, `?`, `#`. The id becomes part of the "
+                    f"message's reference, so it is refused rather than "
+                    f"repaired."
+                )
+            raise _Refused(
+                "a message row carries no usable `id`, so nothing could "
+                "cite it. Refused rather than emitted under an invented one."
+            )
+        created = _created(raw.get("createdDateTime"))
+        text = _body_text(raw.get("body"))
+    except _Refused as refused:
+        raise MessageRowRefused(str(refused)) from None
+    sender = raw.get("from")
+    return MessageRow(
+        message_id=identifier,
+        created_at=created,
+        text=text,
+        sender_user=_nested_id(sender, "user"),
+        sender_application=_nested_id(sender, "application"),
+        mentions=_mentions(raw),
+        reply_to=reply_to,
+    )
+
+
+# ── What a channel or chat is called ─────────────────────────────────────────
+
+MAX_LABEL_LENGTH = 100
+"""The longest name a channel or chat may be shown under, in characters.
+
+A choice, not a measurement: a label is a display name on every message line
+and on the dashboard, and a hundred characters is longer than any name a person
+reads at a glance while leaving each ledger line far under `MAX_ENTRY_LENGTH`.
+It bounds a hand-written label (`33d`, `33f`) and a chat topic used in its
+place (`33f`).
+"""
+
+
+def label_problem(label: object) -> str | None:
+    """Why `label` cannot name a channel or chat, or `None` when it can.
+
+    The one rule for a hand-written label and for a chat's server topic used
+    as one: text, not blank, at most `MAX_LABEL_LENGTH` characters once
+    trimmed, and holding no control or format character (Unicode `Cc`, which
+    includes C0 and DEL, or `Cf`) — such a character reaches every message line
+    and the dashboard unseen. The phrase completes "… has a label that …".
+    """
+    if not isinstance(label, str) or not label.strip():
+        return f"is not text ({label!r})"
+    if len(label.strip()) > MAX_LABEL_LENGTH:
+        return (
+            f"is {len(label.strip())} characters, past the {MAX_LABEL_LENGTH} "
+            f"a name may be; it is shown on every message line and on the "
+            f"dashboard, so shorten it"
+        )
+    if any(unicodedata.category(character) in ("Cc", "Cf") for character in label):
+        return (
+            f"holds a control or format character ({label!r}), which would "
+            f"reach every message line and the dashboard unseen; remove it"
+        )
+    return None
+
+
 # ── Reading provider fields, each in one place ───────────────────────────────
 
 
@@ -601,8 +683,8 @@ def unusable_id_character(character: str) -> bool:
     )
 
 
-def _identifier(value: Any) -> str | None:
-    """A message id usable in a reference, or `None`."""
+def usable_message_id(value: Any) -> str | None:
+    """A message id usable in a reference, or `None`. Shared by the chat walk."""
     if not isinstance(value, str) or not value:
         return None
     if any(unusable_id_character(character) for character in value):
@@ -610,8 +692,12 @@ def _identifier(value: Any) -> str | None:
     return value
 
 
-def _instant(value: Any) -> datetime | None:
-    """An ISO instant carrying its own offset, as aware UTC, or `None`."""
+def instant(value: Any) -> datetime | None:
+    """An ISO instant carrying its own offset, as aware UTC, or `None`.
+
+    Public because the chat walk (`33f`) reads `lastModifiedDateTime` with the
+    same reading the channel walk makes of every provider time.
+    """
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
@@ -640,9 +726,9 @@ def _created(value: Any) -> datetime:
     """A message's `createdDateTime`, or the refusal that says what was wrong."""
     if value is None or (isinstance(value, str) and not value.strip()):
         raise _Refused("the message carries no `createdDateTime`.")
-    instant = _instant(value)
-    if instant is not None:
-        return instant
+    parsed = instant(value)
+    if parsed is not None:
+        return parsed
     if isinstance(value, str):
         text = value.strip()
         try:
@@ -717,19 +803,19 @@ def _activity(raw: Mapping[str, Any]) -> datetime | None:
     never counts as older.
     """
     times = [
-        instant
-        for instant in (
-            _instant(raw.get("createdDateTime")),
-            _instant(raw.get("lastModifiedDateTime")),
+        stamp
+        for stamp in (
+            instant(raw.get("createdDateTime")),
+            instant(raw.get("lastModifiedDateTime")),
         )
-        if instant is not None
+        if stamp is not None
     ]
     replies = raw.get("replies")
     if isinstance(replies, Sequence) and not isinstance(replies, (str, bytes)):
         for reply in replies:
             if isinstance(reply, Mapping):
                 for key in ("createdDateTime", "lastModifiedDateTime"):
-                    instant = _instant(reply.get(key))
-                    if instant is not None:
-                        times.append(instant)
+                    stamp = instant(reply.get(key))
+                    if stamp is not None:
+                        times.append(stamp)
     return max(times) if times else None

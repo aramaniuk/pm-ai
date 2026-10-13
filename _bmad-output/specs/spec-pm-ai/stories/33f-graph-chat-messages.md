@@ -2,7 +2,8 @@
 title: 'Listed Teams chats reach the event log'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '258dff3e8cd44a28d5cbb5fb7ae892996b24019c'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -70,11 +71,11 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] scratch script, not committed -- re-run the spike on one listed chat; save the redacted page as `tests/connectors/fixtures/graph/chat_messages.json`
-- [ ] `pm_ai/connectors/graph/chats.py` -- new: the per-chat filtered walk with the client-side cut, the `channel` label rule, clock readings, failure classes
-- [ ] `pm_ai/connectors/graph/__init__.py` -- `chats` reader with refusals at construction (people scope refused with its sentence); the `chats` cursor member; chats walked after the channels under the shared budget; per-chat failures
-- [ ] `pm_ai/app/wiring.py` -- read `chats` off the row, build the fetchers
-- [ ] `tests/connectors/test_graph_chat_messages.py` -- one test per matrix row from the fixture through a scripted transport; sort and filter asserted on the recorded request; a channel-slice cursor read back with every chat first-run; a quiet chat's position present in the returned cursor
+- [ ] scratch script, not committed -- re-run the spike on one listed chat; save the redacted page as `tests/connectors/fixtures/graph/chat_messages.json` — **OWED**: not done; the re-run needs Andrei's sign-in and a chat id he chooses. The fixture in place is hand-written in Microsoft's published shapes and says so in its `_provenance`; replace it with the redacted real answer when the spike is re-run.
+- [x] `pm_ai/connectors/graph/chats.py` -- new: the per-chat filtered walk with the client-side cut, the `channel` label rule, clock readings, failure classes
+- [x] `pm_ai/connectors/graph/__init__.py` -- `chats` reader with refusals at construction (people scope refused with its sentence); the `chats` cursor member; chats walked after the channels under the shared budget; per-chat failures
+- [x] `pm_ai/app/wiring.py` -- read `chats` off the row, build the fetchers
+- [x] `tests/connectors/test_graph_chat_messages.py` -- one test per matrix row from the fixture through a scripted transport; sort and filter asserted on the recorded request; a channel-slice cursor read back with every chat first-run; a quiet chat's position present in the returned cursor
 
 **Acceptance Criteria:**
 - Given a row listing one chat scoped personal and one scoped `project:alpha`, when `run_harvest` runs against the fixture, then each chat's `message_posted` entries are in its own scope's event log and nowhere else.
@@ -94,3 +95,37 @@ Row key: `chats`, a list of `{chat, scope, label?}`; `RESERVED_ROW_KEYS` (`conne
 - `uv run pytest -q` -- expected: all pass; skip count unchanged from the baseline (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**Reading a listed chat**
+
+- Fifty newest-modified first, server filter after the position, client cut on creation time; the order-checked early stop.
+  [`chats.py:282`](../../../../pm_ai/connectors/graph/chats.py#L282)
+
+- What a chat listing is.
+  [`chats.py:153`](../../../../pm_ai/connectors/graph/chats.py#L153)
+
+**The settings list**
+
+- Each entry checked: chat id, scope, label; people refused with the registry sentence.
+  [`__init__.py:555`](../../../../pm_ai/connectors/graph/__init__.py#L555)
+
+- One label rule for channels, chats and topics.
+  [`channels.py:642`](../../../../pm_ai/connectors/graph/channels.py#L642)
+
+**The run**
+
+- Chats after channels under one budget; what stops the rest.
+  [`__init__.py:1193`](../../../../pm_ai/connectors/graph/__init__.py#L1193)
+
+- One coverage window, withheld when any chat failed; its end is the last resource that finished.
+  [`__init__.py:1244`](../../../../pm_ai/connectors/graph/__init__.py#L1244)
+
+- The cursor gains chat positions only when there are any.
+  [`__init__.py:1692`](../../../../pm_ai/connectors/graph/__init__.py#L1692)
+
+**Tests**
+
+- Every matrix row and both acceptance criteria, no network.
+  [`test_graph_chat_messages.py`](../../../../tests/connectors/test_graph_chat_messages.py)
