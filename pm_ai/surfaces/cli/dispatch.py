@@ -105,6 +105,7 @@ __all__ = [
     "Refusal",
     "TABLE",
     "dispatch",
+    "names_a_command",
     "parse",
     "usage",
 ]
@@ -439,8 +440,8 @@ class Context:
 
     `connector check` lists each one beside the probed connectors — enrolled,
     not built, and the reason — so no enabled row is omitted, and so that
-    `doctor`'s count of enrolled rows (slice `4n`, not yet built) and this one
-    can be one count (AD-39). A disabled row is skipped and not listed. None is
+    `doctor`'s count of enrolled rows (slice `4n`) and this one can be one
+    count (AD-39). A disabled row is skipped and not listed. None is
     probed, so none moves the exit code.
     """
 
@@ -1872,6 +1873,15 @@ TABLE: Mapping[str, Command] = {
 _HELP_FLAGS = frozenset({"-h", "--help", "help"})
 
 
+def names_a_command(word: str) -> bool:
+    """Whether `word`, as a first word, names something `parse` runs or answers.
+
+    A command in `TABLE`, or a help word. The prompt (story 4f) asks this to
+    tell a command from an open line, so there is one table and no copy.
+    """
+    return word in TABLE or word in _HELP_FLAGS
+
+
 def _spelled(name: str, command: Command) -> str:
     """One command's name with what it takes, as an operator would type it.
 
@@ -1974,9 +1984,10 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
     library below here may still raise one.)
     """
     if not argv:
-        # A bare `pm-ai` will open a REPL (CAP-18) and that is `4f`. Until then
-        # it must not exit 0: a bare call that silently succeeded is how a broken
-        # install reads as a working one.
+        # Always a usage error here. Opening the prompt for a bare call at a
+        # terminal (`4f`) is routed in `pm_ai.app.entry.main`, before this is
+        # called, and is no property of `parse`. A bare call that silently
+        # succeeded is how a broken install reads as a working one.
         return Answered(EXIT_USAGE, usage())
     name, *rest = argv
     if name in _HELP_FLAGS:

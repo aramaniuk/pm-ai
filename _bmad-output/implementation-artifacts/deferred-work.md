@@ -471,8 +471,13 @@ transcript.
   resolution: There is no process-global registry left to leak. The AD-27 and AD-34 gates, and the connector conformance check, read `daemon.connectors` from the daemon they build, and `tests/connectors/test_registry.py`'s `_isolated_default` fixture is gone with the global it restored.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8d-connector-registry.md`
-  summary: **ASSIGNED 2026-10-09 to `4n`** — spec written, not built. `ConnectorRegistry.instances()` documents itself as what `doctor` lists without contacting anything, but `doctor.run_all` has no connector-membership probe and `instances()` has no production caller.
-  evidence: The stated split — membership in `doctor`, reachability in `connector check` — exists only in the docstring. Either `doctor` gains the probe or the docstring stops promising it.
+  summary: **RESOLVED 2026-10-13 in `4n`** — `doctor` now lists the enrolled connectors without contacting any, and `instances()` no longer claims to be what it reads. Was: `ConnectorRegistry.instances()` documented itself as what `doctor` lists, while `doctor.run_all` had no connector-membership probe and `instances()` had no production caller.
+  evidence: The split — membership in `doctor`, reachability in `connector check` — existed only in that docstring.
+  resolution: `doctor` and `setup`'s closing report carry a `connectors` line (`platform/doctor.connectors_enrolled`) naming the rows `wiring.read_connector_rows` accepts from `connectors/` — the rule the build applies. It reads the rows, not `instances()`, because a registry exists only once a daemon is composed and the line matters most where there is none. `instances()` stays for its test callers; its docstring says so. Removing it is the entry below.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4n-doctor-and-setup-name-the-connectors.md`
+  summary: `ConnectorRegistry.instances()` (`pm_ai/connectors/registry.py`) has no production caller since `4n`; only tests read it. Remove it, or move its test callers to `all_connectors()`, so no method is kept for tests alone.
+  evidence: `grep -rn "instances()" pm_ai` finds only the definition; `tests/core/test_connector_enrolment.py` and `tests/connectors/test_registry.py` call it. No slice owns it.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4j-cli-service-subcommands.md`
   summary: `key enrol` is gated behind full composition though it needs only the keychain, so an unparseable config or an unenrolled project blocks the command that fixes a fresh machine.
@@ -909,8 +914,9 @@ transcript.
   evidence: Split from step 9; same gap as the 33a entry above (`probe.PROBES`). A real probe needs the GitLab transport (`connectors/gitlab.py` reaches through `_stubbed_reach`) and a host setting for self-managed instances, so it is its own, larger slice.
 
 - source_spec: none
-  summary: **ASSIGNED 2026-10-09 to `4p (the step) and 4n (the closing sentence)`** — spec written, not built. `pm-ai setup` has no connector step, so it can end healthy on a machine with no working connector.
-  evidence: Split from step 9. `_setup` (`surfaces/cli/dispatch.py`) runs key, project and `config.toml` steps only; the 33c entry above warns of exactly this. Once `connector add graph` works, setup can offer it as a fourth step.
+  summary: **Closing-sentence half RESOLVED 2026-10-13 in `4n`** — setup's closing report now names the enrolled connectors, or says none is and how to add one. **The step is still open, ASSIGNED to `4p`:** `pm-ai setup` has no step that adds a connector.
+  evidence: Split from step 9. `_setup` (`surfaces/cli/dispatch.py`) runs key, project and `config.toml` steps only; the 33c entry above warns of this. Once `connector add graph` works, setup can offer it as a fourth step.
+  resolution: (closing sentence, `4n`) Setup's closing report carries the `connectors` line `doctor` prints; with nothing enrolled it says "none enrolled" and names `pm-ai connector add graph <name>` and `pm-ai connector add gitlab <name>`, so setup no longer ends looking ready on a machine with nothing to harvest. Offering the add as a step remains `4p`.
 
 ## Surfaced during wave-2 preparation (2026-10-09)
 

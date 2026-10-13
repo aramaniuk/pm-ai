@@ -12,6 +12,7 @@ write, so a rewrite that changed nothing still changes its bytes.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import os
@@ -22,7 +23,7 @@ import pytest
 
 from claim_fakes import held_by_another_thread
 from pm_ai.app import entry, wiring
-from pm_ai.app.wiring import Bootstrap, GraphEnrolment, bootstrap, build
+from pm_ai.app.wiring import GraphEnrolment, bootstrap, build
 from pm_ai.connectors.graph import GraphConnector
 from pm_ai.core.connector_enrolment import stored_credentials
 from pm_ai.domain.health import ArtifactState, Health
@@ -217,7 +218,9 @@ def test_with_no_project_enrolled_it_runs_as_on_any_machine(enrolled, monkeypatc
     monkeypatch.setattr(
         entry,
         "_bootstrap",
-        lambda chain: Bootstrap({}, ArtifactState.absent(), bootstrap(chain).config),
+        lambda chain: dataclasses.replace(
+            bootstrap(chain), projects={}, registry=ArtifactState.absent()
+        ),
     )
 
     code, _ = _sign_in(monkeypatch, _provider())
@@ -958,7 +961,9 @@ def test_with_encryption_off_and_no_daemon_the_warning_is_printed(
     monkeypatch.setattr(
         entry,
         "_bootstrap",
-        lambda chain: Bootstrap({}, ArtifactState.absent(), bootstrap(chain).config),
+        lambda chain: dataclasses.replace(
+            bootstrap(chain), projects={}, registry=ArtifactState.absent()
+        ),
     )
     capsys.readouterr()
 

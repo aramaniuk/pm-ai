@@ -1136,8 +1136,17 @@ class _NoKey:
 def _diagnosed(daemon):
     from pm_ai.domain.health import ArtifactState
 
+    from pm_ai.app.wiring import read_connector_rows
+
     return entry._diagnose(
-        _NoKey(), entry._Composition(daemon, None, ArtifactState.absent(), ArtifactState.absent())
+        _NoKey(),
+        entry._Composition(
+            daemon,
+            None,
+            ArtifactState.absent(),
+            ArtifactState.absent(),
+            read_connector_rows(daemon.storage).reading,
+        ),
     )
 
 

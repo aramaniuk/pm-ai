@@ -162,12 +162,13 @@ class ConnectorRegistry:
         return tuple(self._connectors.values())
 
     def instances(self) -> tuple[str, ...]:
-        """The names registered, for a diagnostic that reports membership only.
+        """The names registered in this registry, in registration order.
 
-        `doctor` lists these without contacting anything: membership is a fact
-        about this process, health is a fact about a provider, and mixing them
-        puts a network call in the command an operator runs when the network is
-        the thing that is broken.
+        Kept for its test callers only. `doctor` does not read this: its
+        `connectors` line reads the enrolment rows on disk (story 4n), because a
+        registry exists only once a daemon is composed, and the places that
+        line matters most — `setup`'s closing report, a run from a folder inside
+        none of several projects — have none.
         """
         return tuple(self._connectors)
 

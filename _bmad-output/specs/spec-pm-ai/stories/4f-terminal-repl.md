@@ -2,7 +2,8 @@
 title: 'pm-ai with no arguments opens a terminal prompt'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '00c653aa8a60333b44e8312e4f4c21a455c9c874'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -72,11 +73,11 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/surfaces/cli/repl.py` -- the loop: `help`/`exit`/`quit`, `shlex.split` and the unclosed-quote sentence, the runner call and the `exit <n>` line on stdout, the open-line sentence naming the first word, Ctrl-C and Ctrl-D, optional `readline` -- the contract
-- [ ] `pm_ai/app/entry.py` -- the no-arguments branch before `parse`, guarded by standard input and output both being terminals; inject `main` as the runner -- nothing composed at open
-- [ ] `tests/surfaces/test_cli_repl.py` -- one test per matrix row with a fake runner, including that an open line reaches no file -- the matrix is the contract
-- [ ] `tests/surfaces/test_cli_dispatch.py:130` -- monkeypatch `isatty` to `False` explicitly rather than relying on pytest's captured stdin, and fix its docstring (the REPL is this slice, not `4e`); add a sibling with `isatty` true on stdin and stdout whose stdin is fed `doctor\nexit\n`, run through the real `entry.main([])`, asserting the doctor report and an `exit 0` or `exit 4` line -- the runner is the real `main`, not a fake
-- [ ] `tests/slice/test_repl_startup.py` -- the pseudo-terminal timing test with the figure in its message, and the server-imports test -- the budget is measured, not asserted
+- [x] `pm_ai/surfaces/cli/repl.py` -- the loop: `help`/`exit`/`quit`, `shlex.split` and the unclosed-quote sentence, the runner call and the `exit <n>` line on stdout, the open-line sentence naming the first word, Ctrl-C and Ctrl-D, optional `readline` -- the contract
+- [x] `pm_ai/app/entry.py` -- the no-arguments branch before `parse`, guarded by standard input and output both being terminals; inject `main` as the runner -- nothing composed at open
+- [x] `tests/surfaces/test_cli_repl.py` -- one test per matrix row with a fake runner, including that an open line reaches no file -- the matrix is the contract
+- [x] `tests/surfaces/test_cli_dispatch.py:130` -- monkeypatch `isatty` to `False` explicitly rather than relying on pytest's captured stdin, and fix its docstring (the REPL is this slice, not `4e`); add a sibling with `isatty` true on stdin and stdout whose stdin is fed `doctor\nexit\n`, run through the real `entry.main([])`, asserting the doctor report and an `exit 0` or `exit 4` line -- the runner is the real `main`, not a fake
+- [x] `tests/slice/test_repl_startup.py` -- the pseudo-terminal timing test with the figure in its message, and the server-imports test -- the budget is measured, not asserted
 
 **Acceptance Criteria:**
 - Given a machine with a project enrolled, when `pm-ai` is typed and then `doctor`, then the report prints as `pm-ai doctor` prints it, `exit 0` or `exit 4` shows, and the next prompt appears.
@@ -91,3 +92,35 @@ context:
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai` from a real terminal -- expected: `pm-ai> ` within a second; `config show` then `exit 0`; `exit` returns 0; `.pm-ai/memory/event_log/` gained no line
+
+## Suggested Review Order
+
+**Opening the prompt**
+
+- A bare call with both ends at a terminal opens the prompt before `parse`; nothing is composed.
+  [`entry.py:162`](../../../../pm_ai/app/entry.py#L162)
+
+- What counts as a terminal: a missing or closed stream does not.
+  [`entry.py:266`](../../../../pm_ai/app/entry.py#L266)
+
+**The loop**
+
+- Command, ending or open line; Ctrl-C never ends the session; unclosed quote is exit 2.
+  [`repl.py:117`](../../../../pm_ai/surfaces/cli/repl.py#L117)
+
+- The open-line sentence: names no command, no model, sent nowhere.
+  [`repl.py:71`](../../../../pm_ai/surfaces/cli/repl.py#L71)
+
+- Line editing through `readline` when it loads; no history file.
+  [`repl.py:47`](../../../../pm_ai/surfaces/cli/repl.py#L47)
+
+- The one list of command and help words, shared with the command line.
+  [`dispatch.py:1876`](../../../../pm_ai/surfaces/cli/dispatch.py#L1876)
+
+**Tests**
+
+- One test per matrix row with a fake runner.
+  [`test_cli_repl.py`](../../../../tests/surfaces/test_cli_repl.py)
+
+- The real console script on a pseudo-terminal: startup under 1.0 s, recall, no server imports.
+  [`test_repl_startup.py`](../../../../tests/slice/test_repl_startup.py)
