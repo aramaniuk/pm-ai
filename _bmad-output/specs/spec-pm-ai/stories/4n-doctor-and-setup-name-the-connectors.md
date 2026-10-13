@@ -2,7 +2,8 @@
 title: 'pm-ai doctor and pm-ai setup name the connectors enrolled on this machine'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '00c653aa8a60333b44e8312e4f4c21a455c9c874'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -77,14 +78,14 @@ Setup closes with a health report, and `doctor` prints the same one: the master 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/app/wiring.py` -- one reader for the rows, returning accepted names, disabled names, and named problems (unreadable, unparseable, duplicate name, directory unlistable); `_enrolled_connectors` iterates its accepted rows; `Bootstrap` carries the result -- one list, one rule
-- [ ] `pm_ai/platform/doctor.py` -- `connectors_enrolled(...) -> Probe`: OK with "N enrolled: …" (singular "1 enrolled"), OK "none enabled; N disabled: …", OK "none enrolled" with both add commands as remediation, WARNING naming each problem row, FAILING naming a listing error -- wording lives with the other probes
-- [ ] `pm_ai/app/entry.py` -- `_Composition` carries the result; `_diagnose` and `_FirstRun.diagnose` append the probe after the registry line -- both reports, one source
-- [ ] `pm_ai/connectors/registry.py` -- correct the `instances()` docstring; the method stays for its test callers -- no promise the code does not keep
-- [ ] `tests/architecture/test_doctor.py` -- the probe over the reader's result: sorted, singular and plural, both remedies when empty, "none enabled" with only disabled rows, WARNING per problem, FAILING on a listing error, nothing but names in its text -- the probe's own rows
-- [ ] `tests/slice/test_first_run.py` -- the closing line in both states on printed output; the two-projects test asserts both commands print the same line; the line's position asserted after the registry line and before `project selection` -- the setup rows
-- [ ] `tests/slice/test_doctor_names_connectors.py` -- new, on `test_connector_add_graph.py`'s `machine`: a Graph and a GitLab row listed sorted; disabled, unknown-system, malformed and duplicate-name rows handled as the matrix says; an unlistable directory fails; `msal` made to fail on import and the row still listed; two projects from outside both; with a sealed sign-in on disk, the token absent from `doctor` and setup output and `Keychain.fetch` never called while the line is produced; a GitLab row with no project enrolled, `doctor` and `connector check` both run, asserting the counts agree and `connector check` names the row as not built with its reason -- the doctor rows
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved the `instances()` entry and the "setup has no connector step" entry's closing-report half; the step itself is `4p`
+- [x] `pm_ai/app/wiring.py` -- one reader for the rows, returning accepted names, disabled names, and named problems (unreadable, unparseable, duplicate name, directory unlistable); `_enrolled_connectors` iterates its accepted rows; `Bootstrap` carries the result -- one list, one rule
+- [x] `pm_ai/platform/doctor.py` -- `connectors_enrolled(...) -> Probe`: OK with "N enrolled: …" (singular "1 enrolled"), OK "none enabled; N disabled: …", OK "none enrolled" with both add commands as remediation, WARNING naming each problem row, FAILING naming a listing error -- wording lives with the other probes
+- [x] `pm_ai/app/entry.py` -- `_Composition` carries the result; `_diagnose` and `_FirstRun.diagnose` append the probe after the registry line -- both reports, one source
+- [x] `pm_ai/connectors/registry.py` -- correct the `instances()` docstring; the method stays for its test callers -- no promise the code does not keep
+- [x] `tests/architecture/test_doctor.py` -- the probe over the reader's result: sorted, singular and plural, both remedies when empty, "none enabled" with only disabled rows, WARNING per problem, FAILING on a listing error, nothing but names in its text -- the probe's own rows
+- [x] `tests/slice/test_first_run.py` -- the closing line in both states on printed output; the two-projects test asserts both commands print the same line; the line's position asserted after the registry line and before `project selection` -- the setup rows
+- [x] `tests/slice/test_doctor_names_connectors.py` -- new, on `test_connector_add_graph.py`'s `machine`: a Graph and a GitLab row listed sorted; disabled, unknown-system, malformed and duplicate-name rows handled as the matrix says; an unlistable directory fails; `msal` made to fail on import and the row still listed; two projects from outside both; with a sealed sign-in on disk, the token absent from `doctor` and setup output and `Keychain.fetch` never called while the line is produced; a GitLab row with no project enrolled, `doctor` and `connector check` both run, asserting the counts agree and `connector check` names the row as not built with its reason -- the doctor rows. Built on the file's own `machine` fixture, which enrols projects through `setup` and reads the real registry, reusing `test_connector_add_graph.py`'s `Keychain`, `Microsoft` and `_add`: that file's `machine` fakes `_bootstrap` with one project, and two of these rows need two projects or none
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved the `instances()` entry and the "setup has no connector step" entry's closing-report half; the step itself is `4p`
 
 **Acceptance Criteria:**
 - Given a clean machine, when setup runs with its three steps answered, then the printed closing report has a `connectors` line saying none is enrolled and naming `pm-ai connector add graph <name>` and `pm-ai connector add gitlab <name>`, and the exit code equals the probe verdict as before.
@@ -105,3 +106,36 @@ The connector line reads the enrolment rows, not the running system's connector 
 - `uv run pytest -q` -- expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**One rule for which rows count**
+
+- The reader: `*.json` rows, enabled with a known system and a text name; duplicates refused; never raises.
+  [`wiring.py:2025`](../../../../pm_ai/app/wiring.py#L2025)
+
+- What the reader returns, as names only.
+  [`wiring.py:1982`](../../../../pm_ai/app/wiring.py#L1982)
+
+- The build uses the same reading; refused rows are listed as not built.
+  [`wiring.py:755`](../../../../pm_ai/app/wiring.py#L755)
+
+**The `connectors` line**
+
+- The line's wording for each state: enrolled, none, only disabled, only unknown systems, problems, unlistable.
+  [`doctor.py:527`](../../../../pm_ai/platform/doctor.py#L527)
+
+- The reading carried into the domain.
+  [`health.py:119`](../../../../pm_ai/domain/health.py#L119)
+
+- `doctor` adds it after the registry line; setup's closing report too, so its exit follows.
+  [`entry.py:1161`](../../../../pm_ai/app/entry.py#L1161)
+  [`entry.py:421`](../../../../pm_ai/app/entry.py#L421)
+
+**Tests**
+
+- One test per matrix row, including the msal-blocked and no-key cases.
+  [`test_doctor_names_connectors.py`](../../../../tests/slice/test_doctor_names_connectors.py)
+
+- Setup's closing line and its exit code.
+  [`test_first_run.py`](../../../../tests/slice/test_first_run.py)

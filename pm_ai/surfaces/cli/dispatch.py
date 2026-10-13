@@ -439,8 +439,8 @@ class Context:
 
     `connector check` lists each one beside the probed connectors — enrolled,
     not built, and the reason — so no enabled row is omitted, and so that
-    `doctor`'s count of enrolled rows (slice `4n`, not yet built) and this one
-    can be one count (AD-39). A disabled row is skipped and not listed. None is
+    `doctor`'s count of enrolled rows (slice `4n`) and this one can be one
+    count (AD-39). A disabled row is skipped and not listed. None is
     probed, so none moves the exit code.
     """
 

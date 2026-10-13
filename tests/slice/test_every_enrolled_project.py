@@ -1480,7 +1480,7 @@ def test_4o_a_registry_that_cannot_be_read_still_refuses_a_personal_command(
     machine, monkeypatch, capsys, registry
 ):
     if registry == "unreadable":
-        from pm_ai.app.wiring import Bootstrap
+        from pm_ai.app.wiring import Bootstrap, bootstrap
         from pm_ai.domain.health import ArtifactState
 
         monkeypatch.setattr(
@@ -1490,6 +1490,7 @@ def test_4o_a_registry_that_cannot_be_read_still_refuses_a_personal_command(
                 {},
                 ArtifactState.unreadable("projects.toml: [Errno 13] Permission denied"),
                 ArtifactState.absent(),
+                bootstrap(keychain).connectors,
             ),
         )
     else:
@@ -1526,7 +1527,7 @@ def test_4o_a_fault_elsewhere_is_named_as_itself_never_as_nothing_enrolled(
 ):
     """`connector check` included: it no longer has a nothing-enrolled exemption."""
     if fault == "config-unreadable":
-        from pm_ai.app.wiring import Bootstrap
+        from pm_ai.app.wiring import Bootstrap, bootstrap
         from pm_ai.domain.health import ArtifactState
 
         monkeypatch.setattr(
@@ -1536,6 +1537,7 @@ def test_4o_a_fault_elsewhere_is_named_as_itself_never_as_nothing_enrolled(
                 {},
                 ArtifactState.absent(),
                 ArtifactState.unreadable("config.toml: [Errno 13] Permission denied"),
+                bootstrap(keychain).connectors,
             ),
         )
         named = "config.toml"

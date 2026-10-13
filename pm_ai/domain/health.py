@@ -25,7 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-__all__ = ["ArtifactState", "Health", "Presence", "Probe", "Report", "UnbuiltConnector"]
+__all__ = ["ArtifactState", "CONNECTOR_SYSTEMS", "EnrolmentReading", "Health", "Presence",
+           "Probe", "Report", "UnbuiltConnector"]
 
 
 class Health(Enum):
@@ -93,8 +94,8 @@ class UnbuiltConnector:
 
     Not a `Probe`: nothing was asked, so there is no health to report and no
     verdict to contribute. `pm-ai connector check` lists it beside the probed
-    connectors, so that `doctor`'s count of enrolled rows (slice `4n`, not yet
-    built) and this one can be one count, with any difference a stated reason
+    connectors, so that `doctor`'s count of enrolled rows (slice `4n`) and this
+    one can be one count, with any difference a stated reason
     (AD-39).
     """
 
@@ -103,6 +104,48 @@ class UnbuiltConnector:
 
     def __str__(self) -> str:
         return f"[unbuilt] {self.instance}: enrolled, not built: {self.reason}"
+
+
+CONNECTOR_SYSTEMS = ("gitlab", "graph")
+"""The systems pm-ai builds a connector for: `gitlab`, and `graph` since story 33c.
+
+Here rather than in the composition root because two layers state it: the build
+refuses a row naming any other, and `doctor`'s `connectors` line names these as
+the supported ones (story 4n).
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class EnrolmentReading:
+    """The `connectors/` rows on this machine, read by the one rule, as names (story 4n).
+
+    What `pm-ai doctor`'s `connectors` line reports, read without contacting any
+    provider and without opening the sealed credential store. Names only: a row's
+    settings and credentials never reach it, so nothing secret can.
+
+    - `enrolled` — every enabled row naming a system pm-ai has a connector for,
+      with a text name: the rows the build goes on to construct or to list as
+      not built with a reason (`connector check`, story 4o).
+    - `disabled` — rows whose `enabled` is anything but `true`, by name (the
+      file name when the row cannot name itself).
+    - `unknown` — enabled rows naming a system pm-ai has no connector for.
+    - `problems` — one sentence per row that could not be used: unreadable,
+      not JSON, no text name or system, or one name carried by two files.
+    - `unlisted` — why `connectors/` itself could not be listed, or `None`.
+      Set, the other fields say nothing: an unlisted directory is not empty.
+    - `directory` — where `connectors/` is under the paths the read used, so
+      a remedy names the directory actually read.
+
+    No field has a default: a caller that did not read the rows must not be
+    able to report that there are none.
+    """
+
+    directory: str
+    enrolled: tuple[str, ...]
+    disabled: tuple[str, ...]
+    unknown: tuple[str, ...]
+    problems: tuple[str, ...]
+    unlisted: str | None
 
 
 class Presence(Enum):

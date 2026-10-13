@@ -57,7 +57,7 @@ import stat
 import time
 import shutil
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -68,7 +68,15 @@ from pathlib import Path
 # existing `from pm_ai.platform.doctor import Health, Probe, Report` still
 # resolves, and there is one `Health` in the process rather than two that agree
 # by convention.
-from pm_ai.domain.health import ArtifactState, Health, Presence, Probe, Report
+from pm_ai.domain.health import (
+    CONNECTOR_SYSTEMS,
+    ArtifactState,
+    EnrolmentReading,
+    Health,
+    Presence,
+    Probe,
+    Report,
+)
 from pm_ai.domain.api_token import (
     MAX_TOKEN_FILE_BYTES,
     ApiTokenRefused,
@@ -90,11 +98,13 @@ from pm_ai.ports import (
 
 __all__ = [
     "ArtifactState",
+    "CONNECTORS_PROBE",
     "Health",
     "Presence",
     "Probe",
     "Report",
     "config_readable",
+    "connectors_enrolled",
     "daemon_reachable",
     "packages_installed",
     "registry_readable",
@@ -497,6 +507,107 @@ def registry_readable(state: ArtifactState) -> Probe:
             "own.",
         )
     return Probe(name, Health.OK, f"{len(projects)} project(s) enrolled: {', '.join(sorted(projects))}")
+
+
+# ── The enrolled connectors (story 4n) ──────────────────────────────────────
+
+CONNECTORS_PROBE = "connectors"
+
+_ADD_COMMANDS = (
+    "`pm-ai connector add graph <name>` (Microsoft 365) or "
+    "`pm-ai connector add gitlab <name>`"
+)
+_SUPPORTED = " and ".join(CONNECTOR_SYSTEMS)
+
+
+def _named(what: str, names: Sequence[str]) -> str:
+    return f"{len(names)} {what}: {', '.join(names)}"
+
+
+def connectors_enrolled(reading: EnrolmentReading) -> Probe:
+    """Which connectors are enrolled on this machine, contacting none of them.
+
+    Takes the rows already read, as `config_readable` takes bytes: `platform`
+    may import neither `pm_ai.connectors` nor `pm_ai.storage`, and a probe that
+    opened `connectors/` itself would be a second reader. Names only — the
+    reading carries no setting and no credential, so nothing secret can reach
+    this line, and no provider's client is imported to produce it. Whether a
+    listed connector answers is `pm-ai connector check`'s question (AD-39), and
+    whether a listed row builds is the start's, which names its reason.
+
+    - **Nothing enrolled is `OK`**, said with both commands that add one: a
+      machine with nothing to harvest from is an ordinary state, not a fault,
+      and it must not read like a ready one.
+    - **Only disabled rows is "none enabled"**, never "none enrolled": the
+      operator turned them off, and saying nothing is there would be false.
+    - **Rows only for systems pm-ai has no connector for are named**, with the
+      systems it does support: they are not enrolled connectors, and they are
+      not nothing either.
+    - **A row that could not be used is a `WARNING`** naming it, beside every
+      row that could: dropping it silently is how a typo reads as no connector.
+    - **A directory that cannot be listed is `FAILING`**, never "none
+      enrolled": an unlisted directory is not an empty one.
+    """
+    name = CONNECTORS_PROBE
+    if reading.unlisted is not None:
+        return Probe(
+            name, Health.FAILING,
+            f"connectors/ could not be listed, so which connectors are enrolled "
+            f"is unknown: {reading.unlisted}",
+            f"Check the ownership and permissions of {reading.directory}. No "
+            f"connector can start until its row can be read.",
+        )
+    parts: list[str] = []
+    if reading.enrolled:
+        parts.append(_named("enrolled", reading.enrolled))
+    elif reading.unknown:
+        parts.append("none for a system pm-ai supports")
+    elif reading.disabled:
+        parts.append("none enabled")
+    else:
+        parts.append("none enrolled")
+    if reading.disabled:
+        parts.append(_named("disabled", reading.disabled))
+    if reading.unknown:
+        parts.append(
+            _named("for a system pm-ai has no connector for", reading.unknown)
+            + f" (it has connectors for {_SUPPORTED})"
+        )
+    if reading.problems:
+        rows = "row" if len(reading.problems) == 1 else "rows"
+        parts.append(
+            f"{len(reading.problems)} {rows} could not be used: "
+            + "; ".join(reading.problems)
+        )
+    detail = "; ".join(parts)
+    if reading.problems:
+        return Probe(
+            name, Health.WARNING, detail,
+            f"Repair or remove each row named, in {reading.directory}. The "
+            f"connectors listed as enrolled are unaffected by it.",
+        )
+    if reading.enrolled:
+        return Probe(
+            name, Health.OK, detail,
+            "`pm-ai connector check` contacts each one and says whether it "
+            "answers; this line contacts none of them.",
+        )
+    if reading.unknown:
+        return Probe(
+            name, Health.OK, detail,
+            f"Correct the `system` of each row named, in {reading.directory}, to "
+            f"one of {_SUPPORTED}, or add one with {_ADD_COMMANDS}.",
+        )
+    if reading.disabled:
+        return Probe(
+            name, Health.OK, detail,
+            f"Set `\"enabled\": true` in a disabled row to use it, or add one "
+            f"with {_ADD_COMMANDS}.",
+        )
+    return Probe(
+        name, Health.OK, detail,
+        f"Nothing will be harvested until one is added: run {_ADD_COMMANDS}.",
+    )
 
 
 # ── The daemon (story 4e) ────────────────────────────────────────────────────
