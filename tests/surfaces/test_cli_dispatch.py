@@ -11,6 +11,7 @@ needs a subprocess and every branch is reachable.
 
 from __future__ import annotations
 
+import dataclasses
 import ast
 import tempfile
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ import pytest
 
 from pm_ai.core.project_registry import ProjectEntry, render_registry
 from pm_ai.platform.doctor import ArtifactState, Presence
-from pm_ai.app.wiring import Bootstrap, bootstrap
+from pm_ai.app.wiring import bootstrap
 from pm_ai.app import entry
 from pm_ai.core.config import Config
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -67,7 +68,9 @@ def enrolled(**projects: Path):
         # The real bootstrap for `config.toml`, the stub for the registry: the
         # fixtures write a config into the redirected `HOME` and expect it to be
         # honoured, and stubbing it flat would make those rows assert nothing.
-        return Bootstrap(entries, registry, bootstrap(keychain).config)
+        return dataclasses.replace(
+            bootstrap(keychain), projects=entries, registry=registry
+        )
 
     return read
 

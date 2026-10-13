@@ -438,7 +438,7 @@ def test_an_enrolled_connector_is_registered_by_a_fresh_composition(tmp_path):
     from pm_ai.app import entry
     from pm_ai.app.wiring import build
     from pm_ai.connectors.registry import ConnectorRegistry
-    from pm_ai.domain.health import Report
+    from pm_ai.domain.health import EnrolmentReading, Report
     from pm_ai.platform.doctor import ArtifactState
 
     storage = _storage(tmp_path)
@@ -465,7 +465,11 @@ def test_an_enrolled_connector_is_registered_by_a_fresh_composition(tmp_path):
             return Report(())
 
     composed = entry._Composition(
-        daemon, None, ArtifactState.absent(), ArtifactState.absent()
+        daemon,
+        None,
+        ArtifactState.absent(),
+        ArtifactState.absent(),
+        EnrolmentReading("connectors/", (), (), (), (), None),
     )
     probe = entry._probe_connectors(composed, registry=Recording)
     assert probe is not None

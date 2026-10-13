@@ -96,6 +96,7 @@ from pm_ai.domain.event_entries import (
     render_entry,
 )
 from pm_ai.domain.goals import Goal
+from pm_ai.domain.health import EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
@@ -107,6 +108,7 @@ from pm_ai.platform.doctor import (
     Probe,
     Report,
     config_readable,
+    connectors_enrolled,
     daemon_reachable,
     registry_readable,
     run_all,
@@ -339,8 +341,10 @@ def _serve(keychain: KeychainPort, composed: _Composition) -> Callable[[], int] 
 def _status_probes(keychain: KeychainPort, daemon: Daemon) -> Callable[[], Report]:
     """`run_all` over the two artifacts, re-read through the daemon's own writer.
 
-    What `doctor` reports, minus the `daemon` probe: this process is the
-    daemon, and it never sends a request to itself. Re-read per request so a
+    `run_all` alone: what `doctor` reports minus the `daemon` probe — this
+    process is the daemon, and it never sends a request to itself — and minus
+    `doctor`'s `connectors` line (story 4n), which `/v1/status` does not
+    carry. Re-read per request so a
     hand-edited `config.toml` or a project enrolled since the start shows in
     the report; nothing is composed to do it.
     """
@@ -434,7 +438,10 @@ class _FirstRun:
         that `FAILING` for a reason no setup step can fix.
         """
         read = bootstrap(self._keychain)
-        return run_all(self._keychain, config=read.config, registry=read.registry)
+        report = run_all(self._keychain, config=read.config, registry=read.registry)
+        # `4n`: the same line `doctor` prints, from the same fresh read, so
+        # setup cannot end without saying which connectors are enrolled.
+        return Report((*report.probes, connectors_enrolled(read.connectors)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -920,6 +927,13 @@ class _Composition:
     failure: Probe | None
     config: ArtifactState
     registry: ArtifactState
+    connectors: EnrolmentReading
+    """The `connectors/` rows as names, read by `bootstrap` (story 4n).
+
+    Carried whatever composition did, because `doctor`'s `connectors` line
+    needs no daemon: on a machine where none could be built, the rows are
+    still there to name.
+    """
     selection: _Selection | None = None
     """Where this invocation acts and how that was chosen (story 4m).
 
@@ -990,6 +1004,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
     """
     read = _bootstrap(keychain)
     projects, registry, config = read.projects, read.registry, read.config
+    connectors = read.connectors
     if not projects:
         # The registry probe already says this, in all four of its states —
         # absent, empty, unreadable and unparseable — and says it better than a
@@ -1003,6 +1018,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
                 enrolment,
                 config,
                 registry,
+                connectors,
                 undecided=(
                     _named_project_refusal(target)
                     if nothing_enrolled
@@ -1022,6 +1038,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
             None,
             config,
             registry,
+            connectors,
             selection=selected,
             undecided=selected.refusal,
         )
@@ -1050,6 +1067,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
             ),
             config,
             registry,
+            connectors,
         )
     except OperationalStoreUnavailable as unopenable:
         # Busy (`OperationalStoreBusy` is one) or unpreparable: named by its own
@@ -1063,6 +1081,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
             ),
             config,
             registry,
+            connectors,
         )
     except KeychainUnavailable as locked:
         return _Composition(
@@ -1073,6 +1092,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
             ),
             config,
             registry,
+            connectors,
         )
     except OSError as unreadable:
         return _Composition(
@@ -1085,6 +1105,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
             ),
             config,
             registry,
+            connectors,
         )
     # Read by `bootstrap` rather than re-read through `daemon.storage`. Both are
     # the single reader, so either is legal; reading once is what stops `doctor`
@@ -1099,7 +1120,7 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
         # reads as configured and has no effect, which is the one failure
         # `pm_ai.core.config` exists to prevent. An *absent* config is different
         # and does default: there is nothing there to disagree with.
-        return _Composition(None, config_readable(config), config, registry)
+        return _Composition(None, config_readable(config), config, registry, connectors)
     try:
         daemon.config = load_config(config.raw)
     except ConfigRefused:
@@ -1107,8 +1128,8 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
         # same bytes and carries the same loader message, and one of them
         # phrased differently from the other is how `doctor` and a refusal end
         # up disagreeing about the same file.
-        return _Composition(None, config_readable(config), config, registry)
-    return _Composition(daemon, None, config, registry, selection=selected)
+        return _Composition(None, config_readable(config), config, registry, connectors)
+    return _Composition(daemon, None, config, registry, connectors, selection=selected)
 
 
 def _named_project_refusal(target: DataScope | None) -> str | None:
@@ -1156,7 +1177,11 @@ def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
     operator had nothing on the page connecting the two.
     """
     report = run_all(keychain, config=composed.config, registry=composed.registry)
-    probes = report.probes
+    # `4n`: the enrolled connectors, after the registry line and before the
+    # selection. Appended here and in `_FirstRun.diagnose` rather than in
+    # `run_all`, so the two reports carry it from one read and the daemon's
+    # `/v1/status` keeps the seven machine probes.
+    probes = (*report.probes, connectors_enrolled(composed.connectors))
     selection = _selection_probe(composed)
     if selection is not None:
         probes = (*probes, selection)

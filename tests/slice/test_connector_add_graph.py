@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from pm_ai.app import entry, wiring
-from pm_ai.app.wiring import Bootstrap, GraphEnrolment, bootstrap, build
+from pm_ai.app.wiring import GraphEnrolment, bootstrap, build
 from pm_ai.connectors.graph import MAX_SETTING_MINUTES, GraphConnector
 from pm_ai.connectors.graph.auth import (
     GRAPH_RESOURCE_SCOPES,
@@ -219,10 +219,10 @@ def machine(tmp_path, monkeypatch):
     entries = {"alpha": ProjectEntry(path=repository)}
 
     def read(chain):
-        return Bootstrap(
-            entries,
-            ArtifactState.read(render_registry(entries)),
-            bootstrap(chain).config,
+        return dataclasses.replace(
+            bootstrap(chain),
+            projects=entries,
+            registry=ArtifactState.read(render_registry(entries)),
         )
 
     monkeypatch.setattr(entry, "_bootstrap", read)
