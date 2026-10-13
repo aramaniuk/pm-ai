@@ -294,13 +294,13 @@ def test_no_enrolled_calendar_is_its_own_answer_and_reports_no_connector():
 
 
 def test_no_enrolled_calendar_names_no_remedy():
-    """Measured, not tidiness: `pm-ai connector add graph <x>` refuses today.
+    """No calendar connector is enrolled, so the section names no command.
 
-    `probe.PROBES` holds only `_gitlab`, so enrolling a `graph` system is
-    refused, and past the probe `enrol_connector` writes none of the four
-    settings a Graph connector needs. A dashboard printing a command that does
-    not work would be inventing a remedy, which is the same defect as inventing
-    a fact.
+    The dashboard reports what it read and nothing more: with no calendar
+    connector to read from, it does not invent a remedy — a command printed
+    here would be a claim the render did not compute. (Written when `pm-ai
+    connector add graph` still refused; `8l` made it work and `8o` emptied
+    `probe.PROBES`, and the rule about not printing a remedy stands.)
     """
     body = sections(render(meetings=NoCalendarConnector()))["Time-Critical Activities"]
     assert "connector add" not in body

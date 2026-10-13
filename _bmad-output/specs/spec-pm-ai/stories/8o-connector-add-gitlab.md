@@ -2,7 +2,8 @@
 title: 'pm-ai connector add gitlab produces a working GitLab connector'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '00c653aa8a60333b44e8312e4f4c21a455c9c874'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -81,13 +82,13 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/connector_enrolment.py` -- a `project=` parameter on `enrol_connector` that overrides the default derived from the instance; `project` stays reserved against `settings` -- the row holds the real path without weakening the clash rule
-- [ ] `pm_ai/app/wiring.py` -- `GitLabEnrolment`: `ready(instance)` (keychain, name placement), `refusal(host=, project=)`, `check(instance, host, project, credential)` running the health check under the ten-second bound and returning the settings to save -- the connector layer stays behind the composition root
-- [ ] `pm_ai/app/entry.py` -- inject it beside the Graph sign-in -- the CLI may not import connectors
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- the `gitlab` path: up-front checks in order, two questions with re-asking, the hidden prompt with stripping and the interruption refusal, the check, enrolment with `project=` and `settings=`, closing message; the `GitLabProbe` protocol -- the command
-- [ ] `pm_ai/connectors/probe.py` -- remove `_gitlab`; rewrite the docstring -- no entry may refuse on purpose once a real check exists
-- [ ] `tests/slice/test_connector_add_gitlab.py`, `tests/connectors/test_probe.py`, `tests/core/test_connector_enrolment.py`, `tests/surfaces/test_cli_subcommands.py` -- one test per matrix row, with GitLab faked at the transport (no socket), including a full add followed by a fresh `build()` holding the new connector -- the matrix is the contract
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: the "always refuses" entry (`:908`), the GitLab half of the 33a entry (`:560`), the slash entry (`:504`)
+- [x] `pm_ai/core/connector_enrolment.py` -- a `project=` parameter on `enrol_connector` that overrides the default derived from the instance; `project` stays reserved against `settings` -- the row holds the real path without weakening the clash rule
+- [x] `pm_ai/app/wiring.py` -- `GitLabEnrolment`: `ready(instance)` (keychain, name placement), `refusal(host=, project=)`, `check(instance, host, project, credential)` running the health check under the ten-second bound and returning the settings to save -- the connector layer stays behind the composition root
+- [x] `pm_ai/app/entry.py` -- inject it beside the Graph sign-in -- the CLI may not import connectors
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- the `gitlab` path: up-front checks in order, two questions with re-asking, the hidden prompt with stripping and the interruption refusal, the check, enrolment with `project=` and `settings=`, closing message; the `GitLabProbe` protocol -- the command
+- [x] `pm_ai/connectors/probe.py` -- remove `_gitlab`; rewrite the docstring -- no entry may refuse on purpose once a real check exists
+- [x] `tests/slice/test_connector_add_gitlab.py`, `tests/connectors/test_probe.py`, `tests/core/test_connector_enrolment.py`, `tests/surfaces/test_cli_subcommands.py` -- one test per matrix row, with GitLab faked at the transport (no socket), including a full add followed by a fresh `build()` holding the new connector -- the matrix is the contract
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: the "always refuses" entry (`:908`), the GitLab half of the 33a entry (`:560`), the slash entry (`:504`)
 
 **Acceptance Criteria:**
 - Given a machine with project `alpha` enrolled and a master key, when `pm-ai connector add gitlab gitlab:alpha` runs with Enter, `acme/web` and a token the fake GitLab answers 200 for, then the saved row's `project` is `acme/web` and its `host` is `https://gitlab.com`, the sealed store holds the token, and a fresh `build()` has one GitLab connector `gitlab:alpha` — the enrolled one, holding the credential, in the built-in's place.
@@ -105,3 +106,37 @@ Row keys this slice writes: `host` and `project` (the GitLab path); `first_run_r
 - `uv run pytest -q` -- expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**The command**
+
+- The order: refusals before any question, then host, project path, hidden token, the check, the save.
+  [`dispatch.py:1017`](../../../../pm_ai/surfaces/cli/dispatch.py#L1017)
+
+- Any system other than `graph` and `gitlab` is refused by name before a prompt.
+  [`dispatch.py:873`](../../../../pm_ai/surfaces/cli/dispatch.py#L873)
+
+**The check behind the composition root**
+
+- Placement, the answers' local checks, and the one-commit check bounded at ten seconds.
+  [`wiring.py:1835`](../../../../pm_ai/app/wiring.py#L1835)
+
+- Each answer's own refusal; only network faults, 429 and 5xx are "unreachable".
+  [`wiring.py:2086`](../../../../pm_ai/app/wiring.py#L2086)
+
+- The placement rule shared with the build.
+  [`wiring.py:1034`](../../../../pm_ai/app/wiring.py#L1034)
+
+**Saving**
+
+- The row carries the real project path; a blank or slash-less path is refused.
+  [`connector_enrolment.py:418`](../../../../pm_ai/core/connector_enrolment.py#L418)
+
+- The name checks that need no key.
+  [`connector_enrolment.py:330`](../../../../pm_ai/core/connector_enrolment.py#L330)
+
+**Tests**
+
+- Every matrix row, a full add then a fresh build holding the connector, and the token absent from screen and logs.
+  [`test_connector_add_gitlab.py`](../../../../tests/slice/test_connector_add_gitlab.py)

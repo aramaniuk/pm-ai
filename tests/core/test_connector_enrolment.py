@@ -1151,6 +1151,44 @@ def test_a_setting_naming_a_key_enrolment_owns_is_refused_before_anything(
     assert not _sealed_file(tmp_path).exists()
 
 
+def test_the_project_parameter_is_the_rows_project_and_settings_still_cannot_name_it(
+    storage, tmp_path
+):
+    """Story 8o: a GitLab path travels as a parameter, so the clash rule holds.
+
+    `project` stays reserved against `settings`; the parameter is the one way
+    a caller writes a path the instance name cannot hold.
+    """
+    enrol_connector(
+        storage,
+        system="gitlab",
+        instance="gitlab:alpha",
+        credential=SECRET,
+        probe=accepts,
+        settings={"host": "https://git.internal/gitlab"},
+        project="acme/web",
+    )
+    (written,) = _connector_files(tmp_path)
+    assert json.loads(written.read_text()) == {
+        "instance": "gitlab:alpha",
+        "system": "gitlab",
+        "enabled": True,
+        "project": "acme/web",
+        "host": "https://git.internal/gitlab",
+    }
+
+    with pytest.raises(MalformedSettings, match="project"):
+        enrol_connector(
+            storage,
+            system="gitlab",
+            instance="gitlab:beta",
+            credential=SECRET,
+            probe=accepts,
+            settings={"project": "acme/other"},
+            project="acme/web",
+        )
+
+
 @pytest.mark.parametrize("value", [object(), float("nan"), float("inf")])
 def test_a_setting_that_cannot_be_written_is_refused_before_the_seal(
     storage, tmp_path, value
@@ -1397,3 +1435,26 @@ def test_saying_the_claim_is_held_when_it_is_not_is_a_programming_error(
         with pytest.raises(ClaimNotHeld):  # another thread's claim is not this one's
             record_user_id(storage, instance=GRAPH, user_id=PM, claimed=True)
     assert row_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("project", ["", "   ", "web"])
+def test_a_blank_or_slashless_project_is_refused_before_anything(storage, tmp_path, project):
+    """Story 8o: no caller can write a row whose `project` is not a GitLab path."""
+    asked: list[str] = []
+
+    def probe(system: str, credential: str) -> str:
+        asked.append(system)
+        return "accepted"
+
+    with pytest.raises(MalformedSettings, match="group/project"):
+        enrol_connector(
+            storage,
+            system="gitlab",
+            instance="gitlab:alpha",
+            credential=SECRET,
+            probe=probe,
+            project=project,
+        )
+    assert asked == []
+    assert _connector_files(tmp_path) == []
+    assert not _sealed_file(tmp_path).exists()

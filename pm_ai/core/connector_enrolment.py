@@ -86,9 +86,11 @@ __all__ = [
     "RESERVED_ROW_KEYS",
     "USER_ID_KEY",
     "UnknownConnectorSystem",
+    "UnplacedConnector",
     "UserNotRecorded",
     "assert_enrollable",
     "assert_replaceable",
+    "assert_unconfigured",
     "connector_configurations",
     "connector_row",
     "credential_for",
@@ -177,6 +179,22 @@ class OrphanedCredential(RuntimeError):
 
     Never silent, which is the point. The reachable alternative was a sealed
     credential nothing on the machine refers to.
+    """
+
+
+class UnplacedConnector(ValueError):
+    """No start would build a connector under this name, so nothing was asked (story 8o).
+
+    On a machine watching several projects, a GitLab connector is built only
+    when its instance name is `gitlab:<enrolled project id>`: nothing else says
+    which project's tree its harvest files into. Enrolling under any other name
+    would seal a credential for a connector that is never built, so the name
+    is refused before anything is asked. The message names the names that
+    would build.
+
+    Declared here rather than in `pm_ai.ports` because it is about enrolment's
+    own rule for a name — like `MalformedInstanceName` beside it — not about a
+    port's contract (AD-49); `pm_ai.app` raises it and the CLI catches it.
     """
 
 
@@ -309,6 +327,31 @@ def connector_configurations(storage: StoragePort) -> tuple[str, ...]:
     )
 
 
+def assert_unconfigured(storage: StoragePort, *, system: str, instance: str) -> None:
+    """Refuse a malformed name, or one a row in `connectors/` already uses (story 8o).
+
+    The part of `assert_enrollable` that needs no master key: the names'
+    shape, then the unencrypted collection. `assert_enrollable` calls it
+    first. `pm-ai connector add gitlab` also calls it on its own, before the
+    terminal check — nothing is asked by it — so a name in use is the first
+    thing said; the rest of `assert_enrollable`, where the keychain is first
+    reached, runs after the terminal check.
+
+    Raises `MalformedInstanceName` or `DuplicateConnector`.
+    """
+    _assert_nameable(instance)
+    _assert_nameable(system, label="system name")
+
+    configured = connector_configurations(storage)
+    if instance in configured:
+        raise DuplicateConnector(
+            f"{instance!r} is already configured in {CONNECTORS}, and enrolment "
+            f"does not replace one. Two connectors under one instance name "
+            f"share a cursor and a credential, so one of them silently "
+            f"re-harvests from the other's position. Nothing was written."
+        )
+
+
 def assert_enrollable(storage: StoragePort, *, system: str, instance: str) -> None:
     """Refuse an instance that cannot be enrolled, before anything is asked of anyone.
 
@@ -323,17 +366,7 @@ def assert_enrollable(storage: StoragePort, *, system: str, instance: str) -> No
     the sealed store, pre-flighting the git question or fetching the master
     key raises — `KeyNotFound` on a machine with none enrolled.
     """
-    _assert_nameable(instance)
-    _assert_nameable(system, label="system name")
-
-    configured = connector_configurations(storage)
-    if instance in configured:
-        raise DuplicateConnector(
-            f"{instance!r} is already configured in {CONNECTORS}, and enrolment "
-            f"does not replace one. Two connectors under one instance name "
-            f"share a cursor and a credential, so one of them silently "
-            f"re-harvests from the other's position. Nothing was written."
-        )
+    assert_unconfigured(storage, system=system, instance=instance)
     if instance in stored_credentials(storage):
         raise DuplicateConnector(
             f"a credential is already sealed for {instance!r}, though nothing "
@@ -390,8 +423,16 @@ def enrol_connector(
     credential: str,
     probe: CredentialProbePort,
     settings: Mapping[str, object] | None = None,
+    project: str | None = None,
 ) -> str:
     """Probe `credential`, seal it, then configure `instance`.
+
+    `project` is the row's `project`, when the caller knows it (story 8o): a
+    GitLab path such as `group/project`, which an instance name cannot hold.
+    `None` keeps the default derived from the instance's suffix. A parameter
+    rather than a setting, so `project` stays in `RESERVED_ROW_KEYS` and a
+    caller's settings still cannot name it. A blank one, or one with no `/`,
+    is `MalformedSettings` before anything is asked or written.
 
     The order, and what each step buys:
 
@@ -440,6 +481,15 @@ def enrol_connector(
     (`GraphEnrolment` does).
     """
     extra = dict(settings or {})
+    if project is not None and (
+        not isinstance(project, str)
+        or not project.strip()
+        or "/" not in project
+    ):
+        raise MalformedSettings(
+            f"the project for {instance!r} is {project!r}, which is not a path "
+            f"such as 'group/project'. Nothing was written."
+        )
     clash = sorted(RESERVED_ROW_KEYS & extra.keys())
     if clash:
         raise MalformedSettings(
@@ -461,7 +511,7 @@ def enrol_connector(
                 # built an adapter for the wrong path. Recorded here, and
                 # editable in this file, which is unencrypted and hand-editable
                 # for exactly this.
-                "project": _default_project(instance),
+                "project": _default_project(instance) if project is None else project,
                 # A connector's own settings (story 8l): Graph's app id, tenant
                 # and harvest widths, in the same row and by the same writer.
                 **extra,

@@ -19,27 +19,20 @@ def test_a_system_with_no_probe_is_refused_by_name():
     with pytest.raises(UnknownConnectorSystem) as refused:
         probe_credential("nosuch", "a-token")
     assert "nosuch" in str(refused.value)
-    assert "gitlab" in str(refused.value), "the known systems are named"
+    assert "Known systems: none" in str(refused.value), "the known systems are named"
 
 
-def test_gitlab_refuses_while_its_transport_is_a_stub():
-    """The load-bearing refusal.
+def test_gitlab_is_not_in_the_table_and_is_refused_here_by_name():
+    """Story 8o moved GitLab's check behind the composition root.
 
-    `GitLabConnectorAdapter.reach` opens no socket, so there is nothing that
-    could honestly answer. Returning success here would seal a credential on
-    the strength of a check that never happened — the single failure story 8b's
-    whole write ordering exists to prevent, reintroduced by the probe itself.
+    `pm-ai connector add gitlab` asks GitLab through `GitLabEnrolment`, so the
+    table the generic path consults is empty, and a GitLab credential handed
+    to it is refused by name rather than sealed.
     """
-    with pytest.raises(ProbeFailed) as refused:
+    assert PROBES == {}
+    with pytest.raises(UnknownConnectorSystem) as refused:
         probe_credential("gitlab", "glpat-anything")
-    assert "stub" in str(refused.value)
-
-
-def test_no_probe_returns_success_today():
-    """Every declared system refuses; none may claim a credential is good."""
-    for system in PROBES:
-        with pytest.raises(ProbeFailed):
-            probe_credential(system, "a-token")
+    assert "'gitlab'" in str(refused.value)
 
 
 def test_a_refusal_never_carries_the_credential():

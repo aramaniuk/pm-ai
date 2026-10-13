@@ -233,23 +233,29 @@ def test_opening_the_prompt_composes_nothing_and_starts_no_setup(
 def test_a_secret_command_asks_at_this_terminal_and_ctrl_c_there_is_exit_3(
     registered, monkeypatch, capsys
 ):
-    """`connector add gitlab alpha` at the prompt asks for the credential here.
+    """`connector add gitlab alpha` at the prompt asks its questions here.
 
-    Interrupted at the hidden prompt, before any probe or network: the
+    Since `8o` the command asks for the GitLab host before the hidden token;
+    interrupted at that first question, before any probe or network: the
     command's own interruption, `exit 3`, and the session continues.
     """
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: _Keychain(b"k" * 32))
     asked: list[str] = []
 
     def interrupted(prompt=""):
         asked.append(prompt)
         raise KeyboardInterrupt
 
+    # The prompt reads `sys.stdin` through its own default; the command's
+    # questions call `input` by name, so only they meet this.
+    monkeypatch.setattr("builtins.input", interrupted)
     monkeypatch.setattr("getpass.getpass", interrupted)
     _at_the_prompt(monkeypatch, "connector add gitlab alpha\ndoctor --bogus\nexit\n")
     assert entry.main([]) == EXIT_OK
     captured = capsys.readouterr()
-    assert asked == ["gitlab credential for alpha: "]
-    assert "pm-ai: interrupted" in captured.err
+    assert len(asked) == 1 and "host" in asked[0].lower()
+    assert "interrupted" in captured.err
+    assert "nothing was saved" in captured.err
     assert _statuses(captured.out) == ["exit 3", "exit 2"]
 
 
