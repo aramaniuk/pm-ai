@@ -1249,3 +1249,18 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
   summary: Story 8e's "Scoped out" paragraph still names the transcript path as a limit, though 11b retyped the carrier and removed the test that pinned it.
   evidence: The paragraph is in a skill-derived spec file; it changes through `bmad-spec`.
+
+## Surfaced by the story-33f review (2026-10-13)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
+  summary: The chat-messages fixture is hand-written from Microsoft's published shapes, not a redacted recording from a real tenant, which the spec requires.
+  evidence: Re-running the spike needs Andrei's sign-in and a chat id he picks. Unconfirmed against a real tenant: that Graph accepts `$filter` and `$orderby` on `lastModifiedDateTime` together, that rows come back newest-modified first, and the real `chatType` and topic values. The story task stays OWED.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
+  summary: A chat message edited or reacted to after the chat's position is fetched again every run until a newer message arrives, because the position is a creation time and the server filter is on modification time.
+  evidence: Duplicates are dropped by natural key, so nothing is emitted twice, but a busy old thread can fill pages up to the cap each run. Storing a modification watermark beside the creation cut would stop it.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
+  summary: A chat walk cut by the page cap or the time budget advances to the newest message and loses the unreached range for good, though the server-side filter would let the next run resume.
+  evidence: The frozen block carries the channel rule over as written. Holding or bounding the position on a cut is a design change for a later slice.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
+  summary: An unlabelled chat costs one name lookup every run, nothing is cached, and the `channel` name drifts if the topic is renamed.
+  evidence: The lookup is uncached by design in 33f; a label in the settings row avoids it.

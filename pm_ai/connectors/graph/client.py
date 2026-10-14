@@ -1003,6 +1003,44 @@ class GraphClient:
         )
         return f"{self.base}/{segments}?$top=50&$expand=replies"
 
+    def chat(self, chat: str) -> str:
+        """One listed chat's own object — its topic and its kind (story `33f`).
+
+        Asked only for a chat listed without a label, because the topic or the
+        kind is then what the dashboard calls it. One chat by its id: pm-ai
+        never lists chats. The id is encoded as `channel_messages` encodes its
+        ids, `:` and `@` kept, so a hand-typed id cannot add a segment or a
+        query.
+        """
+        return f"{self.base}/chats/{quote(chat, safe=':@')}"
+
+    def chat_messages(self, chat: str, *, after: datetime) -> str:
+        """The first page of one chat's messages modified after `after` (`33f`).
+
+        `$top=50` (the endpoint's maximum), newest modification first, and a
+        filter on the same field — Microsoft honours `$filter` on
+        `lastModifiedDateTime` only beside an `$orderby` naming it, so both are
+        sent. The instant is sent to the millisecond, floored, with a trailing
+        `Z`: floored so the filter is never narrower than the position asked
+        for, and `Z` because a literal `+` in a query string is a space.
+
+        Refuses an instant that is not aware UTC, for the reason
+        `calendar_view` does.
+        """
+        if after.tzinfo is None or after.utcoffset() != timedelta(0):
+            raise GraphProtocolError(
+                f"refusing to filter a chat's messages after {after!r}, which is "
+                f"not aware UTC: Graph would compare it in no zone pm-ai chose."
+            )
+        milliseconds = after.microsecond // 1000
+        stamp = after.strftime("%Y-%m-%dT%H:%M:%S") + f".{milliseconds:03d}Z"
+        orderby = quote("lastModifiedDateTime desc", safe="")
+        where = quote(f"lastModifiedDateTime gt {stamp}", safe=":")
+        segments = "/".join(
+            quote(value, safe=":@") for value in ("chats", chat, "messages")
+        )
+        return f"{self.base}/{segments}?$top=50&$orderby={orderby}&$filter={where}"
+
     # ── The parts every branch above leans on ────────────────────────────────
 
     def _send(self, url: str, token: str, *, accept: str = JSON) -> GraphResponse:

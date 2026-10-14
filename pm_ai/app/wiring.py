@@ -52,6 +52,7 @@ from pm_ai.connectors.graph import (
     UnknownProject,
     graph_category_scopes,
     graph_channel_listings,
+    graph_chat_listings,
     graph_window_policy,
 )
 from pm_ai.connectors.graph.auth import (
@@ -72,6 +73,7 @@ from pm_ai.connectors.graph.calendar import (
     WindowPolicy,
 )
 from pm_ai.connectors.graph.channels import GraphChannelFetch
+from pm_ai.connectors.graph.chats import GraphChatFetch
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.connectors.probe import CREDENTIAL_PROBE_SECONDS
 from pm_ai.connectors.registry import run_bounded
@@ -1180,7 +1182,9 @@ def _graph_connector(
     said "four settings and none of them is defaulted" while the code beside it
     defaulted `tenant` to a literal, which is two claims one file apart that
     could not both be true. A sixth, `channels` (story 33d), lists the Teams
-    channels read; absent, the connector reads the calendar only.
+    channels read; absent, the connector reads the calendar only. A seventh,
+    `chats` (story 33f), lists the Teams chats read, each with its scope;
+    absent, no chat is read.
 
     They live in `connectors/<instance>.json` — per-machine, gitignored,
     hand-editable — rather than in `config.toml`, whose vocabulary stays closed
@@ -1210,9 +1214,13 @@ def _graph_connector(
         # here, at the start, and not in `_judged_graph_row`: a sign-in judges
         # nothing that names a project, as with the category mapping.
         channels = graph_channel_listings(entry, registered=registered)
+        # The chats, likewise (`33f`): a people scope is refused here, naming
+        # the team-member registry that does not exist yet.
+        chats = graph_chat_listings(entry, registered=registered)
     except (_RowRefused, UnknownProject, ValueError) as refused:
-        # `ChannelListRefused` is a `ValueError`; `UnknownProject` a channel
-        # mapped to a project no registry knows (`33d`).
+        # `ChannelListRefused` and `ChatListRefused` are `ValueError`s;
+        # `UnknownProject` a channel or chat filed in a project no registry
+        # knows (`33d`, `33f`).
         return _unbuilt(instance, str(refused), family="Graph")
     client_id, named_tenant, policy = judged.client_id, judged.tenant, judged.policy
     categories = judged.categories
@@ -1266,6 +1274,14 @@ def _graph_connector(
         # host check, and the run's one budget (`33d`). A channel with no
         # stored position reaches back as far as the calendar's first run.
         messages=GraphChannelFetch(
+            client=client,
+            instance=instance,
+            reach_back=policy.first_run_reach_back,
+            now=clock,
+        ),
+        chats=chats,
+        # The same client and the same reach-back for every chat (`33f`).
+        chat_messages=GraphChatFetch(
             client=client,
             instance=instance,
             reach_back=policy.first_run_reach_back,
