@@ -2,7 +2,8 @@
 title: 'The prompt runs the commands the daemon owns through the daemon'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '68fcd28228c4ee24396b995c6e844b98d24b1fc3'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -80,13 +81,13 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `Context` gains `out: TextIO` and `err: TextIO` (defaults `sys.stdout`, `sys.stderr`); rewrite the 42 sites the grep above counts to write to them, including `Answered.deliver` at `:1740` and the refusal at `:1950`; never `contextlib.redirect_stdout` or `redirect_stderr`, which are process-wide — a test greps `pm_ai/` for both names and fails on a hit -- per-request output
-- [ ] `pm_ai/surfaces/api/app.py` -- in `4r`'s prompt endpoint: resolve `--scope` per request against the daemon's watched projects (named, else the only one; unwatched refused by name; enrolled since start refused with the shared restart sentence, read from the registry as a plain read); `config.toml`, connector rows and credentials read afresh per line; run the table with fresh `StringIO` streams in a `Context` of its own; an inline command runs on `4r`'s I/O pool -- the daemon half
-- [ ] `pm_ai/surfaces/cli/loopback.py` -- the client: token read per request, prompt request, stream follow-up, the outcomes as values including the unknown-answer one -- one place speaks to the daemon
-- [ ] `pm_ai/surfaces/cli/repl.py` -- routing by `Command.target` plus the five terminal-bound names; the `exit 1` sentences for no daemon, token rejected and unknown answer; Ctrl-C while waiting; results printed only at the next prompt; jobs listed by id; the exit-with-job sentence -- the contract
-- [ ] `pm_ai/app/entry.py`, `pm_ai/surfaces/cli/dispatch.py` -- build the client from the token path and inject it; the daemon's refusal of a project enrolled since start prints `4r`'s shared restart sentence -- nothing composed at open
-- [ ] `tests/surfaces/test_cli_repl.py` -- one test per matrix row with a stand-in daemon client -- the matrix is the contract
-- [ ] `tests/slice/test_repl_through_daemon.py` -- a real daemon in a throwaway home with one connector enrolled: `connector check` typed at the prompt is acknowledged and that instance's row follows; `dashboard` typed at the prompt is acknowledged, the `requests` row exists, the render arrives with the id, and the prompt's process composed no daemon; two overlapping prompt requests hold only their own output -- the job path is real
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `Context` gains `out: TextIO` and `err: TextIO` (defaults `sys.stdout`, `sys.stderr`); rewrite the 42 sites the grep above counts to write to them, including `Answered.deliver` at `:1740` and the refusal at `:1950`; never `contextlib.redirect_stdout` or `redirect_stderr`, which are process-wide — a test greps `pm_ai/` for both names and fails on a hit -- per-request output (the fields and the `_echo` sites landed with `4r`; this slice added the test, on the syntax tree)
+- [x] `pm_ai/surfaces/api/app.py` -- in `4r`'s prompt endpoint: resolve `--scope` per request against the daemon's watched projects (named, else the only one; unwatched refused by name; enrolled since start refused with the shared restart sentence, read from the registry as a plain read); `config.toml`, connector rows and credentials read afresh per line; run the table with fresh `StringIO` streams in a `Context` of its own; an inline command runs on `4r`'s I/O pool -- the daemon half (built in `pm_ai/app/prompts.py`, where `4r`'s endpoint handler lives; no command defaults to a project, so there is no "only one" case)
+- [x] `pm_ai/surfaces/cli/loopback.py` -- the client: token read per request, prompt request, stream follow-up, the outcomes as values including the unknown-answer one -- one place speaks to the daemon
+- [x] `pm_ai/surfaces/cli/repl.py` -- routing by `Command.target` plus the five terminal-bound names; the `exit 1` sentences for no daemon, token rejected and unknown answer; Ctrl-C while waiting; results printed only at the next prompt; jobs listed by id; the exit-with-job sentence -- the contract
+- [x] `pm_ai/app/entry.py`, `pm_ai/surfaces/cli/dispatch.py` -- build the client from the token path and inject it; the daemon's refusal of a project enrolled since start prints `4r`'s shared restart sentence -- nothing composed at open
+- [x] `tests/surfaces/test_cli_repl.py` -- one test per matrix row with a stand-in daemon client -- the matrix is the contract
+- [x] `tests/slice/test_repl_through_daemon.py` -- a real daemon in a throwaway home with one connector enrolled: `connector check` typed at the prompt is acknowledged and that instance's row follows; `dashboard` typed at the prompt is acknowledged, the `requests` row exists, the render arrives with the id, and the prompt's process composed no daemon; two overlapping prompt requests hold only their own output -- the job path is real
 
 **Acceptance Criteria:**
 - Given `4e`'s daemon running with a project enrolled, when `pm-ai` is typed and then `dashboard`, then an acknowledgement and a job id show, the daemon renders, the command-line output and `exit 0` follow with the id at the next prompt, and the prompt's process composed no daemon of its own.
@@ -109,3 +110,95 @@ Routing reads the command table's own `target` rather than a second list; the fi
 ## Spec Change Log
 
 - **2026-10-14, frozen block amended by Andrei** (the architecture spine's concurrency amendment of the same day: AD-5, AD-6, AD-7; decided by Andrei, re-derived here before any build). Amended: the stale "`4r`'s daemon-level lock serialises the workers' calls" and "whether that lock survives the daemon is `4e`'s decision" are replaced by `4r`'s one writer thread and the cross-process claim the daemon also takes; a connector added is seen at the daemon's next cycle only when it files into the personal scope or a project the daemon loaded at start; `project add` and `key enrol` take effect after a restart, and every command whose change waits for a restart says so in one shared sentence, one constant beside the command table (owned by `4r` since the same day's decision; this slice prints it); a line run through the daemon reads `config.toml`, connector rows and credentials afresh so its output matches the terminal, and a line naming a project enrolled since the daemon started is refused with that sentence, `exit 3`. A `503` from `4r` (its writer thread not free within one second, or the row refused busy) is now told as busy with its wait rather than as an unknown status. Matrix rows "Enrolment while the daemon runs", "Local secret command", "Connector probe" and "Unknown answer" changed; rows added for a busy daemon, a project enrolled since start, a key enrolled while the daemon runs, and settings edited while it runs. Known-bad state avoided: a command through the daemon printing different output from the same command at a terminal; `connector check` counting the rows the daemon composed at start rather than those enrolled now; a person told a change is live when the running daemon cannot see it; three commands giving three different freshness answers. KEEP: the routing rule and the five terminal-bound commands; the token read on each request; the standard library's HTTP client; the `exit 1` sentences; Ctrl-C abandoning only the wait; results printed only at the next prompt; per-request output streams and no process-wide redirection; `4f`'s 1.0-second startup; every field and endpoint being `4r`'s.
+
+## Suggested Review Order
+
+**Start here**
+
+- Where a typed line runs: here or in the daemon, read off the table.
+  [`repl.py:88`](../../../../pm_ai/surfaces/cli/repl.py#L88)
+
+**The prompt as a client**
+
+- Send one line; show the answer, the acknowledgement, or one sentence.
+  [`repl.py:220`](../../../../pm_ai/surfaces/cli/repl.py#L220)
+- A relative path is made absolute against the prompt's directory.
+  [`repl.py:199`](../../../../pm_ai/surfaces/cli/repl.py#L199)
+- Jobs: one waiting thread each; results printed only between lines.
+  [`repl.py:146`](../../../../pm_ai/surfaces/cli/repl.py#L146)
+- Ending: in-flight read first, then delivered, so no result is lost.
+  [`repl.py:321`](../../../../pm_ai/surfaces/cli/repl.py#L321)
+- The loop: deliver before each prompt; client optional, as in 4f.
+  [`repl.py:341`](../../../../pm_ai/surfaces/cli/repl.py#L341)
+
+**The loopback client**
+
+- `send`: Ctrl-C says whether the line went out; nothing else escapes.
+  [`loopback.py:274`](../../../../pm_ai/surfaces/cli/loopback.py#L274)
+- One line over a raw socket, under one deadline, parsed by http.client.
+  [`loopback.py:311`](../../../../pm_ai/surfaces/cli/loopback.py#L311)
+- Every answer as a value: identity, 401, 503, JSON shape.
+  [`loopback.py:515`](../../../../pm_ai/surfaces/cli/loopback.py#L515)
+- Retry-After: ASCII digits only; missing is now, a date is shortly.
+  [`loopback.py:505`](../../../../pm_ai/surfaces/cli/loopback.py#L505)
+- Port and token read on every request, never at open.
+  [`loopback.py:435`](../../../../pm_ai/surfaces/cli/loopback.py#L435)
+- Token: this user's regular file, judged by the daemon's own rule.
+  [`loopback.py:465`](../../../../pm_ai/surfaces/cli/loopback.py#L465)
+- The job's stream: same checks as send, no read timeout after connect.
+  [`loopback.py:384`](../../../../pm_ai/surfaces/cli/loopback.py#L384)
+- Stream events: size-limited lines, malformed ones named, open event kept.
+  [`loopback.py:543`](../../../../pm_ai/surfaces/cli/loopback.py#L543)
+- A finished row as the answer; failed is its sentence and exit 1.
+  [`loopback.py:585`](../../../../pm_ai/surfaces/cli/loopback.py#L585)
+- The sentences for no daemon: no token file, or nothing on the port.
+  [`loopback.py:110`](../../../../pm_ai/surfaces/cli/loopback.py#L110)
+
+**The daemon's half**
+
+- The line's scope resolved per request, before anything is planned.
+  [`prompts.py:360`](../../../../pm_ai/app/prompts.py#L360)
+- Unwatched, enrolled since start, or registry unreadable: each refused by name.
+  [`prompts.py:396`](../../../../pm_ai/app/prompts.py#L396)
+- The registry read strictly for a line's scope.
+  [`prompts.py:809`](../../../../pm_ai/app/prompts.py#L809)
+- `daemon run` through the daemon: a plain "already running" refusal.
+  [`prompts.py:180`](../../../../pm_ai/app/prompts.py#L180)
+
+**Wiring and shared constants**
+
+- The prompt gets the client; nothing is read or composed to open it.
+  [`entry.py:181`](../../../../pm_ai/app/entry.py#L181)
+- The client built from paths alone.
+  [`entry.py:1399`](../../../../pm_ai/app/entry.py#L1399)
+- Only `daemon_port` read, so a bad unrelated key still reaches `config show`.
+  [`config.py:452`](../../../../pm_ai/core/config.py#L452)
+- Commands with a path argument, one list the daemon and prompt share.
+  [`dispatch.py:2768`](../../../../pm_ai/surfaces/cli/dispatch.py#L2768)
+- The five commands that need this terminal, beside the table.
+  [`dispatch.py:2753`](../../../../pm_ai/surfaces/cli/dispatch.py#L2753)
+
+**Tests**
+
+- Real daemon: dashboard acknowledged, its render arrives with the id.
+  [`test_repl_through_daemon.py:137`](../../../../tests/slice/test_repl_through_daemon.py#L137)
+- Real daemon: two commands at once hold only their own output.
+  [`test_repl_through_daemon.py:202`](../../../../tests/slice/test_repl_through_daemon.py#L202)
+- Real daemon on a pseudo-terminal: a typed line runs and is recalled.
+  [`test_repl_through_daemon.py:254`](../../../../tests/slice/test_repl_through_daemon.py#L254)
+- The daemon's scope refusals, in process against 4r's request path.
+  [`test_repl_through_daemon.py:300`](../../../../tests/slice/test_repl_through_daemon.py#L300)
+- One test per matrix row, with a stand-in client.
+  [`test_cli_repl.py:336`](../../../../tests/surfaces/test_cli_repl.py#L336)
+- The client against a stand-in HTTP daemon: every answer it must know.
+  [`test_cli_loopback.py:158`](../../../../tests/surfaces/test_cli_loopback.py#L158)
+- Timeouts: connect vs answer, one deadline, streams that pause.
+  [`test_cli_loopback.py:357`](../../../../tests/surfaces/test_cli_loopback.py#L357)
+- No module redirects the process streams, checked on the syntax tree.
+  [`test_cli_repl.py:815`](../../../../tests/surfaces/test_cli_repl.py#L815)
+- 4f's recall test, now the no-daemon sentence with nothing written.
+  [`test_repl_startup.py:128`](../../../../tests/slice/test_repl_startup.py#L128)
+- 4r's enrolled-since-start test, now refused inline with no row.
+  [`test_line_requests_round2.py:466`](../../../../tests/slice/test_line_requests_round2.py#L466)
+- 4r's writer-thread test, ordered by the queue rather than a sleep.
+  [`test_daemon_writer_thread.py:143`](../../../../tests/slice/test_daemon_writer_thread.py#L143)

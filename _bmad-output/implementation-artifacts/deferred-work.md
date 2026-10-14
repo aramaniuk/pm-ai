@@ -1282,3 +1282,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`
   summary: The restart pass finds a schema-version-mismatch halt by reading `daemon.log` and its rotated copies; once the halt line rotates out, the job gets the ordinary "daemon stopped" reason.
   evidence: The frozen block names the diagnostic log as the source; a marker in the `requests` row would be lasting.
+
+## Surfaced by the story-4q review (2026-10-14)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md`
+  summary: The prompt sends its bearer token to whatever listens on the configured port and checks the pm-ai identity header only on the answer, so another local program on that port receives the token.
+  evidence: Every daemon endpoint requires the token (`4e`), so the client has no tokenless way to identify the daemon first; adding one is an endpoint change that `4r`'s Ask First covers. Exposure is narrow: the daemon refuses to start while its port is taken.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md`
+  summary: A daemon-routed `transcript drop` with a relative path is refused naming the absolute path, where the terminal names the path as typed; exit codes match.
+  evidence: The prompt makes the path absolute before sending; the daemon never learns the typed form. Carrying it would change `4r`'s request body.
