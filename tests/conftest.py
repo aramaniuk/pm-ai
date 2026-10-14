@@ -32,7 +32,42 @@ prevent.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
+
+# The home this test run started with — the developer's own, on a real machine.
+# Read once, at import, before any test redirects `HOME`.
+_REAL_HOME = Path(os.path.expanduser("~")).resolve()
+
+
+@pytest.fixture(autouse=True)
+def _never_the_real_pm_ai_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail any test that resolves pm-ai's layout under the real home (story 4r).
+
+    `ScopePaths.production()` is the one place the pm-ai home is anchored to
+    `Path.home()`. A test that reaches it without redirecting `HOME` opens the
+    developer's own `~/.pm-ai/private/operational.db` — and, since stores are
+    prepared under their own claim, migrates it and leaves a sidecar there.
+    Patched in this process only: `HOME` itself is untouched, so subprocesses
+    that need it (mypy, lint-imports, `uv`) still see it.
+    """
+    from pm_ai.platform.paths import ScopePaths
+
+    real = ScopePaths.production.__func__  # type: ignore[attr-defined]
+
+    def guarded(cls, *, home=None, projects=None):
+        base = Path(home) if home is not None else Path.home()
+        if base.expanduser().resolve() == _REAL_HOME:
+            pytest.fail(
+                f"this test resolved pm-ai's home under the real home ({_REAL_HOME}); "
+                f"redirect HOME to a throwaway directory first",
+                pytrace=True,
+            )
+        return real(cls, home=home, projects=projects)
+
+    monkeypatch.setattr(ScopePaths, "production", classmethod(guarded))
 
 RUNTIME_EXTRA = "uv sync --extra runtime"
 RUNTIME_MODULES = ("starlette", "fastapi", "uvicorn")
@@ -94,7 +129,10 @@ _require_runtime_extra()
 # 23 → 21, story 11b: `pm_ai.core.transcripts` exists, so
 # `test_ad23_transcript_pipeline_works_without_a_live_tenant` and
 # `test_ad23_transcript_without_a_meeting_is_rejected` run instead of skipping.
-EXPECTED_SKIPS = 21
+# 21 → 20, story 4r: `pm_ai.core.dispatch` exists, so
+# `test_ad21_slow_requests_acknowledge_instead_of_blocking` runs instead of
+# skipping.
+EXPECTED_SKIPS = 20
 
 _VERDICT = pytest.StashKey[str]()
 

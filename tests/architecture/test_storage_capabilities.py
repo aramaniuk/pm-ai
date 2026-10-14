@@ -595,6 +595,16 @@ class _Faulting:
     ids=["ENOTSUP", "EOPNOTSUPP", "EACCES", "directory"],
 )
 def test_a_fault_taking_the_claim_is_the_operating_systems_and_not_busy(tmp_path, error):
+    # Prepared first under a working claim: since story 4r a store is prepared
+    # under its own claim, and one already prepared opens without taking any —
+    # so the faulting port below is first asked for `config.json`'s.
+    StorageService(
+        ScopePaths.rooted(tmp_path),
+        now=lambda: NOW,
+        vcs=_NoRepository(),
+        crypto=AesGcmCrypto(KEY),
+        claims=FlockClaims(),
+    ).close()
     storage = StorageService(
         ScopePaths.rooted(tmp_path),
         now=lambda: NOW,

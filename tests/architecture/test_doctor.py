@@ -41,6 +41,17 @@ from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR
 from pm_ai.ports import KeychainUnavailable, KeyNotFound
 from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_UNHEALTHY
 
+@pytest.fixture(autouse=True)
+def _throwaway_home(tmp_path_factory, monkeypatch):
+    """Every test here runs against a throwaway `HOME`, never the developer's own.
+
+    Commands compose through `ScopePaths.production()`, which anchors on
+    `Path.home()`; without this a test opened the real `~/.pm-ai` (story 4r).
+    A test that sets `HOME` itself overrides this one.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
 SECRET = b"\x00\x01\xfe a-real-looking-key"
 
 

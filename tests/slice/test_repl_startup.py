@@ -143,7 +143,12 @@ def test_a_command_then_recall_then_exit_writes_no_event_log_line(terminal):
     memory = home / ".pm-ai" / "memory"
     assert not memory.exists() or not any(memory.rglob("*")), sorted(memory.rglob("*"))
     created = sorted(p.relative_to(home).as_posix() for p in home.rglob("*") if p.is_file())
-    assert created == [".pm-ai/private/operational.db"], created
+    # The store, and since story 4r the empty sidecar of the claim it was
+    # prepared under (AD-5) — structure beside it, never an artifact.
+    assert created == [
+        ".pm-ai/private/operational.db",
+        ".pm-ai/private/operational.db.lock",
+    ], created
 
 
 def test_the_console_script_module_imports_no_server_module():

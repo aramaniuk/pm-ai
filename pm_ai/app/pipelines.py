@@ -26,7 +26,9 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pm_ai.app.wiring import Daemon, read_pm_identity
+from pm_ai.app.wiring import GIT_QUESTION_SECONDS, Daemon, read_pm_identity
+from pm_ai.connectors.graph.client import FETCH_BUDGET as GRAPH_FETCH_BUDGET
+from pm_ai.connectors.registry import HEALTH_PROBE_SECONDS
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.graph import GraphConnector
 from pm_ai.core.config import ConfigRefused
@@ -817,6 +819,12 @@ _NO_REINGEST = (
 )
 
 
+TRANSCRIPT_DROP_BOUND_SECONDS = GIT_QUESTION_SECONDS
+"""`drop_transcript`'s bound (AD-21, story 4r): the capture guard's `git`
+question (AD-43), bounded at ten seconds. Over five, so `transcript drop` sent
+through the daemon is a job."""
+
+
 def drop_transcript(
     daemon: Daemon,
     *,
@@ -1084,6 +1092,42 @@ def _record_exists(daemon: Daemon, meeting: Meeting) -> bool:
 # ── The dashboard pipeline (story 23b) ───────────────────────────────────────
 
 
+CALENDAR_FETCH_BUDGET_SECONDS = GRAPH_FETCH_BUDGET.total_seconds()
+"""One calendar connector's fetch budget: the most one live read may take.
+
+The client's own wall-clock budget for a walk, read off it rather than copied.
+"""
+
+
+def dashboard_bound(calendar_connectors: int) -> float:
+    """`run_dashboard`'s bound in seconds, declared beside it (AD-21, story 4r).
+
+    The per-connector fetch budget, the connectors read one after another — so
+    a render reading two calendars may take two budgets. Counted as at least
+    one: the connector list is read again at the start of every render (AD-5),
+    so the number at planning time is not a promise about the read, and a
+    render is never planned as instant because a calendar was not yet
+    enrolled. Far over five seconds either way, which is why `dashboard` sent
+    through the daemon is acknowledged with a job.
+    """
+    return CALENDAR_FETCH_BUDGET_SECONDS * max(1, calendar_connectors)
+
+
+CONNECTOR_CHECK_BOUND_SECONDS = HEALTH_PROBE_SECONDS
+"""`pm-ai connector check`'s bound: CAP-35's ten seconds, every probe together."""
+
+
+def calendar_instances(daemon: Daemon) -> tuple[str, ...]:
+    """The enrolled connectors a render reads a calendar from, in sorted order."""
+    return tuple(
+        sorted(
+            instance
+            for instance, connector in daemon.connectors.items()
+            if ObservedEventType.CALENDAR_EVENT_HELD in connector.emits()
+        )
+    )
+
+
 def run_dashboard(
     daemon: Daemon, *, scope: DataScope | None = None, now: datetime
 ) -> Path:
@@ -1114,6 +1158,17 @@ def run_dashboard(
     composing one of its own.
     """
     scope = PERSONAL if scope is None else scope
+    document = prepare_dashboard(daemon, scope=scope, now=now)
+    return publish_dashboard(daemon, scope=scope, document=document)
+
+
+def prepare_dashboard(daemon: Daemon, *, scope: DataScope, now: datetime) -> bytes:
+    """Every read and the render, writing nothing: `run_dashboard`'s bounded half.
+
+    The live calendar read, the event log, the goals and the connector rows,
+    then the render — on an I/O worker when the daemon runs it (AD-5, story
+    4r). Returns the document's bytes for `publish_dashboard` to save.
+    """
     _assert_dashboard_scope(scope)
     # First, and before any read. The display zone decides which instants count
     # as today, and it is read once here so that the day boundary the dashboard
@@ -1155,10 +1210,29 @@ def run_dashboard(
         # even by mistake (AD-25) — and no personal-scope artifact is opened on
         # this path at all, which is the half a signature cannot enforce.
         document = render_project_dashboard(meetings, entries, now, tz=zone, pm=pm)
+    return document.encode("utf-8")
 
+
+def ask_dashboard_exclusion(daemon: Daemon, *, scope: DataScope) -> None:
+    """Ask git now whether the dashboard's path is excluded, writing nothing (AD-43).
+
+    The bounded step just before the claimed one in the daemon (story 4r): the
+    single writer keeps the verdict, so `publish_dashboard` on the writer
+    thread finds it answered and spawns no `git` of its own.
+    """
+    daemon.storage.assert_writable(scope=scope, artifact=DASHBOARD_ARTIFACT)
+
+
+def publish_dashboard(daemon: Daemon, *, scope: DataScope, document: bytes) -> Path:
+    """Save a rendered dashboard whole: `run_dashboard`'s one write.
+
+    The claimed step in the daemon: it saves the prepared bytes and does
+    nothing else — published by rename, so a kill leaves the old file or the
+    new one, never half of either (AD-47).
+    """
     try:
         return daemon.storage.write_artifact(
-            document.encode("utf-8"), scope=scope, artifact=DASHBOARD_ARTIFACT
+            document, scope=scope, artifact=DASHBOARD_ARTIFACT
         )
     except OSError as blocked:
         named = _blocked_by_a_directory(daemon, scope=scope)
@@ -1283,11 +1357,7 @@ def _todays_calendar(
     — including which copy of a cross-invited meeting supplies the title and the
     tentative flag.
     """
-    instances = sorted(
-        instance
-        for instance, connector in daemon.connectors.items()
-        if ObservedEventType.CALENDAR_EVENT_HELD in connector.emits()
-    )
+    instances = calendar_instances(daemon)
     if not instances:
         # Its own value, never a `HarvestFailure`: that branch of the renderer
         # ends in `_retry_advice`, whose sentence quotes "the connector" — a

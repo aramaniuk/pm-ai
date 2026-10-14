@@ -28,6 +28,7 @@ reached at all — and `pm_ai.platform.vcs` runs the commands.
 from __future__ import annotations
 
 import contextlib
+import copy
 import errno
 import json
 import logging
@@ -40,7 +41,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -183,7 +184,21 @@ CREATE TABLE IF NOT EXISTS transcript_ingest_attempts (
     attempts    INTEGER NOT NULL,
     PRIMARY KEY (scope, meeting_id)
 );
+CREATE TABLE IF NOT EXISTS requests (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    result     TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
+
+# Every table `_SCHEMA` declares, read off it rather than listed beside it, so
+# the check for a store that still needs preparing cannot disagree with what
+# preparing creates (story 4r).
+_SCHEMA_TABLES = frozenset(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _SCHEMA))
 
 # What this code expects the operational store to look like. Bumped in the same
 # commit that appends to `MIGRATIONS`, never separately: a version with no
@@ -198,7 +213,8 @@ SCHEMA_VERSION = 1
 # table is picked up by a version-1 store without a migration step. What that
 # statement cannot do is add a column to a table that already exists, which is
 # the case migration 1 was written for. A version bump with no migration behind
-# it would stamp a store nothing changed.
+# it would stamp a store nothing changed. Story `4r`'s `requests` table rode in
+# the same way, and for the same reason the version did not move.
 
 # Version 0 is the *unversioned era* — every store written before this story.
 # It is not a shape: two stores can both be at 0 and differ, because the era had
@@ -553,6 +569,33 @@ class _OperationalConnection(sqlite3.Connection):
     def __init__(self, database: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
         super().__init__(database, *args, **kwargs)  # type: ignore[arg-type]
         self.store = os.fspath(database)
+        # The daemon's writer connection (story 4r, AD-5): one rule for every
+        # write on it. The first statement a claimed step sends opens
+        # `BEGIN IMMEDIATE` with the schema-version check first; `commit()`
+        # inside a step is deferred to the step's end, where the writer
+        # commits what returned and rolls back what raised.
+        self.daemon_mode = False
+        self.in_step = False
+
+    def _open_for_step(self, sql: object) -> None:
+        """`BEGIN IMMEDIATE` and the version check, before a statement that needs them."""
+        if not self.daemon_mode or self.in_transaction:
+            return
+        if isinstance(sql, str) and sql.lstrip().upper().startswith(_CONTROL):
+            return
+        started = time.monotonic()
+        try:
+            super().execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            refused = self._busy(exc, started)
+            if refused is exc:
+                raise
+            raise refused from exc
+        row = super().execute("SELECT version FROM schema_version").fetchone()
+        found = UNVERSIONED if row is None else int(row[0])
+        if found != SCHEMA_VERSION:
+            super().execute("ROLLBACK")
+            raise schema_moved(found)
 
     def _busy(self, exc: sqlite3.OperationalError, started: float) -> sqlite3.OperationalError:
         message = str(exc).lower()
@@ -597,12 +640,19 @@ class _OperationalConnection(sqlite3.Connection):
         if not self.in_transaction:
             return False
         try:
-            super().rollback()
+            if self.autocommit is True:
+                # The daemon's writer connection (story 4r): `rollback()` does
+                # nothing in autocommit mode, so the transaction a claimed step
+                # opened with `BEGIN IMMEDIATE` is ended by statement.
+                super().execute("ROLLBACK")
+            else:
+                super().rollback()
         except sqlite3.Error:
             return False
         return True
 
     def execute(self, *args: object, **kwargs: object) -> sqlite3.Cursor:  # type: ignore[override]
+        self._open_for_step(args[0] if args else kwargs.get("sql"))
         started = time.monotonic()
         try:
             return super().execute(*args, **kwargs)  # type: ignore[arg-type]
@@ -623,6 +673,12 @@ class _OperationalConnection(sqlite3.Connection):
             raise refused from exc
 
     def commit(self) -> None:
+        if self.daemon_mode:
+            # Deferred inside a claimed step: the step's rows are saved
+            # together when it returns. Outside one, ended here.
+            if not self.in_step and self.in_transaction:
+                self.execute("COMMIT")
+            return
         started = time.monotonic()
         try:
             super().commit()
@@ -631,6 +687,20 @@ class _OperationalConnection(sqlite3.Connection):
             if refused is exc:
                 raise
             raise refused from exc
+
+
+    def rollback(self) -> None:
+        if self.daemon_mode:
+            # `rollback()` does nothing on an autocommit connection, so the
+            # step's transaction is ended by statement — the whole step.
+            if self.in_transaction:
+                super().execute("ROLLBACK")
+            return
+        super().rollback()
+
+
+_CONTROL = ("BEGIN", "COMMIT", "ROLLBACK", "END", "SAVEPOINT", "RELEASE", "PRAGMA")
+"""Statements that manage a transaction themselves, and so never open one."""
 
 
 class SchemaVersionTooNew(RuntimeError):
@@ -643,6 +713,110 @@ class SchemaVersionTooNew(RuntimeError):
     no automatic downgrade, because a downgrade would mean deciding what to do
     with data this code cannot interpret.
     """
+
+
+class SchemaVersionChanged(RuntimeError):
+    """`operational.db`'s stamp is no longer the version the daemon opened it at (4r).
+
+    The family the daemon halts on. `found` is the version read; it is moved on
+    (`SchemaVersionMoved`) or older or gone (`SchemaVersionRegressed`).
+    """
+
+    found: int
+
+
+class SchemaVersionMoved(SchemaVersionTooNew, SchemaVersionChanged):
+    """Another process moved `operational.db` past the version this daemon knows (4r).
+
+    Raised by the schema-version check that is the first statement inside every
+    claimed step's `BEGIN IMMEDIATE`, after the step's transaction is rolled
+    back — so nothing of the step was written. The daemon stops on it and
+    writes nothing more to the store (AD-5). `found` is the version read.
+    """
+
+    def __init__(self, found: int) -> None:
+        super().__init__(
+            f"the operational store is now stamped schema version {found} and "
+            f"this daemon knows version {SCHEMA_VERSION}: another pm-ai moved it "
+            f"while the daemon ran. The daemon stopped and wrote nothing more to "
+            f"it; upgrade pm-ai and start it again."
+        )
+        self.found = found
+
+
+class SchemaVersionRegressed(SchemaVersionChanged):
+    """`operational.db` is now *older* than the version the daemon opened (4r).
+
+    Its stamp is lower, or gone: the store was replaced or rewritten under the
+    running daemon — a restored copy, a hand edit. Not a reason to upgrade
+    pm-ai, so it says so in its own words.
+    """
+
+    def __init__(self, found: int) -> None:
+        super().__init__(
+            f"the operational store is now stamped schema version {found} — "
+            f"older than the version {SCHEMA_VERSION} this daemon opened it at, "
+            f"or with no stamp at all — so it was replaced or rewritten while "
+            f"the daemon ran (a restored copy, a hand edit). The daemon stopped "
+            f"and wrote nothing more to it; check ~/.pm-ai/private/operational.db "
+            f"and start the daemon again.",
+        )
+        self.found = found
+
+
+class OperationalStoreStuck(OperationalStoreUnavailable):
+    """A claimed step's transaction could not be rolled back (story 4r).
+
+    The writer's connection is left inside a transaction nothing can end, so
+    every later step would fail too; the writer halts on this, naming it.
+    """
+
+
+def schema_moved(found: int) -> SchemaVersionChanged:
+    """The refusal for a store whose stamp is no longer `SCHEMA_VERSION`."""
+    if found < SCHEMA_VERSION:
+        return SchemaVersionRegressed(found)
+    return SchemaVersionMoved(found)
+
+
+DAEMON_BUSY_WAIT_SECONDS = 0.1
+"""The daemon's own busy wait on `operational.db` (AD-5, story 4r).
+
+At most 100 ms: a claimed step is short and never waits, so the writer thread
+meets a write lock another process holds with a refusal rather than a stall.
+The commands that still write for themselves keep the standard library's five
+seconds.
+"""
+
+REQUEST_UNFINISHED = ("queued", "running")
+"""The `requests` states a restart or a shutdown still has to settle (story 4r)."""
+
+
+@dataclass(frozen=True, slots=True)
+class RequestRow:
+    """One row of `requests`: a job the daemon acknowledged (AD-20, story 4r).
+
+    `result` is the JSON text the job settled with — the command's output and
+    exit code, or pm-ai's own sentence and the error's type name — or `None`
+    while it is unsettled.
+    """
+
+    id: str
+    kind: str
+    scope: str
+    state: str
+    result: str | None
+    created_at: str
+    updated_at: str
+
+
+_REQUEST_COLUMNS = "id, kind, scope, state, result, created_at, updated_at"
+
+MIGRATION_CLAIM_ATTEMPTS = 40
+"""How many times `operational.db`'s own claim is tried before opening is refused."""
+
+MIGRATION_CLAIM_INTERVAL = 0.05
+"""Seconds between tries: about two seconds in all, the sealed store's budget."""
 
 
 class NonUtcClock(ValueError):
@@ -755,6 +929,7 @@ class StorageService:
         # every scope's Markdown tree. `reindex` targets Tier 3 and therefore
         # cannot reach this, which is the structural guarantee AD-3 asks for.
         store = paths.resolve(APPLICATION, OPERATIONAL_DB, create=True)
+        self._store = Path(store)
         try:
             # No `timeout=`: the standard library's five-second busy wait is
             # the one pm-ai relies on when the daemon and a thin client meet on
@@ -794,9 +969,21 @@ class StorageService:
                 "SELECT 1 FROM sqlite_master "
                 "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             ).fetchone() is not None
-            self._db.executescript(_SCHEMA)
-            self._db.commit()
-            self._migrate(preexisting=preexisting)
+            if self._needs_preparing():
+                # Migrated only under the store's own claim (AD-5, story 4r), in
+                # every process that opens it: two processes preparing one
+                # store at once must not interleave a schema step, and the
+                # daemon's version check inside each claimed step is what
+                # keeps a migration from landing under a daemon that writes
+                # the old shape.
+                with self._migration_claim():
+                    self._db.executescript(_SCHEMA)
+                    self._db.commit()
+                    self._migrate(preexisting=preexisting)
+            else:
+                # Nothing to change, so nothing to claim: this only reads the
+                # stamp, and refuses a store a later pm-ai wrote.
+                self._migrate(preexisting=preexisting)
         except OperationalStoreBusy:
             # Busy is not "could not prepare": the store is fine and another
             # connection is writing to it. Its own sentence already names the file.
@@ -870,6 +1057,328 @@ class StorageService:
                 raise
             self._db.execute("RELEASE pm_ai_migration")
             self._db.commit()
+
+    def _needs_preparing(self) -> bool:
+        """Whether opening this store would change it: a table missing, or a stamp behind.
+
+        Read without a claim, because it only reads; a store that needs nothing
+        is opened without one, so two commands opening a prepared store never
+        meet on its claim.
+        """
+        tables = {
+            row[0]
+            for row in self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if not _SCHEMA_TABLES <= tables:
+            return True
+        row = self._db.execute("SELECT version FROM schema_version").fetchone()
+        return row is None or int(row[0]) < SCHEMA_VERSION
+
+    @contextlib.contextmanager
+    def _migration_claim(self) -> Iterator[None]:
+        """`operational.db`'s own claim, for preparing it (AD-5, story 4r).
+
+        Only at open: a connection the daemon has adopted is refused, so the
+        retry below can never run inside a claimed step on the running writer.
+        Tried briefly rather than once — another process holding it is
+        preparing the same store, which takes milliseconds, and refusing to
+        open over it would fail a command for having started at the same
+        moment as another. Only taking the claim is retried; past the attempts
+        the open is refused by name, with nothing changed.
+        """
+        if getattr(self._db, "daemon_mode", False):
+            raise RuntimeError(
+                "operational.db is prepared only when it is opened, never on the "
+                "daemon's writer connection; that is a bug in pm-ai."
+            )
+        held = contextlib.ExitStack()
+        for attempt in range(MIGRATION_CLAIM_ATTEMPTS):
+            try:
+                held.enter_context(self.exclusive(scope=APPLICATION, artifact=OPERATIONAL_DB))
+                break
+            except ArtifactBusy:
+                if attempt + 1 < MIGRATION_CLAIM_ATTEMPTS:
+                    time.sleep(MIGRATION_CLAIM_INTERVAL)
+        else:
+            raise OperationalStoreUnavailable(
+                f"the operational store at {self._store} is being prepared by "
+                f"another pm-ai process, which kept its claim for "
+                f"{MIGRATION_CLAIM_ATTEMPTS * MIGRATION_CLAIM_INTERVAL:g} s; nothing "
+                f"was changed. Run the command again."
+            )
+        with held:
+            yield
+
+    # ── The daemon's writer connection (AD-5, story 4r) ──────────────────────
+
+    def adopt_daemon_connection(self) -> None:
+        """Reopen `operational.db` as the daemon's writer connection.
+
+        Called once, on the daemon's writer thread, before anything else is
+        written. The connection runs with `autocommit=True` and a 100 ms busy
+        wait, and one rule holds for every write on it, the older writers'
+        included: the first statement of a claimed step opens `BEGIN IMMEDIATE`
+        with the schema-version check first, and the step's end
+        (`claimed_step`) commits it when the step returned and rolls it back
+        when it raised. So a busy refusal undoes that step and nothing else,
+        and a store another process migrated is never written. The schema was
+        prepared when this writer was built.
+        """
+        replacement = sqlite3.connect(
+            self._store,
+            check_same_thread=False,
+            factory=_OperationalConnection,
+            autocommit=True,
+            timeout=DAEMON_BUSY_WAIT_SECONDS,
+        )
+        replacement.daemon_mode = True
+        previous, self._db = self._db, replacement
+        previous.close()
+
+    @contextlib.contextmanager
+    def claimed_step(self) -> Iterator[None]:
+        """One claimed step's bounds on `operational.db` (AD-5, story 4r).
+
+        The daemon's writer thread runs every step inside this. Whatever the
+        step wrote is committed when it returns and rolled back when it raises,
+        as one transaction; a step that never touched the store opens none. A
+        rollback that fails leaves the connection inside a transaction nothing
+        can end, which is raised as `OperationalStoreStuck` for the writer to
+        halt on. Outside the daemon's connection, or nested, it does nothing.
+        """
+        db = self._db
+        if not isinstance(db, _OperationalConnection) or not db.daemon_mode or db.in_step:
+            yield
+            return
+        db.in_step = True
+        returned = False
+        try:
+            yield
+            returned = True
+        finally:
+            db.in_step = False
+            if db.in_transaction:
+                if returned:
+                    # Busy here is refused by name, with the step undone; any
+                    # failed commit is rolled back, so the next step starts
+                    # with its own `BEGIN IMMEDIATE` and version check rather
+                    # than joining these writes.
+                    try:
+                        db.execute("COMMIT")
+                    except BaseException:
+                        try:
+                            db.rollback()
+                        except sqlite3.Error as stuck:
+                            raise OperationalStoreStuck(
+                                f"a claimed step's commit on the operational store "
+                                f"at {self._store} failed and its transaction could "
+                                f"not be rolled back ({stuck}); the writer stops."
+                            ) from stuck
+                        if db.in_transaction:
+                            raise OperationalStoreStuck(
+                                f"a claimed step's commit on the operational store "
+                                f"at {self._store} failed and left a transaction "
+                                f"that would not end; the writer stops."
+                            ) from None
+                        raise
+                else:
+                    try:
+                        db.rollback()
+                    except sqlite3.Error as stuck:
+                        raise OperationalStoreStuck(
+                            f"a claimed step on the operational store at "
+                            f"{self._store} failed and its transaction could not "
+                            f"be rolled back ({stuck}); every later step would "
+                            f"fail the same way, so the writer stops."
+                        ) from stuck
+            if db.in_transaction:
+                raise OperationalStoreStuck(
+                    f"a claimed step on the operational store at {self._store} "
+                    f"left a transaction that would not end; the writer stops."
+                )
+
+    @contextlib.contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """One writer call's statements: all of them, or none (AD-5).
+
+        On the daemon's connection the first statement opens the step's
+        `BEGIN IMMEDIATE` with the version check first; a raise rolls back,
+        and a return commits — at once outside a claimed step, at the step's
+        end inside one. On a command's own connection the library's implicit
+        transaction does the same job, with the version checked first.
+        """
+        db = self._db
+        try:
+            if not getattr(db, "daemon_mode", False):
+                self._check_version(db)
+            yield db
+        except BaseException:
+            db.rollback()
+            raise
+        db.commit()
+
+    @staticmethod
+    def _check_version(db: sqlite3.Connection) -> None:
+        row = db.execute("SELECT version FROM schema_version").fetchone()
+        found = UNVERSIONED if row is None else int(row[0])
+        if found != SCHEMA_VERSION:
+            raise schema_moved(found)
+
+    @contextlib.contextmanager
+    def _reader(self) -> Iterator[sqlite3.Connection]:
+        """A read-only connection of its own, for a plain read off any thread.
+
+        A plain read is not a writer call (AD-5): it never shares the writer's
+        connection, so it can neither see a step's uncommitted rows nor be
+        undone by a step's rollback.
+        """
+        reader = sqlite3.connect(f"{self._store.as_uri()}?mode=ro", uri=True)
+        try:
+            yield reader
+        finally:
+            reader.close()
+
+    # ── `requests`: the jobs the daemon acknowledged (AD-20, story 4r) ───────
+
+    def create_request(
+        self, *, job_id: str, kind: str, scope: str, deduplicate: bool = True
+    ) -> tuple[RequestRow, bool]:
+        """The job's row, written `queued` — or the unfinished one it duplicates.
+
+        One job per kind and scope at a time: when a row of this kind and scope
+        is still `queued` or `running`, that row is returned with `False` and
+        nothing is written — unless `deduplicate` is off, for a job whose second
+        run is not the same job (`project add`, `transcript drop`). Otherwise the
+        new row is inserted and returned with `True`. Both in one transaction, so no second row can land between the
+        look and the insert. `ArtifactBusy` and `OperationalStoreBusy` pass
+        through: the caller answers busy and no row exists.
+        """
+        with self._transaction() as db:
+            existing = None if not deduplicate else db.execute(
+                f"SELECT {_REQUEST_COLUMNS} FROM requests "
+                f"WHERE kind = ? AND scope = ? AND state IN (?, ?) "
+                f"ORDER BY created_at, id LIMIT 1",
+                (kind, scope, *REQUEST_UNFINISHED),
+            ).fetchone()
+            if existing is not None:
+                return RequestRow(*existing), False
+            at = self._at().isoformat()
+            db.execute(
+                f"INSERT INTO requests ({_REQUEST_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (job_id, kind, scope, REQUEST_UNFINISHED[0], None, at, at),
+            )
+        return RequestRow(job_id, kind, scope, REQUEST_UNFINISHED[0], None, at, at), True
+
+    def move_request(
+        self, job_id: str, *, expected: str, to: str, result: str | None = None
+    ) -> RequestRow | None:
+        """Move one job from `expected` to `to`, in one statement; the row it wrote,
+        or `None` when overtaken.
+
+        Applies only to the state it expects to find, and its count of changed
+        rows is checked: zero means another step got there first — a job
+        finishing late never overwrites `failed`.
+        """
+        with self._transaction() as db:
+            moved = db.execute(
+                "UPDATE requests SET state = ?, result = COALESCE(?, result), "
+                f"updated_at = ? WHERE id = ? AND state = ? RETURNING {_REQUEST_COLUMNS}",
+                (to, result, self._at().isoformat(), job_id, expected),
+            ).fetchone()
+            return None if moved is None else RequestRow(*moved)
+
+    def fail_unfinished_requests(
+        self, reason: Callable[[RequestRow], str]
+    ) -> tuple[RequestRow, ...]:
+        """Mark every `queued` or `running` row `failed`, with `reason(row)` as its result.
+
+        The restart pass and the shutdown pass. Each row moves by its own
+        conditional statement, inside one transaction; the rows it wrote are
+        returned.
+        """
+        failed: list[RequestRow] = []
+        with self._transaction() as db:
+            rows = [
+                RequestRow(*row)
+                for row in db.execute(
+                    f"SELECT {_REQUEST_COLUMNS} FROM requests WHERE state IN (?, ?) "
+                    f"ORDER BY created_at, id",
+                    REQUEST_UNFINISHED,
+                ).fetchall()
+            ]
+            at = self._at().isoformat()
+            for row in rows:
+                settled = db.execute(
+                    "UPDATE requests SET state = ?, result = ?, updated_at = ? "
+                    f"WHERE id = ? AND state = ? RETURNING {_REQUEST_COLUMNS}",
+                    ("failed", reason(row), at, row.id, row.state),
+                ).fetchone()
+                if settled is not None:
+                    failed.append(RequestRow(*settled))
+        return tuple(failed)
+
+    def unfinished_request_ids(self) -> tuple[str, ...]:
+        """Every job still `queued` or `running`, on a read-only connection of its own."""
+        with self._reader() as reader:
+            return tuple(
+                row[0]
+                for row in reader.execute(
+                    "SELECT id FROM requests WHERE state IN (?, ?) ORDER BY created_at, id",
+                    REQUEST_UNFINISHED,
+                )
+            )
+
+    def prune_requests(self, *, older_than: timedelta) -> int:
+        """Remove every row created more than `older_than` ago; how many went."""
+        cutoff = (self._at() - older_than).isoformat()
+        with self._transaction() as db:
+            return db.execute(
+                "DELETE FROM requests WHERE created_at < ?", (cutoff,)
+            ).rowcount
+
+    def read_request(self, job_id: str) -> RequestRow | None:
+        """One job's row, on a read-only connection of its own; `None` when unknown."""
+        with self._reader() as reader:
+            row = reader.execute(
+                f"SELECT {_REQUEST_COLUMNS} FROM requests WHERE id = ?", (job_id,)
+            ).fetchone()
+        return None if row is None else RequestRow(*row)
+
+    def diagnostic_lines(self, name: str) -> tuple[str, ...]:
+        """Every line of `~/.pm-ai/logs/<name>` and its rotations, oldest file first.
+
+        A plain read (AD-24's diagnostic log is outside the tier model): the
+        daemon's restart pass asks it which job a schema-version stop named.
+        Absent files contribute nothing.
+        """
+        directory = self._paths.resolve(APPLICATION, DIAGNOSTIC_LOGS)
+        base = directory / _capture_name(name)
+        files = [
+            base.with_name(f"{base.name}.{n}")
+            for n in range(_DIAGNOSTIC_LOG_BACKUPS, 0, -1)
+        ] + [base]
+        lines: list[str] = []
+        for path in files:
+            try:
+                lines.extend(path.read_text(encoding="utf-8", errors="replace").splitlines())
+            except FileNotFoundError:
+                continue
+        return tuple(lines)
+
+    def seeing(self, paths: ScopePathPort) -> StorageService:
+        """This writer, resolving through `paths` — the same store, claims and cipher.
+
+        For the daemon's `project add` (story 4r): the project being enrolled is
+        one the daemon's resolver does not know, and a second writer with its
+        own store connection is what the daemon may not open. The view shares
+        everything but the resolver, so its writes are still the one writer's,
+        made on the writer thread.
+        """
+        view = copy.copy(self)
+        view._paths = paths
+        return view
 
     @property
     def paths(self) -> ScopePathPort:
@@ -2371,11 +2880,13 @@ class StorageService:
         """Every capture, in any scope, whose ingestion failed too often to retry.
 
         `(scope, meeting_id, reason)`, the reason being the last failure's.
-        Read by `pm-ai doctor`, which names each one (story 11b).
+        Read by `pm-ai doctor`, which names each one (story 11b). A plain read
+        on a read-only connection of its own (story 4r), so `doctor` sent
+        through the daemon reads off its worker and never the writer's
+        connection.
         """
-        return tuple(
-            (DataScope.parse(scope), meeting_id, reason)
-            for scope, meeting_id, reason in self._db.execute(
+        with self._reader() as reader:
+            rows = reader.execute(
                 "SELECT t.scope, t.meeting_id, t.reason FROM transcript_state t "
                 "JOIN transcript_ingest_attempts a "
                 "ON a.scope = t.scope AND a.meeting_id = t.meeting_id "
@@ -2385,7 +2896,10 @@ class StorageService:
                     TranscriptStateKind.INGEST_FAILED.value,
                     MAX_INGEST_ATTEMPTS,
                 ),
-            )
+            ).fetchall()
+        return tuple(
+            (DataScope.parse(scope), meeting_id, reason)
+            for scope, meeting_id, reason in rows
         )
 
     def was_executed(self, idempotency_key: str) -> bool:

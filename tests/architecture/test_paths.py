@@ -630,7 +630,7 @@ def _scopes_of(artifact: str) -> set[ScopeKind]:
         return set()
 
 
-def test_the_resolver_agrees_with_the_bare_string_it_replaces():
+def test_the_resolver_agrees_with_the_bare_string_it_replaces(tmp_path, monkeypatch):
     """`pm_ai.domain.disclosure.DISCLOSURE_LEDGER_PATH` is the same file.
 
     The domain may not import the platform (AD-30), so that constant stays where
@@ -639,6 +639,9 @@ def test_the_resolver_agrees_with_the_bare_string_it_replaces():
     """
     from pm_ai.domain.disclosure import DISCLOSURE_LEDGER_PATH
 
+    # "The ambient home", redirected: both sides read `HOME`, and neither may
+    # be the developer's own (story 4r's guard in tests/conftest.py).
+    monkeypatch.setenv("HOME", str(tmp_path))
     assert ScopePaths.production().disclosure_ledger == Path(
         DISCLOSURE_LEDGER_PATH
     ).expanduser()
@@ -765,8 +768,9 @@ def test_direct_construction_is_normalized_and_the_result_is_no_dict_key():
         hash(paths)
 
 
-def test_home_override_is_expanded():
+def test_home_override_is_expanded(tmp_path, monkeypatch):
     """A `~` reaching the filesystem creates a directory literally named `~`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
     paths = ScopePaths.production(home="~")
     assert "~" not in paths.application_root.parts
     assert paths.application_root == Path.home() / ".pm-ai"

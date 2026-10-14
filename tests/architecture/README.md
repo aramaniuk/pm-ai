@@ -75,7 +75,7 @@ Both are fixed and both now have their own regressions in
 | AD-16 | `no-builtin-tool-agent` | Blocks the Claude Agent SDK and friends |
 | AD-17 | `test_ad17_budget_breach_warns_but_never_degrades` | |
 | AD-20 | `test_ad20_idempotency_keys_are_deterministic`, `test_ad20_mutating_jobs_require_a_key` | |
-| AD-21 | `test_ad21_slow_requests_acknowledge_instead_of_blocking` | |
+| AD-21 | `test_ad21_slow_requests_acknowledge_instead_of_blocking`, `tests/core/test_dispatch_plan.py`, `tests/slice/test_line_answered_or_acknowledged.py`, `tests/slice/test_daemon_requests_slice.py` | Runs since story 4r (it skipped until `pm_ai.core.dispatch` existed). `plan()` is the one decision — under 5 s inline, at 5 s or over a job id — and the boundary is pinned at 4.99 / 5.0. Each pipeline declares its bound beside itself in `pm_ai.app.pipelines` (`dashboard`: the per-connector fetch budget, calendars read in sequence; `connector check`: ten seconds). The slice posts `dashboard` to a real daemon, finds the `requests` row written before the `202`, and reads the stream to `done` |
 | AD-22 | `test_ad22_retrieval_path_never_touches_a_model` | |
 | AD-23 | `test_ad23_transcript_pipeline_works_without_a_live_tenant`, `test_a_negation_line_after_the_rule_refuses_the_capture`, `test_an_already_tracked_capture_directory_refuses_the_capture`, `test_excluding_the_whole_enclave_protects_the_capture_directory`, `test_a_project_root_that_is_not_a_repository_refuses_the_capture` | The capture guard, asked of real `git` in real temporary repositories. Text matching answered the opposite of git for the first three, twice in the direction that publishes a transcript |
 | AD-24 | `test_ad24_event_log_is_not_a_debug_sink` | |
@@ -121,7 +121,15 @@ compliant:
   when it lands.
 - **AD-18** (skill allowlist) — enforced at runtime by the registry; the
   *contents* of the allowlist are a human decision.
-- **AD-19** (bounded worker pool) — needs load testing, not a unit test.
+- **AD-19** (bounded worker pool) — the daemon's one writer thread and its I/O
+  pool of four are built (story 4r, `pm_ai/app/concurrency.py`): every claim
+  and every write runs on the writer thread, the status probes and every
+  client command on the pool, and `tests/slice/test_daemon_writer_thread.py`
+  and `test_line_answered_or_acknowledged.py` pin who runs what (a fifth job
+  waits `queued`; a slow status probe never holds up a line). What is still
+  owed is the load test: whether four workers and one writer hold up under
+  real harvests and renders is measured, not unit-tested. The model pool is
+  not built (story 7).
 
 ## Enforcement-layer corrections (2026-08-19)
 

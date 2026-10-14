@@ -65,8 +65,17 @@ from enum import Enum
 from pathlib import Path
 
 from pm_ai.app.daemon import serve as serve_daemon
-from pm_ai.app.pipelines import drop_transcript, run_dashboard
+from pm_ai.app.pipelines import (
+    CONNECTOR_CHECK_BOUND_SECONDS,
+    TRANSCRIPT_DROP_BOUND_SECONDS,
+    calendar_instances,
+    dashboard_bound,
+    drop_transcript,
+    run_dashboard,
+)
 from pm_ai.app.wiring import (
+    GIT_QUESTION_SECONDS,
+    ONBOARD_BOUND_SECONDS,
     REGISTRY_ARTIFACT,
     Bootstrap,
     Daemon,
@@ -105,6 +114,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.connectors.probe import probe_credential
 from pm_ai.platform.doctor import (
+    DAEMON_PROBE,
     ArtifactState,
     Health,
     Presence,
@@ -364,8 +374,70 @@ def _serve(keychain: KeychainPort, composed: _Composition) -> Callable[[], int] 
     """
     daemon = composed.daemon
     if daemon is not None:
-        return lambda: serve_daemon(daemon, probes=_status_probes(keychain, daemon))
+        # `doctor` sent through the daemon (story 4r) runs on this process's
+        # keychain, reads the artifacts afresh for each line, and its daemon
+        # line is the daemon's own report about itself. `project add` there
+        # runs as steps over the daemon's own writer (`onboard_in_daemon`).
+        return lambda: serve_daemon(
+            daemon,
+            probes=_status_probes(keychain, daemon),
+            diagnose=lambda itself: _diagnose(
+                keychain,
+                _fresh_composition(daemon, composed),
+                daemon_probe=Probe(DAEMON_PROBE, Health.OK, itself),
+            ),
+            bounds=DAEMON_BOUNDS,
+        )
     return None
+
+
+def _fresh_composition(daemon: Daemon, composed: _Composition) -> _Composition:
+    """What `doctor` reads in the daemon: the artifacts as they are now (story 4r).
+
+    Read through the daemon's own writer, as every line reads afresh; the
+    composition itself — which projects, where this daemon acts — is the one
+    made at start.
+    """
+    return _Composition(
+        daemon,
+        None,
+        artifact_state(daemon.storage, CONFIG_ARTIFACT),
+        artifact_state(daemon.storage, REGISTRY_ARTIFACT),
+        read_connector_rows(daemon.storage).reading,
+        selection=composed.selection,
+    )
+
+
+DOCTOR_BOUND_SECONDS = 2 * GIT_QUESTION_SECONDS
+"""`doctor`'s bound: its two `git` questions, each bounded (AD-21, story 4r).
+
+The keychain probe carries no bound of its own, so this is the part that is
+bounded; it is over five seconds, so `doctor` sent through the daemon is a job.
+"""
+
+CONFIG_SHOW_BOUND_SECONDS = 1.0
+"""`config show`'s bound: reads of local files and a print, nothing that waits."""
+
+DAEMON_RUN_BOUND_SECONDS = 0.0
+"""`daemon run` sent through the daemon: refused at once, nothing is started."""
+
+DAEMON_BOUNDS: Mapping[tuple[str, ...], Callable[[Daemon], float]] = {
+    ("dashboard",): lambda daemon: dashboard_bound(len(calendar_instances(daemon))),
+    ("connector", "check"): lambda daemon: CONNECTOR_CHECK_BOUND_SECONDS,
+    ("transcript", "drop"): lambda daemon: TRANSCRIPT_DROP_BOUND_SECONDS,
+    ("project", "add"): lambda daemon: ONBOARD_BOUND_SECONDS,
+    ("doctor",): lambda daemon: DOCTOR_BOUND_SECONDS,
+    ("config", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    ("daemon", "run"): lambda daemon: DAEMON_RUN_BOUND_SECONDS,
+}
+"""Every command the daemon runs, with its declared bound (AD-21, story 4r).
+
+Each bound is declared beside its pipeline — the dashboard's, `connector
+check`'s and the transcript drop's in `pm_ai.app.pipelines`, onboarding's in
+`pm_ai.app.wiring`, the three without a pipeline of their own here — and
+`plan()` reads it. A command missing from this table is a test failure, never a
+guess at the call site.
+"""
 
 
 def _status_probes(keychain: KeychainPort, daemon: Daemon) -> Callable[[], Report]:
@@ -1239,7 +1311,9 @@ def _aimed_at_no_project(target: DataScope | None) -> bool:
     return target is not None and target.kind is not ScopeKind.PROJECT
 
 
-def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
+def _diagnose(
+    keychain: KeychainPort, composed: _Composition, *, daemon_probe: Probe | None = None
+) -> Report:
     """Every startup probe, plus whatever stopped the daemon being built.
 
     Appended rather than prepended: the probes above it are the causes — an
@@ -1270,7 +1344,9 @@ def _diagnose(keychain: KeychainPort, composed: _Composition) -> Report:
         probes = (*probes, selection)
     # `4e`: whether a daemon answers. Appended here and not in `run_all`, so
     # the daemon's own `/v1/status`, which calls `run_all`, never asks itself.
-    probes = (*probes, _daemon_probe(composed))
+    # In the daemon (story 4r) the line about the daemon is the daemon's own
+    # word about itself: it never sends a request to itself.
+    probes = (*probes, daemon_probe if daemon_probe is not None else _daemon_probe(composed))
     ingestion = _ingestion_probe(composed)
     if ingestion is not None:
         probes = (*probes, ingestion)
