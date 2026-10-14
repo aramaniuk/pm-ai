@@ -2,7 +2,8 @@
 title: 'The daemon harvests every connector on a schedule'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '68fcd28228c4ee24396b995c6e844b98d24b1fc3'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -96,17 +97,17 @@ Verified against `ddcb9aa` on 2026-10-10. Sibling specs on disk: `4e`, `4r` (wri
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/cadence.py` -- new, pure: the constants; next cycle with the random offset from an injected draw, and the spread of first attempts; the doubling waits with the provider's floor; whether a failure retries -- the arithmetic 10a keeps
-- [ ] `pm_ai/ports/__init__.py`, `pm_ai/storage/service.py` -- `harvest_runs` table, its read and write, `prune_coverage(before)` -- Tier 2 facts through the single writer
-- [ ] `pm_ai/app/wiring.py` -- `Daemon` carries each instance's own scope, filled from the built-ins' and `_enrolment_scope`'s answers, personal for Graph; `config.toml`, the enrolled list, each row and its credential re-readable at the start of a cycle; the projects loaded at start kept, and a row filing into any other project skipped and named -- the harvest has no current project
-- [ ] `pm_ai/app/pipelines.py` -- `run_harvest` as steps: fetches bounded, the position-coverage-failure save one claimed step, the `git` question bounded before each claimed capture write, preparation on a worker; catch a raising connector as `_ask` does; catch `ArtifactBusy` (`1r`'s refusal) around `save_cursor` as a failed attempt naming the claim; record the attempt; write the empty batch to the instance's scope; hand every fetched-not-ingested transcript to `11b`'s ingestion; prune -- the missing `try/except`
-- [ ] `pm_ai/connectors/graph/calendar.py` -- a busy credentials file with nothing rotated is recorded retryable -- waiting clears it
-- [ ] `pm_ai/app/pipelines.py`, `pm_ai/app/wiring.py` -- the harvest's fetch uses `4r`'s credential read and compare-and-save steps (built in `4r`); nothing of its own -- AD-5, AD-39
-- [ ] `pm_ai/app/daemon.py` -- the per-user lifetime lock on `~/.pm-ai/private/daemon.lock`, taken before the writer thread and any timer, declared in the scope model -- AD-7
-- [ ] `pm_ai/app/ticks.py` -- new, the temporary timers attached in `4e`'s lifespan on the one loop: one per instance from the re-read list, each harvest run on `4r`'s I/O pool with its claimed steps handed to `4r`'s writer thread, logging by type; the docstring names 10a as its replacement -- the timer, in one file
-- [ ] `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- the `harvests` probe from values the composition root reads, appended after the connectors line -- doctor contacts nothing
-- [ ] `tests/core/test_cadence.py`, `tests/slice/test_scheduled_harvest.py`, the doctor suite -- one test per matrix row, with an injected clock, draw and sleep; the refused-save row uses a storage wrapper raising `ArtifactBusy` once; a test that no harvest claim or write runs off the writer thread; the claimed save's duration measured at the page cap and written into Design Notes -- the matrix is the contract
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark `:823`, `:883` (the `run_harvest` half), `:894` resolved; add the temporary-timer entry naming 10a -- the debt is on record
+- [x] `pm_ai/core/cadence.py` -- new, pure: the constants; next cycle with the random offset from an injected draw, and the spread of first attempts; the doubling waits with the provider's floor; whether a failure retries -- the arithmetic 10a keeps
+- [x] `pm_ai/ports/__init__.py`, `pm_ai/storage/service.py` -- `harvest_runs` table, its read and write, `prune_coverage(before)` -- Tier 2 facts through the single writer
+- [x] `pm_ai/app/wiring.py` -- `Daemon` carries each instance's own scope, filled from the built-ins' and `_enrolment_scope`'s answers, personal for Graph; `config.toml`, the enrolled list, each row and its credential re-readable at the start of a cycle; the projects loaded at start kept, and a row filing into any other project skipped and named -- the harvest has no current project
+- [x] `pm_ai/app/pipelines.py` -- `run_harvest` as steps: fetches bounded, the position-coverage-failure save one claimed step, the `git` question bounded before each claimed capture write, preparation on a worker; catch a raising connector as `_ask` does; catch `ArtifactBusy` (`1r`'s refusal) around `save_cursor` as a failed attempt naming the claim; record the attempt; write the empty batch to the instance's scope; hand every fetched-not-ingested transcript to `11b`'s ingestion; prune -- the missing `try/except`
+- [x] `pm_ai/connectors/graph/calendar.py` -- a busy credentials file with nothing rotated is recorded retryable -- waiting clears it
+- [x] `pm_ai/app/pipelines.py`, `pm_ai/app/wiring.py` -- the harvest's fetch uses `4r`'s credential read and compare-and-save steps (built in `4r`); nothing of its own -- AD-5, AD-39
+- [x] `pm_ai/app/daemon.py` -- the per-user lifetime lock on `~/.pm-ai/private/daemon.lock`, taken before the writer thread and any timer, declared in the scope model -- AD-7
+- [x] `pm_ai/app/ticks.py` -- new, the temporary timers attached in `4e`'s lifespan on the one loop: one per instance from the re-read list, each harvest run on `4r`'s I/O pool with its claimed steps handed to `4r`'s writer thread, logging by type; the docstring names 10a as its replacement -- the timer, in one file
+- [x] `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- the `harvests` probe from values the composition root reads, appended after the connectors line -- doctor contacts nothing
+- [x] `tests/core/test_cadence.py`, `tests/slice/test_scheduled_harvest.py`, the doctor suite -- one test per matrix row, with an injected clock, draw and sleep; the refused-save row uses a storage wrapper raising `ArtifactBusy` once; a test that no harvest claim or write runs off the writer thread; the claimed save's duration measured at the page cap and written into Design Notes -- the matrix is the contract
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark `:823`, `:883` (the `run_harvest` half), `:894` resolved; add the temporary-timer entry naming 10a -- the debt is on record
 
 **Acceptance Criteria:**
 - Given two enrolled instances and a fake clock, when the timers run through one cycle with one instance failing transiently, then the saved positions, coverage, failure rows and next due instants match the matrix, and no two harvests overlapped.
@@ -119,7 +120,7 @@ Verified against `ddcb9aa` on 2026-10-10. Sibling specs on disk: `4e`, `4r` (wri
 
 Harvests run on `4r`'s I/O pool, not on the loop, because every connector's `harvest` is a synchronous HTTP client and would stall the request path for the length of a fetch; AD-19 grants the pool for blocking work. `4r` builds the pool (four workers) and the one writer thread through which every write and every claim in the daemon goes (AD-5); the harvest's worker hands its claimed steps to that thread. Background tasks attach in the app's lifespan on the one loop (`4e`); `ticks.py` hooks there.
 
-The claimed save's duration at the page cap: not measured yet. This slice measures it when built and records the figure here; until then no number is stated.
+The claimed steps' duration at the page cap, measured 2026-10-14 (Apple M3 Pro, Python 3.14.7 as x86_64 under Rosetta, APFS; a throwaway root, the daemon's writer connection, three runs): at GitLab's cap — 500 pages of 100 commits, 50,000 events, the largest batch either connector can return — the events' persist, one claimed step into the project's event log, took 1.59–1.77 s (median 1.71 s); the save of position, coverage, failure and the attempt record, one claimed step, took 0.3–0.7 ms. The persist step at the cap is longer than the one second a client request waits for the writer to start its step, so a request arriving during it is answered busy (503); and a 50,000-line batch is far past the 1 MiB single-write size AD-47's append bound was measured to. Both are recorded, not changed here.
 
 The arithmetic is separated from the timer deliberately: 10a's schedule trigger needs the same cadence and waits, so `cadence.py` survives and `ticks.py` is deleted whole.
 
@@ -135,3 +136,113 @@ The arithmetic is separated from the timer deliberately: 10a's schedule trigger 
 ## Spec Change Log
 
 - **2026-10-14, frozen block amended by Andrei** (the architecture spine's concurrency amendment of the same day: AD-5, AD-7, AD-39, AD-43; decided by Andrei, re-derived here before any build). Amended: `4r`'s pool and the lock that serialized every storage call are replaced by `4r`'s I/O pool and one writer thread; the harvest is a sequence of steps — calendar fetch bounded, position-coverage-failure save one claimed step, transcript fetch bounded, the `git` exclusion question bounded just before each claimed capture write — so a deadline or the shutdown abandons only a fetch, and the shutdown no longer lets a running harvest finish within a ten-second wait; a refreshed credential is saved when it is issued, by a compare-and-save handed to the writer thread, one refresh per instance in flight, a lost race dropped and logged; `config.toml`, the connector list, rows and credentials are read again each cycle while projects are read only at start, so "enrolled after start, no restart" now holds only for personal instances and projects loaded at start, and a row filing into a later project is skipped and named until a restart; this slice builds AD-7's per-user lifetime lock before any timer; it measures its claimed save's duration at the page cap and records it in Design Notes. Matrix rows "Enrolled after start", "Success", "Credentials file busy" and "Shutdown mid-harvest" changed; rows added for a project enrolled after start, a second daemon, a mid-harvest token refresh, a fetch abandoned at its budget, a shutdown during a save, and the capture write. Known-bad state avoided: `config.json` or `meetings/` written by a thread nobody waits for, after the attempt said failed and after the writer closed; an older rotation overwriting a newer one or the person's sign-in; harvesting into a scope the running daemon did not compose; two daemons started on different ports both scheduling. Decided the same day (routine, Claude): `4r`, not this slice, builds the credential read and compare-and-save path, which this slice reuses; the shared restart sentence is `4r`'s, which this slice only prints. KEEP: 240 ±15 minutes and the 15-minute spread; one harvest at a time; the scheduled harvest as the one read that owns the position; the backoff ladder and the provider's floor surviving a restart; a permanent failure tried once per regular cycle; a refused save as a failed attempt retried after one minute; no current project; 90-day coverage prune; the `harvests` doctor line; no new setting; the temporary timer that 10a deletes; `cadence.py` and `ticks.py` split.
+
+## Suggested Review Order
+
+**Entry point: the timer loop**
+
+- Start here: one round re-reads the list, then runs due instances one at a time.
+  [`ticks.py:225`](../../../../pm_ai/app/ticks.py#L225)
+- When the list is read, how new instances are spread and floored.
+  [`ticks.py:239`](../../../../pm_ai/app/ticks.py#L239)
+- How an attempt's outcome sets the next due instant.
+  [`ticks.py:295`](../../../../pm_ai/app/ticks.py#L295)
+- The pure arithmetic 10a keeps: cycle, spread, waits, provider floor.
+  [`cadence.py:79`](../../../../pm_ai/core/cadence.py#L79)
+
+**The harvest as steps**
+
+- The scheduled attempt: never raises; classifies abandoned, refused, stopped, unexpected.
+  [`pipelines.py:442`](../../../../pm_ai/app/pipelines.py#L442)
+- The steps: fetch bounded, connector raise recorded by type.
+  [`pipelines.py:208`](../../../../pm_ai/app/pipelines.py#L208)
+- Position, coverage, failure and attempt saved together in one claimed step.
+  [`pipelines.py:366`](../../../../pm_ai/app/pipelines.py#L366)
+- Transcript fetch shares the budget; ingestion has its own.
+  [`pipelines.py:378`](../../../../pm_ai/app/pipelines.py#L378)
+- Prune of coverage older than 90 days, after each harvest.
+  [`pipelines.py:511`](../../../../pm_ai/app/pipelines.py#L511)
+- No current project: empty batch goes where the instance was filed.
+  [`pipelines.py:178`](../../../../pm_ai/app/pipelines.py#L178)
+
+**Deadlines, the writer door and shutdown**
+
+- Shared budget: transcript fetch gets only the calendar's leftover.
+  [`ticks.py:448`](../../../../pm_ai/app/ticks.py#L448)
+- A deadline always raises FetchAbandoned; the call's own errors come out as values.
+  [`ticks.py:466`](../../../../pm_ai/app/ticks.py#L466)
+- Steps from an abandoned thread are refused, re-checked on the writer thread.
+  [`ticks.py:412`](../../../../pm_ai/app/ticks.py#L412)
+- Shutdown records a harvest still in a bounded step as failed.
+  [`ticks.py:517`](../../../../pm_ai/app/ticks.py#L517)
+- Where the shutdown runs that mark, after the jobs are marked.
+  [`prompts.py:597`](../../../../pm_ai/app/prompts.py#L597)
+- A settings read that fails is recorded, retryable only when waiting clears it.
+  [`ticks.py:556`](../../../../pm_ai/app/ticks.py#L556)
+
+**Storage: the attempt record**
+
+- Failure row and attempt record; a failure after this attempt's save undoes its success.
+  [`service.py:2764`](../../../../pm_ai/storage/service.py#L2764)
+- Failure recorded with the position unchanged.
+  [`service.py:2829`](../../../../pm_ai/storage/service.py#L2829)
+- Coverage prune as one statement; odd rows never abort it.
+  [`service.py:2857`](../../../../pm_ai/storage/service.py#L2857)
+- The plain read doctor and the timers' list use.
+  [`service.py:2871`](../../../../pm_ai/storage/service.py#L2871)
+- The new table, picked up without a version bump.
+  [`service.py:151`](../../../../pm_ai/storage/service.py#L151)
+- `StoragePort` declares the attempt record's reads and writes.
+  [`__init__.py:741`](../../../../pm_ai/ports/__init__.py#L741)
+
+**One daemon per user, and enclave modes**
+
+- The lifetime lock is taken after the port, before the writer and timers.
+  [`daemon.py:208`](../../../../pm_ai/app/daemon.py#L208)
+- Its refusal, naming the file whatever port.
+  [`daemon.py:223`](../../../../pm_ai/app/daemon.py#L223)
+- The kernel lock itself: plain file, no symlink, never removed.
+  [`claims.py:207`](../../../../pm_ai/platform/claims.py#L207)
+- Why the lock is declared beside the sidecar suffix, not as a node.
+  [`scope_model.py:831`](../../../../pm_ai/domain/scope_model.py#L831)
+- Fresh home: `~/.pm-ai` and `private/` made at 0700 before the store opens.
+  [`service.py:959`](../../../../pm_ai/storage/service.py#L959)
+- Timers attached in the lifespan; a dead timer is logged, others still cancelled.
+  [`daemon.py:654`](../../../../pm_ai/app/daemon.py#L654)
+
+**Composition and credentials**
+
+- Each instance's filed scope, carried on the daemon.
+  [`wiring.py:305`](../../../../pm_ai/app/wiring.py#L305)
+- A busy credentials file with nothing rotated clears by waiting.
+  [`auth.py:274`](../../../../pm_ai/connectors/graph/auth.py#L274)
+- Applied in the calendar fetch (channels and chats likewise).
+  [`calendar.py:956`](../../../../pm_ai/connectors/graph/calendar.py#L956)
+
+**Doctor**
+
+- The harvests line: OK, WARNING while retrying, FAILING when a person is needed.
+  [`doctor.py:626`](../../../../pm_ai/platform/doctor.py#L626)
+- Read from the store, appended after the connectors line, omitted with no instances.
+  [`entry.py:1365`](../../../../pm_ai/app/entry.py#L1365)
+
+**Tests**
+
+- Start spread and next due a cycle after finishing, no overlap.
+  [`test_scheduled_harvest.py:339`](../../../../tests/slice/test_scheduled_harvest.py#L339)
+- Success saved in one claimed step; doctor OK.
+  [`test_scheduled_harvest.py:479`](../../../../tests/slice/test_scheduled_harvest.py#L479)
+- Refused save: nothing recorded, retried in a minute.
+  [`test_scheduled_harvest.py:723`](../../../../tests/slice/test_scheduled_harvest.py#L723)
+- Budget: shared between fetches, leftover only.
+  [`test_scheduled_harvest.py:1614`](../../../../tests/slice/test_scheduled_harvest.py#L1614)
+- Shutdown during a fetch.
+  [`test_scheduled_harvest.py:758`](../../../../tests/slice/test_scheduled_harvest.py#L758)
+- No claim or write off the writer thread.
+  [`test_scheduled_harvest.py:956`](../../../../tests/slice/test_scheduled_harvest.py#L956)
+- The real daemon records an attempt and cancels its timers.
+  [`test_scheduled_harvest.py:1510`](../../../../tests/slice/test_scheduled_harvest.py#L1510)
+- The cadence arithmetic.
+  [`test_cadence.py:67`](../../../../tests/core/test_cadence.py#L67)
+- The doctor line's states.
+  [`test_doctor.py:961`](../../../../tests/architecture/test_doctor.py#L961)
