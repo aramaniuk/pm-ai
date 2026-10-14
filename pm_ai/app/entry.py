@@ -77,6 +77,7 @@ from pm_ai.app.wiring import (
     bootstrap,
     build,
     onboard_project,
+    read_connector_rows,
     warn_if_encryption_disabled,
 )
 from pm_ai.connectors.registry import ConnectorRegistry
@@ -412,13 +413,22 @@ def _dashboard(daemon: Daemon | None) -> Callable[[DataScope], Path]:
     return lambda scope: run_dashboard(daemon, scope=scope, now=daemon.clock())
 
 
+@dataclass(frozen=True, slots=True)
+class _ConnectorsOnDisk:
+    """`dispatch.ConnectorsOnDisk`: step 4's view of `4n`'s read (story 4p)."""
+
+    graph: tuple[str, ...]
+    remedy: str
+
+
 class _FirstRun:
     """`pm-ai setup`'s reach into storage and the probes, bound to one keychain.
 
     The CLI names this shape structurally (`dispatch.FirstRun`) because it may
-    reach neither `pm_ai.storage` nor `pm_ai.platform`. Every call builds what
-    it needs when it is made rather than at construction, so a `pm-ai doctor`
-    run pays nothing for a command it did not ask for.
+    reach neither `pm_ai.storage` nor `pm_ai.platform`. Nothing is built at
+    construction, so a `pm-ai doctor` run pays nothing for a command it did not
+    ask for: the config read and write and `diagnose` each build a writer when
+    called, and step 4's writer and sign-in are built on first use and kept.
 
     The writer is `application_storage`'s rather than `daemon.storage`, because
     on the machine `setup` exists for there is no daemon: `setup` has no target,
@@ -427,10 +437,54 @@ class _FirstRun:
 
     def __init__(self, keychain: KeychainPort) -> None:
         self._keychain = keychain
+        self._storage: StorageService | None = None
+        self._graph: GraphEnrolment | None = None
 
     @property
     def keychain(self) -> KeychainPort:
         return self._keychain
+
+    @property
+    def storage(self) -> StorageService:
+        """Step 4's writer over the application scope, built once, on first use.
+
+        One for the whole step (story 4p), so `connectors/` is read, the name
+        checked, the sign-in sealed and the row written through the same
+        writer. Every setup run that reaches step 4 builds it, for that read.
+        """
+        if self._storage is None:
+            self._storage = application_storage(self._keychain)
+        return self._storage
+
+    @property
+    def graph_sign_in(self) -> GraphEnrolment:
+        """`connector add graph`'s sign-in over `storage`, built on first use.
+
+        Step 4 asks for it only after "yes" and before anything reads the
+        sealed store, so this is where the console warning `build()` gives
+        with encryption off is printed — once, since it is built once. Setup
+        composes no daemon, and the add path never calls `announce`, so
+        nothing else would say it before a sign-in is sealed in plaintext.
+        """
+        if self._graph is None:
+            warn_if_encryption_disabled()
+            self._graph = GraphEnrolment(storage=self.storage)
+        return self._graph
+
+    def connectors(self) -> _ConnectorsOnDisk:
+        """`connectors/` read now by `4n`'s one rule, contacting nothing.
+
+        Plaintext rows only, so no master key is fetched. `graph` is every
+        enabled Graph row the build would construct; `remedy` is `doctor`'s
+        `connectors` line's remediation for the same read.
+        """
+        rows = read_connector_rows(self.storage)
+        return _ConnectorsOnDisk(
+            graph=tuple(
+                instance for instance, system, _ in rows.accepted if system == "graph"
+            ),
+            remedy=connectors_enrolled(rows.reading).remediation,
+        )
 
     def read_config(self) -> bytes | None:
         """The pre-write read: absence is `None`, anything else unreadable raises."""

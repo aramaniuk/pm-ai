@@ -2,7 +2,8 @@
 title: 'Proactive Enablement fills from real Teams messages'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '258dff3e8cd44a28d5cbb5fb7ae892996b24019c'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -86,11 +87,11 @@ Verified against `ddcb9aa` on 2026-10-09.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/rendering.py` -- widen `entries` on both renderers; the PM-ids parameter; failure branch with its three absences; mark, sort, cap, closing line; the sign-in line naming `pm-ai connector sign-in <instance>`; fourth footnote under its own name -- the section's contract
-- [ ] `pm_ai/app/pipelines.py` -- catch the four failure kinds into `HarvestFailure`, passed and not saved; get the PM's handles and the enabled rows without a usable `user_id` from `2o`'s one app function — one read of the rows at one instant, never a call to `pm_identity()` directly and never a second read; pass both -- the pipeline passes, the renderer states
-- [ ] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- one test per matrix row, the failure test asserting the negatives as `:269,287` do; the parameter-list assertion; re-pin the golden -- the matrix is the contract
-- [ ] `tests/slice/test_dashboard_slice.py` -- the corrupt-segment test flipped; a non-UTF-8 segment; `user_id` read from a row, a disabled row ignored; the project dashboard marking a mention; scope isolation end to end -- what the renderer cannot see
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: the "no failure representation" entry and the cap entry; append the dated line to `23b`'s Spec Change Log (its "malformed segment → refused" row is superseded)
+- [x] `pm_ai/core/rendering.py` -- widen `entries` on both renderers; the PM-ids parameter; failure branch with its three absences; mark, sort, cap, closing line; the sign-in line naming `pm-ai connector sign-in <instance>`; fourth footnote under its own name -- the section's contract
+- [x] `pm_ai/app/pipelines.py` -- catch the four failure kinds into `HarvestFailure`, passed and not saved; get the PM's handles and the enabled rows without a usable `user_id` from `2o`'s one app function — one read of the rows at one instant, never a call to `pm_identity()` directly and never a second read; pass both -- the pipeline passes, the renderer states
+- [x] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- one test per matrix row, the failure test asserting the negatives as `:269,287` do; the parameter-list assertion; re-pin the golden -- the matrix is the contract
+- [x] `tests/slice/test_dashboard_slice.py` -- the corrupt-segment test flipped; a non-UTF-8 segment; `user_id` read from a row, a disabled row ignored; the project dashboard marking a mention; scope isolation end to end -- what the renderer cannot see
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: the "no failure representation" entry and the cap entry; append the dated line to `23b`'s Spec Change Log (its "malformed segment → refused" row is superseded)
 
 **Acceptance Criteria:**
 - Given a personal log holding one `33d`-written message mentioning the PM's recorded `user_id` and three that do not, when `pm-ai dashboard` runs, then the section lists the mention first, marked, with its channel and excerpt, and the rest newest first.
@@ -110,3 +111,36 @@ Verified against `ddcb9aa` on 2026-10-09.
 ## Spec Change Log
 
 - **2026-10-11, frozen block renegotiated by Andrei** (architecture AD-34 and AD-32, same day). A person on a line is the provider's handle, matched to a pm-ai person only when read, and the PM is one function, `pm_identity()` (`2o`). Amended: the actor `none:` renders as `an unknown sender`, not as the bare value; the PM's handles and the sign-in line's rows come from `2o`'s one app function in one read; "mentions you" compares `mentions` against `pm_identity()`'s handles (`graph:<user_id>`), never a raw id; a disabled Graph row's handle still counts (it no longer drops out), while the sign-in line stays limited to enabled rows; the alias table may be read only through `pm_identity()`; `user_id` is saved by `8q` (the spec named `8m`); lands after `2o`. Avoided: a mention of the PM going unmarked once senders and mentions are handles, and past lines unmarked by disabling a row.
+
+## Suggested Review Order
+
+**The section**
+
+- What the section says in each case: failure, empty window, signals with marks and cap, sign-in and unchecked lines.
+  [`rendering.py:637`](../../../../pm_ai/core/rendering.py#L637)
+
+- The PM's handles and the connectors they could not be checked against.
+  [`rendering.py:157`](../../../../pm_ai/core/rendering.py#L157)
+
+- At most twenty lines, mentions first, newest first, ties by entry id.
+  [`rendering.py:275`](../../../../pm_ai/core/rendering.py#L275)
+
+**Where the inputs come from**
+
+- One identity read per render; a failed log read becomes a stated value, never saved.
+  [`pipelines.py:712`](../../../../pm_ai/app/pipelines.py#L712)
+  [`pipelines.py:795`](../../../../pm_ai/app/pipelines.py#L795)
+
+- Which Graph rows give handles, which need a new sign-in, which could not be read.
+  [`wiring.py:2607`](../../../../pm_ai/app/wiring.py#L2607)
+
+- The log read remembers each entry's segment for the footnote.
+  [`event_log.py:34`](../../../../pm_ai/core/event_log.py#L34)
+
+**Tests**
+
+- One test per renderer matrix row, and an exact-string section.
+  [`test_rendering_sections.py`](../../../../tests/core/test_rendering_sections.py)
+
+- Through `run_dashboard`: failures stated, mentions, sign-in, scope isolation.
+  [`test_dashboard_slice.py`](../../../../tests/slice/test_dashboard_slice.py)

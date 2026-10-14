@@ -32,14 +32,17 @@ import pytest
 
 from pm_ai.core.goal_register import GoalRegister, parse_goals
 from pm_ai.core.rendering import (
+    MENTIONS_YOU,
     MESSAGE_WINDOW,
     NO_MEETINGS,
     PROJECT_HEADINGS,
+    PmHandles,
     render_dashboard,
     render_project_dashboard,
 )
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import MessagePayload, ObservedEventType
+from pm_ai.domain.handles import GRAPH, person_handle
 from pm_ai.domain.harvest import (
     HarvestFailure,
     NoCalendarConnector,
@@ -80,6 +83,9 @@ what it read, and this renderer renders what it is passed."""
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 
 DISPLAY = timezone(timedelta(hours=2))
+NOBODY = PmHandles(handles=frozenset(), unrecorded=(), unchecked=())
+"""No Graph row: nobody to mark, and no sign-in to name."""
+PM_USER_ID = "0d9e3c4f-1a2b-4c3d-8e9f-a0b1c2d3e4f5"
 NOW = datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
 """12:30 in the display zone — the same instant `23a`'s suite uses, so the
 byte-identical comparison below is over the same clock as well as the same
@@ -116,6 +122,7 @@ def message(
     actor: str = "u_dana",
     channel: str = "#alpha-build",
     excerpt: str | None = None,
+    mentions: tuple[str, ...] | None = None,
     entry_id: str = "evt_1",
 ) -> EventEntry:
     """A `message_posted` entry off the project's event log, its payload fields
@@ -123,7 +130,9 @@ def message(
     fields: list[tuple[str, str]] = [
         ("ingested_at", at.isoformat()),
         ("src", "slack:msg/1"),
-        *encode_payload(MessagePayload(channel=channel, excerpt=excerpt)),
+        *encode_payload(
+            MessagePayload(channel=channel, excerpt=excerpt, mentions=mentions)
+        ),
     ]
     return EventEntry(
         category=ObservedEventType.MESSAGE_POSTED,
@@ -139,10 +148,17 @@ def render(
     entries: object = (),
     now: datetime = NOW,
     tz: object = DISPLAY,
+    pm: PmHandles | None = None,
 ) -> str:
     # Typed loosely on purpose: the timezone row passes `None`, which is the
     # value the function is required to refuse.
-    return render_project_dashboard(meetings, entries, now, tz=tz)  # type: ignore[arg-type]
+    return render_project_dashboard(
+        meetings,  # type: ignore[arg-type]
+        entries,  # type: ignore[arg-type]
+        now,
+        tz=tz,  # type: ignore[arg-type]
+        pm=NOBODY if pm is None else pm,
+    )
 
 
 def raw_blocks(text: str) -> dict[str, str]:
@@ -223,7 +239,7 @@ def test_the_signature_accepts_no_goal_register():
     cannot be handed the PM's career goals by any caller, correct or not.
     """
     parameters = inspect.signature(render_project_dashboard).parameters
-    assert list(parameters) == ["meetings", "entries", "now", "tz"]
+    assert list(parameters) == ["meetings", "entries", "now", "tz", "pm"]
     assert not [
         name
         for name in parameters
@@ -446,7 +462,7 @@ def test_the_two_new_states_render_byte_identically_in_both_files():
     for answer in (NoCalendarConnector(), partial):
         here = sections(render(meetings=answer))["Time-Critical Activities"]
         there = render_dashboard(
-            answer, PROJECT_ENTRIES, parse_goals(None, scope=PERSONAL), NOW, tz=DISPLAY
+            answer, PROJECT_ENTRIES, parse_goals(None, scope=PERSONAL), NOW, tz=DISPLAY, pm=NOBODY
         )
         assert here == sections(there)["Time-Critical Activities"]
 
@@ -494,10 +510,10 @@ def test_the_shared_section_renders_byte_identically_in_both_files():
     )
     for label, meetings, now in cases:
         personal = raw_blocks(
-            render_dashboard(meetings, PROJECT_ENTRIES, empty, now, tz=DISPLAY)
+            render_dashboard(meetings, PROJECT_ENTRIES, empty, now, tz=DISPLAY, pm=NOBODY)
         )
         project = raw_blocks(
-            render_project_dashboard(meetings, PROJECT_ENTRIES, now, tz=DISPLAY)
+            render_project_dashboard(meetings, PROJECT_ENTRIES, now, tz=DISPLAY, pm=NOBODY)
         )
         for heading in PROJECT_HEADINGS:
             assert project[heading] == personal[heading], label
@@ -528,10 +544,10 @@ def test_the_shared_section_is_identical_with_a_populated_register_too():
         b"## Project\n\n- [g_alpha] (short) Ship the migration\n", scope=PERSONAL
     )
     personal = raw_blocks(
-        render_dashboard(PROJECT_MEETINGS, PROJECT_ENTRIES, register, NOW, tz=DISPLAY)
+        render_dashboard(PROJECT_MEETINGS, PROJECT_ENTRIES, register, NOW, tz=DISPLAY, pm=NOBODY)
     )
     project = raw_blocks(
-        render_project_dashboard(PROJECT_MEETINGS, PROJECT_ENTRIES, NOW, tz=DISPLAY)
+        render_project_dashboard(PROJECT_MEETINGS, PROJECT_ENTRIES, NOW, tz=DISPLAY, pm=NOBODY)
     )
     assert project["Time-Critical Activities"] == personal["Time-Critical Activities"]
     assert "Ship the migration" not in "\n".join(project.values())
@@ -619,3 +635,48 @@ def test_no_datasource_list_survives_anywhere_in_the_package():
         if "project_scope_datasources" in path.read_text(encoding="utf-8")
     ]
     assert not hits, hits
+
+
+# ── Story 23c: mentions on the project dashboard ─────────────────────────────
+
+
+def test_a_project_log_entry_mentioning_the_pm_is_marked_and_listed_first():
+    """Matrix: project dashboard, mention — the same connector rows mark it."""
+    pm = PmHandles(
+        handles=frozenset({person_handle(GRAPH, PM_USER_ID)}),
+        unrecorded=(),
+        unchecked=(),
+    )
+    newer = message(at=NOW - timedelta(minutes=5), actor="u_sam", entry_id="evt_new")
+    mention = message(
+        at=NOW - timedelta(hours=3),
+        actor="u_dana",
+        excerpt="can you review?",
+        mentions=(f"graph:{PM_USER_ID}",),
+        entry_id="evt_mention",
+    )
+    body = sections(render(entries=(newer, mention), pm=pm))["Proactive Enablement"]
+    lines = [line for line in body.split("\n") if line.startswith("- **")]
+    assert lines[0].endswith(f"u_dana in #alpha-build — can you review? — {MENTIONS_YOU}")
+    assert not lines[1].endswith(MENTIONS_YOU)
+
+
+def test_the_proactive_section_renders_byte_identically_in_both_files():
+    """The section is shared, so the marking and the sign-in line are too."""
+    pm = PmHandles(
+        handles=frozenset({person_handle(GRAPH, PM_USER_ID)}),
+        unrecorded=("graph:old",),
+        unchecked=(),
+    )
+    entries = PROJECT_ENTRIES + (
+        message(
+            at=NOW - timedelta(minutes=1),
+            mentions=(f"graph:{PM_USER_ID}",),
+            entry_id="evt_m",
+        ),
+    )
+    personal = raw_blocks(
+        render_dashboard((), entries, GoalRegister(present=False), NOW, tz=DISPLAY, pm=pm)
+    )
+    project = raw_blocks(render_project_dashboard((), entries, NOW, tz=DISPLAY, pm=pm))
+    assert project["Proactive Enablement"] == personal["Proactive Enablement"]

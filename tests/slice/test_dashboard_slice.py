@@ -16,6 +16,7 @@ testing Microsoft rather than this pipeline.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,7 +29,6 @@ from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import MalformedGoals
 from pm_ai.core.meeting_records import as_stored, record_name
 from pm_ai.core.rendering import HEADINGS, NO_MEETINGS, PROJECT_HEADINGS
-from pm_ai.domain.event_entries import MalformedEntry
 from pm_ai.domain.events import MessagePayload, NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import (
     Cursor,
@@ -41,7 +41,7 @@ from pm_ai.domain.handles import person_handle
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.meetings import Meeting
 from pm_ai.platform.paths import ScopePaths
-from pm_ai.ports import KeyNotFound
+from pm_ai.ports import DecryptionFailed, KeyNotFound
 
 NOW = datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
 """12:30 in Europe/Warsaw — mid-morning, so a day can hold both a meeting that
@@ -409,58 +409,152 @@ def test_a_malformed_goals_file_refuses_and_leaves_yesterdays_file_intact(tmp_pa
     assert written(built).encode("utf-8") == yesterday
 
 
-def test_a_malformed_event_log_segment_refuses_and_leaves_the_file_intact(tmp_path):
-    """The third input's refusal path, which had no row until the 2026-09-02 review."""
-    built = daemon(tmp_path, _Calendar("graph:contoso"))
+def _unreadable_log_section(built, *, scope: DataScope = PERSONAL) -> dict[str, str]:
+    """Render, assert the file was written, and return its sections."""
+    path = run_dashboard(built, scope=scope, now=NOW)  # returns: the command exits 0
+    return sections(path.read_text(encoding="utf-8"))
+
+
+def _assert_the_log_failure_is_stated(body: dict[str, str], *, segment: str) -> None:
+    """The failure sentence names the segment; the three absences hold."""
+    section = body["Proactive Enablement"]
+    assert "The event log could not be read" in section
+    assert segment in section
+    assert "event log between" not in section
+    assert "the connector reports" not in section.casefold()
+    assert "sign-in" not in section and "predates" not in section
+
+
+def test_a_malformed_event_log_segment_is_stated_and_the_file_is_written(tmp_path):
+    """Acceptance 2 (`23c`, superseding `23b`'s "malformed segment → refused").
+
+    A hand-edited or corrupt segment, written straight to disk: the command
+    exits zero, the new file names the segment and the reason, and the other
+    three sections render from their own inputs. A Graph row lacking `user_id`
+    is enrolled too — the failure sentence is all the section says.
+    """
+    built = daemon(
+        tmp_path,
+        _Calendar("graph:contoso", live=(meeting("m_sync", "Payments Sync"),)),
+    )
     author_goals(built)
+    _save_row(built, "graph:work", _graph_row("graph:work", None))
     yesterday = run_dashboard(built, now=NOW).read_bytes()
 
-    # Written straight to disk rather than through the writer, which is what
-    # the matrix row says: a hand-edited or corrupt segment. `write_artifact`
-    # refuses a ledger outright, and that refusal is the reason this file can
-    # only ever arrive from outside pm-ai.
     segments = built.storage.paths.resolve(PERSONAL, "event_log/", create=True)
     (segments / "2026-09.md").write_bytes(b"this line is not a ledger entry\n")
-    with pytest.raises(MalformedEntry, match="2026-09.md"):
-        run_dashboard(built, now=NOW)
+    body = _unreadable_log_section(built)
 
-    assert written(built).encode("utf-8") == yesterday
+    assert written(built).encode("utf-8") != yesterday
+    _assert_the_log_failure_is_stated(body, segment="2026-09.md")
+    assert "record marker" in body["Proactive Enablement"]  # the ledger's reason
+    assert "Payments Sync" in body["Time-Critical Activities"]
+    assert "Reach staff engineer" in body["3-Tier Strategic Milestones"]
+    assert "Synthesis is not enabled" in body["Leadership Notes"]
+    # Saved nowhere: the log is exactly the corrupt line it was.
+    assert (segments / "2026-09.md").read_bytes() == b"this line is not a ledger entry\n"
 
 
-def test_a_message_line_hand_edited_to_drop_its_channel_refuses_the_render(tmp_path):
-    """Story 2m: a line that parses and does not decode. Written by the real
-    writer, then hand-edited the way a person might; the render refuses naming
-    the field and the entry, and yesterday's file is left intact."""
+def test_an_entry_of_an_unknown_kind_is_stated(tmp_path):
     built = daemon(tmp_path, _Calendar("graph:contoso"))
-    author_goals(built)
-    yesterday = run_dashboard(built, now=NOW).read_bytes()
-
-    built.storage.persist_events(
-        (
-            NormalizedEvent(
-                scope=PERSONAL,
-                type=ObservedEventType.MESSAGE_POSTED,
-                source_ref=SourceRef.parse("graph:alpha:message:m1"),
-                actor=person_handle("email", "dana@example.com"),
-                occurred_at=NOW - timedelta(minutes=5),
-                payload=MessagePayload(channel="#payments", excerpt="hello"),
-            ),
-        ),
-        scope=PERSONAL,
-    )
+    _persist(built, _message("m1"))
     segment = built.storage.paths.resolve(PERSONAL, "event_log/") / "2026-09.md"
     line = segment.read_text(encoding="utf-8")
-    assert " p.channel=#payments" in line
-    segment.write_text(line.replace(" p.channel=#payments", ""), encoding="utf-8")
-    entry_id = line[3 : line.index("]")]
+    segment.write_text(line.replace("message_posted", "carrier_pigeon", 1), encoding="utf-8")
 
-    with pytest.raises(MalformedEntry) as refusal:
-        run_dashboard(built, now=NOW)
-    assert "p.channel" in str(refusal.value)
-    assert entry_id in str(refusal.value)
-    assert NOW.isoformat() in str(refusal.value)
+    _assert_the_log_failure_is_stated(
+        _unreadable_log_section(built), segment="2026-09.md"
+    )
 
-    assert written(built).encode("utf-8") == yesterday
+
+def test_a_segment_that_is_not_utf8_is_stated_naming_it(tmp_path):
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    segments = built.storage.paths.resolve(PERSONAL, "event_log/", create=True)
+    (segments / "2026-09.md").write_bytes(b"- [evt_\xff] message_posted\n")
+
+    body = _unreadable_log_section(built)
+    _assert_the_log_failure_is_stated(body, segment="2026-09.md")
+    assert (
+        "2026-09.md in personal's event log is not valid UTF-8 text"
+        in body["Proactive Enablement"]
+    )
+
+
+def test_a_segment_listed_then_missing_is_stated(tmp_path, monkeypatch):
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    monkeypatch.setattr(
+        built.storage, "event_log_segments", lambda *, scope: ("2026-08.md",)
+    )
+    _assert_the_log_failure_is_stated(
+        _unreadable_log_section(built), segment="2026-08.md"
+    )
+
+
+def _segment_read_raises(built, monkeypatch, error: Exception) -> None:
+    """A stand-in for the segment read that raises — no file mode is touched,
+    so the outcome does not depend on who runs the suite."""
+
+    def refuse(*, scope, name):
+        raise error
+
+    monkeypatch.setattr(built.storage, "read_event_log_segment", refuse)
+
+
+def test_a_segment_that_cannot_be_read_from_disk_is_stated(tmp_path, monkeypatch):
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _persist(built, _message("m1"))
+    _segment_read_raises(
+        built,
+        monkeypatch,
+        PermissionError(13, "Permission denied", "/root/event_log/2026-09.md"),
+    )
+    body = _unreadable_log_section(built)
+    _assert_the_log_failure_is_stated(body, segment="2026-09.md")
+    assert "Permission denied" in body["Proactive Enablement"]
+
+
+def test_a_segment_that_cannot_be_decrypted_is_stated(tmp_path, monkeypatch):
+    """`DecryptionFailed` is a segment that could not be read: stated, never a
+    stopped render. Raised through the storage service's own wrapper, which
+    names the segment and the log."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _persist(built, _message("m1"))
+
+    original = built.storage.read_artifact
+
+    def unopenable(**kwargs):
+        if kwargs.get("artifact") == "event_log/":
+            raise DecryptionFailed("the tag did not verify")
+        return original(**kwargs)
+
+    monkeypatch.setattr(built.storage, "read_artifact", unopenable)
+    body = _unreadable_log_section(built)
+    _assert_the_log_failure_is_stated(body, segment="2026-09.md")
+    section = body["Proactive Enablement"]
+    assert "could not be decrypted" in section
+    assert "personal" in section and "event log" in section
+
+
+def test_a_message_line_hand_edited_to_drop_its_channel_is_counted(tmp_path):
+    """Story 2m's line that parses and does not decode, now counted in the
+    footnote (`23c`) rather than refusing the render; the others render."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _persist(built, _message("m1", excerpt="hello"), _message("m2", excerpt="still here"))
+    segment = built.storage.paths.resolve(PERSONAL, "event_log/") / "2026-09.md"
+    lines = segment.read_text(encoding="utf-8").split("\n")
+    target = next(i for i, line in enumerate(lines) if "p.excerpt=hello" in line)
+    lines[target] = lines[target].replace(" p.channel=#payments", "")
+    segment.write_text("\n".join(lines), encoding="utf-8")
+
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert "still here" in section
+    assert "hello" not in section
+    assert "1 message log entry carries fields that could not be decoded" in section
+    # Named well enough to find by hand: the entry id and the segment.
+    entry_id = lines[target][3 : lines[target].index("]")]
+    assert f"(`{entry_id}` in `2026-09.md`)" in section
 
 
 def test_an_unset_display_timezone_is_refused_before_anything_is_read(tmp_path):
@@ -1068,3 +1162,256 @@ def _log_bytes(built, scope: DataScope) -> tuple[bytes, ...]:
         built.storage.read_event_log_segment(scope=scope, name=name).encode("utf-8")
         for name in built.storage.event_log_segments(scope=scope)
     )
+
+
+
+# ── Story 23c — mentions from the saved connector rows, and scope isolation ──
+
+PM_ID = "0d9e3c4f-1a2b-4c3d-8e9f-a0b1c2d3e4f5"
+OTHER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+APPLICATION = DataScope(ScopeKind.APPLICATION)
+
+
+def _graph_row(instance: str, user_id: object, *, enabled: bool = True) -> dict:
+    row: dict[str, object] = {"instance": instance, "system": "graph", "enabled": enabled}
+    if user_id is not None:
+        row["user_id"] = user_id
+    return row
+
+
+def _save_row(built, instance: str, row: dict) -> None:
+    """A `connectors/<instance>.json` row, through the single writer."""
+    built.storage.write_artifact(
+        json.dumps(row).encode("utf-8"),
+        scope=APPLICATION,
+        artifact="connectors/",
+        name=f"{instance}.json",
+    )
+
+
+def _message(
+    native: str,
+    *,
+    scope: DataScope = PERSONAL,
+    excerpt: str | None = None,
+    mentions: tuple[str, ...] | None = None,
+    sender: str = OTHER_ID,
+) -> NormalizedEvent:
+    """A message as `33d` writes one: a Graph sender handle, channel, excerpt."""
+    return NormalizedEvent(
+        scope=scope,
+        type=ObservedEventType.MESSAGE_POSTED,
+        source_ref=SourceRef.parse(f"graph:alpha:message:{native}"),
+        actor=person_handle("graph", sender),
+        occurred_at=NOW - timedelta(minutes=5),
+        payload=MessagePayload(channel="#payments", excerpt=excerpt, mentions=mentions),
+    )
+
+
+def _persist(built, *events: NormalizedEvent, scope: DataScope = PERSONAL) -> None:
+    built.storage.persist_events(tuple(events), scope=scope)
+
+
+def _clocked(tmp_path: Path):
+    """A daemon whose storage clock the test moves, so entries differ in age."""
+    clock = [NOW]
+    built = build(
+        tmp_path,
+        "alpha",
+        now=lambda: clock[0],
+        keychain=_NoKey(),
+        config=Config(display_timezone=ZONE),
+    )
+    built.connectors = {"graph:contoso": _Calendar("graph:contoso")}
+    return built, clock
+
+
+def _signal_lines(text: str) -> list[str]:
+    body = sections(text)["Proactive Enablement"]
+    return [line for line in body.split("\n") if line.startswith("- **")]
+
+
+def test_a_mention_of_the_pm_is_listed_first_marked_and_the_rest_newest_first(tmp_path):
+    """Acceptance 1 — one message mentioning the PM's recorded `user_id`, three not."""
+    built, clock = _clocked(tmp_path)
+    _save_row(built, "graph:work", _graph_row("graph:work", PM_ID))
+    for minutes, native, mentions, excerpt in (
+        (240, "m_mention", (f"graph:{PM_ID}",), "can you approve?"),
+        (180, "m_old", (), "oldest"),
+        (120, "m_mid", (f"graph:{OTHER_ID}",), "middle"),
+        (60, "m_new", None, "newest"),
+    ):
+        clock[0] = NOW - timedelta(minutes=minutes)
+        _persist(built, _message(native, excerpt=excerpt, mentions=mentions))
+    clock[0] = NOW
+
+    lines = _signal_lines(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))
+    assert lines == [
+        f"- **08:30** graph:{OTHER_ID} in #payments — can you approve? — mentions you",
+        f"- **11:30** graph:{OTHER_ID} in #payments — newest",
+        f"- **10:30** graph:{OTHER_ID} in #payments — middle",
+        f"- **09:30** graph:{OTHER_ID} in #payments — oldest",
+    ]
+
+
+def test_a_graph_row_without_a_user_id_marks_nothing_and_names_its_sign_in(tmp_path):
+    """Acceptance 3."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _save_row(built, "graph:work", _graph_row("graph:work", None))
+    _persist(built, _message("m1", mentions=(f"graph:{PM_ID}",)))
+
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert "mentions you" not in section
+    sign_in = [line for line in section.split("\n") if "predates" in line]
+    assert len(sign_in) == 1
+    assert "`graph:work`" in sign_in[0]
+    assert "`pm-ai connector sign-in graph:work`" in sign_in[0]
+
+
+def test_a_disabled_rows_user_id_still_marks_and_prints_no_sign_in_line(tmp_path):
+    """Matrix: disabled Graph row — its handle counts; no sign-in line for it."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _save_row(built, "graph:old", _graph_row("graph:old", PM_ID, enabled=False))
+    _save_row(built, "graph:off", _graph_row("graph:off", None, enabled=False))
+    _persist(built, _message("m1", mentions=(f"graph:{PM_ID}",)))
+
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert _signal_lines(f"## Proactive Enablement\n\n{section}")[0].endswith(
+        "mentions you"
+    )
+    assert "predates" not in section
+
+
+def test_a_row_of_an_unknown_system_is_never_read_for_the_pm(tmp_path):
+    """Matrix: unknown-system row — its `user_id` marks nothing, and no sign-in line."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _save_row(built, "jira:x", {"instance": "jira:x", "system": "jira", "enabled": True, "user_id": PM_ID})
+    _save_row(built, "jira:y", {"instance": "jira:y", "system": "jira", "enabled": True})
+    _persist(built, _message("m1", mentions=(f"graph:{PM_ID}",)))
+
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert "mentions you" not in section
+    assert "predates" not in section
+
+
+def test_the_project_dashboard_marks_a_mention_from_the_same_rows(tmp_path):
+    """Matrix: project dashboard, mention — `--scope project:alpha`."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _save_row(built, "graph:work", _graph_row("graph:work", PM_ID))
+    _persist(
+        built,
+        _message("p1", scope=ALPHA, excerpt="alpha ask", mentions=(f"graph:{PM_ID}",)),
+        scope=ALPHA,
+    )
+
+    lines = _signal_lines(
+        run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8")
+    )
+    assert lines == [f"- **12:30** graph:{OTHER_ID} in #payments — alpha ask — mentions you"]
+
+
+def test_each_dashboard_reads_only_its_own_scopes_log(tmp_path):
+    """Matrix: scope isolation, both directions, end to end."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _persist(built, _message("personal1", excerpt="personal only"))
+    _persist(
+        built, _message("project1", scope=ALPHA, excerpt="alpha only"), scope=ALPHA
+    )
+
+    personal = run_dashboard(built, now=NOW).read_text(encoding="utf-8")
+    project = run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8")
+    assert "personal only" in personal and "alpha only" not in personal
+    assert "alpha only" in project and "personal only" not in project
+
+
+def test_twenty_three_messages_list_twenty_and_say_three_more(tmp_path):
+    """Acceptance 4."""
+    built, clock = _clocked(tmp_path)
+    for n in range(23):
+        clock[0] = NOW - timedelta(minutes=n + 1)
+        _persist(built, _message(f"m{n:02d}", excerpt=f"message {n:02d}"))
+    clock[0] = NOW
+
+    text = run_dashboard(built, now=NOW).read_text(encoding="utf-8")
+    assert len(_signal_lines(text)) == 20
+    assert (
+        "3 more message signals in this window are not shown; they are in the "
+        "event log" in text
+    )
+
+
+
+@pytest.mark.parametrize("user_id", [None, "", "   ", 42], ids=["absent", "blank", "whitespace", "not text"])
+def test_every_unusable_user_id_marks_nothing_and_names_the_sign_in(tmp_path, user_id):
+    """Matrix: no `user_id` on a row — absent, blank, whitespace, or not text."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    row = _graph_row("graph:work", None)
+    if user_id is not None:
+        row["user_id"] = user_id
+    _save_row(built, "graph:work", row)
+    _persist(built, _message("m1", mentions=(f"graph:{PM_ID}",)))
+
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert "mentions you" not in section
+    assert [line for line in section.split("\n") if "predates" in line] == [
+        "The sign-in for `graph:work` predates pm-ai recording the user id, so no "
+        "message here is marked as mentioning you for that connector. Run "
+        "`pm-ai connector sign-in graph:work` to record it."
+    ]
+
+
+def test_the_sign_in_line_names_the_rows_own_instance(tmp_path):
+    """The row's `instance` value, not its file name."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _save_row(built, "graph:file-name", _graph_row("graph:tenant-a", None))
+
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert "`pm-ai connector sign-in graph:tenant-a`" in section
+    assert "file-name" not in section
+
+
+def test_the_pms_own_row_being_corrupt_is_said_never_silent(tmp_path):
+    """The PM's only Graph row cannot be read: nothing can be marked, and the
+    section says mentions could not be checked against it, and why."""
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    built.storage.write_artifact(
+        b"{not json", scope=APPLICATION, artifact="connectors/", name="graph:work.json"
+    )
+    _persist(built, _message("m1", mentions=(f"graph:{PM_ID}",)))
+
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert "mentions you" not in section
+    assert (
+        "Mentions could not be checked against `graph:work.json`: it is not valid JSON."
+        in section
+    )
+
+
+def test_connectors_that_cannot_be_listed_are_said(tmp_path, monkeypatch):
+    built = daemon(tmp_path, _Calendar("graph:contoso"))
+    _persist(built, _message("m1", mentions=(f"graph:{PM_ID}",)))
+    original = built.storage.list_collection
+
+    def refuse(*, scope, artifact):
+        if artifact == "connectors/":
+            raise PermissionError(13, "Permission denied", "connectors")
+        return original(scope=scope, artifact=artifact)
+
+    monkeypatch.setattr(built.storage, "list_collection", refuse)
+    section = sections(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))[
+        "Proactive Enablement"
+    ]
+    assert "mentions you" not in section
+    assert "Mentions could not be checked against `connectors/`: it could not be listed" in section

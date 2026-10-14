@@ -91,7 +91,9 @@ from pm_ai.core.connector_enrolment import (
     UserNotRecorded,
     assert_enrollable,
     assert_unconfigured,
+    connector_configurations,
     enrol_connector,
+    stored_credentials,
 )
 from pm_ai.ports import (
     ArtifactBusy,
@@ -99,6 +101,7 @@ from pm_ai.ports import (
     EmptyCapture,
     MalformedCaptureName,
     CredentialProbePort,
+    DecryptionFailed,
     DaemonPort,
     DaemonRefused,
     DuplicateConnector,
@@ -107,6 +110,7 @@ from pm_ai.ports import (
     KeyNotFound,
     ProbeFailed,
     ProbeUnreachable,
+    StoragePort,
     UnknownConnectorSystem,
 )
 
@@ -118,6 +122,8 @@ __all__ = [
     "EXIT_UNHEALTHY",
     "EXIT_USAGE",
     "Command",
+    "ConnectorsOnDisk",
+    "DEFAULT_GRAPH_INSTANCE",
     "Context",
     "FirstRun",
     "GoalBook",
@@ -246,6 +252,53 @@ class FirstRun(Protocol):
 
     def diagnose(self) -> HealthReport:
         """`1g`'s probes, run against the machine as it is now."""
+        ...
+
+    @property
+    def storage(self) -> StoragePort:
+        """A writer over the application scope, for step 4 (story 4p).
+
+        Where a Graph connector's row and sealed sign-in land, and what step 4
+        reads `connectors/` through. Its own, because `setup` composes no
+        daemon: `Context.daemon` is not there to lend one.
+        """
+        ...
+
+    @property
+    def graph_sign_in(self) -> GraphSignIn:
+        """`connector add graph`'s sign-in and checks, over `storage` (story 4p).
+
+        `Context.graph_sign_in` is not used: it is bound to whatever `main`
+        composed, and step 4 must write through the writer it checked with.
+        Obtaining it says, once, that encryption is off when it is: setup
+        builds no daemon, so nothing else printed that before a sign-in is
+        sealed.
+        """
+        ...
+
+    def connectors(self) -> ConnectorsOnDisk:
+        """`4n`'s read of `connectors/`, now: step 4's "already done" check."""
+        ...
+
+
+@runtime_checkable
+class ConnectorsOnDisk(Protocol):
+    """What step 4 needs of `4n`'s read of `connectors/` (story 4p).
+
+    `graph` decides whether the step is already done — an enabled Graph row,
+    as an enrolled key is for step 1. `remedy` is `doctor`'s `connectors`
+    line's own remediation for this machine, word for word, which is what a
+    "no" closes with.
+    """
+
+    @property
+    def graph(self) -> tuple[str, ...]:
+        """Every enabled Graph row's instance name; empty when there is none."""
+        ...
+
+    @property
+    def remedy(self) -> str:
+        """The `connectors` line's remediation, as `doctor` prints it."""
         ...
 
 
@@ -991,11 +1044,18 @@ def _connector_add(context: Context) -> int:
 
     with _enrolment_refusals():
         if system == "graph":
-            return _connector_add_graph(context, daemon, instance)
+            graph = context.graph_sign_in
+            if graph is None:
+                raise Refusal(
+                    "no Graph sign-in was supplied to the CLI, so a Graph connector "
+                    "cannot be enrolled. That is a wiring fault in pm-ai, not anything "
+                    "about this machine; nothing was asked and nothing was saved."
+                )
+            return _connector_add_graph(daemon.storage, graph, instance)
         return _connector_add_gitlab(context, daemon, instance)
 
 
-def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) -> int:
+def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str) -> int:
     """`pm-ai connector add graph <instance>`: questions, sign-in, check, save (8l).
 
     The order is the point, and each step is placed where its refusal costs the
@@ -1026,16 +1086,12 @@ def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) ->
     The sign-in token never reaches this function's output: it is handed to
     enrolment as the credential, and enrolment's own redaction applies to the
     one sentence printed from the check.
-    """
-    graph = context.graph_sign_in
-    if graph is None:
-        raise Refusal(
-            "no Graph sign-in was supplied to the CLI, so a Graph connector "
-            "cannot be enrolled. That is a wiring fault in pm-ai, not anything "
-            "about this machine; nothing was asked and nothing was saved."
-        )
 
-    assert_enrollable(daemon.storage, system="graph", instance=instance)
+    Takes the writer and the sign-in rather than a context, so `pm-ai setup`'s
+    step 4 (story 4p) runs this same path with its own two — setup composes no
+    daemon. Its refusals leave raw; each caller words them.
+    """
+    assert_enrollable(storage, system="graph", instance=instance)
     graph.ready()
 
     if not sys.stdin.isatty():
@@ -1081,7 +1137,7 @@ def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) ->
     # name check under its own reading of the stores and seals. Its "probe" is
     # the check that just ran, so it is reported rather than repeated.
     answer = enrol_connector(
-        daemon.storage,
+        storage,
         system="graph",
         instance=instance,
         credential=signed.credential,
@@ -1728,8 +1784,17 @@ def _ask(prompt: str) -> str:
         ) from closed
 
 
+class _SetupStopped(Refusal):
+    """Setup's own "no admissible answer" refusal, already worded for its step."""
+
+
 def _answer[T](
-    question: str, interpret: Callable[[str], T], *, step: str, default: str | None = None
+    question: str,
+    interpret: Callable[[str], T],
+    *,
+    step: str,
+    default: str | None = None,
+    done: str = "Every earlier step stays done",
 ) -> T:
     """Ask until `interpret` accepts an answer, at most `SETUP_ATTEMPTS` times.
 
@@ -1747,10 +1812,10 @@ def _answer[T](
             return interpret(_ask(prompt))
         except (_Inadmissible, ConfigRefused) as refused:
             print(f"  {refused}", file=sys.stderr)
-    raise Refusal(
+    raise _SetupStopped(
         f"setup stopped at {step}: no admissible answer to {question!r} after "
-        f"{SETUP_ATTEMPTS} attempts. Every earlier step stays done; run "
-        f"`pm-ai setup` again to continue from here."
+        f"{SETUP_ATTEMPTS} attempts. {done}; run `pm-ai setup` again to "
+        f"continue from here."
     )
 
 
@@ -1762,7 +1827,7 @@ def _setup_key(first_run: FirstRun) -> None:
     the operator asked for a ready machine, not for a new key, and one is
     there. Nothing replaces it — `enrol` never does.
     """
-    print("[1/3] master key — first, because every encrypted write refuses without it")
+    print("[1/4] master key — first, because every encrypted write refuses without it")
     try:
         name = enrol(first_run.keychain)
     except KeyAlreadyEnrolled:
@@ -1793,7 +1858,7 @@ def _setup_project(context: Context) -> None:
     one. A changed path for an id already registered is `4d`'s refusal and
     ends setup here: relocating a tree is a migration, not a setup step.
     """
-    print("[2/3] project — second, because no path resolves until one is registered")
+    print("[2/4] project — second, because no path resolves until one is registered")
     path = _answer("project directory", _project_answer, step="step 2 (project)")
     alias = _answer(
         "project id (empty to use the directory's name)",
@@ -1848,14 +1913,20 @@ _YES = frozenset({"y", "yes"})
 _NO = frozenset({"n", "no"})
 
 
+def _y_or_n(raw: str) -> bool | None:
+    """Setup's y/n answer: `True`, `False`, or `None` for an empty one."""
+    text = raw.strip().lower()
+    if not text:
+        return None
+    if text in _YES or text in _NO:
+        return text in _YES
+    raise _Inadmissible(f"{raw.strip()!r} is not y or n.")
+
+
 def _verbose(current: Config) -> Callable[[str], Config]:
     def interpret(raw: str) -> Config:
-        text = raw.strip().lower()
-        if not text:
-            return current
-        if text in _YES or text in _NO:
-            return replace(current, verbose_logging=text in _YES)
-        raise _Inadmissible(f"{raw.strip()!r} is not y or n.")
+        answer = _y_or_n(raw)
+        return current if answer is None else replace(current, verbose_logging=answer)
 
     return interpret
 
@@ -1863,8 +1934,8 @@ def _verbose(current: Config) -> Callable[[str], Config]:
 def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) -> None:
     """Step 3: `config.toml` — asked for, rendered by `4g`, written once.
 
-    Last because it is the only step whose absence is survivable: every key is
-    optional. Which keys are asked is decided from what `load_config` read, not
+    After the key and the project because its absence is survivable: every
+    key is optional. Which keys are asked is decided from what `load_config` read, not
     from the bytes, so a file holding only a BOM, comments or whitespace is a
     first-run file:
 
@@ -1880,7 +1951,7 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
     it at the prompt that asked. Who the PM is is not asked: it comes from the
     Graph connector rows (story 2o).
     """
-    print("[3/3] config.toml — last, because it is the only step a machine survives without")
+    print("[3/4] config.toml — after the project, because every key in it is optional")
     first_run_file = current == Config()
     ask_rate = not current.blended_hourly_rate
     ask_zone = not current.display_timezone
@@ -1922,8 +1993,244 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
     print(f"      written to {written}")
 
 
+DEFAULT_GRAPH_INSTANCE = "graph:work"
+"""The name Enter keeps at step 4's name question, when it is free (story 4p)."""
+
+GRAPH_QUESTION = "add a Microsoft Graph connector now? (y/n)"
+"""Step 4's one question; Enter is no (story 4p)."""
+
+_STEP_4 = "step 4 (Microsoft Graph connector)"
+
+_STEPS_DONE = "Steps 1–3 stay done"
+
+_NOTHING_SAVED = "nothing was saved for the connector"
+
+_RUN_AGAIN = (
+    "Run `pm-ai setup` again, or `pm-ai connector add graph <name>`, to add one."
+)
+
+_STATE_UNREADABLE = (
+    DecryptionFailed,
+    KeychainUnavailable,
+    KeyNotFound,
+    ArtifactBusy,
+    OSError,
+    ValueError,
+)
+"""What reading back the sealed store and `connectors/` can raise."""
+
+
+class _StepFour:
+    """What step 4 has chosen so far, so its ending can say what is on disk."""
+
+    def __init__(self) -> None:
+        self.storage: StoragePort | None = None
+        self.instance: str | None = None
+
+
+def _graph_instance(storage: StoragePort) -> str:
+    """Step 4's name question, each typed name checked by `assert_enrollable`.
+
+    Enter keeps `DEFAULT_GRAPH_INSTANCE` only when that name is free — no row
+    and no sealed entry under it, disabled or not. When it is in use, or
+    whether it is free could not be checked (the store busy or unreadable),
+    the question offers no default and a blank answer is asked again. A
+    malformed or in-use name is named and asked again, at most
+    `SETUP_ATTEMPTS` times. Setup checks the name first so that the shared
+    path's own check of it cannot fail unless the machine changed meanwhile.
+    """
+    default: str | None = None
+    try:
+        assert_enrollable(storage, system="graph", instance=DEFAULT_GRAPH_INSTANCE)
+        default = DEFAULT_GRAPH_INSTANCE
+        question = "connector name"
+    except DuplicateConnector:
+        question = (
+            f"connector name ({DEFAULT_GRAPH_INSTANCE} is in use; type another, "
+            f"as graph:<name>)"
+        )
+    except (ArtifactBusy, OSError):
+        # Not a reason to stop: a typed name is checked on its own, and that
+        # check names whatever is wrong.
+        question = (
+            f"connector name (whether {DEFAULT_GRAPH_INSTANCE} is free could not "
+            f"be checked; type one, as graph:<name>)"
+        )
+
+    def interpret(raw: str) -> str:
+        typed = raw.strip()
+        if not typed:
+            if default is not None:
+                return default
+            raise _Inadmissible("a name is required here; there is no default.")
+        try:
+            assert_enrollable(storage, system="graph", instance=typed)
+        except (MalformedInstanceName, DuplicateConnector) as refused:
+            raise _Inadmissible(str(refused)) from refused
+        return typed
+
+    return _answer(
+        question,
+        interpret,
+        step=_STEP_4,
+        default=default,
+        done=f"{_STEPS_DONE} and {_NOTHING_SAVED}",
+    )
+
+
+def _graph_step(first_run: FirstRun, step: _StepFour) -> None:
+    """Step 4's body: the done check, the question, then `connector add graph`."""
+    on_disk = first_run.connectors()
+    if on_disk.graph:
+        print(
+            f"      already enrolled: {', '.join(on_disk.graph)}; nothing was "
+            f"asked or written. Another is added with `pm-ai connector add graph "
+            f"<name>`."
+        )
+        return
+    wanted = _answer(
+        GRAPH_QUESTION,
+        lambda raw: _y_or_n(raw) is True,
+        step=_STEP_4,
+        default="n",
+        done=_STEPS_DONE,
+    )
+    if not wanted:
+        print("      skipped; nothing was asked about Graph and nothing was written.")
+        print(f"      {on_disk.remedy}")
+        return
+    storage = first_run.storage
+    step.storage = storage
+    graph = first_run.graph_sign_in
+    # Before the name question: a missing runtime extra is said before any
+    # connector question is asked, as `connector add graph` says it.
+    graph.ready()
+    step.instance = _graph_instance(storage)
+    code = _connector_add_graph(storage, graph, step.instance)
+    if code != EXIT_OK:
+        raise Refusal(f"adding {step.instance} ended with exit code {code}.")
+
+
+def _setup_connector(first_run: FirstRun) -> None:
+    """Step 4: an optional Microsoft Graph connector (story 4p).
+
+    Done when an enabled Graph row exists, as an enrolled key is: its names are
+    printed and nothing is asked or written. Otherwise one y/n question, Enter
+    meaning no. "yes" asks the name, then runs `connector add graph`'s
+    questions, sign-in, check and save through `_connector_add_graph` itself,
+    never a copy of it. Those questions keep the command's own behaviour inside
+    setup: they are asked again until answered, with no attempt limit, as in
+    the command; Ctrl-C or Ctrl-D leaves them.
+
+    Every way the step ends early — the read of `connectors/` included — is
+    setup's refusal at step 4, naming steps 1–3 as done, an interruption
+    anywhere in it included, so the shared command's own interrupt sentence is
+    not what is printed. What it says was saved is read back from the sealed
+    store and `connectors/` at that moment, never assumed: a credential sealed
+    with no row, or a connector fully enrolled before the interruption, is
+    said as such.
+    """
+    print(
+        "[4/4] Microsoft Graph connector — optional: the machine is ready without "
+        "one, and adding one signs in at Microsoft in a browser and needs an app "
+        "(client) id"
+    )
+    step = _StepFour()
+    try:
+        with _enrolment_refusals(
+            command="connector add graph", then="then run `pm-ai setup` again"
+        ):
+            _graph_step(first_run, step)
+    except (KeyboardInterrupt, EOFError) as stopped:
+        raise _step_four_ended(step, None) from stopped
+    except _SetupStopped:
+        raise
+    except Refusal as refused:
+        cause = refused.__cause__
+        if isinstance(cause, (KeyboardInterrupt, EOFError)):
+            raise _step_four_ended(step, None) from refused
+        raise _step_four_ended(step, refused) from refused
+
+
+def _saved(step: _StepFour) -> tuple[str, str | None]:
+    """What is on disk for the connector now, and the one remedy that fits it.
+
+    Read back rather than inferred from where the step stopped: an
+    interruption can land between the seal and the row, or after both.
+    """
+    instance, storage = step.instance, step.storage
+    if instance is None or storage is None:
+        return _NOTHING_SAVED, _RUN_AGAIN
+    try:
+        sealed = instance in stored_credentials(storage)
+        row = instance in connector_configurations(storage)
+    except _STATE_UNREADABLE as unread:
+        return (
+            f"whether anything was saved for {instance} could not be read back "
+            f"({unread})",
+            "`pm-ai doctor` names the connectors enrolled.",
+        )
+    if sealed and row:
+        return (
+            f"{instance} WAS saved — its settings row and sealed sign-in are both "
+            f"on disk, so it is enrolled and becomes active at the next start",
+            None,
+        )
+    if sealed:
+        return (
+            f"{instance}'s sign-in is sealed in the credentials file and its "
+            f"settings row was not written, so it is NOT enrolled and will not "
+            f"harvest",
+            f"No pm-ai command removes a sealed entry yet, so {instance} stays in "
+            f"use; enrol the connector under a different name with "
+            f"`pm-ai setup` or `pm-ai connector add graph <name>`.",
+        )
+    if row:
+        return (
+            f"{instance}'s settings row is on disk with no sealed sign-in, so it "
+            f"will not harvest",
+            f"`pm-ai connector sign-in {instance}` signs it in.",
+        )
+    return _NOTHING_SAVED, _RUN_AGAIN
+
+
+_CARRIES_REMEDY = ("`pm-ai ", "uv sync")
+"""Text in a refusal that already tells the person what to run."""
+
+
+def _sentence(text: str) -> str:
+    text = text.strip()
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _step_four_ended(step: _StepFour, refused: Refusal | None) -> Refusal:
+    """Step 4's ending as setup's refusal: the cause, what is on disk, one remedy.
+
+    `refused` is `None` for an interruption. The orphaned-credential refusal's
+    own sentence is replaced by what `_saved` reads back, because its remedy —
+    run the add once more — is refused as a name in use.
+    """
+    state, remedy = _saved(step)
+    if refused is None:
+        cause = f"setup was interrupted at {_STEP_4}."
+    else:
+        inner = refused.__cause__
+        if isinstance(inner, OrphanedCredential):
+            failed = inner.__cause__
+            reason = f"its settings row could not be written: {failed}" if failed else str(inner)
+        else:
+            reason = str(refused)
+        cause = f"setup stopped at {_STEP_4}: {_sentence(reason)}"
+        if state == _NOTHING_SAVED and any(m in reason for m in _CARRIES_REMEDY):
+            remedy = None  # the cause already says what to run
+    parts = [cause, f"{_STEPS_DONE}; {state}."]
+    if remedy:
+        parts.append(remedy)
+    return Refusal(" ".join(parts))
+
+
 def _setup(context: Context) -> int:
-    """`pm-ai setup` — key, project, config, then `1g`'s probes (story 4h).
+    """`pm-ai setup` — key, project, config, Graph, then `1g`'s probes (stories 4h, 4p).
 
     Nothing here is reimplemented: `4b` enrols, `4k` registers, `4g` renders.
     This owns the order, the prompts, and the claim at the end — which is the
@@ -1971,6 +2278,7 @@ def _setup(context: Context) -> int:
     _setup_key(first_run)
     _setup_project(context)
     _setup_config(first_run, existing, current)
+    _setup_connector(first_run)
 
     print()
     report = first_run.diagnose()
@@ -2379,9 +2687,11 @@ TABLE: Mapping[str, Command] = {
             ),
         },
     ),
-    # `4h`: the one command that sequences the three below it on a new machine.
+    # `4h`: the one command that walks a new machine through the key, a
+    # project and `config.toml` — and, since `4p`, offers a Graph connector.
     "setup": Command(
-        "first run: enrol the key, register a project, write config.toml, then probe",
+        "first run: enrol the key, register a project, write config.toml, "
+        "optionally add a Microsoft Graph connector, then probe",
         _setup,
     ),
     # The three groups, each with the one leaf `4j` hung on it. They were in the
