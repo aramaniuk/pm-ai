@@ -15,7 +15,7 @@ import pytest
 from claim_fakes import InMemoryClaims
 from pm_ai.core import ledger
 from pm_ai.domain.event_entries import EventEntry, MalformedEntry, SelfActionType, render_entry
-from pm_ai.core.rendering import render_project_dashboard
+from pm_ai.core.rendering import PmHandles, render_project_dashboard
 from pm_ai.domain.events import (
     PAYLOAD_FOR,
     CommitPayload,
@@ -171,7 +171,10 @@ def test_a_message_with_mentions_is_persisted_parsed_decoded_and_rendered():
     )
     assert decode_payload(entry) == supplied
 
-    rendered = render_project_dashboard((), (entry,), NOW + timedelta(hours=1), tz=DISPLAY)
+    rendered = render_project_dashboard(
+        (), (entry,), NOW + timedelta(hours=1), tz=DISPLAY,
+        pm=PmHandles(handles=frozenset(), unrecorded=(), unchecked=()),
+    )
     assert (
         f"- **11:00** graph:{DANA_GUID} in #payments — Cache TTL is still 60s in staging"
         in rendered

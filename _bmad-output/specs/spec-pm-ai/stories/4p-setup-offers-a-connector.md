@@ -2,7 +2,8 @@
 title: 'pm-ai setup offers to add a Microsoft Graph connector'
 type: 'feature'
 created: '2026-10-09'
-status: 'draft'
+status: 'done'
+baseline_commit: '258dff3e8cd44a28d5cbb5fb7ae892996b24019c'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -76,11 +77,11 @@ Setup walks a new machine through three steps — master key, one project, `conf
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `_connector_add_graph` takes storage and sign-in; `FirstRun` widened; step 4: done when an enabled Graph row exists, else the y/n question with Enter as no, the name question (default only when `graph:work` is free, checked once with `assert_enrollable`, re-asked up to three times), the shared Graph path, interrupts and refusals wrapped as "setup stopped at step 4", the "no" branch printing `4n`'s remedy; headings `/4` -- the step
-- [ ] `pm_ai/app/entry.py` -- `_FirstRun` gains the storage, the `GraphEnrolment` over it, and `4n`'s reader result -- the root supplies what `surfaces` may not reach
-- [ ] `tests/slice/test_first_run.py` -- every script gains the step-4 answer; `[n/4]`; "no" (asserting `4n`'s sentence), Enter, neither, second-run-enrolled with exit 0 when healthy, GitLab-only and disabled-Graph asked, second-run-asks-again, interrupted-at-the-question rows -- the setup rows
-- [ ] `tests/slice/test_setup_connector_step.py` -- new, reusing `Microsoft` and `machine`: "yes" through to a saved `graph:work` a fresh `build()` holds; a typed name; `test_one_refused_name_is_asked_again_and_the_good_one_is_saved` and `test_three_refused_names_stop_setup_at_step_4`; the default withheld when `graph:work` is in use; declined sign-in, failed check, overrun check and missing runtime packages each stop at step 4 with nothing saved; Ctrl-C at a connector question and during the sign-in wait each give the step-4 refusal without the shared command's interrupt sentence; a sealed credential with an unwritable settings directory names the entry and the next run refuses the name; the token absent from output -- the "yes" rows
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved "`pm-ai setup` has no connector step"
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `_connector_add_graph` takes storage and sign-in; `FirstRun` widened; step 4: done when an enabled Graph row exists, else the y/n question with Enter as no, the name question (default only when `graph:work` is free, checked once with `assert_enrollable`, re-asked up to three times), the shared Graph path, interrupts and refusals wrapped as "setup stopped at step 4", the "no" branch printing `4n`'s remedy; headings `/4` -- the step
+- [x] `pm_ai/app/entry.py` -- `_FirstRun` gains the storage, the `GraphEnrolment` over it, and `4n`'s reader result -- the root supplies what `surfaces` may not reach
+- [x] `tests/slice/test_first_run.py` -- every script gains the step-4 answer; `[n/4]`; "no" (asserting `4n`'s sentence), Enter, neither, second-run-enrolled with exit 0 when healthy, GitLab-only and disabled-Graph asked, second-run-asks-again, interrupted-at-the-question rows -- the setup rows
+- [x] `tests/slice/test_setup_connector_step.py` -- new, reusing `Microsoft` and `machine`: "yes" through to a saved `graph:work` a fresh `build()` holds; a typed name; `test_one_refused_name_is_asked_again_and_the_good_one_is_saved` and `test_three_refused_names_stop_setup_at_step_4`; the default withheld when `graph:work` is in use; declined sign-in, failed check, overrun check and missing runtime packages each stop at step 4 with nothing saved; Ctrl-C at a connector question and during the sign-in wait each give the step-4 refusal without the shared command's interrupt sentence; a sealed credential with an unwritable settings directory names the entry and the next run refuses the name; the token absent from output -- the "yes" rows
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved "`pm-ai setup` has no connector step"
 
 **Acceptance Criteria:**
 - Given a clean machine, when setup runs with `y`, Enter at the name, valid answers and an approved sign-in, then `connectors/graph:work.json` and the sealed sign-in exist as `connector add graph` writes them, the closing report lists `graph:work`, and a fresh `build()` holds a Graph connector of that name.
@@ -96,3 +97,33 @@ Setup walks a new machine through three steps — master key, one project, `conf
 - `uv run pytest -q` -- expected: all pass; the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09)
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**Step 4**
+
+- The step: already done, the question, "no" with the connector line's remedy, "yes" through the shared path; one wrapper for every ending.
+  [`dispatch.py:2021`](../../../../pm_ai/surfaces/cli/dispatch.py#L2021)
+
+- The name question: `graph:work` offered only when free and checkable.
+  [`dispatch.py:1938`](../../../../pm_ai/surfaces/cli/dispatch.py#L1938)
+
+- The same function `connector add graph` runs, now taking a writer and a sign-in.
+  [`dispatch.py:965`](../../../../pm_ai/surfaces/cli/dispatch.py#L965)
+
+- Setup's bounded answers and the shared y/n reading.
+  [`dispatch.py:1698`](../../../../pm_ai/surfaces/cli/dispatch.py#L1698)
+  [`dispatch.py:1823`](../../../../pm_ai/surfaces/cli/dispatch.py#L1823)
+
+**What setup carries without a daemon**
+
+- One writer, the Graph sign-in with the encryption-off warning, and the connectors read.
+  [`entry.py:414`](../../../../pm_ai/app/entry.py#L414)
+
+**Tests**
+
+- Every "yes" path, refusals, interruptions and what each says was saved.
+  [`test_setup_connector_step.py`](../../../../tests/slice/test_setup_connector_step.py)
+
+- The question, "no", and a machine where the step is already done.
+  [`test_first_run.py`](../../../../tests/slice/test_first_run.py)

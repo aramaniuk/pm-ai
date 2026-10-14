@@ -20,6 +20,7 @@ sees.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 
 from pm_ai.core import ledger
@@ -27,7 +28,26 @@ from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.identity import DataScope
 from pm_ai.ports import StoragePort
 
-__all__ = ["EventLog"]
+__all__ = ["EventLog", "LogRead"]
+
+
+class LogRead(tuple[EventEntry, ...]):
+    """The entries a read returned, each with the segment it was read from.
+
+    A tuple, so every caller that wanted the entries has them unchanged. The
+    segments ride beside them for a reader that has to tell the PM where a line
+    is (`23c`'s footnote naming the lines that could not be decoded): an entry
+    carries no segment of its own, and deriving one from `ingested_at` would be
+    a guess the segment's name happens to agree with.
+    """
+
+    segments: tuple[str, ...]
+
+    def __new__(cls, located: Iterable[tuple[str, EventEntry]] = ()) -> LogRead:
+        pairs = tuple(located)
+        read = super().__new__(cls, (entry for _, entry in pairs))
+        read.segments = tuple(segment for segment, _ in pairs)
+        return read
 
 
 class EventLog:
@@ -55,7 +75,7 @@ class EventLog:
         scope: DataScope,
         ingested_since: datetime | None = None,
         ingested_until: datetime | None = None,
-    ) -> tuple[EventEntry, ...]:
+    ) -> LogRead:
         """Every entry in `scope`, in **arrival order**, optionally bounded.
 
         Arrival order — segments by name, lines by position — because that is the
@@ -76,22 +96,27 @@ class EventLog:
         An entry with no `ingested_at` is returned by an unbounded read and
         excluded from a bounded one: the range asks a question that entry cannot
         answer, and guessing either way is worse than leaving it out.
+
+        Returned as a `LogRead`: a tuple of the entries that also names, for each,
+        the segment it came from.
         """
         _assert_comparable(ingested_since, name="ingested_since")
         _assert_comparable(ingested_until, name="ingested_until")
 
-        entries: list[EventEntry] = []
+        located: list[tuple[str, EventEntry]] = []
         for name in self._storage.event_log_segments(scope=scope):
             if not _segment_overlaps(name, ingested_since, ingested_until):
                 continue
             text = self._storage.read_event_log_segment(scope=scope, name=name)
-            entries.extend(ledger.parse_segment(text, source=name))
+            located.extend(
+                (name, entry) for entry in ledger.parse_segment(text, source=name)
+            )
 
         if ingested_since is None and ingested_until is None:
-            return tuple(entries)
-        return tuple(
-            entry
-            for entry in entries
+            return LogRead(located)
+        return LogRead(
+            (name, entry)
+            for name, entry in located
             if _within(entry, ingested_since, ingested_until)
         )
 

@@ -1104,3 +1104,414 @@ def test_setup_step_two_with_an_unusable_sidecar_is_refused_by_name(
     assert "setup stopped at step 2 (project); step 1 stays done" in err
     assert "projects.toml.lock" in err and "Traceback" not in err
     assert "registry could not be written" not in err, "names a file it did not check"
+
+
+# ── Story 11c — `pm-ai transcript drop` ──────────────────────────────────────
+#
+# The surface's rows, against a stand-in pipeline that records what it was
+# handed and, when told to, asks the questions the real one asks. The rows
+# that need the real read, bind, capture and ingest are in
+# `tests/slice/test_transcript_drop.py`, through `main()`.
+
+import os  # noqa: E402
+import socket  # noqa: E402
+from datetime import datetime as _datetime, timezone as _timezone  # noqa: E402
+
+from pm_ai.domain.identity import Actor  # noqa: E402
+from pm_ai.domain.transcripts import CaptureNotIngested, DropInterrupted  # noqa: E402
+
+DROP_VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n<v Andrei>we ship on Friday\n"
+DROP_START = _datetime(2026, 10, 9, 11, 0, tzinfo=_timezone.utc)
+
+
+@dataclasses.dataclass
+class _Dropped:
+    capture: Path
+    meeting_id: str
+    scope: DataScope
+    bound_by: str
+    title: str = "Weekly Sync"
+    start: _datetime = DROP_START
+    staged: int = 1
+    left: int = 0
+    duration_minutes: int | None = None
+    duration_from_last_cue: bool = False
+    notices: tuple[str, ...] = ()
+
+
+class _Drop:
+    """A pipeline stand-in: records each call; `ask` makes it ask like the real one."""
+
+    def __init__(self, *, ask: bool = False, ask_duration: bool = True, raises=None,
+                 answer: _Dropped | None = None) -> None:
+        self.calls: list[dict] = []
+        self.ask = ask
+        self.ask_duration = ask_duration
+        self.raises = raises
+        self.answer = answer
+        self.answers: tuple = ()
+
+    def __call__(self, *, text, file_name, scope, meeting_id, identify, describe):
+        self.calls.append(
+            {"text": text, "file_name": file_name, "scope": scope, "meeting_id": meeting_id}
+        )
+        if self.raises is not None:
+            raise self.raises
+        if self.ask and meeting_id is None:
+            title, start = identify()
+            attendees, duration = describe(self.ask_duration)
+            self.answers = (title, start, attendees, duration)
+        if self.answer is not None:
+            return self.answer
+        return _Dropped(
+            Path("/captures/x-manual.vtt"),
+            meeting_id or "mtg_new",
+            scope,
+            "named" if meeting_id else "minted",
+        )
+
+
+def _drop(argv: list[str], drop: _Drop | None = None) -> int:
+    return cli.dispatch(
+        ["transcript", "drop", *argv],
+        daemon=object(),  # type: ignore[arg-type]
+        diagnose=lambda: None,  # type: ignore[arg-type,return-value]
+        probe_connectors=None,
+        transcript_drop=drop or _Drop(),
+    )
+
+
+@pytest.fixture
+def dropped_file(tmp_path):
+    path = tmp_path / "sync.vtt"
+    path.write_text(DROP_VTT, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["{file}"],
+        ["{file}", "--scope", "alpha"],
+        ["{file}", "--scope", "project:"],
+        ["--scope", "personal"],
+        ["{file}", "--scope"],
+        ["{file}", "--scope", "personal", "--meeting"],
+        ["{file}", "--scope", "personal", "--bogus", "x"],
+        ["{file}", "extra", "--scope", "personal"],
+        ["{file}", "--scope", "personal", "--scope", "personal"],
+    ],
+    ids=["no-scope", "scope-alpha", "project-no-id", "no-file", "scope-no-value",
+         "meeting-no-value", "unknown-option", "two-files", "scope-twice"],
+)
+def test_a_drop_command_line_pm_ai_cannot_read_is_the_syntax_reminder(
+    argv, dropped_file, capsys
+):
+    drop = _Drop()
+    words = [word.replace("{file}", str(dropped_file)) for word in argv]
+    assert _drop(words, drop) == EXIT_USAGE
+    assert "drop <file> --scope <scope> [--meeting <meeting>]" in capsys.readouterr().err
+    assert drop.calls == []
+
+
+def test_the_options_may_come_before_the_file(dropped_file):
+    drop = _Drop()
+    assert _drop(["--scope", "personal", str(dropped_file)], drop) == EXIT_OK
+    assert drop.calls[0]["scope"] == DataScope(ScopeKind.PERSONAL)
+
+
+def test_a_bare_double_dash_ends_the_options(tmp_path, monkeypatch):
+    path = tmp_path / "--odd.vtt"
+    path.write_text(DROP_VTT, encoding="utf-8")
+    drop = _Drop()
+    monkeypatch.chdir(tmp_path)
+    assert _drop(["--scope", "personal", "--", "--odd.vtt"], drop) == EXIT_OK
+    assert drop.calls[0]["file_name"] == "--odd.vtt"
+
+
+def test_a_required_option_is_required_on_a_command_without_leaves(monkeypatch, capsys):
+    row = cli.Command("demo", lambda context: EXIT_OK, options=("scope",), requires=("scope",))
+    monkeypatch.setitem(cli.TABLE, "demo", row)  # type: ignore[arg-type]
+    code = cli.dispatch(
+        ["demo"],
+        daemon=None,
+        diagnose=lambda: None,  # type: ignore[arg-type,return-value]
+        probe_connectors=None,
+    )
+    assert code == EXIT_USAGE
+    assert "needs `--scope <scope>`" in capsys.readouterr().err
+
+
+def test_a_named_meeting_is_handed_on_and_nothing_is_asked(dropped_file, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    drop = _Drop(ask=True)
+    code = _drop([str(dropped_file), "--scope", "project:alpha", "--meeting", "mtg_x"], drop)
+    assert code == EXIT_OK
+    assert drop.calls[0]["meeting_id"] == "mtg_x"
+    assert drop.calls[0]["scope"] == DataScope(ScopeKind.PROJECT, "alpha")
+    out = capsys.readouterr().out
+    assert "mtg_x" in out and "1 staged" in out and "executed" not in out
+
+
+def test_a_match_names_the_meetings_title_and_start(dropped_file, capsys):
+    answer = _Dropped(Path("/c.vtt"), "mtg_m", DataScope(ScopeKind.PERSONAL), "matched")
+    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(answer=answer)) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "'Weekly Sync' at 2026-10-09T11:00:00+00:00" in out
+
+
+def test_proposals_left_as_acted_on_are_counted(dropped_file, capsys):
+    answer = _Dropped(Path("/c.vtt"), "mtg_m", DataScope(ScopeKind.PERSONAL), "named",
+                      staged=0, left=2)
+    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(answer=answer)) == EXIT_OK
+    assert "2 left as they were, already approved, rejected or expired" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize("scope", ["people:bob", "application"])
+def test_a_scope_a_drop_cannot_go_to_is_refused_by_name(scope, dropped_file, capsys):
+    drop = _Drop()
+    assert _drop([str(dropped_file), "--scope", scope], drop) == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert scope in err and "personal" in err and "project:<id>" in err
+    assert drop.calls == []
+
+
+@pytest.mark.parametrize(
+    ("name", "said"),
+    [
+        ("minutes.docx", "deferred"),
+        ("minutes.pdf", "a PDF"),
+        ("minutes.doc", "a Word document"),
+        ("minutes.RTF", "a rich-text document"),
+    ],
+)
+def test_a_document_format_is_refused_with_the_way_out(name, said, tmp_path, capsys):
+    path = tmp_path / name
+    path.write_bytes(b"PK\x03\x04")
+    assert _drop([str(path), "--scope", "personal"]) == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert name in err and said in err and "Save the transcript as .vtt or .txt" in err
+
+
+def test_a_missing_docx_is_refused_as_missing(tmp_path, capsys):
+    assert _drop([str(tmp_path / "absent.docx"), "--scope", "personal"]) == EXIT_REFUSAL
+    assert "does not exist" in capsys.readouterr().err
+
+
+def _unusable(tmp_path, kind: str) -> Path:
+    if kind == "missing":
+        return tmp_path / "absent.vtt"
+    if kind == "directory":
+        path = tmp_path / "folder.vtt"
+        path.mkdir()
+        return path
+    if kind == "dangling link":
+        path = tmp_path / "link.vtt"
+        path.symlink_to(tmp_path / "gone.vtt")
+        return path
+    if kind == "unreadable":
+        path = tmp_path / "locked.vtt"
+        path.write_text(DROP_VTT)
+        path.chmod(0)
+        return path
+    if kind == "fifo":
+        path = tmp_path / "pipe.vtt"
+        os.mkfifo(path)
+        return path
+    if kind == "socket":
+        path = Path("/tmp") / f"pm-ai-11c-{os.getpid()}.vtt"
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(path))
+        listener.close()
+        return path
+    if kind == "device":
+        return Path("/dev/null")
+    if kind == "too large":
+        path = tmp_path / "huge.vtt"
+        with path.open("wb") as handle:
+            handle.truncate(cli.MAX_DROP_BYTES + 1)
+        return path
+    path = tmp_path / "latin1.txt"
+    path.write_bytes("Andrei: caf\xe9 at noon\n".encode("latin-1"))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("kind", "said"),
+    [
+        ("missing", "does not exist"),
+        ("directory", "is a directory"),
+        ("dangling link", "dangling link"),
+        ("unreadable", "could not be read"),
+        ("fifo", "not a regular file"),
+        ("socket", "not a regular file"),
+        ("device", "not a regular file"),
+        ("too large", "16 MiB"),
+        ("not utf-8", "not UTF-8"),
+    ],
+)
+def test_an_unusable_path_is_refused_by_name_not_a_traceback(kind, said, tmp_path, capsys):
+    path = _unusable(tmp_path, kind)
+    drop = _Drop()
+    try:
+        assert _drop([str(path), "--scope", "personal"], drop) == EXIT_REFUSAL
+    finally:
+        if kind == "unreadable":
+            path.chmod(0o600)
+        if kind == "socket":
+            path.unlink()
+    err = capsys.readouterr().err
+    assert str(path) in err and said in err
+    assert "Traceback" not in err
+    assert drop.calls == []
+
+
+def test_without_a_terminal_a_drop_that_must_ask_is_refused(dropped_file, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(ask=True)) == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "terminal" in err and "--meeting" in err
+
+
+def _answers(monkeypatch, *typed) -> list[str]:
+    prompts: list[str] = []
+    queue = list(typed)
+
+    def answer(prompt: str = "") -> str:
+        prompts.append(prompt)
+        given = queue.pop(0)
+        if isinstance(given, BaseException):
+            raise given
+        return given
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", answer)
+    return prompts
+
+
+def test_a_start_without_its_offset_is_asked_again_naming_both_forms(
+    dropped_file, monkeypatch, capsys
+):
+    prompts = _answers(
+        monkeypatch,
+        "Weekly Sync",
+        "2026-10-09 14:00",
+        "2026-10-09T14:00",
+        "2026-10-09T14:00+03:00",
+        "email:ana@example.com",
+        "45",
+    )
+    drop = _Drop(ask=True)
+    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
+    assert sum(p.startswith("Meeting start") for p in prompts) == 3
+    err = capsys.readouterr().err
+    assert err.count("2026-10-10T14:00+03:00") == 2 and err.count("2026-10-10T11:00Z") == 2
+    title, start, attendees, duration = drop.answers
+    assert start == DROP_START
+    assert attendees == (Actor("email:ana@example.com"),)
+    assert duration == 45
+
+
+@pytest.mark.parametrize(
+    ("typed", "utc"),
+    [
+        ("2026-10-09T11:00Z", DROP_START),
+        ("2026-10-09T14:00:30.250+03:00", DROP_START.replace(second=30, microsecond=250000)),
+    ],
+)
+def test_a_start_in_utc_or_with_fractional_seconds_is_stored_as_utc(
+    typed, utc, dropped_file, monkeypatch
+):
+    _answers(monkeypatch, "Weekly Sync", typed, "", "30")
+    drop = _Drop(ask=True)
+    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
+    assert drop.answers[1] == utc and drop.answers[1].tzinfo == _timezone.utc
+
+
+@pytest.mark.parametrize("typed", ["Weekly\x07Sync", "x" * 20000])
+def test_a_title_the_record_refuses_is_asked_again(typed, dropped_file, monkeypatch, capsys):
+    prompts = _answers(monkeypatch, typed, "Weekly Sync", "2026-10-09T11:00Z", "", "30")
+    drop = _Drop(ask=True)
+    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
+    assert sum(p.startswith("Meeting title") for p in prompts) == 2
+    assert "the title typed" in capsys.readouterr().err
+    assert drop.answers[0] == "Weekly Sync"
+
+
+@pytest.mark.parametrize("typed", ["Smith, Bob", "ana,,bo", "ana,ana"])
+def test_attendees_the_record_refuses_are_asked_again_naming_the_rule(
+    typed, dropped_file, monkeypatch, capsys
+):
+    prompts = _answers(
+        monkeypatch, "Weekly Sync", "2026-10-09T14:00+03:00", typed, "ana,bo", "30"
+    )
+    drop = _Drop(ask=True)
+    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
+    assert sum(p.startswith("No recorded meeting matches") for p in prompts) == 2
+    assert "separated by commas with no spaces" in capsys.readouterr().err
+    assert drop.answers[2] == (Actor("ana"), Actor("bo"))
+
+
+@pytest.mark.parametrize("typed", ["0", "1441"])
+def test_a_duration_out_of_range_is_asked_again(typed, dropped_file, monkeypatch, capsys):
+    prompts = _answers(monkeypatch, "Weekly Sync", "2026-10-09T11:00Z", "", typed, "1440")
+    drop = _Drop(ask=True)
+    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
+    assert sum(p.startswith("Duration") for p in prompts) == 2
+    assert "type 1 to 1440" in capsys.readouterr().err
+    assert drop.answers[3] == 1440
+
+
+def test_the_duration_is_not_asked_when_the_file_carries_it(dropped_file, monkeypatch):
+    prompts = _answers(monkeypatch, "Weekly Sync", "2026-10-09T14:00+03:00", "")
+    drop = _Drop(ask=True, ask_duration=False)
+    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
+    assert not any(p.startswith("Duration") for p in prompts)
+    assert drop.answers[2:] == ((), None)
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt(), EOFError()], ids=["ctrl-c", "eof"])
+def test_ctrl_c_or_eof_at_a_drop_question_is_a_named_interruption(
+    stop, dropped_file, monkeypatch, capsys
+):
+    _answers(monkeypatch, "Weekly Sync", stop)
+    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(ask=True)) == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "interrupted" in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        CaptureNotIngested(
+            "/c/x-manual.vtt is stored and ingesting it failed: MalformedMeeting."
+        ),
+        DropInterrupted(
+            "interrupted during ingestion. /c/x-manual.vtt was written and stays;"
+        ),
+        OSError(28, "No space left on device"),
+    ],
+    ids=["not-ingested", "interrupted", "os-error"],
+)
+def test_a_late_refusal_is_exit_3_with_its_own_sentence(refused, dropped_file, capsys):
+    code = _drop([str(dropped_file), "--scope", "personal", "--meeting", "m"],
+                 _Drop(raises=refused))
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert (refused.strerror if isinstance(refused, OSError) else str(refused)) in err
+    assert "Traceback" not in err
+
+
+def test_a_pipeline_refusal_is_exit_3_with_its_own_sentence(dropped_file, capsys):
+    from pm_ai.core.meeting_records import MeetingNotFound
+
+    refused = MeetingNotFound("no meeting 'mtg_x' is recorded in personal.")
+    assert _drop([str(dropped_file), "--scope", "personal", "--meeting", "mtg_x"],
+                 _Drop(raises=refused)) == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "no meeting 'mtg_x' is recorded in personal." in err
+    assert "\"no meeting" not in err

@@ -24,15 +24,20 @@ from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import GoalRegister, parse_goals
 from pm_ai.core.rendering import (
     HEADINGS,
+    MAX_SIGNAL_LINES,
+    MENTIONS_YOU,
     MESSAGE_WINDOW,
     NO_MEETINGS,
+    UNKNOWN_SENDER,
+    PmHandles,
     code,
     escape,
     render_dashboard,
 )
-from pm_ai.domain.event_entries import EventEntry, MalformedEntry, SelfActionType
+from pm_ai.domain.event_entries import EventEntry, SelfActionType
 from pm_ai.domain.events import MessagePayload, ObservedEventType
 from pm_ai.domain.goals import GoalDomain
+from pm_ai.domain.handles import GRAPH, person_handle
 from pm_ai.domain.harvest import (
     HarvestFailure,
     NoCalendarConnector,
@@ -55,6 +60,22 @@ and states its own.
 """
 
 GOLDEN = Path(__file__).parent / "goldens" / "dashboard_full_day.md"
+
+NOBODY = PmHandles(handles=frozenset(), unrecorded=(), unchecked=())
+"""No Graph row at all: nothing is marked and no sign-in line is printed."""
+
+PM_ID = "0d9e3c4f-1a2b-4c3d-8e9f-a0b1c2d3e4f5"
+"""The PM's Graph user id on the first tenant, as `8q` saves it at sign-in."""
+
+PM_ID_2 = "11111111-2222-4333-8444-555555555555"
+"""The PM's user id on a second tenant."""
+
+OTHER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+"""Somebody else."""
+
+PM = PmHandles(
+    handles=frozenset({person_handle(GRAPH, PM_ID)}), unrecorded=(), unchecked=()
+)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -87,6 +108,7 @@ def message(
     channel: str = "#payments",
     excerpt: str | None = None,
     entry_id: str = "evt_1",
+    mentions: tuple[str, ...] | None = None,
 ) -> EventEntry:
     """A `message_posted` ledger entry, shaped as `_append_batch` writes one —
     its payload fields built by `encode_payload`, the writer's own encoder.
@@ -105,7 +127,11 @@ def message(
     fields.append(("src", "slack:msg/1"))
     # Through the encoder, as the writer does: entries built with hand-spelled
     # names passed here while every real message would have rendered empty.
-    fields.extend(encode_payload(MessagePayload(channel=channel, excerpt=excerpt)))
+    fields.extend(
+        encode_payload(
+            MessagePayload(channel=channel, excerpt=excerpt, mentions=mentions)
+        )
+    )
     return EventEntry(
         category=ObservedEventType.MESSAGE_POSTED,
         actor=actor,
@@ -141,6 +167,7 @@ def render(
     register: GoalRegister | None = None,
     now: datetime = NOW,
     tz=DISPLAY,
+    pm: PmHandles = NOBODY,
 ) -> str:
     return render_dashboard(
         meetings,
@@ -148,6 +175,7 @@ def render(
         goals() if register is None else register,
         now,
         tz=tz,
+        pm=pm,
     )
 
 
@@ -675,6 +703,7 @@ def test_an_empty_section_no_longer_says_nothing_writes_the_category():
     body = sections(render(entries=()))["Proactive Enablement"]
     assert "No connector in this build writes" not in body
     assert "33d" not in body
+    assert "build" not in body  # matrix "Empty window": no sentence about the build
     assert "event log between" in body
 
 
@@ -1112,29 +1141,430 @@ def test_the_render_reads_no_clock_and_opens_no_file():
 
 
 @pytest.mark.parametrize(
-    ("payload_fields", "named"),
+    "payload_fields",
     [
-        ((("p.excerpt", "hello"),), "p.channel"),
-        ((("p.channel", "#a"), ("p.channel", "#b")), "p.channel"),
-        ((("p.channel", "#a"), ("p.mentions", "u_1,")), "p.mentions"),
+        (("p.excerpt", "hello"),),
+        (("p.channel", "#a"), ("p.channel", "#b")),
+        (("p.channel", "#a"), ("p.mentions", "u_1,")),
     ],
     ids=["no channel", "doubled field", "corrupt list"],
 )
-def test_a_message_entry_that_does_not_decode_refuses_the_render(payload_fields, named):
-    """The refusal 23b's contract gives an unreadable log line, kept by `2m`
-    (`23c` is the slice that makes it non-fatal). Never a fallback to the actor
-    alone: the refusal names the field and the entry — its id and its
-    `ingested_at` — so the line can be found by hand."""
+def test_a_message_entry_that_does_not_decode_is_counted_and_the_others_render(
+    payload_fields,
+):
+    """Matrix: decoder refuses a line (`23c`, superseding `2m`'s refusal of the
+    render). Counted in the footnote as a line that could not be decoded — never
+    dropped in silence, never a crash — and the readable line still renders."""
     at = NOW - timedelta(hours=1)
     broken = EventEntry(
         category=ObservedEventType.MESSAGE_POSTED,
-        actor="u_dana",
+        actor="u_broken",
         fields=(("ingested_at", at.isoformat()), ("src", "slack:msg/1"))
         + payload_fields,
         entry_id="evt_broken",
     )
-    with pytest.raises(MalformedEntry) as refusal:
-        render(entries=(message(at=at, entry_id="evt_fine"), broken))
-    text = str(refusal.value)
-    assert named in text
-    assert "evt_broken" in text and at.isoformat() in text
+    body = sections(
+        render(entries=(message(at=at, actor="u_fine", entry_id="evt_fine"), broken))
+    )["Proactive Enablement"]
+    assert "u_fine" in body
+    assert "u_broken" not in body
+    assert "1 message log entry carries fields that could not be decoded" in body
+    assert "it is not listed" in body
+
+
+# ── Story 23c: real messages — mentions, the cap, an unreadable log ──────────
+
+
+def signal_lines(text: str) -> list[str]:
+    """The Proactive Enablement section's signal lines, in rendered order."""
+    body = sections(text)["Proactive Enablement"]
+    return [line for line in body.split("\n") if line.startswith("- **")]
+
+
+def mentioning(handle_id: str) -> tuple[str, ...]:
+    return (f"graph:{handle_id}",)
+
+
+def test_a_real_message_line_carries_time_actor_channel_and_excerpt():
+    """Matrix: real message line — `- **HH:MM** <actor> in <channel> — <excerpt>`."""
+    entry = message(
+        at=NOW - timedelta(minutes=30),
+        actor=f"graph:{OTHER_ID}",
+        channel="#payments",
+        excerpt="deploy is green",
+        mentions=(),
+    )
+    assert signal_lines(render(entries=(entry,), pm=PM)) == [
+        f"- **12:00** graph:{OTHER_ID} in #payments — deploy is green"
+    ]
+
+
+def test_the_absence_actor_renders_as_an_unknown_sender():
+    """The actor renders as written, except `none:`."""
+    entry = message(at=NOW - timedelta(minutes=30), actor="none:", excerpt="hi")
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == f"- **12:00** {UNKNOWN_SENDER} in #payments — hi"
+    assert "none:" not in line
+
+
+def test_a_mention_of_the_pm_is_marked_and_sits_above_every_unmarked_line():
+    """Matrix: mentions the PM — ends ` — mentions you`, listed first."""
+    newer = message(at=NOW - timedelta(minutes=1), actor="u_new", entry_id="evt_new")
+    mention = message(
+        at=NOW - timedelta(hours=5),
+        actor="u_dana",
+        excerpt="can you look?",
+        mentions=mentioning(PM_ID),
+        entry_id="evt_mention",
+    )
+    lines = signal_lines(render(entries=(newer, mention), pm=PM))
+    assert lines[0] == f"- **07:30** u_dana in #payments — can you look? — {MENTIONS_YOU}"
+    assert lines[1] == "- **12:29** u_new in #payments"
+
+
+def test_a_mention_without_an_excerpt_still_ends_with_the_marker():
+    mention = message(at=NOW - timedelta(minutes=1), mentions=mentioning(PM_ID))
+    (line,) = signal_lines(render(entries=(mention,), pm=PM))
+    assert line.endswith(f"#payments — {MENTIONS_YOU}")
+
+
+def test_a_mention_of_someone_else_is_listed_unmarked():
+    """Matrix: mentions someone else."""
+    entry = message(at=NOW - timedelta(minutes=1), mentions=mentioning(OTHER_ID))
+    (line,) = signal_lines(render(entries=(entry,), pm=PM))
+    assert MENTIONS_YOU not in line
+
+
+def test_mentions_not_recorded_are_listed_unmarked():
+    """Matrix: mentions absent from the line — no claim either way."""
+    entry = message(at=NOW - timedelta(minutes=1), mentions=None)
+    (line,) = signal_lines(render(entries=(entry,), pm=PM))
+    assert MENTIONS_YOU not in line
+
+
+def test_the_comparison_is_on_handles_never_on_a_raw_id(monkeypatch):
+    """A bare GUID among a line's mentions never matches the PM's
+    `graph:<guid>` handle. The decoder refuses a bare member, so the payload is
+    handed in directly to reach the renderer's own comparison."""
+    import pm_ai.core.rendering as rendering
+
+    monkeypatch.setattr(
+        rendering,
+        "decode_payload",
+        lambda entry: MessagePayload(channel="#payments", mentions=(PM_ID,)),
+    )
+    entry = message(at=NOW - timedelta(minutes=1))
+    (line,) = signal_lines(render(entries=(entry,), pm=PM))
+    assert MENTIONS_YOU not in line
+
+
+def test_a_raw_id_mention_on_a_line_is_counted_as_undecodable():
+    """The same raw id written onto a line never reaches the comparison at all."""
+    raw = EventEntry(
+        category=ObservedEventType.MESSAGE_POSTED,
+        actor="u_dana",
+        fields=(
+            ("ingested_at", (NOW - timedelta(minutes=1)).isoformat()),
+            ("p.channel", "#payments"),
+            ("p.mentions", PM_ID),
+        ),
+        entry_id="evt_raw",
+    )
+    body = sections(render(entries=(raw,), pm=PM))["Proactive Enablement"]
+    assert MENTIONS_YOU not in body
+    assert "could not be decoded" in body
+
+
+def test_a_message_entry_decoding_to_another_payload_is_counted(monkeypatch):
+    """Item: a `message_posted` line that decodes to something other than a
+    `MessagePayload` is counted as undecodable, never a crash."""
+    import pm_ai.core.rendering as rendering
+    from pm_ai.domain.events import DecisionPayload
+
+    monkeypatch.setattr(
+        rendering, "decode_payload", lambda entry: DecisionPayload(statement="x")
+    )
+    body = sections(
+        render(entries=(message(at=NOW - timedelta(minutes=1), entry_id="evt_odd"),))
+    )["Proactive Enablement"]
+    assert "1 message log entry carries fields that could not be decoded" in body
+    assert "`evt_odd`" in body
+
+
+def test_the_undecodable_footnote_names_segments_and_the_first_ids():
+    from pm_ai.core.event_log import LogRead
+
+    at = NOW - timedelta(minutes=1)
+
+    def broken(entry_id: str) -> EventEntry:
+        return EventEntry(
+            category=ObservedEventType.MESSAGE_POSTED,
+            actor="u_x",
+            fields=(("ingested_at", at.isoformat()), ("p.excerpt", "no channel")),
+            entry_id=entry_id,
+        )
+
+    log = LogRead(
+        [
+            ("2026-08.md", broken("evt_d")),
+            ("2026-09.md", broken("evt_a")),
+            ("2026-09.md", broken("evt_c")),
+            ("2026-09.md", broken("evt_b")),
+            ("2026-09.md", message(at=at, actor="u_fine", entry_id="evt_fine")),
+        ]
+    )
+    body = sections(render(entries=log))["Proactive Enablement"]
+    assert "u_fine" in body
+    assert (
+        "4 message log entries carry fields that could not be decoded, so they are "
+        "not listed (`evt_a`, `evt_b`, `evt_c` and 1 more in `2026-08.md`, "
+        "`2026-09.md`)." in body
+    )
+
+
+def test_either_tenants_handle_marks_a_mention():
+    """Matrix: two tenants — a mention of either handle is marked."""
+    pm = PmHandles(
+        handles=frozenset({person_handle(GRAPH, PM_ID), person_handle(GRAPH, PM_ID_2)}),
+        unrecorded=(),
+        unchecked=(),
+    )
+    first = message(
+        at=NOW - timedelta(minutes=1), mentions=mentioning(PM_ID), entry_id="evt_a"
+    )
+    second = message(
+        at=NOW - timedelta(minutes=2), mentions=mentioning(PM_ID_2), entry_id="evt_b"
+    )
+    lines = signal_lines(render(entries=(first, second), pm=pm))
+    assert len(lines) == 2
+    assert all(line.endswith(MENTIONS_YOU) for line in lines)
+
+
+def test_a_sign_in_that_predates_the_user_id_is_said_and_nothing_is_marked():
+    """Matrix: no `user_id` on a row — one line naming the connector and the command."""
+    pm = PmHandles(handles=frozenset(), unrecorded=("graph:work",), unchecked=())
+    entry = message(at=NOW - timedelta(minutes=1), mentions=mentioning(PM_ID))
+    body = sections(render(entries=(entry,), pm=pm))["Proactive Enablement"]
+    assert MENTIONS_YOU not in body
+    sign_in = [line for line in body.split("\n") if "predates" in line]
+    assert len(sign_in) == 1
+    assert "`graph:work`" in sign_in[0]
+    assert "`pm-ai connector sign-in graph:work`" in sign_in[0]
+
+
+def test_two_unrecorded_sign_ins_are_one_line_each():
+    pm = PmHandles(handles=frozenset(), unrecorded=("graph:a", "graph:b"), unchecked=())
+    body = sections(render(entries=(), pm=pm))["Proactive Enablement"]
+    assert len([line for line in body.split("\n") if "predates" in line]) == 2
+    assert "event log between" in body  # the empty-window sentence stays
+
+
+def test_a_handle_with_nothing_unrecorded_marks_and_prints_no_sign_in_line():
+    """The renderer's half of the disabled-row matrix row: a handle marks, and
+    with nothing in `unrecorded` no sign-in line is printed. Which rows reach
+    `handles` and `unrecorded` is `read_pm_identity`'s, tested in
+    `tests/slice/test_read_pm_identity.py` and `test_dashboard_slice.py`."""
+    pm = PmHandles(handles=frozenset({person_handle(GRAPH, PM_ID)}), unrecorded=(), unchecked=())
+    entry = message(at=NOW - timedelta(minutes=1), mentions=mentioning(PM_ID))
+    body = sections(render(entries=(entry,), pm=pm))["Proactive Enablement"]
+    assert body.split("\n")[0].endswith(MENTIONS_YOU)
+    assert "predates" not in body
+
+
+def test_no_graph_connector_lists_entries_unmarked_with_no_sign_in_line():
+    """Matrix: no Graph connector."""
+    entry = message(at=NOW - timedelta(minutes=1), mentions=mentioning(PM_ID))
+    body = sections(render(entries=(entry,), pm=NOBODY))["Proactive Enablement"]
+    assert MENTIONS_YOU not in body
+    assert "predates" not in body
+    assert "sign-in" not in body
+
+
+def _spread(count: int, *, mentions_first: int = 0) -> tuple[EventEntry, ...]:
+    """`count` messages a minute apart, the newest first; the first
+    `mentions_first` of the *oldest* mention the PM."""
+    out = []
+    for n in range(count):
+        oldest_rank = count - 1 - n
+        out.append(
+            message(
+                at=NOW - timedelta(minutes=n + 1),
+                actor=f"u_{n:02d}",
+                mentions=mentioning(PM_ID) if oldest_rank < mentions_first else (),
+                entry_id=f"evt_{n:02d}",
+            )
+        )
+    return tuple(out)
+
+
+def test_over_the_cap_lists_twenty_and_says_how_many_more():
+    """Matrix: over the cap — 23 entries."""
+    assert MAX_SIGNAL_LINES == 20
+    text = render(entries=_spread(23), pm=PM)
+    lines = signal_lines(text)
+    assert len(lines) == 20
+    assert [line.split()[2] for line in lines] == [f"u_{n:02d}" for n in range(20)]
+    body = sections(text)["Proactive Enablement"]
+    assert (
+        "3 more message signals in this window are not shown; they are in the "
+        "event log" in body
+    )
+
+
+def test_one_over_the_cap_is_said_in_the_singular():
+    body = sections(render(entries=_spread(21), pm=PM))["Proactive Enablement"]
+    assert "1 more message signal in this window is not shown; it is in the event log" in body
+
+
+def test_exactly_the_cap_has_no_closing_line():
+    """Matrix: exactly the cap — 20 entries."""
+    text = render(entries=_spread(20), pm=PM)
+    assert len(signal_lines(text)) == 20
+    assert "more message signal" not in text
+
+
+def test_over_the_cap_with_mentions_puts_them_first_then_the_newest_rest():
+    """Matrix: 25 entries, 3 mention the PM — the 3, the 17 newest, the closing line."""
+    entries = _spread(25, mentions_first=3)  # u_22, u_23, u_24 are the mentions
+    text = render(entries=entries, pm=PM)
+    lines = signal_lines(text)
+    assert len(lines) == 20
+    assert [line.split()[2] for line in lines[:3]] == ["u_22", "u_23", "u_24"]
+    assert all(line.endswith(MENTIONS_YOU) for line in lines[:3])
+    assert [line.split()[2] for line in lines[3:]] == [f"u_{n:02d}" for n in range(17)]
+    assert "5 more message signals in this window are not shown" in text
+
+
+def test_more_mentions_than_the_cap_shows_the_newest_mentions():
+    """Matrix: 24 entries, 22 mention the PM — the 20 newest mentions; 4 more."""
+    entries = _spread(24, mentions_first=22)  # u_02 … u_23 mention the PM
+    text = render(entries=entries, pm=PM)
+    lines = signal_lines(text)
+    assert [line.split()[2] for line in lines] == [f"u_{n:02d}" for n in range(2, 22)]
+    assert all(line.endswith(MENTIONS_YOU) for line in lines)
+    assert "4 more message signals in this window are not shown" in text
+
+
+def test_ordering_is_mentions_then_newest_then_entry_id_and_byte_identical():
+    """Matrix: ordering — the same inputs, rendered twice in any input order."""
+    at = NOW - timedelta(minutes=10)
+    entries = (
+        message(at=at, actor="u_b", entry_id="evt_b"),
+        message(at=at, actor="u_a", entry_id="evt_a"),
+        message(at=NOW - timedelta(minutes=1), actor="u_new", entry_id="evt_z"),
+        message(
+            at=NOW - timedelta(hours=2),
+            actor="u_m",
+            mentions=mentioning(PM_ID),
+            entry_id="evt_m",
+        ),
+    )
+    one = render(entries=entries, pm=PM)
+    other = render(entries=tuple(reversed(entries)), pm=PM)
+    assert one == other
+    assert [line.split()[2] for line in signal_lines(one)] == [
+        "u_m",
+        "u_new",
+        "u_a",
+        "u_b",
+    ]
+
+
+UNREADABLE_LOG = HarvestFailure(
+    reason="2026-09.md line 1: 'this line is not a ledger entry' does not open "
+    "with the record marker `- [`.",
+    retryable=False,
+)
+
+
+def test_an_unreadable_log_is_stated_never_rendered_as_a_quiet_day():
+    """Matrix: log could not be read — the segment and the reason; three absences."""
+    text = render(
+        meetings=FULL_DAY_MEETINGS,
+        entries=UNREADABLE_LOG,
+        pm=PmHandles(handles=frozenset(), unrecorded=("graph:work",), unchecked=()),
+    )
+    body = sections(text)
+    section = body["Proactive Enablement"]
+    assert "The event log could not be read" in section
+    assert "2026-09.md line 1" in section
+    # The three absences, asserted as the calendar precedents assert theirs.
+    assert "event log between" not in section
+    assert "No `message_posted` entries" not in section
+    assert "the connector reports" not in section.casefold()
+    assert "sign-in" not in section and "predates" not in section
+    # The other sections render from their own inputs.
+    assert "Payments Gateway Sync" in body["Time-Critical Activities"]
+    assert "Reach staff engineer" in body["3-Tier Strategic Milestones"]
+    assert "Synthesis is not enabled" in body["Leadership Notes"]
+
+
+def test_an_unreadable_log_with_a_blank_reason_still_reads_as_a_sentence():
+    failure = HarvestFailure(reason="  ", retryable=False)
+    section = sections(render(entries=failure))["Proactive Enablement"]
+    assert section.endswith("the read gave no reason")
+    assert "connector" not in section
+
+
+
+def test_hidden_lines_that_mention_the_pm_are_counted_in_the_closing_line():
+    """Matrix: more mentions than the cap — the closing line says how many of
+    the hidden ones mention you."""
+    text = render(entries=_spread(24, mentions_first=22), pm=PM)
+    assert (
+        "4 more message signals in this window are not shown; they are in the "
+        "event log. 2 of them mention you." in text
+    )
+
+
+def test_hidden_lines_without_mentions_say_nothing_about_mentions():
+    text = render(entries=_spread(23), pm=PM)
+    assert "mention you" not in text.split("not shown")[1]
+
+
+def test_a_long_failure_reason_is_cut_so_it_cannot_flood_the_section():
+    failure = HarvestFailure(reason="2026-09.md line 1: " + "x" * 16_000, retryable=False)
+    section = sections(render(entries=failure))["Proactive Enablement"]
+    assert section.endswith("…")
+    assert "2026-09.md line 1" in section
+    assert len(section) < 500
+
+
+def test_a_row_that_could_not_be_checked_is_said():
+    """Item: an unusable row (perhaps the PM's own Graph row) is never silent."""
+    pm = PmHandles(
+        handles=frozenset(),
+        unrecorded=(),
+        unchecked=(("graph:work.json", "is not valid JSON"),),
+    )
+    entry = message(at=NOW - timedelta(minutes=1), mentions=mentioning(PM_ID))
+    body = sections(render(entries=(entry,), pm=pm))["Proactive Enablement"]
+    assert MENTIONS_YOU not in body
+    assert (
+        "Mentions could not be checked against `graph:work.json`: it is not valid "
+        "JSON. A message mentioning you through it is not marked." in body
+    )
+
+
+def test_a_section_with_a_mention_the_cap_and_both_row_lines_reads_exactly():
+    """The whole section as one string — a mention, the cap's closing line, a
+    sign-in line and an unchecked row, in that order."""
+    entries = _spread(21, mentions_first=1)
+    pm = PmHandles(
+        handles=frozenset({person_handle(GRAPH, PM_ID)}),
+        unrecorded=("graph:old",),
+        unchecked=(("connectors/", "could not be listed (denied)"),),
+    )
+    lines = [f"- **12:09** u_20 in #payments — {MENTIONS_YOU}"] + [
+        f"- **12:{29 - n:02d}** u_{n:02d} in #payments" for n in range(19)
+    ]
+    expected = "\n".join(lines) + (
+        "\n\n1 more message signal in this window is not shown; it is in the "
+        "event log."
+        "\n\nThe sign-in for `graph:old` predates pm-ai recording the user id, so "
+        "no message here is marked as mentioning you for that connector. Run "
+        "`pm-ai connector sign-in graph:old` to record it."
+        "\n\nMentions could not be checked against `connectors/`: it could not be "
+        "listed (denied). A message mentioning you through it is not marked."
+    )
+    assert sections(render(entries=entries, pm=pm))["Proactive Enablement"] == expected

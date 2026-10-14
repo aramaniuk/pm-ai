@@ -36,10 +36,13 @@ in `.importlinter`). The 07:00 tick belongs to the daemon.
 from __future__ import annotations
 
 import getpass
+import re
+import stat
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -56,8 +59,25 @@ from pm_ai.domain.goals import Goal
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report, UnbuiltConnector
 from pm_ai.core.project_registry import RegistryRefused
-from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
+from pm_ai.core.meeting_records import (
+    MalformedMeeting,
+    MeetingNotFound,
+    check_title,
+    parse_attendees,
+)
+from pm_ai.core.transcripts import MAX_DROP_MINUTES, MIN_DROP_MINUTES
+from pm_ai.domain.meetings import AmbiguousMeeting
+from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
+from pm_ai.domain.transcripts import (
+    CaptureNotIngested,
+    DropInterrupted,
+    DropRefused,
+    NothingSaid,
+    UnboundTranscript,
+    UnreadableTranscript,
+)
 from pm_ai.core.connector_enrolment import (
     ConnectorNotConfigured,
     ConnectorRowChanged,
@@ -71,11 +91,17 @@ from pm_ai.core.connector_enrolment import (
     UserNotRecorded,
     assert_enrollable,
     assert_unconfigured,
+    connector_configurations,
     enrol_connector,
+    stored_credentials,
 )
 from pm_ai.ports import (
     ArtifactBusy,
+    CaptureAlreadyExists,
+    EmptyCapture,
+    MalformedCaptureName,
     CredentialProbePort,
+    DecryptionFailed,
     DaemonPort,
     DaemonRefused,
     DuplicateConnector,
@@ -84,6 +110,7 @@ from pm_ai.ports import (
     KeyNotFound,
     ProbeFailed,
     ProbeUnreachable,
+    StoragePort,
     UnknownConnectorSystem,
 )
 
@@ -95,6 +122,8 @@ __all__ = [
     "EXIT_UNHEALTHY",
     "EXIT_USAGE",
     "Command",
+    "ConnectorsOnDisk",
+    "DEFAULT_GRAPH_INSTANCE",
     "Context",
     "FirstRun",
     "GoalBook",
@@ -108,6 +137,8 @@ __all__ = [
     "Parsed",
     "Refusal",
     "TABLE",
+    "TranscriptDrop",
+    "TranscriptDropOutcome",
     "dispatch",
     "names_a_command",
     "parse",
@@ -221,6 +252,53 @@ class FirstRun(Protocol):
 
     def diagnose(self) -> HealthReport:
         """`1g`'s probes, run against the machine as it is now."""
+        ...
+
+    @property
+    def storage(self) -> StoragePort:
+        """A writer over the application scope, for step 4 (story 4p).
+
+        Where a Graph connector's row and sealed sign-in land, and what step 4
+        reads `connectors/` through. Its own, because `setup` composes no
+        daemon: `Context.daemon` is not there to lend one.
+        """
+        ...
+
+    @property
+    def graph_sign_in(self) -> GraphSignIn:
+        """`connector add graph`'s sign-in and checks, over `storage` (story 4p).
+
+        `Context.graph_sign_in` is not used: it is bound to whatever `main`
+        composed, and step 4 must write through the writer it checked with.
+        Obtaining it says, once, that encryption is off when it is: setup
+        builds no daemon, so nothing else printed that before a sign-in is
+        sealed.
+        """
+        ...
+
+    def connectors(self) -> ConnectorsOnDisk:
+        """`4n`'s read of `connectors/`, now: step 4's "already done" check."""
+        ...
+
+
+@runtime_checkable
+class ConnectorsOnDisk(Protocol):
+    """What step 4 needs of `4n`'s read of `connectors/` (story 4p).
+
+    `graph` decides whether the step is already done — an enabled Graph row,
+    as an enrolled key is for step 1. `remedy` is `doctor`'s `connectors`
+    line's own remediation for this machine, word for word, which is what a
+    "no" closes with.
+    """
+
+    @property
+    def graph(self) -> tuple[str, ...]:
+        """Every enabled Graph row's instance name; empty when there is none."""
+        ...
+
+    @property
+    def remedy(self) -> str:
+        """The `connectors` line's remediation, as `doctor` prints it."""
         ...
 
 
@@ -426,6 +504,57 @@ class GitLabCheck(Protocol):
         ...
 
 
+@runtime_checkable
+class TranscriptDropOutcome(Protocol):
+    """What a drop did — `pm_ai.app.pipelines.TranscriptDropped`, named by shape."""
+
+    @property
+    def capture(self) -> Path: ...
+    @property
+    def meeting_id(self) -> str: ...
+    @property
+    def scope(self) -> DataScope: ...
+    @property
+    def bound_by(self) -> str:
+        """`named`, `matched` or `minted`."""
+        ...
+    @property
+    def title(self) -> str: ...
+    @property
+    def start(self) -> datetime: ...
+    @property
+    def staged(self) -> int: ...
+    @property
+    def left(self) -> int: ...
+    @property
+    def duration_minutes(self) -> int | None: ...
+    @property
+    def duration_from_last_cue(self) -> bool: ...
+    @property
+    def notices(self) -> tuple[str, ...]: ...
+
+
+class TranscriptDrop(Protocol):
+    """`pm-ai transcript drop`'s pipeline, bound to this daemon (story 11c).
+
+    `pm_ai.app.pipelines.drop_transcript` is the real one. Named structurally
+    because it reaches storage, the meeting records and the skill registry,
+    none of which `surfaces` may import. Its refusals are the core's, the
+    domain's and `pm_ai.ports`' (AD-49).
+    """
+
+    def __call__(
+        self,
+        *,
+        text: str,
+        file_name: str,
+        scope: DataScope,
+        meeting_id: str | None,
+        identify: Callable[[], tuple[str, datetime]] | None,
+        describe: Callable[[bool], tuple[tuple[Actor, ...], int | None]] | None,
+    ) -> TranscriptDropOutcome: ...
+
+
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
     """The `Context` default: no onboarding sequence was injected.
 
@@ -597,6 +726,13 @@ class Context:
     goals: GoalBook | None = None
     """`strategic_goals.md`'s reader and writer. `None` refuses `goal set`."""
 
+    transcript_drop: TranscriptDrop | None = None
+    """`pm-ai transcript drop`'s read, bind, capture and ingest (story 11c).
+
+    Bound by the composition root to the daemon it built; `None` with no
+    daemon, and the command refuses through `require_daemon()` first.
+    """
+
     serve: Callable[[], int] | None = None
     """Runs the daemon in the foreground until it is stopped (story 4e).
 
@@ -735,6 +871,16 @@ class Command:
     Every one of them takes a value; there are no flags here, because a flag
     that is absent and a flag that is false are the same word on a command line
     and no command in this table needs to tell them apart.
+    """
+
+    requires: tuple[str, ...] = ()
+    """The members of `options` that must be given (story 11c).
+
+    `transcript drop` is the first command with an option it cannot run
+    without: `--scope` names where the meeting is looked for and written, and
+    no default would be honest. Missing one is a usage error (`2`), and the
+    usage line spells it without brackets. Enforced for a leaf and for a
+    command without leaves alike (`_missing`).
     """
 
     target: Callable[[Mapping[str, str]], DataScope] | None = None
@@ -898,11 +1044,18 @@ def _connector_add(context: Context) -> int:
 
     with _enrolment_refusals():
         if system == "graph":
-            return _connector_add_graph(context, daemon, instance)
+            graph = context.graph_sign_in
+            if graph is None:
+                raise Refusal(
+                    "no Graph sign-in was supplied to the CLI, so a Graph connector "
+                    "cannot be enrolled. That is a wiring fault in pm-ai, not anything "
+                    "about this machine; nothing was asked and nothing was saved."
+                )
+            return _connector_add_graph(daemon.storage, graph, instance)
         return _connector_add_gitlab(context, daemon, instance)
 
 
-def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) -> int:
+def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str) -> int:
     """`pm-ai connector add graph <instance>`: questions, sign-in, check, save (8l).
 
     The order is the point, and each step is placed where its refusal costs the
@@ -933,16 +1086,12 @@ def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) ->
     The sign-in token never reaches this function's output: it is handed to
     enrolment as the credential, and enrolment's own redaction applies to the
     one sentence printed from the check.
-    """
-    graph = context.graph_sign_in
-    if graph is None:
-        raise Refusal(
-            "no Graph sign-in was supplied to the CLI, so a Graph connector "
-            "cannot be enrolled. That is a wiring fault in pm-ai, not anything "
-            "about this machine; nothing was asked and nothing was saved."
-        )
 
-    assert_enrollable(daemon.storage, system="graph", instance=instance)
+    Takes the writer and the sign-in rather than a context, so `pm-ai setup`'s
+    step 4 (story 4p) runs this same path with its own two — setup composes no
+    daemon. Its refusals leave raw; each caller words them.
+    """
+    assert_enrollable(storage, system="graph", instance=instance)
     graph.ready()
 
     if not sys.stdin.isatty():
@@ -988,7 +1137,7 @@ def _connector_add_graph(context: Context, daemon: DaemonPort, instance: str) ->
     # name check under its own reading of the stores and seals. Its "probe" is
     # the check that just ran, so it is reported rather than repeated.
     answer = enrol_connector(
-        daemon.storage,
+        storage,
         system="graph",
         instance=instance,
         credential=signed.credential,
@@ -1635,8 +1784,17 @@ def _ask(prompt: str) -> str:
         ) from closed
 
 
+class _SetupStopped(Refusal):
+    """Setup's own "no admissible answer" refusal, already worded for its step."""
+
+
 def _answer[T](
-    question: str, interpret: Callable[[str], T], *, step: str, default: str | None = None
+    question: str,
+    interpret: Callable[[str], T],
+    *,
+    step: str,
+    default: str | None = None,
+    done: str = "Every earlier step stays done",
 ) -> T:
     """Ask until `interpret` accepts an answer, at most `SETUP_ATTEMPTS` times.
 
@@ -1654,10 +1812,10 @@ def _answer[T](
             return interpret(_ask(prompt))
         except (_Inadmissible, ConfigRefused) as refused:
             print(f"  {refused}", file=sys.stderr)
-    raise Refusal(
+    raise _SetupStopped(
         f"setup stopped at {step}: no admissible answer to {question!r} after "
-        f"{SETUP_ATTEMPTS} attempts. Every earlier step stays done; run "
-        f"`pm-ai setup` again to continue from here."
+        f"{SETUP_ATTEMPTS} attempts. {done}; run `pm-ai setup` again to "
+        f"continue from here."
     )
 
 
@@ -1669,7 +1827,7 @@ def _setup_key(first_run: FirstRun) -> None:
     the operator asked for a ready machine, not for a new key, and one is
     there. Nothing replaces it — `enrol` never does.
     """
-    print("[1/3] master key — first, because every encrypted write refuses without it")
+    print("[1/4] master key — first, because every encrypted write refuses without it")
     try:
         name = enrol(first_run.keychain)
     except KeyAlreadyEnrolled:
@@ -1700,7 +1858,7 @@ def _setup_project(context: Context) -> None:
     one. A changed path for an id already registered is `4d`'s refusal and
     ends setup here: relocating a tree is a migration, not a setup step.
     """
-    print("[2/3] project — second, because no path resolves until one is registered")
+    print("[2/4] project — second, because no path resolves until one is registered")
     path = _answer("project directory", _project_answer, step="step 2 (project)")
     alias = _answer(
         "project id (empty to use the directory's name)",
@@ -1755,14 +1913,20 @@ _YES = frozenset({"y", "yes"})
 _NO = frozenset({"n", "no"})
 
 
+def _y_or_n(raw: str) -> bool | None:
+    """Setup's y/n answer: `True`, `False`, or `None` for an empty one."""
+    text = raw.strip().lower()
+    if not text:
+        return None
+    if text in _YES or text in _NO:
+        return text in _YES
+    raise _Inadmissible(f"{raw.strip()!r} is not y or n.")
+
+
 def _verbose(current: Config) -> Callable[[str], Config]:
     def interpret(raw: str) -> Config:
-        text = raw.strip().lower()
-        if not text:
-            return current
-        if text in _YES or text in _NO:
-            return replace(current, verbose_logging=text in _YES)
-        raise _Inadmissible(f"{raw.strip()!r} is not y or n.")
+        answer = _y_or_n(raw)
+        return current if answer is None else replace(current, verbose_logging=answer)
 
     return interpret
 
@@ -1770,8 +1934,8 @@ def _verbose(current: Config) -> Callable[[str], Config]:
 def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) -> None:
     """Step 3: `config.toml` — asked for, rendered by `4g`, written once.
 
-    Last because it is the only step whose absence is survivable: every key is
-    optional. Which keys are asked is decided from what `load_config` read, not
+    After the key and the project because its absence is survivable: every
+    key is optional. Which keys are asked is decided from what `load_config` read, not
     from the bytes, so a file holding only a BOM, comments or whitespace is a
     first-run file:
 
@@ -1787,7 +1951,7 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
     it at the prompt that asked. Who the PM is is not asked: it comes from the
     Graph connector rows (story 2o).
     """
-    print("[3/3] config.toml — last, because it is the only step a machine survives without")
+    print("[3/4] config.toml — after the project, because every key in it is optional")
     first_run_file = current == Config()
     ask_rate = not current.blended_hourly_rate
     ask_zone = not current.display_timezone
@@ -1829,8 +1993,244 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
     print(f"      written to {written}")
 
 
+DEFAULT_GRAPH_INSTANCE = "graph:work"
+"""The name Enter keeps at step 4's name question, when it is free (story 4p)."""
+
+GRAPH_QUESTION = "add a Microsoft Graph connector now? (y/n)"
+"""Step 4's one question; Enter is no (story 4p)."""
+
+_STEP_4 = "step 4 (Microsoft Graph connector)"
+
+_STEPS_DONE = "Steps 1–3 stay done"
+
+_NOTHING_SAVED = "nothing was saved for the connector"
+
+_RUN_AGAIN = (
+    "Run `pm-ai setup` again, or `pm-ai connector add graph <name>`, to add one."
+)
+
+_STATE_UNREADABLE = (
+    DecryptionFailed,
+    KeychainUnavailable,
+    KeyNotFound,
+    ArtifactBusy,
+    OSError,
+    ValueError,
+)
+"""What reading back the sealed store and `connectors/` can raise."""
+
+
+class _StepFour:
+    """What step 4 has chosen so far, so its ending can say what is on disk."""
+
+    def __init__(self) -> None:
+        self.storage: StoragePort | None = None
+        self.instance: str | None = None
+
+
+def _graph_instance(storage: StoragePort) -> str:
+    """Step 4's name question, each typed name checked by `assert_enrollable`.
+
+    Enter keeps `DEFAULT_GRAPH_INSTANCE` only when that name is free — no row
+    and no sealed entry under it, disabled or not. When it is in use, or
+    whether it is free could not be checked (the store busy or unreadable),
+    the question offers no default and a blank answer is asked again. A
+    malformed or in-use name is named and asked again, at most
+    `SETUP_ATTEMPTS` times. Setup checks the name first so that the shared
+    path's own check of it cannot fail unless the machine changed meanwhile.
+    """
+    default: str | None = None
+    try:
+        assert_enrollable(storage, system="graph", instance=DEFAULT_GRAPH_INSTANCE)
+        default = DEFAULT_GRAPH_INSTANCE
+        question = "connector name"
+    except DuplicateConnector:
+        question = (
+            f"connector name ({DEFAULT_GRAPH_INSTANCE} is in use; type another, "
+            f"as graph:<name>)"
+        )
+    except (ArtifactBusy, OSError):
+        # Not a reason to stop: a typed name is checked on its own, and that
+        # check names whatever is wrong.
+        question = (
+            f"connector name (whether {DEFAULT_GRAPH_INSTANCE} is free could not "
+            f"be checked; type one, as graph:<name>)"
+        )
+
+    def interpret(raw: str) -> str:
+        typed = raw.strip()
+        if not typed:
+            if default is not None:
+                return default
+            raise _Inadmissible("a name is required here; there is no default.")
+        try:
+            assert_enrollable(storage, system="graph", instance=typed)
+        except (MalformedInstanceName, DuplicateConnector) as refused:
+            raise _Inadmissible(str(refused)) from refused
+        return typed
+
+    return _answer(
+        question,
+        interpret,
+        step=_STEP_4,
+        default=default,
+        done=f"{_STEPS_DONE} and {_NOTHING_SAVED}",
+    )
+
+
+def _graph_step(first_run: FirstRun, step: _StepFour) -> None:
+    """Step 4's body: the done check, the question, then `connector add graph`."""
+    on_disk = first_run.connectors()
+    if on_disk.graph:
+        print(
+            f"      already enrolled: {', '.join(on_disk.graph)}; nothing was "
+            f"asked or written. Another is added with `pm-ai connector add graph "
+            f"<name>`."
+        )
+        return
+    wanted = _answer(
+        GRAPH_QUESTION,
+        lambda raw: _y_or_n(raw) is True,
+        step=_STEP_4,
+        default="n",
+        done=_STEPS_DONE,
+    )
+    if not wanted:
+        print("      skipped; nothing was asked about Graph and nothing was written.")
+        print(f"      {on_disk.remedy}")
+        return
+    storage = first_run.storage
+    step.storage = storage
+    graph = first_run.graph_sign_in
+    # Before the name question: a missing runtime extra is said before any
+    # connector question is asked, as `connector add graph` says it.
+    graph.ready()
+    step.instance = _graph_instance(storage)
+    code = _connector_add_graph(storage, graph, step.instance)
+    if code != EXIT_OK:
+        raise Refusal(f"adding {step.instance} ended with exit code {code}.")
+
+
+def _setup_connector(first_run: FirstRun) -> None:
+    """Step 4: an optional Microsoft Graph connector (story 4p).
+
+    Done when an enabled Graph row exists, as an enrolled key is: its names are
+    printed and nothing is asked or written. Otherwise one y/n question, Enter
+    meaning no. "yes" asks the name, then runs `connector add graph`'s
+    questions, sign-in, check and save through `_connector_add_graph` itself,
+    never a copy of it. Those questions keep the command's own behaviour inside
+    setup: they are asked again until answered, with no attempt limit, as in
+    the command; Ctrl-C or Ctrl-D leaves them.
+
+    Every way the step ends early — the read of `connectors/` included — is
+    setup's refusal at step 4, naming steps 1–3 as done, an interruption
+    anywhere in it included, so the shared command's own interrupt sentence is
+    not what is printed. What it says was saved is read back from the sealed
+    store and `connectors/` at that moment, never assumed: a credential sealed
+    with no row, or a connector fully enrolled before the interruption, is
+    said as such.
+    """
+    print(
+        "[4/4] Microsoft Graph connector — optional: the machine is ready without "
+        "one, and adding one signs in at Microsoft in a browser and needs an app "
+        "(client) id"
+    )
+    step = _StepFour()
+    try:
+        with _enrolment_refusals(
+            command="connector add graph", then="then run `pm-ai setup` again"
+        ):
+            _graph_step(first_run, step)
+    except (KeyboardInterrupt, EOFError) as stopped:
+        raise _step_four_ended(step, None) from stopped
+    except _SetupStopped:
+        raise
+    except Refusal as refused:
+        cause = refused.__cause__
+        if isinstance(cause, (KeyboardInterrupt, EOFError)):
+            raise _step_four_ended(step, None) from refused
+        raise _step_four_ended(step, refused) from refused
+
+
+def _saved(step: _StepFour) -> tuple[str, str | None]:
+    """What is on disk for the connector now, and the one remedy that fits it.
+
+    Read back rather than inferred from where the step stopped: an
+    interruption can land between the seal and the row, or after both.
+    """
+    instance, storage = step.instance, step.storage
+    if instance is None or storage is None:
+        return _NOTHING_SAVED, _RUN_AGAIN
+    try:
+        sealed = instance in stored_credentials(storage)
+        row = instance in connector_configurations(storage)
+    except _STATE_UNREADABLE as unread:
+        return (
+            f"whether anything was saved for {instance} could not be read back "
+            f"({unread})",
+            "`pm-ai doctor` names the connectors enrolled.",
+        )
+    if sealed and row:
+        return (
+            f"{instance} WAS saved — its settings row and sealed sign-in are both "
+            f"on disk, so it is enrolled and becomes active at the next start",
+            None,
+        )
+    if sealed:
+        return (
+            f"{instance}'s sign-in is sealed in the credentials file and its "
+            f"settings row was not written, so it is NOT enrolled and will not "
+            f"harvest",
+            f"No pm-ai command removes a sealed entry yet, so {instance} stays in "
+            f"use; enrol the connector under a different name with "
+            f"`pm-ai setup` or `pm-ai connector add graph <name>`.",
+        )
+    if row:
+        return (
+            f"{instance}'s settings row is on disk with no sealed sign-in, so it "
+            f"will not harvest",
+            f"`pm-ai connector sign-in {instance}` signs it in.",
+        )
+    return _NOTHING_SAVED, _RUN_AGAIN
+
+
+_CARRIES_REMEDY = ("`pm-ai ", "uv sync")
+"""Text in a refusal that already tells the person what to run."""
+
+
+def _sentence(text: str) -> str:
+    text = text.strip()
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _step_four_ended(step: _StepFour, refused: Refusal | None) -> Refusal:
+    """Step 4's ending as setup's refusal: the cause, what is on disk, one remedy.
+
+    `refused` is `None` for an interruption. The orphaned-credential refusal's
+    own sentence is replaced by what `_saved` reads back, because its remedy —
+    run the add once more — is refused as a name in use.
+    """
+    state, remedy = _saved(step)
+    if refused is None:
+        cause = f"setup was interrupted at {_STEP_4}."
+    else:
+        inner = refused.__cause__
+        if isinstance(inner, OrphanedCredential):
+            failed = inner.__cause__
+            reason = f"its settings row could not be written: {failed}" if failed else str(inner)
+        else:
+            reason = str(refused)
+        cause = f"setup stopped at {_STEP_4}: {_sentence(reason)}"
+        if state == _NOTHING_SAVED and any(m in reason for m in _CARRIES_REMEDY):
+            remedy = None  # the cause already says what to run
+    parts = [cause, f"{_STEPS_DONE}; {state}."]
+    if remedy:
+        parts.append(remedy)
+    return Refusal(" ".join(parts))
+
+
 def _setup(context: Context) -> int:
-    """`pm-ai setup` — key, project, config, then `1g`'s probes (story 4h).
+    """`pm-ai setup` — key, project, config, Graph, then `1g`'s probes (stories 4h, 4p).
 
     Nothing here is reimplemented: `4b` enrols, `4k` registers, `4g` renders.
     This owns the order, the prompts, and the claim at the end — which is the
@@ -1878,6 +2278,7 @@ def _setup(context: Context) -> int:
     _setup_key(first_run)
     _setup_project(context)
     _setup_config(first_run, existing, current)
+    _setup_connector(first_run)
 
     print()
     report = first_run.diagnose()
@@ -1970,6 +2371,301 @@ def _goal_set(context: Context) -> int:
     return EXIT_OK
 
 
+# ── `pm-ai transcript drop` (story 11c) ──────────────────────────────────────
+
+MEETING_ARGUMENT = "meeting"
+"""`transcript drop`'s optional `--meeting <id>`: the record to bind to."""
+
+_DROPPABLE_KINDS = frozenset({ScopeKind.PERSONAL, ScopeKind.PROJECT})
+
+START_FORMS = ("2026-10-10T14:00+03:00", "2026-10-10T11:00Z")
+"""The spellings the start question names: a date-time with its offset, or in
+UTC with `Z`. Seconds and fractions of a second are accepted too."""
+
+_START = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+MAX_DROP_BYTES = 16 * 1024 * 1024
+"""The largest file `transcript drop` reads: 16 MiB.
+
+A day-long meeting's WebVTT is a few megabytes; anything past this is not a
+transcript somebody typed or downloaded, and reading it whole would be the
+first thing to go wrong.
+"""
+
+_NOT_A_TRANSCRIPT_FORMAT = {
+    ".docx": "a Word document",
+    ".doc": "a Word document",
+    ".pdf": "a PDF",
+    ".rtf": "a rich-text document",
+}
+"""Document formats refused by name. `.docx` is the deferred one (it needs a
+parser dependency); the others get the same way out."""
+
+
+def _drop_target(options: Mapping[str, str]) -> DataScope:
+    """`--scope`'s scope, required; `_Misread` when absent or naming none.
+
+    `people:<id>` and `application` parse, and the command refuses them by
+    name (`3`): they are scopes pm-ai read and declines to drop into.
+    """
+    requested = options.get(SCOPE_ARGUMENT)
+    scope = None if requested is None else _scope(requested)
+    if scope is None:
+        raise _Misread(
+            f"`transcript drop` needs `--{SCOPE_ARGUMENT} personal` or "
+            f"`--{SCOPE_ARGUMENT} project:<id>` naming an enrolled project"
+            + ("" if requested is None else f"; `{requested}` is not a scope")
+            + "."
+        )
+    return scope
+
+
+def _start_refusal(answer: str) -> str | None:
+    if _START.match(answer):
+        try:
+            datetime.fromisoformat(answer)
+        except ValueError:
+            pass
+        else:
+            return None
+    return (
+        f"{answer!r} is not a start pm-ai can read. Type a date and time with "
+        f"its offset from UTC, as {START_FORMS[0]}, or in UTC, as {START_FORMS[1]}."
+    )
+
+
+def _title_refusal(answer: str) -> str | None:
+    if not answer:
+        return "a title is required: it is half of what matches a meeting."
+    try:
+        check_title(answer)
+    except MalformedMeeting as refused:
+        return str(refused)
+    return None
+
+
+def _attendee_refusal(answer: str) -> str | None:
+    try:
+        parse_attendees(answer)
+    except MalformedMeeting as refused:
+        return (
+            f"{refused} Type handles separated by commas with no spaces, as "
+            f"email:ana@example.com,email:bo@example.com; a handle cannot "
+            f"carry a comma."
+        )
+    return None
+
+
+def _duration_refusal(minutes: int) -> str | None:
+    if MIN_DROP_MINUTES <= minutes <= MAX_DROP_MINUTES:
+        return None
+    return (
+        f"{minutes} minutes is not a meeting's length here; type "
+        f"{MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}."
+    )
+
+
+def _drop_identify() -> tuple[str, datetime]:
+    """The title and start, asked at the terminal; refused without one."""
+    if not sys.stdin.isatty():
+        raise Refusal(
+            "binding this transcript needs the meeting's title and start, and "
+            "stdin is not a terminal to ask them at — a pipe, a cron job or a "
+            "CI step. Nothing was written. Name the meeting with "
+            "`--meeting <id>` to drop without being asked."
+        )
+    title = _ask_until("Meeting title (required): ", judge=_title_refusal)
+    start = _ask_until(
+        f"Meeting start, as {START_FORMS[0]} or {START_FORMS[1]}: ",
+        judge=_start_refusal,
+    )
+    return title, datetime.fromisoformat(start).astimezone(timezone.utc)
+
+
+def _drop_describe(ask_duration: bool) -> tuple[tuple[Actor, ...], int | None]:
+    """The attendees, and the duration when the file does not carry one."""
+    attendees = parse_attendees(
+        _ask_until(
+            "No recorded meeting matches, so a new record is made. Attendees, as "
+            "handles separated by commas with no spaces (Enter for none): ",
+            judge=_attendee_refusal,
+        )
+    )
+    if not ask_duration:
+        return attendees, None
+    minutes = _ask_minutes(
+        f"Duration in minutes ({MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}): ",
+        judge=_duration_refusal,
+    )
+    return attendees, minutes
+
+
+def _read_drop(path: Path) -> str:
+    """The dropped file's text, or a refusal naming the path and what is wrong.
+
+    Checked in this order: there is something at the path, it is a document
+    format pm-ai does not read, it is a regular file, it is within
+    `MAX_DROP_BYTES`, it can be read, it is UTF-8.
+    """
+    if path.is_symlink() and not path.exists():
+        raise Refusal(
+            f"{path} is a link to nothing (a dangling link), so there is no "
+            f"transcript to read. Nothing was written."
+        )
+    if not path.exists():
+        raise Refusal(f"{path} does not exist. Nothing was written.")
+    described = _NOT_A_TRANSCRIPT_FORMAT.get(path.suffix.lower())
+    if described is not None:
+        deferral = (
+            " Reading .docx needs a parser pm-ai does not ship yet, so it is deferred."
+            if path.suffix.lower() == ".docx"
+            else ""
+        )
+        raise Refusal(
+            f"{path} is {described}, not a transcript pm-ai reads.{deferral} Save "
+            f"the transcript as .vtt or .txt and drop that. Nothing was written."
+        )
+    if path.is_dir():
+        raise Refusal(f"{path} is a directory, not a transcript file. Nothing was written.")
+    try:
+        status = path.stat()
+    except OSError as unreadable:
+        reason = unreadable.strerror or type(unreadable).__name__
+        raise Refusal(f"{path} could not be read ({reason}). Nothing was written.") from unreadable
+    if not stat.S_ISREG(status.st_mode):
+        raise Refusal(
+            f"{path} is not a regular file (a FIFO, a device or a socket), so it "
+            f"is not a transcript pm-ai will read. Nothing was written."
+        )
+    if status.st_size > MAX_DROP_BYTES:
+        raise Refusal(
+            f"{path} is {status.st_size} bytes, over the {MAX_DROP_BYTES // (1024 * 1024)} "
+            f"MiB a dropped transcript may be. Nothing was written."
+        )
+    try:
+        raw = path.read_bytes()
+    except OSError as unreadable:
+        reason = unreadable.strerror or type(unreadable).__name__
+        raise Refusal(f"{path} could not be read ({reason}). Nothing was written.") from unreadable
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as undecodable:
+        raise Refusal(
+            f"{path} is not UTF-8 text (byte {undecodable.start} does not decode), "
+            f"so pm-ai cannot read it as a transcript. Nothing was written."
+        ) from undecodable
+
+
+def _closing_line(dropped: TranscriptDropOutcome) -> str:
+    """The exit-0 sentence: where the capture is, which meeting, what was staged."""
+    if dropped.bound_by == "minted":
+        how = f"a new manual-only record {dropped.meeting_id}"
+    elif dropped.bound_by == "matched":
+        how = (
+            f"the recorded meeting {dropped.meeting_id}, {dropped.title!r} at "
+            f"{dropped.start.isoformat()}"
+        )
+    else:
+        how = f"the recorded meeting {dropped.meeting_id}"
+    line = (
+        f"{dropped.capture} is stored and ingested against {how} in "
+        f"{dropped.scope}: {dropped.staged} staged for approval."
+    )
+    if dropped.left:
+        line += (
+            f" {dropped.left} left as they were, already approved, rejected or "
+            f"expired."
+        )
+    if dropped.bound_by == "minted" and dropped.duration_minutes is not None:
+        source = (
+            "taken from the last cue's end"
+            if dropped.duration_from_last_cue
+            else "as answered"
+        )
+        line += f" Its duration is {dropped.duration_minutes} minutes, {source}."
+    return line
+
+
+def _transcript_drop(context: Context) -> int:
+    """`pm-ai transcript drop <file> --scope <scope> [--meeting <id>]` (story 11c).
+
+    The surface of `pm_ai.app.pipelines.drop_transcript`: it refuses the scopes
+    a drop cannot go to and a path that is not a readable UTF-8 transcript
+    file, then hands the text to the pipeline with the two question sets — the
+    title and start, then the attendees and duration — which the pipeline asks
+    only when binding needs them. Every refusal the pipeline meets, a
+    filesystem error included, is passed through verbatim as exit `3`; it
+    writes nothing before the capture, and a failure or Ctrl-C after it says
+    whether the capture was kept.
+    """
+    scope = context.target
+    if scope is None:
+        raise RuntimeError(
+            "no target scope reached `transcript drop`. That is a wiring fault in pm-ai."
+        )
+    if scope.kind is ScopeKind.PEOPLE:
+        raise Refusal(
+            f"a transcript cannot be dropped into {scope}: a 1:1's transcript is "
+            f"a later slice. Drop into `personal` or `project:<id>`. Nothing was "
+            f"written."
+        )
+    if scope.kind not in _DROPPABLE_KINDS:
+        raise Refusal(
+            f"a transcript cannot be dropped into {scope}, which records no "
+            f"meetings. Drop into `personal` or `project:<id>`. Nothing was "
+            f"written."
+        )
+    (file,) = context.arguments
+    path = Path(file)
+    text = _read_drop(path)
+    context.require_daemon()
+    drop = context.transcript_drop
+    if drop is None:
+        raise Refusal(
+            "no transcript pipeline was supplied to the CLI, so nothing was "
+            "dropped. That is a wiring fault in pm-ai, not this machine's."
+        )
+    try:
+        dropped = drop(
+            text=text,
+            file_name=str(path),
+            scope=scope,
+            meeting_id=context.options.get(MEETING_ARGUMENT),
+            identify=_drop_identify,
+            describe=_drop_describe,
+        )
+    except (
+        UnreadableTranscript,
+        NothingSaid,
+        UnboundTranscript,
+        MeetingNotFound,
+        AmbiguousMeeting,
+        MalformedMeeting,
+        CaptureAlreadyExists,
+        UnprotectedCaptureDir,
+        EmptyCapture,
+        MalformedCaptureName,
+        CaptureNotIngested,
+        DropInterrupted,
+        DropRefused,
+        ScopeResolutionError,
+        ArtifactBusy,
+    ) as refused:
+        message = refused.args[0] if isinstance(refused, KeyError) and refused.args else refused
+        raise Refusal(str(message)) from refused
+    except OSError as failed:
+        # The filesystem's own refusal, at the listing, the candidate lookup or
+        # the capture write — all before anything is written, or the capture
+        # write itself, which publishes whole or not at all.
+        raise Refusal(f"the drop stopped and nothing was written: {failed}") from failed
+    for notice in dropped.notices:
+        print(f"pm-ai: {notice}", file=sys.stderr)
+    print(_closing_line(dropped))
+    return EXIT_OK
+
+
 TABLE: Mapping[str, Command] = {
     "dashboard": Command(
         "render this scope's daily_dashboard.md, once",
@@ -1991,9 +2687,11 @@ TABLE: Mapping[str, Command] = {
             ),
         },
     ),
-    # `4h`: the one command that sequences the three below it on a new machine.
+    # `4h`: the one command that walks a new machine through the key, a
+    # project and `config.toml` — and, since `4p`, offers a Graph connector.
     "setup": Command(
-        "first run: enrol the key, register a project, write config.toml, then probe",
+        "first run: enrol the key, register a project, write config.toml, "
+        "optionally add a Microsoft Graph connector, then probe",
         _setup,
     ),
     # The three groups, each with the one leaf `4j` hung on it. They were in the
@@ -2037,6 +2735,20 @@ TABLE: Mapping[str, Command] = {
                 "create or revise one goal in strategic_goals.md",
                 _goal_set,
                 target=_goals_target,
+            ),
+        },
+    ),
+    # `11c`: a transcript somebody downloaded or typed, ingested by hand.
+    "transcript": Command(
+        "meeting transcripts pm-ai extracts from",
+        leaves={
+            "drop": Command(
+                "ingest a .vtt or .txt transcript against a meeting in that scope",
+                _transcript_drop,
+                takes=("file",),
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
+                requires=(SCOPE_ARGUMENT,),
+                target=_drop_target,
             ),
         },
     ),
@@ -2086,7 +2798,10 @@ def _spelled(name: str, command: Command) -> str:
     """
     required = "".join(f" <{argument}>" for argument in command.takes)
     positional = "".join(f" [{argument}]" for argument in command.optional)
-    optional = "".join(f" [--{option} <{option}>]" for option in command.options)
+    optional = "".join(
+        f" --{option} <{option}>" if option in command.requires else f" [--{option} <{option}>]"
+        for option in command.options
+    )
     return f"{name}{required}{positional}{optional}"
 
 
@@ -2215,11 +2930,27 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
         named, misread = _options(rest, allowed=command.options)
         if misread is not None:
             return _misused(f"`{name}` {misread}")
+        absent = _missing(command, named)
+        if absent is not None:
+            return _misused(f"`{name}` {absent}")
         return _parsed(command, command.run, options=named)
     leaf = command.leaves.get(rest[0]) if rest else None
     if leaf is None or leaf.run is None:
         return Answered(EXIT_USAGE, usage(group=name))
     supplied = tuple(rest[1:])
+    leaf_options: Mapping[str, str] = {}
+    if leaf.options:
+        # Story 11c: a leaf with options as well as positionals. The words are
+        # split first — every `--name` with its value, the rest in order — so
+        # `drop <file> --scope personal` and `drop --scope personal <file>`
+        # read alike, and each half meets the refusal it always met.
+        supplied, option_words = _split_options(supplied)
+        leaf_options, misread = _options(option_words, allowed=leaf.options)
+        if misread is not None:
+            return _misused(f"`{name} {rest[0]}` {misread}", group=name)
+        absent = _missing(leaf, leaf_options)
+        if absent is not None:
+            return _misused(f"`{name} {rest[0]}` {absent}", group=name)
     if not len(leaf.takes) <= len(supplied) <= len(leaf.takes) + len(leaf.optional):
         # 4j refused every trailing word because no leaf took one. 8b's
         # `connector add` does, so the refusal became about *arity* — still a
@@ -2239,7 +2970,7 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
             else "no arguments"
         )
         return _misused(f"`{name} {rest[0]}` takes {expected}", group=name)
-    return _parsed(leaf, leaf.run, arguments=supplied)
+    return _parsed(leaf, leaf.run, arguments=supplied, options=leaf_options, group=name)
 
 
 def _parsed(
@@ -2248,13 +2979,14 @@ def _parsed(
     *,
     arguments: tuple[str, ...] = (),
     options: Mapping[str, str] | None = None,
+    group: str | None = None,
 ) -> Parsed | Answered:
     """The parsed command with its target read, or the usage error naming why not."""
     named = {} if options is None else options
     try:
         target = None if command.target is None else command.target(named)
     except _Misread as misread:
-        return _misused(str(misread))
+        return _misused(str(misread), group=group)
     return Parsed(run, arguments=arguments, options=named, target=target)
 
 
@@ -2271,6 +3003,7 @@ def dispatch(
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     first_run: FirstRun | None = None,
     goals: GoalBook | None = None,
+    transcript_drop: TranscriptDrop | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -2297,6 +3030,7 @@ def dispatch(
         dashboard=dashboard,
         first_run=first_run,
         goals=goals,
+        transcript_drop=transcript_drop,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,
@@ -2360,6 +3094,43 @@ def _options(
             )
         parsed[option] = remaining.pop(0)
     return parsed, None
+
+
+def _missing(command: Command, named: Mapping[str, str]) -> str | None:
+    """The sentence naming each required option absent, or `None`.
+
+    Asked of a leaf and of a command without leaves alike, so `requires` means
+    the same thing wherever it is declared.
+    """
+    absent = [option for option in command.requires if option not in named]
+    if not absent:
+        return None
+    return "needs " + ", ".join(f"`--{option} <{option}>`" for option in absent)
+
+
+def _split_options(words: Sequence[str]) -> tuple[tuple[str, ...], list[str]]:
+    """Positionals in order, and every `--name value` / `--name=value` word.
+
+    A `--name` takes the word after it as its value unless that word is another
+    option, so `_options` still names a missing value as missing. A bare `--`
+    ends the options: every word after it is positional, so a file whose name
+    starts with `--` can still be named.
+    """
+    positional: list[str] = []
+    options: list[str] = []
+    remaining = list(words)
+    while remaining:
+        word = remaining.pop(0)
+        if word == "--":
+            positional.extend(remaining)
+            break
+        if not word.startswith("--"):
+            positional.append(word)
+            continue
+        options.append(word)
+        if "=" not in word and remaining and not remaining[0].startswith("--"):
+            options.append(remaining.pop(0))
+    return tuple(positional), options
 
 
 def _run(handler: Callable[[Context], int], context: Context) -> int:

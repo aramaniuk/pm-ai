@@ -2597,10 +2597,27 @@ class PmIdentityReading:
     `identity` is what `pm_identity` answered; `unusable` lists every row that
     could not be read, and every enabled Graph row with no usable user id, so
     `23c`'s sign-in line and its marking come from the same read.
+
+    `unusable` splits in two for `23c`, each held apart so the dashboard reads
+    names rather than parsing reasons:
+
+    - `unrecorded` is the instance of every enabled Graph row with no usable
+      user id — the rows the sign-in line names. The instance is the row's own
+      `instance` value, or its file name without `.json` when it has none.
+    - `unchecked` is every other entry of `unusable`: a row that could not be
+      read (so whether it is the PM's Graph row is unknown), a Graph row with no
+      user id whose `enabled` is neither true nor false, and `connectors/`
+      itself when it could not be listed. Mentions could not be checked for
+      any of them, and the dashboard says so.
+
+    No defaults: a reading that did not sort its rows must not be able to look
+    as if every row were usable.
     """
 
     identity: frozenset[PersonHandle]
     unusable: tuple[UnusableRow, ...]
+    unrecorded: tuple[str, ...]
+    unchecked: tuple[UnusableRow, ...]
 
 
 def read_pm_identity(storage: StorageService) -> PmIdentityReading:
@@ -2627,14 +2644,17 @@ def read_pm_identity(storage: StorageService) -> PmIdentityReading:
     try:
         names = storage.list_collection(scope=application, artifact="connectors/")
     except (OSError, DecryptionFailed) as unlisted:
+        unlistable = (UnusableRow("connectors/", f"could not be listed ({unlisted})"),)
         return PmIdentityReading(
             identity=pm_identity((), aliased=frozenset()),
-            unusable=(
-                UnusableRow("connectors/", f"could not be listed ({unlisted})"),
-            ),
+            unusable=unlistable,
+            unrecorded=(),
+            unchecked=unlistable,
         )
     rows: list[Mapping[str, object]] = []
     unusable: list[UnusableRow] = []
+    unrecorded: list[str] = []
+    signed_in_before: list[UnusableRow] = []
     for name in names:
         try:
             raw = storage.read_artifact(
@@ -2664,8 +2684,14 @@ def read_pm_identity(storage: StorageService) -> PmIdentityReading:
             continue
         enabled = decoded.get("enabled")
         if enabled is True:
-            unusable.append(
-                UnusableRow(name, "is an enabled Graph row with no usable user id")
+            predates = UnusableRow(name, "is an enabled Graph row with no usable user id")
+            unusable.append(predates)
+            signed_in_before.append(predates)
+            instance = decoded.get("instance")
+            unrecorded.append(
+                instance.strip()
+                if isinstance(instance, str) and instance.strip()
+                else name.removesuffix(".json")
             )
         elif enabled is not False:
             unusable.append(
@@ -2678,6 +2704,12 @@ def read_pm_identity(storage: StorageService) -> PmIdentityReading:
     return PmIdentityReading(
         identity=pm_identity(rows, aliased=frozenset()),
         unusable=tuple(unusable),
+        unrecorded=tuple(unrecorded),
+        unchecked=tuple(
+            row
+            for row in unusable
+            if not any(row is predates for predates in signed_in_before)
+        ),
     )
 
 
