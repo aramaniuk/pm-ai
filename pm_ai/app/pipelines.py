@@ -23,10 +23,14 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
+from enum import Enum
 from pathlib import Path
+from typing import Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
+from pm_ai.app.concurrency import WriterStopped
 from pm_ai.app.wiring import GIT_QUESTION_SECONDS, Daemon, read_pm_identity
+from pm_ai.connectors.gitlab.client import FETCH_BUDGET as GITLAB_FETCH_BUDGET
 from pm_ai.connectors.graph.client import FETCH_BUDGET as GRAPH_FETCH_BUDGET
 from pm_ai.connectors.registry import HEALTH_PROBE_SECONDS
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
@@ -62,6 +66,7 @@ from pm_ai.core.transcripts import (
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import parse_goals
 from pm_ai.core.normalize import attribute_all
+from pm_ai.core.cadence import coverage_cutoff
 from pm_ai.core.transcript_acquisition import acquire_transcripts
 from pm_ai.core.rendering import (
     CalendarAnswer,
@@ -106,6 +111,7 @@ from pm_ai.domain.transcripts import (
 from pm_ai.ports import (
     ArtifactBusy,
     CalendarReadPort,
+    ConnectorPort,
     CaptureAlreadyExists,
     DecryptionFailed,
 )
@@ -113,6 +119,7 @@ from pm_ai.storage.service import (
     OperationalStoreBusy,
     OperationalStoreUnavailable,
     ProposalNotFound,
+    SchemaVersionChanged,
 )
 from pm_ai.skills.registry import ExecutedButUnrecorded, Invocation
 
@@ -130,19 +137,123 @@ PERSONAL = DataScope(ScopeKind.PERSONAL)
 """CAP-9 names `~/.manager-ai/memory/daily_dashboard.md`, so this is the default."""
 
 
-def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
+HARVEST_FETCH_BUDGET_SECONDS = max(
+    GRAPH_FETCH_BUDGET.total_seconds(), GITLAB_FETCH_BUDGET.total_seconds()
+)
+"""The per-connector fetch budget a scheduled harvest's bounded steps run under (9a).
+
+Each connector bounds its own walk by its client's budget (ten minutes for both
+built today); this is the deadline that abandons a fetch that does not come
+back by itself, read off the clients rather than copied.
+"""
+
+_T = TypeVar("_T")
+
+
+class FetchBound(Protocol):
+    """How a bounded step is run: `bound(call, label)` returns `call()`'s answer, or
+    raises `FetchAbandoned` when its deadline passes first (AD-5)."""
+
+    def __call__(
+        self, call: Callable[[], _T], label: str, *, own_budget: bool = False
+    ) -> _T: ...
+
+
+class FetchAbandoned(Exception):
+    """A bounded step outlasted its deadline and was abandoned (AD-5, story 9a).
+
+    Only a bounded step is ever abandoned: a claimed step it handed over
+    already ran, and one it hands over later is refused. `after_save` is set
+    when the attempt had already saved its position.
+    """
+
+    after_save: bool = False
+
+
+def _unbounded(call: Callable[[], _T], label: str, *, own_budget: bool = False) -> _T:
+    """A bounded step run where it is, with no deadline: the terminal's and the tests'."""
+    return call()
+
+
+def instance_scope(daemon: Daemon, instance: str) -> DataScope:
+    """The scope `instance` was filed under at build, or the daemon's own (story 9a).
+
+    A scheduled harvest has no current project (AD-11), so a write that names
+    no scope of its own — the empty-batch receipt — goes where the instance was
+    filed: its project for a GitLab instance, personal for a Graph one.
+    """
+    return daemon.instance_scopes.get(instance, daemon.scope)
+
+
+def set_up(connector: ConnectorPort) -> bool:
+    """Whether a connector can be asked at all (story 8n): a built-in GitLab
+    instance holds no token until an enrolment replaces it."""
+    return not (isinstance(connector, GitLabConnectorAdapter) and not connector.has_credential)
+
+
+def run_harvest(
+    daemon: Daemon, instance: str, *, bound: FetchBound | None = None
+) -> PersistResult:
+    """One harvest of `instance`, as steps: fetch, save, transcripts (stories 9a, 33e, 11b).
+
+    `bound` runs each bounded step — the calendar fetch, the transcript fetch —
+    under a deadline; without one they run where they are. A connector that
+    raises instead of reporting is recorded as a failure naming the
+    exception's type, never its text, with the position unchanged. A write
+    that is refused propagates.
+    """
+    return _harvest(daemon, instance, bound=bound or _unbounded)[0]
+
+
+def _harvest(
+    daemon: Daemon, instance: str, *, bound: FetchBound
+) -> tuple[PersistResult, HarvestFailure | None]:
     connector = daemon.connectors[instance]
-    if isinstance(connector, GitLabConnectorAdapter) and not connector.has_credential:
+    scope = instance_scope(daemon, instance)
+    if not set_up(connector):
         # Not set up, which is not a fault (story 8n): the built-in each watched
         # project gets holds no token until an enrolment replaces it. Nothing is
         # asked and nothing is recorded — no cursor, no window, no failure — so
         # an unconfigured connector cannot read as a broken one (AD-35, AD-39).
         # The empty write is the single writer's clock read, as for an empty
         # harvest below; it writes no line.
-        return daemon.storage.persist_events((), scope=daemon.scope)
+        return daemon.storage.persist_events((), scope=scope), None
     cursor = daemon.storage.load_cursor(instance)  # scheduler owns the cursor (AD-9)
 
-    result = connector.harvest(cursor)
+    # The calendar fetch: a bounded step — on a worker, no claim, no write
+    # (AD-5). A connector that raises instead of reporting is caught as `_ask`
+    # catches one, by type (story 9a): recorded as a failure that needs a
+    # human, the position left where it was.
+    try:
+        result: HarvestResult = bound(lambda: connector.harvest(cursor), f"{instance}'s fetch")
+    except FetchAbandoned:
+        raise
+    except TimeoutError:
+        # A transport timeout the connector let out: waiting clears it, and it
+        # is not a bug in pm-ai.
+        failure = HarvestFailure(
+            reason=(
+                f"{instance}'s fetch timed out (TimeoutError) instead of reporting; "
+                f"its position is unchanged."
+            ),
+            retryable=True,
+        )
+        daemon.storage.record_harvest_failure(instance, failure)
+        return _no_events(daemon), failure
+    except Exception as raised:  # noqa: BLE001 — a failure is a value here
+        failure = HarvestFailure(
+            reason=(
+                f"{instance} raised {type(raised).__name__} instead of reporting, "
+                f"which pm-ai cannot classify; its position is unchanged. That is "
+                f"a bug in pm-ai rather than a verdict about the provider."
+            ),
+            retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
+        )
+        # The failure is the attempt's one claimed step: the receipt's instant
+        # is the clock's, not a second write's (a busy refusal of a second
+        # write would turn this recorded failure into a refused save).
+        daemon.storage.record_harvest_failure(instance, failure)
+        return _no_events(daemon), failure
 
     # AD-36 — the match step. Connectors emit `unknown`; this is the only layer
     # that can see the executed-mutation ledger, so this is where provenance is
@@ -237,7 +348,7 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # all-or-nothing, and this call sequence means a refusal there discards page
     # one's cursor *and* its coverage together rather than leaving a cursor that
     # advanced past events nobody stored.
-    persisted = _persist_by_scope(daemon, attributed)
+    persisted = _persist_by_scope(daemon, attributed, scope=scope)
     if refusals:
         persisted = replace(persisted, refusals=(*persisted.refusals, *refusals))
     # AD-35 — `result.coverage` is `CoverageWindow | None` and `None` is passed
@@ -263,11 +374,177 @@ def run_harvest(daemon: Daemon, instance: str) -> PersistResult:
     # Story 11b — then every capture fetched and not yet ingested is ingested:
     # this run's and any an earlier run left (a daemon killed between capture
     # and ingestion), each recorded ingested or failed by name.
+    #
+    # Story 9a — the transcript fetch is a bounded step of the same attempt,
+    # and its time counts against the harvest: it gets what the calendar fetch
+    # left of the attempt's one per-connector budget, and nothing left is a
+    # deadline like any other. The ingestion after it is bounded too, under a
+    # budget of its own — the spec is silent on its bound, and one hung
+    # ingestion must not hold every instance's harvest. A deadline abandons
+    # that step alone; the attempt is recorded failed naming the last claimed
+    # step it finished.
     if isinstance(connector, GraphConnector):
-        report = _acquire_transcripts(daemon, instance, connector, result)
+        graph = connector
+        try:
+            report = bound(
+                lambda: _acquire_transcripts(daemon, instance, graph, result),
+                f"{instance}'s transcript fetch",
+            )
+            if report is not None:
+                fetched = report
+                persisted = replace(
+                    persisted,
+                    transcripts=bound(
+                        lambda: ingest_captures(daemon, fetched),
+                        f"{instance}'s transcript ingestion",
+                        own_budget=True,
+                    ),
+                )
+        except FetchAbandoned as abandoned:
+            # After the save: the failure recorded for it takes back the
+            # success that save stamped (story 9a).
+            abandoned.after_save = True
+            raise
+    return persisted, result.failure
+
+
+def _no_events(daemon: Daemon) -> PersistResult:
+    """The receipt of an attempt that persisted nothing, at the daemon's one clock."""
+    return PersistResult(persisted=0, duplicates=0, at=daemon.clock())
+
+
+class AttemptOutcome(Enum):
+    """How one scheduled attempt ended, which decides when the next is due (9a)."""
+
+    SKIPPED = "skipped"
+    """Not set up, or no longer enrolled: nothing asked, nothing recorded."""
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    """A failure was recorded: the connector's own, or one pm-ai composed."""
+    REFUSED = "refused"
+    """A save another command's claim or a busy store refused; nothing recorded."""
+    STOPPED = "stopped"
+    """The daemon's writer stopped or closed under the attempt."""
+
+
+@dataclass(frozen=True, slots=True)
+class HarvestAttempt:
+    """One scheduled harvest of one instance, as the timer reads it (story 9a)."""
+
+    instance: str
+    outcome: AttemptOutcome
+    failure: HarvestFailure | None = None
+    refused: str | None = None
+    """The refusal's own sentence, naming the claim or the store."""
+    persisted: PersistResult | None = None
+
+
+def harvest_once(
+    daemon: Daemon,
+    instance: str,
+    *,
+    bound: FetchBound | None = None,
+    last_step: Callable[[], str | None] = lambda: None,
+) -> HarvestAttempt:
+    """The scheduled harvest's one attempt at `instance`; never raises (story 9a).
+
+    `run_harvest`'s steps, then the transcript refusals recorded for `doctor`
+    and coverage older than 90 days pruned. How it ended:
+
+    - a fetch abandoned at its deadline is recorded failed, retryable, naming
+      `last_step()` — the last claimed step the attempt finished;
+    - a save refused by another command's claim or a busy store records
+      nothing against the connector and is `REFUSED`, named;
+    - a write the harvest could not classify is recorded failed, by type, not
+      retryable — the position unchanged unless its save had been made;
+    - the writer stopping under it is `STOPPED`: the shutdown's own step
+      records what it must.
+    """
+    connector = daemon.connectors.get(instance)
+    if connector is None or not set_up(connector):
+        return HarvestAttempt(instance, AttemptOutcome.SKIPPED)
+    try:
+        persisted, failure = _harvest(daemon, instance, bound=bound or _unbounded)
+    except FetchAbandoned as abandoned:
+        last = last_step()
+        return record_failed(
+            daemon,
+            instance,
+            after_save=abandoned.after_save,
+            failure=HarvestFailure(
+                reason=(
+                    f"{abandoned} "
+                    + (
+                        f"The last claimed step it finished was {last!r}: what that "
+                        f"step and the ones before it saved stays, and nothing "
+                        f"after it was saved."
+                        if last
+                        else "It had finished no claimed step, so nothing was saved."
+                    )
+                ),
+                retryable=True,
+            ),
+        )
+    except (WriterStopped, SchemaVersionChanged):
+        return HarvestAttempt(instance, AttemptOutcome.STOPPED)
+    except (ArtifactBusy, OperationalStoreBusy) as busy:
+        return HarvestAttempt(instance, AttemptOutcome.REFUSED, refused=str(busy))
+    except Exception as unexpected:  # noqa: BLE001 — recorded by type, never raised
+        return record_failed(
+            daemon,
+            instance,
+            HarvestFailure(
+                reason=(
+                    f"{instance}'s harvest stopped on {type(unexpected).__name__}, "
+                    f"which pm-ai cannot classify. Nothing after the step it "
+                    f"stopped at was saved."
+                ),
+                retryable=UNCLASSIFIED_FAULT_IS_RETRYABLE,
+            ),
+        )
+    try:
+        report = persisted.transcripts
         if report is not None:
-            persisted = replace(persisted, transcripts=ingest_captures(daemon, report))
-    return persisted
+            daemon.storage.record_transcript_refusals(instance, transcript_refusals(report))
+        # Coverage older than 90 days, pruned after each harvest: one claimed
+        # step, one statement.
+        daemon.storage.prune_coverage(before=coverage_cutoff(daemon.clock()))
+    except (WriterStopped, SchemaVersionChanged):
+        return HarvestAttempt(instance, AttemptOutcome.STOPPED, failure, persisted=persisted)
+    except Exception as unrecorded:  # noqa: BLE001 — the harvest itself is saved
+        _log.warning(
+            "after %s's harvest, recording its transcript refusals or pruning old "
+            "coverage failed (%s); the harvest itself is saved",
+            instance,
+            type(unrecorded).__name__,
+        )
+    outcome = AttemptOutcome.SUCCEEDED if failure is None else AttemptOutcome.FAILED
+    return HarvestAttempt(instance, outcome, failure, persisted=persisted)
+
+
+def record_failed(
+    daemon: Daemon, instance: str, failure: HarvestFailure, *, after_save: bool = False
+) -> HarvestAttempt:
+    """Record `failure` against `instance`; the attempt it makes."""
+    try:
+        daemon.storage.record_harvest_failure(instance, failure, after_save=after_save)
+    except (WriterStopped, SchemaVersionChanged):
+        return HarvestAttempt(instance, AttemptOutcome.STOPPED, failure)
+    except (ArtifactBusy, OperationalStoreBusy) as busy:
+        return HarvestAttempt(instance, AttemptOutcome.REFUSED, failure, refused=str(busy))
+    return HarvestAttempt(instance, AttemptOutcome.FAILED, failure)
+
+
+def transcript_refusals(report: TranscriptReport) -> tuple[str, ...]:
+    """Every sentence a transcript fetch and its ingestion refused with (story 9a)."""
+    return (
+        *report.refusals,
+        *(
+            f"meeting {entry.meeting_id} in {entry.scope}: {entry.reason}"
+            for entry in report.refused
+        ),
+        *(reason for _, _, reason in report.ingest_failed),
+    )
 
 
 def _without_held(
@@ -541,7 +818,7 @@ def _record_busy_meetings(
 
 
 def _persist_by_scope(
-    daemon: Daemon, events: tuple[NormalizedEvent, ...]
+    daemon: Daemon, events: tuple[NormalizedEvent, ...], *, scope: DataScope
 ) -> PersistResult:
     """Write each event into the scope it declares, and report the whole run.
 
@@ -555,9 +832,10 @@ def _persist_by_scope(
     every event carried the daemon's own and this grouping produced exactly the
     single call it replaced.
 
-    An empty harvest still calls the writer once, in the daemon's scope, so the
-    `at` a caller reads is a real clock read from the single writer rather than
-    one composed here (AD-5).
+    An empty harvest still calls the writer once, in `scope` — the scope the
+    instance was filed under (story 9a), since a scheduled harvest has no
+    current project — so the `at` a caller reads is a real clock read from the
+    single writer rather than one composed here (AD-5).
 
     All-or-nothing per scope rather than across the batch, which is the cost of
     the split and is stated rather than hidden: `persist_events` is the unit of
@@ -565,7 +843,7 @@ def _persist_by_scope(
     are different files in different trees, one of them committed.
     """
     if not events:
-        return daemon.storage.persist_events((), scope=daemon.scope)
+        return daemon.storage.persist_events((), scope=scope)
     grouped: dict[DataScope, list[NormalizedEvent]] = {}
     for event in events:
         grouped.setdefault(event.scope, []).append(event)

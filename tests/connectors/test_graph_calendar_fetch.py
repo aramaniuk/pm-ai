@@ -35,7 +35,12 @@ import pytest
 
 import pm_ai.connectors.graph.calendar as calendar_module
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
-from pm_ai.connectors.graph.auth import AuthTimedOut, CredentialStale, GraphUnreachable
+from pm_ai.connectors.graph.auth import (
+    AuthTimedOut,
+    CredentialStale,
+    CredentialStoreBusy,
+    GraphUnreachable,
+)
 from pm_ai.connectors.graph.client import (
     DEFAULT_THROTTLE_BACKOFF,
     GRAPH_BASE,
@@ -1650,8 +1655,29 @@ def test_the_fetch_budget_stops_a_walk_that_outlives_its_run():
         # was learned, so waiting is the remedy — and reading an unreachable
         # network as a dead credential sends the PM to re-enrol a good token.
         (GraphUnreachable("the token endpoint never answered"), True),
+        # Story 9a: the credentials file busy at the credential read, with
+        # nothing rotated — another pm-ai command held it, and the next attempt
+        # finds it free. Waiting clears it.
+        (
+            CredentialStoreBusy(
+                "graph:work's credential could not be read, because the "
+                "credentials file was busy.",
+                rotated=False,
+            ),
+            True,
+        ),
+        # A busy file that lost a rotated token keeps today's verdict: the
+        # token on disk is retired, and only a sign-in brings one back.
+        (
+            CredentialStoreBusy(
+                "Microsoft issued a replacement credential for graph:work and it "
+                "could not be saved, because the credentials file was busy.",
+                rotated=True,
+            ),
+            False,
+        ),
     ],
-    ids=["credential-stale", "auth-timed-out", "unreachable"],
+    ids=["credential-stale", "auth-timed-out", "unreachable", "busy-unrotated", "busy-rotated"],
 )
 def test_an_auth_adapter_that_cannot_get_a_token_is_a_value_not_a_raise(refusal, retryable):
     """A fetch reports; it never raises. The coverage a partial walk earned

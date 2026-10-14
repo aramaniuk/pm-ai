@@ -18,20 +18,24 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from pm_ai.domain.harvest import HarvestFailure, HarvestRecord
 from pm_ai.domain.health import EnrolmentReading, Report
 from pm_ai.platform import doctor
 from pm_ai.platform import vcs as vcs_module
 from pm_ai.platform.doctor import (
     CONNECTORS_PROBE,
+    HARVESTS_PROBE,
     ArtifactState,
     Health,
     connectors_enrolled,
     encryption_toggle,
     git_available,
+    harvests_recorded,
     keychain_reachable,
     packages_installed,
     run_all,
@@ -937,3 +941,75 @@ def test_the_line_carries_nothing_but_names():
         "1 enrolled: graph:work; 1 disabled: gitlab:old; 1 for a system pm-ai has "
         "no connector for: jira:x (it has connectors for gitlab and graph)"
     )
+
+
+# ── Story 9a: the `harvests` line ────────────────────────────────────────────
+
+_AT = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
+
+
+def _record(instance: str, failure: HarvestFailure | None = None, **more) -> HarvestRecord:
+    return HarvestRecord(
+        instance=instance,
+        last_attempt=_AT,
+        last_success=None if failure is not None else _AT,
+        failure=failure,
+        **more,
+    )
+
+
+def test_harvests_with_nothing_failing_is_ok_naming_each_instants():
+    probe = harvests_recorded(["graph:work"], [_record("graph:work")])
+    assert probe.name == HARVESTS_PROBE and probe.health is Health.OK
+    assert probe.detail == (
+        "graph:work: last attempt 2026-10-14T09:00:00+00:00, "
+        "last success 2026-10-14T09:00:00+00:00"
+    )
+
+
+def test_an_instance_with_no_record_has_had_no_harvest():
+    probe = harvests_recorded(["gitlab:alpha", "graph:work"], [_record("graph:work")])
+    assert probe.health is Health.OK
+    assert probe.detail.startswith("gitlab:alpha: no harvest has run; graph:work: ")
+
+
+def test_nothing_built_is_ok_and_says_so():
+    probe = harvests_recorded([], [])
+    assert probe.health is Health.OK and "nothing is harvested" in probe.detail
+
+
+def test_a_pending_retryable_failure_is_a_warning():
+    failing = HarvestFailure("503 from the provider", retryable=True, at=_AT)
+    probe = harvests_recorded(["graph:work"], [_record("graph:work", failing)])
+    assert probe.health is Health.WARNING
+    assert "last success never" in probe.detail
+    assert "retried on its own: 503 from the provider" in probe.detail
+    assert probe.remediation
+
+
+def test_a_failure_that_needs_a_person_fails_naming_instance_and_reason_and_wins():
+    expired = HarvestFailure("the sign-in expired; run `pm-ai connector sign-in graph:work`", retryable=False)
+    busy = HarvestFailure("503", retryable=True)
+    probe = harvests_recorded(
+        ["gitlab:alpha", "graph:work"],
+        [_record("graph:work", expired), _record("gitlab:alpha", busy)],
+    )
+    assert probe.health is Health.FAILING
+    assert "graph:work: last attempt" in probe.detail
+    assert "FAILING, needs you: the sign-in expired" in probe.detail
+    assert "retried on its own" in probe.detail, "the other instance is still named"
+    assert "once each cycle" in probe.remediation
+
+
+def test_transcript_refusals_are_counted_on_the_line():
+    record = _record(
+        "graph:work", transcript_refusals=("meeting X in personal: no transcript", "other")
+    )
+    probe = harvests_recorded(["graph:work"], [record])
+    assert probe.health is Health.OK
+    assert "2 transcript refusals, the first: meeting X in personal: no transcript" in probe.detail
+
+
+def test_a_record_for_an_instance_no_longer_built_is_not_listed():
+    probe = harvests_recorded(["graph:work"], [_record("graph:work"), _record("graph:gone")])
+    assert "graph:gone" not in probe.detail

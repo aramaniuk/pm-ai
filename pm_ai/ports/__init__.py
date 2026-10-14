@@ -19,6 +19,7 @@ from pm_ai.domain.events import NormalizedEvent, ObservedEventType
 from pm_ai.domain.harvest import (
     Cursor,
     HarvestFailure,
+    HarvestRecord,
     HarvestResult,
     PersistResult,
 )
@@ -737,6 +738,20 @@ class StoragePort(Protocol):
         the absence of a coverage window, so after a restart they were one state
         and a dead credential resolved to `UNKNOWN` — patience, forever.
         """
+    def record_harvest_failure(
+        self, instance: str, failure: HarvestFailure, *, after_save: bool = False
+    ) -> None:
+        """A failed attempt, position and coverage unchanged (story 9a).
+
+        `after_save`: the same attempt saved its position first, so the
+        success that save stamped is taken back.
+        """
+    def record_transcript_refusals(self, instance: str, refusals: Sequence[str]) -> None:
+        """What the last attempt's transcript fetch and ingestion refused (9a)."""
+    def prune_coverage(self, *, before: datetime) -> int:
+        """Remove coverage records ending before `before`; how many went (9a)."""
+    def harvest_records(self) -> tuple[HarvestRecord, ...]:
+        """Every instance's attempts and current failure, a plain read (9a)."""
     def was_executed(self, idempotency_key: str) -> bool: ...
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None: ...
     # Reads, added with story 2h. The port declared only writes, so an accessor

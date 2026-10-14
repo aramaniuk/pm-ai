@@ -30,6 +30,12 @@ key not yet enrolled does not, and every encrypted step is refused instead.
 After the port and the token, the restart pass marks every job an earlier run
 left unfinished `failed`, and jobs older than seven days are removed.
 
+Story 9a put one step between the port and the writer: the per-user lifetime
+lock on `~/.pm-ai/private/daemon.lock` (AD-7), held until the process ends. A
+second daemon reading another `daemon_port` binds its port and is refused
+there, naming the file, before its writer thread exists or any timer is
+attached. It is not an AD-5 claim, and no command takes it.
+
 ## One loop, one writer thread, one I/O pool (AD-5, AD-19, story 4r)
 
 The daemon composed once, before this module was reached. The event loop only
@@ -90,9 +96,11 @@ from pm_ai.app.prompts import (
     WRITER_HALT_EVENT,
     RequestPath,
 )
+from pm_ai.app.ticks import HarvestTimers
 from pm_ai.app.wiring import Daemon
 from pm_ai.domain.api_token import TOKEN_BYTES, ApiTokenRefused
 from pm_ai.domain.health import Report
+from pm_ai.platform.claims import LifetimeLock, LifetimeLockHeld, hold_for_life
 from pm_ai.ports import DaemonRefused, KeychainUnavailable
 from pm_ai.storage.crypto import LazyKeyCrypto
 from pm_ai.storage.service import (
@@ -190,6 +198,62 @@ def _serve(
 ) -> int:
     server_holder: list[Any] = []
 
+    # The port first: a second `daemon run` meets the first one's listener and
+    # is refused before its writer opens the store or the keychain is asked.
+    listener = bind_loopback(port)
+    # Then the per-user lifetime lock (AD-7, story 9a), before the writer
+    # thread exists and before any timer: a second daemon reading another
+    # `daemon_port` binds its port and is refused here, naming the file.
+    try:
+        lifetime = take_lifetime_lock(daemon)
+    except BaseException:
+        listener.close()
+        raise
+    try:
+        return _serve_locked(
+            daemon, uvicorn, port, listener,
+            probes=probes, announce=announce, diagnose=diagnose, bounds=bounds,
+            server_holder=server_holder,
+        )
+    finally:
+        # Released when the daemon is done, which is when the process ends.
+        lifetime.release()
+
+
+def take_lifetime_lock(daemon: Daemon) -> LifetimeLock:
+    """The daemon's per-user lifetime lock, or `DaemonRefused` naming the file (AD-7)."""
+    where = daemon.storage.daemon_lock_path()
+    try:
+        # `~/.pm-ai` and `private/` at 0700 when this is the first write there.
+        daemon.storage.prepare_private_dir()
+        return hold_for_life(where)
+    except LifetimeLockHeld:
+        raise DaemonRefused(
+            f"another pm-ai daemon is running for this user: it holds {where}, "
+            f"which one daemon keeps for as long as it runs, whatever port it "
+            f"listens on. This one did not start; `pm-ai doctor` says whether "
+            f"the other answers."
+        ) from None
+    except OSError as unusable:
+        raise DaemonRefused(
+            f"the daemon did not start: its lifetime lock {where} could not be "
+            f"taken ({unusable.strerror or type(unusable).__name__}). Nothing "
+            f"was started."
+        ) from unusable
+
+
+def _serve_locked(
+    daemon: Daemon,
+    uvicorn: Any,
+    port: int,
+    listener: socket.socket,
+    *,
+    probes: Callable[[], Report],
+    announce: Callable[[str], None] | None,
+    diagnose: Callable[[str], HealthReport],
+    bounds: Mapping[tuple[str, ...], Callable[[Daemon], float]],
+    server_holder: list[Any],
+) -> int:
     def halted(error: BaseException, job: str | None) -> None:
         # On the writer thread, once: the store moved past this daemon's
         # version, or a transaction would not end. Recorded, naming every
@@ -203,9 +267,6 @@ def _serve(
         for server in server_holder:
             server.should_exit = True
 
-    # The port first: a second `daemon run` meets the first one's listener and
-    # is refused before its writer opens the store or the keychain is asked.
-    listener = bind_loopback(port)
     writer = WriterThread(
         log=_log,
         step_scope=daemon.storage.claimed_step,
@@ -260,6 +321,7 @@ def _serve(
         try:
             requests.restart_pass()
             requests.prune()
+            requests.prune_coverage()  # story 9a; logged, never a refusal
         except (SchemaVersionChanged, OperationalStoreUnavailable, OSError) as refused:
             raise DaemonRefused(
                 f"the daemon did not start: settling the jobs an earlier run left "
@@ -276,6 +338,9 @@ def _serve(
             job_events=requests.job_events,
         )
         app.state.pm_ai_requests = requests
+        # The scheduled harvests (story 9a): attached in `_lifespan`, on this
+        # loop; an unfinished one is marked by the shutdown's own step.
+        app.state.pm_ai_timers = HarvestTimers(requests=requests, now=daemon.clock)
         server = _server_class(uvicorn)(
             uvicorn.Config(
                 app,
@@ -589,23 +654,38 @@ def status_body(
 async def _lifespan(app: Any) -> AsyncIterator[None]:
     """Where background work attaches when the application starts serving.
 
-    The daily removal of old jobs (story 4r) starts here, on the daemon's one
-    event loop, and is cancelled on the way out. `9a`'s harvest timers and
-    `9b`'s render attach here too, and stop the same way — after the listener
-    has stopped and before the writer is closed.
+    The daily removal of old jobs (story 4r) and the scheduled harvests
+    (story 9a) start here, on the daemon's one event loop, and are cancelled on
+    the way out — after the listener has stopped and before the writer is
+    closed. `9b`'s render attaches here too.
     """
     requests: RequestPath | None = getattr(app.state, "pm_ai_requests", None)
     if requests is None:
         yield
         return
     requests.events.attach(asyncio.get_running_loop())
-    timer = asyncio.create_task(requests.prune_daily(), name="pm-ai-daily-prune")
+    timers: list[asyncio.Task[None]] = [
+        asyncio.create_task(requests.prune_daily(), name="pm-ai-daily-prune")
+    ]
+    harvests: HarvestTimers | None = getattr(app.state, "pm_ai_timers", None)
+    if harvests is not None:
+        timers.append(asyncio.create_task(harvests.run(), name="pm-ai-harvests"))
     try:
         yield
     finally:
-        timer.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await timer
+        for timer in timers:
+            timer.cancel()
+        for timer in timers:
+            try:
+                await timer
+            except asyncio.CancelledError:
+                pass
+            except Exception as died:  # noqa: BLE001 — one dead timer stops no other
+                _log.error(
+                    "the background task %s had stopped on an unexpected %s",
+                    timer.get_name(),
+                    type(died).__name__,
+                )
 
 
 class _JsonLines(logging.Formatter):

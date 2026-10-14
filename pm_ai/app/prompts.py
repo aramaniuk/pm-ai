@@ -76,6 +76,7 @@ from pm_ai.app.wiring import (
     refreshed,
 )
 from pm_ai.connectors.registry import ConnectorRegistry
+from pm_ai.core.cadence import coverage_cutoff
 from pm_ai.core.config import ConfigRefused
 from pm_ai.core.dispatch import JobState, plan
 from pm_ai.core.project_registry import RegistryRefused, parse_registry
@@ -304,6 +305,10 @@ class RequestPath:
     wait_a_day: Callable[[float], Awaitable[None]] = asyncio.sleep
     """The daily prune's wait; a test hands one that does not take a day."""
     notes: JobNotes = field(default_factory=JobNotes)
+    shutdown_marks: list[Callable[[], object]] = field(default_factory=list)
+    """More of the shutdown's own work, each run as its own shutdown step on the
+    writer thread after the jobs are marked: `9a`'s mark of a harvest still in
+    a fetch."""
     _slots: dict[str, threading.Lock] = field(default_factory=dict)
     _slots_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -580,6 +585,26 @@ class RequestPath:
             label="remove jobs older than seven days",
         )
 
+    def prune_coverage(self) -> int:
+        """Remove coverage records older than 90 days (story 9a); how many went.
+
+        At start and once a day after. Never refuses anything: a prune that
+        does not run is logged by type and tried again tomorrow.
+        """
+        try:
+            return self.writer.call(
+                lambda: self.daemon.storage.prune_coverage(
+                    before=coverage_cutoff(self.daemon.clock())
+                ),
+                label="remove old coverage records",
+            )
+        except Exception as failed:  # noqa: BLE001 — tomorrow tries again
+            _log.warning(
+                "the removal of old coverage records did not run: %s",
+                type(failed).__name__,
+            )
+            return 0
+
     async def prune_daily(self) -> None:
         """Once a day after start, until the daemon stops and cancels it."""
         while True:
@@ -594,6 +619,7 @@ class RequestPath:
                     "the daily removal of old jobs did not run: %s",
                     type(failed).__name__,
                 )
+            await self.pool.run(self.prune_coverage)
 
     def shutdown_pass(self) -> tuple[str, ...]:
         """The shutdown's own step: jobs still unfinished are marked `failed`.
@@ -614,11 +640,23 @@ class RequestPath:
                 )
             return json.dumps({"error": sentence, "type": "DaemonStopped"})
 
-        settled = self.writer.call(
-            lambda: self.daemon.storage.fail_unfinished_requests(reason),
-            label="mark unfinished jobs failed",
-            kind=StepKind.SHUTDOWN,
-        )
+        try:
+            settled = self.writer.call(
+                lambda: self.daemon.storage.fail_unfinished_requests(reason),
+                label="mark unfinished jobs failed",
+                kind=StepKind.SHUTDOWN,
+            )
+        finally:
+            for mark in self.shutdown_marks:
+                try:
+                    self.writer.call(
+                        mark, label="mark an unfinished harvest failed", kind=StepKind.SHUTDOWN
+                    )
+                except Exception as unmarked:  # noqa: BLE001 — named; the stop goes on
+                    _log.warning(
+                        "the shutdown could not mark an unfinished harvest failed (%s)",
+                        type(unmarked).__name__,
+                    )
         for row in settled:
             self.events.publish(row)
         return tuple(row.id for row in settled)
@@ -797,6 +835,15 @@ class RequestPath:
             terminal=False,
         )
         return out.getvalue() + err.getvalue(), code
+
+    def fresh(self) -> Daemon:
+        """The daemon as a scheduled job sees it, read again now (AD-5, story 9a).
+
+        `config.toml`, the connector list, each row and the credentials — the
+        same refresh a line gets, with the daemon's credential stores and their
+        one-refresh-per-instance slots.
+        """
+        return self._fresh(None)
 
     def _fresh(self, job: str | None = None) -> Daemon:
         """`refreshed`, with the daemon's credential stores (and their refresh slots)."""
