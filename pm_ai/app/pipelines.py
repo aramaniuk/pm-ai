@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import errno
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -35,10 +36,27 @@ from pm_ai.core.extraction import Extraction, SpokenCommand, extract
 from pm_ai.core.jobs import idempotency_key
 from pm_ai.core.meeting_records import (
     DuplicateCalendarReference,
+    MalformedMeeting,
     MeetingDisplaced,
+    MeetingRecord,
+    MeetingNotFound,
     capture_name,
+    capture_stem,
+    has_capture,
+    render_record,
 )
-from pm_ai.core.transcripts import MeetingDetails, bind_meeting, failure_reason, ingest
+from pm_ai.core.transcripts import (
+    MAX_DROP_MINUTES,
+    MIN_DROP_MINUTES,
+    MeetingDetails,
+    bind_candidates,
+    bind_meeting,
+    failure_reason,
+    ingest,
+    is_webvtt,
+    last_cue_end_minutes,
+    read_transcript,
+)
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import parse_goals
 from pm_ai.core.normalize import attribute_all
@@ -52,7 +70,7 @@ from pm_ai.core.rendering import (
 )
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.events import MeetingHeldPayload, NormalizedEvent, ObservedEventType
-from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.proposals import Proposal
@@ -68,16 +86,32 @@ from pm_ai.domain.harvest import (
     UnreadCalendar,
 )
 from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
-from pm_ai.domain.storage_tiers import CAPTURES
+from pm_ai.domain.disclosure import CommittedScopeLeak
+from pm_ai.domain.storage_tiers import CAPTURES, UnprotectedCaptureDir
 from pm_ai.domain.transcripts import (
     CaptureFormat,
+    CaptureNotIngested,
+    DropInterrupted,
+    DropRefused,
+    NothingSaid,
     Transcript,
     TranscriptReport,
     TranscriptSource,
     TranscriptStateKind,
+    UnboundTranscript,
+    UnreadableTranscript,
 )
-from pm_ai.ports import ArtifactBusy, CalendarReadPort, DecryptionFailed
-from pm_ai.storage.service import OperationalStoreBusy
+from pm_ai.ports import (
+    ArtifactBusy,
+    CalendarReadPort,
+    CaptureAlreadyExists,
+    DecryptionFailed,
+)
+from pm_ai.storage.service import (
+    OperationalStoreBusy,
+    OperationalStoreUnavailable,
+    ProposalNotFound,
+)
 from pm_ai.skills.registry import ExecutedButUnrecorded, Invocation
 
 _log = logging.getLogger(__name__)
@@ -365,8 +399,14 @@ def _record_ingestion(
     meeting_id: str,
     state: TranscriptStateKind,
     reason: str,
+    *,
+    unrecorded: str = "the next run offers its capture again",
 ) -> tuple[str, ...]:
     """Record where one capture's ingestion got to; a sentence if that failed.
+
+    `unrecorded` ends that sentence: what follows from the missing row. A
+    harvest's capture is offered again on the next run; a dropped one is not
+    (story 11c), so the drop says so instead.
 
     A failure to record is returned for the report's refusals, not raised: the
     ingestion already happened or already failed, and the next run repairs a
@@ -380,12 +420,11 @@ def _record_ingestion(
             reason,
             retryable=state is TranscriptStateKind.INGEST_FAILED,
         )
-    except Exception as unrecorded:  # noqa: BLE001 — named; the run goes on
+    except Exception as failure:  # noqa: BLE001 — named; the run goes on
         _log.exception("could not record %s for meeting %s in %s", state.value, meeting_id, scope)
         return (
             f"meeting {meeting_id} in {scope} was {state.value} but the row saying "
-            f"so could not be written ({type(unrecorded).__name__}); the next run "
-            f"offers its capture again.",
+            f"so could not be written ({type(failure).__name__}); {unrecorded}.",
         )
     return ()
 
@@ -704,6 +743,342 @@ def _execute(
         return ran
     except Exception as failed:  # noqa: BLE001 — named, staged, and the loop goes on
         return f"{qualified} on {target} raised {failure_reason(failed)}"
+
+
+# ── A hand-dropped transcript (story 11c) ────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptDropped:
+    """What `pm-ai transcript drop` did, for the closing line (story 11c).
+
+    `bound_by` is how the meeting was found: `named` (`--meeting`), `matched`
+    (a title and start), or `minted` (a new manual-only record). `title` and
+    `start` are the bound meeting's own, so a match can be confirmed.
+    `duration_minutes` is a minted record's duration and
+    `duration_from_last_cue` says it came from the file rather than an answer.
+    `staged` counts the proposals staged and `left` those already approved,
+    rejected or expired and so left as they were; a dropped transcript never
+    executes anything (AD-32). `notices` are what went wrong after the
+    ingestion itself succeeded.
+    """
+
+    capture: Path
+    meeting_id: str
+    scope: DataScope
+    bound_by: str
+    title: str
+    start: datetime
+    staged: int
+    left: int = 0
+    duration_minutes: int | None = None
+    duration_from_last_cue: bool = False
+    notices: tuple[str, ...] = ()
+
+    @property
+    def minted(self) -> bool:
+        return self.bound_by == DROP_MINTED
+
+
+DROP_NAMED = "named"
+DROP_MATCHED = "matched"
+DROP_MINTED = "minted"
+
+Identify = Callable[[], tuple[str, datetime]]
+"""Asks for a dropped transcript's meeting title and its start, as aware UTC."""
+
+Describe = Callable[[bool], tuple[tuple[Actor, ...], int | None]]
+"""Asks for a meeting's attendees and, when told to, its duration in minutes."""
+
+_INGESTION_REFUSALS: tuple[type[BaseException], ...] = (
+    MalformedMeeting,
+    MeetingDisplaced,
+    DuplicateCalendarReference,
+    ArtifactBusy,
+    UnprotectedCaptureDir,
+    CommittedScopeLeak,
+    OperationalStoreUnavailable,
+    ScopeResolutionError,
+    UnreadableTranscript,
+    UnboundTranscript,
+    OSError,
+)
+"""The refusals a dropped capture's ingestion meets, by type: the record
+write's (`MalformedMeeting`, `MeetingDisplaced`, a duplicated calendar
+reference, a busy `meetings/`, a `meetings/` git would commit, an unresolvable
+scope), the storage guard's citation refusal, a busy or unopenable operational
+store (`OperationalStoreBusy` is one), the readers' and the bind's, and the
+filesystem's own errors. Anything else is a defect in pm-ai and propagates as
+one (exit 1), with a note naming the capture it kept."""
+
+_NO_REINGEST = (
+    "a manual capture is never offered again by a harvest, and there is no "
+    "re-ingest command"
+)
+
+
+def drop_transcript(
+    daemon: Daemon,
+    *,
+    text: str,
+    file_name: str,
+    scope: DataScope,
+    meeting_id: str | None = None,
+    identify: Identify | None = None,
+    describe: Describe | None = None,
+) -> TranscriptDropped:
+    """Read, bind, capture and ingest a hand-supplied transcript (story 11c, AD-23).
+
+    In that order, and a refusal at any step leaves nothing from the later
+    ones:
+
+    1. **Read** `text` to utterances by `11b`'s readers. `NothingSaid` for a
+       file with nothing in it, or cues that say nothing; the readers' own
+       `UnreadableTranscript` for a file neither accepts.
+    2. **Bind** in `scope` by `11b`'s rule, reading the records once and
+       writing nothing: a named `meeting_id` must exist there
+       (`MeetingNotFound`); otherwise `identify` gives a title and start, two
+       candidates are `AmbiguousMeeting`, one binds, and none asks `describe`
+       for the attendees — and the duration, unless the file is WebVTT and its
+       last cue gives one in range — and mints a manual-only record in memory,
+       checked against the record's own rules before anything is written.
+    3. **Capture** through `write_capture`, under `33e`'s name with
+       `-manual.vtt` or `-manual.txt`. A meeting that already has a capture of
+       any source is `CaptureAlreadyExists` naming it; the writer's own
+       refusals (git cannot confirm exclusion, a taken name) pass through.
+    4. **Ingest** as `TranscriptSource.MANUAL`, which writes the record and
+       stages, never executes (AD-32). A refusal here is `CaptureNotIngested`,
+       naming the kept capture, what was staged and how to drop again; on
+       success the capture's row in the transcript table is `ingested`.
+
+    Ctrl-C during the capture write or the ingestion is `DropInterrupted`,
+    saying whether the capture was kept. A busy or unopenable operational store
+    before the capture is `DropRefused`.
+
+    The capture format is the file's extension for `.vtt` and `.txt` — a
+    `.txt` holding WebVTT is still read as WebVTT and stored as `-manual.txt` —
+    and otherwise what the content is.
+    """
+    if not text.strip():
+        raise NothingSaid(
+            f"{file_name} is empty or holds only whitespace, so there is nothing "
+            f"said in it to read. Nothing was written."
+        )
+    utterances = read_transcript(text, name=file_name)
+    if not utterances:
+        raise NothingSaid(
+            f"{file_name} has cue timings but none of its cues says anything, so "
+            f"there is nothing to extract from it. Nothing was written."
+        )
+    form = _drop_format(file_name, text)
+    from_cues = last_cue_end_minutes(text) if form is CaptureFormat.MANUAL_VTT else None
+    if from_cues is not None and not MIN_DROP_MINUTES <= from_cues <= MAX_DROP_MINUTES:
+        # A last cue at 0:00:00, or past a day, is no meeting's length: asked.
+        from_cues = None
+
+    try:
+        meeting, bound_by, duration = _bind_drop(
+            daemon,
+            scope=scope,
+            meeting_id=meeting_id,
+            identify=identify,
+            describe=describe,
+            from_cues=from_cues,
+        )
+        home = meeting.transcript_home
+        stem = capture_stem(meeting.meeting_id, meeting.start)
+        names = daemon.storage.list_collection(scope=home, artifact=CAPTURES)
+    except OperationalStoreUnavailable as unopenable:
+        raise DropRefused(f"{unopenable} Nothing was written.") from unopenable
+    if has_capture(names, stem):
+        present = ", ".join(name for name in names if name.startswith(stem))
+        raise CaptureAlreadyExists(
+            f"meeting {meeting.meeting_id} in {home} already has a capture: "
+            f"{present}. A transcript is verbatim input and is never amended or "
+            f"replaced; remove that capture from {home}'s transcripts/ to drop "
+            f"this one instead. Nothing was written."
+        )
+    name = capture_name(meeting.meeting_id, meeting.start, form)
+    try:
+        capture = daemon.storage.write_capture(text, scope=home, name=name)
+    except KeyboardInterrupt as stopped:
+        kept = _capture_kept(daemon, home, name)
+        raise DropInterrupted(
+            f"interrupted while the capture was being written. "
+            + (
+                f"{name} was written to {home}'s transcripts/ and stays, not "
+                f"ingested; remove it by hand to drop again."
+                if kept
+                else "No capture was kept, and nothing else was written."
+            )
+        ) from stopped
+
+    transcript = Transcript(
+        meeting_id=meeting.meeting_id, source=TranscriptSource.MANUAL, utterances=utterances
+    )
+    try:
+        outcome = run_transcript_ingestion(daemon, transcript, meeting)
+    except KeyboardInterrupt as stopped:
+        raise DropInterrupted(
+            f"interrupted during ingestion. {capture} was written and stays; "
+            f"{_aftermath(daemon, meeting, capture, bound_by)}"
+        ) from stopped
+    except _INGESTION_REFUSALS as failed:
+        raise CaptureNotIngested(
+            f"{capture} is stored and ingesting it against meeting "
+            f"{meeting.meeting_id} in {home} failed: {failure_reason(failed)}. "
+            f"{_aftermath(daemon, meeting, capture, bound_by)}"
+        ) from failed
+    except Exception as broken:
+        broken.add_note(
+            f"pm-ai: {capture} was written before this failure and stays; nothing "
+            f"is recorded as ingested, and it must be removed by hand to drop "
+            f"the transcript again."
+        )
+        raise
+    notices = _record_ingestion(
+        daemon,
+        home,
+        meeting.meeting_id,
+        TranscriptStateKind.INGESTED,
+        _ingested(name, outcome),
+        unrecorded=(
+            f"its proposals are staged regardless; {_NO_REINGEST}, so the "
+            f"missing row stays missing"
+        ),
+    )
+    return TranscriptDropped(
+        capture=capture,
+        meeting_id=meeting.meeting_id,
+        scope=home,
+        bound_by=bound_by,
+        title=meeting.title,
+        start=meeting.start,
+        staged=len(outcome.staged),
+        left=len(outcome.left),
+        duration_minutes=duration if bound_by == DROP_MINTED else None,
+        duration_from_last_cue=bound_by == DROP_MINTED and from_cues is not None,
+        notices=notices,
+    )
+
+
+def _drop_format(file_name: str, text: str) -> CaptureFormat:
+    """`-manual.vtt` or `-manual.txt`: the extension's word, else the content's."""
+    suffix = Path(file_name).suffix.lower()
+    if suffix == ".vtt":
+        return CaptureFormat.MANUAL_VTT
+    if suffix == ".txt":
+        return CaptureFormat.MANUAL_TXT
+    return CaptureFormat.MANUAL_VTT if is_webvtt(text) else CaptureFormat.MANUAL_TXT
+
+
+def _bind_drop(
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    meeting_id: str | None,
+    identify: Identify | None,
+    describe: Describe | None,
+    from_cues: int | None,
+) -> tuple[Meeting, str, int | None]:
+    """The meeting, how it was bound, and a minted record's duration.
+
+    Asks only what binding needs, in order: nothing for a named meeting; the
+    title and start otherwise; the attendees and duration only when nothing
+    matched. The candidates are read once, and the choice is made among those
+    by `11b`'s own step, so a record that vanishes between a read and a bind
+    cannot turn a match into a record minted from placeholders. Writes nothing.
+    """
+    if meeting_id is not None or identify is None:
+        meeting = bind_transcript(daemon, scope=scope, meeting_id=meeting_id)
+        return meeting, DROP_NAMED, None
+    title, start = identify()
+    found = daemon.meetings.find_candidates(scope, title, start)
+    if found:
+        # One binds and several refuse naming each; the duration given here is
+        # never read, because nothing is minted from a match.
+        details = MeetingDetails(title=title, start=start, duration_minutes=0)
+        return bind_candidates(found, scope=scope, details=details), DROP_MATCHED, None
+    if describe is None:
+        raise UnboundTranscript(
+            f"no meeting in {scope} matches {title!r} at {start.isoformat()}, and "
+            f"nothing was given to ask for the attendees a new record needs."
+        )
+    attendees, typed = describe(from_cues is None)
+    duration = from_cues if from_cues is not None else typed
+    if duration is None or not MIN_DROP_MINUTES <= duration <= MAX_DROP_MINUTES:
+        raise UnboundTranscript(
+            f"a new record of {title!r} needs a duration of {MIN_DROP_MINUTES} to "
+            f"{MAX_DROP_MINUTES} minutes, and {duration!r} was given, so none was "
+            f"minted. Nothing was written."
+        )
+    details = MeetingDetails(
+        title=title, start=start, duration_minutes=duration, attendees=attendees
+    )
+    meeting = bind_candidates((), scope=scope, details=details)
+    # The record's own rules, asked before the capture is written: a title or
+    # attendee list `put` would refuse must not leave a capture behind it.
+    render_record(MeetingRecord(meeting))
+    return meeting, DROP_MINTED, duration
+
+
+def _capture_kept(daemon: Daemon, scope: DataScope, name: str) -> bool:
+    try:
+        return name in daemon.storage.list_collection(scope=scope, artifact=CAPTURES)
+    except Exception:  # noqa: BLE001 — answering a Ctrl-C; unknown reads as kept
+        return True
+
+
+def _aftermath(daemon: Daemon, meeting: Meeting, capture: Path, bound_by: str) -> str:
+    """What a failed ingestion left, and how to drop again — for its refusal."""
+    staged = _staged_so_far(daemon, meeting.meeting_id)
+    if staged is None:
+        said = "How many of its proposals were staged before the failure could not be read."
+    elif staged:
+        said = f"{staged} of its proposals were already staged before the failure and stay staged."
+    else:
+        said = "No proposal from it was staged."
+    said += " The capture is kept, and nothing is recorded as ingested."
+    if bound_by == DROP_MINTED and not _record_exists(daemon, meeting):
+        return (
+            f"{said} The new record {meeting.meeting_id} was not written, so "
+            f"dropping again mints a new meeting id; {_NO_REINGEST}, so remove "
+            f"{capture} by hand first — nothing will refer to it."
+        )
+    return (
+        f"{said} {_NO_REINGEST[0].upper()}{_NO_REINGEST[1:]}: to drop again, "
+        f"remove {capture} by hand first, then drop with `--meeting "
+        f"{meeting.meeting_id}`."
+    )
+
+
+def _staged_so_far(daemon: Daemon, meeting_id: str) -> int | None:
+    """How many of this meeting's manual proposals exist, or `None` unreadable.
+
+    Proposal ids are `prp_<meeting>_manual_<index>` and a manual transcript
+    executes nothing, so its proposals are numbered without gaps.
+    """
+    count = 0
+    try:
+        while True:
+            daemon.storage.load_proposal(
+                f"prp_{meeting_id}_{TranscriptSource.MANUAL.value}_{count}"
+            )
+            count += 1
+    except ProposalNotFound:
+        return count
+    except Exception:  # noqa: BLE001 — a count for a refusal's sentence
+        return None
+
+
+def _record_exists(daemon: Daemon, meeting: Meeting) -> bool:
+    try:
+        daemon.meetings.get(meeting.meeting_id, scope=meeting.scope)
+    except MeetingNotFound:
+        return False
+    except Exception:  # noqa: BLE001 — unknown: say what holds if it exists
+        return True
+    return True
 
 
 # ── The dashboard pipeline (story 23b) ───────────────────────────────────────

@@ -37,6 +37,41 @@ class UnreadableTranscript(ValueError):
     """
 
 
+class NothingSaid(ValueError):
+    """A transcript a reader accepted that holds no utterance (story 11c).
+
+    Whitespace only, or WebVTT cues whose payloads are all empty: there is
+    nothing said to extract from, and storing it would spend the meeting's
+    one capture name on a recording of silence. The message names the file.
+    """
+
+
+class CaptureNotIngested(RuntimeError):
+    """A dropped transcript was stored and its ingestion then failed (story 11c).
+
+    The capture stays — it is verbatim input, and removing it is how the drop
+    is run again — so the message names it, and the failure, by type and a
+    bounded message that quotes no transcript text.
+    """
+
+
+class DropInterrupted(Exception):
+    """Ctrl-C after a drop's questions, while it wrote or ingested (story 11c).
+
+    An `Exception` rather than the `KeyboardInterrupt` it replaces, so the
+    command can say whether the capture was kept instead of a bare
+    "interrupted". The message says which.
+    """
+
+
+class DropRefused(RuntimeError):
+    """A drop refused before its capture for a reason storage gave (story 11c).
+
+    A busy or unopenable operational store, which the CLI cannot name by its
+    storage type (AD-30). The message is storage's own sentence.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class Utterance:
     """One line of a transcript.

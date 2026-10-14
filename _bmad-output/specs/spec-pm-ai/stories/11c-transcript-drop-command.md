@@ -2,7 +2,8 @@
 title: 'pm-ai transcript drop ingests a hand-supplied transcript'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '258dff3e8cd44a28d5cbb5fb7ae892996b24019c'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -73,10 +74,10 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/app/pipelines.py` -- the drop sequence: read to utterances (refuse on zero or on neither reader), bind (`11b`, a value), copy through `write_capture` into the meeting's scope under `33e`'s name after the prefix presence check, ingest, record ingested; refusals surfaced by type -- one function the command calls
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `transcript drop <file> --scope <scope> [--meeting <id>]` in `TABLE`; path checks (missing, directory, unreadable, dangling link, not UTF-8, `.docx`); enrolled-project check; the questions, re-asked with the reason (offset form, attendee rule); `.vtt` duration from the last cue; `people:` refused; every refusal → `Refusal`; the exit-0 sentence counting staged -- the command
-- [ ] `pm_ai/app/entry.py` -- inject the drop bound to this daemon, as `dashboard` is -- `surfaces` may not reach `app`
-- [ ] `tests/surfaces/test_cli_subcommands.py`, `tests/slice/test_transcript_drop.py` -- one test per matrix row, the slice ones through `main()` against a temporary home; every "nothing written" row lists `meetings/` and `transcripts/` afterwards and asserts both unchanged -- the matrix is the contract
+- [x] `pm_ai/app/pipelines.py` -- the drop sequence: read to utterances (refuse on zero or on neither reader), bind (`11b`, a value), copy through `write_capture` into the meeting's scope under `33e`'s name after the prefix presence check, ingest, record ingested; refusals surfaced by type -- one function the command calls
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `transcript drop <file> --scope <scope> [--meeting <id>]` in `TABLE`; path checks (missing, directory, unreadable, dangling link, not UTF-8, `.docx`); enrolled-project check; the questions, re-asked with the reason (offset form, attendee rule); `.vtt` duration from the last cue; `people:` refused; every refusal → `Refusal`; the exit-0 sentence counting staged -- the command
+- [x] `pm_ai/app/entry.py` -- inject the drop bound to this daemon, as `dashboard` is -- `surfaces` may not reach `app`
+- [x] `tests/surfaces/test_cli_subcommands.py`, `tests/slice/test_transcript_drop.py` -- one test per matrix row, the slice ones through `main()` against a temporary home; every "nothing written" row lists `meetings/` and `transcripts/` afterwards and asserts both unchanged -- the matrix is the contract
 
 **Acceptance Criteria:**
 - Given a project enrolled and a `.vtt` whose voice tag equals the PM's handle saying `pm-ai, post_comment gitlab:alpha:issue:102 ship it`, when `pm-ai transcript drop` runs with `--scope project:alpha` and answers that match no record, then a `mtg_` record exists in alpha's `meetings/`, `<stem>-manual.vtt` exists in alpha's `transcripts/`, one proposal is staged citing `meeting:<that id>`, nothing is executed, the closing line says one staged and the duration taken from the last cue, and the exit is 0.
@@ -94,3 +95,39 @@ context:
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai transcript drop sample.vtt --scope personal` on a fresh home (no project needed): asks title, start, attendees; prints the capture path, the minted id and the count staged; exit 0. Run again: exit 3 naming the capture.
+
+## Suggested Review Order
+
+**The drop, in order: read, bind, capture, ingest**
+
+- The one pipeline function the command calls; what each failure keeps and says.
+  [`pipelines.py:812`](../../../../pm_ai/app/pipelines.py#L812)
+
+- Binding once from one candidate read: named, matched or minted.
+  [`pipelines.py:967`](../../../../pm_ai/app/pipelines.py#L967)
+  [`transcripts.py:422`](../../../../pm_ai/core/transcripts.py#L422)
+
+- The capture's name by extension, then by content.
+  [`pipelines.py:957`](../../../../pm_ai/app/pipelines.py#L957)
+
+**The command**
+
+- Scope, file checks, questions, exit codes and the closing line.
+  [`dispatch.py:2283`](../../../../pm_ai/surfaces/cli/dispatch.py#L2283)
+
+- What a dropped path must be before anything is written.
+  [`dispatch.py:2197`](../../../../pm_ai/surfaces/cli/dispatch.py#L2197)
+
+- Title and start questions.
+  [`dispatch.py:2162`](../../../../pm_ai/surfaces/cli/dispatch.py#L2162)
+
+- Options for a leaf command, `--` ends them.
+  [`dispatch.py:2801`](../../../../pm_ai/surfaces/cli/dispatch.py#L2801)
+
+- A WebVTT file's duration from its latest real cue end.
+  [`transcripts.py:181`](../../../../pm_ai/core/transcripts.py#L181)
+
+**Tests**
+
+- Through `main()` against a temporary home and a real git repository.
+  [`test_transcript_drop.py`](../../../../tests/slice/test_transcript_drop.py)

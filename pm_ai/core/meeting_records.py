@@ -137,7 +137,9 @@ __all__ = [
     "as_stored",
     "capture_name",
     "capture_stem",
+    "check_title",
     "has_capture",
+    "parse_attendees",
     "parse_record",
     "record_name",
     "render_record",
@@ -437,6 +439,38 @@ def has_capture(names: Iterable[str], stem: str) -> bool:
     if not stem:
         raise ValueError("an empty stem would make every member a capture of it")
     return any(name.startswith(stem) for name in names)
+
+
+def parse_attendees(value: str) -> tuple[Actor, ...]:
+    """Attendee handles typed as the record writes them, or `MalformedMeeting`.
+
+    The record's own rule, for a caller that asks a person (story 11c's drop):
+    handles separated by commas and nothing else — no empty item, no padding,
+    no handle twice. So `Smith, Bob` is refused rather than read as two
+    people, which is the split the rule exists to make loud. Empty is no
+    attendees.
+    """
+    attendees = _parse_attendees(value, source="the attendees typed")
+    _assert_readable_length(
+        f"{_ATTENDEES}={render_value(value, where='the attendees typed')}",
+        where="the attendees typed",
+    )
+    return attendees
+
+
+def check_title(title: str) -> str:
+    """A typed meeting title, or `MalformedMeeting` by the record's own rules.
+
+    The two a title can break: a control character the field grammar does not
+    escape, and a rendered line past `MAX_ENTRY_LENGTH`. Asked when the title
+    is typed (story 11c), so a capture is never written for a record `put`
+    would then refuse.
+    """
+    _assert_recordable_text(title, where="the title typed")
+    _assert_readable_length(
+        f"{_TITLE}={render_value(title, where='the title typed')}", where="the title typed"
+    )
+    return title
 
 
 def render_record(record: MeetingRecord) -> str:

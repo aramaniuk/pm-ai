@@ -26,12 +26,18 @@ so `Utterance.speaker` stays `None` and every spoken command read here stages.
 from __future__ import annotations
 
 import html
+import math
 import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
 
-from pm_ai.core.meeting_records import MalformedMeeting, MeetingNotFound, MeetingRecords
+from pm_ai.core.meeting_records import (
+    MalformedMeeting,
+    MeetingNotFound,
+    MeetingRecord,
+    MeetingRecords,
+)
 from pm_ai.core.sanitize import sanitize
 from pm_ai.domain.identity import Actor, DataScope
 from pm_ai.domain.meetings import AmbiguousMeeting, Meeting, tolerance_minutes
@@ -50,10 +56,15 @@ __all__ = [
     "UnboundTranscript",
     "UnknownTranscriptSource",
     "UnreadableTranscript",
+    "bind_candidates",
     "bind_meeting",
     "failure_reason",
     "get_adapter",
     "ingest",
+    "MAX_DROP_MINUTES",
+    "MIN_DROP_MINUTES",
+    "is_webvtt",
+    "last_cue_end_minutes",
     "mint_meeting_id",
     "read_transcript",
     "register_adapter",
@@ -147,6 +158,64 @@ def read_transcript(text: str, *, name: str) -> tuple[Utterance, ...]:
             f"no cue timing line, and most of its lines are not `Speaker: words`."
         )
     return utterances
+
+
+MIN_DROP_MINUTES = 1
+MAX_DROP_MINUTES = 1440
+"""The duration a dropped transcript's new record may have, inclusive: at least
+a minute, at most a day (story 11c). A typed duration outside it is asked
+again; a last cue outside it is no measure of the meeting, so it is asked for."""
+
+
+def is_webvtt(text: str) -> bool:
+    """Whether `read_transcript` would read `text` as WebVTT (story 11c).
+
+    The same choice it makes, by content: the first non-blank line is a
+    `WEBVTT` header or a cue timing line.
+    """
+    lines = text.removeprefix("\ufeff").splitlines()
+    first = next((line.strip() for line in lines if line.strip()), "")
+    return _is_header(first) or bool(_TIMING.match(first))
+
+
+def last_cue_end_minutes(text: str) -> int | None:
+    """The latest end among a WebVTT transcript's cues, in whole minutes rounded up.
+
+    How long a dropped `.vtt` says its meeting ran (story 11c): the file
+    carries no duration, and the last thing said is the nearest it has. Only
+    real cue timing lines count — the one opening a cue, found as `_read_vtt`
+    finds it — never a line inside a `NOTE`, `STYLE` or `REGION` block or a
+    cue's payload. `None` for text `read_transcript` would not read as
+    WebVTT, or with no cue. Rounded up, so 30 minutes and 4 seconds is 31.
+    """
+    if not is_webvtt(text):
+        return None
+    ends: list[float] = []
+    for block in _blocks(text.removeprefix("\ufeff").splitlines()):
+        head = block[0].strip()
+        if _is_header(head):
+            timed = next((i for i, line in enumerate(block) if _TIMING.match(line.strip())), None)
+            if timed is None:
+                continue
+            block = block[timed:]
+            head = block[0].strip()
+        elif any(_is_block(head, keyword) for keyword in _SKIPPED_BLOCKS):
+            continue
+        at = 0 if _TIMING.match(head) else 1
+        if at >= len(block):
+            continue
+        timing = _TIMING.match(block[at].strip())
+        if timing is not None:
+            ends.append(_exact_seconds(timing["end"]))
+    if not ends:
+        return None
+    return math.ceil(max(ends) / 60)
+
+
+def _exact_seconds(stamp: str) -> float:
+    parts = stamp.split(":")
+    hours = int(parts[0]) if len(parts) == 3 else 0
+    return hours * 3600 + int(parts[-2]) * 60 + float(parts[-1])
 
 
 def _is_header(line: str) -> bool:
@@ -347,6 +416,19 @@ def bind_meeting(
             f"is nothing in {scope} to bind the transcript to (AD-23)."
         )
     found = records.find_candidates(scope, details.title, details.start)
+    return bind_candidates(found, scope=scope, details=details)
+
+
+def bind_candidates(
+    found: tuple[MeetingRecord, ...], *, scope: DataScope, details: MeetingDetails
+) -> Meeting:
+    """`bind_meeting`'s choice among candidates already read (story 11c).
+
+    One binds, two or more are `AmbiguousMeeting` naming each, none mints a
+    manual-only record from `details` — returned, not written. For a caller
+    that has already asked `find_candidates`, so the records are read once and
+    the answer it acted on is the one bound.
+    """
     if len(found) == 1:
         return found[0].meeting
     if found:

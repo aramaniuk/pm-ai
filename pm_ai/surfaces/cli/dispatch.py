@@ -36,10 +36,13 @@ in `.importlinter`). The 07:00 tick belongs to the daemon.
 from __future__ import annotations
 
 import getpass
+import re
+import stat
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -56,8 +59,25 @@ from pm_ai.domain.goals import Goal
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report, UnbuiltConnector
 from pm_ai.core.project_registry import RegistryRefused
-from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
+from pm_ai.core.meeting_records import (
+    MalformedMeeting,
+    MeetingNotFound,
+    check_title,
+    parse_attendees,
+)
+from pm_ai.core.transcripts import MAX_DROP_MINUTES, MIN_DROP_MINUTES
+from pm_ai.domain.meetings import AmbiguousMeeting
+from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
+from pm_ai.domain.transcripts import (
+    CaptureNotIngested,
+    DropInterrupted,
+    DropRefused,
+    NothingSaid,
+    UnboundTranscript,
+    UnreadableTranscript,
+)
 from pm_ai.core.connector_enrolment import (
     ConnectorNotConfigured,
     ConnectorRowChanged,
@@ -77,6 +97,9 @@ from pm_ai.core.connector_enrolment import (
 )
 from pm_ai.ports import (
     ArtifactBusy,
+    CaptureAlreadyExists,
+    EmptyCapture,
+    MalformedCaptureName,
     CredentialProbePort,
     DecryptionFailed,
     DaemonPort,
@@ -114,6 +137,8 @@ __all__ = [
     "Parsed",
     "Refusal",
     "TABLE",
+    "TranscriptDrop",
+    "TranscriptDropOutcome",
     "dispatch",
     "names_a_command",
     "parse",
@@ -479,6 +504,57 @@ class GitLabCheck(Protocol):
         ...
 
 
+@runtime_checkable
+class TranscriptDropOutcome(Protocol):
+    """What a drop did — `pm_ai.app.pipelines.TranscriptDropped`, named by shape."""
+
+    @property
+    def capture(self) -> Path: ...
+    @property
+    def meeting_id(self) -> str: ...
+    @property
+    def scope(self) -> DataScope: ...
+    @property
+    def bound_by(self) -> str:
+        """`named`, `matched` or `minted`."""
+        ...
+    @property
+    def title(self) -> str: ...
+    @property
+    def start(self) -> datetime: ...
+    @property
+    def staged(self) -> int: ...
+    @property
+    def left(self) -> int: ...
+    @property
+    def duration_minutes(self) -> int | None: ...
+    @property
+    def duration_from_last_cue(self) -> bool: ...
+    @property
+    def notices(self) -> tuple[str, ...]: ...
+
+
+class TranscriptDrop(Protocol):
+    """`pm-ai transcript drop`'s pipeline, bound to this daemon (story 11c).
+
+    `pm_ai.app.pipelines.drop_transcript` is the real one. Named structurally
+    because it reaches storage, the meeting records and the skill registry,
+    none of which `surfaces` may import. Its refusals are the core's, the
+    domain's and `pm_ai.ports`' (AD-49).
+    """
+
+    def __call__(
+        self,
+        *,
+        text: str,
+        file_name: str,
+        scope: DataScope,
+        meeting_id: str | None,
+        identify: Callable[[], tuple[str, datetime]] | None,
+        describe: Callable[[bool], tuple[tuple[Actor, ...], int | None]] | None,
+    ) -> TranscriptDropOutcome: ...
+
+
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
     """The `Context` default: no onboarding sequence was injected.
 
@@ -650,6 +726,13 @@ class Context:
     goals: GoalBook | None = None
     """`strategic_goals.md`'s reader and writer. `None` refuses `goal set`."""
 
+    transcript_drop: TranscriptDrop | None = None
+    """`pm-ai transcript drop`'s read, bind, capture and ingest (story 11c).
+
+    Bound by the composition root to the daemon it built; `None` with no
+    daemon, and the command refuses through `require_daemon()` first.
+    """
+
     serve: Callable[[], int] | None = None
     """Runs the daemon in the foreground until it is stopped (story 4e).
 
@@ -788,6 +871,16 @@ class Command:
     Every one of them takes a value; there are no flags here, because a flag
     that is absent and a flag that is false are the same word on a command line
     and no command in this table needs to tell them apart.
+    """
+
+    requires: tuple[str, ...] = ()
+    """The members of `options` that must be given (story 11c).
+
+    `transcript drop` is the first command with an option it cannot run
+    without: `--scope` names where the meeting is looked for and written, and
+    no default would be honest. Missing one is a usage error (`2`), and the
+    usage line spells it without brackets. Enforced for a leaf and for a
+    command without leaves alike (`_missing`).
     """
 
     target: Callable[[Mapping[str, str]], DataScope] | None = None
@@ -2278,6 +2371,301 @@ def _goal_set(context: Context) -> int:
     return EXIT_OK
 
 
+# ── `pm-ai transcript drop` (story 11c) ──────────────────────────────────────
+
+MEETING_ARGUMENT = "meeting"
+"""`transcript drop`'s optional `--meeting <id>`: the record to bind to."""
+
+_DROPPABLE_KINDS = frozenset({ScopeKind.PERSONAL, ScopeKind.PROJECT})
+
+START_FORMS = ("2026-10-10T14:00+03:00", "2026-10-10T11:00Z")
+"""The spellings the start question names: a date-time with its offset, or in
+UTC with `Z`. Seconds and fractions of a second are accepted too."""
+
+_START = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+MAX_DROP_BYTES = 16 * 1024 * 1024
+"""The largest file `transcript drop` reads: 16 MiB.
+
+A day-long meeting's WebVTT is a few megabytes; anything past this is not a
+transcript somebody typed or downloaded, and reading it whole would be the
+first thing to go wrong.
+"""
+
+_NOT_A_TRANSCRIPT_FORMAT = {
+    ".docx": "a Word document",
+    ".doc": "a Word document",
+    ".pdf": "a PDF",
+    ".rtf": "a rich-text document",
+}
+"""Document formats refused by name. `.docx` is the deferred one (it needs a
+parser dependency); the others get the same way out."""
+
+
+def _drop_target(options: Mapping[str, str]) -> DataScope:
+    """`--scope`'s scope, required; `_Misread` when absent or naming none.
+
+    `people:<id>` and `application` parse, and the command refuses them by
+    name (`3`): they are scopes pm-ai read and declines to drop into.
+    """
+    requested = options.get(SCOPE_ARGUMENT)
+    scope = None if requested is None else _scope(requested)
+    if scope is None:
+        raise _Misread(
+            f"`transcript drop` needs `--{SCOPE_ARGUMENT} personal` or "
+            f"`--{SCOPE_ARGUMENT} project:<id>` naming an enrolled project"
+            + ("" if requested is None else f"; `{requested}` is not a scope")
+            + "."
+        )
+    return scope
+
+
+def _start_refusal(answer: str) -> str | None:
+    if _START.match(answer):
+        try:
+            datetime.fromisoformat(answer)
+        except ValueError:
+            pass
+        else:
+            return None
+    return (
+        f"{answer!r} is not a start pm-ai can read. Type a date and time with "
+        f"its offset from UTC, as {START_FORMS[0]}, or in UTC, as {START_FORMS[1]}."
+    )
+
+
+def _title_refusal(answer: str) -> str | None:
+    if not answer:
+        return "a title is required: it is half of what matches a meeting."
+    try:
+        check_title(answer)
+    except MalformedMeeting as refused:
+        return str(refused)
+    return None
+
+
+def _attendee_refusal(answer: str) -> str | None:
+    try:
+        parse_attendees(answer)
+    except MalformedMeeting as refused:
+        return (
+            f"{refused} Type handles separated by commas with no spaces, as "
+            f"email:ana@example.com,email:bo@example.com; a handle cannot "
+            f"carry a comma."
+        )
+    return None
+
+
+def _duration_refusal(minutes: int) -> str | None:
+    if MIN_DROP_MINUTES <= minutes <= MAX_DROP_MINUTES:
+        return None
+    return (
+        f"{minutes} minutes is not a meeting's length here; type "
+        f"{MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}."
+    )
+
+
+def _drop_identify() -> tuple[str, datetime]:
+    """The title and start, asked at the terminal; refused without one."""
+    if not sys.stdin.isatty():
+        raise Refusal(
+            "binding this transcript needs the meeting's title and start, and "
+            "stdin is not a terminal to ask them at — a pipe, a cron job or a "
+            "CI step. Nothing was written. Name the meeting with "
+            "`--meeting <id>` to drop without being asked."
+        )
+    title = _ask_until("Meeting title (required): ", judge=_title_refusal)
+    start = _ask_until(
+        f"Meeting start, as {START_FORMS[0]} or {START_FORMS[1]}: ",
+        judge=_start_refusal,
+    )
+    return title, datetime.fromisoformat(start).astimezone(timezone.utc)
+
+
+def _drop_describe(ask_duration: bool) -> tuple[tuple[Actor, ...], int | None]:
+    """The attendees, and the duration when the file does not carry one."""
+    attendees = parse_attendees(
+        _ask_until(
+            "No recorded meeting matches, so a new record is made. Attendees, as "
+            "handles separated by commas with no spaces (Enter for none): ",
+            judge=_attendee_refusal,
+        )
+    )
+    if not ask_duration:
+        return attendees, None
+    minutes = _ask_minutes(
+        f"Duration in minutes ({MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}): ",
+        judge=_duration_refusal,
+    )
+    return attendees, minutes
+
+
+def _read_drop(path: Path) -> str:
+    """The dropped file's text, or a refusal naming the path and what is wrong.
+
+    Checked in this order: there is something at the path, it is a document
+    format pm-ai does not read, it is a regular file, it is within
+    `MAX_DROP_BYTES`, it can be read, it is UTF-8.
+    """
+    if path.is_symlink() and not path.exists():
+        raise Refusal(
+            f"{path} is a link to nothing (a dangling link), so there is no "
+            f"transcript to read. Nothing was written."
+        )
+    if not path.exists():
+        raise Refusal(f"{path} does not exist. Nothing was written.")
+    described = _NOT_A_TRANSCRIPT_FORMAT.get(path.suffix.lower())
+    if described is not None:
+        deferral = (
+            " Reading .docx needs a parser pm-ai does not ship yet, so it is deferred."
+            if path.suffix.lower() == ".docx"
+            else ""
+        )
+        raise Refusal(
+            f"{path} is {described}, not a transcript pm-ai reads.{deferral} Save "
+            f"the transcript as .vtt or .txt and drop that. Nothing was written."
+        )
+    if path.is_dir():
+        raise Refusal(f"{path} is a directory, not a transcript file. Nothing was written.")
+    try:
+        status = path.stat()
+    except OSError as unreadable:
+        reason = unreadable.strerror or type(unreadable).__name__
+        raise Refusal(f"{path} could not be read ({reason}). Nothing was written.") from unreadable
+    if not stat.S_ISREG(status.st_mode):
+        raise Refusal(
+            f"{path} is not a regular file (a FIFO, a device or a socket), so it "
+            f"is not a transcript pm-ai will read. Nothing was written."
+        )
+    if status.st_size > MAX_DROP_BYTES:
+        raise Refusal(
+            f"{path} is {status.st_size} bytes, over the {MAX_DROP_BYTES // (1024 * 1024)} "
+            f"MiB a dropped transcript may be. Nothing was written."
+        )
+    try:
+        raw = path.read_bytes()
+    except OSError as unreadable:
+        reason = unreadable.strerror or type(unreadable).__name__
+        raise Refusal(f"{path} could not be read ({reason}). Nothing was written.") from unreadable
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as undecodable:
+        raise Refusal(
+            f"{path} is not UTF-8 text (byte {undecodable.start} does not decode), "
+            f"so pm-ai cannot read it as a transcript. Nothing was written."
+        ) from undecodable
+
+
+def _closing_line(dropped: TranscriptDropOutcome) -> str:
+    """The exit-0 sentence: where the capture is, which meeting, what was staged."""
+    if dropped.bound_by == "minted":
+        how = f"a new manual-only record {dropped.meeting_id}"
+    elif dropped.bound_by == "matched":
+        how = (
+            f"the recorded meeting {dropped.meeting_id}, {dropped.title!r} at "
+            f"{dropped.start.isoformat()}"
+        )
+    else:
+        how = f"the recorded meeting {dropped.meeting_id}"
+    line = (
+        f"{dropped.capture} is stored and ingested against {how} in "
+        f"{dropped.scope}: {dropped.staged} staged for approval."
+    )
+    if dropped.left:
+        line += (
+            f" {dropped.left} left as they were, already approved, rejected or "
+            f"expired."
+        )
+    if dropped.bound_by == "minted" and dropped.duration_minutes is not None:
+        source = (
+            "taken from the last cue's end"
+            if dropped.duration_from_last_cue
+            else "as answered"
+        )
+        line += f" Its duration is {dropped.duration_minutes} minutes, {source}."
+    return line
+
+
+def _transcript_drop(context: Context) -> int:
+    """`pm-ai transcript drop <file> --scope <scope> [--meeting <id>]` (story 11c).
+
+    The surface of `pm_ai.app.pipelines.drop_transcript`: it refuses the scopes
+    a drop cannot go to and a path that is not a readable UTF-8 transcript
+    file, then hands the text to the pipeline with the two question sets — the
+    title and start, then the attendees and duration — which the pipeline asks
+    only when binding needs them. Every refusal the pipeline meets, a
+    filesystem error included, is passed through verbatim as exit `3`; it
+    writes nothing before the capture, and a failure or Ctrl-C after it says
+    whether the capture was kept.
+    """
+    scope = context.target
+    if scope is None:
+        raise RuntimeError(
+            "no target scope reached `transcript drop`. That is a wiring fault in pm-ai."
+        )
+    if scope.kind is ScopeKind.PEOPLE:
+        raise Refusal(
+            f"a transcript cannot be dropped into {scope}: a 1:1's transcript is "
+            f"a later slice. Drop into `personal` or `project:<id>`. Nothing was "
+            f"written."
+        )
+    if scope.kind not in _DROPPABLE_KINDS:
+        raise Refusal(
+            f"a transcript cannot be dropped into {scope}, which records no "
+            f"meetings. Drop into `personal` or `project:<id>`. Nothing was "
+            f"written."
+        )
+    (file,) = context.arguments
+    path = Path(file)
+    text = _read_drop(path)
+    context.require_daemon()
+    drop = context.transcript_drop
+    if drop is None:
+        raise Refusal(
+            "no transcript pipeline was supplied to the CLI, so nothing was "
+            "dropped. That is a wiring fault in pm-ai, not this machine's."
+        )
+    try:
+        dropped = drop(
+            text=text,
+            file_name=str(path),
+            scope=scope,
+            meeting_id=context.options.get(MEETING_ARGUMENT),
+            identify=_drop_identify,
+            describe=_drop_describe,
+        )
+    except (
+        UnreadableTranscript,
+        NothingSaid,
+        UnboundTranscript,
+        MeetingNotFound,
+        AmbiguousMeeting,
+        MalformedMeeting,
+        CaptureAlreadyExists,
+        UnprotectedCaptureDir,
+        EmptyCapture,
+        MalformedCaptureName,
+        CaptureNotIngested,
+        DropInterrupted,
+        DropRefused,
+        ScopeResolutionError,
+        ArtifactBusy,
+    ) as refused:
+        message = refused.args[0] if isinstance(refused, KeyError) and refused.args else refused
+        raise Refusal(str(message)) from refused
+    except OSError as failed:
+        # The filesystem's own refusal, at the listing, the candidate lookup or
+        # the capture write — all before anything is written, or the capture
+        # write itself, which publishes whole or not at all.
+        raise Refusal(f"the drop stopped and nothing was written: {failed}") from failed
+    for notice in dropped.notices:
+        print(f"pm-ai: {notice}", file=sys.stderr)
+    print(_closing_line(dropped))
+    return EXIT_OK
+
+
 TABLE: Mapping[str, Command] = {
     "dashboard": Command(
         "render this scope's daily_dashboard.md, once",
@@ -2350,6 +2738,20 @@ TABLE: Mapping[str, Command] = {
             ),
         },
     ),
+    # `11c`: a transcript somebody downloaded or typed, ingested by hand.
+    "transcript": Command(
+        "meeting transcripts pm-ai extracts from",
+        leaves={
+            "drop": Command(
+                "ingest a .vtt or .txt transcript against a meeting in that scope",
+                _transcript_drop,
+                takes=("file",),
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
+                requires=(SCOPE_ARGUMENT,),
+                target=_drop_target,
+            ),
+        },
+    ),
     "connector": Command(
         "the connectors this daemon harvests from",
         leaves={
@@ -2396,7 +2798,10 @@ def _spelled(name: str, command: Command) -> str:
     """
     required = "".join(f" <{argument}>" for argument in command.takes)
     positional = "".join(f" [{argument}]" for argument in command.optional)
-    optional = "".join(f" [--{option} <{option}>]" for option in command.options)
+    optional = "".join(
+        f" --{option} <{option}>" if option in command.requires else f" [--{option} <{option}>]"
+        for option in command.options
+    )
     return f"{name}{required}{positional}{optional}"
 
 
@@ -2525,11 +2930,27 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
         named, misread = _options(rest, allowed=command.options)
         if misread is not None:
             return _misused(f"`{name}` {misread}")
+        absent = _missing(command, named)
+        if absent is not None:
+            return _misused(f"`{name}` {absent}")
         return _parsed(command, command.run, options=named)
     leaf = command.leaves.get(rest[0]) if rest else None
     if leaf is None or leaf.run is None:
         return Answered(EXIT_USAGE, usage(group=name))
     supplied = tuple(rest[1:])
+    leaf_options: Mapping[str, str] = {}
+    if leaf.options:
+        # Story 11c: a leaf with options as well as positionals. The words are
+        # split first — every `--name` with its value, the rest in order — so
+        # `drop <file> --scope personal` and `drop --scope personal <file>`
+        # read alike, and each half meets the refusal it always met.
+        supplied, option_words = _split_options(supplied)
+        leaf_options, misread = _options(option_words, allowed=leaf.options)
+        if misread is not None:
+            return _misused(f"`{name} {rest[0]}` {misread}", group=name)
+        absent = _missing(leaf, leaf_options)
+        if absent is not None:
+            return _misused(f"`{name} {rest[0]}` {absent}", group=name)
     if not len(leaf.takes) <= len(supplied) <= len(leaf.takes) + len(leaf.optional):
         # 4j refused every trailing word because no leaf took one. 8b's
         # `connector add` does, so the refusal became about *arity* — still a
@@ -2549,7 +2970,7 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
             else "no arguments"
         )
         return _misused(f"`{name} {rest[0]}` takes {expected}", group=name)
-    return _parsed(leaf, leaf.run, arguments=supplied)
+    return _parsed(leaf, leaf.run, arguments=supplied, options=leaf_options, group=name)
 
 
 def _parsed(
@@ -2558,13 +2979,14 @@ def _parsed(
     *,
     arguments: tuple[str, ...] = (),
     options: Mapping[str, str] | None = None,
+    group: str | None = None,
 ) -> Parsed | Answered:
     """The parsed command with its target read, or the usage error naming why not."""
     named = {} if options is None else options
     try:
         target = None if command.target is None else command.target(named)
     except _Misread as misread:
-        return _misused(str(misread))
+        return _misused(str(misread), group=group)
     return Parsed(run, arguments=arguments, options=named, target=target)
 
 
@@ -2581,6 +3003,7 @@ def dispatch(
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     first_run: FirstRun | None = None,
     goals: GoalBook | None = None,
+    transcript_drop: TranscriptDrop | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -2607,6 +3030,7 @@ def dispatch(
         dashboard=dashboard,
         first_run=first_run,
         goals=goals,
+        transcript_drop=transcript_drop,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,
@@ -2670,6 +3094,43 @@ def _options(
             )
         parsed[option] = remaining.pop(0)
     return parsed, None
+
+
+def _missing(command: Command, named: Mapping[str, str]) -> str | None:
+    """The sentence naming each required option absent, or `None`.
+
+    Asked of a leaf and of a command without leaves alike, so `requires` means
+    the same thing wherever it is declared.
+    """
+    absent = [option for option in command.requires if option not in named]
+    if not absent:
+        return None
+    return "needs " + ", ".join(f"`--{option} <{option}>`" for option in absent)
+
+
+def _split_options(words: Sequence[str]) -> tuple[tuple[str, ...], list[str]]:
+    """Positionals in order, and every `--name value` / `--name=value` word.
+
+    A `--name` takes the word after it as its value unless that word is another
+    option, so `_options` still names a missing value as missing. A bare `--`
+    ends the options: every word after it is positional, so a file whose name
+    starts with `--` can still be named.
+    """
+    positional: list[str] = []
+    options: list[str] = []
+    remaining = list(words)
+    while remaining:
+        word = remaining.pop(0)
+        if word == "--":
+            positional.extend(remaining)
+            break
+        if not word.startswith("--"):
+            positional.append(word)
+            continue
+        options.append(word)
+        if "=" not in word and remaining and not remaining[0].startswith("--"):
+            options.append(remaining.pop(0))
+    return tuple(positional), options
 
 
 def _run(handler: Callable[[Context], int], context: Context) -> int:

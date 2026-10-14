@@ -1236,6 +1236,7 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
   summary: `bind_transcript` reads candidates outside the `meetings/` claim and the record is written later, so two concurrent drops of one meeting can mint two manual-only records.
   evidence: Check-then-act with no claim. Its first production caller is `11c`'s drop command, which should hold the claim across bind and put.
+  update (2026-10-13, `11c`): the drop command binds once from one candidate read but still holds no claim across bind and put. Holding the `meetings/` claim there needs its own design: ingestion's `put` takes that claim itself, and AD-5 forbids a second claim on one thread. A Graph capture landing between the drop's "already captured" check and its write can also leave two captures for one meeting.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`
   summary: A crash between writing an adopted record under the calendar day and removing the old manual-only file leaves two files under one id until the meeting is harvested again; that recovery is untested.
   evidence: `MeetingRecords._write` writes then calls `remove_member`, two steps.
