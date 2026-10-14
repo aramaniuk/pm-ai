@@ -32,10 +32,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from pm_ai.core.goal_register import GoalRegister
-from pm_ai.core.rendering import render_project_dashboard
+from pm_ai.core.rendering import PmHandles, render_project_dashboard
 
 NOW = datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
 DISPLAY = timezone(timedelta(hours=2))
+NOBODY = PmHandles(handles=frozenset(), unrecorded=(), unchecked=())
 REGISTER = GoalRegister(present=True)
 
 
@@ -44,15 +45,15 @@ def register_as_the_entries() -> str:
 
     `render_dashboard(meetings, entries, goals, now, tz=...)` puts the register
     third. Here the third positional is `now`, and the second is the event log,
-    so the muscle-memory call lands the register on `Sequence[EventEntry]`.
+    so the muscle-memory call lands the register on `EventLogAnswer`.
     `arg-type`, at the call site, in the checker — not in review.
     """
-    return render_project_dashboard((), REGISTER, NOW, tz=DISPLAY)
+    return render_project_dashboard((), REGISTER, NOW, tz=DISPLAY, pm=NOBODY)
 
 
 def register_as_the_meetings() -> str:
     """The same refusal from the only other slot that takes a collection."""
-    return render_project_dashboard(REGISTER, (), NOW, tz=DISPLAY)
+    return render_project_dashboard(REGISTER, (), NOW, tz=DISPLAY, pm=NOBODY)
 
 
 def register_by_keyword() -> str:
@@ -61,4 +62,4 @@ def register_by_keyword() -> str:
     There is no parameter to mistype against: `call-arg`, "unexpected keyword
     argument". This is the wall stated in the checker's own words.
     """
-    return render_project_dashboard((), (), NOW, tz=DISPLAY, goals=REGISTER)
+    return render_project_dashboard((), (), NOW, tz=DISPLAY, pm=NOBODY, goals=REGISTER)

@@ -72,14 +72,17 @@ and ends this morning appear without a date filter here silently dropping it.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from enum import Enum
 
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
+from pm_ai.core.event_log import LogRead
 from pm_ai.core.goal_register import GoalRegister
-from pm_ai.domain.event_entries import EventEntry, SelfActionType
+from pm_ai.domain.event_entries import EventEntry, MalformedEntry, SelfActionType
 from pm_ai.domain.events import MessagePayload, ObservedEventType
 from pm_ai.domain.goals import Goal, GoalDomain
+from pm_ai.domain.handles import NO_PERSON, PersonHandle
 from pm_ai.domain.harvest import (
     HarvestFailure,
     NoCalendarConnector,
@@ -90,16 +93,21 @@ from pm_ai.domain.payload_fields import decode_payload
 
 __all__ = [
     "CalendarAnswer",
+    "EventLogAnswer",
     "GOALS_PATH",
     "HEADINGS",
     "LEADERSHIP_NOTES",
+    "MAX_SIGNAL_LINES",
+    "MENTIONS_YOU",
     "MESSAGE_WINDOW",
     "NO_MEETINGS",
     "NO_REASON_GIVEN",
     "PROACTIVE_ENABLEMENT",
     "PROJECT_HEADINGS",
+    "PmHandles",
     "STRATEGIC_MILESTONES",
     "TIME_CRITICAL",
+    "UNKNOWN_SENDER",
     "code",
     "escape",
     "render_dashboard",
@@ -128,6 +136,47 @@ no two of them can be collapsed into one sentence:
 Widened from two members to four by story `23b`, the slice that performs the
 fetch and therefore the only one that can tell these four apart.
 """
+
+
+EventLogAnswer = Sequence[EventEntry] | HarvestFailure
+"""What reading the scope's event log can honestly answer (story `23c`).
+
+A **sequence** is a read that completed — possibly empty, which is a measured
+quiet window. A **`HarvestFailure`** is a read that could not complete: a line
+that is not a well-formed entry, an entry of a kind pm-ai does not know, a
+segment that is not UTF-8 text, or a segment that could not be read from disk.
+Its `reason` is the refusal's own text, which names the segment.
+
+The same value `CalendarAnswer` uses for a failed fetch, built by the pipeline
+and handed only to the renderer — never saved, so the persisted-harvest meaning
+in `HarvestFailure`'s docstring does not apply to it.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PmHandles:
+    """Who the PM is, for marking "mentions you", from one read at one instant.
+
+    `handles` is what `pm_identity()` answered (AD-34): `graph:<user_id>` for
+    every Graph connector row, enabled or disabled. A message whose `mentions`
+    holds one of them, compared as handle text, mentions the PM.
+
+    `unrecorded` names every enabled Graph connector whose row records no usable
+    user id — a sign-in from before pm-ai recorded it. Nothing can be marked for
+    that tenant, and the section says so, naming the command that records it.
+
+    `unchecked` is every other connector row (or `connectors/` itself) that
+    could not say whether it is the PM's, as `(name, why)` pairs: a row that
+    could not be read may be the PM's own Graph row, so mentions could not be
+    checked against it, and the section says that too.
+
+    No defaults: a caller that did not read the rows must not be able to render
+    a section that looks as if nobody was mentioned.
+    """
+
+    handles: frozenset[PersonHandle]
+    unrecorded: tuple[str, ...]
+    unchecked: tuple[tuple[str, str], ...]
 
 
 # ── The four headings, in CAP-9's order ──────────────────────────────────────
@@ -223,6 +272,19 @@ about the failure, and stating it keeps the line a sentence rather than a
 truncated one a reader assumes was cut off.
 """
 
+MAX_SIGNAL_LINES = 20
+"""At most this many signal lines — one screen at 07:00 (settled 2026-10-09).
+
+Mentions of the PM first, then newest first. When the window held more, one
+closing line states how many more and that they are in the event log.
+"""
+
+MENTIONS_YOU = "mentions you"
+"""How a signal line whose `mentions` holds one of the PM's handles ends."""
+
+UNKNOWN_SENDER = "an unknown sender"
+"""What the absence actor `none:` renders as; every other actor renders as written."""
+
 # The categories Proactive Enablement reads. One member today; a tuple because
 # the section states its own vocabulary, and a widening should change the
 # printed sentence by changing this.
@@ -230,11 +292,12 @@ SIGNAL_CATEGORIES: tuple[ObservedEventType, ...] = (ObservedEventType.MESSAGE_PO
 
 def render_dashboard(
     meetings: CalendarAnswer,
-    entries: Sequence[EventEntry],
+    entries: EventLogAnswer,
     goals: GoalRegister,
     now: datetime,
     *,
     tz: tzinfo | None,
+    pm: PmHandles,
 ) -> str:
     """CAP-9's four sections, as Markdown, from these inputs and this instant.
 
@@ -249,7 +312,12 @@ def render_dashboard(
     `entries` is the scope's event log, **unbounded**. The window is applied
     here rather than by `EventLog.read`, because a bounded read drops an entry
     with no `ingested_at` silently and this section counts them: an entry that
-    cannot be placed in time is a fact about the log, not an absence.
+    cannot be placed in time is a fact about the log, not an absence. It is an
+    `EventLogAnswer`: a log that could not be read arrives as a
+    `HarvestFailure` and is stated, never rendered as a quiet day (`23c`).
+
+    `pm` is who the PM is, read from the connector rows (`PmHandles`): a message
+    mentioning one of its handles is marked and listed first.
 
     `goals` carries `present`, which is the whole reason it is a `GoalRegister`
     and not a `dict`. An absent file and a file with nothing in it need
@@ -267,7 +335,7 @@ def render_dashboard(
         HEADINGS,
         (
             _time_critical(meetings, now=now, tz=tz),
-            _proactive_enablement(entries, now=now, tz=tz),
+            _proactive_enablement(entries, pm=pm, now=now, tz=tz),
             _strategic_milestones(goals),
             _leadership_notes(),
         ),
@@ -276,10 +344,11 @@ def render_dashboard(
 
 def render_project_dashboard(
     meetings: CalendarAnswer,
-    entries: Sequence[EventEntry],
+    entries: EventLogAnswer,
     now: datetime,
     *,
     tz: tzinfo | None,
+    pm: PmHandles,
 ) -> str:
     """A project's day, as Markdown — and nothing of the PM's.
 
@@ -309,6 +378,8 @@ def render_project_dashboard(
     two files saying the same thing about the same answer.
 
     `now` must be aware UTC and `tz` must be supplied, both exactly as above.
+    `entries` and `pm` mean what they mean there: the PM's handles come from
+    pm-ai's own connector settings, which the wall does not forbid (`23c`).
     Rendering the same inputs twice returns byte-identical output, and so does
     rendering them through the other function: the two sections below are the
     same two functions.
@@ -320,7 +391,7 @@ def render_project_dashboard(
         PROJECT_HEADINGS,
         (
             _time_critical(meetings, now=now, tz=tz),
-            _proactive_enablement(entries, now=now, tz=tz),
+            _proactive_enablement(entries, pm=pm, now=now, tz=tz),
         ),
     )
 
@@ -564,19 +635,43 @@ def _duration_words(delta: timedelta) -> str:
 
 
 def _proactive_enablement(
-    entries: Sequence[EventEntry], *, now: datetime, tz: tzinfo
+    entries: EventLogAnswer, *, pm: PmHandles, now: datetime, tz: tzinfo
 ) -> str:
-    """Message signals inside the window, or the reason the window is empty."""
+    """Message signals inside the window, or why there are none to show.
+
+    A log that could not be read is stated, with its reason bounded, and nothing
+    else is said. Otherwise: the signals decoded, marked and ordered — mentions
+    of the PM first, then newest first — at most `MAX_SIGNAL_LINES` of them with
+    a closing line counting the rest, or the empty-window sentence; then a line
+    per connector whose sign-in predates the recorded user id and per row that
+    could not be checked; then the footnotes counting what the window excluded.
+    """
+    if isinstance(entries, HarvestFailure):
+        # First, and the mirror of `_time_critical`'s failure branch without its
+        # `_retry_advice`: no connector was asked, so no "the connector reports"
+        # sentence; there is no query result, so no no-signals sentence; and no
+        # mention could have been marked, so no sign-in line.
+        # Not `NO_REASON_GIVEN`, which names a connector, and none was asked.
+        reason = _bounded(escape(entries.reason)) or "the read gave no reason"
+        return (
+            f"The event log could not be read, so the message signals in this "
+            f"window are unknown: {reason}"
+        )
+
     since = now - MESSAGE_WINDOW
-    inside: list[tuple[datetime, EventEntry]] = []
-    # Three separate counts, because they are three different facts and the
-    # section prints what it counted. Folding them into one number forced one
-    # sentence to stand for all of them, and that sentence — "carries no
-    # `ingested_at`" — was false for two of the three.
+    # The segment each entry came from, when the read named them (`LogRead`).
+    segments: Sequence[str | None] = (
+        entries.segments if isinstance(entries, LogRead) else (None,) * len(entries)
+    )
+    inside: list[tuple[datetime, EventEntry, str | None]] = []
+    # Separate counts, because they are different facts and the section prints
+    # what it counted. Folding them into one number forced one sentence to stand
+    # for all of them, and that sentence — "carries no `ingested_at`" — was
+    # false for two of the three.
     absent = 0
     unreadable = 0
     ahead = 0
-    for entry in entries:
+    for entry, segment in zip(entries, segments, strict=True):
         if entry.category not in SIGNAL_CATEGORIES:
             # `SelfActionType` entries share this log and are not signals: their
             # subject is pm-ai, and a dashboard reporting pm-ai's own compaction
@@ -603,17 +698,116 @@ def _proactive_enablement(
             ahead += 1
             continue
         if since <= at:
-            inside.append((at, entry))
+            inside.append((at, entry, segment))
 
-    footnote = _window_notes(absent=absent, unreadable=unreadable, ahead=ahead)
-    if not inside:
-        return f"{_no_signals(since=since, now=now, tz=tz)}{footnote}"
+    # Decoded before the sort and the cap: whether a line mentions the PM
+    # decides its place, and a line that cannot be decoded takes no place.
+    mine = frozenset(str(handle) for handle in pm.handles)
+    signals: list[_Signal] = []
+    undecodable: list[tuple[str | None, str]] = []
+    for at, entry, segment in inside:
+        try:
+            payload = decode_payload(entry)
+        except MalformedEntry:
+            payload = None
+        if not isinstance(payload, MessagePayload):
+            # Counted, never a crash and never silence (`23c`): one hand-edited
+            # line used to take the whole dashboard down with it. A line that
+            # decodes to some other payload is as unusable here as one that
+            # does not decode at all.
+            undecodable.append((segment, entry.entry_id or "<no id>"))
+            continue
+        # `None` is "mentions not recorded": no claim either way, so unmarked.
+        mentioned = bool(mine.intersection(payload.mentions or ()))
+        signals.append(_Signal(at, entry, payload, mentioned))
 
-    inside.sort(key=lambda pair: (pair[0], pair[1].entry_id or ""))
-    lines = "\n".join(
-        _signal_line(at, entry, tz=tz, now=now) for at, entry in inside
+    footnote = _window_notes(
+        absent=absent, unreadable=unreadable, ahead=ahead, undecodable=undecodable
     )
-    return f"{lines}{footnote}"
+    sign_ins = "".join(
+        f"\n\n{_unrecorded_sign_in(name)}" for name in pm.unrecorded
+    ) + "".join(f"\n\n{_unchecked_row(name, why)}" for name, why in pm.unchecked)
+    if not signals:
+        return f"{_no_signals(since=since, now=now, tz=tz)}{sign_ins}{footnote}"
+
+    # Mentions of the PM first, then newest first, then the entry id — total,
+    # so a re-render is byte-identical. When the mentions alone exceed the cap,
+    # the newest of them fill it, which this order gives for free.
+    signals.sort(
+        key=lambda s: (not s.mentioned, -s.at.timestamp(), s.entry.entry_id or "")
+    )
+    shown = signals[:MAX_SIGNAL_LINES]
+    lines = "\n".join(_signal_line(signal, tz=tz, now=now) for signal in shown)
+    hidden = signals[MAX_SIGNAL_LINES:]
+    closing = (
+        f"\n\n{_more_signals(len(hidden), sum(s.mentioned for s in hidden))}"
+        if hidden
+        else ""
+    )
+    return f"{lines}{closing}{sign_ins}{footnote}"
+
+
+@dataclass(frozen=True, slots=True)
+class _Signal:
+    """One decoded message inside the window, and whether it mentions the PM."""
+
+    at: datetime
+    entry: EventEntry
+    payload: MessagePayload
+    mentioned: bool
+
+
+def _more_signals(hidden: int, mentioning: int) -> str:
+    """The closing line of a cut list — never a claim that the day held only these.
+
+    Says how many of the hidden lines mention the PM when any do: the cap fills
+    with the newest mentions, so older ones can be among the hidden.
+    """
+    if hidden == 1:
+        line = (
+            "1 more message signal in this window is not shown; it is in the "
+            "event log."
+        )
+    else:
+        line = (
+            f"{hidden} more message signals in this window are not shown; they "
+            f"are in the event log."
+        )
+    if mentioning == 1 and hidden == 1:
+        line += " It mentions you."
+    elif mentioning:
+        line += f" {mentioning} of them mention{'s' if mentioning == 1 else ''} you."
+    return line
+
+
+REASON_LIMIT = 300
+"""How many characters of a failure's reason the section shows before cutting."""
+
+
+def _bounded(reason: str) -> str:
+    """A reason cut at `REASON_LIMIT` with `…`, so one corrupt 16 KiB line —
+    which the ledger's refusal quotes — cannot flood the section."""
+    if len(reason) <= REASON_LIMIT:
+        return reason
+    return reason[:REASON_LIMIT].rstrip() + "…"
+
+
+def _unchecked_row(name: str, why: str) -> str:
+    """A connector row (or `connectors/`) that could not say whether it is the PM's."""
+    return (
+        f"Mentions could not be checked against `{code(name)}`: it "
+        f"{_bounded(escape(why))}. A message mentioning you through it is not "
+        f"marked."
+    )
+
+
+def _unrecorded_sign_in(instance: str) -> str:
+    """One enabled Graph connector whose sign-in predates the recorded user id."""
+    return (
+        f"The sign-in for `{code(instance)}` predates pm-ai recording the user "
+        f"id, so no message here is marked as mentioning you for that "
+        f"connector. Run `pm-ai connector sign-in {code(instance)}` to record it."
+    )
 
 
 def _no_signals(*, since: datetime, now: datetime, tz: tzinfo) -> str:
@@ -628,37 +822,43 @@ def _no_signals(*, since: datetime, now: datetime, tz: tzinfo) -> str:
     )
 
 
-def _signal_line(at: datetime, entry: EventEntry, *, tz: tzinfo, now: datetime) -> str:
+def _signal_line(signal: _Signal, *, tz: tzinfo, now: datetime) -> str:
     # Decoded, never looked up by name (AD-27): the line names these `p.channel`
     # and `p.excerpt`, and a literal lookup that misspells either reads as "not
     # recorded" — which is how every real message would have rendered as an
     # actor and nothing else.
-    payload = decode_payload(entry)
-    if not isinstance(payload, MessagePayload):
-        raise TypeError(
-            f"{entry.category.value} decoded to {type(payload).__name__}; the "
-            f"message line reads a MessagePayload."
-        )
-    channel = payload.channel
-    excerpt = payload.excerpt
-    parts = [f"- **{_local(at, tz=tz, now=now)}**", escape(entry.actor)]
+    channel = signal.payload.channel
+    excerpt = signal.payload.excerpt
+    # The actor as the line carries it — a handle, not a name: the alias table
+    # that would resolve it is saved nowhere, so nothing here resolves it.
+    actor = signal.entry.actor
+    sender = UNKNOWN_SENDER if actor == str(NO_PERSON) else escape(actor)
+    parts = [f"- **{_local(signal.at, tz=tz, now=now)}**", sender]
     if channel:
         parts.append(f"in {escape(channel)}")
     line = " ".join(parts)
     if excerpt:
         line += f" — {escape(excerpt)}"
+    if signal.mentioned:
+        line += f" — {MENTIONS_YOU}"
     return line
 
 
-def _window_notes(*, absent: int, unreadable: int, ahead: int) -> str:
+def _window_notes(
+    *,
+    absent: int,
+    unreadable: int,
+    ahead: int,
+    undecodable: Sequence[tuple[str | None, str]],
+) -> str:
     """Everything the window excluded for a reason other than being old.
 
     A bounded `EventLog.read` drops these silently — correctly, since the range
     asks a question they cannot answer — so this is the only place a PM can
     learn that the count above is short, and by how many.
 
-    Three sentences rather than one, because they are three different facts. One
-    counter printed under one wording made the dashboard say "carries no
+    One sentence per fact, because they are different facts. One counter
+    printed under one wording made the dashboard say "carries no
     `ingested_at`" about an entry whose `ingested_at` was there and readable,
     which is the invented claim this module is arranged against.
     """
@@ -683,7 +883,35 @@ def _window_notes(*, absent: int, unreadable: int, ahead: int) -> str:
             f"silence; a stamp in the future is a clock disagreeing, not a "
             f"signal that did not happen."
         )
+    if undecodable:
+        # Its own counter: `unreadable` already means an `ingested_at` that
+        # could not be read, and this is a line whose fields did not decode.
+        count = len(undecodable)
+        notes.append(
+            f"{count} message log {_carry(count)} fields that could not be "
+            f"decoded, so {'it is' if count == 1 else 'they are'} not listed"
+            f"{_where_to_find(undecodable)}. Counted here rather than dropped in "
+            f"silence."
+        )
     return "".join(f"\n\n{note}" for note in notes)
+
+
+UNDECODABLE_IDS_NAMED = 3
+"""How many undecodable entries' ids the footnote names before saying "and N more"."""
+
+
+def _where_to_find(undecodable: Sequence[tuple[str | None, str]]) -> str:
+    """The segments and the first few entry ids, so the lines can be found by hand."""
+    named = sorted({segment for segment, _ in undecodable if segment is not None})
+    ids = sorted(entry_id for _, entry_id in undecodable)
+    shown = ", ".join(f"`{code(entry_id)}`" for entry_id in ids[:UNDECODABLE_IDS_NAMED])
+    more = len(ids) - UNDECODABLE_IDS_NAMED
+    where = f" ({shown}"
+    if more > 0:
+        where += f" and {more} more"
+    if named:
+        where += " in " + ", ".join(f"`{code(segment)}`" for segment in named)
+    return where + ")"
 
 
 def _carry(count: int) -> str:

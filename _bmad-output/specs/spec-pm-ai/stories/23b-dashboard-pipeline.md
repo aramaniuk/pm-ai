@@ -123,6 +123,9 @@ Re-derived against `dd2e537` on 2026-09-15; every address below was bounds-check
 
 ## Spec Change Log
 
+- **2026-10-13, the "Malformed event-log segment" row is superseded by `23c`.**
+  A segment that cannot be read — a line that is not a well-formed entry, an entry of an unknown kind, a segment that is not UTF-8 text, or one that could not be read from disk — no longer refuses the command with exit `3`. `run_dashboard` turns the refusal into a `HarvestFailure` handed only to the renderer, writes the file, and exits zero; the Proactive Enablement section names the segment and the reason, and the other sections render from their own inputs. `tests/slice/test_dashboard_slice.py` flipped the refusal test accordingly. The frozen row above is left as written; this entry is its supersession.
+
 - **2026-09-15, two matrix rows deleted on instruction, at the build's matrix audit.**
   Both described a pipeline that touches `meetings/` records, which the 2026-09-07 realignment removed, and neither could be covered by a test that was not manufactured to satisfy it.
   **`Malformed meeting record` / `MalformedMeeting`.** `run_dashboard` reads no meeting record at all — the day comes off the live calendar — so there is no hand-edited file for it to refuse. The implementing agent declined to invent a read to satisfy the row, which was the right call.

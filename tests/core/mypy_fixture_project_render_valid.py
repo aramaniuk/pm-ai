@@ -21,16 +21,18 @@ from datetime import datetime, timedelta, timezone
 
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import MessagePayload, ObservedEventType
+from pm_ai.domain.handles import GRAPH, person_handle
 from pm_ai.domain.harvest import HarvestFailure
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.payload_fields import encode_payload
 
-from pm_ai.core.rendering import render_project_dashboard
+from pm_ai.core.rendering import PmHandles, render_project_dashboard
 
 NOW = datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
 DISPLAY = timezone(timedelta(hours=2))
 ALPHA = DataScope(ScopeKind.PROJECT, project_id="alpha")
+NOBODY = PmHandles(handles=frozenset(), unrecorded=(), unchecked=())
 
 MEETING = Meeting(
     meeting_id="m_alpha_standup",
@@ -53,25 +55,41 @@ ENTRY = EventEntry(
 
 def a_project_day() -> str:
     """The populated case — a sequence of meetings and a sequence of entries."""
-    return render_project_dashboard((MEETING,), (ENTRY,), NOW, tz=DISPLAY)
+    return render_project_dashboard((MEETING,), (ENTRY,), NOW, tz=DISPLAY, pm=NOBODY)
 
 
 def an_empty_day() -> str:
     """Empty tuples, which is what an answered calendar with nothing in it is."""
-    return render_project_dashboard((), (), NOW, tz=DISPLAY)
+    return render_project_dashboard((), (), NOW, tz=DISPLAY, pm=NOBODY)
 
 
 def an_unreachable_calendar() -> str:
     """The other arm of the union — the whole reason `meetings` is not a list."""
     failure = HarvestFailure(reason="token expired", retryable=False)
-    return render_project_dashboard(failure, (ENTRY,), NOW, tz=DISPLAY)
+    return render_project_dashboard(failure, (ENTRY,), NOW, tz=DISPLAY, pm=NOBODY)
+
+
+def an_unreadable_event_log() -> str:
+    """The other arm of `EventLogAnswer` (`23c`): a log that could not be read."""
+    failure = HarvestFailure(reason="2026-09.md line 1: corrupt", retryable=False)
+    return render_project_dashboard((MEETING,), failure, NOW, tz=DISPLAY, pm=NOBODY)
+
+
+def a_pm_with_a_handle_and_an_unrecorded_sign_in() -> str:
+    """The PM's handles and the sign-ins that predate the recorded user id."""
+    pm = PmHandles(
+        handles=frozenset({person_handle(GRAPH, "11111111-2222-4333-8444-555555555555")}),
+        unrecorded=("graph:old",),
+        unchecked=(),
+    )
+    return render_project_dashboard((), (ENTRY,), NOW, tz=DISPLAY, pm=pm)
 
 
 def lists_not_tuples() -> str:
     """`Sequence`, not `tuple`: a caller that built a list must not be refused."""
     meetings: list[Meeting] = [MEETING]
     entries: list[EventEntry] = [ENTRY]
-    return render_project_dashboard(meetings, entries, NOW, tz=DISPLAY)
+    return render_project_dashboard(meetings, entries, NOW, tz=DISPLAY, pm=NOBODY)
 
 
 def an_optional_timezone(tz: timezone | None) -> str:
@@ -82,4 +100,4 @@ def an_optional_timezone(tz: timezone | None) -> str:
     than a type error a PM never sees. A caller holding an unresolved value must
     therefore be able to pass it.
     """
-    return render_project_dashboard((), (), NOW, tz=tz)
+    return render_project_dashboard((), (), NOW, tz=tz, pm=NOBODY)
