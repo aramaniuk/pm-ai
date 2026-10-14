@@ -81,8 +81,7 @@ from pm_ai.core.dispatch import JobState, plan
 from pm_ai.core.project_registry import RegistryRefused, parse_registry
 from pm_ai.domain.health import Report
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.scope_model import ScopeResolutionError
-from pm_ai.ports import ArtifactBusy, KeyNotFound
+from pm_ai.ports import ArtifactBusy, DaemonRefused, KeyNotFound
 from pm_ai.storage.service import (
     OperationalStoreStuck,
     OperationalStoreUnavailable,
@@ -96,6 +95,7 @@ from pm_ai.surfaces.cli.dispatch import (
     EXIT_UNEXPECTED,
     EXIT_USAGE,
     RESTART_SENTENCE,
+    TAKES_A_PATH,
     TERMINAL_BOUND,
     Answered,
     HealthReport,
@@ -137,8 +137,6 @@ no arguments besides their scope. `project add` and `transcript drop` never are.
 STREAM_REREAD_SECONDS = 5.0
 """How long a stream waits for a published change before reading the row again."""
 
-_TAKES_A_PATH = frozenset({("project", "add"), ("transcript", "drop")})
-"""Commands whose first word is a path, refused through the daemon when relative."""
 
 _HELP_WORDS = frozenset({"help", "-h", "--help"})
 _ORDER = {state.value: index for index, state in enumerate(JobState)}
@@ -177,6 +175,15 @@ def row_body(row: RequestRow) -> dict[str, object]:
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
+
+
+def _already_serving() -> int:
+    """`pm-ai daemon run` sent through the daemon: this one is already running (4q)."""
+    raise DaemonRefused(
+        "a pm-ai daemon is already running — this one, which answered the line — "
+        "so `pm-ai daemon run` started nothing. To start it again, stop it first "
+        "(Ctrl-C in its terminal)."
+    )
 
 
 def _inline(output: str, code: int) -> Reply:
@@ -336,7 +343,7 @@ class RequestPath:
         parsed = parse(words)
         if isinstance(parsed, Answered):
             return _inline(parsed.text + "\n", parsed.code)
-        if tuple(words[:2]) in _TAKES_A_PATH and parsed.arguments:
+        if tuple(words[:2]) in TAKES_A_PATH and parsed.arguments:
             given = parsed.arguments[0]
             if not Path(given).expanduser().is_absolute():
                 # The daemon's working directory is not the client's, so a
@@ -347,6 +354,12 @@ class RequestPath:
                     f"{' '.join(words[:2])}` an absolute path.\n",
                     EXIT_USAGE,
                 )
+        # The line's `--scope`, resolved for this request against the projects
+        # the daemon watches (story 4q): a project it does not watch, or one
+        # enrolled since it started, is refused in the answer, by name.
+        unwatched = await self._unwatched(parsed.target)
+        if unwatched is not None:
+            return _inline(f"pm-ai: {unwatched}\n", EXIT_REFUSAL)
         declared = self._bound(words)
         if declared is None:
             # Never a guess at the call site: a command without a declared
@@ -378,6 +391,46 @@ class RequestPath:
                     or tuple(words[:1]) in DEDUPLICATED,
                 )
             )
+        )
+
+    async def _unwatched(self, target: DataScope | None) -> str | None:
+        """Why the line cannot act in its project here, or `None` when it can.
+
+        Story 4m's order without the folder step — the daemon runs in no folder
+        of the person's: a project named on the line, which must be one the
+        daemon watches. No command's target defaults to a project, so there is
+        no unnamed case to resolve. The projects are the ones read at start
+        (AD-5, AD-7); the registry is read now, as a plain read on a worker,
+        only to tell a project enrolled since the start from one never
+        enrolled.
+        """
+        if target is None or target.kind is not ScopeKind.PROJECT:
+            return None
+        named = target.project_id
+        watched = self.daemon.watched
+        if named in watched:
+            return None
+        try:
+            enrolled = await self.pool.run(self._read_registry)
+        except (RegistryRefused, OSError, ValueError) as unreadable:
+            return (
+                f"{target} is not a project this daemon watches, and the project "
+                f"registry could not be read ({type(unreadable).__name__}: "
+                f"{unreadable}), so whether it was enrolled since the daemon "
+                f"started cannot be told; the line was not run. `pm-ai doctor` "
+                f"reports the registry."
+            )
+        if named in enrolled:
+            return (
+                f"{target} was enrolled after this daemon started, so it does "
+                f"not act in it yet. {RESTART_SENTENCE}"
+            )
+        listed = ", ".join(sorted(watched)) if watched else "no project"
+        return (
+            f"{target} is not a project this daemon watches, so the line was not "
+            f"run; it watches {listed}. Name one of them with "
+            f"`--scope project:<id>`, or enrol {named} first with "
+            f"`pm-ai project add <path> {named}`. {RESTART_SENTENCE}"
         )
 
     async def _record_and_start(
@@ -737,7 +790,7 @@ class RequestPath:
             # Runs here, on the worker: its reads, binding, `git` question and
             # extraction are bounded steps; each write is handed over.
             transcript_drop=functools.partial(drop_transcript, handed_daemon(fresh, hand=hand)),
-            serve=None,
+            serve=_already_serving,
             unbuilt_connectors=fresh.unbuilt,
             out=out,
             err=err,
@@ -753,13 +806,22 @@ class RequestPath:
             enrolled_now=self._enrolled_now(),
         )
 
+    def _read_registry(self) -> tuple[str, ...]:
+        """The registry as it is now: a plain read, never composed from; raises when unreadable."""
+        raw = self.daemon.storage.read_artifact(
+            scope=DataScope(ScopeKind.APPLICATION), artifact=REGISTRY_ARTIFACT
+        )
+        return tuple(parse_registry(raw)) if raw is not None else ()
+
     def _enrolled_now(self) -> tuple[str, ...]:
-        """The registry as it is now: a plain read, never composed from."""
+        """`_read_registry`, with an unreadable registry read as naming nothing new.
+
+        For the connector refresh only, which names rows filing into later
+        projects; a line's scope is resolved through `_read_registry` itself, so
+        an unreadable registry is said rather than read as "never enrolled".
+        """
         try:
-            raw = self.daemon.storage.read_artifact(
-                scope=DataScope(ScopeKind.APPLICATION), artifact=REGISTRY_ARTIFACT
-            )
-            return tuple(parse_registry(raw)) if raw is not None else ()
+            return self._read_registry()
         except (RegistryRefused, OSError, ValueError):
             return ()
 
@@ -797,16 +859,11 @@ class RequestPath:
         return enumerated.check_health()
 
     def _dashboard(self, fresh: Daemon, scope: DataScope, *, job: str | None) -> Path:
-        """The render as steps: reads and render bounded, git bounded, the save claimed."""
-        if (
-            scope.kind is ScopeKind.PROJECT
-            and scope.project_id not in fresh.watched
-            and scope.project_id in self._enrolled_now()
-        ):
-            raise ScopeResolutionError(
-                f"{scope} was enrolled after this daemon started, so it renders "
-                f"nothing for it yet. {RESTART_SENTENCE}"
-            )
+        """The render as steps: reads and render bounded, git bounded, the save claimed.
+
+        A project scope here is one the daemon watches: `prompt` refused every
+        other before the line was planned (story 4q).
+        """
         document = prepare_dashboard(fresh, scope=scope, now=fresh.clock())
         ask_dashboard_exclusion(fresh, scope=scope)
         written: Path = self._hand_for(job)(
