@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -185,8 +186,12 @@ def by_name(report: Report) -> dict[str, Probe]:
 
 
 def answers_for(repository: Path, *, project_id: str = "") -> tuple[str, ...]:
-    """A full first run: path, id, rate, zone, verbose."""
-    return (str(repository), project_id, "85", "Europe/Warsaw", "n")
+    """A full first run: path, id, rate, zone, verbose, and "n" to a Graph connector."""
+    return (str(repository), project_id, "85", "Europe/Warsaw", "n", "n")
+
+
+GRAPH_QUESTION = "add a Microsoft Graph connector now?"
+"""How step 4's question begins (story 4p)."""
 
 
 def setup() -> int:
@@ -244,7 +249,9 @@ def test_a_clean_machine_reaches_healthy_keychain_registry_and_config_probes(
     # The packages probe is FAILING in this repo, so the verdict is honest.
     assert code == (EXIT_OK if report.healthy else EXIT_UNHEALTHY)
     printed = capsys.readouterr().out
-    assert "[1/3]" in printed and "[2/3]" in printed and "[3/3]" in printed
+    for step in ("[1/4]", "[2/4]", "[3/4]", "[4/4]"):
+        assert step in printed, step
+    assert "/3]" not in printed
 
 
 def test_a_clean_machine_with_the_runtime_installed_exits_zero(
@@ -313,15 +320,18 @@ def test_setup_exits_unhealthy_when_the_connectors_line_warns(
     (pm_ai_root(home) / "connectors" / "broken.json").write_text("{", encoding="utf-8")
     capsys.readouterr()
 
-    operator.script(str(repository), "")
+    operator.script(str(repository), "", "n")
     assert setup() == EXIT_UNHEALTHY
 
     report = reports[-1]
+    printed = capsys.readouterr()
+    # Step 4 closes with this machine's own `connectors` remedy, word for word.
+    closing = step_four(printed.out).splitlines()[-1].strip()
+    assert closing == by_name(report)["connectors"].remediation
+    assert closing.startswith("Repair or remove each row named")
     assert by_name(report)["connectors"].health is Health.WARNING
     assert [p.name for p in report.probes if not p.health.is_healthy] == ["connectors"]
-    assert "connectors/broken.json is not valid JSON" in connectors_line(
-        capsys.readouterr().out
-    )
+    assert "connectors/broken.json is not valid JSON" in connectors_line(printed.out)
 
 
 def test_setup_re_run_with_a_connector_enrolled_lists_it(
@@ -367,10 +377,12 @@ def test_a_second_run_asks_nothing_about_a_config_that_is_already_complete(
     setup()
     capsys.readouterr()
 
-    operator.script(str(repository), "")
+    operator.script(str(repository), "", "n")
     assert setup() == EXIT_OK
 
-    assert len(operator.asked) == 2, operator.asked
+    # The project's two questions, and step 4's: nothing is enrolled yet.
+    assert len(operator.asked) == 3, operator.asked
+    assert operator.asked[2].startswith(GRAPH_QUESTION)
     printed = capsys.readouterr().out
     assert "already enrolled" in printed
     assert "already registered" in printed
@@ -416,7 +428,7 @@ def test_a_new_project_id_on_a_second_run_joins_the_registry_additively(
     setup()
     config_before = config_path(home).read_bytes()
 
-    operator.script(str(tmp_path / "beta"), "")
+    operator.script(str(tmp_path / "beta"), "", "n")
     assert setup() == EXIT_OK
 
     assert set(registry_of(home)) == {"alpha", "beta"}
@@ -445,12 +457,12 @@ def test_setup_and_doctor_agree_on_a_machine_with_two_projects(
     """
     operator.script(*answers_for(tmp_path / "alpha"))
     assert setup() == EXIT_OK
-    operator.script(str(tmp_path / "beta"), "")
+    operator.script(str(tmp_path / "beta"), "", "n")
     assert setup() == EXIT_OK
     assert set(registry_of(home)) == {"alpha", "beta"}
     capsys.readouterr()
 
-    operator.script(str(tmp_path / "alpha"), "")
+    operator.script(str(tmp_path / "alpha"), "", "n")
     from_setup = setup()
     setup_said = capsys.readouterr().out
 
@@ -558,12 +570,12 @@ def test_setup_on_a_fresh_home_never_asks_who_the_pm_is(
 ):
     """Story 2o: who the PM is comes from the Graph connector rows, so a fresh
     home is set up without being asked, and every config answer may be empty."""
-    operator.script(str(tmp_path / "alpha"), "", "", "", "")
+    operator.script(str(tmp_path / "alpha"), "", "", "", "", "")
 
     assert setup() == EXIT_OK
 
     assert not any("pm_handle" in prompt for prompt in operator.asked), operator.asked
-    assert len(operator.asked) == 5, operator.asked
+    assert len(operator.asked) == 6, operator.asked
     assert load_config(config_path(home).read_bytes()) == load_config(None)
     assert "pm_handle" not in capsys.readouterr().out
 
@@ -575,7 +587,7 @@ def test_setup_on_a_fresh_home_never_asks_who_the_pm_is(
 def test_an_inadmissible_rate_is_named_and_re_asked(
     home, tmp_path, keychain, operator, capsys, bad_rate, named
 ):
-    operator.script(str(tmp_path / "alpha"), "", bad_rate, "40", "", "")
+    operator.script(str(tmp_path / "alpha"), "", bad_rate, "40", "", "", "n")
 
     setup()
 
@@ -586,7 +598,7 @@ def test_an_inadmissible_rate_is_named_and_re_asked(
 def test_an_inadmissible_flag_is_named_and_re_asked(
     home, tmp_path, keychain, operator, capsys
 ):
-    operator.script(str(tmp_path / "alpha"), "", "", "", "maybe", "y")
+    operator.script(str(tmp_path / "alpha"), "", "", "", "maybe", "y", "n")
 
     setup()
 
@@ -598,7 +610,9 @@ def test_an_inadmissible_flag_is_named_and_re_asked(
 
 
 def test_an_unknown_zone_is_named_and_re_asked(home, tmp_path, keychain, operator, capsys):
-    operator.script(str(tmp_path / "alpha"), "", "", "Europe/Warsav", "Europe/Warsaw", "")
+    operator.script(
+        str(tmp_path / "alpha"), "", "", "Europe/Warsav", "Europe/Warsaw", "", "n"
+    )
 
     setup()
 
@@ -666,7 +680,7 @@ def test_a_partial_config_is_completed_and_keeps_what_it_held(
     is kept, and it is written over only because it did not change underneath."""
     config_path(home).parent.mkdir(parents=True)
     config_path(home).write_bytes(b"blended_hourly_rate = 50\n")
-    operator.script(str(tmp_path / "alpha"), "", "Europe/Warsaw")
+    operator.script(str(tmp_path / "alpha"), "", "Europe/Warsaw", "n")
 
     code = setup()
 
@@ -675,8 +689,9 @@ def test_a_partial_config_is_completed_and_keeps_what_it_held(
     config = load_config(config_path(home).read_bytes())
     assert config.blended_hourly_rate == 50.0
     assert config.display_timezone == "Europe/Warsaw"
-    asked = [p.split(" ", 1)[0] for p in operator.asked[2:]]
+    asked = [p.split(" ", 1)[0] for p in operator.asked[2:-1]]
     assert asked == ["display_timezone,"], operator.asked
+    assert operator.asked[-1].startswith(GRAPH_QUESTION)
     assert not any(p.startswith("blended_hourly_rate") for p in operator.asked)
 
 
@@ -687,12 +702,12 @@ def test_a_complete_config_is_a_completed_step_and_left_byte_identical(
     config_path(home).parent.mkdir(parents=True)
     body = b'blended_hourly_rate = 50\ndisplay_timezone = "Europe/Warsaw"\n'
     config_path(home).write_bytes(body)
-    operator.script(str(tmp_path / "alpha"), "")
+    operator.script(str(tmp_path / "alpha"), "", "n")
 
     assert setup() != EXIT_REFUSAL
 
     assert config_path(home).read_bytes() == body
-    assert len(operator.asked) == 2, operator.asked
+    assert len(operator.asked) == 3, operator.asked
     assert "already configured" in capsys.readouterr().out
 
 
@@ -712,7 +727,7 @@ def test_a_config_holding_no_setting_is_a_first_run_file(
     assert setup() != EXIT_REFUSAL
 
     assert "changed while setup" not in capsys.readouterr().err
-    assert len(operator.asked) == 5, operator.asked
+    assert len(operator.asked) == 6, operator.asked
     config = load_config(config_path(home).read_bytes())
     assert config.blended_hourly_rate == 85.0
     assert config.display_timezone == "Europe/Warsaw"
@@ -808,3 +823,189 @@ def test_an_undecodable_answer_is_re_asked_rather_than_a_traceback(
 
     assert load_config(config_path(home).read_bytes()).display_timezone == "Europe/Warsaw"
     assert "not valid text" in capsys.readouterr().err
+
+
+# ── Step 4: an optional Microsoft Graph connector (story 4p) ─────────────────
+
+
+_REPORT_LINE = re.compile(r"^\[\s*(ok|warning|absent|failing)\] ", re.MULTILINE)
+
+
+def step_four(printed: str) -> str:
+    """What setup printed for step 4, up to the closing report's first line.
+
+    Not up to the first blank line: a "yes" prints one before the sign-in.
+    """
+    start = printed.index("[4/4]")
+    report = _REPORT_LINE.search(printed, start)
+    end = report.start() if report else len(printed)
+    return printed[start:end].rstrip()
+
+
+def test_step_four_says_it_is_optional_and_why(home, tmp_path, keychain, operator, capsys):
+    operator.script(*answers_for(tmp_path / "alpha"))
+
+    setup()
+
+    heading = step_four(capsys.readouterr().out).splitlines()[0]
+    assert "optional" in heading
+    assert "browser" in heading and "app (client) id" in heading
+
+
+@pytest.mark.parametrize("declined", ["n", "no", "N", ""], ids=["n", "no", "N", "enter"])
+def test_no_or_enter_skips_the_step_closing_with_the_connectors_lines_remedy(
+    home, tmp_path, keychain, operator, installed, reports, capsys, declined
+):
+    repository = tmp_path / "alpha"
+    operator.script(str(repository), "", "85", "Europe/Warsaw", "n", declined)
+
+    assert setup() == EXIT_OK
+
+    assert sum(p.startswith(GRAPH_QUESTION) for p in operator.asked) == 1
+    assert len(operator.asked) == 6, "something about Graph was asked after the no"
+    assert not (pm_ai_root(home) / "connectors").exists()
+    assert not (pm_ai_root(home) / "private" / "config.json").exists()
+    (report,) = reports
+    connectors = by_name(report)["connectors"]
+    assert "none enrolled" in connectors.detail
+    # The step's closing sentence is 4n's remedy, word for word.
+    closing = step_four(capsys.readouterr().out).splitlines()[-1].strip()
+    assert closing == connectors.remediation
+    assert closing.startswith("Nothing will be harvested until one is added")
+
+
+def test_neither_y_nor_n_is_asked_again_twice_then_setup_stops_at_step_four(
+    home, tmp_path, keychain, operator, capsys
+):
+    repository = tmp_path / "alpha"
+    operator.script(*answers_for(repository)[:-1], *(["maybe"] * SETUP_ATTEMPTS))
+
+    assert setup() == EXIT_REFUSAL
+
+    assert sum(p.startswith(GRAPH_QUESTION) for p in operator.asked) == SETUP_ATTEMPTS
+    err = capsys.readouterr().err
+    assert "'maybe' is not y or n" in err
+    assert "setup stopped at step 4" in err and "Steps 1–3 stay done" in err
+    # The refusal quotes the question as asked, without its default.
+    assert repr("add a Microsoft Graph connector now? (y/n)") in err
+    # Steps 1–3 stay done.
+    assert keychain.secret is not None
+    assert set(registry_of(home)) == {"alpha"}
+    assert load_config(config_path(home).read_bytes()).display_timezone == "Europe/Warsaw"
+
+
+@pytest.mark.parametrize("interruption", ["^C", None], ids=["ctrl-c", "ctrl-d"])
+def test_an_interruption_at_the_question_stops_at_step_four_with_steps_one_to_three_done(
+    home, tmp_path, keychain, operator, capsys, interruption
+):
+    answers = answers_for(tmp_path / "alpha")[:-1]
+    # Running out of answers is Ctrl-D.
+    operator.script(*answers, *([interruption] if interruption else []))
+
+    assert setup() == EXIT_REFUSAL
+
+    err = capsys.readouterr().err
+    assert "interrupted at step 4" in err and "Steps 1–3 stay done" in err
+    assert "nothing was saved for the connector" in err
+    assert "pm-ai: interrupted" not in err
+    assert set(registry_of(home)) == {"alpha"} and config_path(home).exists()
+    assert not (pm_ai_root(home) / "connectors").exists()
+
+
+def test_a_second_run_with_a_graph_connector_enrolled_asks_nothing_and_changes_no_bytes(
+    home, tmp_path, keychain, operator, installed, capsys
+):
+    repository = tmp_path / "alpha"
+    operator.script(*answers_for(repository))
+    assert setup() == EXIT_OK
+    write_row(home, "graph:work", system="graph")
+    before = digests(home)
+    capsys.readouterr()
+
+    operator.script(str(repository), "")
+    assert setup() == EXIT_OK
+
+    assert not any(p.startswith(GRAPH_QUESTION) for p in operator.asked), operator.asked
+    assert digests(home) == before
+    said = step_four(capsys.readouterr().out)
+    assert "already enrolled: graph:work" in said and "nothing was asked or written" in said
+
+
+def test_a_second_run_with_two_graph_connectors_names_both_and_asks_nothing(
+    home, tmp_path, keychain, operator, installed, capsys
+):
+    repository = tmp_path / "alpha"
+    operator.script(*answers_for(repository))
+    assert setup() == EXIT_OK
+    write_row(home, "graph:work", system="graph")
+    write_row(home, "graph:home", system="graph")
+    before = digests(home)
+    capsys.readouterr()
+
+    operator.script(str(repository), "")
+    assert setup() == EXIT_OK
+
+    assert not any(p.startswith(GRAPH_QUESTION) for p in operator.asked)
+    assert digests(home) == before
+    said = step_four(capsys.readouterr().out)
+    assert "already enrolled: graph:home, graph:work" in said, said
+
+
+@pytest.mark.parametrize(
+    ("instance", "row"),
+    [
+        ("gitlab:alpha", {"system": "gitlab"}),
+        ("graph:work", {"system": "graph", "enabled": False}),
+    ],
+    ids=["gitlab-only", "disabled-graph"],
+)
+def test_a_second_run_with_no_enabled_graph_connector_is_asked(
+    home, tmp_path, keychain, operator, installed, instance, row
+):
+    repository = tmp_path / "alpha"
+    operator.script(*answers_for(repository))
+    assert setup() == EXIT_OK
+    write_row(home, instance, **row)
+
+    operator.script(str(repository), "", "n")
+    setup()
+
+    assert operator.asked[-1].startswith(GRAPH_QUESTION), operator.asked
+
+
+def test_a_second_run_after_answering_no_asks_again(
+    home, tmp_path, keychain, operator, installed
+):
+    repository = tmp_path / "alpha"
+    operator.script(*answers_for(repository))
+    assert setup() == EXIT_OK
+
+    operator.script(str(repository), "", "n")
+    assert setup() == EXIT_OK
+
+    assert operator.asked[-1].startswith(GRAPH_QUESTION)
+
+
+@pytest.mark.parametrize(
+    ("fault", "said"),
+    [
+        (KeyboardInterrupt(), "interrupted at step 4"),
+        (PermissionError(13, "Permission denied", "connectors"), "Permission denied"),
+    ],
+    ids=["ctrl-c", "unreadable"],
+)
+def test_a_fault_reading_the_connectors_is_the_step_four_refusal(
+    home, tmp_path, keychain, operator, monkeypatch, capsys, fault, said
+):
+    def failing(self):
+        raise fault
+
+    monkeypatch.setattr(entry._FirstRun, "connectors", failing)
+    operator.script(*answers_for(tmp_path / "alpha"))
+
+    assert setup() == EXIT_REFUSAL
+
+    err = capsys.readouterr().err
+    assert said in err and "step 4" in err and "Steps 1–3 stay done" in err
+    assert "Traceback" not in err and "pm-ai: interrupted" not in err
+    assert set(registry_of(home)) == {"alpha"} and config_path(home).exists()
