@@ -289,7 +289,9 @@ def test_a_valid_add_saves_the_settings_and_the_sealed_sign_in_together(
     assert len(terminal.prompts) == 4
     assert FLOW_MESSAGE in captured.out, "Microsoft's own address and code"
     assert "enrolled and healthy" in captured.out
-    assert "next start" in captured.out
+    # Story 4r: rows are read afresh by every command and daemon job, so the
+    # closing message says the next one uses it rather than "the next start".
+    assert "a running daemon needs no restart" in captured.out
     assert str(_settings_file(home)) in captured.out, "the closing message names the file"
     assert "categories" in captured.out
 

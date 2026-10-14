@@ -35,6 +35,8 @@ in `.importlinter`). The 07:00 tick belongs to the daemon.
 
 from __future__ import annotations
 
+import builtins
+import contextvars
 import getpass
 import re
 import stat
@@ -44,7 +46,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TextIO, runtime_checkable
 
 from pm_ai.core.config import Config, ConfigRefused, load_config, render_config
 from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
@@ -135,8 +137,10 @@ __all__ = [
     "GraphSignInReplacement",
     "HealthReport",
     "Parsed",
+    "RESTART_SENTENCE",
     "Refusal",
     "TABLE",
+    "TERMINAL_BOUND",
     "TranscriptDrop",
     "TranscriptDropOutcome",
     "dispatch",
@@ -144,6 +148,47 @@ __all__ = [
     "parse",
     "usage",
 ]
+
+# ── Where a command's words go (story 4r) ────────────────────────────────────
+
+_OUT: contextvars.ContextVar[TextIO | None] = contextvars.ContextVar("pm_ai_cli_out", default=None)
+_ERR: contextvars.ContextVar[TextIO | None] = contextvars.ContextVar("pm_ai_cli_err", default=None)
+_TERMINAL: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "pm_ai_cli_terminal", default=None
+)
+
+
+def _echo(*values: object, file: TextIO | None = None, **options: object) -> None:
+    """`print`, to this command's own output streams.
+
+    `dispatch` sets them from `Context.out` and `Context.err` for the length of
+    one command, in this thread's context only — never `redirect_stdout`, which
+    swaps the process-wide `sys.stdout` and would carry one request's words
+    into another's, or onto the daemon's console. With none set they are the
+    process's own, read at the call, as `print` reads them.
+
+    A `file` of `sys.stderr` is this command's error stream; anything else is
+    its output.
+    """
+    error = file is not None and file is sys.stderr
+    chosen = (_ERR if error else _OUT).get()
+    if chosen is None:
+        chosen = file if file is not None else sys.stdout
+    builtins.print(*values, file=chosen, **options)  # type: ignore[call-overload]
+
+
+def _stdin_is_terminal() -> bool:
+    """Whether this command may ask a question: its standard input is a terminal.
+
+    `False` for a command sent through the daemon (story 4r), whatever the
+    daemon's own standard input is: the daemon's terminal is not the client's,
+    and a question asked there would be answered by nobody — or by whoever is
+    watching the daemon.
+    """
+    if _TERMINAL.get() is False:
+        return False
+    return sys.stdin is not None and sys.stdin.isatty()
+
 
 # ── The exit-code table ──────────────────────────────────────────────────────
 
@@ -776,6 +821,23 @@ class Context:
     that knows the projects, and this layer may not import the registry.
     """
 
+    out: TextIO | None = None
+    """Where this command's output goes; `None` is the process's standard output.
+
+    The daemon hands each request its own buffer (story 4r), so nothing one
+    command prints reaches another request or the daemon's console.
+    """
+
+    err: TextIO | None = None
+    """Where this command's error stream goes; `None` is standard error."""
+
+    terminal: bool | None = None
+    """`False` when no question may be asked whatever stdin is (story 4r).
+
+    A command sent through the daemon has no terminal of its own, so every
+    "stdin is not a terminal" refusal applies to it. `None` asks stdin.
+    """
+
     def require_selection(self) -> None:
         """Refuse when no project was selected; do nothing when one was.
 
@@ -905,7 +967,7 @@ def _doctor(context: Context) -> int:
     operator trusts while the morning briefing cannot decrypt anything.
     """
     report = context.diagnose()
-    print(report)
+    _echo(report)
     return EXIT_OK if report.healthy else EXIT_UNHEALTHY
 
 
@@ -963,10 +1025,13 @@ def _key_enrol(context: Context) -> int:
         # adapter's. Collapsing them into one sentence here would send an
         # operator to unlock a keychain that is not installed.
         raise Refusal(str(unreachable)) from unreachable
-    print(
+    _echo(
         f"a master key is enrolled under {name!r}. It stays in the keychain: "
         f"pm-ai fetches it when it seals an artifact, and no command prints it."
     )
+    # The daemon asks the keychain once, at its start (AD-5), so a key enrolled
+    # now reaches a running daemon only when it restarts — said every time.
+    _echo(RESTART_SENTENCE)
     return EXIT_OK
 
 
@@ -1001,9 +1066,9 @@ def _config_show(context: Context) -> int:
     for name in names:
         value = getattr(settings, name)
         origin = "default" if value == getattr(defaults, name) else "set"
-        print(f"{name:<{width}}  {value!r:<8}  ({origin})")
-    print()
-    print(
+        _echo(f"{name:<{width}}  {value!r:<8}  ({origin})")
+    _echo()
+    _echo(
         "(default) means the value equals pm-ai's built-in default, and (set) "
         "means it differs. `Config` keeps no provenance, so this compares "
         "values, not origins: a key written into config.toml with the same "
@@ -1094,7 +1159,7 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
     assert_enrollable(storage, system="graph", instance=instance)
     graph.ready()
 
-    if not sys.stdin.isatty():
+    if not _stdin_is_terminal():
         raise Refusal(
             "adding a Graph connector asks four questions and waits for a "
             "Microsoft sign-in in a browser, so it needs a terminal. stdin is "
@@ -1124,14 +1189,14 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
         judge=lambda minutes: graph.refusal(width=width, reach_back=minutes),
     )
 
-    print()
+    _echo()
     signed = graph.sign_in(
         instance=instance,
         client_id=client_id,
         tenant=tenant,
         width=width,
         reach_back=reach_back,
-        present=print,
+        present=_echo,
     )
     # The sign-in and the check have both answered; enrolment re-runs the
     # name check under its own reading of the stores and seals. Its "probe" is
@@ -1145,18 +1210,19 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
         settings=signed.settings,
     )
 
-    print(answer)
+    _echo(answer)
     state = (
         "enrolled and healthy"
         if signed.healthy
         else "enrolled; its health check warned (above)"
     )
-    print(
-        f"{instance} is {state}. It becomes active at the next start — "
-        f"connectors are registered when the daemon is composed, so nothing is "
-        f"harvesting from it yet."
+    _echo(
+        f"{instance} is {state}. Its row is read afresh by every command and "
+        f"every daemon job, so the next one uses it and a running daemon needs "
+        f"no restart; nothing harvests from it until scheduled harvesting "
+        f"exists."
     )
-    print(
+    _echo(
         f"Outlook categories are not mapped to projects yet, so every meeting "
         f"is filed as personal. To map them, add a \"categories\" object — "
         f"Outlook category to project id — to {graph.settings_file(instance)}."
@@ -1201,7 +1267,7 @@ def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -
         )
 
     assert_unconfigured(daemon.storage, system="gitlab", instance=instance)
-    if not sys.stdin.isatty():
+    if not _stdin_is_terminal():
         raise Refusal(
             "adding a GitLab connector asks two questions and takes a token at "
             "a hidden prompt, so it needs a terminal. stdin is not a TTY here — "
@@ -1257,8 +1323,8 @@ def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -
         project=checked.project,
     )
 
-    print(answer)
-    print(
+    _echo(answer)
+    _echo(
         f"{instance} is enrolled and healthy. It becomes active at the next "
         f"start — connectors are registered when the daemon is composed, so "
         f"nothing is harvesting from it yet. Its settings are in "
@@ -1294,7 +1360,7 @@ def _hidden(prompt: str) -> str:
         try:
             return getpass.getpass(prompt).strip()
         except UnicodeDecodeError:
-            print(f"  {_NOT_TEXT}", file=sys.stderr)
+            _echo(f"  {_NOT_TEXT}", file=sys.stderr)
         except (EOFError, KeyboardInterrupt) as closed:
             raise Refusal(_INTERRUPTED) from closed
 
@@ -1323,7 +1389,7 @@ def _ask_until(prompt: str, *, judge: Callable[[str], str | None]) -> str:
         reason = _NOT_TEXT if answer is None else judge(answer)
         if reason is None and answer is not None:
             return answer
-        print(f"  {reason}", file=sys.stderr)
+        _echo(f"  {reason}", file=sys.stderr)
 
 
 def _ask_minutes(prompt: str, *, judge: Callable[[int], str | None]) -> int:
@@ -1338,13 +1404,13 @@ def _ask_minutes(prompt: str, *, judge: Callable[[int], str | None]) -> int:
     while True:
         typed = _typed(prompt)
         if typed is None:
-            print(f"  {_NOT_TEXT}", file=sys.stderr)
+            _echo(f"  {_NOT_TEXT}", file=sys.stderr)
             continue
         if not typed:
-            print("  this has no default; type a whole number of minutes.", file=sys.stderr)
+            _echo("  this has no default; type a whole number of minutes.", file=sys.stderr)
             continue
         if not (typed.isascii() and typed.isdigit()):
-            print(
+            _echo(
                 f"  {typed!r} is not a whole number of minutes; type digits only.",
                 file=sys.stderr,
             )
@@ -1353,7 +1419,7 @@ def _ask_minutes(prompt: str, *, judge: Callable[[int], str | None]) -> int:
         reason = judge(minutes)
         if reason is None:
             return minutes
-        print(f"  {reason}", file=sys.stderr)
+        _echo(f"  {reason}", file=sys.stderr)
 
 
 @contextmanager
@@ -1448,7 +1514,7 @@ def _connector_sign_in(context: Context) -> int:
     with _sign_in_refusals():
         graph.enrolled(instance)
         graph.ready()
-        if not sys.stdin.isatty():
+        if not _stdin_is_terminal():
             raise Refusal(
                 "redoing a sign-in waits for a Microsoft sign-in in a browser, so "
                 "it needs a terminal. stdin is not a TTY here — this is a pipe, a "
@@ -1456,11 +1522,11 @@ def _connector_sign_in(context: Context) -> int:
                 f"Run `pm-ai connector sign-in {instance}` from an interactive "
                 f"shell."
             )
-        replaced = graph.replace(instance=instance, present=print)
+        replaced = graph.replace(instance=instance, present=_echo)
 
-    print(replaced.answer)
+    _echo(replaced.answer)
     state = "healthy" if replaced.healthy else "warned (above)"
-    print(
+    _echo(
         f"{instance}: sign-in replaced; {state}. No restart is needed: a running "
         f"daemon reads the new sign-in on its next refresh."
     )
@@ -1481,7 +1547,7 @@ def _sign_in_refusals() -> Iterator[None]:
         ):
             yield
     except UserNotRecorded as unrecorded:
-        print(unrecorded.answer)
+        _echo(unrecorded.answer)
         raise Refusal(str(unrecorded)) from unrecorded
     except (
         ConnectorNotConfigured,
@@ -1547,26 +1613,26 @@ def _connector_check(context: Context) -> int:
     report = probe_all()
     unbuilt = context.unbuilt_connectors
     if not report.probes and not unbuilt:
-        print(
+        _echo(
             "no connectors are registered, so there is nothing to probe. That is "
             "an ordinary first-run state: connectors are registered when the "
             "daemon is composed."
         )
         return EXIT_OK
     for probe in report.probes:
-        print(probe)
+        _echo(probe)
     for row in unbuilt:
-        print(row)
-    print()
+        _echo(row)
+    _echo()
     if not report.probes:
-        print(
+        _echo(
             f"no connector was built, so nothing was probed; "
             f"{len(unbuilt)} enrolled, not built."
         )
         return EXIT_OK
     if unbuilt:
-        print(f"{len(unbuilt)} enrolled, not built, and not probed.")
-    # Not `print(report)`: `Report.__str__` ends in "pm-ai is healthy.", which is
+        _echo(f"{len(unbuilt)} enrolled, not built, and not probed.")
+    # Not `_echo(report)`: `Report.__str__` ends in "pm-ai is healthy.", which is
     # a claim about the machine. This command asked about providers, and the two
     # verdicts are not interchangeable — `doctor` can pass while every connector
     # is refused.
@@ -1575,7 +1641,7 @@ def _connector_check(context: Context) -> int:
         if report.healthy
         else "not every connector is healthy."
     )
-    print(f"{len(report.probes)} connectors probed; {verdict}")
+    _echo(f"{len(report.probes)} connectors probed; {verdict}")
     return EXIT_OK if report.healthy else EXIT_UNHEALTHY
 
 
@@ -1700,7 +1766,7 @@ def _dashboard(context: Context) -> int:
         ScopeResolutionError,
     ) as refused:
         raise Refusal(str(refused)) from refused
-    print(f"the {scope} dashboard is written: {written}")
+    _echo(f"the {scope} dashboard is written: {written}")
     return EXIT_OK
 
 
@@ -1730,13 +1796,17 @@ def _project_add(context: Context) -> int:
         # names its file — is the report, not a guess at which file it was.
         raise Refusal(f"project add stopped: {failed}") from failed
     if outcome.already_registered:
-        print(
+        _echo(
             f"{outcome.project_id} is already onboarded at {outcome.repository}; "
             f"nothing changed."
         )
-        return EXIT_OK
-    print(f"{outcome.project_id} is onboarded at {outcome.repository}")
-    print(f"git exclusion rules are in {outcome.gitignore}")
+    else:
+        _echo(f"{outcome.project_id} is onboarded at {outcome.repository}")
+        _echo(f"git exclusion rules are in {outcome.gitignore}")
+    # Enrolled projects are read once, at the daemon's start (AD-5): said every
+    # time this succeeds, an already-enrolled project included — a daemon
+    # started before it was first enrolled still does not watch it.
+    _echo(RESTART_SENTENCE)
     return EXIT_OK
 
 
@@ -1811,7 +1881,7 @@ def _answer[T](
         try:
             return interpret(_ask(prompt))
         except (_Inadmissible, ConfigRefused) as refused:
-            print(f"  {refused}", file=sys.stderr)
+            _echo(f"  {refused}", file=sys.stderr)
     raise _SetupStopped(
         f"setup stopped at {step}: no admissible answer to {question!r} after "
         f"{SETUP_ATTEMPTS} attempts. {done}; run `pm-ai setup` again to "
@@ -1827,18 +1897,19 @@ def _setup_key(first_run: FirstRun) -> None:
     the operator asked for a ready machine, not for a new key, and one is
     there. Nothing replaces it — `enrol` never does.
     """
-    print("[1/4] master key — first, because every encrypted write refuses without it")
+    _echo("[1/4] master key — first, because every encrypted write refuses without it")
     try:
         name = enrol(first_run.keychain)
     except KeyAlreadyEnrolled:
-        print("      already enrolled; the keychain was not written.")
+        _echo("      already enrolled; the keychain was not written.")
         return
     except KeychainUnavailable as unreachable:
         raise Refusal(
             f"setup stopped at step 1 (master key) and nothing after it ran: "
             f"{unreachable}"
         ) from unreachable
-    print(f"      a master key is enrolled under {name!r}; no command prints it.")
+    _echo(f"      a master key is enrolled under {name!r}; no command prints it.")
+    _echo(f"      {RESTART_SENTENCE}")
 
 
 def _project_answer(raw: str) -> str:
@@ -1858,7 +1929,7 @@ def _setup_project(context: Context) -> None:
     one. A changed path for an id already registered is `4d`'s refusal and
     ends setup here: relocating a tree is a migration, not a setup step.
     """
-    print("[2/4] project — second, because no path resolves until one is registered")
+    _echo("[2/4] project — second, because no path resolves until one is registered")
     path = _answer("project directory", _project_answer, step="step 2 (project)")
     alias = _answer(
         "project id (empty to use the directory's name)",
@@ -1876,12 +1947,13 @@ def _setup_project(context: Context) -> None:
             f"setup stopped at step 2 (project); step 1 stays done: {unwritable}"
         ) from unwritable
     if outcome.already_registered:
-        print(
+        _echo(
             f"      {outcome.project_id} is already registered at "
             f"{outcome.repository}; nothing changed."
         )
     else:
-        print(f"      {outcome.project_id} is registered at {outcome.repository}")
+        _echo(f"      {outcome.project_id} is registered at {outcome.repository}")
+        _echo(f"      {RESTART_SENTENCE}")
 
 
 def _rate(current: Config) -> Callable[[str], Config]:
@@ -1951,12 +2023,12 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
     it at the prompt that asked. Who the PM is is not asked: it comes from the
     Graph connector rows (story 2o).
     """
-    print("[3/4] config.toml — after the project, because every key in it is optional")
+    _echo("[3/4] config.toml — after the project, because every key in it is optional")
     first_run_file = current == Config()
     ask_rate = not current.blended_hourly_rate
     ask_zone = not current.display_timezone
     if not first_run_file and not ask_rate and not ask_zone:
-        print("      already configured; nothing was written.")
+        _echo("      already configured; nothing was written.")
         return
     step = "step 3 (config.toml)"
     settled = current
@@ -1990,7 +2062,7 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
             f"setup stopped at {step}; steps 1 and 2 stay done. config.toml "
             f"could not be written: {unwritable}"
         ) from unwritable
-    print(f"      written to {written}")
+    _echo(f"      written to {written}")
 
 
 DEFAULT_GRAPH_INSTANCE = "graph:work"
@@ -2082,7 +2154,7 @@ def _graph_step(first_run: FirstRun, step: _StepFour) -> None:
     """Step 4's body: the done check, the question, then `connector add graph`."""
     on_disk = first_run.connectors()
     if on_disk.graph:
-        print(
+        _echo(
             f"      already enrolled: {', '.join(on_disk.graph)}; nothing was "
             f"asked or written. Another is added with `pm-ai connector add graph "
             f"<name>`."
@@ -2096,8 +2168,8 @@ def _graph_step(first_run: FirstRun, step: _StepFour) -> None:
         done=_STEPS_DONE,
     )
     if not wanted:
-        print("      skipped; nothing was asked about Graph and nothing was written.")
-        print(f"      {on_disk.remedy}")
+        _echo("      skipped; nothing was asked about Graph and nothing was written.")
+        _echo(f"      {on_disk.remedy}")
         return
     storage = first_run.storage
     step.storage = storage
@@ -2130,7 +2202,7 @@ def _setup_connector(first_run: FirstRun) -> None:
     with no row, or a connector fully enrolled before the interruption, is
     said as such.
     """
-    print(
+    _echo(
         "[4/4] Microsoft Graph connector — optional: the machine is ready without "
         "one, and adding one signs in at Microsoft in a browser and needs an app "
         "(client) id"
@@ -2173,7 +2245,7 @@ def _saved(step: _StepFour) -> tuple[str, str | None]:
     if sealed and row:
         return (
             f"{instance} WAS saved — its settings row and sealed sign-in are both "
-            f"on disk, so it is enrolled and becomes active at the next start",
+            f"on disk, so it is enrolled and the next command or daemon job uses it",
             None,
         )
     if sealed:
@@ -2245,7 +2317,7 @@ def _setup(context: Context) -> int:
     # `sys.stdin` is `None` in a detached process — no descriptor 0 at all —
     # which is the same fact as a pipe for this purpose, and must not reach
     # `main` as an `AttributeError` and exit 1.
-    if sys.stdin is None or not sys.stdin.isatty():
+    if not _stdin_is_terminal():
         raise Refusal(
             "setup asks questions and can only run at a terminal. stdin is not a "
             "TTY here — a pipe, a cron job or a CI step — so nothing was done: "
@@ -2280,9 +2352,9 @@ def _setup(context: Context) -> int:
     _setup_config(first_run, existing, current)
     _setup_connector(first_run)
 
-    print()
+    _echo()
     report = first_run.diagnose()
-    print(report)
+    _echo(report)
     return EXIT_OK if report.healthy else EXIT_UNHEALTHY
 
 
@@ -2318,7 +2390,7 @@ def _goal_set(context: Context) -> int:
     The file is read before the first prompt, so a `strategic_goals.md` the
     parser refuses is refused before anything is asked, and is not written.
     """
-    if sys.stdin is None or not sys.stdin.isatty():
+    if not _stdin_is_terminal():
         raise Refusal(
             "goal set asks questions and can only run at a terminal. stdin is "
             "not a TTY here — a pipe, a cron job or a CI step — so nothing was "
@@ -2362,12 +2434,12 @@ def _goal_set(context: Context) -> int:
             f"{unwritable}"
         ) from unwritable
     if not outcome.changed:
-        print(f"{goal.goal_id} is unchanged; nothing was written or recorded.")
+        _echo(f"{goal.goal_id} is unchanged; nothing was written or recorded.")
         return EXIT_OK
     # The verb from the read `set` merged onto, not from `register` above: the
     # file may have gained this id while the prompts were open.
     verb = "revised" if outcome.revised else "set"
-    print(f"{goal.goal_id} is {verb} in {outcome.path}")
+    _echo(f"{goal.goal_id} is {verb} in {outcome.path}")
     return EXIT_OK
 
 
@@ -2469,7 +2541,7 @@ def _duration_refusal(minutes: int) -> str | None:
 
 def _drop_identify() -> tuple[str, datetime]:
     """The title and start, asked at the terminal; refused without one."""
-    if not sys.stdin.isatty():
+    if not _stdin_is_terminal():
         raise Refusal(
             "binding this transcript needs the meeting's title and start, and "
             "stdin is not a terminal to ask them at — a pipe, a cron job or a "
@@ -2661,10 +2733,36 @@ def _transcript_drop(context: Context) -> int:
         # write itself, which publishes whole or not at all.
         raise Refusal(f"the drop stopped and nothing was written: {failed}") from failed
     for notice in dropped.notices:
-        print(f"pm-ai: {notice}", file=sys.stderr)
-    print(_closing_line(dropped))
+        _echo(f"pm-ai: {notice}", file=sys.stderr)
+    _echo(_closing_line(dropped))
     return EXIT_OK
 
+
+RESTART_SENTENCE = (
+    "A daemon already running sees this after it is restarted (`pm-ai daemon run`)."
+)
+"""The one sentence every command whose change waits for a daemon restart says (AD-5).
+
+Owned here, beside the table, by story 4r: `project add` and `key enrol` print
+it every time they succeed, wherever they run, and the daemon names a connector
+row filing into a project enrolled since it started with it. Later slices print
+this constant, never a sentence of their own.
+"""
+
+TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("goal", "set"),
+        ("setup",),
+        ("connector", "add"),
+        ("connector", "sign-in"),
+        ("key", "enrol"),
+    }
+)
+"""The commands that need a terminal of their own: they ask questions or take a secret.
+
+A line sent through the daemon naming one of these is refused by name (story
+4r, `4q`'s routing rule) — the daemon's terminal is not the client's.
+"""
 
 TABLE: Mapping[str, Command] = {
     "dashboard": Command(
@@ -2870,7 +2968,7 @@ class Answered:
     text: str
 
     def deliver(self) -> int:
-        print(self.text, file=sys.stdout if self.code == EXIT_OK else sys.stderr)
+        _echo(self.text, file=sys.stdout if self.code == EXIT_OK else sys.stderr)
         return self.code
 
 
@@ -3008,6 +3106,9 @@ def dispatch(
     unavailable: str | None = None,
     undecided: str | None = None,
     unbuilt_connectors: tuple[UnbuiltConnector, ...] = (),
+    out: TextIO | None = None,
+    err: TextIO | None = None,
+    terminal: bool | None = None,
 ) -> int:
     """Run an already-parsed command, and return the exit code the table gives it.
 
@@ -3016,6 +3117,57 @@ def dispatch(
     name — is still accepted and parsed here, so every row of the CLI's matrix
     stays a unit test that needs neither a subprocess nor a composition root.
     """
+    streams = (_OUT.set(out), _ERR.set(err), _TERMINAL.set(terminal))
+    try:
+        return _dispatch(
+            argv,
+            daemon=daemon,
+            diagnose=diagnose,
+            probe_connectors=probe_connectors,
+            probe_credential=probe_credential,
+            graph_sign_in=graph_sign_in,
+            gitlab_enrolment=gitlab_enrolment,
+            onboard=onboard,
+            dashboard=dashboard,
+            first_run=first_run,
+            goals=goals,
+            transcript_drop=transcript_drop,
+            serve=serve,
+            unavailable=unavailable,
+            undecided=undecided,
+            unbuilt_connectors=unbuilt_connectors,
+            out=out,
+            err=err,
+            terminal=terminal,
+        )
+    finally:
+        _TERMINAL.reset(streams[2])
+        _ERR.reset(streams[1])
+        _OUT.reset(streams[0])
+
+
+def _dispatch(
+    argv: Sequence[str] | Parsed,
+    *,
+    daemon: DaemonPort | None,
+    diagnose: Callable[[], HealthReport],
+    probe_connectors: Callable[[], Report] | None,
+    probe_credential: CredentialProbePort,
+    graph_sign_in: GraphSignIn | None,
+    gitlab_enrolment: GitLabCheck | None,
+    onboard: Callable[[str, str | None], OnboardOutcome],
+    dashboard: Callable[[DataScope], Path],
+    first_run: FirstRun | None,
+    goals: GoalBook | None,
+    transcript_drop: TranscriptDrop | None,
+    serve: Callable[[], int] | None,
+    unavailable: str | None,
+    undecided: str | None,
+    unbuilt_connectors: tuple[UnbuiltConnector, ...],
+    out: TextIO | None,
+    err: TextIO | None,
+    terminal: bool | None,
+) -> int:
     parsed = argv if isinstance(argv, Parsed) else parse(argv)
     if isinstance(parsed, Answered):
         return parsed.deliver()
@@ -3038,6 +3190,9 @@ def dispatch(
         arguments=parsed.arguments,
         options=parsed.options,
         target=parsed.target,
+        out=out,
+        err=err,
+        terminal=terminal,
     )
     return _run(parsed.run, context)
 
@@ -3143,5 +3298,5 @@ def _run(handler: Callable[[Context], int], context: Context) -> int:
     try:
         return handler(context)
     except Refusal as refused:
-        print(f"pm-ai: {refused}", file=sys.stderr)
+        _echo(f"pm-ai: {refused}", file=sys.stderr)
         return EXIT_REFUSAL

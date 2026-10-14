@@ -164,7 +164,9 @@ def registry_of(home: Path) -> dict:
     return dict(parse_registry((pm_ai_root(home) / "projects.toml").read_bytes()))
 
 
-SQLITE_SIDECARS = (".db", ".db-wal", ".db-shm")
+# `.db.lock` since story 4r: the store is prepared under its own claim, whose
+# empty sidecar is declared structure beside it (AD-5), never an artifact.
+SQLITE_SIDECARS = (".db", ".db-wal", ".db-shm", ".db.lock")
 
 
 def digests(root: Path) -> dict[str, str]:
@@ -252,6 +254,11 @@ def test_a_clean_machine_reaches_healthy_keychain_registry_and_config_probes(
     for step in ("[1/4]", "[2/4]", "[3/4]", "[4/4]"):
         assert step in printed, step
     assert "/3]" not in printed
+    # Story 4r: a key and a project enrolled — each says a running daemon sees
+    # it only after a restart.
+    from pm_ai.surfaces.cli.dispatch import RESTART_SENTENCE
+
+    assert printed.count(RESTART_SENTENCE) == 2
 
 
 def test_a_clean_machine_with_the_runtime_installed_exits_zero(

@@ -1120,6 +1120,17 @@ from datetime import datetime as _datetime, timezone as _timezone  # noqa: E402
 from pm_ai.domain.identity import Actor  # noqa: E402
 from pm_ai.domain.transcripts import CaptureNotIngested, DropInterrupted  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _throwaway_home(tmp_path_factory, monkeypatch):
+    """Every test here runs against a throwaway `HOME`, never the developer's own.
+
+    Commands compose through `ScopePaths.production()`, which anchors on
+    `Path.home()`; without this a test opened the real `~/.pm-ai` (story 4r).
+    A test that sets `HOME` itself overrides this one.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
 DROP_VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n<v Andrei>we ship on Friday\n"
 DROP_START = _datetime(2026, 10, 9, 11, 0, tzinfo=_timezone.utc)
 

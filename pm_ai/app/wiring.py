@@ -8,7 +8,10 @@ before it did.
 
 from __future__ import annotations
 
+import contextvars
+import copy
 import json
+import logging
 import math
 import sys
 import threading
@@ -18,9 +21,10 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
+from pm_ai.app.concurrency import IOPool, WriterThread
 from pm_ai.connectors.gitlab import (
     DEFAULT_HOST as GITLAB_DEFAULT_HOST,
     HOST_KEY as GITLAB_HOST_KEY,
@@ -40,6 +44,9 @@ from pm_ai.connectors.gitlab.client import (
     token_refusal,
 )
 from pm_ai.connectors.graph import (
+    CATEGORIES_KEY,
+    CHANNELS_KEY,
+    CHATS_KEY,
     CLIENT_ID_KEY,
     MAX_SETTING_MINUTES,
     REACH_BACK_KEY,
@@ -60,6 +67,7 @@ from pm_ai.connectors.graph.auth import (
     GraphDeviceCodeAuth,
     GraphUnreachable,
     InMemoryRefreshTokenStore,
+    RefreshTokenStore,
     SealedCredential,
     StoreBusy,
     StoreEntryMissing,
@@ -74,6 +82,7 @@ from pm_ai.connectors.graph.calendar import (
 )
 from pm_ai.connectors.graph.channels import GraphChannelFetch
 from pm_ai.connectors.graph.chats import GraphChatFetch
+from pm_ai.connectors.graph.client import FETCH_BUDGET as GRAPH_FETCH_BUDGET
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.connectors.probe import CREDENTIAL_PROBE_SECONDS
 from pm_ai.connectors.registry import run_bounded
@@ -83,7 +92,7 @@ from pm_ai.connectors.transcripts.graph_transcripts import (
 )
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core import transcripts as transcript_catalogue
-from pm_ai.core.config import Config
+from pm_ai.core.config import Config, load_config
 from pm_ai.core.connector_enrolment import (
     CONNECTORS,
     CREDENTIAL_STORE,
@@ -104,7 +113,7 @@ from pm_ai.core.connector_enrolment import (
     replace_credential,
     stored_credentials,
 )
-from pm_ai.core.meeting_records import MeetingRecords
+from pm_ai.core.meeting_records import MEETINGS, MeetingRecords
 from pm_ai.core.project_registry import (
     DuplicateProject,
     ProjectEntry,
@@ -133,12 +142,12 @@ from pm_ai.domain.health import (
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
-from pm_ai.domain.storage_tiers import GITIGNORE_FILENAME
+from pm_ai.domain.storage_tiers import API_TOKEN, CAPTURES, EVENT_LOG, GITIGNORE_FILENAME
 from pm_ai.platform.claims import FlockClaims
 from pm_ai.platform.environment import encryption_disabled as encryption_off
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
-from pm_ai.platform.vcs import GitVcs
+from pm_ai.platform.vcs import GIT_TIMEOUT_SECONDS, GitVcs
 from pm_ai.ports import (
     MASTER_KEY_NAME,
     ArtifactBusy,
@@ -155,6 +164,7 @@ from pm_ai.skills.gitlab import PostComment
 from pm_ai.skills.registry import SkillRegistry
 from pm_ai.storage.crypto import LazyKeyCrypto, PlaintextCrypto
 from pm_ai.storage.service import StorageService
+from pm_ai.surfaces.cli.dispatch import RESTART_SENTENCE
 
 __all__ = [
     "Bootstrap",
@@ -166,6 +176,15 @@ __all__ = [
     "GraphEnrolment",
     "GraphSignInReplaced",
     "GraphSignedIn",
+    "HandedMeetings",
+    "HandedRefreshTokenStore",
+    "HandedStorage",
+    "HANDED_CALLS",
+    "NEVER_FROM_A_JOB",
+    "PLAIN_READS",
+    "UnclassifiedStorageCall",
+    "handed_daemon",
+    "onboard_in_daemon",
     "MASTER_KEY_NAME",
     "REGISTRY_ARTIFACT",
     "application_storage",
@@ -174,6 +193,7 @@ __all__ = [
     "build",
     "onboard_project",
     "read_connector_rows",
+    "refreshed",
     "Onboarded",
     "warn_if_encryption_disabled",
     "PmIdentityReading",
@@ -273,6 +293,15 @@ class Daemon:
     connector with no entry here gets a named refusal, never another
     account's source.
     """
+    writer: WriterThread | None = None
+    """The daemon's one writer thread, once `pm-ai daemon run` has started it (4r).
+
+    Every write and every claim in the daemon is a claimed step handed to it
+    (AD-5); `9a`'s harvests and `9b`'s renders take it from here rather than
+    making their own. `None` in a command that is not the daemon.
+    """
+    pool: IOPool | None = None
+    """The daemon's I/O pool of four, once started (AD-19, story 4r); `None` elsewhere."""
     unbuilt: tuple[UnbuiltConnector, ...] = ()
     """Every enabled connector row this build did not construct, with why (4o).
 
@@ -741,6 +770,21 @@ def _record_disabled_encryption(storage: StorageService) -> None:
     )
 
 
+_QUIET: contextvars.ContextVar[bool] = contextvars.ContextVar("pm_ai_wiring_quiet", default=False)
+
+
+def _warn(sentence: str) -> None:
+    """A composition warning on stderr — unless the daemon is refreshing for a line.
+
+    The daemon reads the connector rows again at the start of every line and
+    job (AD-5, story 4r); the sentence each unbuilt row carries goes to
+    `connector check`'s output, and printing it on the daemon's console for
+    every request would put one request's words where nobody asked for them.
+    """
+    if not _QUIET.get():
+        print(sentence, file=sys.stderr)
+
+
 def _registrar(resolver: ScopePaths) -> Callable[[str], bool]:
     """Whether a project id is one this machine's registry knows (AD-11).
 
@@ -783,6 +827,8 @@ def _enrolled_connectors(
     scopes: Mapping[str, DataScope],
     clock: Callable[[], datetime],
     registered: Callable[[str], bool],
+    store_for: Callable[[str, str], RefreshTokenStore] | None = None,
+    later: frozenset[str] = frozenset(),
 ) -> tuple[tuple[tuple[str, ConnectorPort], ...], tuple[UnbuiltConnector, ...]]:
     """What `pm-ai connector add` wrote, as adapters, so enrolment survives a restart.
 
@@ -852,15 +898,35 @@ def _enrolled_connectors(
     # it words them for its own line.
     unbuilt.extend(_unplaced(instance, reason) for instance, reason in rows.refused)
     for instance, system, entry in rows.accepted:
+        # A row filing into a project enrolled since the daemon started is named
+        # with the shared restart sentence and never built, so nothing probes or
+        # harvests a scope the daemon did not compose (AD-5, story 4r). Empty
+        # outside the daemon: a command composes every project enrolled now.
+        newer = _files_into(instance, system, entry) & later
+        if newer:
+            unbuilt.append(
+                UnbuiltConnector(
+                    instance,
+                    f"it files into {', '.join(sorted(newer))}, enrolled since "
+                    f"this daemon started, so it was not probed. {RESTART_SENTENCE}",
+                )
+            )
+            continue
         if system == "graph":
             # No credential is read here: the store reads the sealed file each
             # time the adapter asks, so a token another run rotated is the one
-            # this run refreshes from (story 8j).
+            # this run refreshes from (story 8j). In the daemon the store is
+            # one that hands its read and its compare-and-save to the writer
+            # thread and cannot write by itself (story 4r).
             graph = _graph_connector(
                 entry,
                 instance=instance,
-                store=SealedRefreshTokenStore(
-                    storage=storage, instance=instance, system=system
+                store=(
+                    SealedRefreshTokenStore(
+                        storage=storage, instance=instance, system=system
+                    )
+                    if store_for is None
+                    else store_for(instance, system)
                 ),
                 clock=clock,
                 registered=registered,
@@ -893,6 +959,115 @@ def _enrolled_connectors(
         else:
             built.append((instance, gitlab))
     return tuple(built), tuple(unbuilt)
+
+
+def _files_into(instance: str, system: str, entry: Mapping[str, object]) -> frozenset[str]:
+    """The project ids one enrolled row names as where its harvest files.
+
+    GitLab: the project its instance is named for (`gitlab:<id>`). Graph: every
+    project its category mapping, its channels and its chats name. Read off
+    the row as written, without judging it — the builders below do that.
+    """
+    named: set[str] = set()
+    if system == "gitlab":
+        prefix, _, project = instance.partition(":")
+        if prefix == "gitlab" and project:
+            named.add(project)
+        return frozenset(named)
+    categories = entry.get(CATEGORIES_KEY)
+    if isinstance(categories, Mapping):
+        named.update(value for value in categories.values() if isinstance(value, str))
+    for key, field_name in ((CHANNELS_KEY, "project"), (CHATS_KEY, "scope")):
+        listed = entry.get(key)
+        if not isinstance(listed, list):
+            continue
+        for item in listed:
+            if not isinstance(item, Mapping):
+                continue
+            value = item.get(field_name)
+            if not isinstance(value, str):
+                continue
+            if field_name == "project":
+                # A channel names its project by id.
+                named.add(value)
+                continue
+            # A chat names a scope: only `project:<id>` is a project; `personal`
+            # and the rest name none.
+            kind, _, project = value.partition(":")
+            if kind == "project" and project:
+                named.add(project)
+    return frozenset(named)
+
+
+def refreshed(
+    daemon: Daemon,
+    *,
+    store_for: Callable[[str, str], RefreshTokenStore],
+    enrolled_now: Sequence[str] = (),
+) -> Daemon:
+    """The daemon as one line or job sees it: settings and connectors read again.
+
+    AD-5's refresh point (story 4r): `config.toml`, the connector list, each
+    connector row and the credentials are read again at the start of every line
+    the daemon answers and every job; the enrolled projects are the ones read
+    at start (`daemon.watched`). `enrolled_now` is the registry as it is now —
+    a row filing into a project in it but not watched is named with the shared
+    restart sentence instead of being built.
+
+    `store_for` builds each Graph connector's credential store: in the daemon,
+    one that hands its read and its compare-and-save to the writer thread.
+    Nothing here writes. A `config.toml` the loader refuses raises
+    `ConfigRefused`, which the line reports as the terminal would.
+    """
+    storage = daemon.storage
+    config = load_config(
+        storage.read_artifact(scope=DataScope(ScopeKind.APPLICATION), artifact=CONFIG_ARTIFACT)
+    )
+    clock = daemon.clock
+    paths = storage.paths
+    resolvable = _registrar(paths) if isinstance(paths, ScopePaths) else (lambda _: True)
+
+    def registered(project_id: str) -> bool:
+        # Registered *at start*: a project enrolled since is not one this
+        # daemon composed, whatever the registry says now.
+        return project_id in daemon.watched and resolvable(project_id)
+
+    connectors: dict[str, ConnectorPort] = {}
+    builtin_scopes: dict[str, DataScope] = {}
+    for watched_id in daemon.watched:
+        watched_scope = DataScope(ScopeKind.PROJECT, watched_id)
+        builtin = GitLabConnectorAdapter(
+            instance=_builtin_instance(watched_id),
+            project=watched_id,
+            scope=watched_scope,
+            now=clock,
+            wait=time.sleep,
+        )
+        connectors[builtin.instance] = builtin
+        builtin_scopes[builtin.instance] = watched_scope
+    token = _QUIET.set(True)
+    try:
+        enrolled_rows, unbuilt = _enrolled_connectors(
+            storage,
+            scopes=builtin_scopes,
+            clock=clock,
+            registered=registered,
+            store_for=store_for,
+            later=frozenset(enrolled_now) - frozenset(daemon.watched),
+        )
+    finally:
+        _QUIET.reset(token)
+    for instance, enrolled in enrolled_rows:
+        connectors[instance] = enrolled
+    sources = _transcript_sources(connectors)
+    return replace(
+        daemon,
+        connectors=connectors,
+        transcripts=_transcript_families(sources),
+        transcript_sources=sources,
+        config=config,
+        unbuilt=unbuilt,
+    )
 
 
 def _gitlab_connector(
@@ -1063,10 +1238,7 @@ def _unplaced(instance: str, reason: str) -> UnbuiltConnector:
     write into; and returned, so the daemon carries it for `pm-ai connector
     check` to list (story 4o).
     """
-    print(
-        f"WARNING: the enrolled connector {instance!r} was not built — {reason}",
-        file=sys.stderr,
-    )
+    _warn(f"WARNING: the enrolled connector {instance!r} was not built — {reason}")
     return UnbuiltConnector(instance, reason)
 
 
@@ -1167,7 +1339,7 @@ def _graph_connector(
     entry: Mapping[str, object],
     *,
     instance: str,
-    store: SealedRefreshTokenStore,
+    store: RefreshTokenStore,
     clock: Callable[[], datetime],
     registered: Callable[[str], bool],
 ) -> GraphConnector | UnbuiltConnector:
@@ -2321,6 +2493,166 @@ class SealedRefreshTokenStore:
         self._holder = None
 
 
+class _Unread:
+    """Nothing has been read inside this thread's hold on the store yet."""
+
+
+_UNREAD = _Unread()
+
+
+@dataclass
+class HandedRefreshTokenStore:
+    """One Graph instance's sealed credential, as the daemon holds it (AD-5, AD-39, 4r).
+
+    The store a connector is handed in the daemon **cannot write by itself**.
+    Around the bounded call to the provider, the fetch hands the writer thread
+    only two kinds of claimed step: a read of the stored credential, and a
+    compare-and-save. `hand(work, label, save)` is the writer's door — `save`
+    marks the compare-and-save, which a stopping writer still takes while it
+    is open, and refuses and logs once it has closed.
+
+    **The compare is against what this thread read.** The adapter reads inside
+    `exclusive()` (`_superseding`) and, finding the token it refreshed from
+    still there, writes; the write is a compare-and-save against exactly that
+    read, made in one claimed step. If the stored entry changed in between —
+    `connector sign-in`, or another process's refresh — the new token is
+    dropped and the lost race logged, never saved over theirs.
+
+    `exclusive()` takes no claim: claims are entered on the writer thread,
+    inside each step. A busy file (`ArtifactBusy`) is retried by *this* thread,
+    the worker that handed the step over, after the sealed store's interval —
+    never by a sleep on the writer thread.
+    """
+
+    storage: StorageService
+    instance: str
+    system: str
+    hand: Callable[[Callable[[], Any], str, bool], Any]
+    log: logging.Logger
+    sleep: Callable[[float], None] = time.sleep
+    attempts: int = CLAIM_WAIT_ATTEMPTS
+    interval: float = CLAIM_WAIT_INTERVAL
+    refresh_slot: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    """The one refresh of this instance's credential that may be in flight in the
+    daemon (AD-5): shared by every store built for the instance, held by the
+    connector's auth from its read of the stored credential to its save."""
+    _held: threading.local = field(default_factory=threading.local, init=False, repr=False)
+
+    refresh_wait: float = GRAPH_FETCH_BUDGET.total_seconds()
+    """How long a refresh waits for the slot: one fetch budget, the most the
+    refresh holding it may take. Past it the refresh is refused by name."""
+
+    @contextmanager
+    def refreshing(self) -> Iterator[None]:
+        """Hold this instance's refresh slot for one refresh; the wait is the worker's.
+
+        Bounded: a refresh abandoned at a deadline may still hold the slot, and
+        a worker must never wait on it for ever.
+        """
+        if not self.refresh_slot.acquire(timeout=self.refresh_wait):
+            raise StoreBusy(
+                f"another refresh of {self.instance}'s credential has held its "
+                f"slot for {self.refresh_wait:g} s — one fetch budget — so this "
+                f"one was not started. Nothing was changed; try again."
+            )
+        try:
+            yield
+        finally:
+            self.refresh_slot.release()
+
+    def read(self) -> str | None:
+        """This instance's stored credential, read in a claimed step on the writer."""
+        value: str | None = self._handed(
+            self._read_claimed, f"read {self.instance}'s stored credential", save=False
+        )
+        if getattr(self._held, "inside", False):
+            self._held.read = value
+        return value
+
+    def write(self, credential: str) -> None:
+        """Compare-and-save against this thread's read; dropped and logged if overtaken."""
+        expected = getattr(self._held, "read", _UNREAD)
+        if not getattr(self._held, "inside", False) or isinstance(expected, _Unread):
+            raise RuntimeError(
+                f"a write to {self.instance}'s entry in {CREDENTIAL_STORE} was "
+                f"made without a read of it under this thread's hold, so there "
+                f"is nothing to compare against; it was refused."
+            )
+        saved = self._handed(
+            lambda: self._compare_and_save(expected, credential),
+            f"save {self.instance}'s refreshed credential",
+            save=True,
+        )
+        if not saved:
+            self.log.warning(
+                "a refreshed credential for %s was dropped: the stored entry "
+                "changed after the refresh read it, so saving would have "
+                "overwritten a newer one",
+                self.instance,
+                extra={"instance": self.instance},
+            )
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """This thread's hold: what `write` compares against is read inside it."""
+        if getattr(self._held, "inside", False):
+            raise ClaimReentered(
+                f"the hold on {CREDENTIAL_STORE} for {self.instance} is already "
+                f"this thread's; it is not re-entrant."
+            )
+        self._held.inside = True
+        self._held.read = _UNREAD
+        try:
+            yield
+        finally:
+            self._held.inside = False
+            self._held.read = _UNREAD
+
+    def _read_claimed(self) -> str | None:
+        with self.storage.exclusive(
+            scope=DataScope(ScopeKind.APPLICATION), artifact=CREDENTIAL_STORE
+        ):
+            return credential_for(
+                stored_credentials(self.storage).get(self.instance), system=self.system
+            )
+
+    def _compare_and_save(self, expected: str | None, credential: str) -> bool:
+        with self.storage.exclusive(
+            scope=DataScope(ScopeKind.APPLICATION), artifact=CREDENTIAL_STORE
+        ):
+            current = credential_for(
+                stored_credentials(self.storage).get(self.instance), system=self.system
+            )
+            if current != expected:
+                return False
+            replace_credential(
+                self.storage,
+                system=self.system,
+                instance=self.instance,
+                credential=credential,
+                claimed=True,
+            )
+            return True
+
+    def _handed(self, work: Callable[[], Any], label: str, *, save: bool) -> Any:
+        busy: str | None = None
+        for attempt in range(max(self.attempts, 1)):
+            try:
+                return self.hand(work, label, save)
+            except ArtifactBusy as held:
+                busy = str(held)
+            except CredentialNotHeld as missing:
+                raise StoreEntryMissing(str(missing)) from None
+            except Exception as unusable:  # noqa: BLE001 — translated, never relayed raw
+                raise StoreUnavailable(
+                    f"{CREDENTIAL_STORE} could not be used for {self.instance}: "
+                    f"{type(unusable).__name__}: {unusable}"
+                ) from None
+            if attempt + 1 < self.attempts:
+                self.sleep(self.interval)
+        raise StoreBusy(busy or f"{CREDENTIAL_STORE} stayed claimed.")
+
+
 def _unbuilt(instance: str, reason: str, *, family: str) -> UnbuiltConnector:
     """Say why a connector this machine is configured for was not constructed.
 
@@ -2329,10 +2661,7 @@ def _unbuilt(instance: str, reason: str, *, family: str) -> UnbuiltConnector:
     failed; and returned, so the daemon carries the sentence for `pm-ai
     connector check` to list (story 4o).
     """
-    print(
-        f"WARNING: the {family} connector {instance!r} was not built — {reason}",
-        file=sys.stderr,
-    )
+    _warn(f"WARNING: the {family} connector {instance!r} was not built — {reason}")
     return UnbuiltConnector(instance, reason)
 
 
@@ -2862,6 +3191,15 @@ class Onboarded:
     """
 
 
+GIT_QUESTION_SECONDS = float(GIT_TIMEOUT_SECONDS)
+"""The bound on one `git` question pm-ai asks (AD-43), re-exported for the bounds."""
+
+ONBOARD_BOUND_SECONDS = GIT_QUESTION_SECONDS
+"""`onboard_project`'s bound (AD-21, story 4r): the `git` question asked before
+its machine-local writes, bounded at ten seconds. Over five, so `project add`
+sent through the daemon is a job."""
+
+
 def onboard_project(
     keychain: KeychainPort,
     raw_path: str,
@@ -2943,67 +3281,11 @@ def onboard_project(
         scope=DataScope(ScopeKind.APPLICATION), artifact=REGISTRY_ARTIFACT
     ):
         state = _artifact_state(storage, REGISTRY_ARTIFACT)
-        if state.presence is Presence.UNREADABLE:
-            # The registry exists and could not be opened. `parse_registry(None)`
-            # means *absent*, so falling through would render a registry holding
-            # this project alone and `os.replace` it over the one that could not
-            # be read — and `projects.toml` is Tier 1, rebuildable from nothing,
-            # so every other enrolled project would be gone with the command
-            # reporting success. Measured doing exactly that in review on
-            # 2026-09-15: two projects enrolled, the file chmod 000, and the
-            # registry afterwards held only the third.
-            raise ProjectPathUnusable(
-                f"{known.project_registry} exists and could not be read: "
-                f"{state.detail}. Nothing was onboarded. pm-ai will not write a "
-                f"new registry over one it cannot read — that would forget every "
-                f"project already enrolled, and nothing else records them. Fix "
-                f"the file's permissions and run this again."
-            )
-        held = parse_registry(state.raw)
-        claimed = {e.path: i for i, e in held.items()}
-        registered_as = claimed.get(repository)
-        if registered_as is not None and registered_as != project_id:
-            # Two ids for one repository is not a second project: both resolve to
-            # the same `<repo>/.project-ai`, so they would share one event log,
-            # one meeting set and one dashboard while every `SourceRef` disagreed
-            # about which project owned them — and `_compose` would refuse every
-            # subcommand but `doctor` as an ambiguous registry, on a machine with
-            # exactly one repository.
-            raise DuplicateProject(
-                f"{repository} is already onboarded as {registered_as!r}, so it "
-                f"cannot also be onboarded as {project_id!r}. One directory is "
-                f"one project: both ids would resolve to the same "
-                f"{PROJECT_DIRNAME} tree and pm-ai would then have no way to "
-                f"choose between them. To rename the project, edit its entry in "
-                f"{known.project_registry}."
-            )
-        entry = held.get(project_id)
-        if entry is not None and entry.path != repository:
-            raise DuplicateProject(
-                f"project {project_id!r} is already registered at {entry.path}, "
-                f"and this would point it at {repository}. Artifacts have "
-                f"already been written and referenced under the old path, so "
-                f"re-pointing the id would leave its event log and meetings "
-                f"invisible — that is a migration, not a registration. Onboard "
-                f"the new path under a different alias."
-            )
-        already = entry is not None
+        held = _readable_registry(state, known)
+        _assert_placeable(held, repository, project_id, known)
+        already = project_id in held
         _create(repository)
-        try:
-            existing = storage.read_project_gitignore(project_id)
-        except OSError as unreadable:
-            # `read_project_gitignore` propagates every `OSError` but absence,
-            # deliberately — "cannot open" must not read as "no rules yet". Here
-            # it becomes a refusal rather than reaching `main`'s generic handler,
-            # which exits 1 with a traceback. Exit 1 means "pm-ai broke" in the
-            # one table that decides these, and this is an ordinary thing to be
-            # wrong with a machine.
-            raise ProjectPathUnusable(
-                f"{repository / GITIGNORE_FILENAME} exists and could not be "
-                f"read: {unreadable}. Nothing was onboarded. pm-ai appends its "
-                f"rules to what is already there, so it will not write this "
-                f"file without first reading it."
-            ) from unreadable
+        existing = _read_gitignore(storage, project_id, repository)
         gitignore = storage.write_project_gitignore(
             project_id, render_gitignore(existing)
         )
@@ -3019,6 +3301,347 @@ def onboard_project(
                 ),
             )
     return Onboarded(project_id, repository, gitignore, already)
+
+
+def _readable_registry(state: ArtifactState, known: ScopePaths) -> dict[str, ProjectEntry]:
+    """The registry as read, or the refusal for one that exists and cannot be read."""
+    if state.presence is Presence.UNREADABLE:
+        # The registry exists and could not be opened. `parse_registry(None)`
+        # means *absent*, so falling through would render a registry holding
+        # this project alone and `os.replace` it over the one that could not
+        # be read — and `projects.toml` is Tier 1, rebuildable from nothing,
+        # so every other enrolled project would be gone with the command
+        # reporting success. Measured doing exactly that in review on
+        # 2026-09-15: two projects enrolled, the file chmod 000, and the
+        # registry afterwards held only the third.
+        raise ProjectPathUnusable(
+            f"{known.project_registry} exists and could not be read: "
+            f"{state.detail}. Nothing was onboarded. pm-ai will not write a "
+            f"new registry over one it cannot read — that would forget every "
+            f"project already enrolled, and nothing else records them. Fix "
+            f"the file's permissions and run this again."
+        )
+    return dict(parse_registry(state.raw))
+
+
+def _assert_placeable(
+    held: Mapping[str, ProjectEntry], repository: Path, project_id: str, known: ScopePaths
+) -> None:
+    """Refuse a second id for one directory, or one id moved to another directory."""
+    claimed = {e.path: i for i, e in held.items()}
+    registered_as = claimed.get(repository)
+    if registered_as is not None and registered_as != project_id:
+        # Two ids for one repository is not a second project: both resolve to
+        # the same `<repo>/.project-ai`, so they would share one event log,
+        # one meeting set and one dashboard while every `SourceRef` disagreed
+        # about which project owned them — and `_compose` would refuse every
+        # subcommand but `doctor` as an ambiguous registry, on a machine with
+        # exactly one repository.
+        raise DuplicateProject(
+            f"{repository} is already onboarded as {registered_as!r}, so it "
+            f"cannot also be onboarded as {project_id!r}. One directory is "
+            f"one project: both ids would resolve to the same "
+            f"{PROJECT_DIRNAME} tree and pm-ai would then have no way to "
+            f"choose between them. To rename the project, edit its entry in "
+            f"{known.project_registry}."
+        )
+    entry = held.get(project_id)
+    if entry is not None and entry.path != repository:
+        raise DuplicateProject(
+            f"project {project_id!r} is already registered at {entry.path}, "
+            f"and this would point it at {repository}. Artifacts have "
+            f"already been written and referenced under the old path, so "
+            f"re-pointing the id would leave its event log and meetings "
+            f"invisible — that is a migration, not a registration. Onboard "
+            f"the new path under a different alias."
+        )
+
+
+def _read_gitignore(storage: StorageService, project_id: str, repository: Path) -> bytes | None:
+    """The repository's `.gitignore` as it is, or the refusal for one that cannot be read."""
+    try:
+        return storage.read_project_gitignore(project_id)
+    except OSError as unreadable:
+        # `read_project_gitignore` propagates every `OSError` but absence,
+        # deliberately — "cannot open" must not read as "no rules yet". Here
+        # it becomes a refusal rather than reaching `main`'s generic handler,
+        # which exits 1 with a traceback. Exit 1 means "pm-ai broke" in the
+        # one table that decides these, and this is an ordinary thing to be
+        # wrong with a machine.
+        raise ProjectPathUnusable(
+            f"{repository / GITIGNORE_FILENAME} exists and could not be "
+            f"read: {unreadable}. Nothing was onboarded. pm-ai appends its "
+            f"rules to what is already there, so it will not write this "
+            f"file without first reading it."
+        ) from unreadable
+
+
+Hand = Callable[[Callable[[], Any], str], Any]
+"""The daemon's door to its writer thread: run `work` as one claimed step named `label`."""
+
+
+def onboard_in_daemon(
+    daemon: Daemon, raw_path: str, alias: str | None, *, hand: Hand
+) -> Onboarded:
+    """`project add` sent through the daemon, as steps (AD-5, story 4r).
+
+    The same checks and the same writes as `onboard_project`, split by the
+    rule every job follows. Everything that reads or waits runs here, on the
+    I/O worker, as bounded steps: resolving the path, the directory checks, the
+    registry and `.gitignore` reads, and `git`'s answer for the registry's
+    write. The writes are one claimed step handed to the writer thread: under
+    the registry's claim it checks that neither file changed since it was read,
+    then creates the directory, publishes the `.gitignore`, makes the tree and
+    writes the registry last — so a kill partway leaves a directory and a rule
+    that a re-run completes, never a registered project with no home.
+
+    No second writer is opened and no keychain is asked: the daemon's own
+    store, seen through a resolver that knows this project, does every write.
+    The path must be absolute — the daemon's working directory is not the
+    client's; the request path refuses a relative one before it gets here.
+    """
+    expanded = Path(raw_path).expanduser()
+    if not expanded.is_absolute():
+        raise ProjectPathUnusable(
+            f"{raw_path!r} is a relative path, and the daemon's working directory "
+            f"is not the one it was typed in; give an absolute path. Nothing was "
+            f"onboarded."
+        )
+    repository = expanded.resolve()
+    project_id = alias if alias is not None else repository.name
+    resolver = daemon.storage.paths
+    if not isinstance(resolver, ScopePaths):
+        raise TypeError("the daemon's writer resolves through ScopePaths")
+    known = replace(
+        resolver, project_roots={**resolver.project_roots, project_id: repository}
+    )
+    scope = DataScope(ScopeKind.PROJECT, project_id)
+    known.scope_root(scope)
+    _assert_usable(repository)
+    storage = daemon.storage.seeing(known)
+    application = DataScope(ScopeKind.APPLICATION)
+    # Bounded: the reads the write is computed from, and git's answer for it.
+    state = _artifact_state(storage, REGISTRY_ARTIFACT)
+    held = _readable_registry(state, known)
+    _assert_placeable(held, repository, project_id, known)
+    already = project_id in held
+    existing = _read_gitignore(storage, project_id, repository)
+    rules = render_gitignore(existing)
+    registry = (
+        None
+        if already
+        else render_registry({**held, project_id: ProjectEntry(path=repository, alias=alias)})
+    )
+    storage.assert_writable(scope=application, artifact=REGISTRY_ARTIFACT)
+
+    def save() -> Path:
+        with storage.exclusive(scope=application, artifact=REGISTRY_ARTIFACT):
+            if _artifact_state(storage, REGISTRY_ARTIFACT).raw != state.raw:
+                raise ArtifactBusy(
+                    f"{REGISTRY_ARTIFACT} in application changed while this "
+                    f"project was being enrolled; nothing was changed. Run the "
+                    f"command again."
+                )
+            if _read_gitignore(storage, project_id, repository) != existing:
+                raise ArtifactBusy(
+                    f"{repository / GITIGNORE_FILENAME} changed while this project "
+                    f"was being enrolled; nothing was changed. Run the command again."
+                )
+            _create(repository)
+            gitignore = storage.write_project_gitignore(project_id, rules)
+            for node in PROJECT_TREE:
+                if node.is_dir:
+                    known.resolve(scope, node.key, create=True)
+            if registry is not None:
+                storage.write_artifact(
+                    scope=application, artifact=REGISTRY_ARTIFACT, payload=registry
+                )
+            return gitignore
+
+    gitignore: Path = hand(save, "enrol the project")
+    return Onboarded(project_id, repository, gitignore, already)
+
+
+_GitQuestion = Callable[[tuple[Any, ...], Mapping[str, Any]], tuple[tuple[DataScope, str], ...]]
+
+
+def _named(artifact: str | None) -> _GitQuestion:
+    """The `(scope, artifact)` a call's write asks `git` about, read off its own arguments."""
+
+    def asks(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> tuple[tuple[DataScope, str], ...]:
+        scope = kwargs.get("scope")
+        named = artifact if artifact is not None else kwargs.get("artifact")
+        if isinstance(scope, DataScope) and isinstance(named, str):
+            return ((scope, named),)
+        return ()
+
+    return asks
+
+
+def _asks_none(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> tuple[tuple[DataScope, str], ...]:
+    return ()
+
+
+def _asks_token(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> tuple[tuple[DataScope, str], ...]:
+    return ((DataScope(ScopeKind.APPLICATION), API_TOKEN),)
+
+
+HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
+    # Writes, each asking `git` (AD-43) on the worker first where it asks it.
+    "write_capture": ("save the capture", _named(CAPTURES)),
+    "write_artifact": ("save an artifact", _named(None)),
+    "create_api_token": ("create the API token", _asks_token),
+    "append_event_log": ("append to the event log", _named(EVENT_LOG)),
+    "persist_events": ("persist harvested events", _named(EVENT_LOG)),
+    # Asks no `git`: its only home is the application scope, which `assert_writable`
+    # in the call itself enforces.
+    "append_disclosure": ("append to the disclosure ledger", _asks_none),
+    # Asks no `git`: a repository's own `.gitignore` is the answer, not a question.
+    "write_project_gitignore": ("save the project's .gitignore", _asks_none),
+    "remove_member": ("remove a collection member", _asks_none),
+    # `operational.db`: rows, never a file `git` could carry.
+    "save_cursor": ("save a connector's position", _asks_none),
+    "record_transcript_state": ("record the transcript's state", _asks_none),
+    "stage_unless_acted": ("stage a proposal", _asks_none),
+    "stage_proposal": ("stage a proposal", _asks_none),
+    "transition_proposal": ("move a proposal", _asks_none),
+    "begin_execution": ("record a skill call before it is made", _asks_none),
+    "settle_execution": ("record a skill call's outcome", _asks_none),
+    "fail_execution": ("record a skill call that failed", _asks_none),
+    "record_execution": ("record a skill call", _asks_none),
+    "create_request": ("record a job", _asks_none),
+    "move_request": ("move a job", _asks_none),
+    "fail_unfinished_requests": ("mark unfinished jobs failed", _asks_none),
+    "prune_requests": ("remove old jobs", _asks_none),
+    # Reads of `operational.db` through the writer's connection: only on its thread.
+    "load_proposal": ("read a proposal", _asks_none),
+    "transcript_states": ("read the transcript states", _asks_none),
+    "fetched_not_ingested": ("read the transcripts awaiting ingestion", _asks_none),
+    "was_executed": ("read the executed-key ledger", _asks_none),
+    "executed_mutations": ("read the executed-key ledger", _asks_none),
+    "load_cursor": ("read a connector's position", _asks_none),
+    "harvest_failure": ("read a harvest failure", _asks_none),
+    "coverage_windows": ("read coverage", _asks_none),
+}
+"""Every `StorageService` call a job hands to the writer thread, its step's name,
+and the `git` question asked on the worker before it (AD-5, AD-43, story 4r)."""
+
+PLAIN_READS: frozenset[str] = frozenset(
+    {
+        "api_token_path",
+        "assert_writable",  # `git`'s answer and the key check: a bounded step
+        "diagnostic_lines",
+        "event_log_segments",
+        "holds_claim",
+        "ingestion_exhausted",  # its own read-only connection
+        "list_collection",
+        "paths",
+        "read_api_token",
+        "read_artifact",
+        "read_disclosure",
+        "read_event_log_segment",
+        "read_project_gitignore",
+        "read_request",  # its own read-only connection
+        "unfinished_request_ids",  # its own read-only connection
+    }
+)
+"""`StorageService` calls a job's bounded step runs where it is: file reads and
+reads on a connection of their own. They take no claim and write nothing."""
+
+NEVER_FROM_A_JOB: frozenset[str] = frozenset(
+    {
+        "exclusive",  # a claim is entered inside a claimed step, never around one
+        "claimed_step",
+        "adopt_daemon_connection",
+        "close",
+        "seeing",  # a view of the unhanded writer
+        "diagnostic_log",  # opens a file for writing: the daemon's own, at start
+    }
+)
+"""`StorageService` calls a job may not make at all through `HandedStorage`."""
+
+
+class UnclassifiedStorageCall(AttributeError):
+    """A `StorageService` call `HandedStorage` has no rule for — refused, never run."""
+
+
+class HandedStorage:
+    """The daemon's store as a job's bounded steps see it (AD-5, story 4r).
+
+    Pipelines written against `StorageService` run unchanged on an I/O worker.
+    Fails closed: each call is in exactly one of `HANDED_CALLS` (handed to the
+    writer thread as its own named claimed step, its `git` question asked here
+    first), `PLAIN_READS` (run here) or `NEVER_FROM_A_JOB` (refused). Anything
+    else is refused by name, so a writer added later cannot run on a worker
+    because nobody listed it.
+    """
+
+    def __init__(self, storage: StorageService, hand: Hand) -> None:
+        self._storage = storage
+        self._hand = hand
+
+    def __getattr__(self, name: str) -> Any:
+        if name in PLAIN_READS:
+            return getattr(self._storage, name)
+        handed = HANDED_CALLS.get(name)
+        if handed is None:
+            why = (
+                "a job may not make it"
+                if name in NEVER_FROM_A_JOB
+                else "nothing says whether it reads or writes, so it is refused "
+                "rather than run on a worker — list it in pm_ai.app.wiring"
+            )
+            raise UnclassifiedStorageCall(f"StorageService.{name} through a job: {why}.")
+        label, asks = handed
+        call = getattr(self._storage, name)
+
+        def hand(*args: Any, **kwargs: Any) -> Any:
+            for scope, artifact in asks(args, kwargs):
+                self._storage.assert_writable(scope=scope, artifact=artifact)
+            return self._hand(lambda: call(*args, **kwargs), label)
+
+        return hand
+
+
+class HandedMeetings:
+    """`MeetingRecords` as a job's bounded steps see it: `put` is one claimed step.
+
+    `put` reads and writes `meetings/` under its claim, so it is handed whole,
+    after `git`'s answer for the meeting's scope is asked here. Every read runs
+    here.
+    """
+
+    def __init__(self, meetings: MeetingRecords, storage: StorageService, hand: Hand) -> None:
+        self._meetings = meetings
+        self._storage = storage
+        self._hand = hand
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._meetings, name)
+
+    def put(self, meeting: Any) -> Any:
+        self._storage.assert_writable(scope=meeting.scope, artifact=MEETINGS)
+        return self._hand(lambda: self._meetings.put(meeting), "save the meeting record")
+
+
+def handed_daemon(daemon: Daemon, *, hand: Hand) -> Daemon:
+    """`daemon`, as a job's bounded steps use it: every write a claimed step (4r).
+
+    The store, the meeting records and the skill registry are seen through
+    `HandedStorage`: a pipeline runs on the worker and its writes go to the
+    writer thread one claimed step at a time, while its reads, its `git`
+    questions and any skill's provider call stay bounded steps on the worker.
+    """
+    storage = daemon.storage
+    handed = cast(StorageService, HandedStorage(storage, hand))
+    skills = copy.copy(daemon.skills)
+    skills._storage = handed  # noqa: SLF001 — the registry, seeing the handed store
+    return replace(
+        daemon,
+        storage=handed,
+        skills=skills,
+        meetings=cast(MeetingRecords, HandedMeetings(daemon.meetings, storage, hand)),
+    )
 
 
 def _resolved(raw_path: str) -> Path:

@@ -2,7 +2,8 @@
 title: 'A line is answered at once or acknowledged with a job'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '238430e3df3cbcec282b2e91db54e66f520d7f00'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -105,17 +106,17 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/app/pipelines.py` -- `run_dashboard` declares its bound (the per-connector budget, connectors in sequence) beside itself; `connector check` declares its ten seconds -- gate F7
-- [ ] `pm_ai/core/dispatch.py` -- `plan()` reading declared bounds; the boundary at exactly 5.0 s -- un-skips the AD-21 test
-- [ ] `pm_ai/storage/service.py` -- `requests` in `_SCHEMA`, no version bump; writer methods: create a job (raising `ArtifactBusy` through), move its state with `UPDATE … WHERE state = ?` checking the changed-row count, read one, fail stragglers, prune by age -- AD-20
-- [ ] `pm_ai/storage/service.py` -- the daemon's writer connection `autocommit=True` with a 100 ms busy wait; `BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK` per claimed step with the no-open-transaction check; the schema-version check as the first statement inside it; `_migrate` under `operational.db`'s own claim in every process -- AD-5
-- [ ] `pm_ai/app/daemon.py` -- the writer thread and the I/O pool of four threads that do not keep the process alive; the master key asked once on the writer thread before listening (locked or unreadable refused, exit code 3; not enrolled starts and refuses each encrypted step naming `pm-ai key enrol`; encryption off not asked); the restart pass and prune before listening; the daily prune; the shutdown, its wait for the writer in the stop sequence's `finally`; the schema-version stop; the `dashboard` job as steps (calendar read and the project copy's `git` question bounded, the file write and records claimed) and inline commands on the pool, bound to the daemon's writer, clock and per-request `StringIO`s, reading `config.toml`, connector rows and credentials fresh per line -- AD-5, AD-19
-- [ ] `pm_ai/connectors/graph/auth.py`, `pm_ai/core/connector_enrolment.py`, `pm_ai/app/wiring.py` -- in the daemon the credential store handed to a connector cannot write: its read and its compare-and-save are claimed steps handed to the writer thread, the save made when the provider answers, a lost race dropped and logged, one refresh per instance in flight; the busy retry is the handing worker's; `9a` and `9b` reuse it -- AD-5, AD-39
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- the shared restart sentence as one constant beside the command table, printed by `project add` and `key enrol`; `connector check` in the daemon names a row filing into a project enrolled since start with it instead of probing -- AD-5
-- [ ] `pm_ai/surfaces/api/app.py`, `pm_ai/app/daemon.py` -- the status probes on the I/O pool; the request log line through a queue and one listener thread -- AD-19's two exceptions closed
-- [ ] `pm_ai/surfaces/api/app.py` -- `/v1/prompt` with the `line` check, `/v1/jobs/<id>`, `/v1/jobs/<id>/events` over the framework's streaming response; `503` with `Retry-After` on a refused row; the duplicate-job answer -- the endpoints
-- [ ] `tests/` -- one test per matrix row, including a writer wrapper that refuses on create (asserting `503`, never `202`), a writer thread held past one second (asserting `503`), a straggler whose claimed step arrives after `failed`, a test that every claim and every write in the daemon runs on the writer thread, a kill of a claimed step partway (a child process killed mid-step; the store and files checked whole), and `plan(4.99)` / `plan(5.0)`; a slice test that starts the daemon on a free port in a throwaway home, posts `dashboard`, reads the row before the `202` returns, and reads the stream to `done` -- the matrix is the contract
-- [ ] `tests/architecture/README.md` -- AD-21 row no longer skips; AD-19 row names the writer thread and the I/O pool as built, load test still owed; the `GET /v1/status` enforcement-gap row closed
+- [x] `pm_ai/app/pipelines.py` -- `run_dashboard` declares its bound (the per-connector budget, connectors in sequence) beside itself; `connector check` declares its ten seconds -- gate F7
+- [x] `pm_ai/core/dispatch.py` -- `plan()` reading declared bounds; the boundary at exactly 5.0 s -- un-skips the AD-21 test
+- [x] `pm_ai/storage/service.py` -- `requests` in `_SCHEMA`, no version bump; writer methods: create a job (raising `ArtifactBusy` through), move its state with `UPDATE … WHERE state = ?` checking the changed-row count, read one, fail stragglers, prune by age -- AD-20
+- [x] `pm_ai/storage/service.py` -- the daemon's writer connection `autocommit=True` with a 100 ms busy wait; `BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK` per claimed step with the no-open-transaction check; the schema-version check as the first statement inside it; `_migrate` under `operational.db`'s own claim in every process -- AD-5
+- [x] `pm_ai/app/daemon.py` -- the writer thread and the I/O pool of four threads that do not keep the process alive; the master key asked once on the writer thread before listening (locked or unreadable refused, exit code 3; not enrolled starts and refuses each encrypted step naming `pm-ai key enrol`; encryption off not asked); the restart pass and prune before listening; the daily prune; the shutdown, its wait for the writer in the stop sequence's `finally`; the schema-version stop; the `dashboard` job as steps (calendar read and the project copy's `git` question bounded, the file write and records claimed) and inline commands on the pool, bound to the daemon's writer, clock and per-request `StringIO`s, reading `config.toml`, connector rows and credentials fresh per line -- AD-5, AD-19
+- [x] `pm_ai/connectors/graph/auth.py`, `pm_ai/core/connector_enrolment.py`, `pm_ai/app/wiring.py` -- in the daemon the credential store handed to a connector cannot write: its read and its compare-and-save are claimed steps handed to the writer thread, the save made when the provider answers, a lost race dropped and logged, one refresh per instance in flight; the busy retry is the handing worker's; `9a` and `9b` reuse it -- AD-5, AD-39
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- the shared restart sentence as one constant beside the command table, printed by `project add` and `key enrol`; `connector check` in the daemon names a row filing into a project enrolled since start with it instead of probing -- AD-5
+- [x] `pm_ai/surfaces/api/app.py`, `pm_ai/app/daemon.py` -- the status probes on the I/O pool; the request log line through a queue and one listener thread -- AD-19's two exceptions closed
+- [x] `pm_ai/surfaces/api/app.py` -- `/v1/prompt` with the `line` check, `/v1/jobs/<id>`, `/v1/jobs/<id>/events` over the framework's streaming response; `503` with `Retry-After` on a refused row; the duplicate-job answer -- the endpoints
+- [x] `tests/` -- one test per matrix row, including a writer wrapper that refuses on create (asserting `503`, never `202`), a writer thread held past one second (asserting `503`), a straggler whose claimed step arrives after `failed`, a test that every claim and every write in the daemon runs on the writer thread, a kill of a claimed step partway (a child process killed mid-step; the store and files checked whole), and `plan(4.99)` / `plan(5.0)`; a slice test that starts the daemon on a free port in a throwaway home, posts `dashboard`, reads the row before the `202` returns, and reads the stream to `done` -- the matrix is the contract
+- [ ] `tests/architecture/README.md` -- AD-21 row no longer skips; AD-19 row names the writer thread and the I/O pool as built, load test still owed; the `GET /v1/status` enforcement-gap row closed — OWED — the AD-21 and AD-19 rows are done (load test still owed, as the task says); the `GET /v1/status` gap row is not in the README but in the spine's "Still open" table, which is skill-derived and was not hand-edited — closing it needs a spine re-derive
 
 **Acceptance Criteria:**
 - Given `4e`'s daemon running, when a client posts `{"line": "dashboard"}` with the token, then it receives `202` and a job id, the `requests` row exists, and the events stream ends with `done` and the dashboard's path.
@@ -143,3 +144,144 @@ context:
 ## Spec Change Log
 
 - **2026-10-14, frozen block amended by Andrei** (the architecture spine's concurrency amendment of the same day: AD-5, AD-6, AD-19, AD-21; decided by Andrei, re-derived here before any build). Amended: the daemon-level `threading.Lock` every worker took before calling the writer is replaced by one writer thread that makes every write and enters every claim, plus an I/O pool of four threads that do not keep the process alive; a job is a sequence of bounded steps (on a worker, no claim, no write) and claimed steps (on the writer thread, handed over whole, short, never waiting); the `503` now covers the writer thread not free within one second as well as a claim held or the database busy past the daemon's 100 ms wait, and a step the request stopped waiting for is withdrawn before it starts, so no orphan row follows a `503`; the ten-second shutdown wait is replaced by the spine's shutdown (claimed steps running or queued finish with no time limit, jobs still in a bounded step marked `failed` and their later steps refused and logged, the wait for the writer at the end of the stop sequence) and every claimed step is safe to kill, with a kill test; the status handler and request log line move off the loop. Added to this slice, which the spine left unowned: the master key asked once at start, `operational.db` migrated under its own claim, and the schema-version check first inside each claimed step's `BEGIN IMMEDIATE`, a mismatch stopping the daemon with nothing written and the restart pass naming it. Matrix rows "Writer refuses the row", "Late finish", "Unfinished at restart", "Stop" and "Schema" changed; seven rows added. Known-bad state avoided: a lock nested against the cross-process claim (deadlock, or one job at a time); worker threads sharing one SQLite connection so a busy rollback undoes another thread's work; a render or harvest writing after its job was marked `failed` and after the writer closed; a keychain dialog or `git` subprocess stalling the loop or the writer thread; a migration by an upgraded command landing under a daemon that keeps writing the old shape. KEEP: the three endpoints, their paths and response fields (`4q` builds against them); job ids `job_` plus random hex; the five-second rule and its one `plan()` function; the row before the `202`; one job per kind and scope; no re-run at restart; the seven-day prune; `Retry-After: 1`; the stream without a new package; every Never line. Decided the same day (routine, Claude): `4r` builds the credential read and compare-and-save path, which its `dashboard` and `connector check` jobs need first, and `9a` and `9b` reuse it; `4r` owns the shared restart sentence, printed every time by `project add` and `key enrol` and only printed by `9a` and `4q`; `connector check` through the daemon names a row filing into a project enrolled since start with that sentence instead of probing it; three matrix rows added.
+
+## Suggested Review Order
+
+**Entry point**
+
+- Start here: one line in, inline answer or acknowledged job.
+  [`prompts.py:305`](../../../../pm_ai/app/prompts.py#L305)
+
+**The five-second plan**
+
+- The one decision: under 5.0 s inline, at or over a job id.
+  [`dispatch.py:64`](../../../../pm_ai/core/dispatch.py#L64)
+- Every routable command's declared bound, read by the plan.
+  [`entry.py:424`](../../../../pm_ai/app/entry.py#L424)
+- Dashboard's bound: fetch budget per calendar, in sequence.
+  [`pipelines.py:1102`](../../../../pm_ai/app/pipelines.py#L1102)
+
+**The request path and job steps**
+
+- Row written before the 202; create and submit shielded together.
+  [`prompts.py:383`](../../../../pm_ai/app/prompts.py#L383)
+- A job's body: start, run the command, settle done or failed.
+  [`prompts.py:619`](../../../../pm_ai/app/prompts.py#L619)
+- Conditional state moves; final moves retry until they land.
+  [`prompts.py:660`](../../../../pm_ai/app/prompts.py#L660)
+- One command with fresh reads and its own output buffers.
+  [`prompts.py:722`](../../../../pm_ai/app/prompts.py#L722)
+- Dashboard as steps: render and git bounded, save claimed.
+  [`prompts.py:799`](../../../../pm_ai/app/prompts.py#L799)
+- Each handed step named and noted for its job.
+  [`prompts.py:818`](../../../../pm_ai/app/prompts.py#L818)
+- Restart pass: unfinished rows failed, schema stops named.
+  [`prompts.py:497`](../../../../pm_ai/app/prompts.py#L497)
+- Shutdown pass: still-running jobs failed, naming their last step.
+  [`prompts.py:545`](../../../../pm_ai/app/prompts.py#L545)
+- The requests table, created on open, no version bump.
+  [`service.py:187`](../../../../pm_ai/storage/service.py#L187)
+- Row creation, deduplicated only for argument-free commands.
+  [`service.py:1245`](../../../../pm_ai/storage/service.py#L1245)
+
+**The writer thread and the I/O pool**
+
+- One writer thread: ordered steps, withdrawal, stopping, halting.
+  [`concurrency.py:103`](../../../../pm_ai/app/concurrency.py#L103)
+- Awaiting a step from the loop; cancellation never reaches it.
+  [`concurrency.py:203`](../../../../pm_ai/app/concurrency.py#L203)
+- Running one step inside the store's step scope.
+  [`concurrency.py:318`](../../../../pm_ai/app/concurrency.py#L318)
+- Four daemon threads for bounded steps and client commands.
+  [`concurrency.py:351`](../../../../pm_ai/app/concurrency.py#L351)
+
+**The claimed-step transaction and the schema check**
+
+- Commit on return, roll back on raise; stuck transactions halt.
+  [`service.py:1141`](../../../../pm_ai/storage/service.py#L1141)
+- First statement opens BEGIN IMMEDIATE with the version check.
+  [`service.py:580`](../../../../pm_ai/storage/service.py#L580)
+- The daemon's own connection: autocommit, 100 ms busy wait.
+  [`service.py:1116`](../../../../pm_ai/storage/service.py#L1116)
+- Schema moved or regressed: the refusals the writer halts on.
+  [`service.py:718`](../../../../pm_ai/storage/service.py#L718)
+- Preparing the store under its own claim, only at open.
+  [`service.py:1080`](../../../../pm_ai/storage/service.py#L1080)
+
+**The master key and start/stop order**
+
+- Start order: log, port, writer, key, token, restart pass, serve.
+  [`daemon.py:181`](../../../../pm_ai/app/daemon.py#L181)
+- Request log attached first; the store always closed.
+  [`daemon.py:136`](../../../../pm_ai/app/daemon.py#L136)
+- Master key fetched once on the writer thread.
+  [`daemon.py:417`](../../../../pm_ai/app/daemon.py#L417)
+- No key enrolled: every encrypted step refused, keychain never re-asked.
+  [`crypto.py:299`](../../../../pm_ai/storage/crypto.py#L299)
+- Stop: drain the writer; a second interrupt exits at once.
+  [`daemon.py:376`](../../../../pm_ai/app/daemon.py#L376)
+- Halt line naming every unfinished job for the restart pass.
+  [`daemon.py:349`](../../../../pm_ai/app/daemon.py#L349)
+- Diagnostic log keeps exception types and frames, never their text.
+  [`daemon.py:632`](../../../../pm_ai/app/daemon.py#L632)
+
+**Credential compare-and-save and the refresh slot**
+
+- The daemon's credential store: read and compare-and-save on the writer.
+  [`wiring.py:2504`](../../../../pm_ai/app/wiring.py#L2504)
+- The compare-and-save itself, under the credential file's claim.
+  [`wiring.py:2619`](../../../../pm_ai/app/wiring.py#L2619)
+- One refresh per instance, bounded by one fetch budget.
+  [`wiring.py:2546`](../../../../pm_ai/app/wiring.py#L2546)
+- Graph auth holds the slot from read to save.
+  [`auth.py:922`](../../../../pm_ai/connectors/graph/auth.py#L922)
+- Per-line fresh connectors; later projects named with the restart sentence.
+  [`wiring.py:1002`](../../../../pm_ai/app/wiring.py#L1002)
+
+**`project add` and `transcript drop` as steps**
+
+- Every StorageService call classified: handed, plain read or refused.
+  [`wiring.py:3489`](../../../../pm_ai/app/wiring.py#L3489)
+- The handing proxy: git asked on the worker, write on the writer.
+  [`wiring.py:3568`](../../../../pm_ai/app/wiring.py#L3568)
+- A daemon whose store, meetings and skills hand their writes.
+  [`wiring.py:3627`](../../../../pm_ai/app/wiring.py#L3627)
+- Onboarding: reads bounded, one compare-and-save claimed step.
+  [`wiring.py:3383`](../../../../pm_ai/app/wiring.py#L3383)
+
+**Endpoints and the stream**
+
+- POST /v1/prompt: 422 from the framework, 400 naming line.
+  [`app.py:179`](../../../../pm_ai/surfaces/api/app.py#L179)
+- The event stream: the framework's StreamingResponse, no new package.
+  [`app.py:211`](../../../../pm_ai/surfaces/api/app.py#L211)
+- Stream subscription inside the generator; re-read on a timeout.
+  [`prompts.py:462`](../../../../pm_ai/app/prompts.py#L462)
+
+**The restart sentence and the CLI's output**
+
+- The one shared restart sentence, beside the command table.
+  [`dispatch.py:2741`](../../../../pm_ai/surfaces/cli/dispatch.py#L2741)
+- Commands that need a terminal, refused by name through the daemon.
+  [`dispatch.py:2752`](../../../../pm_ai/surfaces/cli/dispatch.py#L2752)
+- Per-request output streams without redirect_stdout.
+  [`dispatch.py:161`](../../../../pm_ai/surfaces/cli/dispatch.py#L161)
+
+**Tests**
+
+- The request path in-process: matrix rows against a real store.
+  [`test_line_answered_or_acknowledged.py:1`](../../../../tests/slice/test_line_answered_or_acknowledged.py#L1)
+- The writer thread and pool rules, including cancellation.
+  [`test_daemon_writer_thread.py:1`](../../../../tests/slice/test_daemon_writer_thread.py#L1)
+- Review fixes, round one: bounds, refresh slot, doctor, streams.
+  [`test_line_requests_hardening.py:1`](../../../../tests/slice/test_line_requests_hardening.py#L1)
+- Review fixes, round two: dedup, final moves, kill through the writer.
+  [`test_line_requests_round2.py:1`](../../../../tests/slice/test_line_requests_round2.py#L1)
+- project add and transcript drop as steps; storage classification.
+  [`test_project_add_and_drop_through_daemon.py:1`](../../../../tests/slice/test_project_add_and_drop_through_daemon.py#L1)
+- Store rows, transactions, migration claim, kill partway.
+  [`test_requests_store.py:1`](../../../../tests/slice/test_requests_store.py#L1)
+- The real daemon in a throwaway home, end to end.
+  [`test_daemon_requests_slice.py:1`](../../../../tests/slice/test_daemon_requests_slice.py#L1)
+- The planning rule and the declared bounds.
+  [`test_dispatch_plan.py:1`](../../../../tests/core/test_dispatch_plan.py#L1)

@@ -19,16 +19,39 @@ binds, takes its token, serves and stops. What it serves is built in
    unusable refuses the start naming it, and is never minted over.
 4. **Serve**, until Ctrl-C, a stop signal, or the terminal closing (`SIGINT`,
    `SIGTERM`, `SIGHUP` — all three are a stop, none is re-raised afterwards).
-5. **Stop**: stop listening, close the writer, return 0.
+5. **Stop**: stop listening, cancel the timers, mark unfinished jobs, close
+   the writer, return 0.
 
-## One writer, one loop, one thread
+Story 4r put two steps before the port and two before serving: the writer
+thread starts and reopens `operational.db` as the daemon's own connection, and
+asks the keychain for the master key — once, on the writer thread (AD-5). A
+locked keychain or a key that cannot be read refuses the start, naming it; a
+key not yet enrolled does not, and every encrypted step is refused instead.
+After the port and the token, the restart pass marks every job an earlier run
+left unfinished `failed`, and jobs older than seven days are removed.
 
-The daemon composed once, before this module was reached, and nothing here
-composes again: every request reads through the writer the daemon already
-holds. The status endpoint runs on the event loop's own thread, which in this
-slice is the only thread that touches the writer — `4r` brings the one executor
-and the lock every worker takes. Background work (`9a`'s timers, `9b`'s render)
-attaches in `_lifespan`, when the application starts serving, on this loop.
+## One loop, one writer thread, one I/O pool (AD-5, AD-19, story 4r)
+
+The daemon composed once, before this module was reached. The event loop only
+waits and schedules: every write and every claim is a claimed step on the one
+writer thread (`pm_ai.app.concurrency.WriterThread`), and everything else that
+blocks — the status probes, every command a client sends, a job's bounded steps
+— runs on the I/O pool of four. The request log line goes on a queue the loop
+never waits on, and one listener thread writes it to the file. Background work
+(`9a`'s timers, `9b`'s render) attaches in `_lifespan`, on this loop, and hands
+its steps to the same writer thread and pool.
+
+## Stopping (AD-5, cited by `9a` and `9b`)
+
+Stop listening; cancel the timers and end the open event streams. From then on
+the writer takes no claimed step but a credential save and the shutdown's own
+step, which marks every job still unfinished `failed`, naming the last claimed
+step each finished. It finishes the step it is running and every step already
+queued, with no time limit; a job's later step is refused and logged by name.
+The wait for the writer is the last thing `serve` does before closing the
+store — in its `finally`, never in the application's lifespan, where a second
+Ctrl-C would skip it. A stop on a schema-version mismatch skips the marking and
+refuses with exit code 3.
 
 ## The thin clients still write
 
@@ -44,34 +67,70 @@ import contextlib
 import errno
 import json
 import logging
+import logging.handlers
+import os
+import queue
 import secrets
 import signal
 import socket
+import sys
 import threading
+import traceback
 import time
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from types import FrameType
 from typing import Any
 
+from pm_ai.app.concurrency import IOPool, WriterThread
+from pm_ai.app.prompts import (
+    DAEMON_LOG_NAME,
+    DAEMON_LOGGER,
+    SCHEMA_MISMATCH_EVENT,
+    WRITER_HALT_EVENT,
+    RequestPath,
+)
 from pm_ai.app.wiring import Daemon
 from pm_ai.domain.api_token import TOKEN_BYTES, ApiTokenRefused
 from pm_ai.domain.health import Report
-from pm_ai.ports import DaemonRefused
+from pm_ai.ports import DaemonRefused, KeychainUnavailable
+from pm_ai.storage.crypto import LazyKeyCrypto
+from pm_ai.storage.service import (
+    OperationalStoreStuck,
+    OperationalStoreUnavailable,
+    SchemaVersionChanged,
+)
 from pm_ai.surfaces.api.app import REQUEST_LOGGER, create_app
+from pm_ai.surfaces.cli.dispatch import (
+    RESTART_SENTENCE,
+    HealthReport,
+)
 
 __all__ = ["LOOPBACK", "REQUEST_LOG", "bind_loopback", "serve", "status_body", "take_token"]
 
 LOOPBACK = "127.0.0.1"
 """The one address the daemon listens on (AD-2). Never a wildcard, never another interface."""
 
-REQUEST_LOG = "daemon.log"
-"""The file under `~/.pm-ai/logs/` the request log rotates through (AD-24)."""
+REQUEST_LOG = DAEMON_LOG_NAME
+"""The file under `~/.pm-ai/logs/` the request log rotates through (AD-24) —
+the one the daemon's own diagnostic lines go to and the restart pass reads."""
 
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 """Ctrl-C, a stop signal, and the terminal closing — each a clean stop, exit 0."""
 
 _PORT_KEY = "daemon_port"
+
+NO_KEY_ENROLLED = (
+    "no master key was enrolled when the daemon started, so it reads and writes "
+    "no encrypted file; run `pm-ai key enrol`. " + RESTART_SENTENCE
+)
+"""What every encrypted step is refused with when the start found no key (AD-5)."""
+
+_log = logging.getLogger(DAEMON_LOGGER)
+
+
+def _no_diagnosis(itself: str) -> HealthReport:
+    raise DaemonRefused("no diagnosis was composed for this daemon")
 
 
 def serve(
@@ -79,37 +138,144 @@ def serve(
     *,
     probes: Callable[[], Report],
     announce: Callable[[str], None] | None = None,
+    diagnose: Callable[[str], HealthReport] = _no_diagnosis,
+    bounds: Mapping[tuple[str, ...], Callable[[Daemon], float]] | None = None,
 ) -> int:
     """Run the daemon in the foreground until it is told to stop; return 0.
 
     `probes` is `run_all` over what the daemon holds, bound by the composition
     root — `GET /v1/status` reports it without a `daemon` probe, because this
     process is the daemon and never asks itself. `announce` is where the one
-    line saying where it listens goes.
+    line saying where it listens goes. `diagnose` is `doctor`'s report for a
+    line sent through the daemon, handed the daemon's own words about itself;
+    `bounds` every command's declared
+    bound (AD-21).
 
     Raises `DaemonRefused` for every reason it will not start, each naming its
-    cause, before anything is served.
+    cause, before anything is served — and for a stop on a schema-version
+    mismatch or a stuck writer, which is a refusal too (exit code 3).
     """
     uvicorn = _require_runtime_extra()
     port = daemon.config.daemon_port
+    # First, so a step refused at start and a start with no key enrolled are
+    # in the diagnostic log, not only on the console (AD-24). A log that cannot
+    # be opened still closes the store.
+    try:
+        request_log = _RequestLog.attach(daemon)
+    except BaseException:
+        daemon.storage.close()
+        raise
+    try:
+        return _serve(
+            daemon, uvicorn, port,
+            probes=probes, announce=announce, diagnose=diagnose,
+            bounds=bounds or {},
+        )
+    finally:
+        try:
+            request_log.detach()
+        finally:
+            daemon.storage.close()
+
+
+def _serve(
+    daemon: Daemon,
+    uvicorn: Any,
+    port: int,
+    *,
+    probes: Callable[[], Report],
+    announce: Callable[[str], None] | None,
+    diagnose: Callable[[str], HealthReport],
+    bounds: Mapping[tuple[str, ...], Callable[[Daemon], float]],
+) -> int:
+    server_holder: list[Any] = []
+
+    def halted(error: BaseException, job: str | None) -> None:
+        # On the writer thread, once: the store moved past this daemon's
+        # version, or a transaction would not end. Recorded, naming every
+        # unfinished job, and the server is asked to stop; nothing more is
+        # written.
+        try:
+            unfinished = daemon.storage.unfinished_request_ids()
+        except Exception:  # noqa: BLE001 — the line names the step's job at least
+            unfinished = ()
+        record_writer_halt(error, job, unfinished=unfinished)
+        for server in server_holder:
+            server.should_exit = True
+
+    # The port first: a second `daemon run` meets the first one's listener and
+    # is refused before its writer opens the store or the keychain is asked.
     listener = bind_loopback(port)
+    writer = WriterThread(
+        log=_log,
+        step_scope=daemon.storage.claimed_step,
+        halts_on=(SchemaVersionChanged, OperationalStoreStuck),
+        on_halt=halted,
+    )
+    writer.start()
+    try:
+        writer.call(
+            daemon.storage.adopt_daemon_connection,
+            label="open the store as the daemon's writer",
+        )
+        enrolled = _master_key(daemon, writer)
+    except BaseException:
+        listener.close()
+        writer.close()
+        raise
+    if not enrolled:
+        (announce or _announce)(f"pm-ai: {NO_KEY_ENROLLED}")
+        _log.warning(NO_KEY_ENROLLED)
     try:
         token = take_token(daemon)
     except BaseException:
         listener.close()
+        writer.close()
         raise
     started_at = daemon.clock()
     started = time.monotonic()
-    request_log: _RequestLog | None = None
+
+    def itself() -> str:
+        # The daemon's line in `doctor`, as `daemon_reachable` words it —
+        # without asking itself over HTTP.
+        return (
+            f"running on {LOOPBACK}:{port}, up {int(time.monotonic() - started)}s, "
+            f"started at {started_at.astimezone(timezone.utc).isoformat()}"
+        )
+
+    pool = IOPool()
+    # `9a` and `9b` take both from the daemon (AD-5, AD-19).
+    daemon.writer, daemon.pool = writer, pool
+    requests = RequestPath(
+        daemon=daemon,
+        writer=writer,
+        pool=pool,
+        diagnose=lambda: diagnose(itself()),
+        bounds=bounds,
+    )
     try:
-        request_log = _RequestLog.attach(daemon)
+        pool.start()
+        # Before serving, after the port: a second `daemon run` loses the port
+        # first, so it can never mark the running daemon's jobs failed.
+        try:
+            requests.restart_pass()
+            requests.prune()
+        except (SchemaVersionChanged, OperationalStoreUnavailable, OSError) as refused:
+            raise DaemonRefused(
+                f"the daemon did not start: settling the jobs an earlier run left "
+                f"was refused ({refused}). Nothing was served."
+            ) from refused
         app = create_app(
             token=token,
-            status=lambda: status_body(
-                probes(), started_at=started_at, started=started
+            status=lambda: requests.status(
+                lambda: status_body(probes(), started_at=started_at, started=started)
             ),
             lifespan=_lifespan,
+            prompt=requests.prompt,
+            job=requests.job,
+            job_events=requests.job_events,
         )
+        app.state.pm_ai_requests = requests
         server = _server_class(uvicorn)(
             uvicorn.Config(
                 app,
@@ -131,6 +297,10 @@ def serve(
             f"pm-ai daemon listening on {LOOPBACK}:{port} — in the foreground "
             f"until Ctrl-C or a stop signal."
         )
+        # Stopping ends every open event stream first, so the listener's wait
+        # for open connections is not a wait on a job that has not finished.
+        server.on_stop = requests.events.close_all
+        server_holder.append(server)
         try:
             asyncio.run(server.serve(sockets=[listener]))
         except SystemExit as stopped:
@@ -155,13 +325,124 @@ def serve(
                 f"its error is printed above. Nothing was served."
             )
     finally:
-        # Stop listening (uvicorn closed the socket when it shut down; closing
-        # again is harmless), then close the writer. Nothing serves after this.
-        listener.close()
-        if request_log is not None:
-            request_log.detach()
-        daemon.storage.close()
+        # The stop sequence, each part in its own `finally`. Stop listening
+        # (uvicorn closed the socket; closing again is harmless). Then the
+        # writer: no new step but credential saves and the shutdown's own; the
+        # steps already queued finish, with no time limit; still-unfinished
+        # jobs are marked failed — skipped on a halt — and the writer closes.
+        # Waited for here, at the end of the stop sequence, never in the
+        # application's lifespan. A second Ctrl-C during that wait ends the
+        # process at once — every claimed step is safe to kill partway (AD-5)
+        # — and the parts after it still run where they can.
+        try:
+            listener.close()
+        finally:
+            try:
+                _stop_writer(requests)
+            finally:
+                pool.shutdown()
+    if writer.halted is not None:
+        raise DaemonRefused(f"the daemon stopped: {writer.halted}")
     return 0
+
+
+def record_writer_halt(
+    error: BaseException, job: str | None, *, unfinished: Sequence[str] = ()
+) -> None:
+    """The diagnostic log's line for a writer halt, naming the job (AD-24).
+
+    A schema-version stop is marked so the next start's restart pass reads it
+    and marks that job `failed` naming the mismatch and the log rather than
+    the ordinary restart reason. Every job still unfinished at the halt is
+    named (`jobs`), so each gets that reason, not only the step's own.
+    """
+    jobs = sorted({*unfinished, *([job] if job else [])})
+    if isinstance(error, SchemaVersionChanged):
+        found = getattr(error, "found", None)
+        _log.error(
+            "the operational store's schema version is now %s, not the one the "
+            "daemon opened it at; the daemon stopped and wrote nothing more to it",
+            found,
+            extra={"event": SCHEMA_MISMATCH_EVENT, "found": found, "job": job, "jobs": jobs},
+        )
+        return
+    _log.error(
+        "the daemon's writer halted: %s",
+        error,
+        extra={"event": WRITER_HALT_EVENT, "job": job, "jobs": jobs},
+    )
+
+
+def _stop_writer(requests: RequestPath) -> None:
+    writer = requests.writer
+    writer.stop_accepting()
+    try:
+        _drain(requests)
+    except KeyboardInterrupt:
+        # A second interrupt while the writer finishes its queue ends the
+        # process at once, as a kill would (AD-5): every claimed step is safe
+        # to kill partway, and nothing after this — the store's close above
+        # all — may run under a writer that is still mid-step.
+        print("\npm-ai: interrupted again; stopping at once.", file=sys.stderr, flush=True)
+        _exit_now(EXIT_INTERRUPTED)
+
+
+EXIT_INTERRUPTED = 3
+"""A second interrupt during the stop: the refusal code `main` gives an interrupt."""
+
+
+def _exit_now(code: int) -> None:
+    os._exit(code)
+
+
+def _drain(requests: RequestPath) -> None:
+    """The shutdown's own step, then the writer's close — each waited for, no time limit.
+
+    No `finally`: an interrupt during either wait goes straight to the caller,
+    which ends the process rather than wait again.
+    """
+    writer = requests.writer
+    if writer.halted is None:
+        try:
+            requests.shutdown_pass()
+        except Exception as unmarked:  # noqa: BLE001 — the next start's pass marks them
+            _log.warning(
+                "the shutdown could not mark unfinished jobs failed (%s); the "
+                "next start's restart pass will",
+                type(unmarked).__name__,
+            )
+    writer.close()
+
+
+def _master_key(daemon: Daemon, writer: WriterThread) -> bool:
+    """Ask the keychain for the master key once, on the writer thread (AD-5, AD-6).
+
+    With encryption turned off for the process no key is asked for. A locked
+    keychain, or a key it cannot read, refuses the start naming it. A key not
+    yet enrolled does not: the daemon runs, and every encrypted step is refused
+    naming `pm-ai key enrol`, with no further keychain call. `True` when a key
+    is held or none is needed; `False` when none is enrolled.
+    """
+    crypto = daemon.crypto
+    if not isinstance(crypto, LazyKeyCrypto):
+        return True
+    try:
+        enrolled = writer.call(
+            lambda: crypto.fetch_once(absent=NO_KEY_ENROLLED),
+            label="fetch the master key",
+        )
+    except KeychainUnavailable as locked:
+        raise DaemonRefused(
+            f"the daemon did not start: the keychain could not give it the master "
+            f"key ({locked}). Unlock the login keychain and start it again; "
+            f"nothing listens."
+        ) from locked
+    except Exception as unusable:  # noqa: BLE001 — named, and the start refused
+        raise DaemonRefused(
+            f"the daemon did not start: the master key in the keychain could not "
+            f"be used ({type(unusable).__name__}). Nothing listens."
+        ) from unusable
+    return bool(enrolled)
 
 
 def _announce(line: str) -> None:
@@ -308,11 +589,23 @@ def status_body(
 async def _lifespan(app: Any) -> AsyncIterator[None]:
     """Where background work attaches when the application starts serving.
 
-    Empty in this slice. `9a`'s harvest timers and `9b`'s render start here, on
-    the daemon's one event loop, and stop on the way out — after the listener
+    The daily removal of old jobs (story 4r) starts here, on the daemon's one
+    event loop, and is cancelled on the way out. `9a`'s harvest timers and
+    `9b`'s render attach here too, and stop the same way — after the listener
     has stopped and before the writer is closed.
     """
-    yield
+    requests: RequestPath | None = getattr(app.state, "pm_ai_requests", None)
+    if requests is None:
+        yield
+        return
+    requests.events.attach(asyncio.get_running_loop())
+    timer = asyncio.create_task(requests.prune_daily(), name="pm-ai-daily-prune")
+    try:
+        yield
+    finally:
+        timer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await timer
 
 
 class _JsonLines(logging.Formatter):
@@ -330,19 +623,65 @@ class _JsonLines(logging.Formatter):
             "level": record.levelname.lower(),
             "message": record.getMessage(),
         }
-        for key in ("method", "path", "status"):
+        for key in ("method", "path", "status", "event", "found", "job", "jobs", "step", "instance"):
             if hasattr(record, key):
                 line[key] = getattr(record, key)
         return json.dumps(line, ensure_ascii=False)
 
 
-class _RequestLog:
-    """The request log's handler on its logger, and how to put the logger back."""
+class _TextlessQueueHandler(logging.handlers.QueueHandler):
+    """The queue's feeder, keeping an exception's text out of the file (story 4r).
 
-    def __init__(self, handler: logging.Handler, *, propagate: bool, level: int) -> None:
+    `QueueHandler.prepare` folds `exc_info` — the exception's message included
+    — into the line. An exception's text can carry a token from a provider, so
+    the line keeps its type name and the frames it was raised through, never
+    its message: the same rule a job's result follows.
+    """
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        prepared = logging.makeLogRecord(record.__dict__)
+        message = record.getMessage()
+        if record.exc_info and record.exc_info[0] is not None:
+            kind, _, tb = record.exc_info
+            # Where it was raised, never what it said: file, line and function,
+            # without the source line, which can hold a literal of its own.
+            frames = "".join(
+                f"  File {frame.filename}, line {frame.lineno}, in {frame.name}\n"
+                for frame in traceback.extract_tb(tb)
+            )
+            message = f"{message}\n{kind.__name__} (its text is not logged)\n{frames}".rstrip()
+        prepared.msg = message
+        prepared.args = None
+        prepared.exc_info = None
+        prepared.exc_text = None
+        prepared.stack_info = None
+        return prepared
+
+
+_LOGGERS = (REQUEST_LOGGER, DAEMON_LOGGER)
+"""The request log and the daemon's own diagnostic lines: one file, one listener."""
+
+
+class _RequestLog:
+    """The request log's file, fed through a queue by one listener thread (4r).
+
+    The loop never writes a log line: a request's line is put on a queue the
+    loop never waits on, and one listener thread writes it to the rotating
+    file (AD-19). The daemon's own diagnostic lines — a refused step, an
+    overtaken job, a schema-version stop — go the same way to the same file.
+    """
+
+    def __init__(
+        self,
+        handler: logging.Handler,
+        feeder: logging.Handler,
+        listener: logging.handlers.QueueListener,
+        saved: Mapping[str, tuple[bool, int]],
+    ) -> None:
         self._handler = handler
-        self._propagate = propagate
-        self._level = level
+        self._feeder = feeder
+        self._listener = listener
+        self._saved = saved
 
     @classmethod
     def attach(cls, daemon: Daemon) -> _RequestLog:
@@ -357,22 +696,30 @@ class _RequestLog:
                 f"~/.pm-ai/logs is a directory pm-ai can write to."
             ) from unopenable
         handler.setFormatter(_JsonLines())
-        logger = logging.getLogger(REQUEST_LOGGER)
-        attached = cls(handler, propagate=logger.propagate, level=logger.level)
-        logger.setLevel(logging.INFO)
-        # Not propagated: the request log belongs in its file, and a root
-        # handler configured by anything else in the process must not copy it
-        # to a console.
-        logger.propagate = False
-        logger.addHandler(handler)
-        return attached
+        lines: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
+        feeder = _TextlessQueueHandler(lines)
+        listener = logging.handlers.QueueListener(lines, handler)
+        listener.start()
+        saved: dict[str, tuple[bool, int]] = {}
+        for name in _LOGGERS:
+            logger = logging.getLogger(name)
+            saved[name] = (logger.propagate, logger.level)
+            logger.setLevel(logging.INFO)
+            # Not propagated: these lines belong in their file, and a root
+            # handler configured by anything else in the process must not copy
+            # them to a console.
+            logger.propagate = False
+            logger.addHandler(feeder)
+        return cls(handler, feeder, listener, saved)
 
     def detach(self) -> None:
-        """Remove and close the handler; the logger gets back what it had."""
-        logger = logging.getLogger(REQUEST_LOGGER)
-        logger.removeHandler(self._handler)
-        logger.propagate = self._propagate
-        logger.setLevel(self._level)
+        """Write what is queued, remove the handler; each logger gets back what it had."""
+        for name, (propagate, level) in self._saved.items():
+            logger = logging.getLogger(name)
+            logger.removeHandler(self._feeder)
+            logger.propagate = propagate
+            logger.setLevel(level)
+        self._listener.stop()
         self._handler.close()
 
 
@@ -390,6 +737,13 @@ def _server_class(uvicorn: Any) -> Any:
 
     class _Server(uvicorn.Server):  # type: ignore[misc, name-defined]
         announce: Callable[[], None] | None = None
+        on_stop: Callable[[], None] | None = None
+
+        async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+            server: Any = self
+            if server.on_stop is not None:
+                server.on_stop()
+            await super().shutdown(sockets=sockets)
 
         @contextlib.contextmanager
         def capture_signals(self) -> Iterator[None]:

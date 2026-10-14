@@ -916,6 +916,26 @@ class GraphDeviceCodeAuth:
         cached = self._access_token
         if not force_refresh and cached is not None and self._cached_token_is_live():
             return cached
+        # One refresh per connector instance in flight, when the store keeps a
+        # slot for it (the daemon's does, story 4r); held from the read of the
+        # stored credential to its save, never across the cached answer above.
+        refreshing = getattr(self.store, "refreshing", None)
+        slot = refreshing() if callable(refreshing) else nullcontext()
+        try:
+            slot.__enter__()
+        except StoreBusy as busy:
+            raise CredentialStoreBusy(
+                f"{self.instance}'s credential could not be refreshed: "
+                f"{_sentence(str(busy))}",
+                rotated=False,
+            ) from None
+        try:
+            return self._refresh(force_refresh=force_refresh)
+        finally:
+            slot.__exit__(None, None, None)
+
+    def _refresh(self, *, force_refresh: bool) -> str:
+        """`access_token`'s refresh: read, redeem, compare-and-save, adopt."""
         app = self._application()
         with self._claimed(rotated=False):
             sealed = self._sealed()

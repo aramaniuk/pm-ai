@@ -42,6 +42,17 @@ from pm_ai.surfaces.cli.dispatch import (
     Command,
 )
 
+@pytest.fixture(autouse=True)
+def _throwaway_home(tmp_path_factory, monkeypatch):
+    """Every test here runs against a throwaway `HOME`, never the developer's own.
+
+    Commands compose through `ScopePaths.production()`, which anchors on
+    `Path.home()`; without this a test opened the real `~/.pm-ai` (story 4r).
+    A test that sets `HOME` itself overrides this one.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
 PACKAGE_ROOT = Path(entry.__file__).resolve().parent.parent
 
 

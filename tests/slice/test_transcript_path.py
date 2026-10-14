@@ -1150,7 +1150,9 @@ def _diagnosed(daemon):
     )
 
 
-def test_doctor_names_an_exhausted_capture_through_diagnose(tmp_path):
+def test_doctor_names_an_exhausted_capture_through_diagnose(tmp_path, monkeypatch):
+    # `doctor`'s probes resolve the pm-ai home; never the developer's own.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     daemon, _ = _daemon(tmp_path)
     _fetched(daemon, text="no header, no timings, no speakers\n")
     for _ in range(MAX_INGEST_ATTEMPTS):
@@ -1164,6 +1166,7 @@ def test_doctor_names_an_exhausted_capture_through_diagnose(tmp_path):
 
 
 def test_doctor_reports_a_store_it_cannot_ask_as_failing(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     daemon, _ = _daemon(tmp_path)
 
     def unreadable():

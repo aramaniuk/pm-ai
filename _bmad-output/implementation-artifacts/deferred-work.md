@@ -1264,3 +1264,21 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33f-graph-chat-messages.md`
   summary: An unlabelled chat costs one name lookup every run, nothing is cached, and the `channel` name drifts if the topic is renamed.
   evidence: The lookup is uncached by design in 33f; a label in the settings row avoids it.
+
+## Surfaced by the story-4r review (2026-10-14)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`
+  summary: Four long jobs (e.g. four `dashboard`s for different scopes, each bounded at 600 s per calendar) fill the I/O pool, so `GET /v1/status`, `GET /v1/jobs/<id>`, a stream's first read and every inline line wait behind them, and a reachability check reads the daemon as down.
+  evidence: The frozen block fixes the pool at four threads, puts status probes and inline lines on it, and allows no other threads; reserving a thread or answering 503 on a full pool is a spec change, and AD-19's load test is still owed.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`
+  summary: The keychain probe in `GET /v1/status` and `doctor` has no deadline, so an unanswered keychain prompt holds a pool thread, and repeated status calls can exhaust the pool.
+  evidence: Pre-existing in `4e`'s probe (it ran on the loop before); `DOCTOR_BOUND_SECONDS` notes the probe is unbounded. Bounding it needs the keychain call behind `run_bounded`.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`
+  summary: A process killed during a whole-file publish leaves a complete hidden `.part` staging file beside the published file, and nothing sweeps it.
+  evidence: The kill-partway test shows the published file whole and the `.part` complete, so nothing is half-written; a sweep at open would remove the leftovers.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`
+  summary: The spine's "Still open" table still lists the `GET /v1/status` enforcement gap that `4r` closes by moving the probes off the loop.
+  evidence: The spine is skill-derived; the row closes through `bmad-architecture`.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`
+  summary: The restart pass finds a schema-version-mismatch halt by reading `daemon.log` and its rotated copies; once the halt line rotates out, the job gets the ordinary "daemon stopped" reason.
+  evidence: The frozen block names the diagnostic log as the source; a marker in the `requests` row would be lasting.

@@ -7,6 +7,7 @@ real process and live in `tests/slice/test_daemon_slice.py`.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -185,3 +186,131 @@ def test_a_long_path_is_cut_in_the_log(client, caplog):
     assert len(record.path) == LOGGED_PATH_LIMIT + 1
     assert record.path.endswith("…")
     assert set(record.__dict__) >= {"method", "path", "status"}
+
+
+# ── Story 4r: the prompt, the job and its stream ─────────────────────────────
+
+from pm_ai.surfaces.api.app import (  # noqa: E402
+    JOB_EVENTS_PATH,
+    JOB_PATH,
+    LINE_LIMIT,
+    PROMPT_PATH,
+    Reply,
+)
+
+ROW = {"id": "job_0123456789abcdef", "kind": "dashboard", "scope": "personal",
+       "state": "done", "result": {"output": "x\n", "exit": 0},
+       "created_at": "2026-10-14T08:00:00+00:00", "updated_at": "2026-10-14T08:00:01+00:00"}
+
+
+@pytest.fixture
+def jobs() -> TestClient:
+    lines: list[str] = []
+
+    async def prompt(line: str) -> Reply:
+        lines.append(line)
+        if line == "busy":
+            return Reply(503, {"detail": "busy"}, {"Retry-After": "1"})
+        if line == "dashboard":
+            return Reply(202, {"inline": False, "job_id": ROW["id"]})
+        return Reply(200, {"inline": True, "output": "said\n", "exit": 0})
+
+    async def job(job_id: str):
+        return ROW if job_id == ROW["id"] else None
+
+    async def job_events(job_id: str):
+        if job_id != ROW["id"]:
+            return None
+
+        async def events():
+            for state in ("queued", "running", "done"):
+                yield {**ROW, "state": state}
+
+        return events()
+
+    client = TestClient(
+        create_app(token=TOKEN, status=lambda: STATUS, prompt=prompt, job=job, job_events=job_events)
+    )
+    client.lines = lines  # type: ignore[attr-defined]
+    return client
+
+
+def _job(path: str, job_id: str = ROW["id"]) -> str:
+    return path.replace("{job_id}", job_id)
+
+
+def test_the_three_endpoints_refuse_without_the_token(jobs):
+    assert jobs.post(PROMPT_PATH, json={"line": "help"}).status_code == 401
+    assert jobs.get(_job(JOB_PATH)).status_code == 401
+    assert jobs.get(_job(JOB_EVENTS_PATH)).status_code == 401
+    assert jobs.lines == []
+
+
+def test_a_line_is_answered_inline_or_with_a_job_id(jobs):
+    inline = jobs.post(PROMPT_PATH, json={"line": "help"}, headers=_bearer(TOKEN))
+    assert inline.status_code == 200
+    assert inline.json() == {"inline": True, "output": "said\n", "exit": 0}
+    slow = jobs.post(PROMPT_PATH, json={"line": "dashboard"}, headers=_bearer(TOKEN))
+    assert slow.status_code == 202 and slow.json() == {"inline": False, "job_id": ROW["id"]}
+
+
+def test_a_refused_row_is_503_with_retry_after(jobs):
+    busy = jobs.post(PROMPT_PATH, json={"line": "busy"}, headers=_bearer(TOKEN))
+    assert busy.status_code == 503
+    assert busy.headers["retry-after"] == "1"
+    assert "job_id" not in busy.json()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"x", b"{}", b'{"line": 3}', b'{"line": null}', b"[]"],
+    ids=["not-json", "no-line", "number", "null", "list"],
+)
+def test_a_body_without_a_text_line_is_the_frameworks_422(jobs, body):
+    answered = jobs.post(
+        PROMPT_PATH,
+        content=body,
+        headers={**_bearer(TOKEN), "Content-Type": "application/json"},
+    )
+    assert answered.status_code == 422
+    assert jobs.lines == []
+
+
+@pytest.mark.parametrize("line", ["", "x" * LINE_LIMIT, "x" * (LINE_LIMIT + 10)], ids=["empty", "at-limit", "over"])
+def test_a_bad_line_is_400_naming_line(jobs, line):
+    answered = jobs.post(PROMPT_PATH, json={"line": line}, headers=_bearer(TOKEN))
+    assert answered.status_code == 400
+    assert "`line`" in answered.json()["detail"]
+    assert jobs.lines == []
+
+
+def test_the_longest_line_accepted_is_one_under_the_limit(jobs):
+    answered = jobs.post(PROMPT_PATH, json={"line": "x" * (LINE_LIMIT - 1)}, headers=_bearer(TOKEN))
+    assert answered.status_code == 200
+
+
+def test_a_job_is_its_row_and_an_unknown_id_is_404_on_both(jobs):
+    found = jobs.get(_job(JOB_PATH), headers=_bearer(TOKEN))
+    assert found.status_code == 200 and found.json() == ROW
+    assert jobs.get(_job(JOB_PATH, "job_nope"), headers=_bearer(TOKEN)).status_code == 404
+    assert jobs.get(_job(JOB_EVENTS_PATH, "job_nope"), headers=_bearer(TOKEN)).status_code == 404
+
+
+def test_the_stream_is_the_frameworks_event_stream_and_closes_after_the_last(jobs):
+    with jobs.stream("GET", _job(JOB_EVENTS_PATH), headers=_bearer(TOKEN)) as streamed:
+        assert streamed.status_code == 200
+        assert streamed.headers["content-type"].startswith("text/event-stream")
+        text = "".join(streamed.iter_text())
+    frames = [frame for frame in text.split("\n\n") if frame]
+    assert [json.loads(frame.removeprefix("data: "))["state"] for frame in frames] == [
+        "queued", "running", "done"
+    ]
+
+
+def test_an_async_status_source_is_awaited():
+    async def status():
+        return STATUS
+
+    client = TestClient(create_app(token=TOKEN, status=status))
+    answered = client.get(STATUS_PATH, headers=_bearer(TOKEN))
+    assert answered.status_code == 200 and answered.json() == STATUS

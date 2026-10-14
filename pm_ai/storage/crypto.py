@@ -58,7 +58,7 @@ from pm_ai.domain.scope_model import (
     PROJECT_DIRNAME,
 )
 from pm_ai.domain.storage_tiers import RESTRICTED_FILE_MODE
-from pm_ai.ports import AES_KEY_BYTES, CryptoPort, DecryptionFailed, KeychainPort
+from pm_ai.ports import AES_KEY_BYTES, CryptoPort, DecryptionFailed, KeychainPort, KeyNotFound
 
 __all__ = [
     "AES_KEY_BYTES",
@@ -284,11 +284,33 @@ class LazyKeyCrypto:
     # `repr=False` for the same reason as `AesGcmCrypto.key`: the cached cipher's
     # repr would otherwise carry the key into any message that renders this one.
     _cipher: CryptoPort | None = field(default=None, repr=False)
+    _absent: str | None = field(default=None, repr=False)
 
     def _resolve(self) -> CryptoPort:
+        if self._absent is not None:
+            # The daemon asked once, at start, and no key was enrolled (AD-5,
+            # story 4r): every encrypted read or write is refused by this
+            # sentence, and the keychain is never asked again.
+            raise KeyNotFound(self._absent)
         if self._cipher is None:
             self._cipher = AesGcmCrypto(self.keychain.fetch(self.key_name))
         return self._cipher
+
+    def fetch_once(self, *, absent: str) -> bool:
+        """Ask the keychain now, once, and never again (the daemon's start, story 4r).
+
+        `True` when the key was fetched and is held. `False` when none is
+        enrolled: from then on every encrypted step is refused with `absent`
+        — the sentence naming `pm-ai key enrol` — and no further keychain call
+        is made. A keychain that could not be reached, or a key that cannot be
+        used, raises as the fetch did: the daemon refuses to start over it.
+        """
+        try:
+            self._resolve()
+        except KeyNotFound:
+            self._absent = absent
+            return False
+        return True
 
     def ready(self) -> None:
         """Fetch the key now, refusing as a seal would, and encrypt nothing."""

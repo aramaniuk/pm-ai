@@ -36,21 +36,57 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
+import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
     "AuthenticatedApp",
     "IDENTITY_HEADER",
+    "JOB_EVENTS_PATH",
+    "JOB_PATH",
+    "LINE_LIMIT",
+    "PROMPT_PATH",
     "REQUEST_LOGGER",
+    "Reply",
     "STATUS_PATH",
     "TOKEN_REQUIRED",
     "create_app",
 ]
 
 STATUS_PATH = "/v1/status"
+
+PROMPT_PATH = "/v1/prompt"
+"""Takes `{"line": "..."}`; answers inline (`200`) or with a job id (`202`) (story 4r)."""
+
+JOB_PATH = "/v1/jobs/{job_id}"
+"""One job's row; `404` for an id the daemon does not hold."""
+
+JOB_EVENTS_PATH = "/v1/jobs/{job_id}/events"
+"""One job's state changes, as an event stream that closes after the last."""
+
+LINE_LIMIT = 4096
+"""A line of this many characters or more is refused `400`, naming `line`."""
+
+EVENT_STREAM = "text/event-stream"
+
+
+@dataclass(frozen=True, slots=True)
+class Reply:
+    """What the daemon answers one request with: a status, a JSON body, headers."""
+
+    status: int
+    body: Mapping[str, object]
+    headers: Mapping[str, str] = field(default_factory=dict)
+
+
+Prompt = Callable[[str], Awaitable[Reply]]
+Job = Callable[[str], Awaitable[Mapping[str, object] | None]]
+JobEvents = Callable[[str], Awaitable[AsyncIterator[Mapping[str, object]] | None]]
 
 REQUEST_LOGGER = "pm_ai.api.requests"
 """The logger the request log goes to. The daemon attaches the file handler."""
@@ -82,7 +118,7 @@ def _loggable(path: str) -> str:
         return path
     return path[:LOGGED_PATH_LIMIT] + "…"
 
-Status = Callable[[], Mapping[str, object]]
+Status = Callable[[], Mapping[str, object] | Awaitable[Mapping[str, object]]]
 Lifespan = Callable[[Any], AbstractAsyncContextManager[None]]
 
 _log = logging.getLogger(REQUEST_LOGGER)
@@ -93,6 +129,9 @@ def create_app(
     token: str | None,
     status: Status | None = None,
     lifespan: Lifespan | None = None,
+    prompt: Prompt | None = None,
+    job: Job | None = None,
+    job_events: JobEvents | None = None,
 ) -> AuthenticatedApp:
     """The application: one bearer check, one endpoint, one request log.
 
@@ -104,7 +143,14 @@ def create_app(
     serving (`9a`'s timers, `9b`'s render), on the daemon's one event loop.
     """
     from fastapi import FastAPI
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
+    from pydantic import BaseModel, ConfigDict, StrictStr
+
+    class PromptBody(BaseModel):
+        """`{"line": "..."}`; anything else is the framework's `422`."""
+
+        model_config = ConfigDict(extra="ignore")
+        line: StrictStr
 
     api = FastAPI(
         title="pm-ai",
@@ -118,12 +164,75 @@ def create_app(
 
     @api.get(STATUS_PATH)
     async def read_status() -> JSONResponse:
-        # Async on purpose: the probes run on the daemon's one loop and its
-        # one thread, which is the only thread that touches the writer in this
-        # slice. A plain `def` would be dispatched to a worker thread.
+        # Async, and the probes are not run here: since story 4r the daemon's
+        # `status` hands them to its I/O pool and this awaits the answer, so
+        # the keychain fetch and the `git` subprocess never block the loop
+        # (AD-19). A plain value is still accepted, for a caller with nothing
+        # slow to report.
         if status is None:
             return JSONResponse({"detail": "no status source was composed"}, status_code=503)
-        return JSONResponse(dict(status()))
+        body = status()
+        if inspect.isawaitable(body):
+            body = await body
+        return JSONResponse(dict(body))
+
+    async def post_prompt(body: PromptBody) -> JSONResponse:
+        line = body.line
+        if not line or len(line) >= LINE_LIMIT:
+            return JSONResponse(
+                {
+                    "detail": (
+                        f"`line` must be between 1 and {LINE_LIMIT - 1} characters; "
+                        f"this one has {len(line)}."
+                    )
+                },
+                status_code=400,
+            )
+        if prompt is None:
+            return JSONResponse({"detail": "no prompt handler was composed"}, status_code=503)
+        reply = await prompt(line)
+        return JSONResponse(dict(reply.body), status_code=reply.status, headers=dict(reply.headers))
+
+    # The model is local to this function (the framework is imported here, so
+    # importing the module never needs the runtime extra), and annotations are
+    # strings under `from __future__ import annotations` — so the framework is
+    # handed the class itself rather than a name it cannot resolve.
+    post_prompt.__annotations__["body"] = PromptBody
+    api.post(PROMPT_PATH)(post_prompt)
+
+    @api.get(JOB_PATH)
+    async def get_job(job_id: str) -> JSONResponse:
+        row = None if job is None else await job(job_id)
+        if row is None:
+            return JSONResponse({"detail": f"no job {job_id!r} is known"}, status_code=404)
+        return JSONResponse(dict(row))
+
+    @api.get(JOB_EVENTS_PATH)
+    async def get_job_events(job_id: str) -> Any:
+        events = None if job_events is None else await job_events(job_id)
+        if events is None:
+            return JSONResponse({"detail": f"no job {job_id!r} is known"}, status_code=404)
+
+        async def frames() -> AsyncIterator[bytes]:
+            try:
+                async for event in events:
+                    yield f"data: {json.dumps(dict(event), ensure_ascii=False)}\n\n".encode(
+                        "utf-8"
+                    )
+            finally:
+                # A reader that left mid-stream: the subscription is let go.
+                close = getattr(events, "aclose", None)
+                if close is not None:
+                    await close()
+
+        # The framework's own kept-open response with the event-stream type —
+        # no package beyond it (story 4r). A reader that leaves closes it; the
+        # job keeps running and its result stays in the row.
+        return StreamingResponse(
+            frames(),
+            media_type=EVENT_STREAM,
+            headers={"Cache-Control": "no-store"},
+        )
 
     return AuthenticatedApp(api, token)
 
