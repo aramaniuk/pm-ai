@@ -90,7 +90,7 @@ from pm_ai.app.wiring import (
     warn_if_encryption_disabled,
 )
 from pm_ai.connectors.registry import ConnectorRegistry
-from pm_ai.core.config import Config, ConfigRefused, load_config
+from pm_ai.core.config import Config, ConfigRefused, load_config, read_daemon_port
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import (
     GOALS_SCOPE,
@@ -145,6 +145,7 @@ from pm_ai.surfaces.cli.dispatch import (
     parse,
 )
 from pm_ai.surfaces.cli import repl
+from pm_ai.surfaces.cli.loopback import LoopbackClient
 
 __all__ = ["CONFIG_ARTIFACT", "GoalBook", "GoalWritten", "main", "read_optional"]
 
@@ -170,12 +171,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         # Story 4f: a bare `pm-ai` at a terminal opens the prompt, before
-        # anything is parsed or composed. Each typed command comes back here
-        # with its words, composing afresh as the command line does. Anywhere
-        # else — a pipe, cron, no stdin, output to a file — it stays the usage
-        # error `parse` answers.
+        # anything is parsed or composed. Since story 4q a typed command the
+        # daemon owns goes to the running daemon through `_loopback()`; one
+        # that needs this terminal, or no daemon, comes back here with its
+        # words, composing afresh as the command line does. Anywhere else — a
+        # pipe, cron, no stdin, output to a file — it stays the usage error
+        # `parse` answers.
         if not arguments and _at_a_terminal():
-            return repl.run(main, line_editing=True)
+            return repl.run(main, line_editing=True, client=_loopback())
         # Parsed first, and once (story 4m, AD-11): the command's target decides
         # where the daemon acts, so it has to be known before anything about
         # projects is decided. Help and usage errors are answered here, with
@@ -1391,6 +1394,35 @@ def _ingestion_probe(composed: _Composition) -> Probe | None:
         "the captures are still on disk. No command re-ingests a capture yet "
         "(deferred), so pm-ai will not try these again on its own.",
     )
+
+
+def _loopback() -> LoopbackClient:
+    """The prompt's client of the running daemon (story 4q, AD-8).
+
+    Built from paths alone: the token file and `config.toml` are read on every
+    request, never here, so opening the prompt composes nothing and a daemon
+    started after it opened is reached without a restart.
+    """
+    return LoopbackClient(
+        token_path=lambda: ScopePaths.production().resolve(APPLICATION, API_TOKEN),
+        port=_configured_port,
+    )
+
+
+def _configured_port() -> int:
+    """`daemon_port` from `~/.pm-ai/config.toml` as it is now; the default when absent.
+
+    A plain read of the file — nothing is composed — and of that one key only:
+    a bad unrelated key does not stop a line reaching the daemon, where
+    `config show` explains it. A `daemon_port` that cannot be read raises
+    `ConfigRefused`, and the line is not sent.
+    """
+    path = ScopePaths.production().resolve(APPLICATION, CONFIG_ARTIFACT)
+    try:
+        raw: bytes | None = path.read_bytes()
+    except FileNotFoundError:
+        raw = None
+    return read_daemon_port(raw)
 
 
 def _daemon_probe(composed: _Composition) -> Probe:

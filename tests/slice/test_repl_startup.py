@@ -125,9 +125,13 @@ def test_the_prompt_shows_within_one_second(terminal):
     assert list(home.iterdir()) == []
 
 
-def test_a_command_then_recall_then_exit_writes_no_event_log_line(terminal):
-    """`config show` with encryption off composes, writes no protected file,
-    and so leaves the event log and the memory tree as they were (`1p`)."""
+def test_a_command_then_recall_then_exit_writes_nothing(terminal):
+    """`config show` with no daemon running, typed and then recalled.
+
+    Since story 4q the line goes to the daemon, so with none running each try
+    is the one no-daemon sentence and `exit 1` — and the prompt's process
+    composes nothing to say so: the home is as it was (`4f`, `4q`).
+    """
     session, home = terminal
     assert session.read_until(1), f"no prompt; printed {session.output!r}"
     session.type(b"config show\n")
@@ -138,17 +142,9 @@ def test_a_command_then_recall_then_exit_writes_no_event_log_line(terminal):
     session.type(b"exit\n")
     assert session.finish() == 0
     text = session.output.decode(errors="replace").replace("\r\n", "\n")
-    assert text.count("daemon_port") == 2, text
-    assert text.splitlines().count("exit 0") == 2, text
-    memory = home / ".pm-ai" / "memory"
-    assert not memory.exists() or not any(memory.rglob("*")), sorted(memory.rglob("*"))
-    created = sorted(p.relative_to(home).as_posix() for p in home.rglob("*") if p.is_file())
-    # The store, and since story 4r the empty sidecar of the claim it was
-    # prepared under (AD-5) — structure beside it, never an artifact.
-    assert created == [
-        ".pm-ai/private/operational.db",
-        ".pm-ai/private/operational.db.lock",
-    ], created
+    assert text.count("`pm-ai daemon run`") == 2, text
+    assert text.splitlines().count("exit 1") == 2, text
+    assert list(home.iterdir()) == [], sorted(home.rglob("*"))
 
 
 def test_the_console_script_module_imports_no_server_module():

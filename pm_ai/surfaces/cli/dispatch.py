@@ -140,6 +140,7 @@ __all__ = [
     "RESTART_SENTENCE",
     "Refusal",
     "TABLE",
+    "TAKES_A_PATH",
     "TERMINAL_BOUND",
     "TranscriptDrop",
     "TranscriptDropOutcome",
@@ -2762,6 +2763,16 @@ TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
 
 A line sent through the daemon naming one of these is refused by name (story
 4r, `4q`'s routing rule) — the daemon's terminal is not the client's.
+"""
+
+TAKES_A_PATH: frozenset[tuple[str, ...]] = frozenset(
+    {("project", "add"), ("transcript", "drop")}
+)
+"""The commands whose first positional argument is a filesystem path.
+
+The daemon refuses a relative one (story 4r) — it does not run in the
+directory the line was typed in — and the prompt makes it absolute against its
+own working directory before sending (story 4q), so the two read one list.
 """
 
 TABLE: Mapping[str, Command] = {

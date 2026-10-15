@@ -77,6 +77,7 @@ __all__ = [
     "Config",
     "ConfigRefused",
     "load_config",
+    "read_daemon_port",
     "render_config",
 ]
 
@@ -446,6 +447,25 @@ _ESCAPES = {
 # no short escape — it reaches the file as the six characters `\u007F` or
 # not at all.
 _DELETE = "\x7f"
+
+
+def read_daemon_port(raw: bytes | None) -> int:
+    """`daemon_port` alone, read leniently: every other key is ignored (story 4q).
+
+    For the prompt, which needs only the port to reach the daemon. A bad
+    unrelated key must not stop a line from reaching the daemon — `config show`
+    through it is how that key gets explained — so only a file that cannot be
+    decoded or parsed, or a `daemon_port` the one validator refuses, raises
+    `ConfigRefused`. Absent, it is the default.
+    """
+    if raw is None or not raw.strip():
+        return DEFAULT_DAEMON_PORT
+    port = _parse(_decode(raw)).get("daemon_port", DEFAULT_DAEMON_PORT)
+    _refuse_port(port)
+    if isinstance(port, int):
+        return port
+    # `_refuse_port` already refused every value that is not a whole number.
+    raise ConfigRefused(f"`daemon_port` must be a whole number, not {port!r}.")
 
 
 def render_config(config: Config) -> bytes:

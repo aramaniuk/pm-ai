@@ -461,9 +461,13 @@ def test_the_daily_prune_removes_old_rows_and_stops_on_cancel(rig):
 def test_a_dashboard_for_a_project_enrolled_since_start_names_the_restart(rig):
     entries = {pid: ProjectEntry(path=rig.root / pid) for pid in (*WATCHED, "zeta")}
     (rig.root / ".pm-ai" / "projects.toml").write_bytes(render_registry(entries))
-    result = _result(rig, rig.ask("dashboard --scope project:zeta").body["job_id"])
-    assert result["exit"] == EXIT_REFUSAL
-    assert RESTART_SENTENCE in result["output"]
+    # Refused in the answer since story 4q, before any job is recorded: the
+    # line's scope is resolved per request against the watched projects.
+    answered = rig.ask("dashboard --scope project:zeta")
+    assert answered.status == 200
+    assert answered.body["exit"] == EXIT_REFUSAL
+    assert RESTART_SENTENCE in answered.body["output"]
+    assert rig.rows() == []
 
 
 # ── 14. A kill through the writer thread's claimed step ──────────────────────

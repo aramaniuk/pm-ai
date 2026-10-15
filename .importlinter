@@ -59,6 +59,11 @@ forbidden_modules =
 # `pm_ai.platform` would have spoken HTTP from the one layer this contract
 # forbids it in — and passed, because the contract named only the three clients
 # below. A violation that passes the gate is worse than one that fails.
+#
+# Story 4q's prompt speaks to the running daemon from `pm_ai.surfaces.cli.loopback`
+# through the standard library's `http.client`, to 127.0.0.1 only — loopback to
+# the daemon is not egress (AD-8), and no third-party client is needed for it,
+# so this list stands unchanged.
 [importlinter:contract:http-confined-to-adapters]
 name = AD-1 — HTTP clients confined to connectors and skills
 type = forbidden

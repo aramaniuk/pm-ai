@@ -56,6 +56,23 @@ def _hold(writer: WriterThread, *, label: str = "held") -> tuple[threading.Event
     return entered, release, handing
 
 
+def _until_queued(writer: WriterThread, count: int, *, within: float = 10.0) -> None:
+    """Wait until `count` steps wait in the writer's queue behind the running one.
+
+    Reads the writer's own queue under its own lock: a test's view of private
+    state, so no hook in the writer is needed.
+    """
+    deadline = time.monotonic() + within
+    while True:
+        with writer._condition:
+            waiting = len(writer._queue)
+        if waiting >= count:
+            assert waiting == count, f"{waiting} steps queued, expected {count}"
+            return
+        assert time.monotonic() < deadline, f"only {waiting} of {count} steps were queued"
+        time.sleep(0.005)
+
+
 def test_a_step_runs_on_the_writer_thread_and_its_answer_comes_back(writer):
     ran_on = writer.call(lambda: threading.current_thread().name, label="who")
     assert ran_on == writer.name
@@ -130,12 +147,15 @@ def test_close_finishes_the_running_step_and_every_queued_one_with_no_time_limit
         threading.Thread(target=lambda n=n: writer.call(lambda: done.append(n), label=n))
         for n in ("a", "b", "c")
     ]
-    for thread in queued:
+    # One at a time, each started only once the writer has queued the one
+    # before it, so the order the steps were handed over is the order asserted
+    # — never the order three threads happened to be scheduled in.
+    for count, thread in enumerate(queued, 1):
         thread.start()
-    time.sleep(0.2)
+        _until_queued(writer, count)
     closing = threading.Thread(target=writer.close)
     closing.start()
-    time.sleep(0.5)
+    closing.join(0.5)
     assert closing.is_alive(), "close waits for the running step, however long"
     release.set()
     closing.join(10)
