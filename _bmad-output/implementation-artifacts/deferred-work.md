@@ -671,7 +671,7 @@ transcript.
   evidence: `_scheduled` in `pm_ai/core/rendering.py` renders one line per meeting with no limit. Split out on 2026-10-13 from the entry above when `23c` capped the signal list only; no slice owns a meeting-list budget, and a cut list needs the same closing line the signal list has, so a cut never reads as the whole day.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23a-dashboard-sections.md`
-  summary: **ASSIGNED 2026-10-10 to `9b`** — spec written, not built. `MESSAGE_WINDOW` is a fixed 24 hours while its docstring justifies the width as "a signal older than the last render has already been past the PM once" — two different rules that agree only while the dashboard renders daily.
+  summary: **RESOLVED 2026-10-15 by `9b`** — every successful render records its instant per scope (`renders` in `operational.db`, the hand-run `pm-ai dashboard` included), and Proactive Enablement looks back to the scope's last render, 24 hours when none is recorded (`MESSAGE_WINDOW` is now that fallback), never more than 7 days; the section says which. Was: **ASSIGNED 2026-10-10 to `9b`**. `MESSAGE_WINDOW` is a fixed 24 hours while its docstring justifies the width as "a signal older than the last render has already been past the PM once" — two different rules that agree only while the dashboard renders daily.
   evidence: The stated rationale is relative to the previous render; the constant is absolute. They coincide on the schedule `9a` will establish and diverge the moment it does not run — a laptop closed over a long weekend renders Tuesday with a window that silently excludes Saturday and Sunday, and the empty-section string still says only that nothing was found between two timestamps, which is true and incomplete. Not `23a`'s to fix: nothing records when the last render happened, and the artifact that would is `9a`'s scheduled tick in wave 2. Recorded so that whoever gives the renderer a last-render instant knows this docstring is already written against it.
 
 ## Surfaced by the story-23d review (2026-09-14)
@@ -1303,3 +1303,12 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
   summary: `operational.db` and its WAL side files are created 0644, though the spine's private tier says 0600; 9a fixed only the directories (0700).
   evidence: Pre-existing; found while fixing the lock's parent directories.
+
+## Surfaced by the story-9b review (2026-10-15)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/9b-morning-render.md`
+  summary: **Needs Andrei's decision.** Proactive Enablement's window filters signals on their own timestamps from the last render, so a message timestamped before a render but harvested after it (the harvest cycle is 240 minutes) never appears on any page.
+  evidence: The frozen block defines the look-back as "back to the last successful render of that scope"; filtering on harvest time, or starting the window no later than the harvest coverage at the last render, changes that contract.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/9b-morning-render.md`
+  summary: A hand-run `pm-ai dashboard` and the daemon's render of one scope in two processes can record `last_success` a few minutes backwards when the earlier-started one publishes second.
+  evidence: The frozen block requires the `renders` upsert's new value never depend on the old one, so a `MAX` is ruled out; the daemon's own renders are serialized by the per-scope slot and read the clock inside it.
