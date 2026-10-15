@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable
+from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable, clears_by_waiting
 from pm_ai.connectors.graph.channels import (
     MessageRow,
     MessageRowRefused,
@@ -388,7 +388,7 @@ class GraphChatFetch:
                     f"{self.instance} could not sign in to read chat "
                     f"{listing.name!r}: {unauthenticated}"
                 ),
-                retryable=False,
+                retryable=clears_by_waiting(unauthenticated),
             )
         except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
             # The type and never the message: a reason reaches Tier 2.

@@ -827,6 +827,23 @@ derived ignore rule covers it (`pm_ai.core.project_scaffold.project_rules`).
 """
 
 
+
+DAEMON_LOCK = "daemon.lock"
+"""The daemon's per-user lifetime lock (AD-7, story 9a): `private/daemon.lock`.
+
+In the application scope's `private/` directory, beside the loopback API's
+token. `pm-ai daemon run` takes an exclusive kernel lock on it before its
+writer thread exists and before any timer is attached, and holds it until the
+process ends; a second daemon finding it held is refused naming it, whatever
+port it reads. It is **not** an AD-5 claim and no command claims it.
+
+Declared here, beside `CLAIM_SIDECAR_SUFFIX`, rather than as a `File` node:
+like a sidecar it is structure, not state — empty, in no tier, never backed
+up, rebuilt, pruned or encrypted — and a node may not end in the sidecar's
+suffix. No declared node is keyed `daemon`, so no claim's sidecar can ever be
+this file (asserted at import below).
+"""
+
 # ── Everything below is derived from the trees ───────────────────────────────
 
 
@@ -1161,6 +1178,16 @@ def _assert_declarations_agree() -> None:
         raise InconsistentModel(
             f"a declared node ends in the claim sidecar's suffix "
             f"{CLAIM_SIDECAR_SUFFIX!r}: {sidecar_named}."
+        )
+
+    # The daemon's lifetime lock must never be some node's claim sidecar.
+    lock_owner = DAEMON_LOCK.removesuffix(CLAIM_SIDECAR_SUFFIX)
+    if any(
+        key.rstrip("/") == lock_owner for kind in SCOPE_TREES for key in ADDRESS[kind]
+    ):
+        raise InconsistentModel(
+            f"a declared node is keyed {lock_owner!r}, so claiming it would take "
+            f"the daemon's lifetime lock {DAEMON_LOCK!r} as its sidecar."
         )
 
     if not all(SCOPE_TREES.get(kind) for kind in ScopeKind):

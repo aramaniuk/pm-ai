@@ -526,3 +526,23 @@ class PersistResult:
     A calendar meeting that matched two or more hand-recorded meetings adopts
     neither: it is recorded on its own, and the candidates are named here.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class HarvestRecord:
+    """What the operational store holds about one instance's scheduled harvests (9a).
+
+    Read by `pm-ai doctor`'s `harvests` line, which contacts nothing. All
+    instants are the single writer's clock (AD-5). `last_attempt` is `None` for
+    an instance with a failure row written before attempts were recorded;
+    `last_success` is `None` until an attempt succeeds. `failure` is the
+    current failure — `None` when the last attempt did not fail. `transcript_refusals`
+    are the sentences the last attempt's transcript fetch and ingestion
+    refused with, pm-ai's own words and never a provider's.
+    """
+
+    instance: str
+    last_attempt: datetime | None
+    last_success: datetime | None
+    failure: HarvestFailure | None
+    transcript_refusals: tuple[str, ...] = ()

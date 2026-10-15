@@ -40,7 +40,7 @@ import stat
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -63,12 +63,12 @@ from pm_ai.domain.event_entries import (
     render_entry,
 )
 from pm_ai.domain.events import NormalizedEvent
-from pm_ai.domain.harvest import Cursor, HarvestFailure, PersistResult
+from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestRecord, PersistResult
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.payload_fields import encode_payload
 from pm_ai.domain.proposals import Proposal
-from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX
+from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
 from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS, TranscriptState, TranscriptStateKind
 from pm_ai.domain.storage_tiers import (
@@ -148,6 +148,13 @@ CREATE TABLE IF NOT EXISTS harvest_failures (
     retry_after REAL,
     at          TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS harvest_runs (
+    instance            TEXT PRIMARY KEY,
+    last_attempt        TEXT NOT NULL,
+    last_success        TEXT,
+    previous_success    TEXT,
+    transcript_refusals TEXT
+);
 CREATE TABLE IF NOT EXISTS executed (
     key         TEXT PRIMARY KEY,
     lock_key    TEXT NOT NULL,
@@ -214,7 +221,8 @@ SCHEMA_VERSION = 1
 # statement cannot do is add a column to a table that already exists, which is
 # the case migration 1 was written for. A version bump with no migration behind
 # it would stamp a store nothing changed. Story `4r`'s `requests` table rode in
-# the same way, and for the same reason the version did not move.
+# the same way, and for the same reason the version did not move; so did story
+# `9a`'s `harvest_runs`.
 
 # Version 0 is the *unversioned era* — every store written before this story.
 # It is not a shape: two stores can both be at 0 and differ, because the era had
@@ -255,6 +263,23 @@ MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = 
 # mounts refuse it; the errno differs by platform, so both are named rather than
 # one assumed.
 _LINK_UNSUPPORTED = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS})
+
+
+def _refusals(stored: str | None) -> tuple[str, ...]:
+    """`harvest_runs.transcript_refusals` read back: a JSON list of sentences, or none.
+
+    A value that is not a list of strings — a hand edit, a row from a build
+    that wrote something else — reads as one sentence saying so, never as none.
+    """
+    if not stored:
+        return ()
+    try:
+        decoded = json.loads(stored)
+    except ValueError:
+        decoded = None
+    if isinstance(decoded, list) and all(isinstance(item, str) for item in decoded):
+        return tuple(decoded)
+    return ("the recorded transcript refusals could not be read back",)
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -928,6 +953,10 @@ class StorageService:
         # Tier 2 is its own file, in the application scope's enclave and outside
         # every scope's Markdown tree. `reindex` targets Tier 3 and therefore
         # cannot reach this, which is the structural guarantee AD-3 asks for.
+        # The enclave first, by story 1f's rule: on a fresh home this is the
+        # first write under `~/.pm-ai`, and `resolve(create=True)` would make
+        # `~/.pm-ai` and `private/` at the umask's mode (story 9a).
+        _mkdir_enclave(Path(paths.resolve(APPLICATION, OPERATIONAL_DB)).parent)
         store = paths.resolve(APPLICATION, OPERATIONAL_DB, create=True)
         self._store = Path(store)
         try:
@@ -2004,6 +2033,21 @@ class StorageService:
         """Where the token file is, for a refusal that has to name it (4e)."""
         return self._paths.resolve(APPLICATION, API_TOKEN)
 
+    def daemon_lock_path(self) -> Path:
+        """Where the daemon's lifetime lock is: beside the token (AD-7, story 9a)."""
+        return self.api_token_path().with_name(DAEMON_LOCK)
+
+    def prepare_private_dir(self) -> Path:
+        """The application scope's `private/`, every missing directory made at 0700.
+
+        By story 1f's rule (`_mkdir_enclave`): the daemon's lifetime lock is
+        the first thing a fresh home may write there (story 9a), and its
+        directories must not come out at the umask's mode.
+        """
+        directory = self.daemon_lock_path().parent
+        _mkdir_enclave(directory)
+        return directory
+
     def create_api_token(self, token: str) -> Path:
         """Publish a freshly minted token, refusing a name already taken (4e).
 
@@ -2715,6 +2759,20 @@ class StorageService:
                     coverage.end.isoformat(),
                 ),
             )
+        self._write_failure(instance, failure)
+
+    def _write_failure(
+        self, instance: str, failure: HarvestFailure | None, *, after_save: bool = False
+    ) -> None:
+        """The failure row and the attempt it belongs to, on the caller's transaction.
+
+        `None` clears the failure and stamps the attempt a success, keeping the
+        success before it; a failure replaces the row and leaves the last
+        success as it was — or, `after_save`, puts back the one before this
+        attempt's own save, which a later step of the same attempt undid
+        (story 9a).
+        """
+        at = self._at().isoformat()
         if failure is None:
             self._db.execute("DELETE FROM harvest_failures WHERE instance = ?", (instance,))
         else:
@@ -2736,9 +2794,121 @@ class StorageService:
                     # the single writer's fact (AD-5, AD-30), and taking it from
                     # the value would let a connector with a skewed clock date a
                     # failure into next week. `harvest_failure()` reads it back.
-                    self._at().isoformat(),
+                    at,
                 ),
             )
+        # The attempt itself (story 9a): when it was, and when one last worked.
+        # A new attempt starts with no transcript refusals; the transcript
+        # fetch after the save records its own.
+        if failure is None:
+            self._db.execute(
+                "INSERT INTO harvest_runs (instance, last_attempt, last_success, "
+                "previous_success, transcript_refusals) VALUES (?, ?, ?, NULL, NULL) "
+                "ON CONFLICT(instance) DO UPDATE SET "
+                "  last_attempt = excluded.last_attempt, "
+                "  previous_success = harvest_runs.last_success, "
+                "  last_success = excluded.last_success, "
+                "  transcript_refusals = NULL",
+                (instance, at, at),
+            )
+        elif after_save:
+            self._db.execute(
+                "UPDATE harvest_runs SET last_attempt = ?, last_success = previous_success "
+                "WHERE instance = ?",
+                (at, instance),
+            )
+        else:
+            self._db.execute(
+                "INSERT INTO harvest_runs (instance, last_attempt, transcript_refusals) "
+                "VALUES (?, ?, NULL) "
+                "ON CONFLICT(instance) DO UPDATE SET "
+                "  last_attempt = excluded.last_attempt, transcript_refusals = NULL",
+                (instance, at),
+            )
+
+    def record_harvest_failure(
+        self, instance: str, failure: HarvestFailure, *, after_save: bool = False
+    ) -> None:
+        """Record a failed attempt with the position and coverage left as they are (9a).
+
+        For an attempt that never reached the save: a connector that raised
+        instead of reporting, a fetch abandoned at its budget or by the
+        shutdown, a write the harvest could not classify. One transaction:
+        the failure row and the attempt together. `after_save`: the same
+        attempt saved its position first, so the success that save stamped is
+        taken back — the record never shows a success at an attempt that failed.
+        """
+        with self._transaction():
+            self._write_failure(instance, failure, after_save=after_save)
+
+    def record_transcript_refusals(self, instance: str, refusals: Sequence[str]) -> None:
+        """What the last attempt's transcript fetch and ingestion refused (story 9a).
+
+        pm-ai's own sentences, stored for `doctor`'s `harvests` line. An
+        instance with no attempt recorded gets none: the refusals belong to an
+        attempt, and there is none to hang them on.
+        """
+        with self._transaction() as db:
+            db.execute(
+                "UPDATE harvest_runs SET transcript_refusals = ? WHERE instance = ?",
+                (json.dumps(list(refusals), ensure_ascii=False) if refusals else None, instance),
+            )
+
+    def prune_coverage(self, *, before: datetime) -> int:
+        """Remove every coverage record ending before `before`; how many went (9a)."""
+        if before.tzinfo is None or before.utcoffset() != timedelta(0):
+            raise ValueError(f"before={before!r} is not aware UTC")
+        # One statement. Bounds are written by `_write_cursor` as ISO-8601
+        # strings of one aware-UTC clock (a window starts at `answered_at`,
+        # which `HarvestResult` refuses unless aware UTC), and those compare as
+        # text in time order. A row in any other shape — naive, hand-edited,
+        # unparseable — is compared as text too and never aborts the prune.
+        with self._transaction() as db:
+            return db.execute(
+                "DELETE FROM coverage WHERE end < ?", (before.isoformat(),)
+            ).rowcount
+
+    def harvest_records(self) -> tuple[HarvestRecord, ...]:
+        """Every instance's attempts and current failure, by instance (story 9a).
+
+        A plain read on a read-only connection of its own, so `doctor` sent
+        through the daemon and the timers' start read off a worker and never
+        the writer's connection.
+        """
+        with self._reader() as reader:
+            runs = {
+                instance: (attempt, success, refusals)
+                for instance, attempt, success, refusals in reader.execute(
+                    "SELECT instance, last_attempt, last_success, transcript_refusals "
+                    "FROM harvest_runs"
+                )
+            }
+            failures = {
+                instance: HarvestFailure(
+                    reason=reason,
+                    retryable=bool(retryable),
+                    retry_after=(
+                        timedelta(seconds=retry_after) if retry_after is not None else None
+                    ),
+                    at=datetime.fromisoformat(at) if at is not None else None,
+                )
+                for instance, reason, retryable, retry_after, at in reader.execute(
+                    "SELECT instance, reason, retryable, retry_after, at FROM harvest_failures"
+                )
+            }
+        records = []
+        for instance in sorted({*runs, *failures}):
+            attempt, success, refusals = runs.get(instance, (None, None, None))
+            records.append(
+                HarvestRecord(
+                    instance=instance,
+                    last_attempt=datetime.fromisoformat(attempt) if attempt else None,
+                    last_success=datetime.fromisoformat(success) if success else None,
+                    failure=failures.get(instance),
+                    transcript_refusals=_refusals(refusals),
+                )
+            )
+        return tuple(records)
 
     def harvest_failure(self, instance: str) -> HarvestFailure | None:
         """The last harvest failure for `instance`, or `None` if the last one worked.

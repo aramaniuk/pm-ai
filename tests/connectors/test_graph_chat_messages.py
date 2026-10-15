@@ -1116,3 +1116,26 @@ def test_a_topic_failing_the_label_rules_falls_back_to_the_kind_word(topic):
     result = _connector(routes, _chat(label=None)).harvest(Cursor())
     (event,) = _messages(result)
     assert event.payload.channel == "group chat"
+
+
+@pytest.mark.parametrize(("rotated", "retryable"), [(False, True), (True, False)])
+def test_a_busy_credentials_file_on_a_chat_is_retryable_only_when_nothing_was_rotated(
+    rotated, retryable
+):
+    """Story 9a: waiting clears a busy file that lost nothing; a lost rotation needs a sign-in."""
+    from pm_ai.connectors.graph.auth import CredentialStoreBusy
+
+    calls = {"n": 0}
+
+    def _token(*, force_refresh: bool = False) -> str:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the chat's page; the calendar was the first
+            raise CredentialStoreBusy("the credentials file was busy.", rotated=rotated)
+        return "token-1"
+
+    routes = Routes(chats={CHAT_A: []})
+    connector = _connector(routes, _chat(CHAT_A))
+    connector.calendar.client.auth.access_token = _token  # type: ignore[method-assign]
+    result = connector.harvest(Cursor())
+    assert result.failure is not None and result.failure.retryable is retryable
+    assert "busy" in result.failure.reason

@@ -1172,3 +1172,26 @@ def test_the_scheduled_harvest_still_walks_every_listed_channel(tmp_path):
     daemon.connectors[INSTANCE] = _connector(routes, _listing(CHANNEL_A), _listing(CHANNEL_B))
     run_harvest(daemon, INSTANCE)
     assert routes.asked(CHANNEL_A) and routes.asked(CHANNEL_B)
+
+
+@pytest.mark.parametrize(("rotated", "retryable"), [(False, True), (True, False)])
+def test_a_busy_credentials_file_on_a_channel_is_retryable_only_when_nothing_was_rotated(
+    rotated, retryable
+):
+    """Story 9a: waiting clears a busy file that lost nothing; a lost rotation needs a sign-in."""
+    from pm_ai.connectors.graph.auth import CredentialStoreBusy
+
+    calls = {"n": 0}
+
+    def _token(*, force_refresh: bool = False) -> str:
+        calls["n"] += 1
+        if calls["n"] == 2:  # the channel's page; the calendar was the first
+            raise CredentialStoreBusy("the credentials file was busy.", rotated=rotated)
+        return "token-1"
+
+    routes = Routes(channels={CHANNEL_A: []})
+    connector = _connector(routes, _listing(CHANNEL_A))
+    connector.calendar.client.auth.access_token = _token  # type: ignore[method-assign]
+    result = connector.harvest(Cursor())
+    assert result.failure is not None and result.failure.retryable is retryable
+    assert "busy" in result.failure.reason

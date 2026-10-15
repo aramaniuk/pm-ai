@@ -575,3 +575,22 @@ def test_doctor_and_connector_check_count_the_same_row_the_daemon_cannot_build(
     (row,) = rows
     assert row.startswith("[unbuilt] gitlab:x: enrolled, not built:"), row
     assert "no project is enrolled" in row
+
+
+# ── Story 9a: the `harvests` line, after the connectors line ─────────────────
+
+
+def test_the_harvests_line_follows_the_connectors_line_and_contacts_nothing(
+    machine, operator, uncontacted, capsys
+):
+    """`gitlab:alpha` is the built-in for the enrolled project: not set up, so
+    no harvest has run for it. Read from the operational store; nothing asked."""
+    with_project(machine, operator)
+
+    printed = doctor(capsys).splitlines()
+
+    (at,) = [i for i, line in enumerate(printed) if CONNECTORS_LINE in line]
+    following = [line for line in printed[at + 1 :] if not line.lstrip().startswith("→")]
+    assert following[0].lstrip().startswith("[     ok] harvests: "), printed
+    assert "gitlab:alpha: no harvest has run" in following[0]
+    assert uncontacted == []

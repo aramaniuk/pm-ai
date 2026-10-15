@@ -59,6 +59,7 @@ import shutil
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -85,6 +86,7 @@ from pm_ai.domain.api_token import (
 )
 from pm_ai.core.config import ConfigRefused, load_config
 from pm_ai.core.project_registry import RegistryRefused, parse_registry
+from pm_ai.domain.harvest import HarvestRecord
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR, TRUTHY, raw_toggle
 from pm_ai.platform.vcs import GitVcs
@@ -99,6 +101,7 @@ from pm_ai.ports import (
 __all__ = [
     "ArtifactState",
     "CONNECTORS_PROBE",
+    "HARVESTS_PROBE",
     "Health",
     "Presence",
     "Probe",
@@ -106,6 +109,7 @@ __all__ = [
     "config_readable",
     "connectors_enrolled",
     "daemon_reachable",
+    "harvests_recorded",
     "packages_installed",
     "registry_readable",
     "run_all",
@@ -608,6 +612,80 @@ def connectors_enrolled(reading: EnrolmentReading) -> Probe:
         name, Health.OK, detail,
         f"Nothing will be harvested until one is added: run {_ADD_COMMANDS}.",
     )
+
+
+# ── Scheduled harvests (story 9a) ────────────────────────────────────────────
+
+HARVESTS_PROBE = "harvests"
+
+
+def _instant(at: datetime | None) -> str:
+    return "never" if at is None else at.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def harvests_recorded(
+    instances: Sequence[str], records: Sequence[HarvestRecord]
+) -> Probe:
+    """Each connector instance's last attempt, last success and current failure.
+
+    Read from the operational store and handed in, contacting nothing: whether
+    a connector answers now is `pm-ai connector check`'s question. `OK` when
+    nothing is failing; `WARNING` while a failure that can clear on its own is
+    pending — the daemon retries it; `FAILING` for one that needs a person,
+    which the daemon tries once each regular cycle and never reports as a
+    pending retry. An instance with no record has had no harvest: not set up
+    yet, or the daemon has not reached it.
+    """
+    recorded = {record.instance: record for record in records}
+    if not instances:
+        return Probe(
+            HARVESTS_PROBE,
+            Health.OK,
+            "no connector instance is built, so nothing is harvested.",
+        )
+    parts: list[str] = []
+    pending = needs_a_person = False
+    for instance in sorted(instances):
+        record = recorded.get(instance)
+        if record is None or (record.last_attempt is None and record.failure is None):
+            parts.append(f"{instance}: no harvest has run")
+            continue
+        line = (
+            f"{instance}: last attempt {_instant(record.last_attempt)}, "
+            f"last success {_instant(record.last_success)}"
+        )
+        failure = record.failure
+        if failure is not None and failure.retryable:
+            pending = True
+            line += f", failing, retried on its own: {failure.reason}"
+        elif failure is not None:
+            needs_a_person = True
+            line += f", FAILING, needs you: {failure.reason}"
+        if record.transcript_refusals:
+            count = len(record.transcript_refusals)
+            line += (
+                f"; {count} transcript refusal{'s' if count != 1 else ''}, the "
+                f"first: {record.transcript_refusals[0]}"
+            )
+        parts.append(line)
+    detail = "; ".join(parts)
+    if needs_a_person:
+        return Probe(
+            HARVESTS_PROBE,
+            Health.FAILING,
+            detail,
+            "Each instance marked FAILING says what is wrong and what to do. The "
+            "daemon tries it again once each cycle, and a success clears it.",
+        )
+    if pending:
+        return Probe(
+            HARVESTS_PROBE,
+            Health.WARNING,
+            detail,
+            "Nothing to do yet: the daemon retries on its own, waiting longer "
+            "after each failure and never sooner than the provider asked.",
+        )
+    return Probe(HARVESTS_PROBE, Health.OK, detail)
 
 
 # ── The daemon (story 4e) ────────────────────────────────────────────────────

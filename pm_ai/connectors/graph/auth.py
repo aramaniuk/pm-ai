@@ -74,6 +74,7 @@ from typing import Any, ClassVar, NoReturn, Protocol, TypeVar, runtime_checkable
 from pm_ai.domain.health import Health, Probe
 
 __all__ = [
+    "clears_by_waiting",
     "AuthDeclined",
     "AuthTimedOut",
     "CLOCK_SKEW_TOLERANCE",
@@ -268,6 +269,17 @@ class CredentialStoreBusy(CustodyFailed):
     it. A command that was stopped holds nothing: the claim is a kernel lock,
     released with its process, so there is no claim file to remove.
     """
+
+
+def clears_by_waiting(refused: GraphAuthError) -> bool:
+    """Whether waiting alone could clear this sign-in failure (story 9a).
+
+    Only one can: the credentials file busy when nothing had been rotated —
+    another pm-ai command held it, and the next attempt finds it free. Every
+    other sign-in failure, a busy file that lost a rotated token among them,
+    needs a person, and stays not retryable.
+    """
+    return isinstance(refused, CredentialStoreBusy) and not refused.rotated
 
 
 class CredentialEntryMissing(CustodyFailed):

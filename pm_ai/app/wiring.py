@@ -302,6 +302,15 @@ class Daemon:
     """
     pool: IOPool | None = None
     """The daemon's I/O pool of four, once started (AD-19, story 4r); `None` elsewhere."""
+    instance_scopes: Mapping[str, DataScope] = field(default_factory=dict)
+    """The scope each connector instance was filed under when it was built (9a).
+
+    A built-in `gitlab:<project>` and an enrolled GitLab row file into their
+    project, a Graph row into personal. A scheduled harvest has no current
+    project (AD-11), so its empty-batch write goes here rather than to `scope`;
+    an instance missing from it — one a test put into `connectors` by hand —
+    falls back to `scope`.
+    """
     unbuilt: tuple[UnbuiltConnector, ...] = ()
     """Every enabled connector row this build did not construct, with why (4o).
 
@@ -514,8 +523,10 @@ def build(
         clock=clock,
         registered=_registrar(resolver),
     )
-    for instance, enrolled in enrolled_rows:
+    filed: dict[str, DataScope] = dict(builtin_scopes)
+    for instance, enrolled, filed_under in enrolled_rows:
         connectors[instance] = enrolled
+        filed[instance] = filed_under
     sources = _transcript_sources(connectors)
     return Daemon(
         storage=storage,
@@ -540,6 +551,7 @@ def build(
         # has to build a second one.
         clock=clock,
         config=config if config is not None else Config(),
+        instance_scopes=filed,
         unbuilt=unbuilt,
     )
 
@@ -829,7 +841,7 @@ def _enrolled_connectors(
     registered: Callable[[str], bool],
     store_for: Callable[[str, str], RefreshTokenStore] | None = None,
     later: frozenset[str] = frozenset(),
-) -> tuple[tuple[tuple[str, ConnectorPort], ...], tuple[UnbuiltConnector, ...]]:
+) -> tuple[tuple[tuple[str, ConnectorPort, DataScope], ...], tuple[UnbuiltConnector, ...]]:
     """What `pm-ai connector add` wrote, as adapters, so enrolment survives a restart.
 
     Story 8b's success message tells the operator the connector becomes active
@@ -889,7 +901,7 @@ def _enrolled_connectors(
     # enrolled — every machine before the first `connector add` — paid it on
     # every `build()` to read a mapping nothing then consulted.
     credentials: dict[str, dict[str, str]] | None = None
-    built: list[tuple[str, ConnectorPort]] = []
+    built: list[tuple[str, ConnectorPort, DataScope]] = []
     unbuilt: list[UnbuiltConnector] = []
     rows = read_connector_rows(storage)
     # Every enabled row the rule refuses — no usable name or system, a system
@@ -934,7 +946,9 @@ def _enrolled_connectors(
             if isinstance(graph, UnbuiltConnector):
                 unbuilt.append(graph)
             else:
-                built.append((instance, graph))
+                # Filed personal: a Graph row is the person's own account, and
+                # its events land in the scope each declares (story 9a).
+                built.append((instance, graph, DataScope(ScopeKind.PERSONAL)))
             continue
         # Placed before the credential is read, so a row that will not be built
         # — on a machine with no project enrolled, every GitLab row — costs no
@@ -957,7 +971,7 @@ def _enrolled_connectors(
         if isinstance(gitlab, UnbuiltConnector):
             unbuilt.append(gitlab)
         else:
-            built.append((instance, gitlab))
+            built.append((instance, gitlab, filed))
     return tuple(built), tuple(unbuilt)
 
 
@@ -1057,12 +1071,15 @@ def refreshed(
         )
     finally:
         _QUIET.reset(token)
-    for instance, enrolled in enrolled_rows:
+    filed: dict[str, DataScope] = dict(builtin_scopes)
+    for instance, enrolled, filed_under in enrolled_rows:
         connectors[instance] = enrolled
+        filed[instance] = filed_under
     sources = _transcript_sources(connectors)
     return replace(
         daemon,
         connectors=connectors,
+        instance_scopes=filed,
         transcripts=_transcript_families(sources),
         transcript_sources=sources,
         config=config,
@@ -3501,6 +3518,9 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "remove_member": ("remove a collection member", _asks_none),
     # `operational.db`: rows, never a file `git` could carry.
     "save_cursor": ("save a connector's position", _asks_none),
+    "record_harvest_failure": ("record a failed harvest attempt", _asks_none),
+    "record_transcript_refusals": ("record the transcript refusals", _asks_none),
+    "prune_coverage": ("remove old coverage records", _asks_none),
     "record_transcript_state": ("record the transcript's state", _asks_none),
     "stage_unless_acted": ("stage a proposal", _asks_none),
     "stage_proposal": ("stage a proposal", _asks_none),
@@ -3529,6 +3549,8 @@ and the `git` question asked on the worker before it (AD-5, AD-43, story 4r)."""
 PLAIN_READS: frozenset[str] = frozenset(
     {
         "api_token_path",
+        "daemon_lock_path",
+        "harvest_records",  # its own read-only connection
         "assert_writable",  # `git`'s answer and the key check: a bounded step
         "diagnostic_lines",
         "event_log_segments",
@@ -3555,6 +3577,7 @@ NEVER_FROM_A_JOB: frozenset[str] = frozenset(
         "adopt_daemon_connection",
         "close",
         "seeing",  # a view of the unhanded writer
+        "prepare_private_dir",  # the daemon's own, at start
         "diagnostic_log",  # opens a file for writing: the daemon's own, at start
     }
 )

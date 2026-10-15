@@ -828,7 +828,7 @@ transcript.
   evidence: 8i revised four connector-side docstrings and missed these three, which sit on the read path a future reader of these records will follow. Not bundled into 4l because they belong to a merged slice and one commit per slice is this repo's convention. `SPEC.md` carries the same tension in its coverage clause, but it is re-rendered from the memlog per AGENTS.md, so it needs a re-derive rather than an edit.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8i-coverage-earned-by-an-empty-fetch.md`
-  summary: **ASSIGNED 2026-10-10 to `9a (prunes rows older than 90 days)`** — spec written, not built. A quiet project now writes one coverage row per harvest forever — the insert de-duplicates only on an exact `(instance, start, end)` match, and nothing compacts or prunes them.
+  summary: **RESOLVED 2026-10-14 by `9a`** — every scheduled harvest prunes coverage records ending more than 90 days ago (and the daemon also prunes at start and once a day) (`StorageService.prune_coverage`, `pm_ai.core.cadence.COVERAGE_RETENTION`); story 16's verdict builder may shorten the horizon. Was: A quiet project now writes one coverage row per harvest forever — the insert de-duplicates only on an exact `(instance, start, end)` match, and nothing compacts or prunes them.
   evidence: Before 8i a quiet project wrote none, so this is new pressure the slice created rather than an existing one it inherited: six rows per instance per day, and the fold story 16 owns will union an unbounded list. Raised independently by two review lenses. The fix belongs with whoever builds that fold, since the retention horizon and the fold's gap tolerance are the same question asked twice.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8i-coverage-earned-by-an-empty-fetch.md`
@@ -889,7 +889,7 @@ transcript.
   evidence: Found by the edge-case reviewer: `_compose` returns the registry failure before it reads the command's target. 4m's intent says such a command is "never refused for want of a project"; 4l's frozen matrix says the nothing-enrolled case is "unchanged: say nothing is enrolled and how to enrol". The two disagree, so it was left for Andrei to decide rather than fixed either way.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4m-project-selection-order.md`
-  summary: **ASSIGNED 2026-10-10 to `11b (the citation guard) and 9a (the empty-batch receipt)`** — spec written, not built. A daemon can now act in the personal or application scope, and two paths that read `daemon.scope` have never run that way — `run_harvest`'s empty-batch write (`pipelines.py:164`) and `run_transcript_ingestion`'s citation guard (`:193`, `into=daemon.scope`).
+  summary: **ASSIGNED 2026-10-10 to `11b (the citation guard) and 9a (the empty-batch receipt)`**; **the `run_harvest` half RESOLVED 2026-10-14 by `9a`** — the empty-batch receipt goes to the scope the instance was filed under at build (`Daemon.instance_scopes`: a project's GitLab instance to its project, a Graph instance to personal), never to the acting scope. A daemon can now act in the personal or application scope, and two paths that read `daemon.scope` have never run that way — `run_harvest`'s empty-batch write (`pipelines.py:164`) and `run_transcript_ingestion`'s citation guard (`:193`, `into=daemon.scope`).
   evidence: Latent: no command calls either path today (checked 2026-10-08), and an empty batch appends no line. `9a` (scheduled harvest) and `11b` (transcript path) are the first callers, and must decide where a harvest that is not about one project records itself and which scope a transcript is cited into.
 
 ## Surfaced by story 8j (2026-10-08)
@@ -900,7 +900,7 @@ transcript.
   evidence: AD-39's revised custody bullet (2026-09-23) puts sign-in, refresh and rotation in the connector and custody in the daemon, and says the composition root injects the store a connector writes to. Its next bullet still says "A connector never persists, refreshes, or prompts for a credential." Since `8j` the Graph connector refreshes and hands the rotated token to the store it was given, which the custody bullet allows and the second bullet forbids. The custody bullet's "Admitted limit … owed by story `8b`" is also stale: the write-back exists now, in `8j`. The Open Risks row "Two compliant custodians of the sealed credential store" describes the state before `8j`. All three are spine text, so they change through the architecture skill rather than by hand.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8j-rotated-tokens-are-kept.md`
-  summary: **ASSIGNED 2026-10-10 to `9a`** — spec written, not built. A harvest that finds the credentials file busy records a non-retryable failure.
+  summary: **RESOLVED 2026-10-14 by `9a`** — a busy credentials file with nothing rotated is recorded retryable (`graph.auth.clears_by_waiting`, used by the calendar, channel and chat fetches); a busy file that lost a rotated token keeps its non-retryable verdict and remedy. Was: A harvest that finds the credentials file busy records a non-retryable failure.
   evidence: `CredentialStoreBusy` is a `GraphAuthError`, so `GraphCalendarFetch.fetch` (`pm_ai/connectors/graph/calendar.py`) records it with `retryable=False`, the same as a stale credential. When nothing was rotated, waiting does clear it, so the failure should be retryable in that case. The failure text still says "busy", and the next scheduled run tries again, so it is not silent.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8j-rotated-tokens-are-kept.md`
@@ -1034,11 +1034,11 @@ Found by the spec writers while reading the code each slice touches. Each names 
   evidence: Reported by the `4e` writer against `.importlinter:62`, `config.py:472-475` and the pool design. Owner: `4e` states the first and fourth; story 10 the second; the third waits for a reason to tune.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
-  summary: `9a`'s scheduler is an in-memory timer (`pm_ai/app/ticks.py`), labelled temporary: story 10a's durable queue replaces it, and until then a backoff position is lost on restart. The briefing does not yet name an instance with a recorded permanent failure — `doctor` does — so the `[ERROR]` surfacing in the dashboard belongs to stories 16 and 23. A hand-run `pm-ai dashboard` and the daemon both write `operational.db`; `4e`'s lock decision applies.
+  summary: **Built 2026-10-14, still temporary.** `9a`'s scheduler is an in-memory timer (`pm_ai/app/ticks.py`), labelled temporary: story 10a's durable queue replaces it, and until then a backoff position is lost on restart. The briefing does not yet name an instance with a recorded permanent failure — `doctor` does — so the `[ERROR]` surfacing in the dashboard belongs to stories 16 and 23. A hand-run `pm-ai dashboard` and the daemon both write `operational.db`; `4e`'s lock decision applies.
   evidence: Stated in `9a`'s Intent and Never clauses by decision (prototype path, "Deferred, with reasons"). Owner: 10a for the timer; 16/23 for the dashboard's `[ERROR]` line; 4e for the writer question.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
-  summary: `9a`'s `try/except` around the connector call must classify `ArtifactBusy` as the retryable failure `1r` already recorded with the position unchanged, not as a raising connector — otherwise `9a`'s "connector raised → not retryable" row misfiles it. And `tests/connectors/test_probe.py:81`'s docstring still says enrolment probes inside the claim; `8l` corrected the code comment, not the test's.
+  summary: **RESOLVED 2026-10-14 by `9a`** — `harvest_once` treats `ArtifactBusy` (and `OperationalStoreBusy`) as a refused save retried after one minute, never as a raising connector; only an exception out of the connector's own `harvest` is recorded not retryable. Was: `9a`'s `try/except` around the connector call must classify `ArtifactBusy` as the retryable failure `1r` already recorded with the position unchanged, not as a raising connector — otherwise `9a`'s "connector raised → not retryable" row misfiles it. And `tests/connectors/test_probe.py:81`'s docstring still says enrolment probes inside the claim; `8l` corrected the code comment, not the test's.
   evidence: `1r` makes `run_harvest` record the busy refusal and re-raise it; `9a` owns the surrounding `try/except`. Owner: `9a` for the first, `1r` for the docstring — the docstring half done in `1r` on 2026-10-10.
 
 ## Wave 2 sizing — measured 2026-10-10
@@ -1078,7 +1078,7 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: When `meetings/` is claimed by a concurrent harvest of the same connector instance, `run_harvest` records its failure with the cursor it loaded, which can overwrite the position and cleared failure the other harvest just saved.
   evidence: `_record_busy_meetings` calls `save_cursor(instance, <loaded cursor>, None, failure)`. Two harvests of one instance at once is what `9a`'s one-at-a-time scheduler rules out; until then two terminals can do it. Belongs with `9a` (or a compare-and-set on the stored cursor).
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
-  summary: A meeting-record write that fails on the claim for a reason other than busy (a filesystem without `flock`, a directory or unreadable sidecar) raises out of `run_harvest` with no failure row recorded, so the scheduler has nothing to report or back off on.
+  summary: **RESOLVED 2026-10-14 by `9a`** — any write the scheduled harvest cannot classify is recorded as a failure naming its type, not retryable, so the scheduler has a row to report. Was: A meeting-record write that fails on the claim for a reason other than busy (a filesystem without `flock`, a directory or unreadable sidecar) raises out of `run_harvest` with no failure row recorded, so the scheduler has nothing to report or back off on.
   evidence: Only `ArtifactBusy` is caught around `put`; the non-busy `OSError`s are named refusals at the CLI but unrecorded in Tier 2. Belongs with `9a`'s `try/except` around the cycle.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1r-one-claim-for-whole-file-writes.md`
   summary: An older build's `.<name>.claim` marker is reported on stderr from the storage layer once per writer per path, and never cleaned up; a daemon or Telegram context would not show stderr.
@@ -1198,7 +1198,7 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: Whether a capture carries speaker names is not stored durably; `attributed=False` lives only on the run's report.
   evidence: `11b`'s rule that every extraction from an unattributed capture stages needs it after a restart. `11b` can read it from the stored text (no `<v Speaker>` voice tags), or record it in its ingestion row.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
-  summary: Transcript acquisition has no wall-clock bound of its own and no cap on download size.
+  summary: **Half RESOLVED 2026-10-14 by `9a`** — in the daemon, transcript acquisition is a bounded step of the harvest under the per-connector fetch budget, abandoned at it; the download-size cap is still open. Was: Transcript acquisition has no wall-clock bound of its own and no cap on download size.
   evidence: N meetings times up to five requests run inline in `run_harvest` after the cursor is saved, and `download` reads the whole body. The spec puts acquisition time inside `9a`'s one-at-a-time harvest, so `9a` is the owner of the bound.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md`
   summary: The shared-join-link check sees only meetings selected this run, and `has_capture` matches on a stem that includes the record's day.
@@ -1291,3 +1291,15 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md`
   summary: A daemon-routed `transcript drop` with a relative path is refused naming the absolute path, where the terminal names the path as typed; exit codes match.
   evidence: The prompt makes the path absolute before sending; the daemon never learns the typed form. Carrying it would change `4r`'s request body.
+
+## Surfaced by the story-9a review (2026-10-14)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
+  summary: `doctor`'s `harvests` line has no notion of staleness: a daemon that has not run for a week, or an instance whose last success is days old, can still read `OK`.
+  evidence: The frozen block defines OK, WARNING and FAILING by the recorded failure only; comparing `last_attempt` and `last_success` against the 240-minute cycle is a behaviour change for a later slice.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
+  summary: At GitLab's page cap (50,000 events) persisting a harvest's events is one claimed step of about 1.7 s on the writer thread, longer than the 1 s a client request waits for the writer, so a request arriving then is answered 503; the batch is also far past AD-47's measured 1 MiB single write.
+  evidence: Measured 2026-10-14 on an M3 Pro (Rosetta), median 1.71 s over three runs; recorded in 9a's Design Notes. Splitting the persist into several claimed steps needs its own design, since each must leave storage complete.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
+  summary: `operational.db` and its WAL side files are created 0644, though the spine's private tier says 0600; 9a fixed only the directories (0700).
+  evidence: Pre-existing; found while fixing the lock's parent directories.

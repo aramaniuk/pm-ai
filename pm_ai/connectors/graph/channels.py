@@ -58,7 +58,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any
 
-from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable
+from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable, clears_by_waiting
 from pm_ai.connectors.graph.client import (
     ConsentChanged,
     FetchBudgetSpent,
@@ -384,7 +384,7 @@ class GraphChannelFetch:
                     f"{self.instance} could not sign in to read channel "
                     f"{listing.name!r}: {unauthenticated}"
                 ),
-                retryable=False,
+                retryable=clears_by_waiting(unauthenticated),
             )
         except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
             # The type and never the message, as everywhere a reason reaches

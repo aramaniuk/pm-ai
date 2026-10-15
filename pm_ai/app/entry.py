@@ -115,6 +115,7 @@ from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.connectors.probe import probe_credential
 from pm_ai.platform.doctor import (
     DAEMON_PROBE,
+    HARVESTS_PROBE,
     ArtifactState,
     Health,
     Presence,
@@ -123,6 +124,7 @@ from pm_ai.platform.doctor import (
     config_readable,
     connectors_enrolled,
     daemon_reachable,
+    harvests_recorded,
     registry_readable,
     run_all,
 )
@@ -1342,6 +1344,11 @@ def _diagnose(
     # `run_all`, so the two reports carry it from one read and the daemon's
     # `/v1/status` keeps the seven machine probes.
     probes = (*report.probes, connectors_enrolled(composed.connectors))
+    # `9a`: each instance's scheduled harvests, read from the operational
+    # store, contacting nothing; after the connectors line it describes.
+    harvests = _harvests_probe(composed)
+    if harvests is not None:
+        probes = (*probes, harvests)
     selection = _selection_probe(composed)
     if selection is not None:
         probes = (*probes, selection)
@@ -1356,6 +1363,27 @@ def _diagnose(
     if composed.failure is None or composed.failure.name in {p.name for p in probes}:
         return Report(probes)
     return Report((*probes, composed.failure))
+
+
+def _harvests_probe(composed: _Composition) -> Probe | None:
+    """`harvests_recorded` over the composed daemon's instances, or `None` (9a).
+
+    Absent when no daemon was composed — the probe that says why is already in
+    the report — or when it built no connector instance: there is nothing to
+    name, and the `connectors` line above already says why.
+    """
+    if composed.daemon is None or not composed.daemon.connectors:
+        return None
+    try:
+        records = composed.daemon.storage.harvest_records()
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        return Probe(
+            HARVESTS_PROBE,
+            Health.FAILING,
+            f"the operational store could not be asked what the scheduled "
+            f"harvests did: {type(unreadable).__name__}.",
+        )
+    return harvests_recorded(tuple(composed.daemon.connectors), records)
 
 
 INGESTION_PROBE = "transcript ingestion"

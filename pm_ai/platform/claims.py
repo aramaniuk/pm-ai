@@ -40,7 +40,16 @@ from pathlib import Path
 
 from pm_ai.domain.claims import LOCK_SUFFIX, ClaimHeld, ClaimReentered
 
-__all__ = ["ClaimHeld", "ClaimReentered", "FlockClaims", "LOCK_SUFFIX", "exclusive"]
+__all__ = [
+    "ClaimHeld",
+    "ClaimReentered",
+    "FlockClaims",
+    "LOCK_SUFFIX",
+    "LifetimeLock",
+    "LifetimeLockHeld",
+    "exclusive",
+    "hold_for_life",
+]
 
 # `ClaimHeld` and `LOCK_SUFFIX` are declared in `pm_ai.domain.claims` and
 # re-exported here. The scope model declares the sidecar and may not import this
@@ -170,3 +179,55 @@ class FlockClaims:
 
     def exclusive(self, guarded: Path) -> AbstractContextManager[None]:
         return exclusive(guarded)
+
+
+class LifetimeLockHeld(Exception):
+    """Another process holds the lifetime lock (AD-7, story 9a). Not an AD-5 claim."""
+
+
+class LifetimeLock:
+    """An exclusive kernel lock held from `hold_for_life` until `release` or exit.
+
+    Not an AD-5 claim: it guards no artifact's read-modify-write, it is taken
+    once and never re-entered, and the kernel releases it however the process
+    ends.
+    """
+
+    def __init__(self, descriptor: int, path: Path) -> None:
+        self._descriptor: int | None = descriptor
+        self.path = path
+
+    def release(self) -> None:
+        """Give the lock up; idempotent. The file stays, as every sidecar does."""
+        descriptor, self._descriptor = self._descriptor, None
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def hold_for_life(path: Path) -> LifetimeLock:
+    """Take an exclusive lock on `path` for as long as the caller holds it.
+
+    Created at `0600` if absent and never removed (unlinking races a process
+    waiting on it, as `exclusive` explains). Refuses with `LifetimeLockHeld`
+    when another process has it; anything else — a link, a directory, a
+    filesystem without `flock` — is an `OSError` naming the file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise IsADirectoryError(
+                errno.EISDIR, "the lock file is not a plain file", str(path)
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as taken:
+            if taken.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise LifetimeLockHeld(str(path)) from taken
+            raise
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return LifetimeLock(descriptor, path)

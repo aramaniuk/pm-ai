@@ -61,7 +61,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable
+from pm_ai.connectors.graph.auth import GraphAuthError, GraphUnreachable, clears_by_waiting
 from pm_ai.connectors.graph.client import GraphCallFailed, GraphClient
 from pm_ai.domain.clocks import ImplausibleTimestamp, validate_occurred_at
 from pm_ai.domain.harvest import (
@@ -945,7 +945,16 @@ class GraphCalendarFetch:
                 # change the answer, not whether the credential is recoverable —
                 # so all five say no, and all five name a remedy a human
                 # performs.
-                failure = self._failure(span, str(unauthenticated), retryable=False)
+                #
+                # One exception (story 9a): the credentials file busy with
+                # nothing rotated — another pm-ai command held it — is cleared
+                # by waiting, so it is retryable. A busy file that lost a
+                # rotated token keeps its verdict and remedy.
+                failure = self._failure(
+                    span,
+                    str(unauthenticated),
+                    retryable=clears_by_waiting(unauthenticated),
+                )
                 signed_out = True
                 break
             except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
