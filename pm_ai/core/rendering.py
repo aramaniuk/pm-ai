@@ -76,6 +76,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from enum import Enum
 
+from pm_ai.core.cadence import (
+    FIRST_LOOK_BACK,
+    LOOK_BACK_CAP,
+    LookBack,
+    LookBackKind,
+    look_back,
+)
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.event_log import LogRead
 from pm_ai.core.goal_register import GoalRegister
@@ -234,13 +241,15 @@ the remediation this file prints and the file the parser reads cannot drift
 apart.
 """
 
-MESSAGE_WINDOW = timedelta(hours=24)
-"""How far back Proactive Enablement looks for message signals.
+MESSAGE_WINDOW = FIRST_LOOK_BACK
+"""How far back Proactive Enablement looks when no earlier render is recorded.
 
-A day, because the artifact is a *daily* dashboard: a signal older than the last
-render has already been past the PM once. Stated as a constant because the
-section names it — an empty section that says "in the window" without saying
-which window has not told the reader anything.
+Since story 9b the window starts at the scope's last successful render — a
+signal the PM already saw on the page is not news — and this is only the
+fallback for a scope with none, clamped like every window to
+`cadence.LOOK_BACK_CAP`. The section names whichever it used: an empty section
+that says "in the window" without saying which window has not told the reader
+anything.
 """
 
 NO_MEETINGS = "No meetings on the calendar today"
@@ -298,6 +307,7 @@ def render_dashboard(
     *,
     tz: tzinfo | None,
     pm: PmHandles,
+    since: LookBack | None = None,
 ) -> str:
     """CAP-9's four sections, as Markdown, from these inputs and this instant.
 
@@ -324,6 +334,10 @@ def render_dashboard(
     different sentences, and telling a PM to author a file they have already
     authored is how a dashboard loses their trust.
 
+    `since` is where Proactive Enablement's window starts and why there
+    (`cadence.look_back`, story 9b): the scope's last render, or `None` for no
+    render recorded, which looks back `MESSAGE_WINDOW`.
+
     `now` must be aware UTC and `tz` must be supplied. Rendering the same inputs
     twice returns byte-identical output: nothing here reads a clock and every
     ordering is total.
@@ -335,7 +349,7 @@ def render_dashboard(
         HEADINGS,
         (
             _time_critical(meetings, now=now, tz=tz),
-            _proactive_enablement(entries, pm=pm, now=now, tz=tz),
+            _proactive_enablement(entries, pm=pm, now=now, tz=tz, since=since),
             _strategic_milestones(goals),
             _leadership_notes(),
         ),
@@ -349,6 +363,7 @@ def render_project_dashboard(
     *,
     tz: tzinfo | None,
     pm: PmHandles,
+    since: LookBack | None = None,
 ) -> str:
     """A project's day, as Markdown — and nothing of the PM's.
 
@@ -378,8 +393,9 @@ def render_project_dashboard(
     two files saying the same thing about the same answer.
 
     `now` must be aware UTC and `tz` must be supplied, both exactly as above.
-    `entries` and `pm` mean what they mean there: the PM's handles come from
-    pm-ai's own connector settings, which the wall does not forbid (`23c`).
+    `entries`, `pm` and `since` mean what they mean there: the PM's handles come
+    from pm-ai's own connector settings, which the wall does not forbid (`23c`),
+    and `since` is this scope's own last render (story 9b).
     Rendering the same inputs twice returns byte-identical output, and so does
     rendering them through the other function: the two sections below are the
     same two functions.
@@ -391,7 +407,7 @@ def render_project_dashboard(
         PROJECT_HEADINGS,
         (
             _time_critical(meetings, now=now, tz=tz),
-            _proactive_enablement(entries, pm=pm, now=now, tz=tz),
+            _proactive_enablement(entries, pm=pm, now=now, tz=tz, since=since),
         ),
     )
 
@@ -635,9 +651,19 @@ def _duration_words(delta: timedelta) -> str:
 
 
 def _proactive_enablement(
-    entries: EventLogAnswer, *, pm: PmHandles, now: datetime, tz: tzinfo
+    entries: EventLogAnswer,
+    *,
+    pm: PmHandles,
+    now: datetime,
+    tz: tzinfo,
+    since: LookBack | None = None,
 ) -> str:
     """Message signals inside the window, or why there are none to show.
+
+    The window runs from `since` — the scope's last render, 24 hours when none
+    is recorded, never more than 7 days (story 9b) — to `now`, and the section
+    says which of those it is: as its first line above the signals, or inside
+    the empty-window sentence.
 
     A log that could not be read is stated, with its reason bounded, and nothing
     else is said. Otherwise: the signals decoded, marked and ordered — mentions
@@ -658,7 +684,8 @@ def _proactive_enablement(
             f"window are unknown: {reason}"
         )
 
-    since = now - MESSAGE_WINDOW
+    window = since if since is not None else look_back(None, now)
+    since_at = window.since
     # The segment each entry came from, when the read named them (`LogRead`).
     segments: Sequence[str | None] = (
         entries.segments if isinstance(entries, LogRead) else (None,) * len(entries)
@@ -697,7 +724,7 @@ def _proactive_enablement(
             # else, but the only exclusion this section used to make in silence.
             ahead += 1
             continue
-        if since <= at:
+        if since_at <= at:
             inside.append((at, entry, segment))
 
     # Decoded before the sort and the cap: whether a line mentions the PM
@@ -728,7 +755,7 @@ def _proactive_enablement(
         f"\n\n{_unrecorded_sign_in(name)}" for name in pm.unrecorded
     ) + "".join(f"\n\n{_unchecked_row(name, why)}" for name, why in pm.unchecked)
     if not signals:
-        return f"{_no_signals(since=since, now=now, tz=tz)}{sign_ins}{footnote}"
+        return f"{_no_signals(window=window, now=now, tz=tz)}{sign_ins}{footnote}"
 
     # Mentions of the PM first, then newest first, then the entry id — total,
     # so a re-render is byte-identical. When the mentions alone exceed the cap,
@@ -744,7 +771,11 @@ def _proactive_enablement(
         if hidden
         else ""
     )
-    return f"{lines}{closing}{sign_ins}{footnote}"
+    heading = (
+        f"Message signals {_window_words(window, now=now, tz=tz)}, up to "
+        f"{_local(now, tz=tz, now=now, dated=True)}:"
+    )
+    return f"{heading}\n\n{lines}{closing}{sign_ins}{footnote}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -810,15 +841,51 @@ def _unrecorded_sign_in(instance: str) -> str:
     )
 
 
-def _no_signals(*, since: datetime, now: datetime, tz: tzinfo) -> str:
-    """Names the window and the vocabulary — a query, never a state of the world."""
+def _no_signals(*, window: LookBack, now: datetime, tz: tzinfo) -> str:
+    """Names the window, why it starts there, and the vocabulary — a query,
+    never a state of the world."""
     read = ", ".join(f"`{member.value}`" for member in SIGNAL_CATEGORIES)
     ignored = ", ".join(f"`{member.value}`" for member in SelfActionType)
     return (
         f"No {read} entries in the event log between "
-        f"{_local(since, tz=tz, now=now, dated=True)} and "
-        f"{_local(now, tz=tz, now=now, dated=True)}. This section reads "
+        f"{_local(window.since, tz=tz, now=now, dated=True)} and "
+        f"{_local(now, tz=tz, now=now, dated=True)} — "
+        f"{_window_words(window, now=now, tz=tz)}. This section reads "
         f"{read} only; {ignored} are pm-ai's own actions and are not signals."
+    )
+
+
+def _hours(delta: timedelta) -> str:
+    return f"{round(delta.total_seconds() / 3600)} hours"
+
+
+def _days(delta: timedelta) -> str:
+    return f"{delta.days} days"
+
+
+def _window_words(window: LookBack, *, now: datetime, tz: tzinfo) -> str:
+    """Why the window starts where it does (story 9b), as the section says it.
+
+    One of four: since the scope's last render; the last 24 hours, no render
+    being recorded; or the last 7 days, the recorded render being older than
+    that or later than this render (a clock stepped back). Each names only
+    what was computed.
+    """
+    kind = window.kind
+    if kind is LookBackKind.SINCE_LAST_RENDER:
+        return f"since the last render at {_local(window.since, tz=tz, now=now, dated=True)}"
+    if kind is LookBackKind.NO_RENDER_RECORDED:
+        return f"in the last {_hours(FIRST_LOOK_BACK)} (no earlier render recorded)"
+    recorded = window.last_render
+    at = "" if recorded is None else f", at {_local(recorded, tz=tz, now=now, dated=True)},"
+    if kind is LookBackKind.CLAMPED_OLDER:
+        return (
+            f"in the last {_days(LOOK_BACK_CAP)} (the earlier render{at} was "
+            f"older, so the window was clamped)"
+        )
+    return (
+        f"in the last {_days(LOOK_BACK_CAP)} (the recorded render{at} is later "
+        f"than this one, so the window was clamped)"
     )
 
 

@@ -96,7 +96,7 @@ from pm_ai.app.prompts import (
     WRITER_HALT_EVENT,
     RequestPath,
 )
-from pm_ai.app.ticks import HarvestTimers
+from pm_ai.app.ticks import HarvestTimers, RenderTimers
 from pm_ai.app.wiring import Daemon
 from pm_ai.domain.api_token import TOKEN_BYTES, ApiTokenRefused
 from pm_ai.domain.health import Report
@@ -341,6 +341,10 @@ def _serve_locked(
         # The scheduled harvests (story 9a): attached in `_lifespan`, on this
         # loop; an unfinished one is marked by the shutdown's own step.
         app.state.pm_ai_timers = HarvestTimers(requests=requests, now=daemon.clock)
+        # The 07:00 render of every dashboard scope (story 9b), attached after
+        # the harvests'; a render still before its claimed step is marked by
+        # the shutdown's own step too.
+        app.state.pm_ai_renders = RenderTimers(requests=requests, now=daemon.clock)
         server = _server_class(uvicorn)(
             uvicorn.Config(
                 app,
@@ -657,7 +661,7 @@ async def _lifespan(app: Any) -> AsyncIterator[None]:
     The daily removal of old jobs (story 4r) and the scheduled harvests
     (story 9a) start here, on the daemon's one event loop, and are cancelled on
     the way out — after the listener has stopped and before the writer is
-    closed. `9b`'s render attaches here too.
+    closed. `9b`'s 07:00 render attaches here too, after the harvests.
     """
     requests: RequestPath | None = getattr(app.state, "pm_ai_requests", None)
     if requests is None:
@@ -670,6 +674,9 @@ async def _lifespan(app: Any) -> AsyncIterator[None]:
     harvests: HarvestTimers | None = getattr(app.state, "pm_ai_timers", None)
     if harvests is not None:
         timers.append(asyncio.create_task(harvests.run(), name="pm-ai-harvests"))
+    renders: RenderTimers | None = getattr(app.state, "pm_ai_renders", None)
+    if renders is not None:
+        timers.append(asyncio.create_task(renders.run(), name="pm-ai-morning-render"))
     try:
         yield
     finally:

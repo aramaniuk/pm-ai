@@ -579,12 +579,16 @@ def test_setup_on_a_fresh_home_never_asks_who_the_pm_is(
     home is set up without being asked, and every config answer may be empty."""
     operator.script(str(tmp_path / "alpha"), "", "", "", "", "")
 
-    assert setup() == EXIT_OK
+    # Every answer empty leaves `display_timezone` unset, so the closing report's
+    # `renders` line fails (story 9b: no 07:00 can be scheduled) — exit 4.
+    assert setup() == EXIT_UNHEALTHY
+    out = capsys.readouterr().out
+    assert "[failing] renders: display_timezone is not set" in out
+    assert "pm_handle" not in out
 
     assert not any("pm_handle" in prompt for prompt in operator.asked), operator.asked
     assert len(operator.asked) == 6, operator.asked
     assert load_config(config_path(home).read_bytes()) == load_config(None)
-    assert "pm_handle" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

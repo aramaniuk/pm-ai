@@ -321,6 +321,11 @@ def test_a_re_run_with_unchanged_inputs_is_byte_identical(tmp_path):
         _Calendar("graph:contoso", live=(meeting("m_1", "Standup"),)),
     )
     author_goals(built)
+    # The first render records its instant, which is the next render's input
+    # (story 9b: the look-back starts there), so unchanged inputs are the
+    # second and third renders. The first render after another differs from it
+    # by design: its Proactive Enablement window line names that render.
+    run_dashboard(built, now=NOW)
     first = run_dashboard(built, now=NOW).read_bytes()
     second = run_dashboard(built, now=NOW).read_bytes()
     assert first == second
@@ -339,6 +344,11 @@ def test_a_re_run_with_two_connectors_is_byte_identical(tmp_path):
             live=(meeting("m_a", "Weekly Sync", ical_uid="uid-1"),),
         ),
     )
+    # The first render records its instant, which is the next render's input
+    # (story 9b: the look-back starts there), so unchanged inputs are the
+    # second and third renders. The first render after another differs from it
+    # by design: its Proactive Enablement window line names that render.
+    run_dashboard(built, now=NOW)
     first = run_dashboard(built, now=NOW).read_bytes()
     second = run_dashboard(built, now=NOW).read_bytes()
     assert first == second

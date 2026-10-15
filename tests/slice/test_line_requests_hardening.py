@@ -272,7 +272,7 @@ def test_the_line_a_schema_stop_writes_is_the_line_the_restart_pass_reads(rig):
 
 
 def test_a_failed_job_leaves_no_notes(rig, monkeypatch):
-    def broken(daemon, *, scope, now):
+    def broken(daemon, *, scope, now, **kwargs):
         raise RuntimeError("broken")
 
     monkeypatch.setattr(prompts, "prepare_dashboard", broken)

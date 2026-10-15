@@ -1,4 +1,4 @@
-"""When the scheduled harvest runs, and how long it waits after a failure (story 9a).
+"""When the scheduled harvest and the morning render run, and how they wait (9a, 9b).
 
 Pure arithmetic: every instant is handed in and every random choice is a
 `draw` in `[0, 1)` the caller supplies. Separate from the timer on purpose —
@@ -19,12 +19,26 @@ stays.
 
 No setting reads any of these: they are constants, and the cadence is not per
 instance.
+
+The morning render (story 9b):
+
+- **07:00 in `display_timezone`**, once per local day per dashboard scope. A
+  scope with no successful render since today's 07:00 is due as soon as it is
+  past 07:00, so a daemon started at 09:30, or a laptop asleep through the
+  morning, renders on arrival. 07:00 is the zone's wall clock, computed on the
+  local date and converted, as the dashboard's own day is.
+- **The look-back** of Proactive Enablement: to the last successful render of
+  that scope; `FIRST_LOOK_BACK` when none is recorded; never longer than
+  `LOOK_BACK_CAP` — a render weeks old, or one recorded later than now (a
+  clock stepped back), is clamped, and the section says which.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from enum import Enum
 
 from pm_ai.domain.harvest import HarvestFailure
 
@@ -32,16 +46,26 @@ __all__ = [
     "COVERAGE_RETENTION",
     "CYCLE",
     "CYCLE_JITTER",
+    "FIRST_LOOK_BACK",
     "FIRST_RETRY",
+    "LOOK_BACK_CAP",
+    "LookBack",
+    "LookBackKind",
+    "RENDER_AT",
     "REFUSED_SAVE_RETRY",
     "RETRY_CAP",
     "START_SPREAD",
     "coverage_cutoff",
     "first_attempts",
+    "latest_render",
+    "look_back",
+    "next_render",
     "next_cycle",
     "provider_floor",
+    "render_due",
     "retries",
     "retry_wait",
+    "todays_render",
 ]
 
 CYCLE = timedelta(minutes=240)
@@ -141,3 +165,94 @@ def provider_floor(failure: HarvestFailure | None) -> datetime | None:
 def coverage_cutoff(now: datetime) -> datetime:
     """Coverage records ending before this instant are pruned."""
     return now - COVERAGE_RETENTION
+
+
+# ── The morning render (story 9b) ────────────────────────────────────────────
+
+RENDER_AT = time(7, 0)
+"""CAP-9's 07:00, on the wall clock of `display_timezone`."""
+
+FIRST_LOOK_BACK = timedelta(hours=24)
+"""How far Proactive Enablement looks back when no render of the scope is recorded."""
+
+LOOK_BACK_CAP = timedelta(days=7)
+"""The longest Proactive Enablement ever looks back, whatever was recorded."""
+
+
+def _render_on(day: date, zone: tzinfo) -> datetime:
+    """07:00 on `day` in `zone`, as an aware UTC instant."""
+    return datetime.combine(day, RENDER_AT, tzinfo=zone).astimezone(timezone.utc)
+
+
+def todays_render(now: datetime, zone: tzinfo) -> datetime:
+    """Today's 07:00 in `zone` — today being `now`'s local date there."""
+    return _render_on(now.astimezone(zone).date(), zone)
+
+
+def latest_render(now: datetime, zone: tzinfo) -> datetime:
+    """The most recent 07:00 in `zone` at or before `now`: today's or yesterday's."""
+    today = todays_render(now, zone)
+    if now >= today:
+        return today
+    return _render_on(now.astimezone(zone).date() - timedelta(days=1), zone)
+
+
+def next_render(now: datetime, zone: tzinfo) -> datetime:
+    """The next 07:00 in `zone` strictly after `now`.
+
+    Tomorrow is the next local date at 07:00, never `now` plus 24 hours, so a
+    day with a DST change still renders at 07:00 on the wall clock.
+    """
+    today = todays_render(now, zone)
+    if now < today:
+        return today
+    return _render_on(now.astimezone(zone).date() + timedelta(days=1), zone)
+
+
+def render_due(last_success: datetime | None, now: datetime, zone: tzinfo) -> bool:
+    """Whether a scope is due: past today's 07:00 with no success since it.
+
+    A recorded success later than `now` — the clock was stepped back — stands
+    for nothing: the scope is due, and its look-back is clamped
+    (`look_back`). Otherwise a step back would leave it never due.
+    """
+    today = todays_render(now, zone)
+    if now < today:
+        return False
+    return last_success is None or last_success < today or last_success > now
+
+
+class LookBackKind(Enum):
+    """Which of the four look-backs a render used; the section says which."""
+
+    SINCE_LAST_RENDER = "since the last render"
+    NO_RENDER_RECORDED = "no earlier render recorded"
+    CLAMPED_OLDER = "the earlier render was older than the cap"
+    CLAMPED_LATER = "the recorded render is later than this one"
+
+
+@dataclass(frozen=True, slots=True)
+class LookBack:
+    """Where Proactive Enablement's window starts, and why there."""
+
+    since: datetime
+    kind: LookBackKind
+    last_render: datetime | None = None
+    """The recorded render it was computed from, when one was."""
+
+
+def look_back(last_render: datetime | None, now: datetime) -> LookBack:
+    """The window's start: the last render, 24 hours, or the 7-day clamp.
+
+    A recorded render later than `now` — the clock was stepped back — is
+    clamped like one older than the cap, and says so separately: neither
+    "older" nor "since" would be true of it.
+    """
+    cap = now - LOOK_BACK_CAP
+    if last_render is None:
+        return LookBack(now - FIRST_LOOK_BACK, LookBackKind.NO_RENDER_RECORDED)
+    if last_render > now:
+        return LookBack(cap, LookBackKind.CLAMPED_LATER, last_render)
+    if last_render < cap:
+        return LookBack(cap, LookBackKind.CLAMPED_OLDER, last_render)
+    return LookBack(last_render, LookBackKind.SINCE_LAST_RENDER, last_render)

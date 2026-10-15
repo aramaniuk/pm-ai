@@ -87,6 +87,8 @@ from pm_ai.domain.api_token import (
 from pm_ai.core.config import ConfigRefused, load_config
 from pm_ai.core.project_registry import RegistryRefused, parse_registry
 from pm_ai.domain.harvest import HarvestRecord
+from pm_ai.domain.identity import DataScope
+from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.platform.environment import DISABLE_ENCRYPTION_VAR, TRUTHY, raw_toggle
 from pm_ai.platform.vcs import GitVcs
@@ -102,6 +104,7 @@ __all__ = [
     "ArtifactState",
     "CONNECTORS_PROBE",
     "HARVESTS_PROBE",
+    "RENDERS_PROBE",
     "Health",
     "Presence",
     "Probe",
@@ -112,6 +115,7 @@ __all__ = [
     "harvests_recorded",
     "packages_installed",
     "registry_readable",
+    "renders_recorded",
     "run_all",
 ]
 
@@ -686,6 +690,79 @@ def harvests_recorded(
             "after each failure and never sooner than the provider asked.",
         )
     return Probe(HARVESTS_PROBE, Health.OK, detail)
+
+
+# ── The morning render (story 9b) ────────────────────────────────────────────
+
+RENDERS_PROBE = "renders"
+
+
+def renders_recorded(
+    scopes: Sequence[DataScope],
+    records: Sequence[RenderRecord],
+    *,
+    zone_set: bool,
+    config_refused: str | None = None,
+) -> Probe:
+    """Each dashboard scope's last render and current failure, contacting nothing.
+
+    Read from the operational store and handed in. `FAILING` when a render's
+    last attempt failed — the reason is pm-ai's own sentence, recorded with it
+    — or when no 07:00 can be scheduled because `display_timezone` is unset
+    or `config.toml` cannot be used (`config_refused`, the loader's sentence);
+    a fresh machine before `setup` is in that state, which is expected and said
+    so. A scope with no record has not been rendered yet. The failure shown is
+    the latest one recorded.
+    """
+    recorded = {record.scope: record for record in records}
+    parts: list[str] = []
+    failing = False
+    for scope in scopes:
+        record = recorded.get(scope)
+        if record is None:
+            parts.append(f"{scope}: never rendered")
+            continue
+        line = f"{scope}: last render {_instant(record.last_success)}"
+        if record.failing:
+            failing = True
+            line += (
+                f", FAILING, last failed at {_instant(record.last_failure)}"
+                + (", retried on its own" if record.retryable else "")
+                + f": {record.reason or 'no reason was recorded'}"
+            )
+        parts.append(line)
+    detail = "; ".join(parts) if parts else "no dashboard scope"
+    if config_refused is not None:
+        return Probe(
+            RENDERS_PROBE,
+            Health.FAILING,
+            f"config.toml could not be used, so no 07:00 render can be scheduled "
+            f"({config_refused}); {detail}",
+            "Correct config.toml as the `config.toml` line says.",
+        )
+    if not zone_set:
+        return Probe(
+            RENDERS_PROBE,
+            Health.FAILING,
+            f"display_timezone is not set in config.toml, so no 07:00 render can "
+            f"be scheduled and the daemon records that for every dashboard scope "
+            f"(expected on a machine before `pm-ai setup`); {detail}",
+            "Set `display_timezone` in config.toml to an IANA zone, such as "
+            "`display_timezone = \"Europe/Warsaw\"`, or run `pm-ai setup`.",
+        )
+    if failing:
+        return Probe(
+            RENDERS_PROBE,
+            Health.FAILING,
+            detail,
+            "Each scope marked FAILING says why; a failed attempt does not replace "
+            "the dashboard file. One marked as retried on its own (another "
+            "command's claim, a busy store, an I/O error, a locked keychain) is "
+            "tried again by the daemon after 1, 2, 4 … minutes until it succeeds "
+            "or the next 07:00; any other failure is tried again at the next "
+            "07:00. `pm-ai dashboard` renders one now.",
+        )
+    return Probe(RENDERS_PROBE, Health.OK, detail)
 
 
 # ── The daemon (story 4e) ────────────────────────────────────────────────────

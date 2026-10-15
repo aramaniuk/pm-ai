@@ -6,6 +6,8 @@
 
 ## Proactive Enablement
 
+Message signals in the last 24 hours (no earlier render recorded), up to 2026-09-09 12:30:
+
 - **11:40** u_sam in #oncall
 - **08:15** u_dana in #payments — Cache TTL is still 60s in staging
 

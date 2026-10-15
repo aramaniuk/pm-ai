@@ -109,13 +109,14 @@ from pm_ai.domain.event_entries import (
 )
 from pm_ai.domain.goals import Goal
 from pm_ai.domain.health import EnrolmentReading
-from pm_ai.core.project_registry import ProjectEntry
+from pm_ai.core.project_registry import ProjectEntry, parse_registry
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.connectors.probe import probe_credential
 from pm_ai.platform.doctor import (
     DAEMON_PROBE,
     HARVESTS_PROBE,
+    RENDERS_PROBE,
     ArtifactState,
     Health,
     Presence,
@@ -125,10 +126,11 @@ from pm_ai.platform.doctor import (
     connectors_enrolled,
     daemon_reachable,
     harvests_recorded,
+    renders_recorded,
     registry_readable,
     run_all,
 )
-from pm_ai.domain.storage_tiers import API_TOKEN
+from pm_ai.domain.storage_tiers import API_TOKEN, OPERATIONAL_DB
 from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
@@ -138,7 +140,11 @@ from pm_ai.ports import (
     KeychainUnavailable,
     StoragePort,
 )
-from pm_ai.storage.service import OperationalStoreUnavailable, StorageService
+from pm_ai.storage.service import (
+    OperationalStoreUnavailable,
+    StorageService,
+    render_records_at,
+)
 from pm_ai.surfaces.cli.dispatch import (
     EXIT_REFUSAL,
     EXIT_UNEXPECTED,
@@ -601,7 +607,12 @@ class _FirstRun:
         report = run_all(self._keychain, config=read.config, registry=read.registry)
         # `4n`: the same line `doctor` prints, from the same fresh read, so
         # setup cannot end without saying which connectors are enrolled.
-        return Report((*report.probes, connectors_enrolled(read.connectors)))
+        # `9b`: the `renders` line `doctor` prints, from the same fresh read, so
+        # setup ends saying whether a 07:00 render can now be scheduled.
+        renders = _renders_probe(
+            _Composition(None, None, read.config, read.registry, read.connectors)
+        )
+        return Report((*report.probes, connectors_enrolled(read.connectors), renders))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1349,6 +1360,9 @@ def _diagnose(
     harvests = _harvests_probe(composed)
     if harvests is not None:
         probes = (*probes, harvests)
+    # `9b`: each dashboard scope's last render and failure, read from the
+    # operational store, contacting nothing; after `9a`'s line.
+    probes = (*probes, _renders_probe(composed))
     selection = _selection_probe(composed)
     if selection is not None:
         probes = (*probes, selection)
@@ -1384,6 +1398,64 @@ def _harvests_probe(composed: _Composition) -> Probe | None:
             f"harvests did: {type(unreadable).__name__}.",
         )
     return harvests_recorded(tuple(composed.daemon.connectors), records)
+
+
+def _renders_probe(composed: _Composition) -> Probe:
+    """`renders_recorded` over every dashboard scope, contacting nothing (9b).
+
+    Printed whether or not a daemon was composed, so a fresh machine sees the
+    line naming `display_timezone`. `config.toml` is read now — through the
+    composed daemon's store when there is one, so the daemon's own `doctor`
+    and its render timer read the same zone — and the records straight from
+    the operational store, read-only. The scopes are the 07:00 render's:
+    personal, then each watched (or, with no daemon, enrolled) project.
+    """
+    daemon = composed.daemon
+    config_refused: str | None = None
+    zone: str | None = None
+    try:
+        if daemon is not None:
+            raw = daemon.storage.read_artifact(scope=APPLICATION, artifact=CONFIG_ARTIFACT)
+            zone = load_config(raw).display_timezone
+        elif composed.config.presence is Presence.READ:
+            zone = load_config(composed.config.raw).display_timezone
+        elif composed.config.presence is not Presence.ABSENT:
+            config_refused = composed.config.detail or "it could not be read"
+    except ConfigRefused as refused:
+        config_refused = str(refused)
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        config_refused = f"it could not be read: {type(unreadable).__name__}"
+    if daemon is not None:
+        projects: tuple[str, ...] = daemon.watched
+    else:
+        projects = _enrolled_ids(composed.registry)
+    scopes = (
+        DataScope(ScopeKind.PERSONAL),
+        *(DataScope(ScopeKind.PROJECT, project) for project in projects),
+    )
+    try:
+        paths = daemon.storage.paths if daemon is not None else ScopePaths.production()
+        records = render_records_at(Path(paths.resolve(APPLICATION, OPERATIONAL_DB)))
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        return Probe(
+            RENDERS_PROBE,
+            Health.FAILING,
+            f"the operational store could not be asked what the dashboard renders "
+            f"did: {type(unreadable).__name__}.",
+        )
+    return renders_recorded(
+        scopes, records, zone_set=bool(zone), config_refused=config_refused
+    )
+
+
+def _enrolled_ids(registry: ArtifactState) -> tuple[str, ...]:
+    """The enrolled project ids, or none when the registry cannot be read."""
+    if registry.presence is not Presence.READ or registry.raw is None:
+        return ()
+    try:
+        return tuple(parse_registry(registry.raw))
+    except Exception:  # noqa: BLE001 — the registry line reports it
+        return ()
 
 
 INGESTION_PROBE = "transcript ingestion"

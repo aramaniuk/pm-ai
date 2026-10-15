@@ -27,6 +27,7 @@ from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.sanitize import Sanitized
 from pm_ai.domain.task_classes import TaskClass
 from pm_ai.domain.transcripts import (
@@ -752,6 +753,16 @@ class StoragePort(Protocol):
         """Remove coverage records ending before `before`; how many went (9a)."""
     def harvest_records(self) -> tuple[HarvestRecord, ...]:
         """Every instance's attempts and current failure, a plain read (9a)."""
+    def record_render(self, scope: DataScope, *, at: datetime) -> None:
+        """A successful render of `scope` at `at`, in one statement (9b)."""
+    def record_render_failure(
+        self, scope: DataScope, reason: str, *, at: datetime, retryable: bool = False
+    ) -> None:
+        """A failed render of `scope` at `at`, last success unchanged, one statement (9b)."""
+    def render_records(self) -> tuple[RenderRecord, ...]:
+        """Every dashboard scope's render record, a plain read (9b)."""
+    def last_render(self, scope: DataScope) -> datetime | None:
+        """`scope`'s last successful render instant, a keyed plain read (9b)."""
     def was_executed(self, idempotency_key: str) -> bool: ...
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None: ...
     # Reads, added with story 2h. The port declared only writes, so an accessor

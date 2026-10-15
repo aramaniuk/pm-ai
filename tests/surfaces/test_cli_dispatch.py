@@ -132,6 +132,10 @@ def registered(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # A set-up machine names its display zone: without one no 07:00 render can
+    # be scheduled, which `doctor`'s `renders` line reports as failing (9b).
+    (home / ".pm-ai").mkdir()
+    (home / ".pm-ai" / "config.toml").write_text('display_timezone = "Europe/Warsaw"\n')
     repository = tmp_path / "repo"
     repository.mkdir()
     monkeypatch.setattr(entry, "_bootstrap", enrolled(alpha=repository))
@@ -471,6 +475,9 @@ def test_two_registered_projects_are_not_a_fault_of_any_kind(
     holds that row.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    # A set-up machine names its display zone (story 9b's `renders` line).
+    (tmp_path / ".pm-ai").mkdir()
+    (tmp_path / ".pm-ai" / "config.toml").write_text('display_timezone = "Europe/Warsaw"\n')
     monkeypatch.setattr(
         entry,
         "_bootstrap",
@@ -502,16 +509,29 @@ def test_an_unwritable_root_is_a_probe_result_not_a_traceback(
 # ── config.toml ──────────────────────────────────────────────────────────────
 
 
-def test_an_absent_config_is_a_first_run_not_an_error(registered, probes, capsys):
-    """No `config.toml` yet is the ordinary state of a clean machine."""
-    assert not (registered / ".pm-ai" / "config.toml").exists()
-    assert entry.main(["doctor"]) == EXIT_OK
-    assert "pm-ai is healthy." in capsys.readouterr().out
+def test_an_absent_config_fails_only_the_renders_line_naming_display_timezone(registered, probes, capsys):
+    """No `config.toml` yet is the ordinary state of a clean machine.
+
+    Not an error in the config line. Since story 9b the `renders` line fails on
+    it — no `display_timezone`, so no 07:00 can be scheduled — which the spec
+    calls expected before `setup`; it is the only line that does.
+    """
+    (registered / ".pm-ai" / "config.toml").unlink()
+    assert entry.main(["doctor"]) == EXIT_UNHEALTHY
+    printed = capsys.readouterr().out
+    failing = [line for line in printed.splitlines() if line.startswith("[failing]")]
+    assert len(failing) == 1 and failing[0].startswith("[failing] renders: display_timezone")
+    assert not [
+        line
+        for line in printed.splitlines()
+        if line.startswith("[") and not line.startswith(("[     ok]", "[failing] renders"))
+    ]
 
 
 def test_read_optional_turns_absence_into_a_value(registered, tmp_path):
     """Absence is a value on this path — through the wrapper and, since `8f`,
     through `read_artifact` itself, which is what the wrapper now delegates to."""
+    (registered / ".pm-ai" / "config.toml").unlink()
     daemon = entry._compose(_Keychain()).daemon
     assert daemon is not None
     assert entry.read_optional(
@@ -979,6 +999,19 @@ def test_dashboard_needs_a_daemon_and_says_so(tmp_path, monkeypatch, capsys):
         # quietly lost this member would turn a corrupt segment into a traceback.
         (cli.UnknownCategory("2026-09.md line 9: `gossip` is not a category"), "gossip"),
         (cli.ScopeResolutionError("people:bob declares no daily_dashboard.md"), "people:bob"),
+        # Story 9b: the page was written and recording its instant failed.
+        (
+            cli.RenderUnrecorded(
+                "the personal dashboard was written (daily_dashboard.md is the new "
+                "page), but recording its instant failed: disk full"
+            ),
+            "was written",
+        ),
+        # Story 9b: another process holds the dashboard's claim, named.
+        (
+            cli.ArtifactBusy("daily_dashboard.md in personal is claimed by another pm-ai process"),
+            "claimed by another pm-ai process",
+        ),
     ],
 )
 def test_every_pipeline_refusal_exits_3_with_its_own_sentence(
@@ -1123,3 +1156,85 @@ def test_every_daemon_backed_command_declares_its_target():
         assert command.run is not None
         if asks_for_a_daemon(command.run):
             assert command.target is not None, f"`{name}` needs a daemon and no target"
+
+
+def test_a_fresh_machine_with_no_daemon_prints_the_renders_line_naming_the_zone(
+    tmp_path, monkeypatch, probes, capsys
+):
+    """Story 9b: the `renders` line needs no composed daemon, so a machine
+    before `setup` sees it name `display_timezone`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(entry, "_bootstrap", enrolled())
+    assert entry.main(["doctor"]) == EXIT_UNHEALTHY
+    printed = capsys.readouterr().out
+    assert "[failing] renders: display_timezone is not set in config.toml" in printed
+    assert "personal: never rendered" in printed
+
+
+def test_an_unusable_display_zone_shows_the_loaders_refusal_on_the_renders_line(
+    registered, probes, capsys
+):
+    (registered / ".pm-ai" / "config.toml").write_text('display_timezone = "Mars/Base"\n')
+    assert entry.main(["doctor"]) == EXIT_UNHEALTHY
+    printed = capsys.readouterr().out
+    line = next(l for l in printed.splitlines() if l.startswith("[failing] renders:"))
+    assert "config.toml could not be used" in line and "Mars/Base" in line
+    assert "Correct config.toml" in printed
+
+
+def test_the_renders_line_names_the_project_with_and_without_a_daemon(
+    tmp_path, monkeypatch, probes, capsys
+):
+    """With one project a daemon is composed; with two and a working directory
+    in neither, none is — the line names `project:alpha` and its recorded
+    failure either way, read from the same store."""
+    from datetime import datetime, timezone
+
+    home = tmp_path / "home"
+    (home / ".pm-ai").mkdir(parents=True)
+    (home / ".pm-ai" / "config.toml").write_text('display_timezone = "Europe/Warsaw"\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(entry, "_bootstrap", enrolled(alpha=tmp_path / "alpha"))
+    composed = entry._compose(_Keychain())
+    assert composed.daemon is not None
+    composed.daemon.storage.record_render_failure(
+        DataScope(ScopeKind.PROJECT, "alpha"),
+        "the project copy is not excluded",
+        at=datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc),
+    )
+    composed.daemon.storage.close()
+
+    entry.main(["doctor"])
+    with_daemon = next(
+        l for l in capsys.readouterr().out.splitlines() if l.startswith("[failing] renders:")
+    )
+    monkeypatch.setattr(
+        entry, "_bootstrap", enrolled(alpha=tmp_path / "alpha", beta=tmp_path / "beta")
+    )
+    monkeypatch.chdir(tmp_path)
+    assert entry._compose(_Keychain()).daemon is None, "two projects, a directory in neither"
+    entry.main(["doctor"])
+    without = next(
+        l for l in capsys.readouterr().out.splitlines() if l.startswith("[failing] renders:")
+    )
+    for line in (with_daemon, without):
+        assert "project:alpha: last render never, FAILING" in line
+        assert "the project copy is not excluded" in line
+    assert "project:beta: never rendered" in without
+
+
+def test_a_render_written_but_unrecorded_prints_the_written_line_then_refuses(
+    registered, monkeypatch, capsys
+):
+    def written_but_unrecorded(scope):
+        raise cli.RenderUnrecorded(
+            "the personal dashboard was written (daily_dashboard.md is the new page), "
+            "but recording its instant failed: disk full",
+            path=registered / "daily_dashboard.md",
+        )
+
+    monkeypatch.setattr(entry, "_dashboard", lambda daemon: written_but_unrecorded)
+    assert entry.main(["dashboard"]) == EXIT_REFUSAL
+    captured = capsys.readouterr()
+    assert f"the personal dashboard is written: {registered / 'daily_dashboard.md'}" in captured.out
+    assert "recording its instant failed" in captured.err

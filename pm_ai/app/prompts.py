@@ -49,7 +49,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from pm_ai.app.concurrency import (
     WRITER_START_WAIT_SECONDS,
@@ -60,11 +60,19 @@ from pm_ai.app.concurrency import (
     WriterThread,
 )
 from pm_ai.app.pipelines import (
+    CALENDAR_FETCH_BUDGET_SECONDS,
+    FetchAbandoned,
+    ReadBound,
     ask_dashboard_exclusion,
+    assert_dashboard_scope,
     drop_transcript,
     prepare_dashboard,
     publish_dashboard,
+    record_failed_render,
+    render_unrecorded,
 )
+from pm_ai.connectors.registry import run_bounded
+from pm_ai.domain.renders import RenderUnrecorded
 from pm_ai.app.wiring import (
     handed_daemon,
     onboard_in_daemon,
@@ -113,6 +121,8 @@ __all__ = [
     "JOB_RETENTION",
     "RequestPath",
 ]
+
+_T = TypeVar("_T")
 
 DAEMON_LOG_NAME = "daemon.log"
 """The one file under `~/.pm-ai/logs/` the daemon writes (AD-24): the request
@@ -284,6 +294,20 @@ class JobEvents:
                 return  # the loop has closed; nobody is reading
 
 
+@dataclass(eq=False)
+class _Rendering:
+    """One render in flight: where it is, for the shutdown's own step (9b)."""
+
+    scope: DataScope
+    claimed: bool = False
+    """Its claimed step has run (or failed) on the writer: nothing to mark."""
+    in_fetch: bool = False
+    started: bool = False
+    """It holds its scope's render slot; before that it waits behind another."""
+    finished: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
 @dataclass
 class RequestPath:
     """The daemon's request path: lines, jobs and their streams (story 4r).
@@ -311,6 +335,14 @@ class RequestPath:
     a fetch."""
     _slots: dict[str, threading.Lock] = field(default_factory=dict)
     _slots_lock: threading.Lock = field(default_factory=threading.Lock)
+    render_budget: float = CALENDAR_FETCH_BUDGET_SECONDS
+    """The per-connector budget each render's calendar read is held to (9b)."""
+    _render_slots: dict[DataScope, threading.Lock] = field(default_factory=dict)
+    """One lock per dashboard scope: at most one render of a scope in flight in
+    the daemon, the 07:00 timer's and a dashboard job's together (story 9b)."""
+    _render_slots_lock: threading.Lock = field(default_factory=threading.Lock)
+    _renders: set[_Rendering] = field(default_factory=set)
+    """The renders in flight, for the shutdown's own step."""
 
     # ── the endpoints ────────────────────────────────────────────────────────
 
@@ -647,6 +679,17 @@ class RequestPath:
                 kind=StepKind.SHUTDOWN,
             )
         finally:
+            try:
+                self.writer.call(
+                    self._mark_unfinished_renders,
+                    label="mark an unfinished render failed",
+                    kind=StepKind.SHUTDOWN,
+                )
+            except Exception as unmarked:  # noqa: BLE001 — named; the stop goes on
+                _log.warning(
+                    "the shutdown could not mark an unfinished render failed (%s)",
+                    type(unmarked).__name__,
+                )
             for mark in self.shutdown_marks:
                 try:
                     self.writer.call(
@@ -906,18 +949,167 @@ class RequestPath:
         return enumerated.check_health()
 
     def _dashboard(self, fresh: Daemon, scope: DataScope, *, job: str | None) -> Path:
-        """The render as steps: reads and render bounded, git bounded, the save claimed.
+        """A dashboard job's render: `render_dashboard` with the job's own door.
 
         A project scope here is one the daemon watches: `prompt` refused every
         other before the line was planned (story 4q).
         """
-        document = prepare_dashboard(fresh, scope=scope, now=fresh.clock())
-        ask_dashboard_exclusion(fresh, scope=scope)
-        written: Path = self._hand_for(job)(
-            lambda: publish_dashboard(fresh, scope=scope, document=document),
-            f"save the {scope} dashboard",
-        )
-        return written
+        return self.render_dashboard(fresh, scope, hand=self._hand_for(job))
+
+    def render_slot(self, scope: DataScope) -> threading.Lock:
+        """The lock that keeps one render of `scope` in flight at a time (9b)."""
+        with self._render_slots_lock:
+            return self._render_slots.setdefault(scope, threading.Lock())
+
+    def render_dashboard(
+        self,
+        fresh: Daemon,
+        scope: DataScope,
+        *,
+        hand: Callable[[Callable[[], Any], str], Any],
+        budget: float | None = None,
+    ) -> Path:
+        """The render as steps (AD-5, stories 4r, 9b), on a worker — every path's.
+
+        A dashboard job and the 07:00 timer both come here. Inside the scope's
+        render slot, so the clock is read only once the render may run: the
+        reads and the render are bounded steps, each calendar read held to the
+        per-connector fetch budget (`budget`, or `render_budget`); `git` is
+        asked in a bounded step just before the write and its answer handed
+        over with the bytes; the save and the render's record are one claimed
+        step handed through `hand`, the record committed last. A failure is
+        recorded for the scope, through `hand`, and raised; the writer stopping
+        under it is raised unrecorded, and a render still before its claimed
+        step at shutdown is recorded failed by the shutdown's own step.
+        """
+        assert_dashboard_scope(scope)
+        rendering = _Rendering(scope)
+
+        def claimed(work: Callable[[], Any], label: str) -> Any:
+            def marked() -> Any:
+                try:
+                    return work()
+                finally:
+                    # On the writer thread: the shutdown's step, queued after
+                    # this one, sees it and marks nothing.
+                    with rendering.lock:
+                        rendering.claimed = True
+
+            return hand(marked, label)
+
+        # Registered before it waits for the slot, so a render still waiting
+        # behind another at shutdown is marked too.
+        with self._render_slots_lock:
+            self._renders.add(rendering)
+        try:
+            with self.render_slot(scope):
+                with rendering.lock:
+                    rendering.started = True
+                now = fresh.clock()
+                try:
+                    document = prepare_dashboard(
+                        fresh,
+                        scope=scope,
+                        now=now,
+                        bound=self._render_bound(rendering, budget),
+                    )
+                    exclusion = ask_dashboard_exclusion(fresh, scope=scope)
+                    published: list[Path] = []
+
+                    def publish() -> Path:
+                        published.append(
+                            publish_dashboard(
+                                fresh,
+                                scope=scope,
+                                document=document,
+                                at=now,
+                                exclusion=exclusion,
+                            )
+                        )
+                        return published[-1]
+
+                    try:
+                        written: Path = claimed(publish, f"save the {scope} dashboard")
+                    except (WriterStopped, SchemaVersionChanged, RenderUnrecorded):
+                        raise
+                    except Exception as failed:
+                        if published:
+                            # The step's commit failed after the rename: the
+                            # page is new, only its record is missing.
+                            raise render_unrecorded(
+                                scope, failed, path=published[0]
+                            ) from failed
+                        raise
+                except (WriterStopped, SchemaVersionChanged):
+                    raise
+                except Exception as failed:
+                    record_failed_render(fresh, scope, failed, at=now, hand=claimed)
+                    raise
+                return written
+        finally:
+            with rendering.lock:
+                rendering.finished = True
+            with self._render_slots_lock:
+                self._renders.discard(rendering)
+
+    def _render_bound(self, rendering: _Rendering, budget: float | None) -> ReadBound:
+        """Each calendar read of one render held to the per-connector budget (AD-5)."""
+        limit = self.render_budget if budget is None else budget
+
+        def bound(call: Callable[[], _T], label: str) -> _T:
+            with rendering.lock:
+                rendering.in_fetch = True
+            try:
+                try:
+                    return run_bounded(call, timeout=limit, label=label)
+                except TimeoutError:
+                    raise FetchAbandoned(
+                        f"{label} did not answer within its {limit:g} s budget and "
+                        f"was abandoned, so that calendar could not be read."
+                    ) from None
+            finally:
+                with rendering.lock:
+                    rendering.in_fetch = False
+
+        return bound
+
+    def _mark_unfinished_renders(self) -> None:
+        """The shutdown's own step: a render not yet at its claimed step is
+        recorded failed, and writes nothing after — the stopping writer refuses
+        its save (story 9b)."""
+        with self._render_slots_lock:
+            renders = tuple(self._renders)
+        failures: list[tuple[DataScope, str]] = []
+        for rendering in renders:
+            with rendering.lock:
+                if rendering.finished or rendering.claimed:
+                    continue
+                where = (
+                    "reading the calendar"
+                    if rendering.in_fetch
+                    else "preparing it"
+                    if rendering.started
+                    else "waiting for another render of it to finish"
+                )
+            scope = rendering.scope
+            failures.append(
+                (
+                    scope,
+                    f"the daemon stopped while the {scope} render was {where}, so "
+                    f"this attempt wrote nothing; the dashboard file was not "
+                    f"replaced by it.",
+                )
+            )
+        if not failures:
+            return
+        # One step, each record its own statement: one that fails is logged
+        # and undone alone, never the others' marks.
+        recorded = self.daemon.storage.record_render_failures(failures, at=self.daemon.clock())
+        for scope in recorded:
+            _log.warning(
+                "the %s render was unfinished when the daemon stopped; recorded failed",
+                scope,
+            )
 
     def _hand_for(self, job: str | None) -> Callable[[Callable[[], Any], str], Any]:
         """The writer's door for one command: each step named, and noted for its job."""
