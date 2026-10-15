@@ -1,4 +1,5 @@
-"""The scheduled harvest's timers — temporary; story 10a replaces this file (story 9a).
+"""The scheduled harvest's and the morning render's timers — temporary; story 10a
+replaces this file (stories 9a, 9b).
 
 **An in-memory timer, which story 10a forbids** ("every job is a queue row, never
 an in-memory timer"). It is here because CAP-2's four-hour cycle needed an
@@ -43,6 +44,34 @@ every instance's due instant and the next read of the connector list.
   An instance skipped as not set up waits for its next cycle, or for the list
   read that finds it set up, whichever is first.
 
+## The morning render (story 9b)
+
+`RenderTimers`, one task beside the harvests', renders every dashboard scope —
+personal, then each project the daemon watches (the enrolled projects read at
+its start, AD-5; one enrolled since waits for a restart) — at 07:00 in
+`display_timezone`. Whenever
+it evaluates, at start or after any wait, a scope with no successful render
+since today's 07:00 is rendered at once if it is past 07:00 (`cadence`), so a
+daemon started late, or a laptop that slept through the morning, renders on
+arrival. It evaluates again at the next 07:00, at a pending retry, and at least
+every fifteen minutes, so a changed zone or a hand-run render is noticed.
+
+- `config.toml` is read again at every evaluation for the zone, and the whole
+  daemon (`RequestPath.fresh`) at the start of every render (AD-5). With the
+  zone unset nothing is scheduled: the refusal is recorded for every dashboard
+  scope at every evaluation.
+- Each render runs on the I/O pool through `RequestPath.render_dashboard`:
+  each calendar read a bounded step under the per-connector fetch budget, the
+  project copy's `git` question a bounded step, the save and its record one
+  claimed step on the writer thread. One scope failing does not stop the next.
+- A render that met something waiting can clear — another command's claim, a
+  busy store, an I/O error, a locked keychain — is tried again on `9a`'s waits,
+  1, 2, 4, … minutes, until it succeeds or the next 07:00, whoever recorded the
+  refusal (a hand-run or a job included). One that failed on its own input
+  waits for the next 07:00, unless its file goes missing; a `config.toml`
+  refused inside a render is tried at the next evaluation. A deleted dashboard
+  is rendered again past 07:00.
+
 ## Stopping
 
 The task is cancelled with the other timers. A harvest still in a bounded step
@@ -51,6 +80,14 @@ step (`RequestPath.shutdown_marks`) records it failed, naming the last claimed
 step it finished, and the writer refuses any step it hands over later. A step
 abandoned at its budget is refused the same way, by thread, checked again on
 the writer thread when its handed step runs.
+
+The render task is cancelled the same way. A render not yet at its claimed step
+— waiting for its scope's slot, reading the calendar, or preparing the page —
+is recorded failed by the shutdown's own step
+(`RequestPath._mark_unfinished_renders`), each record its own statement in that
+one step, and the stopping writer refuses its save, so it writes no file after.
+A render whose claimed step is running or queued finishes it and records; then
+the writer closes.
 """
 
 from __future__ import annotations
@@ -63,7 +100,8 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
+from enum import Enum
 from typing import Any, TypeVar, cast
 
 from pm_ai.app.concurrency import WriterStopped
@@ -73,8 +111,12 @@ from pm_ai.app.pipelines import (
     FetchAbandoned,
     FetchBound,
     HarvestAttempt,
+    DASHBOARD_ARTIFACT,
+    clears_by_waiting,
+    display_zone_now,
     harvest_once,
     record_failed,
+    record_failed_render,
     set_up,
 )
 from pm_ai.app.prompts import DAEMON_LOGGER, RequestPath
@@ -86,18 +128,23 @@ from pm_ai.core.cadence import (
     FIRST_RETRY,
     REFUSED_SAVE_RETRY,
     first_attempts,
+    latest_render,
     next_cycle,
+    next_render,
     provider_floor,
+    render_due,
     retries,
     retry_wait,
+    todays_render,
 )
 from pm_ai.core.config import ConfigRefused
 from pm_ai.domain.harvest import HarvestFailure
 from pm_ai.domain.health import UnbuiltConnector
+from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import ArtifactBusy
-from pm_ai.storage.service import OperationalStoreBusy
+from pm_ai.storage.service import OperationalStoreBusy, SchemaVersionChanged
 
-__all__ = ["HarvestTimers"]
+__all__ = ["HarvestTimers", "RenderTimers"]
 
 _log = logging.getLogger(DAEMON_LOGGER)
 _T = TypeVar("_T")
@@ -579,3 +626,314 @@ def _unreadable(instance: str, error: BaseException) -> HarvestFailure:
 def _minutes(wait: timedelta) -> str:
     minutes = wait.total_seconds() / 60
     return f"{minutes:g} minute{'s' if minutes != 1 else ''}"
+
+
+# ── The morning render (story 9b) ────────────────────────────────────────────
+
+REEVALUATE = timedelta(minutes=15)
+"""The longest the render timer goes without evaluating again: a zone changed or
+set, a render made by hand, or a dashboard file deleted is noticed within it.
+Also the longest wait after an evaluation that could not run."""
+
+PERSONAL = DataScope(ScopeKind.PERSONAL)
+
+
+class RenderOutcome(Enum):
+    """How one render attempt ended, which decides when the scope is due again."""
+
+    RENDERED = "rendered"
+    BUSY = "busy"
+    """It met something waiting can clear — another command's claim, a busy
+    store, an I/O error, a locked keychain: retried on `9a`'s waits until the
+    next 07:00."""
+    FAILED = "failed"
+    """It failed on its own input — a malformed goals file, a refusal: the next 07:00."""
+    REEVALUATE = "reevaluate"
+    """`config.toml` was refused inside the render although the evaluation read
+    a zone: tried again at the next evaluation, which reads it again."""
+    STOPPED = "stopped"
+    """The daemon's writer stopped under it: the round ends."""
+
+
+def _outcome_of(error: BaseException) -> RenderOutcome:
+    if isinstance(error, ConfigRefused):
+        return RenderOutcome.REEVALUATE
+    return RenderOutcome.BUSY if clears_by_waiting(error) else RenderOutcome.FAILED
+
+
+@dataclass
+class _Retry:
+    """A scope's waitable failures in a row, within one 07:00's day."""
+
+    day: datetime
+    """The latest 07:00 when they began; the next 07:00 starts over."""
+    due: datetime
+    failures_in_a_row: int
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """One evaluation: the zone, or why there is none, and the scopes due now."""
+
+    zone: tzinfo | None
+    due: tuple[DataScope, ...]
+    retry_at: datetime | None = None
+    """When an evaluation that could not run is tried again."""
+
+
+class RenderTimers:
+    """The daemon's 07:00 render of every dashboard scope (story 9b).
+
+    `now` and `sleep` are injected so a test drives the day with a fake clock;
+    `budget`, when given, replaces the per-connector fetch budget each
+    calendar read runs under.
+    """
+
+    def __init__(
+        self,
+        *,
+        requests: RequestPath,
+        now: Callable[[], datetime],
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        budget: float | None = None,
+        nap: float = NAP_SECONDS,
+    ) -> None:
+        self.requests = requests
+        self.now = now
+        self.sleep = sleep
+        self.budget = budget
+        self.nap = nap
+        self._wake: datetime | None = None
+        self._retries: dict[DataScope, _Retry] = {}
+        self._given_up: dict[DataScope, datetime] = {}
+        """Scopes whose render failed on its own input, by the latest 07:00 then."""
+        self._today: dict[DataScope, datetime] = {}
+        """Each scope's latest 07:00 at the last evaluation."""
+        self._present: dict[DataScope, bool] = {}
+        """Whether each scope's file was there at the last evaluation."""
+        self._unreadable_in_a_row = 0
+        """Evaluations in a row that could not read the zone or the records."""
+        self._unexpected_in_a_row = 0
+        """Rounds in a row that stopped on something unexpected."""
+
+    # ── what a test reads ────────────────────────────────────────────────────
+
+    @property
+    def wake(self) -> datetime | None:
+        """When the timer evaluates next."""
+        return self._wake
+
+    @property
+    def scopes(self) -> tuple[DataScope, ...]:
+        """Every dashboard scope, in render order: personal, then each project the
+        daemon watches — read at its start (AD-5)."""
+        return (
+            PERSONAL,
+            *(DataScope(ScopeKind.PROJECT, project) for project in self.requests.daemon.watched),
+        )
+
+    # ── the loop ─────────────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Until cancelled: evaluate, render what is due, wait for the next wake.
+
+        A round that stops on something unexpected is logged by type and tried
+        again after 1, 2, 4 … minutes, at most `REEVALUATE`.
+        """
+        while True:
+            try:
+                await self.tick()
+                self._unexpected_in_a_row = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as unexpected:  # noqa: BLE001 — logged; backed off
+                self._unexpected_in_a_row += 1
+                wait = min(retry_wait(self._unexpected_in_a_row), REEVALUATE)
+                _log.error(
+                    "an evaluation of the morning render stopped on an unexpected %s; "
+                    "it is evaluated again in %s",
+                    type(unexpected).__name__,
+                    _minutes(wait),
+                )
+                self._wake = self.now() + wait
+            await self._wait()
+
+    async def tick(self) -> None:
+        """Evaluate once: render every scope due now, one after another, in order."""
+        plan = await self.requests.pool.run(self._plan)
+        for scope in plan.due:
+            outcome = await self.requests.pool.run(functools.partial(self._attempt, scope))
+            self._settle(scope, outcome)
+            if outcome is RenderOutcome.STOPPED:
+                break
+        self._wake = self._next_wake(plan)
+
+    def _next_wake(self, plan: _Plan) -> datetime:
+        now = self.now()
+        wakes = [now + REEVALUATE]
+        if plan.retry_at is not None:
+            wakes.append(plan.retry_at)
+        if plan.zone is not None:
+            wakes.append(next_render(now, plan.zone))
+        # An overdue retry wakes the timer at once, never at the next fifteen.
+        wakes.extend(max(retry.due, now) for retry in self._retries.values())
+        return min(wakes)
+
+    async def _wait(self) -> None:
+        while True:
+            wake = self._wake if self._wake is not None else self.now()
+            remaining = (wake - self.now()).total_seconds()
+            if remaining <= 0:
+                return
+            await self.sleep(min(remaining, self.nap))
+
+    def _settle(self, scope: DataScope, outcome: RenderOutcome) -> None:
+        now = self.now()
+        day = self._today.get(scope, now)
+        if outcome is RenderOutcome.RENDERED:
+            self._retries.pop(scope, None)
+            self._given_up.pop(scope, None)
+            _log.info("the %s dashboard was rendered", scope)
+        elif outcome is RenderOutcome.BUSY:
+            retry = self._retries.get(scope)
+            count = 1 if retry is None or retry.day != day else retry.failures_in_a_row + 1
+            wait = retry_wait(count)
+            self._retries[scope] = _Retry(day=day, due=now + wait, failures_in_a_row=count)
+            _log.warning(
+                "the %s dashboard render met something waiting can clear (`pm-ai "
+                "doctor` names it); it is tried again in %s",
+                scope,
+                _minutes(wait),
+            )
+        elif outcome is RenderOutcome.FAILED:
+            self._retries.pop(scope, None)
+            self._given_up[scope] = day
+            _log.warning(
+                "the %s dashboard render failed and is tried again at the next 07:00 "
+                "(`pm-ai doctor` names the reason)",
+                scope,
+            )
+        elif outcome is RenderOutcome.REEVALUATE:
+            self._retries.pop(scope, None)
+            _log.warning(
+                "the %s dashboard render met a config.toml it could not use; it is "
+                "tried again at the next evaluation",
+                scope,
+            )
+        else:
+            _log.warning(
+                "the %s dashboard render stopped with the daemon's writer; the "
+                "round ends",
+                scope,
+            )
+
+    # ── on a worker ──────────────────────────────────────────────────────────
+
+    def _plan(self) -> _Plan:
+        """The zone read now, the records read now, and the scopes due now.
+
+        With no zone, a `config.toml` the loader refuses, or a zone or records
+        that cannot be read, nothing is due and the refusal is recorded for
+        every dashboard scope; an unreadable read is tried again on the waits.
+
+        A scope is due when it is past today's 07:00 with no success since; or
+        past it with its file missing (a disposable artifact deleted is
+        re-rendered); or when its latest record is a failure waiting can clear,
+        newer than its last success and since the latest 07:00 — whoever
+        recorded it, a hand-run or a job included — retried on `9a`'s waits.
+        """
+        now = self.now()
+        daemon = self.requests.daemon
+        self._today = {}
+        try:
+            zone = display_zone_now(daemon)
+            records = {record.scope: record for record in daemon.storage.render_records()}
+        except ConfigRefused as refused:
+            self._unreadable_in_a_row = 0
+            self._record_everywhere(refused, now)
+            return _Plan(None, ())
+        except Exception as unreadable:  # noqa: BLE001 — recorded; retried on the waits
+            self._unreadable_in_a_row += 1
+            self._record_everywhere(unreadable, now)
+            wait = min(retry_wait(self._unreadable_in_a_row), REEVALUATE)
+            _log.warning(
+                "the morning render could not read its zone or its records (%s); it "
+                "is evaluated again in %s",
+                type(unreadable).__name__,
+                _minutes(wait),
+            )
+            return _Plan(None, (), retry_at=now + wait)
+        self._unreadable_in_a_row = 0
+        today = todays_render(now, zone)
+        day = latest_render(now, zone)
+        due: list[DataScope] = []
+        for scope in self.scopes:
+            self._today[scope] = day
+            record = records.get(scope)
+            present = daemon.storage.paths.resolve(scope, DASHBOARD_ARTIFACT).exists()
+            if self._present.get(scope, True) and not present:
+                # The file went missing: whatever was given up is tried again.
+                self._given_up.pop(scope, None)
+            self._present[scope] = present
+            # Past 07:00, a deleted page is rebuilt even if today's render is
+            # recorded: the file is disposable (Tier 3), and what it shows is
+            # whatever answers now.
+            missing = now >= today and not present
+            waitable = (
+                record is not None
+                and record.failing
+                and record.retryable
+                and record.last_failure is not None
+                and record.last_failure >= day
+            )
+            last = None if record is None else record.last_success
+            if not (missing or waitable or render_due(last, now, zone)):
+                # Rendered since today's 07:00, by anyone, or not yet 07:00.
+                self._retries.pop(scope, None)
+                continue
+            if self._given_up.get(scope) == day:
+                continue
+            retry = self._retries.get(scope)
+            if retry is not None and retry.day != day:
+                # A new 07:00: the waits start over.
+                del self._retries[scope]
+                retry = None
+            if retry is None and waitable and record is not None and record.last_failure:
+                # Refused by a claim or a busy store, recorded by anyone: the
+                # first wait counts from that refusal.
+                retry = _Retry(day=day, due=record.last_failure + FIRST_RETRY, failures_in_a_row=1)
+                self._retries[scope] = retry
+            if retry is not None and retry.due > now:
+                continue
+            due.append(scope)
+        return _Plan(zone, tuple(due))
+
+    def _record_everywhere(self, error: BaseException, now: datetime) -> None:
+        for scope in self.scopes:
+            record_failed_render(
+                self.requests.daemon, scope, error, at=now, hand=self._hand_record
+            )
+
+    def _attempt(self, scope: DataScope) -> RenderOutcome:
+        """One render of `scope`, the daemon read afresh. Never raises."""
+        try:
+            fresh = self.requests.fresh()
+        except (WriterStopped, SchemaVersionChanged):
+            return RenderOutcome.STOPPED
+        except Exception as unreadable:  # noqa: BLE001 — recorded against the scope
+            record_failed_render(
+                self.requests.daemon, scope, unreadable, at=self.now(), hand=self._hand_record
+            )
+            return _outcome_of(unreadable)
+        try:
+            self.requests.render_dashboard(
+                fresh, scope, hand=self._hand_record, budget=self.budget
+            )
+        except (WriterStopped, SchemaVersionChanged):
+            return RenderOutcome.STOPPED
+        except Exception as failed:  # noqa: BLE001 — recorded by `render_dashboard`
+            return _outcome_of(failed)
+        return RenderOutcome.RENDERED
+
+    def _hand_record(self, work: Callable[[], Any], label: str) -> Any:
+        return self.requests.writer.call(work, label=label)

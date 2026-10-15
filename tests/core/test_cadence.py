@@ -100,3 +100,79 @@ def test_the_providers_wait_is_read_back_from_the_recorded_failure():
 
 def test_coverage_older_than_90_days_is_cut_off():
     assert coverage_cutoff(T0) == T0 - timedelta(days=90)
+
+
+# ── The morning render (story 9b) ────────────────────────────────────────────
+
+from zoneinfo import ZoneInfo  # noqa: E402
+
+from pm_ai.core.cadence import (  # noqa: E402
+    FIRST_LOOK_BACK,
+    LOOK_BACK_CAP,
+    RENDER_AT,
+    LookBackKind,
+    look_back,
+    next_render,
+    render_due,
+    todays_render,
+)
+
+WARSAW = ZoneInfo("Europe/Warsaw")
+
+
+def test_the_render_constants_are_the_decided_ones():
+    assert (RENDER_AT.hour, RENDER_AT.minute) == (7, 0)
+    assert FIRST_LOOK_BACK == timedelta(hours=24)
+    assert LOOK_BACK_CAP == timedelta(days=7)
+
+
+def test_07_00_is_the_zones_wall_clock_on_both_sides_of_a_change():
+    # Europe/Warsaw: CEST (+2) until 2026-10-25 03:00, CET (+1) after.
+    before = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
+    assert todays_render(before, WARSAW) == datetime(2026, 10, 24, 5, 0, tzinfo=timezone.utc)
+    assert next_render(before, WARSAW) == datetime(2026, 10, 25, 6, 0, tzinfo=timezone.utc)
+    spring = datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc)
+    assert next_render(spring, WARSAW) == datetime(2026, 3, 29, 5, 0, tzinfo=timezone.utc)
+
+
+def test_the_next_render_is_today_before_07_00_and_tomorrow_from_it():
+    seven = datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc)
+    assert next_render(seven - MINUTE, WARSAW) == seven
+    assert next_render(seven, WARSAW) == seven + timedelta(days=1)
+
+
+def test_today_is_the_local_date_not_the_utc_one():
+    # 23:30 UTC on the 13th is 01:30 on the 14th in Warsaw.
+    late = datetime(2026, 10, 13, 23, 30, tzinfo=timezone.utc)
+    assert todays_render(late, WARSAW) == datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("last", "now", "due"),
+    [
+        (None, datetime(2026, 10, 14, 4, 59, tzinfo=timezone.utc), False),
+        (None, datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc), True),
+        (datetime(2026, 10, 14, 4, 0, tzinfo=timezone.utc), datetime(2026, 10, 14, 7, 30, tzinfo=timezone.utc), True),
+        (datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc), datetime(2026, 10, 14, 7, 30, tzinfo=timezone.utc), False),
+        # A recorded success later than now: the clock was stepped back — due.
+        (datetime(2026, 10, 15, 9, 0, tzinfo=timezone.utc), datetime(2026, 10, 14, 7, 30, tzinfo=timezone.utc), True),
+    ],
+)
+def test_a_scope_is_due_past_07_00_with_no_success_since_it(last, now, due):
+    assert render_due(last, now, WARSAW) is due
+
+
+def test_the_look_back_is_the_last_render_24_hours_or_clamped_to_7_days():
+    assert look_back(None, T0).since == T0 - FIRST_LOOK_BACK
+    assert look_back(None, T0).kind is LookBackKind.NO_RENDER_RECORDED
+    friday = T0 - timedelta(days=3)
+    assert look_back(friday, T0).since == friday
+    assert look_back(friday, T0).kind is LookBackKind.SINCE_LAST_RENDER
+    old = T0 - timedelta(days=21)
+    assert look_back(old, T0).since == T0 - LOOK_BACK_CAP
+    assert look_back(old, T0).kind is LookBackKind.CLAMPED_OLDER
+    ahead = T0 + timedelta(days=1)
+    assert look_back(ahead, T0).since == T0 - LOOK_BACK_CAP
+    assert look_back(ahead, T0).kind is LookBackKind.CLAMPED_LATER
+    exactly = T0 - LOOK_BACK_CAP
+    assert look_back(exactly, T0).kind is LookBackKind.SINCE_LAST_RENDER

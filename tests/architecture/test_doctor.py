@@ -1013,3 +1013,59 @@ def test_transcript_refusals_are_counted_on_the_line():
 def test_a_record_for_an_instance_no_longer_built_is_not_listed():
     probe = harvests_recorded(["graph:work"], [_record("graph:work"), _record("graph:gone")])
     assert "graph:gone" not in probe.detail
+
+
+# ── The morning render's line (story 9b) ─────────────────────────────────────
+
+from pm_ai.domain.identity import DataScope, ScopeKind  # noqa: E402
+from pm_ai.domain.renders import RenderRecord  # noqa: E402
+from pm_ai.platform.doctor import RENDERS_PROBE, renders_recorded  # noqa: E402
+
+_PERSONAL = DataScope(ScopeKind.PERSONAL)
+_ALPHA = DataScope(ScopeKind.PROJECT, "alpha")
+_SEVEN = datetime(2026, 10, 14, 5, 0, tzinfo=timezone.utc)
+
+
+def test_renders_with_nothing_failing_is_ok_naming_each_scopes_last_render():
+    probe = renders_recorded(
+        [_PERSONAL, _ALPHA], [RenderRecord(_PERSONAL, _SEVEN, None, None)], zone_set=True
+    )
+    assert probe.name == RENDERS_PROBE and probe.health is Health.OK
+    assert probe.detail == (
+        "personal: last render 2026-10-14T05:00:00+00:00; project:alpha: never rendered"
+    )
+
+
+def test_a_failed_render_fails_naming_its_scope_and_reason():
+    probe = renders_recorded(
+        [_PERSONAL, _ALPHA],
+        [
+            RenderRecord(_PERSONAL, None, _SEVEN, "the goals file has two goals named g_x"),
+            RenderRecord(_ALPHA, _SEVEN, None, None),
+        ],
+        zone_set=True,
+    )
+    assert probe.health is Health.FAILING
+    assert (
+        "personal: last render never, FAILING, last failed at 2026-10-14T05:00:00+00:00: "
+        "the goals file has two goals named g_x" in probe.detail
+    )
+    assert probe.remediation
+
+
+def test_no_display_zone_fails_naming_the_key_even_before_any_render():
+    probe = renders_recorded([_PERSONAL], [], zone_set=False)
+    assert probe.health is Health.FAILING
+    assert "display_timezone is not set" in probe.detail
+    assert "pm-ai setup" in probe.detail
+    assert "display_timezone" in probe.remediation
+
+
+def test_a_config_the_loader_refuses_fails_the_renders_line_with_its_sentence():
+    probe = renders_recorded(
+        [_PERSONAL], [], zone_set=False, config_refused="display_timezone 'Mars/Base' is unknown"
+    )
+    assert probe.health is Health.FAILING
+    assert "config.toml could not be used" in probe.detail
+    assert "Mars/Base" in probe.detail
+    assert probe.remediation.startswith("Correct config.toml")

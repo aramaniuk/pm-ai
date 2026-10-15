@@ -3521,6 +3521,9 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "record_harvest_failure": ("record a failed harvest attempt", _asks_none),
     "record_transcript_refusals": ("record the transcript refusals", _asks_none),
     "prune_coverage": ("remove old coverage records", _asks_none),
+    "record_render": ("record the render", _asks_none),
+    "record_render_failure": ("record a failed render", _asks_none),
+    "record_render_failures": ("record failed renders", _asks_none),
     "record_transcript_state": ("record the transcript's state", _asks_none),
     "stage_unless_acted": ("stage a proposal", _asks_none),
     "stage_proposal": ("stage a proposal", _asks_none),
@@ -3551,6 +3554,9 @@ PLAIN_READS: frozenset[str] = frozenset(
         "api_token_path",
         "daemon_lock_path",
         "harvest_records",  # its own read-only connection
+        "render_records",  # its own read-only connection
+        "last_render",  # its own read-only connection
+        "ask_git_exclusion",  # `git`'s answer, uncached: a bounded step
         "assert_writable",  # `git`'s answer and the key check: a bounded step
         "diagnostic_lines",
         "event_log_segments",
@@ -3574,6 +3580,7 @@ NEVER_FROM_A_JOB: frozenset[str] = frozenset(
     {
         "exclusive",  # a claim is entered inside a claimed step, never around one
         "claimed_step",
+        "recording_render",  # entered inside the render's claimed step, never around one
         "adopt_daemon_connection",
         "close",
         "seeing",  # a view of the unhanded writer

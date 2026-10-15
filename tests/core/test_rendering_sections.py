@@ -694,6 +694,8 @@ def test_no_message_entries_names_the_window():
     # The two stamps are the window, and they are 24h apart — asserting
     # MESSAGE_WINDOW against its own literal here would restate the constant
     # rather than check that the render names it.
+    # And why it starts there (story 9b): no earlier render was handed in.
+    assert "in the last 24 hours (no earlier render recorded)" in body
 
 
 def test_an_empty_section_no_longer_says_nothing_writes_the_category():
@@ -1367,7 +1369,8 @@ def test_a_handle_with_nothing_unrecorded_marks_and_prints_no_sign_in_line():
     pm = PmHandles(handles=frozenset({person_handle(GRAPH, PM_ID)}), unrecorded=(), unchecked=())
     entry = message(at=NOW - timedelta(minutes=1), mentions=mentioning(PM_ID))
     body = sections(render(entries=(entry,), pm=pm))["Proactive Enablement"]
-    assert body.split("\n")[0].endswith(MENTIONS_YOU)
+    # The first line names the window (story 9b); the first signal follows.
+    assert body.split("\n")[2].endswith(MENTIONS_YOU)
     assert "predates" not in body
 
 
@@ -1558,7 +1561,10 @@ def test_a_section_with_a_mention_the_cap_and_both_row_lines_reads_exactly():
     lines = [f"- **12:09** u_20 in #payments — {MENTIONS_YOU}"] + [
         f"- **12:{29 - n:02d}** u_{n:02d} in #payments" for n in range(19)
     ]
-    expected = "\n".join(lines) + (
+    expected = (
+        "Message signals in the last 24 hours (no earlier render recorded), up "
+        "to 2026-09-09 12:30:\n\n"
+    ) + "\n".join(lines) + (
         "\n\n1 more message signal in this window is not shown; it is in the "
         "event log."
         "\n\nThe sign-in for `graph:old` predates pm-ai recording the user id, so "
@@ -1568,3 +1574,65 @@ def test_a_section_with_a_mention_the_cap_and_both_row_lines_reads_exactly():
         "listed (denied). A message mentioning you through it is not marked."
     )
     assert sections(render(entries=entries, pm=pm))["Proactive Enablement"] == expected
+
+
+# ── The look-back (story 9b) ─────────────────────────────────────────────────
+
+
+def _since(last: datetime | None) -> str:
+    from pm_ai.core.cadence import look_back
+
+    return sections(
+        render_dashboard(
+            (),
+            (message(at=NOW - timedelta(days=2), actor="u_weekend", entry_id="evt_w"),),
+            goals(),
+            NOW,
+            tz=DISPLAY,
+            pm=NOBODY,
+            since=look_back(last, NOW),
+        )
+    )["Proactive Enablement"]
+
+
+def test_the_window_starts_at_the_last_render_and_says_so():
+    body = _since(NOW - timedelta(days=3))
+    assert body.startswith(
+        "Message signals since the last render at 2026-09-06 12:30, up to 2026-09-09 12:30:"
+    )
+    assert "u_weekend" in body
+
+
+def test_with_no_render_recorded_the_window_is_24_hours_and_says_so():
+    body = _since(None)
+    assert "in the last 24 hours (no earlier render recorded)" in body
+    assert "u_weekend" not in body
+
+
+def test_a_render_older_than_7_days_is_clamped_and_says_so():
+    body = _since(NOW - timedelta(days=21))
+    assert body.startswith(
+        "Message signals in the last 7 days (the earlier render, at 2026-08-19 "
+        "12:30, was older, so the window was clamped), up to 2026-09-09 12:30:"
+    )
+
+
+def test_a_render_recorded_later_than_now_is_clamped_and_says_so():
+    body = _since(NOW + timedelta(days=1))
+    assert "in the last 7 days (the recorded render, at 2026-09-10 12:30, is later" in body
+    assert "u_weekend" in body
+
+
+def test_an_empty_window_since_the_last_render_names_it():
+    from pm_ai.core.cadence import look_back
+
+    body = sections(
+        render_dashboard(
+            (), (), goals(), NOW, tz=DISPLAY, pm=NOBODY,
+            since=look_back(NOW - timedelta(hours=3), NOW),
+        )
+    )["Proactive Enablement"]
+    assert (
+        "No `message_posted` entries in the event log between 2026-09-09 09:30 and "
+        "2026-09-09 12:30 — since the last render at 2026-09-09 09:30." in body
+    )

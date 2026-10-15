@@ -189,9 +189,9 @@ def held_render(monkeypatch) -> Iterator[threading.Event]:
     release = threading.Event()
     real = prompts.prepare_dashboard
 
-    def prepare(daemon, *, scope, now):
+    def prepare(daemon, *, scope, now, **kwargs):
         release.wait(30)
-        return real(daemon, scope=scope, now=now)
+        return real(daemon, scope=scope, now=now, **kwargs)
 
     monkeypatch.setattr(prompts, "prepare_dashboard", prepare)
     yield release
@@ -300,7 +300,7 @@ def test_the_row_is_queued_before_the_202_and_the_job_ends_done_with_the_path(ri
 
 
 def test_a_render_that_fails_is_failed_with_pm_ais_sentence_and_the_type_name(rig, monkeypatch):
-    def broken(daemon, *, scope, now):
+    def broken(daemon, *, scope, now, **kwargs):
         raise RuntimeError("Bearer eyJ-a-provider-token-in-an-exception")
 
     monkeypatch.setattr(prompts, "prepare_dashboard", broken)
@@ -945,7 +945,7 @@ def test_a_rollback_that_fails_halts_the_writer_naming_it(rig, monkeypatch, capl
 
 
 def test_a_claimed_step_meeting_a_held_claim_fails_the_attempt_naming_it(rig, monkeypatch):
-    def held(daemon, *, scope, document):
+    def held(daemon, *, scope, document, **kwargs):
         raise ArtifactBusy("daily_dashboard.md in personal is claimed by another pm-ai process; nothing was changed. Run the command again.")
 
     monkeypatch.setattr(prompts, "publish_dashboard", held)

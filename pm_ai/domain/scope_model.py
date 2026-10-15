@@ -549,8 +549,13 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
         "memory",
         (
             # Manager Strategic Focus morning briefing. Two scopes, one tier, for
-            # the same reason as `persona.md` above.
-            File("daily_dashboard.md", Tier.TRUTH, encrypted=False, gitignored=False),
+            # the same reason as `persona.md` above. Tier 3 since story 9b (D4,
+            # 2026-10-09): a render product, replaced whole on every render, so
+            # no hand edit survives and nothing in it is truth — its inputs are
+            # the scope's records, the last recorded harvest failure, a live
+            # calendar read and the clock. Never watched, never a backup target;
+            # a rebuild re-renders it from whatever answers now.
+            File("daily_dashboard.md", Tier.DERIVED, encrypted=False, gitignored=False),
             # All three goal domains live here today. A project artifact citing a
             # personal goal is the cross-scope violation the model exists to
             # prevent, which is why there is no project-scope counterpart.
@@ -743,7 +748,10 @@ PROJECT_TREE: tuple[LayoutNode, ...] = (
         (
             # Project daily team dashboard. Replaced whole, daily, by each
             # machine — so two machines sharing it means the later write wins.
-            File("daily_dashboard.md", Tier.TRUTH, encrypted=False, gitignored=True),
+            # Tier 3 with the personal copy (story 9b, D4): a render product, and
+            # one basename carries one tier everywhere (AD-44). Still gitignored:
+            # a rebuild writes it only when git confirms the exclusion (AD-43).
+            File("daily_dashboard.md", Tier.DERIVED, encrypted=False, gitignored=True),
             # Spoken commitments & promise tracking. Append-only, with the same
             # clobber window as a segment.
             File("commitments_log.md", Tier.TRUTH, encrypted=False, gitignored=True),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -93,6 +94,12 @@ def test_two_drops_of_different_files_in_one_scope_are_two_jobs(rig):
 
 def test_a_final_move_that_meets_a_busy_store_still_ends_done(rig, held_render, monkeypatch):
     monkeypatch.setattr(prompts, "_STATE_ATTEMPTS", 1)
+    # Since story 9b the render's own claimed step records it in the store too;
+    # that record would meet the held lock first. Under test here is the final
+    # move alone, so the render records nothing.
+    monkeypatch.setattr(
+        rig.daemon.storage, "recording_render", lambda scope, *, at: contextlib.nullcontext()
+    )
     job = rig.ask("dashboard").body["job_id"]
     rig.wait(job, "running")
     other = sqlite3.connect(rig.store, timeout=0)
@@ -272,7 +279,7 @@ def test_a_stopped_writer_while_recording_is_answered_as_stopped(rig):
 
 
 def test_a_job_meeting_no_enrolled_key_names_key_enrol(rig, monkeypatch):
-    def no_key(daemon, *, scope, now):
+    def no_key(daemon, *, scope, now, **kwargs):
         raise KeyNotFound(daemon_module.NO_KEY_ENROLLED)
 
     monkeypatch.setattr(prompts, "prepare_dashboard", no_key)

@@ -57,6 +57,7 @@ from pm_ai.core.goal_register import (
     MalformedGoals,
     declare_goal,
 )
+from pm_ai.domain.renders import RenderUnrecorded
 from pm_ai.domain.goals import Goal
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report, UnbuiltConnector
@@ -1767,6 +1768,20 @@ def _dashboard(context: Context) -> int:
         ScopeResolutionError,
     ) as refused:
         raise Refusal(str(refused)) from refused
+    except RenderUnrecorded as unrecorded:
+        # Story 9b: the page was written and recording its instant failed.
+        # The written line first, so the output says the file changed; then
+        # the refusal, exit 3.
+        if unrecorded.path is not None:
+            _echo(f"the {scope} dashboard is written: {unrecorded.path}")
+        raise Refusal(str(unrecorded)) from unrecorded
+    except ArtifactBusy as claimed:
+        # Story 9b: another command holds the dashboard's claim. At a terminal
+        # that is a refusal naming it; a job sent through the daemon fails with
+        # it, for the job's own record (story 4r).
+        if context.terminal is False:
+            raise
+        raise Refusal(str(claimed)) from claimed
     _echo(f"the {scope} dashboard is written: {written}")
     return EXIT_OK
 

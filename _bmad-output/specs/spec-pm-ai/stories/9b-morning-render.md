@@ -2,7 +2,8 @@
 title: 'The daemon renders every dashboard at 07:00 local'
 type: 'feature'
 created: '2026-10-10'
-status: 'draft'
+status: 'done'
+baseline_commit: '07392789180e5072dddee6ab6042e47f468ca024'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -90,15 +91,15 @@ Verified against `ddcb9aa` on 2026-10-10. Builds on `9a`'s `cadence.py` and `tic
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/scope_model.py` -- flip both `daily_dashboard.md` declarations to `Tier.DERIVED` and say why on the node -- D4
-- [ ] `pm_ai/core/cadence.py` -- next 07:00 in a zone, whether a scope's render is due, the 7-day clamp of `since` -- the arithmetic 10a keeps
-- [ ] `pm_ai/ports/__init__.py`, `pm_ai/storage/service.py` -- `renders` table, its read and its write as one insert-or-update statement keyed by scope -- Tier 2 through the single writer
-- [ ] `pm_ai/core/rendering.py` -- both renderers take `since`; the section and `_no_signals` state "since the last render at …", "the last 24 hours (no earlier render recorded)" or "the last 7 days (the earlier render was older)"; update `test_project_rendering.py:226` -- 23c's open window
-- [ ] `pm_ai/app/pipelines.py` -- `run_dashboard` re-reads `config.toml` (`display_timezone`), passes `since` from the last render, runs the calendar read and the project copy's `git` question as bounded steps and the file write plus its record as one claimed step (the record last), the write path taking `git`'s answer instead of asking, and records a failed attempt naming the claim on `ArtifactBusy` -- every path records
-- [ ] `pm_ai/app/ticks.py` -- the render timer attached in `4e`'s lifespan, each render run on `4r`'s I/O pool with its claimed step handed to `4r`'s writer thread; one scope's failure does not stop the next; the busy retry on `9a`'s waits; nothing scheduled without a display zone -- the 07:00 run
-- [ ] `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- the `renders` probe, appended after `9a`'s -- doctor contacts nothing
-- [ ] `tests/slice/test_morning_render.py`, `tests/core/test_rendering_sections.py`, `tests/architecture/` tier assertions, the doctor suite -- one test per matrix row with an injected clock; the one-scope-fails row runs a failing personal render ahead of a project render -- the matrix is the contract
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark `:666` resolved -- the debt is on record
+- [x] `pm_ai/domain/scope_model.py` -- flip both `daily_dashboard.md` declarations to `Tier.DERIVED` and say why on the node -- D4
+- [x] `pm_ai/core/cadence.py` -- next 07:00 in a zone, whether a scope's render is due, the 7-day clamp of `since` -- the arithmetic 10a keeps
+- [x] `pm_ai/ports/__init__.py`, `pm_ai/storage/service.py` -- `renders` table, its read and its write as one insert-or-update statement keyed by scope -- Tier 2 through the single writer
+- [x] `pm_ai/core/rendering.py` -- both renderers take `since`; the section and `_no_signals` state "since the last render at …", "the last 24 hours (no earlier render recorded)" or "the last 7 days (the earlier render was older)"; update `test_project_rendering.py:226` -- 23c's open window
+- [x] `pm_ai/app/pipelines.py` -- `run_dashboard` re-reads `config.toml` (`display_timezone`), passes `since` from the last render, runs the calendar read and the project copy's `git` question as bounded steps and the file write plus its record as one claimed step (the record last), the write path taking `git`'s answer instead of asking, and records a failed attempt naming the claim on `ArtifactBusy` -- every path records
+- [x] `pm_ai/app/ticks.py` -- the render timer attached in `4e`'s lifespan, each render run on `4r`'s I/O pool with its claimed step handed to `4r`'s writer thread; one scope's failure does not stop the next; the busy retry on `9a`'s waits; nothing scheduled without a display zone -- the 07:00 run
+- [x] `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- the `renders` probe, appended after `9a`'s -- doctor contacts nothing
+- [x] `tests/slice/test_morning_render.py`, `tests/core/test_rendering_sections.py`, `tests/architecture/` tier assertions, the doctor suite -- one test per matrix row with an injected clock; the one-scope-fails row runs a failing personal render ahead of a project render -- the matrix is the contract
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark `:666` resolved -- the debt is on record
 
 **Acceptance Criteria:**
 - Given a dashboard scope and a clock stepped past 07:00 local, when the render timer evaluates, then the file is rewritten, the instant recorded, and the next evaluation before tomorrow's 07:00 writes nothing.
@@ -119,3 +120,129 @@ The disposable tier is AD-3's Tier 3. The `renders` table is Tier 2, created by 
 ## Spec Change Log
 
 - **2026-10-14, frozen block amended by Andrei** (the architecture spine's concurrency amendment of the same day: AD-5, AD-39, AD-43; decided by Andrei, re-derived here before any build). Amended: `4r`'s pool and the lock that serialized every storage call are replaced by `4r`'s I/O pool and one writer thread; a render is a sequence of steps — the live calendar read a bounded step held to the per-connector budget, a refreshed credential saved by `4r`'s compare-and-save as soon as it is issued, the project copy's `git` exclusion question asked in a bounded step just before the write, then one claimed step that publishes the file by rename and records the render last; the `renders` row, written by both the hand-run dashboard and the daemon, changes only through one insert-or-update statement; the shutdown follows `4r` (a render in its read is recorded failed and writes nothing after; one in its write finishes). Matrix row "Render due during a harvest" changed; rows added for a hand-run and daemon render at once, the project copy's `git` question, a token refreshed during the read, and a shutdown during the read and during the write. Known-bad state avoided: a render writing its file after it was marked failed and after the writer closed (the old "harmless for a render product"); a credential saved inside the fetch; the hand-run command and the daemon reading the `renders` row then writing it and losing one instant. Decided the same day (routine, Claude): the compare-and-save path is `4r`'s, which this slice reuses. KEEP: `display_timezone` read at every render (the spine now re-reads `config.toml` at the start of every job); once per local day per scope at 07:00, rendered on arrival when past it; one scope failing does not stop the next; the disposable tier (D4); the busy retry on `9a`'s waits; an unreadable calendar is not a failed render; the look-back to the last render with the 24-hour fallback and the 7-day clamp; the `renders` doctor line; no new setting.
+
+## Suggested Review Order
+
+**The render timer and its due rule**
+
+- Entry point: one evaluation decides which scopes render now, and why.
+  [`ticks.py:832`](../../../../pm_ai/app/ticks.py#L832)
+- Due past 07:00 with no success since; a stepped-back clock is due.
+  [`cadence.py:212`](../../../../pm_ai/core/cadence.py#L212)
+- A waitable refusal by anyone, newer than the success, is retried on the waits.
+  [`ticks.py:882`](../../../../pm_ai/app/ticks.py#L882)
+- Outcomes: busy retries, own input waits for 07:00, config re-evaluates, stop ends.
+  [`ticks.py:790`](../../../../pm_ai/app/ticks.py#L790)
+- Wakes: next 07:00, retries (overdue at once), at most fifteen minutes.
+  [`ticks.py:771`](../../../../pm_ai/app/ticks.py#L771)
+- Each render reads the daemon afresh and is classified by its failure.
+  [`ticks.py:917`](../../../../pm_ai/app/ticks.py#L917)
+- The latest 07:00 keys retries and give-ups, so both reset at 07:00.
+  [`cadence.py:192`](../../../../pm_ai/core/cadence.py#L192)
+- Attached in serve beside the harvest timers; started and cancelled by the lifespan.
+  [`daemon.py:347`](../../../../pm_ai/app/daemon.py#L347)
+
+**The render as steps**
+
+- Every daemon render path: slot first, then clock, reads, git, one claimed step.
+  [`prompts.py:964`](../../../../pm_ai/app/prompts.py#L964)
+- Each calendar read is a bounded step under the per-connector budget.
+  [`prompts.py:1055`](../../../../pm_ai/app/prompts.py#L1055)
+- An abandoned calendar read is an unread calendar, not a failed render.
+  [`pipelines.py:1922`](../../../../pm_ai/app/pipelines.py#L1922)
+- Git is asked afresh in a bounded step; the answer is a token.
+  [`pipelines.py:1672`](../../../../pm_ai/app/pipelines.py#L1672)
+- Only the asking store mints it; a write refuses any other answer.
+  [`service.py:866`](../../../../pm_ai/storage/service.py#L866)
+- The write checks the answer instead of asking git.
+  [`service.py:2115`](../../../../pm_ai/storage/service.py#L2115)
+- Claim, record statement, rename, commit last; a late record failure is RenderUnrecorded.
+  [`pipelines.py:1683`](../../../../pm_ai/app/pipelines.py#L1683)
+- The hand-run takes the same steps and records its failures too.
+  [`pipelines.py:1420`](../../../../pm_ai/app/pipelines.py#L1420)
+- Which failures can clear by waiting; drives retries and the recorded flag.
+  [`pipelines.py:1533`](../../../../pm_ai/app/pipelines.py#L1533)
+- Only pm-ai's own refusals record their sentence; anything else by type.
+  [`pipelines.py:1504`](../../../../pm_ai/app/pipelines.py#L1504)
+
+**The renders record**
+
+- The Tier-2 table, created by the schema on open, no version bump.
+  [`service.py:195`](../../../../pm_ai/storage/service.py#L195)
+- A success: one insert-or-update, never depending on the old value.
+  [`service.py:927`](../../../../pm_ai/storage/service.py#L927)
+- A failure: when, why, whether waiting clears it; one statement.
+  [`service.py:936`](../../../../pm_ai/storage/service.py#L936)
+- The success statement opens the step's transaction before the rename.
+  [`service.py:3079`](../../../../pm_ai/storage/service.py#L3079)
+- Failing is decided when read: a failure newer than the success.
+  [`renders.py:38`](../../../../pm_ai/domain/renders.py#L38)
+- Read-only rows; an unreadable instant drops only its column.
+  [`service.py:964`](../../../../pm_ai/storage/service.py#L964)
+- Keyed last render; missing store means none, other errors are waitable.
+  [`service.py:3146`](../../../../pm_ai/storage/service.py#L3146)
+
+**The look-back window**
+
+- Last render, 24 hours when none, clamped at 7 days either way.
+  [`cadence.py:244`](../../../../pm_ai/core/cadence.py#L244)
+- The section starts at that instant and names the window.
+  [`rendering.py:653`](../../../../pm_ai/core/rendering.py#L653)
+- The four sentences saying why the window starts there.
+  [`rendering.py:866`](../../../../pm_ai/core/rendering.py#L866)
+- Each render reads its scope's last instant for its look-back.
+  [`pipelines.py:1602`](../../../../pm_ai/app/pipelines.py#L1602)
+
+**Shutdown marking**
+
+- Renders not yet at their claimed step are recorded failed in one step.
+  [`prompts.py:1076`](../../../../pm_ai/app/prompts.py#L1076)
+- Each mark under its own savepoint, so one failure undoes only itself.
+  [`service.py:3105`](../../../../pm_ai/storage/service.py#L3105)
+- Run as the shutdown's own step, before 9a's harvest marks.
+  [`prompts.py:683`](../../../../pm_ai/app/prompts.py#L683)
+
+**The tier move**
+
+- Personal copy is Tier 3: a render product, never truth.
+  [`scope_model.py:558`](../../../../pm_ai/domain/scope_model.py#L558)
+- Project copy moves with it and stays gitignored.
+  [`scope_model.py:754`](../../../../pm_ai/domain/scope_model.py#L754)
+
+**Doctor and setup**
+
+- The renders line: last render, latest failure, unset zone or unusable config.
+  [`doctor.py:700`](../../../../pm_ai/platform/doctor.py#L700)
+- Read fresh, printed with or without a composed daemon.
+  [`entry.py:1403`](../../../../pm_ai/app/entry.py#L1403)
+- Setup's closing report carries the same line.
+  [`entry.py:612`](../../../../pm_ai/app/entry.py#L612)
+- Written-but-unrecorded prints the written line, then refuses.
+  [`dispatch.py:1771`](../../../../pm_ai/surfaces/cli/dispatch.py#L1771)
+
+**Tests**
+
+- 07:00 renders both scopes, then nothing until tomorrow.
+  [`test_morning_render.py:275`](../../../../tests/slice/test_morning_render.py#L275)
+- One scope failing does not stop the next.
+  [`test_morning_render.py:370`](../../../../tests/slice/test_morning_render.py#L370)
+- A hand-run's busy refusal is retried by the daemon a minute later.
+  [`test_morning_render.py:1301`](../../../../tests/slice/test_morning_render.py#L1301)
+- No git or subprocess on the writer thread, on any render path.
+  [`test_morning_render.py:539`](../../../../tests/slice/test_morning_render.py#L539)
+- Record statement before the write, commit after it, seen by another reader.
+  [`test_morning_render.py:715`](../../../../tests/slice/test_morning_render.py#L715)
+- Shutdown during the calendar read records failed and writes nothing.
+  [`test_morning_render.py:655`](../../../../tests/slice/test_morning_render.py#L655)
+- Rebuild: deleted copies re-render; unconfirmed project copy skipped by name.
+  [`test_morning_render.py:875`](../../../../tests/slice/test_morning_render.py#L875)
+- Tier move and git-exclusion answers.
+  [`test_morning_render.py:866`](../../../../tests/slice/test_morning_render.py#L866)
+- The real daemon renders on start and cancels the task at stop.
+  [`test_morning_render.py:1207`](../../../../tests/slice/test_morning_render.py#L1207)
+- Look-back arithmetic.
+  [`test_cadence.py:165`](../../../../tests/core/test_cadence.py#L165)
+- The section's window line.
+  [`test_rendering_sections.py:1598`](../../../../tests/core/test_rendering_sections.py#L1598)
+- Doctor names project:alpha with and without a daemon.
+  [`test_cli_dispatch.py:1185`](../../../../tests/surfaces/test_cli_dispatch.py#L1185)

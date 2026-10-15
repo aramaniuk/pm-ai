@@ -239,7 +239,7 @@ def test_the_signature_accepts_no_goal_register():
     cannot be handed the PM's career goals by any caller, correct or not.
     """
     parameters = inspect.signature(render_project_dashboard).parameters
-    assert list(parameters) == ["meetings", "entries", "now", "tz", "pm"]
+    assert list(parameters) == ["meetings", "entries", "now", "tz", "pm", "since"]
     assert not [
         name
         for name in parameters

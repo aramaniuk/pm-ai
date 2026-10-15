@@ -41,7 +41,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -68,6 +68,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.payload_fields import encode_payload
 from pm_ai.domain.proposals import Proposal
+from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
 from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS, TranscriptState, TranscriptStateKind
@@ -191,6 +192,13 @@ CREATE TABLE IF NOT EXISTS transcript_ingest_attempts (
     attempts    INTEGER NOT NULL,
     PRIMARY KEY (scope, meeting_id)
 );
+CREATE TABLE IF NOT EXISTS renders (
+    scope        TEXT PRIMARY KEY,
+    last_success TEXT,
+    last_failure TEXT,
+    reason       TEXT,
+    retryable    INTEGER
+);
 CREATE TABLE IF NOT EXISTS requests (
     id         TEXT PRIMARY KEY,
     kind       TEXT NOT NULL,
@@ -222,7 +230,7 @@ SCHEMA_VERSION = 1
 # the case migration 1 was written for. A version bump with no migration behind
 # it would stamp a store nothing changed. Story `4r`'s `requests` table rode in
 # the same way, and for the same reason the version did not move; so did story
-# `9a`'s `harvest_runs`.
+# `9a`'s `harvest_runs`, and story `9b`'s `renders`.
 
 # Version 0 is the *unversioned era* — every store written before this story.
 # It is not a shape: two stores can both be at 0 and differ, because the era had
@@ -854,6 +862,34 @@ class NonUtcClock(ValueError):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class GitExclusion:
+    """Git's answer that a write to `artifact` in `scope` is excluded (AD-43, 9b).
+
+    Asked in a bounded step on a worker and handed with the bytes to the
+    claimed step, which then never calls `git` itself. Minted only by
+    `StorageService.ask_git_exclusion`; one built anywhere else is refused.
+    """
+
+    scope: DataScope
+    artifact: str
+    _asked_by: object = field(default=None, repr=False, compare=False)
+    """The `StorageService` that asked, which alone accepts it."""
+    _target: Path | None = field(default=None, repr=False, compare=False)
+    """The path git was asked about, under that service's root."""
+
+
+class GitNotAsked(RuntimeError):
+    """A write handed an exclusion answer that `ask_git_exclusion` did not give."""
+
+
+def _assert_aware_utc(at: datetime, *, name: str) -> None:
+    """Refuse an instant to be stored that is not aware UTC: stored text compares
+    in time order only when every row is written in one offset."""
+    if at.tzinfo is None or at.utcoffset() != timedelta(0):
+        raise NonUtcClock(f"{name}={at!r} is not aware UTC, so it was not recorded.")
+
+
 class ReconciliationRequired(RuntimeError):
     """AD-20 — a prior attempt reached the provider and its outcome is unknown.
 
@@ -886,6 +922,92 @@ _DIAGNOSTIC_LOG_BACKUPS = 3
 # a re-entry is a programming error whichever `ClaimPort` is wired — the kernel
 # lock refuses it too, and an in-memory one would otherwise answer "busy".
 _CLAIMED_HERE = threading.local()
+
+
+_RECORD_RENDER = (
+    "INSERT INTO renders (scope, last_success, last_failure, reason) "
+    "VALUES (?, ?, NULL, NULL) "
+    "ON CONFLICT(scope) DO UPDATE SET "
+    "  last_success = excluded.last_success, "
+    "  last_failure = NULL, reason = NULL, retryable = NULL"
+)
+"""A successful render: its instant, and no failure. One statement (AD-5, 9b)."""
+
+_RECORD_FAILURE = (
+    "INSERT INTO renders (scope, last_success, last_failure, reason, retryable) "
+    "VALUES (?, NULL, ?, ?, ?) "
+    "ON CONFLICT(scope) DO UPDATE SET "
+    "  last_failure = excluded.last_failure, reason = excluded.reason, "
+    "  retryable = excluded.retryable"
+)
+"""A failed render: when, why, whether waiting clears it. One statement (9b)."""
+
+_storage_log = logging.getLogger(__name__)
+
+
+def _instant_or_none(raw: object, *, scope: str, column: str) -> datetime | None:
+    """A stored instant, or `None` (logged) when it cannot be read as an aware one."""
+    try:
+        at: datetime | None = datetime.fromisoformat(str(raw))
+    except ValueError:
+        at = None
+    if at is None or at.tzinfo is None:
+        _storage_log.warning(
+            "the renders row for %s holds a %s that is not an instant; it is skipped",
+            scope,
+            column,
+        )
+        return None
+    return at
+
+
+def render_records_at(store: Path) -> tuple[RenderRecord, ...]:
+    """Every `renders` row in the operational store at `store`, read-only (9b).
+
+    No store, or no table yet, is no records. A row whose scope does not parse,
+    or whose instant cannot be read, is skipped and logged, so one bad row
+    never fails a render or `doctor`'s line.
+    """
+    if not store.exists():
+        return ()
+    reader = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
+    try:
+        try:
+            rows = reader.execute(
+                "SELECT scope, last_success, last_failure, reason, retryable "
+                "FROM renders ORDER BY scope"
+            ).fetchall()
+        except sqlite3.OperationalError as missing:
+            if "no such table" in str(missing):
+                return ()
+            raise
+    finally:
+        reader.close()
+    records = []
+    for scope, success, failure, reason, retryable in rows:
+        try:
+            parsed = DataScope.parse(str(scope))
+        except ValueError:
+            _storage_log.warning("a renders row names no scope pm-ai knows; it is skipped")
+            continue
+        # An unreadable instant drops that column alone (logged), so a valid
+        # failure and its reason still show beside a broken success.
+        last_success = (
+            _instant_or_none(success, scope=scope, column="last_success") if success else None
+        )
+        last_failure = (
+            _instant_or_none(failure, scope=scope, column="last_failure") if failure else None
+        )
+        records.append(
+            RenderRecord(
+                parsed,
+                last_success,
+                last_failure,
+                reason if last_failure is not None else None,
+                retryable=bool(retryable) and last_failure is not None,
+            )
+        )
+    return tuple(records)
 
 
 def _canonical(target: Path) -> Path:
@@ -1453,7 +1575,9 @@ class StorageService:
         self._assert_git_excludes(scope, artifact)
         return self._paths.resolve(scope, artifact, create=True)
 
-    def _assert_git_excludes(self, scope: DataScope, artifact: str) -> None:
+    def _assert_git_excludes(
+        self, scope: DataScope, artifact: str, *, cached: bool = True
+    ) -> None:
         """Refuse a write that git would carry into a commit (AD-23, AD-43).
 
         Raw captures were the whole subject until story 1n (2026-09-15) flipped
@@ -1515,7 +1639,7 @@ class StorageService:
         if not requires_git_exclusion(scope.kind, artifact):
             return
         seen = (scope.kind, scope.project_id, scope.person_id, artifact)
-        if seen in self._git_checked:
+        if cached and seen in self._git_checked:
             return
         # Resolved without `create`: asking git about a directory is not a reason
         # to bring it into existence, and git answers the same either way.
@@ -1940,6 +2064,7 @@ class StorageService:
         artifact: str,
         name: str | None = None,
         exclusive: bool = False,
+        exclusion: GitExclusion | None = None,
     ) -> Path:
         """Write a declared artifact whole, sealed or not as the model says.
 
@@ -1971,6 +2096,10 @@ class StorageService:
         replacing: a name already taken raises `FileExistsError` and the file
         there is left exactly as it was. The API token is the caller — two
         daemons starting at once must never replace each other's token.
+
+        `exclusion` (story 9b) is git's answer asked in a bounded step before
+        this write (`ask_git_exclusion`): given, this write asks no `git` of its
+        own and refuses an answer it was not handed for this artifact.
         """
         if is_append_only(scope.kind, artifact):
             raise AppendOnlyArtifact(
@@ -1981,7 +2110,18 @@ class StorageService:
             )
         if name is not None:
             name = _capture_name(name)
-        self._assert_git_excludes(scope, artifact)
+        if exclusion is None:
+            self._assert_git_excludes(scope, artifact)
+        elif (
+            exclusion._asked_by is not self
+            or exclusion.scope != scope
+            or exclusion.artifact != artifact
+            or exclusion._target != self._paths.resolve(scope, artifact)
+        ):
+            raise GitNotAsked(
+                f"the write of {artifact} in {scope} was handed a git answer that "
+                f"was not asked for it, so nothing was written."
+            )
         target = self._paths.resolve(scope, artifact)
         if name is not None:
             target = target / name
@@ -2223,6 +2363,18 @@ class StorageService:
             str(self._paths.resolve(scope, artifact))
         ):
             self._crypto.ready()
+
+    def ask_git_exclusion(self, *, scope: DataScope, artifact: str) -> GitExclusion:
+        """Ask git now, never from the cache, whether `artifact` is excluded (9b).
+
+        A bounded step: `git` runs here, on the caller's thread, and the answer
+        is handed to `write_artifact(exclusion=...)`, which then asks nothing.
+        Refuses as the write would (`UnprotectedCaptureDir`) when git cannot
+        confirm the exclusion. An artifact git need not be asked about gets an
+        answer without asking.
+        """
+        self._assert_git_excludes(scope, artifact, cached=False)
+        return GitExclusion(scope, artifact, self, Path(self._paths.resolve(scope, artifact)))
 
     @contextlib.contextmanager
     def exclusive(self, *, scope: DataScope, artifact: str) -> Iterator[None]:
@@ -2909,6 +3061,109 @@ class StorageService:
                 )
             )
         return tuple(records)
+
+    # ── `renders`: each dashboard scope's last render (story 9b) ────────────
+    # Tier 2. A hand-run `pm-ai dashboard` and the daemon both write a row, so
+    # it changes only through one statement — an insert-or-update keyed by
+    # scope, setting only the columns that attempt records — never read in one
+    # statement and written in another; the new value never depends on the old
+    # (AD-5).
+
+    def record_render(self, scope: DataScope, *, at: datetime) -> None:
+        """A successful render of `scope` at `at`: its instant, and no failure."""
+        _assert_aware_utc(at, name="at")
+        with self._transaction() as db:
+            db.execute(_RECORD_RENDER, (str(scope), at.isoformat()))
+
+    @contextlib.contextmanager
+    def recording_render(self, scope: DataScope, *, at: datetime) -> Iterator[None]:
+        """`record_render`'s one statement, made first and committed last (9b).
+
+        The statement opens the transaction before the body runs, so a busy
+        store refuses the render before its file is published; the body (the
+        publish) runs inside it, and the record is committed only after the
+        body returns — rolled back if it raises. In the daemon the commit is
+        the claimed step's end.
+        """
+        _assert_aware_utc(at, name="at")
+        with self._transaction() as db:
+            db.execute(_RECORD_RENDER, (str(scope), at.isoformat()))
+            yield
+
+    def record_render_failure(
+        self, scope: DataScope, reason: str, *, at: datetime, retryable: bool = False
+    ) -> None:
+        """A failed render of `scope` at `at`, and why; its last success unchanged.
+
+        `retryable`: waiting can clear it (a held claim, a busy store), so the
+        daemon retries it on the waits whoever recorded it.
+        """
+        _assert_aware_utc(at, name="at")
+        with self._transaction() as db:
+            db.execute(_RECORD_FAILURE, (str(scope), at.isoformat(), reason, int(retryable)))
+
+    def record_render_failures(
+        self, failures: Sequence[tuple[DataScope, str]], *, at: datetime
+    ) -> tuple[DataScope, ...]:
+        """Several failed renders in one step, each its own statement (9b).
+
+        For the shutdown's own step: each record is made under a savepoint of
+        its own, so one that fails is undone alone, logged, and the others are
+        kept. Returns the scopes recorded.
+        """
+        _assert_aware_utc(at, name="at")
+        recorded: list[DataScope] = []
+        with self._transaction() as db:
+            # A plain statement first, so the daemon's step opens its
+            # `BEGIN IMMEDIATE` with the version check before any savepoint.
+            db.execute("SELECT 1 FROM renders LIMIT 0")
+            for index, (scope, reason) in enumerate(failures):
+                point = f"render_failure_{index}"
+                db.execute(f"SAVEPOINT {point}")
+                try:
+                    db.execute(_RECORD_FAILURE, (str(scope), at.isoformat(), reason, 0))
+                except sqlite3.Error as failed:
+                    db.execute(f"ROLLBACK TO {point}")
+                    _storage_log.warning(
+                        "the %s render's failure was not recorded (%s)",
+                        scope,
+                        type(failed).__name__,
+                    )
+                else:
+                    recorded.append(scope)
+                db.execute(f"RELEASE {point}")
+        return tuple(recorded)
+
+    def render_records(self) -> tuple[RenderRecord, ...]:
+        """Every dashboard scope's render record, by scope — a plain read (9b).
+
+        On a read-only connection of its own, so `doctor`, a render's look-back
+        and the render timer read it off a worker, never the writer's
+        connection. A row whose scope no longer parses is skipped.
+        """
+        return render_records_at(self._store)
+
+    def last_render(self, scope: DataScope) -> datetime | None:
+        """The instant of `scope`'s last successful render, keyed — a plain read (9b).
+
+        `None` when none is recorded, or when the recorded instant cannot be
+        read as one (logged, never raised).
+        """
+        try:
+            with self._reader() as reader:
+                row = reader.execute(
+                    "SELECT last_success FROM renders WHERE scope = ?", (str(scope),)
+                ).fetchone()
+        except sqlite3.OperationalError as unread:
+            if not self._store.exists() or "no such table" in str(unread):
+                return None
+            raise OperationalStoreBusy(
+                f"the operational store at {self._store} could not be read for the "
+                f"{scope} render's last instant ({unread}); waiting may clear it."
+            ) from unread
+        if row is None or row[0] is None:
+            return None
+        return _instant_or_none(row[0], scope=str(scope), column="last_success")
 
     def harvest_failure(self, instance: str) -> HarvestFailure | None:
         """The last harvest failure for `instance`, or `None` if the last one worked.

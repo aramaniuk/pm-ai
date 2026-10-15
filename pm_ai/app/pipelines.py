@@ -29,13 +29,18 @@ from typing import Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
 from pm_ai.app.concurrency import WriterStopped
-from pm_ai.app.wiring import GIT_QUESTION_SECONDS, Daemon, read_pm_identity
+from pm_ai.app.wiring import (
+    CONFIG_ARTIFACT,
+    GIT_QUESTION_SECONDS,
+    Daemon,
+    read_pm_identity,
+)
 from pm_ai.connectors.gitlab.client import FETCH_BUDGET as GITLAB_FETCH_BUDGET
 from pm_ai.connectors.graph.client import FETCH_BUDGET as GRAPH_FETCH_BUDGET
 from pm_ai.connectors.registry import HEALTH_PROBE_SECONDS
 from pm_ai.connectors.gitlab import GitLabConnectorAdapter
 from pm_ai.connectors.graph import GraphConnector
-from pm_ai.core.config import ConfigRefused
+from pm_ai.core.config import Config, ConfigRefused, load_config
 from pm_ai.core.event_log import EventLog
 from pm_ai.core.command_authorization import EXECUTE
 from pm_ai.core.extraction import Extraction, SpokenCommand, extract
@@ -64,9 +69,9 @@ from pm_ai.core.transcripts import (
     read_transcript,
 )
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
-from pm_ai.core.goal_register import parse_goals
+from pm_ai.core.goal_register import MalformedGoals, parse_goals
 from pm_ai.core.normalize import attribute_all
-from pm_ai.core.cadence import coverage_cutoff
+from pm_ai.core.cadence import coverage_cutoff, look_back
 from pm_ai.core.transcript_acquisition import acquire_transcripts
 from pm_ai.core.rendering import (
     CalendarAnswer,
@@ -81,6 +86,8 @@ from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.proposals import Proposal
+from pm_ai.domain.renders import RenderUnrecorded
+from pm_ai.connectors.graph.auth import StoreBusy
 from pm_ai.domain.harvest import (
     UNCLASSIFIED_FAULT_IS_RETRYABLE,
     Cursor,
@@ -114,8 +121,12 @@ from pm_ai.ports import (
     ConnectorPort,
     CaptureAlreadyExists,
     DecryptionFailed,
+    KeychainUnavailable,
+    KeyNotFound,
 )
 from pm_ai.storage.service import (
+    GitExclusion,
+    GitNotAsked,
     OperationalStoreBusy,
     OperationalStoreUnavailable,
     ProposalNotFound,
@@ -1418,14 +1429,12 @@ def run_dashboard(
     `render_dashboard` is a pure function, so the composition root reads and the
     renderer renders.
 
-    **Nothing here is a write but the last line.** No cursor is saved, no
+    **Nothing here is a write but the last step.** No cursor is saved, no
     `meetings/` record is mapped, no event is persisted and no event-log entry is
-    appended: a render projects truth rather than changing it, and a dashboard is
-    fully derivable from Tier 1 plus a clock, so a line per day per scope would
-    record nothing a reader could not reconstruct. That is also why `run_harvest`
-    is not called from here — a render that also ingests makes the one artifact
-    the PM reads at 07:00 a side effect of a write path, and hands a failed
-    harvest a second way to spoil the morning.
+    appended: a render projects truth rather than changing it. That is also why
+    `run_harvest` is not called from here — a render that also ingests makes the
+    one artifact the PM reads at 07:00 a side effect of a write path, and hands a
+    failed harvest a second way to spoil the morning.
 
     **Read and render fully before writing anything.** `write_artifact` replaces
     a file whole, so opening the target first and meeting a malformed goals file
@@ -1434,29 +1443,195 @@ def run_dashboard(
 
     Returns the path written, so a surface can say where the file went without
     composing one of its own.
+
+    **Every render records (story 9b).** The same steps as in the daemon: the
+    reads and the render, then `git`'s answer for the copy, then one step that
+    publishes the file and records the render's instant last. A failure records
+    itself and its reason, and yesterday's file stays — except a record that
+    fails after the publish, which says the page was written
+    (`RenderUnrecorded`). A hand-run render counts: a signal the PM saw on the
+    page at 22:00 is not news at 07:00.
     """
     scope = PERSONAL if scope is None else scope
-    document = prepare_dashboard(daemon, scope=scope, now=now)
-    return publish_dashboard(daemon, scope=scope, document=document)
+    assert_dashboard_scope(scope)
+    try:
+        document = prepare_dashboard(daemon, scope=scope, now=now)
+        exclusion = ask_dashboard_exclusion(daemon, scope=scope)
+        return publish_dashboard(
+            daemon, scope=scope, document=document, at=now, exclusion=exclusion
+        )
+    except Exception as failed:
+        record_failed_render(daemon, scope, failed, at=now)
+        raise
 
 
-def prepare_dashboard(daemon: Daemon, *, scope: DataScope, now: datetime) -> bytes:
+def _direct(work: Callable[[], _T], label: str) -> _T:
+    """A claimed step run where it is: outside the daemon, no writer thread."""
+    return work()
+
+
+def record_failed_render(
+    daemon: Daemon,
+    scope: DataScope,
+    error: BaseException,
+    *,
+    at: datetime,
+    hand: Callable[[Callable[[], None], str], None] = _direct,
+) -> None:
+    """Record that `scope`'s render failed and why; never raises (story 9b).
+
+    Through `hand` — the writer thread's door in the daemon. A record that
+    cannot be made is logged by type: the failure it would have recorded is
+    the one the caller raises.
+    """
+    reason = render_failure_reason(scope, error)
+    retryable = clears_by_waiting(error)
+    try:
+        hand(
+            lambda: daemon.storage.record_render_failure(
+                scope, reason, at=at, retryable=retryable
+            ),
+            f"record the {scope} render's failure",
+        )
+    except Exception as unrecorded:  # noqa: BLE001 — logged; the render's own error is raised
+        _log.warning(
+            "the failed %s render could not be recorded (%s)",
+            scope,
+            type(unrecorded).__name__,
+        )
+
+
+RENDER_REFUSALS: tuple[type[BaseException], ...] = (
+    ArtifactBusy,
+    ConfigRefused,
+    MalformedGoals,
+    ScopeResolutionError,
+    UnprotectedCaptureDir,
+    GitNotAsked,
+    OperationalStoreUnavailable,
+    KeyNotFound,
+    KeychainUnavailable,
+    StoreBusy,
+)
+"""pm-ai's own refusals a render can meet, whose sentences are recorded as they
+are: each is composed by pm-ai and carries no provider's text. Anything else
+is recorded by its type name only."""
+
+
+CLEARS_BY_WAITING: tuple[type[BaseException], ...] = (
+    OSError,
+    ArtifactBusy,
+    OperationalStoreBusy,
+    StoreBusy,
+    KeychainUnavailable,
+)
+"""A render's failures waiting can clear (story 9b): an I/O error, another
+command's claim, a busy store, a busy credential store, a keychain locked
+after a wake. Retried on `9a`'s waits until the next 07:00."""
+
+
+def clears_by_waiting(error: BaseException) -> bool:
+    """Whether a render's failure is one waiting can clear (story 9b).
+
+    A record that failed after the publish is judged by what failed it. A
+    directory standing where the file belongs is an `OSError` that needs a
+    person, so it is not.
+    """
+    if isinstance(error, RenderUnrecorded) and error.__cause__ is not None:
+        error = error.__cause__
+    if isinstance(error, IsADirectoryError):
+        return False
+    return isinstance(error, CLEARS_BY_WAITING)
+
+
+def render_failure_reason(scope: DataScope, error: BaseException) -> str:
+    """The sentence recorded for a failed render: pm-ai's own words, never a
+    third party's (story 9b).
+
+    A refusal in `RENDER_REFUSALS` carries its own sentence; a directory where
+    the file belongs is named without its path; anything else is named by
+    type only, since its text may not be pm-ai's.
+    """
+    if isinstance(error, RenderUnrecorded):
+        return str(error)
+    if isinstance(error, ArtifactBusy):
+        return f"the {scope} dashboard was not written: {error}"
+    if isinstance(error, IsADirectoryError):
+        return (
+            f"the {scope} dashboard was not written: a directory stands where "
+            f"{DASHBOARD_ARTIFACT} is declared a file. Nothing was changed; move "
+            f"or remove the directory."
+        )
+    if isinstance(error, RENDER_REFUSALS):
+        return f"the {scope} dashboard was not rendered: {error}"
+    return (
+        f"the {scope} dashboard was not rendered: it stopped on "
+        f"{type(error).__name__}, which pm-ai cannot classify. The dashboard "
+        f"file was not replaced by this attempt."
+    )
+
+
+def render_unrecorded(
+    scope: DataScope, failed: BaseException, *, path: Path | None = None
+) -> RenderUnrecorded:
+    """The page was published and its record then failed: said as that (9b)."""
+    why = (
+        str(failed)
+        if isinstance(failed, RENDER_REFUSALS)
+        else f"it stopped on {type(failed).__name__}, which pm-ai cannot classify"
+    )
+    return RenderUnrecorded(
+        f"the {scope} dashboard was written ({DASHBOARD_ARTIFACT} is the new "
+        f"page), but recording its instant failed: {why}",
+        path=path,
+    )
+
+
+class ReadBound(Protocol):
+    """How a render's calendar read is run: `bound(call, label)` returns
+    `call()`'s answer, or raises `FetchAbandoned` past its deadline (9b)."""
+
+    def __call__(self, call: Callable[[], _T], label: str) -> _T: ...
+
+
+def _read_where_it_is(call: Callable[[], _T], label: str) -> _T:
+    """A calendar read with no deadline: the terminal's and the tests'."""
+    return call()
+
+
+def prepare_dashboard(
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    now: datetime,
+    bound: ReadBound | None = None,
+) -> bytes:
     """Every read and the render, writing nothing: `run_dashboard`'s bounded half.
 
-    The live calendar read, the event log, the goals and the connector rows,
-    then the render — on an I/O worker when the daemon runs it (AD-5, story
-    4r). Returns the document's bytes for `publish_dashboard` to save.
+    The live calendar read, the event log, the goals, the connector rows and
+    the scope's last recorded render, then the render — on an I/O worker when
+    the daemon runs it (AD-5, story 4r). Each calendar read is a bounded step
+    under `bound` (the per-connector fetch budget in the daemon, story 9b); one
+    abandoned at its deadline is a calendar that could not be read, never a
+    failed render. Returns the document's bytes for `publish_dashboard` to save.
     """
-    _assert_dashboard_scope(scope)
+    assert_dashboard_scope(scope)
     # First, and before any read. The display zone decides which instants count
-    # as today, and it is read once here so that the day boundary the dashboard
-    # *shows* and the day boundary its meetings were *selected by* cannot
-    # disagree. Unset is refused rather than defaulted to UTC: a PM two zones
-    # away would silently get a day that is not theirs.
+    # as today, and it is read once here — from the `config.toml` this render
+    # read — so that the day boundary the dashboard *shows* and the day boundary
+    # its meetings were *selected by* cannot disagree. Unset is refused rather
+    # than defaulted to UTC: a PM two zones away would silently get a day that
+    # is not theirs.
     zone = _display_zone(daemon)
 
-    meetings = _todays_calendar(daemon, scope=scope, now=now, zone=zone)
+    meetings = _todays_calendar(
+        daemon, scope=scope, now=now, zone=zone, bound=bound or _read_where_it_is
+    )
     entries = _event_log(daemon, scope=scope)
+    # Proactive Enablement looks back to this scope's last successful render,
+    # however it was produced (story 9b): 24 hours when none is recorded,
+    # never more than 7 days.
+    since = look_back(daemon.storage.last_render(scope), now)
     # One read of the connector rows at one instant, for both the marking and
     # the sign-in line (`23c`), whichever scope renders: the rows are pm-ai's
     # own settings, not the personal store AD-25 walls off.
@@ -1481,42 +1656,69 @@ def prepare_dashboard(daemon: Daemon, *, scope: DataScope, now: datetime) -> byt
             now,
             tz=zone,
             pm=pm,
+            since=since,
         )
     else:
         # A different function, not a flag. `render_project_dashboard` has no
         # goals parameter, so this branch cannot hand it the personal register
         # even by mistake (AD-25) — and no personal-scope artifact is opened on
         # this path at all, which is the half a signature cannot enforce.
-        document = render_project_dashboard(meetings, entries, now, tz=zone, pm=pm)
+        document = render_project_dashboard(
+            meetings, entries, now, tz=zone, pm=pm, since=since
+        )
     return document.encode("utf-8")
 
 
-def ask_dashboard_exclusion(daemon: Daemon, *, scope: DataScope) -> None:
+def ask_dashboard_exclusion(daemon: Daemon, *, scope: DataScope) -> GitExclusion:
     """Ask git now whether the dashboard's path is excluded, writing nothing (AD-43).
 
-    The bounded step just before the claimed one in the daemon (story 4r): the
-    single writer keeps the verdict, so `publish_dashboard` on the writer
-    thread finds it answered and spawns no `git` of its own.
+    The bounded step just before the claimed one (stories 4r, 9b). Asked
+    afresh every render, never from a cache, and the answer is handed to
+    `publish_dashboard` with the bytes, so the claimed step never calls `git`.
+    A copy git cannot confirm excluded is refused here, by name.
     """
-    daemon.storage.assert_writable(scope=scope, artifact=DASHBOARD_ARTIFACT)
+    return daemon.storage.ask_git_exclusion(scope=scope, artifact=DASHBOARD_ARTIFACT)
 
 
-def publish_dashboard(daemon: Daemon, *, scope: DataScope, document: bytes) -> Path:
-    """Save a rendered dashboard whole: `run_dashboard`'s one write.
+def publish_dashboard(
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    document: bytes,
+    at: datetime,
+    exclusion: GitExclusion,
+) -> Path:
+    """Save a rendered dashboard whole and record the render: the one claimed step.
 
-    The claimed step in the daemon: it saves the prepared bytes and does
-    nothing else — published by rename, so a kill leaves the old file or the
-    new one, never half of either (AD-47).
+    Under the dashboard's claim (story 9b): another command holding it refuses
+    this attempt as `ArtifactBusy`, naming the claim, and nothing is written.
+    Then the record's one statement opens the store's transaction, so a busy
+    store refuses before the file is touched. The file is published by rename
+    with `git`'s answer handed in — a kill leaves the old file or the new one,
+    never half of either (AD-47) — and the record is committed last. A record
+    that fails after the rename raises `RenderUnrecorded`: the page is new.
     """
+    written: Path | None = None
     try:
-        return daemon.storage.write_artifact(
-            document, scope=scope, artifact=DASHBOARD_ARTIFACT
-        )
-    except OSError as blocked:
-        named = _blocked_by_a_directory(daemon, scope=scope)
-        if named is None:
+        with daemon.storage.exclusive(scope=scope, artifact=DASHBOARD_ARTIFACT):
+            with daemon.storage.recording_render(scope, at=at):
+                try:
+                    written = daemon.storage.write_artifact(
+                        document,
+                        scope=scope,
+                        artifact=DASHBOARD_ARTIFACT,
+                        exclusion=exclusion,
+                    )
+                except OSError as blocked:
+                    named = _blocked_by_a_directory(daemon, scope=scope)
+                    if named is None:
+                        raise
+                    raise named from blocked
+    except Exception as failed:
+        if written is None:
             raise
-        raise named from blocked
+        raise render_unrecorded(scope, failed, path=written) from failed
+    return written
 
 
 def _event_log(daemon: Daemon, *, scope: DataScope) -> EventLogAnswer:
@@ -1572,7 +1774,7 @@ def _blocked_by_a_directory(
     )
 
 
-def _assert_dashboard_scope(scope: DataScope) -> None:
+def assert_dashboard_scope(scope: DataScope) -> None:
     """Refuse a scope whose tree declares no dashboard, by name.
 
     `resolve` would refuse it too, but at the *write*, which is after every read
@@ -1601,7 +1803,12 @@ def _display_zone(daemon: Daemon) -> tzinfo:
     "the zone is wrong" and "the zone is missing" one outcome to an operator
     reading an exit code.
     """
-    named = daemon.config.display_timezone
+    return zone_of(daemon.config)
+
+
+def zone_of(config: Config) -> tzinfo:
+    """`config`'s `display_timezone`, or `ConfigRefused` naming the key."""
+    named = config.display_timezone
     if not named:
         raise ConfigRefused(
             "display_timezone is not set in config.toml, so pm-ai does not know "
@@ -1614,8 +1821,29 @@ def _display_zone(daemon: Daemon) -> tzinfo:
     return ZoneInfo(named)
 
 
+def display_zone_now(daemon: Daemon) -> tzinfo:
+    """`config.toml` read again now, and its `display_timezone` (AD-5, story 9b).
+
+    For the render timer, which decides when 07:00 is before any render runs:
+    the zone is read at every evaluation, so a change takes effect at the next
+    one. Raises `ConfigRefused` for a file the loader refuses or an unset key.
+    """
+    return zone_of(
+        load_config(
+            daemon.storage.read_artifact(
+                scope=DataScope(ScopeKind.APPLICATION), artifact=CONFIG_ARTIFACT
+            )
+        )
+    )
+
+
 def _todays_calendar(
-    daemon: Daemon, *, scope: DataScope, now: datetime, zone: tzinfo
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    now: datetime,
+    zone: tzinfo,
+    bound: ReadBound = _read_where_it_is,
 ) -> CalendarAnswer:
     """What every enrolled calendar says about today, as one of four answers.
 
@@ -1647,7 +1875,7 @@ def _todays_calendar(
     unread: list[UnreadCalendar] = []
     answered = 0
     for instance in instances:
-        result = _ask(daemon, instance)
+        result = _ask_within(daemon, instance, bound)
         if result.failure is not None:
             unread.append(UnreadCalendar(instance=instance, failure=result.failure))
         else:
@@ -1689,6 +1917,20 @@ def _todays_calendar(
     # Nothing was read at all, so there is no query result to report and the
     # renderer must say so rather than show an empty day.
     return _one_failure(unread)
+
+
+def _ask_within(daemon: Daemon, instance: str, bound: ReadBound) -> HarvestResult:
+    """`_ask` as a bounded step (story 9b): abandoned at its deadline, it is a
+    calendar that could not be read, never a failed render."""
+    try:
+        return bound(lambda: _ask(daemon, instance), f"{instance}'s calendar read")
+    except FetchAbandoned as abandoned:
+        return HarvestResult(
+            events=(),
+            cursor=Cursor(),
+            outcome=HarvestOutcome.FAILED,
+            failure=HarvestFailure(reason=str(abandoned), retryable=True),
+        )
 
 
 def _ask(daemon: Daemon, instance: str) -> HarvestResult:
