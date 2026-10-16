@@ -1,0 +1,118 @@
+---
+title: 'transcript drop reads .vtt, .txt, .md and .docx, and says how a path is read'
+type: 'feature'
+created: '2026-10-16'
+status: 'draft'
+review_loop_iteration: 0
+context:
+  - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
+---
+
+<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
+
+## Intent
+
+**Problem:** `11c`'s `transcript drop` reads WebVTT and `Speaker: words` text only. In the field test a transcript exported from Teams as `.docx` was refused (finding 22 in `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which lands with PR #71), and the same export converted to Markdown is refused too, because its lines are not `Speaker: words`. Andrei also found the paths confusing: nothing says that a relative path is read from the folder pm-ai was started in, an unquoted path with a space fails with "takes <file>" and no hint to quote it (finding 21), and a path starting with `~` typed at the prompt is read literally.
+
+**Approach:** The drop reads a Teams `.docx` export — its paragraph text taken out with the standard library — and `.md`, through a third text reader for Teams' speaker-and-time layout, chosen by content like `11b`'s two. The usage and every refusal about the file name the four accepted formats; the usage says how a relative path is read, and a refusal names the absolute path it looked at. Andrei's decision of 2026-10-16. Everything else is `11c`'s: binding, scopes, capture, ingestion and the sanitization boundary. Amends `11b`'s "two readers, chosen by content" (now three) and its Never "No `.docx`", and `11c`'s Never lines "No `.docx`" and "No change to `11b`'s path, readers…" (a reader is added).
+
+## Boundaries & Constraints
+
+**Always:**
+- **Accepted: `.vtt`, `.txt`, `.md`, `.docx`.** The command's usage says so: `ingest a .vtt, .txt, .md or .docx transcript against a meeting in that scope; a relative <file> is read from the folder pm-ai was started in`, shown by `pm-ai transcript drop --help` (`4t`'s subcommand help). Every refusal about the file — missing, a directory, unreadable, too large, not UTF-8, a document format pm-ai does not read (`.doc`, `.pdf`, `.rtf`), a `.docx` it cannot open, no reader accepts it, nothing said in it — ends by naming the four. The four are added by the command, where it turns a refusal into its sentence, never inside the readers, whose refusals Graph captures share. Refusals about the scope or the meeting do not name them. A file with another extension, or none, is read by content as today.
+- **Paths are stated, not guessed.** A relative path is read from the folder pm-ai was started in (the prompt is started there too, and `4q` makes the path absolute before a line goes to the daemon, which refuses a relative one). `~` is expanded by the command itself, in whichever process runs it, so `'~/x.vtt'` quoted at the command line and `~/x.vtt` typed at the prompt and sent to the daemon both read the home folder's file. A refusal about the path names the full absolute path it looked at, after expansion. When `transcript drop` is given more than one word before its options, the usage error adds that a path with spaces must be in quotes, exit 2 (only this command: `project add`'s two words are a path and an alias).
+- **Checks run in this order:** something is at the path, it is not a refused document format, a regular file, within `11c`'s 16 MiB; then a `.docx` is read as bytes by the `.docx` reader and anything else is decoded as UTF-8. The `.docx` reader is imported only when a `.docx` is dropped, so the prompt's startup does not load it.
+- **`.docx` is read with the standard library, not a new dependency.** A `.docx` is a ZIP archive whose `word/document.xml` holds the text as paragraphs of runs of text, with tabs and line breaks — the layout of the Office Open XML standard for Word documents. `zipfile` opens the archive from memory, and the XML is read as a stream with the standard library's XML parser (expat, 2.8.2 here, measured, which limits how far entity definitions can expand), keeping nothing but the text read so far. What is taken out, in document order: each paragraph's text as one line, tables and text boxes included; a tab as a tab; a line break, carriage return or page break inside a paragraph as a new line; text inside hyperlinks, content controls and tracked insertions; of an alternative-content block, the first choice only, never its fallback copy. Deleted text in tracked changes, comments, headers, footers and images are not read. Refused by name, nothing written: a file starting with the compound-document signature (bytes `D0 CF 11 E0`), which is what a password-protected Word file or an old `.doc` renamed `.docx` is — "password-protected, or an old .doc"; not a ZIP; more than 10,000 entries; no `word/document.xml`, or two of them; an encrypted entry; an entry compressed by a method `zipfile` cannot read; a damaged entry (bad checksum, truncated data, bad compression); `document.xml` larger than 64 MiB uncompressed (checked from the archive's directory and enforced while reading); a document type declaration anywhere in the XML (refused by the parser's start-of-declaration handler, whatever the encoding); XML that does not parse or decode; the Strict variant of the standard (its other namespace), named so it can be saved again as a regular Word document; more than 16 MiB of text taken out. Every one of these is a refusal sentence, never a traceback.
+- **Teams' layout, unverified.** Microsoft's Teams help describes downloading a transcript as `.docx` or `.vtt` (not re-checked for this spec) and does not describe what is inside the `.docx`. The reader is written for this layout, which is what the export is expected to hold and is **not verified**: optional header lines (the meeting's title, its date, the word "Transcript"), then for each turn a line holding only the speaker's display name and a time, then one or more lines of what was said. A time of two fields is minutes and seconds (`3:07`), of three fields hours, minutes and seconds (`1:03:07`) — checked against the fixture. The first task records Andrei's own refused export as a test fixture, and the reader is fitted to it.
+- **What a speaker-and-time line is.** The name, then whitespace, then the time as the line's last word: the name starts with a letter and holds letters, spaces and name punctuation (apostrophe, hyphen, full stop), at most 80 characters, with no digit, colon or comma — so a header line with a date or `AM`/`PM` is not one, and neither is `Ana: meet at 10:30`, which stays a `Speaker: words` line. Markdown's marks are set aside on a line before it is judged: a heading's `#`s, a list marker, a quotation `>`, emphasis (`**`, `__`, `*`, `_`) around the name or the time, a time written as a link (`[3:07](…)` reads as `3:07`), and a trailing backslash or two spaces. This happens inside the reader, so the stored text re-reads the same way. The words said are kept as written.
+- **Readers are chosen by content, in order:** WebVTT when the first non-blank line is a header or a cue timing (`11b`); otherwise the speaker-and-time reader when there are at least two speaker-and-time lines and they are at least a quarter of the non-blank lines from the first of them on; otherwise `Speaker: words` (`11b`). A turn is a speaker-and-time line and the non-blank lines after it, up to the next one. Lines before the first turn are the header and are not utterances. A turn with no words is skipped. An utterance's offset is its time in seconds; times out of order are kept as read. As in `11b`, a display name is never a person handle, so every spoken command read this way stages and none executes (AD-32).
+- **Nothing said, and no reader.** "Nothing said" is a file a reader accepted that holds no utterance with words — WebVTT cues that are all empty, or turns that are all empty — and a `.docx` whose text holds no speaker-and-time line and that `Speaker: words` does not accept, which is a document holding only its header. "No reader" is any other text no reader accepts. Both are refused before anything is written, each with its own sentence.
+- **What is stored.** The capture is the transcript's text: a `.md` file's bytes as they are, and for a `.docx` the text taken out of it as above. Both are stored under `33e`'s name ending `-manual.txt` (a `.md` already is today, by content), so the capture-name rule, `write_capture` and the transcript table are unchanged; the closing line says when the capture is text taken from a `.docx`. The `.docx` itself is not kept.
+- **`11c` and `11b` otherwise unchanged.** `--scope` required and refused as before; binding by `11b`'s rule, the questions and the no-terminal refusal; read, bind, capture, ingest, nothing from a later step after a refusal; one capture per meeting; `TranscriptSource.MANUAL`; the duration asked for anything that is not WebVTT; exit codes. Sanitization stays where `8e` and `11b` bind it — at the model boundary, over the utterances' text, whatever reader produced them.
+- **The fixture names no one.** The committed `.docx` is rebuilt from only `[Content_Types].xml`, the package relationships and a `word/document.xml` whose every name and spoken word is replaced and whose structure is kept; no document properties (creator, last modified by, application, custom properties) and no list of people is carried over. Before it is committed the fixture and its `.md` conversion are searched for every real name in the original, and the search finding none is recorded in the note beside them.
+
+**Ask First:** Before the first task, if Andrei's refused export is not available on his machine to record. If the recorded export's structure is not the layout above (for example the older layout with WebVTT-style `-->` timings inside the document), before writing a reader for it. Keeping the `.docx` itself as the capture.
+
+**Never:** No `.doc`, `.pdf` or `.rtf` (still refused by name). No new runtime dependency for `.docx`. No reading images, comments, headers, footers, deleted text or document properties from a `.docx`. No speaker name turned into a person handle. No change to `33e`'s capture-name rule, `11b`'s binding or the sanitization boundary. No real names or spoken words, and no document properties, in a committed fixture.
+
+## I/O & Edge-Case Matrix
+
+| Scenario | Input / State | Expected Output / Behavior | Error Handling |
+|----------|--------------|---------------------------|----------------|
+| Teams `.docx` | the recorded fixture, `--scope personal`, matching no record | utterances with speakers and offsets; record minted; capture `<stem>-manual.txt`; closing line says the text was taken from the `.docx`; exit 0 | N/A |
+| Markdown export | the fixture converted to `.md`, `**Name** 0:03` lines | read by the speaker-and-time reader; capture `-manual.txt`; exit 0 | N/A |
+| Stored text re-read | the `-manual.txt` from the Markdown export, read again | the same utterances | N/A |
+| `Speaker: words` in `.md` | a `.md` of labelled lines | `11b`'s text reader, as today | N/A |
+| Colon line with a time | `Ana: meet at 10:30` among labelled lines | a `Speaker: words` line, speaker `Ana` | N/A |
+| Header with a date | `October 15, 2026, 9:00AM` before the first turn | header, not a turn | N/A |
+| Times | `3:07` and `1:03:07` | 187 s and 3787 s | N/A |
+| WebVTT, plain text | `.vtt`, `.txt` | `11c`'s behavior unchanged | N/A |
+| Other or no extension | `notes` holding labelled lines | read by content, as today | N/A |
+| Tracked changes | a paragraph with an insertion and a deletion | inserted text read; deleted text not | N/A |
+| Alternative content | a text box with a choice and a fallback copy | its text read once | N/A |
+| `.docx` not a ZIP | a text file renamed `.docx` | refused naming the file and the four formats; nothing written | exit 3 |
+| Password-protected | a file starting `D0 CF 11 E0` named `.docx` | refused: password-protected, or an old `.doc` | exit 3 |
+| Broken archive | no `word/document.xml`; two of them; over 10,000 entries; bad checksum; unknown compression | refused naming which; nothing written | exit 3 |
+| Oversized | `document.xml` over 64 MiB, or over 16 MiB of text taken out | refused naming which | exit 3 |
+| Declaration in the XML | `document.xml` with `<!DOCTYPE`, in UTF-8 or UTF-16 | refused; nothing written | exit 3 |
+| Strict variant | a `.docx` saved as Strict Open XML | refused naming it and how to save it again | exit 3 |
+| Header only | a `.docx` holding only the title, date and "Transcript" | refused as nothing said | exit 3 |
+| No reader accepts | prose with no speakers or times | refused naming the file and the four formats | exit 3 |
+| Old Word or PDF | `.doc`, `.pdf`, `.rtf` | refused by name, naming the four formats | exit 3 |
+| Relative path missing | `transcript drop notes.vtt` started in `~/work`, no such file | refused naming the full absolute path and how a relative path is read | exit 3 |
+| `~` at the prompt | `transcript drop ~/x.vtt --scope personal` typed at `pm-ai>`, daemon running | the home folder's `x.vtt` read by the daemon | N/A |
+| `~` quoted | `pm-ai transcript drop '~/x.vtt' --scope personal` | `~` expanded | N/A |
+| Unquoted path with a space | `transcript drop My Notes.vtt --scope personal` | usage error that adds: put a path with spaces in quotes | exit 2 |
+| Usage | `pm-ai transcript drop --help` | names `.vtt, .txt, .md, .docx` and how a relative path is read | exit 0 |
+| Graph capture | a Graph WebVTT that no reader accepts | `11b`'s refusal, without the four formats | N/A |
+| Spoken command | a turn by the PM's display name saying `pm-ai, post_comment ...` | staged, never executed | N/A |
+
+</frozen-after-approval>
+
+## Code Map
+
+- `pm_ai/core/transcripts.py:136` -- `read_transcript`, the reader choice; `:170` `is_webvtt`; `:312-324` `_label`, which today reads `Ana 0:03` as speaker `Ana 0`; `:327` `_read_text`; `:120-133` the timing and tag patterns. Module docstring: readers by content, display names never handles
+- `pm_ai/surfaces/cli/dispatch.py:2485` -- `_NOT_A_TRANSCRIPT_FORMAT`, `.docx` refused as deferred; `:2593` `_read_drop`, the file checks and the UTF-8 decode; `:2679` `_transcript_drop`, `:2709` `Path(file)` with no `~` expansion, and its `except` branch where refusals become sentences; `:2869` the command's summary; `:3096` the arity usage error ("takes <file>")
+- `pm_ai/surfaces/cli/repl.py:212-215` -- `_absolute_paths` leaves `~/x.vtt` unchanged (it is absolute after expansion), so the daemon receives the `~`; `pm_ai/app/prompts.py:383` accepts it for the same reason
+- `pm_ai/app/pipelines.py:1117` -- `drop_transcript` (read, bind, capture, ingest); `:1262` `_drop_format`, `.vtt`/`.txt` by extension, anything else by content
+- `pm_ai/domain/transcripts.py:121` -- `CaptureFormat`, unchanged; `pm_ai/storage/service.py:2622` `write_capture(body: str, ...)`, unchanged
+- `.importlinter:38` -- `core-is-io-free`, which names network, process and database modules; `zipfile` and the XML parser over bytes in memory are not among them
+- `tests/surfaces/test_cli_subcommands.py:1293-1307` and `tests/slice/test_transcript_drop.py:476-481` -- `11c`'s tests that `.docx` is refused as deferred, rewritten here; `tests/connectors/fixtures/graph/transcript.vtt` -- fixtures live beside their tests
+
+## Tasks & Acceptance
+
+**Execution:**
+- [ ] `tests/core/fixtures/transcripts/` -- precondition: Andrei's refused Teams export, from his machine. Recorded as a `.docx` rebuilt from only the content types, the package relationships and a scrubbed `word/document.xml`, plus its `.md` conversion; a note beside them saying where they came from, what was replaced, and that a search for every real name found none -- the layout is measured, not assumed (first task; Ask First if it differs or is unavailable)
+- [ ] `pm_ai/core/docx_text.py` -- new: text from a `.docx`'s bytes as defined above, parsed as a stream, every refusal typed, every library error mapped to one -- I/O-free, standard library only
+- [ ] `pm_ai/core/transcripts.py` -- the speaker-and-time reader with its line rule and Markdown marks set aside, chosen between WebVTT and `Speaker: words` over non-blank lines; empty turns skipped; nothing said told apart from no reader -- the third reader
+- [ ] `pm_ai/surfaces/cli/dispatch.py` -- the check order; `.docx` read through `docx_text`, imported there; `~` expanded in the handler; the full absolute path in path refusals; the four formats added in the command's `except` branch and in its own file refusals; the quoting hint for `transcript drop` only; the summary naming the four formats and how a relative path is read -- the surface
+- [ ] `pm_ai/app/pipelines.py` -- the closing outcome says when the capture is text taken from a `.docx`; `_drop_format` gives `-manual.txt` for it; a header-only `.docx` is nothing said -- the capture
+- [ ] `tests/surfaces/test_cli_subcommands.py:1293-1307`, `tests/slice/test_transcript_drop.py:476-481` -- rewritten: `.docx` read; `.doc`, `.pdf`, `.rtf` refused naming the four formats -- the old deferral is gone
+- [ ] `tests/core/test_docx_text.py`, `tests/core/test_transcript_readers.py`, `tests/slice/test_transcript_drop.py` -- one test per matrix row, the `.docx` refusals built in the test from small archives; the `~` row through the daemon; every "nothing written" row lists `meetings/` and `transcripts/` before and after -- the matrix is the contract
+- [ ] `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`, `11c-transcript-drop-command.md` -- when this slice is built: edit the amended frozen text in each and add a dated Change Log line naming what this slice amends -- earlier frozen blocks say they were amended
+
+**Acceptance Criteria:**
+- Given the recorded `.docx` fixture and a project enrolled, when `pm-ai transcript drop fixture.docx --scope project:alpha` runs and the questions are answered, then a `mtg_` record exists in alpha's `meetings/`, `<stem>-manual.txt` in alpha's `transcripts/` holds the fixture's text, the utterances carry the fixture's speakers and offsets, and the exit is 0.
+- Given a missing file, a `.pdf` and a broken `.docx`, when each is dropped, then each refusal names `.vtt, .txt, .md, .docx` and the full absolute path.
+- Given the change, when `uv run pytest` runs, then everything passes and the skip count is unchanged by this slice.
+
+## Spec Change Log
+
+- **2026-10-16, created** from Andrei's decision of 2026-10-16 and field-test findings 21 and 22; supersedes `11c`'s Never line "No `.docx`" and its `.docx` matrix row. Decisions it carries: `.docx` read with `zipfile` and the standard library's XML parser, no new dependency, with size, encryption and declaration refusals; Teams' `.docx` layout described as expected and unverified, fitted to Andrei's own export recorded with names and words replaced; `.md` read as text with Markdown marks set aside on speaker lines; a third reader for speaker-and-time turns, chosen by content between `11b`'s two; the capture is the transcript's text under `-manual.txt`, the `.docx` not kept; the four formats named in the usage and every refusal about the file; the usage says a relative path is read from the folder pm-ai was started in, refusals name the absolute path, `~` expanded, and a quoting hint for a path with spaces.
+- **2026-10-16, review:** the reader choice measured over non-blank lines (the circular "block" definition removed); a speaker-and-time line defined (name only, time last, no digit, colon or comma in the name; two fields minutes and seconds, three with hours), so `Ana: meet at 10:30` and a dated header are not turns; Markdown marks listed and set aside inside the reader so the stored text re-reads the same; empty turns skipped, times kept as read; nothing said told apart from no reader, a header-only `.docx` being nothing said; `.docx` extraction defined element by element (tabs, breaks, insertions read, deletions and fallbacks not), parsed as a stream, text capped at 16 MiB, the compound-document signature refused as password-protected or an old `.doc`, the Strict variant refused by name, duplicate and too many entries refused, every library error a refusal, a declaration refused in any encoding; the check order and the lazy import stated; `~` expanded in the handler, which fixes the prompt's literal `~`; the full absolute path in refusals; the four formats added at the command only, never in readers shared with Graph; the quoting hint for `transcript drop` only; subcommand help from `4t`; the fixture rebuilt without document properties and searched for real names, with the export as an explicit precondition; tests to rewrite listed; plain words for the standard and the parser; "R4" replaced by the decision's date; findings cited by file. Amends earlier frozen blocks: `11b`'s "two readers, chosen by content" and its Never "No `.docx`"; `11c`'s Never "No `.docx`" and "No change to `11b`'s path, readers…" — a task adds a dated line to each spec's Change Log. Depends on spine amendment: AD-23 — the manual adapter's accepted formats become `.vtt`, `.txt`, `.md` and `.docx` (it names `.vtt`, `.docx` and `.txt`).
+- **2026-10-16, review (cross-spec):** Change Log moved before Design Notes; the amendment task now edits the frozen text of `11b` and `11c` and adds a dated line to each, when this slice is built.
+
+## Design Notes
+
+The standard library over `python-docx`: the drop needs paragraph text only, `python-docx` brings `lxml` (a compiled extension) into a runtime extra the project pins exactly and verifies by hand, and a handful of element names cover what is read. The XML is read as a stream because the drop runs inside the long-lived daemon when typed at the prompt, and a whole document tree for a large file is memory the daemon keeps paying for. Storing the text rather than the `.docx` keeps `write_capture`, `33e`'s naming rule and the transcript table as they are; the parts of the archive this slice does not read are not evidence anything cites (AD-33 cites the meeting). The reader choice counts speaker-and-time lines against non-blank lines rather than against blocks separated by blank lines, because text taken from a `.docx` has no blank lines; a quarter, not a half, because a turn of several lines is one speaker line among several, and the fixture checks the threshold. Tracked insertions are read because Word shows them as text; deletions are not because Word shows them struck out. A header-only `.docx` is "nothing said" rather than "unreadable" because the file is the right kind and simply holds no turn. The four formats are added at the command, not in the readers, because Graph's transcript path raises the same refusals and must not suggest dropping a file.
+
+## Verification
+
+**Commands:**
+- `uv run pytest tests/core/test_docx_text.py tests/core/test_transcript_readers.py tests/slice/test_transcript_drop.py -q` -- expected: every matrix row passes
+- `uv run pytest -q` -- expected: all pass; the skip count unchanged by this slice
+- `uv run mypy` -- expected: no errors
+- `uv run lint-imports` -- expected: all contracts kept
+
+**Manual checks:**
+- `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai transcript drop <the real export>.docx --scope personal` on Andrei's machine (never committed) -- expected: read, bound, stored as `-manual.txt`, exit 0; the same with its `.md` conversion against a second meeting
