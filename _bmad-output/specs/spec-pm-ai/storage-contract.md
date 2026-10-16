@@ -6,8 +6,8 @@ Companion to `SPEC.md`. What persists, which tier it belongs to, what is encrypt
 
 | Tier | Contents | Backed up | Rebuildable |
 | --- | --- | --- | --- |
-| **1 — Truth** | Plaintext Markdown: event log segments, `commitments_log.md`, coaching history, goals, rules, meeting records, disclosure ledger | Yes | n/a — it *is* the source |
-| **2 — Operational** | Job queue and retry buffer, connector cursors, executed-idempotency-key ledger, staged proposals, key material, personal analytics | Yes | **Never** — not derivable from Markdown |
+| **1 — Truth** | Plaintext Markdown: event log segments, `commitments_log.md`, coaching history, goals, rules, meeting records, disclosure ledger, the saved alias table `aliases.md` and a project's `member_updates.md` (both 2026-10-16) | Yes | n/a — it *is* the source |
+| **2 — Operational** | Job queue and retry buffer, connector cursors, executed-idempotency-key ledger, staged proposals, key material, personal analytics; since 2026-10-16 the GitLab work tables, transcript parts and the meeting summary state | Yes | **Never** — not derivable from Markdown |
 | **3 — Derived** | Search index (`event_index.db`), commitment index (`commitment_index.db`), vector index (`vector_index/`) | No | Yes, entirely from Truth, with zero loss |
 
 Nothing builds the Tier-3 contents today, and no story claimed to until 2026-08-27. `derivation-services.md` holds the design that closes it, the job that owns each artifact, and the constraint that follows for everything in this tier — and it is why the single `derived.db` became two files on that date: one index per rebuilding job, because a job declares its whole output and two jobs cannot each own half a file. The rule: **an artifact is Tier 3 only if a declared job can rebuild it from Tier 1 alone.** Anything that cannot belongs in another tier. ("Caches" was struck from the row above on the same date: no capability asked for one, and an undefined member of the disposable tier is an invitation to put something non-rebuildable there.)
@@ -25,6 +25,12 @@ An artifact in none of the five is an oversight, not a category. Deleting Tier 3
 
 **Tier-2 schema change is forward-only.** Ordered migrations that preserve existing rows, each applied at most once, refusing to open a store stamped newer than the code. Drop-and-recreate is prohibited on the one tier no rebuild can reconstruct: it destroys pending external writes and resets every connector cursor.
 
+**What wave 3 added to Tier 2** (2026-10-16), all in `operational.db`, keyed by scope, created on open with no change to the store's version number. **Additive tables are exempt from the version bump:** the store's schema runs `CREATE TABLE IF NOT EXISTS` on every open, which creates a missing table on an older store and leaves an existing one alone, so a new table needs no migration step, and a version bump with no migration behind it would stamp a store nothing changed (`SCHEMA_VERSION` stays 1; stories 8a, 4r, 9a and 9b added tables the same way). Any change to an existing table — a column added, a type changed — is a migration and bumps the version, as the rule above says.
+
+- **GitLab work** (story 8t): `gitlab_members`, `gitlab_issues`, `gitlab_issue_assignees`, `gitlab_merge_requests`, `gitlab_merge_request_issues`, and `gitlab_work_status` (per scope and section: complete or unread, the reason, the last complete read). Written by one claimed step that merges a harvest's change in one transaction; read only through `StoragePort.project_work(scope)`. Tier 2 because it is current state, not history: a file replaced whole would break Tier 1's append-only promise, it cannot be rebuilt from Tier 1, and the event log's natural key would keep only an issue's first state. No description, comment or email is ever stored.
+- **Transcript parts** (story 33g): `transcript_parts`, one row per stored part of a meeting's transcript (`pending` until its capture is written, then `stored`), and `transcript_part_asks`, when each meeting was last asked. A part is one claimed step, safe to kill.
+- **Meeting summary state** (story 7b): one row per scope and meeting, with a version a job compares and sets on its final write, so a summary the PM asked for wins over an automatic one still running. Written last, after the record's summary block, the decision events and the proposals, so a failure part-way leaves the meeting offered again.
+
 `personal_analytics.db` is Tier 2 specifically because burnout trends outlive the telemetry they were computed from once compaction prunes it — Tier 3 would mean rebuildable-from-truth, and it is not.
 
 ## Encryption at rest
@@ -33,7 +39,7 @@ Encryption applies to a **defined set** rather than to all local state, because 
 
 **Encrypted** (AES-256, 600 permissions) — narrowed 2026-08-22 to credentials and the sovereign personal enclave:
 
-- API credentials (`~/.pm-ai/private/config.json`) — every provider token lands here, including the one `pm-ai connector add` prompts for
+- API credentials (`~/.pm-ai/private/config.json`) — every provider token lands here, including the one `pm-ai connector add` prompts for, and the frontier API key (2026-10-16, story 7c) under its own top-level key, entered at a hidden prompt by `pm-ai frontier key`, checked by the daemon, then sealed — secret first
 - The PM's own voice notes and dialogue state (`~/.manager-ai/private/telegram_cache/`)
 
 Both are **files**. Nothing encrypted is a database, which is what removed `sqlcipher3` from the dependency set — it had no macOS wheel and would have needed a source build on the one platform v1 targets, for a single file.
@@ -69,13 +75,17 @@ Deliberately not a config key, and this supersedes the spine's Deployment note p
 
 Added 2026-08-27. Until a filesystem watcher existed, a half-written file had no observer and only crash durability mattered. Now the moment a name appears is the moment a job starts, so *when* a write becomes visible is part of the contract. Three write shapes, three different answers.
 
-**Append — `event_log/` segments, `commitments_log.md`.** Cannot be made atomic: rename-into-place means rewriting the whole file, which the append-only rule below forbids. It does not need to be. Records are one per line, newline-terminated, so a reader that lands mid-flush sees every complete record plus a fragment at the tail. **The rule is therefore a parser rule: a record without its terminating newline is not a record.** A fragment is a boundary, not corruption. A job that ran early is corrected by the next event, since indexers delete and rebuild a source file's entries rather than adding to them.
+**Append — `event_log/` segments, `commitments_log.md`, `disclosure.md`, `aliases.md`, `member_updates.md`.** Cannot be made atomic: rename-into-place means rewriting the whole file, which the append-only rule below forbids. It does not need to be. Records are one per line, newline-terminated, so a reader that lands mid-flush sees every complete record plus a fragment at the tail. **The rule is therefore a parser rule: a record without its terminating newline is not a record.** A fragment is a boundary, not corruption. A job that ran early is corrected by the next event, since indexers delete and rebuild a source file's entries rather than adding to them.
+
+**Append-only is enforced for the two ledgers wave 3 adds** (2026-10-16, story 7e): `aliases.md` and `member_updates.md` are written only through storage's append method and are on the append-only list the writer checks, so a whole-file write of either is refused. A correction is a later line — a removal or replacement in the alias table, a `withdrawn` or confirmation line in the updates ledger — never an edit. A disclosure `sent` line is appended before a frontier request leaves the machine; if it cannot be written, nothing is sent.
 
 **Exclusive create — captures in `transcripts/`.** `O_CREAT|O_EXCL` claims the name before the content exists, so a watcher sees a capture that is still growing. This is the one shape where an early read is unrecoverable: transcript processing appends a summary, decisions and commitments to Tier-1 ledgers, and re-running on the completed file appends all of them a second time with nothing to distinguish the two. **A capture becomes visible atomically or not at all:**
 
 1. Write the whole body into `transcripts/temp/`, flush and `fsync`.
 2. `os.link` it to the final name — atomic *and* refusing a name already taken, so exclusivity stays kernel-enforced exactly as `O_EXCL` made it.
 3. Unlink the temp name; `fsync` the directory.
+
+A meeting's transcript may be several captures (2026-10-15, story 33g): part 1 keeps `<record stem>-graph.vtt`, so every capture already on disk is a part 1, and part *n* ≥ 2 is `<record stem>-graph-<n>.vtt`. Each is its own exclusive create, nothing is concatenated or appended to, and a hand-dropped transcript is one capture named `-manual.vtt` or `-manual.txt` — since story 11d a `.md` file's bytes as they are, and a `.docx`'s extracted text, under `-manual.txt`, the `.docx` itself not kept.
 
 `transcripts/temp/` is inside the capture directory deliberately: the derived gitignore rule is a directory rule (`/.project-ai/transcripts/`), so the temp is already excluded from version control with no second rule, and it is on the same filesystem, which `link` requires. **It must be excluded from the watcher** — a recursive watch would otherwise see every temp file. That is an explicit exclusion, not an implied one.
 
@@ -86,6 +96,14 @@ Where `link` is unsupported — exFAT, some network mounts, reachable only throu
 **Whole-file replace — `config.json`.** `O_TRUNC` destroys the old content before the new content is written, and an AES-GCM file truncated part-way does not degrade, it fails its tag and becomes unreadable. A crash mid-rotation therefore loses every connector credential. **Write to a temp file in the same directory at `0600`, `fsync`, then `os.replace`.** Here `replace` is right where `link` was right for captures: rotating a token *must* overwrite, so overwrite-on-rename is the wanted behaviour and refusing a taken name would be the defect.
 
 **And every raw write loops.** `os.write` returns how many bytes it wrote and a short write silently truncates — same total unreadability for a sealed file. Write until the payload is exhausted; never discard the return value.
+
+## File modes
+
+Added 2026-10-16 (story 1s, field-test findings 3, 8 and 14). **Private is decided by where a file lives:** everything under `~/.pm-ai` and `~/.manager-ai`, the two roots included, and everything under a project's `.project-ai/memory/` and `.project-ai/transcripts/`, is `0600` in `0700` folders. A project's shared parts — `.project-ai/`, `rules/`, `skills/`, the repository's `.gitignore` — stay at the umask and are never walked. `config.toml` and `projects.toml` are private too: they hold no secret, but name every managed repository, the hourly rate and the time zone.
+
+**Created at the mode, never widened then narrowed.** Every way pm-ai creates a file there — whole-file publishes and their temporary files, appends, captures and their staging, lock files, `operational.db` (created at `0600` before SQLite opens it, so its `-wal` and `-shm` follow), and `logs/daemon.log` on every rollover — creates it at `0600` and sets the mode again on the open file; a new folder and every missing folder above it are made `0700` and set again, so a umask that strips owner bits cannot lock pm-ai out.
+
+**Each daemon start tightens what already exists** — after it holds its lifetime lock and before its writer thread starts — in `~/.pm-ai`, `~/.manager-ai` and each loaded project's private folders. It removes group and other bits and nothing else, follows no link inside a root, leaves hard-linked files and access-control lists alone, logs one `daemon.log` line per path changed and, only when anything was changed or not tightened, prints one console line with the counts. It changes no content and no store row, so it is not a write in the single-writer sense. A path it may not change, or whose mode the filesystem does not keep, is logged as not tightened and reported again at the next start; tightening never stops the daemon, and there is no setting to turn it off.
 
 ## Retention
 

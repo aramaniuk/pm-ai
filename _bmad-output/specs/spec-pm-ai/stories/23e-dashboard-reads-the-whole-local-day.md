@@ -32,6 +32,7 @@ context:
 - **The exclusions stand.**
   - A meeting the PM declined is left out, wherever it falls.
   - A cancelled meeting is left out while it has not ended (`_is_the_pms_meeting`).
+- **An ended cancelled meeting is listed, marked as cancelled** (Andrei's decision on field-test finding 7, 2026-10-16). The connector already keeps it: `_is_the_pms_meeting` drops a cancelled row only while `end > now`, so an ended one comes back with the day's other ended meetings. What is missing is the mark — `Meeting` carries no cancellation, so the page lists it as an ordinary ended meeting. The row's `is_cancelled` is carried on `Meeting` in memory only, as `tentative` is, absent from the record fields, and the meeting's line adds `cancelled` to its facts. Its record and citations are unchanged; the harvest is unchanged.
   - Copies of one meeting across two tenants are matched as `23b` matches them.
 - **The read stays bounded (`9b`).** The live calendar read is one bounded step held to the per-connector fetch budget. If that step is abandoned at its deadline, the calendar counts as unread, never as a failed render. A day is far narrower than the widest span asked for in one request (30 days), so it is one request, walked page by page.
 - **One range, never two.** The calendar fetch is given either the harvest's cursor or the render's range. Given both, it refuses with a `ValueError` naming both, rather than mixing them.
@@ -62,7 +63,7 @@ context:
 | All-day, zone east of UTC | UTC+9; all-day entries dated yesterday and today | only today's is listed | N/A |
 | Declined | response `declined`, any time today | left out | N/A |
 | Cancelled, not ended | 15:00 today, render at 07:00 | left out | N/A |
-| Cancelled, ended | 08:00 today, render at 10:00 | listed as ended, as today | N/A |
+| Cancelled, ended | 08:00 today, render at 10:00 | listed as ended, its facts including `cancelled` | N/A |
 | Read times out | the bounded step's deadline passes | "calendar could not be read"; file written | as `9b` |
 | Two tenants | two Graph rows | each read for the same local day; merged and deduplicated | one failing → partial |
 | Both range and cursor | the fetch is handed both | refused with `ValueError` naming both | a bug; caught by `_ask` as today |
@@ -86,7 +87,8 @@ Verified against `a1182f8` on 2026-10-16.
   - `:1278-1320` the split between ended and not-yet-ended meetings;
   - `:1561` `_is_the_pms_meeting`;
   - `:2026-2040` `_minutes_of`, which gives an all-day row zero minutes.
-- `pm_ai/domain/meetings.py:100` -- `Meeting`, which has no all-day date; one is carried in memory only, as `tentative` is.
+- `pm_ai/domain/meetings.py:100` -- `Meeting`, which has no all-day date and no cancellation; each is carried in memory only, as `tentative` is.
+- `pm_ai/connectors/graph/calendar.py:688`, `:1117` -- `CalendarRow.is_cancelled`, read off the row; `pm_ai/core/rendering.py:572-587` -- `_meeting_line`, where `tentative` already adds a fact.
 - `pm_ai/ports/__init__.py:96-109` -- `CalendarReadPort.read_calendar(since: Cursor)`, documented as reading "exactly as `harvest` reads it".
 - `pm_ai/app/pipelines.py` --
   - `:1627` `prepare_dashboard`, which calls `_todays_calendar`;
@@ -108,6 +110,7 @@ Verified against `a1182f8` on 2026-10-16.
 - [ ] `pm_ai/ports/__init__.py` -- `CalendarReadPort.read_calendar(start, end)`, aware UTC, replacing the always-empty cursor; the docstring says it reads the calendar alone over that range -- the render names its day
 - [ ] `pm_ai/connectors/graph/calendar.py` -- `fetch` takes an optional given range and walks it instead of the policy's window; a range given together with a cursor is refused -- one fetch, two callers
 - [ ] `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py` -- `read_calendar` builds the range and reads over it; an all-day row's own date is carried on `Meeting` in memory only, absent from the record fields like `tentative` -- the harvest stays as it was
+- [ ] `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py`, `pm_ai/core/rendering.py` -- `Meeting.cancelled` set from the row's `is_cancelled`, in memory only and absent from the record fields; `_meeting_line` adds `cancelled` -- an ended cancellation is shown and marked (finding 7)
 - [ ] `pm_ai/app/pipelines.py` -- `_todays_calendar` hands `_day_bounds`' instants through `_ask_within` and `_ask`; `_on_day` places a marker that carries a date by that date -- the day asked is the day shown
 - [ ] `tests/slice/test_dashboard_slice.py` -- a double implementing `read_calendar(start, end)` that records its arguments, and a port test that asserts the parameter names -- a structural `isinstance` check passes with the old signature too, so the range must be asserted, not inferred
 - [ ] `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_chat_messages.py`, `tests/slice/test_dashboard_slice.py` -- one test per matrix row; the request's `startDateTime` and `endDateTime` asserted on the recorded URL; the "exactly as harvest" test replaced by one asserting the harvest's range is unchanged -- the matrix is the contract
@@ -131,6 +134,7 @@ Verified against `a1182f8` on 2026-10-16.
   - **Stated:** the AD-9 spine amendment. Added a task for a Change Log line in `23b`.
   - **Wording:** the example zone is now UTC−5; "flagged" became "marked"; the ACs were replaced with system-level checks; the Intent was trimmed.
   - **Rejected:** changing `_day_bounds` for zones that change clocks at midnight. Measured on 2026-10-16, it already yields the correct 23- and 25-hour days there, so that finding became a matrix row and a test instead.
+- **2026-10-16, Andrei's decision on field-test finding 7.** An ended cancelled meeting is shown on the dashboard, marked as cancelled, not left out; a cancelled meeting not yet ended stays left out. Read against the code: the connector already keeps the ended row, so the change is the in-memory flag and the line's mark. Always bullet, matrix row, Code Map line and task added.
 
 ## Design Notes
 
