@@ -55,6 +55,10 @@ Severity is by consequence for the person using pm-ai. "Where" is the code the f
 | 23 | No way to list or show goals: `goal update`, `goal create` and `goal list` were all tried and refused as usage errors; only `goal set` exists. | Usability — low | `surfaces/cli/dispatch.py` command table |
 | — | A GitLab host typed without `https://` is refused (clear message) rather than assumed https. | Cosmetic | `connectors/gitlab/client.py` `host_refusal` |
 
+| 25 | **The morning page shows only the next four hours.** The dashboard reads "today" through the harvest window: the calendar fetch's window ends at `now + width` (240 minutes). The 07:00 page listed 3 of the day's 7 meetings, all starting before 11:00; a render at 10:31 listed 6. The afternoon never appears on the morning page. | Bug — high | `connectors/graph/calendar.py:633` |
+| 26 | The project page reported no meetings while the day held seven: Outlook categories are not mapped to the project, so every meeting files as personal, and nothing in setup offers the mapping. | Setup gap — medium | `connectors/graph/__init__.py` `CATEGORIES_KEY` |
+| 27 | GitLab commits reach the project's event log but no dashboard section reads them, so the project page shows nothing from GitLab. | Product gap — medium | `core/rendering.py` sections |
+
 ### Withdrawn during the test
 
 - **"Sync" lost its Cyrillic words** — not a bug: Outlook shows a meeting's location after its subject; the subject was the one word.
@@ -65,6 +69,20 @@ Severity is by consequence for the person using pm-ai. "Where" is the code the f
 ### Corrected: a claim made in #69
 
 24. **#69 and its `deferred-work.md` entry said Proactive Enablement filters on each message's own timestamp, so a message harvested after a render could be lost. That was wrong.** The window filters on `ingested_at` (`core/rendering.py:708`): a message posted before a render and harvested after it appears on the next page — measured here, where messages posted at 11:20–15:41 appeared on a page rendered after a 22:20 render. The decision #69 asked for is not needed; the entry is withdrawn. What the test found instead is finding 15.
+
+## After first use — Andrei's feedback (2026-10-16)
+
+In his words, condensed; each became a decision in the spec memlog and a wave-3 slice.
+
+1. The morning page missed most of the day's meetings → findings 25 and 26.
+2. Nothing from GitLab on the project page → finding 27.
+3. A first run reaching back 600 minutes leaves pm-ai looking empty; five days is the right first look back.
+4. Goals: only `goal set` exists; list, show, update and delete are needed.
+5. The prompt needs completion and hints to build commands.
+6. `transcript drop` is unclear about how a relative path is resolved and reads too few formats: `.vtt`, `.md` and `.docx` are needed.
+7. Pressing Enter again to see a job's result is unfriendly: show results as they arrive, how many jobs are running, and that they are progressing.
+8. The logs are hard to find; there should be a way to look at them.
+9. A stored transcript produced nothing useful: summaries, decisions and action items need the model (story 7), local first, with a disclosed frontier summary on request.
 
 ## Requirements decided during the test (Andrei, 2026-10-15)
 
