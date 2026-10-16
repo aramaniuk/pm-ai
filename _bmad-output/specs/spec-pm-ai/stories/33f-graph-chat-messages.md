@@ -71,7 +71,7 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] scratch script, not committed -- re-run the spike on one listed chat; save the redacted page as `tests/connectors/fixtures/graph/chat_messages.json` — **OWED**: not done; the re-run needs Andrei's sign-in and a chat id he chooses. The fixture in place is hand-written in Microsoft's published shapes and says so in its `_provenance`; replace it with the redacted real answer when the spike is re-run.
+- [x] scratch script, not committed -- re-run the spike on one listed chat; save the redacted page as `tests/connectors/fixtures/graph/chat_messages.json` — done 2026-10-16: the page was captured 2026-10-15 through pm-ai's own Graph client, redacted, and saved as `tests/connectors/fixtures/graph/chat_messages_recorded.json` beside the hand-written fixture — a change from this task's filename, so the hand-written page and the tests that assert its values stay
 - [x] `pm_ai/connectors/graph/chats.py` -- new: the per-chat filtered walk with the client-side cut, the `channel` label rule, clock readings, failure classes
 - [x] `pm_ai/connectors/graph/__init__.py` -- `chats` reader with refusals at construction (people scope refused with its sentence); the `chats` cursor member; chats walked after the channels under the shared budget; per-chat failures
 - [x] `pm_ai/app/wiring.py` -- read `chats` off the row, build the fetchers

@@ -1,0 +1,1326 @@
+{
+  "_provenance": "Captured from a real tenant on 2026-10-15 through pm-ai's own Graph client: the first page of GET /chats/{chat}/messages as GraphClient.chat_messages builds it ($top=50, $orderby=lastModifiedDateTime desc, $filter=lastModifiedDateTime gt fourteen days before the capture) for the first listed chat with a message in that window, a meeting chat. Graph accepted the filtered, sorted request, and the rows arrived newest modification first. Redacted before it left the machine. Ids come from HMAC-SHA256 under a random 32-byte key that was never written down, so the mapping cannot be reproduced, or confirmed by hashing a guessed real value: GUIDs come out v4-shaped, Teams ids keep their shape (`19:...@thread.tacv2`, `19:meeting_...@thread.v2`, `..._...@unq.gbl.spaces`), and online-meeting and other opaque ids keep their length and alphabet. People are mapped per user id: one id is one 'Person N' across the channel and chat fixtures, and `mentionText` and the text inside `<at>` carry the same label. Free text: every word is replaced by lowercase letters of random length (2 to 9) in its own script, digits become 0, and punctuation, spacing and HTML entities are kept. Kept as recorded: keys, value types, timestamps (the real instants), Graph enumerations (keys ending in Type or Status, `@odata.type`, `contentType`, `messageType` and the like), the JSON keys inside card attachments, HTML tag names and structural attributes. `href` and `src` become https://example.invalid/<token>; URL fields become https://graph.microsoft.com/v1.0/redacted/<token>, keeping `?$skiptoken=` where the original had one. Kept whole: all 20 rows. No `GET /chats/{chat}` answer was captured, so there is no `chat` object beside the page. Observed on this page: call started, ended, recording and transcript events are typed `unknownFutureValue`, with the body `<systemEventMessage/>`, an `eventDetail` and no `from`.",
+  "page": {
+    "@odata.context": "https://graph.microsoft.com/v1.0/redacted/584337f8d7774cbf834a218d",
+    "@odata.count": 20,
+    "@odata.nextLink": "https://graph.microsoft.com/v1.0/redacted/eb2f7559e3b1ebb469a81314?$skiptoken=UMh0PQiVs779Bm13iMPk6AvrNk0iaBBWNkwCcj54",
+    "value": [
+      {
+        "id": "1334160692976",
+        "replyToId": null,
+        "etag": "1334160692976",
+        "messageType": "message",
+        "createdDateTime": "2026-10-12T13:35:09.705Z",
+        "lastModifiedDateTime": "2026-10-12T13:35:09.705Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/84f53c65a31f6dc004fff6f5",
+        "channelIdentity": null,
+        "policyViolation": null,
+        "eventDetail": null,
+        "from": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "f961ff99-8daa-4589-88c0-70aa6a14fe7c",
+            "displayName": "Person 16",
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        },
+        "body": {
+          "contentType": "text",
+          "content": "брсч 👍"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": []
+      },
+      {
+        "id": "1135243157886",
+        "replyToId": null,
+        "etag": "1135243157886",
+        "messageType": "message",
+        "createdDateTime": "2026-10-12T13:34:18.142Z",
+        "lastModifiedDateTime": "2026-10-12T13:34:18.142Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/8544f62e7ae94b39e4016d27",
+        "channelIdentity": null,
+        "policyViolation": null,
+        "eventDetail": null,
+        "from": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "2357f7b6-42c8-4859-a040-62ce41139904",
+            "displayName": "Person 1",
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        },
+        "body": {
+          "contentType": "html",
+          "content": "<p><at id=\"0\">Person 16</at></p>\n<p><img src=\"https://example.invalid/2163ffe1329249b9d9266d08\" width=\"253.32929782082326\" height=\"250\" alt=\"tljyuy\" itemid=\"188MnsllepPhYibs72IsI9ALWWUBMoPctGSJiU0RR\"></p>"
+        },
+        "attachments": [],
+        "mentions": [
+          {
+            "id": 0,
+            "mentionText": "Person 16",
+            "mentioned": {
+              "application": null,
+              "device": null,
+              "conversation": null,
+              "tag": null,
+              "user": {
+                "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                "id": "f961ff99-8daa-4589-88c0-70aa6a14fe7c",
+                "displayName": "Person 16",
+                "userIdentityType": "aadUser",
+                "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+              }
+            }
+          }
+        ],
+        "reactions": []
+      },
+      {
+        "id": "1139959184607",
+        "replyToId": null,
+        "etag": "1361454268022",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T08:06:06.812Z",
+        "lastModifiedDateTime": "2026-10-12T08:06:08.771Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/20091a1df5664bc5f28ef032",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callRecordingDisplayName": "tvd ysoovuvzp twbkjx emxz-00000000_ydnniio-cbqn kv.gzuj",
+          "callRecordingUrl": "https://graph.microsoft.com/v1.0/redacted/27fa92d3d3b6dd11964d8d91",
+          "callRecordingDuration": "qrjnk.wm",
+          "callRecordingStatus": "success",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1358354763602",
+        "replyToId": null,
+        "etag": "1358354763602",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T08:01:37.83Z",
+        "lastModifiedDateTime": "2026-10-12T08:01:37.83Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/4e1f02e12e6cc2d6f60536fd",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callRecordingDisplayName": "jxfccc sdbpdpx hluvk ssxq-00000000_kzvlg-bqq uqpqohtfx.as",
+          "callRecordingUrl": "https://graph.microsoft.com/v1.0/redacted/a5a7669c896bdeac165ab2d1",
+          "callRecordingDuration": "sxinuheb.ltpsko",
+          "callRecordingStatus": "chunkFinished",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1492541681818",
+        "replyToId": null,
+        "etag": "1492541681818",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T08:01:37.67Z",
+        "lastModifiedDateTime": "2026-10-12T08:01:37.67Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/63577637d4ed72036a08f06c",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callRecordingDisplayName": "yjijuus ikz cz zzzc-00000000_mqeoovw-pf qwfwqc.lnm",
+          "callRecordingUrl": "https://graph.microsoft.com/v1.0/redacted/a5a7669c896bdeac165ab2d1",
+          "callRecordingDuration": "wdpbn.dqd",
+          "callRecordingStatus": "chunkFinished",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1621928699138",
+        "replyToId": null,
+        "etag": "1621928699138",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T08:01:37.551Z",
+        "lastModifiedDateTime": "2026-10-12T08:01:37.551Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/c73a30183b7bb936454f5ec5",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callEndedEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callDuration": "fmgxx",
+          "callEventType": "meeting",
+          "callParticipants": [
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "5e7dfa49-c15a-46f5-91ad-ddf5dba86962",
+                  "displayName": "Person 17",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "3c7efd4a-82f9-4887-ba01-4baeb402e62c",
+                  "displayName": "Person 5",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "4a2b148d-aa83-43f5-814b-8ce542cba9f9",
+                  "displayName": "Person 8",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "f961ff99-8daa-4589-88c0-70aa6a14fe7c",
+                  "displayName": "Person 16",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "c59a7f6f-690e-49c9-aae7-a4994de2d034",
+                  "displayName": "Person 18",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "d9754b13-de39-4c43-a66b-4504015147f9",
+                  "displayName": "Person 11",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "device": null,
+                "user": null,
+                "application": {
+                  "@odata.type": "#microsoft.graph.teamworkApplicationIdentity",
+                  "id": "c5ca60a0-3b93-44c9-83ae-4f23fa5074c8",
+                  "displayName": "Person 10",
+                  "applicationIdentityType": "bot"
+                }
+              }
+            },
+            {
+              "participant": {
+                "device": null,
+                "user": null,
+                "application": {
+                  "@odata.type": "#microsoft.graph.teamworkApplicationIdentity",
+                  "id": "e4158f76-41b0-49fa-acec-59740ecced8f",
+                  "displayName": "Person 10",
+                  "applicationIdentityType": "bot"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+                  "displayName": "Person 19",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "2357f7b6-42c8-4859-a040-62ce41139904",
+                  "displayName": "Person 1",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "46700e8e-beef-449a-8c22-b490ac79acf9",
+                  "displayName": "Person 9",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            }
+          ],
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": "Person 19",
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1157654938648",
+        "replyToId": null,
+        "etag": "1101404119512",
+        "messageType": "message",
+        "createdDateTime": "2026-10-12T07:07:10.977Z",
+        "lastModifiedDateTime": "2026-10-12T07:56:43.435Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/f68342c29f5d1bbf92a41990",
+        "channelIdentity": null,
+        "policyViolation": null,
+        "eventDetail": null,
+        "from": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "f961ff99-8daa-4589-88c0-70aa6a14fe7c",
+            "displayName": "Person 16",
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        },
+        "body": {
+          "contentType": "html",
+          "content": "<div>аак люфшс . daeodpnml джаглаз лжалфпяом чвниуежк чкге врчсзмоз . <br>\nцзисттжт тшн &nbsp;кххшюиунс сеоа , лцжис вегн, ачопумфлс шкч.</div>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [
+          {
+            "reactionType": "👍",
+            "displayName": "Person 3",
+            "reactionContentUrl": null,
+            "createdDateTime": "2026-10-12T07:24:49.846Z",
+            "user": {
+              "application": null,
+              "device": null,
+              "user": {
+                "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                "id": "2357f7b6-42c8-4859-a040-62ce41139904",
+                "displayName": null,
+                "userIdentityType": "aadUser",
+                "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+              },
+              "displayName": null
+            }
+          },
+          {
+            "reactionType": "👍",
+            "displayName": "Person 3",
+            "reactionContentUrl": null,
+            "createdDateTime": "2026-10-12T07:56:43.466Z",
+            "user": {
+              "application": null,
+              "device": null,
+              "user": {
+                "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                "id": "4a2b148d-aa83-43f5-814b-8ce542cba9f9",
+                "displayName": null,
+                "userIdentityType": "aadUser",
+                "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+              },
+              "displayName": null
+            }
+          }
+        ]
+      },
+      {
+        "id": "1128841758908",
+        "replyToId": null,
+        "etag": "1128841758908",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T07:00:14.743Z",
+        "lastModifiedDateTime": "2026-10-12T07:00:14.743Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/936add8eb02fe8cb77108c3d",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callTranscriptEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callTranscriptICalUid": "rc",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1414670683035",
+        "replyToId": null,
+        "etag": "1414670683035",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T07:00:14.592Z",
+        "lastModifiedDateTime": "2026-10-12T07:00:14.592Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/26377704a94b11e789ae1aa5",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callRecordingDisplayName": "zdyigh yncpgdej pdotsvz oauz-00000000_lxykhus-bdkxn od.ieizqgo",
+          "callRecordingUrl": null,
+          "callRecordingDuration": "unzwms",
+          "callRecordingStatus": "initial",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1152256182140",
+        "replyToId": null,
+        "etag": "1152256182140",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T07:00:14.402Z",
+        "lastModifiedDateTime": "2026-10-12T07:00:14.402Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/c83727464d8177b5549ed140",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callRecordingDisplayName": "vkygtvly whrbya cpbftqegr vukfcp-00000000_iwyedzlmk-zzqsr bxb.sg",
+          "callRecordingUrl": null,
+          "callRecordingDuration": "ecbstph",
+          "callRecordingStatus": "initial",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1299405756651",
+        "replyToId": null,
+        "etag": "1299405756651",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-12T07:00:12.518Z",
+        "lastModifiedDateTime": "2026-10-12T07:00:12.518Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/0fde22f8202e8be30012b73b",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callStartedEventMessageDetail",
+          "callId": "88f16d54-e4fa-41c0-905b-551cd9f491e5",
+          "callEventType": "meeting",
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1993265939898",
+        "replyToId": null,
+        "etag": "1440022217175",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T07:53:48.264Z",
+        "lastModifiedDateTime": "2026-10-05T07:53:50.475Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/33a3c4312457f80246a175c8",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callRecordingDisplayName": "nw xpbdtbuq oy ncky-00000000_srwf-abju nt.jacttfs",
+          "callRecordingUrl": "https://graph.microsoft.com/v1.0/redacted/6cd4191193a1c2605e71a52f",
+          "callRecordingDuration": "cp.vdnykxez",
+          "callRecordingStatus": "success",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1118428901624",
+        "replyToId": null,
+        "etag": "1118428901624",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T07:49:18.441Z",
+        "lastModifiedDateTime": "2026-10-05T07:49:18.441Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/515966b47176301897b4bc3f",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callEndedEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callDuration": "mbzgbikw",
+          "callEventType": "meeting",
+          "callParticipants": [
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "2357f7b6-42c8-4859-a040-62ce41139904",
+                  "displayName": "Person 1",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "46700e8e-beef-449a-8c22-b490ac79acf9",
+                  "displayName": "Person 9",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "d9754b13-de39-4c43-a66b-4504015147f9",
+                  "displayName": "Person 11",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "4a2b148d-aa83-43f5-814b-8ce542cba9f9",
+                  "displayName": "Person 8",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "3c7efd4a-82f9-4887-ba01-4baeb402e62c",
+                  "displayName": "Person 5",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "5e7dfa49-c15a-46f5-91ad-ddf5dba86962",
+                  "displayName": "Person 17",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "device": null,
+                "user": null,
+                "application": {
+                  "@odata.type": "#microsoft.graph.teamworkApplicationIdentity",
+                  "id": "e4158f76-41b0-49fa-acec-59740ecced8f",
+                  "displayName": "Person 10",
+                  "applicationIdentityType": "bot"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "c59a7f6f-690e-49c9-aae7-a4994de2d034",
+                  "displayName": "Person 18",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+                  "displayName": "Person 19",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "device": null,
+                "user": null,
+                "application": {
+                  "@odata.type": "#microsoft.graph.teamworkApplicationIdentity",
+                  "id": "c5ca60a0-3b93-44c9-83ae-4f23fa5074c8",
+                  "displayName": "Person 10",
+                  "applicationIdentityType": "bot"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "f961ff99-8daa-4589-88c0-70aa6a14fe7c",
+                  "displayName": "Person 16",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            },
+            {
+              "participant": {
+                "application": null,
+                "device": null,
+                "user": {
+                  "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                  "id": "5f63a490-5a93-4af4-9cc9-e5decacdf99b",
+                  "displayName": "Person 2",
+                  "userIdentityType": "aadUser",
+                  "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+                }
+              }
+            }
+          ],
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": "Person 19",
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1270884691361",
+        "replyToId": null,
+        "etag": "1270884691361",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T07:49:18.38Z",
+        "lastModifiedDateTime": "2026-10-05T07:49:18.38Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/18c19c6fc4392e05ada154c6",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callRecordingDisplayName": "weydodlap zerleqoqy awwslp mguui-00000000_kzcjrsn-blgg oes.rerteytmr",
+          "callRecordingUrl": "https://graph.microsoft.com/v1.0/redacted/a5a7669c896bdeac165ab2d1",
+          "callRecordingDuration": "hknjhmwjg.qdox",
+          "callRecordingStatus": "chunkFinished",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1621557212782",
+        "replyToId": null,
+        "etag": "1621557212782",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T07:49:18.183Z",
+        "lastModifiedDateTime": "2026-10-05T07:49:18.183Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/720e9a55438c4cf742d974b1",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callRecordingDisplayName": "gbthsakno lmudjskq wu vrai-00000000_knwjkqin-ck cmquhpk.jt",
+          "callRecordingUrl": "https://graph.microsoft.com/v1.0/redacted/a5a7669c896bdeac165ab2d1",
+          "callRecordingDuration": "vxnmiapry.iksmord",
+          "callRecordingStatus": "chunkFinished",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1176520843447",
+        "replyToId": null,
+        "etag": "1176520843447",
+        "messageType": "message",
+        "createdDateTime": "2026-10-05T07:08:59.112Z",
+        "lastModifiedDateTime": "2026-10-05T07:08:59.112Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/84e9e7ff8cdc0d8b7f6f6c35",
+        "channelIdentity": null,
+        "policyViolation": null,
+        "eventDetail": null,
+        "from": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "5e7dfa49-c15a-46f5-91ad-ddf5dba86962",
+            "displayName": "Person 17",
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        },
+        "body": {
+          "contentType": "html",
+          "content": "<p>ти дгбв эво, птзлсми ивд оэгяихн пя</p>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": []
+      },
+      {
+        "id": "1514977714106",
+        "replyToId": null,
+        "etag": "1514977714106",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T06:59:18.737Z",
+        "lastModifiedDateTime": "2026-10-05T06:59:18.737Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/05342d1934eadac436ee8443",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callTranscriptEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callTranscriptICalUid": "hrhd",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1127955354122",
+        "replyToId": null,
+        "etag": "1127955354122",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T06:59:18.578Z",
+        "lastModifiedDateTime": "2026-10-05T06:59:18.578Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/13fc7a674a370b7fffe2772a",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callRecordingDisplayName": "fsj yixmm puodwq jivrrc-00000000_um-aec syvlcw.zeoyrisbs",
+          "callRecordingUrl": null,
+          "callRecordingDuration": "ldjbxtwg",
+          "callRecordingStatus": "initial",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1402872278336",
+        "replyToId": null,
+        "etag": "1402872278336",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T06:59:18.394Z",
+        "lastModifiedDateTime": "2026-10-05T06:59:18.394Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/334304c01f5db749269141ff",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callRecordingEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callRecordingDisplayName": "szbkzv dl ob gqvyvu-00000000_bzfhlfs-yvsmkur yk.qb",
+          "callRecordingUrl": null,
+          "callRecordingDuration": "awdmvujo",
+          "callRecordingStatus": "initial",
+          "meetingOrganizer": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          },
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      },
+      {
+        "id": "1138866530690",
+        "replyToId": null,
+        "etag": "1138866530690",
+        "messageType": "unknownFutureValue",
+        "createdDateTime": "2026-10-05T06:59:16.779Z",
+        "lastModifiedDateTime": "2026-10-05T06:59:16.779Z",
+        "lastEditedDateTime": null,
+        "deletedDateTime": null,
+        "subject": null,
+        "summary": null,
+        "chatId": "19:meeting_yIr7YfQdSWU6KyyuF6TKnwVTd8Xa700ff9XkAAjCKpBIivth@thread.v2",
+        "importance": "normal",
+        "locale": "en-us",
+        "webUrl": "https://graph.microsoft.com/v1.0/redacted/da95a548a50348628bae1d5d",
+        "from": null,
+        "channelIdentity": null,
+        "policyViolation": null,
+        "body": {
+          "contentType": "html",
+          "content": "<systemEventMessage/>"
+        },
+        "attachments": [],
+        "mentions": [],
+        "reactions": [],
+        "eventDetail": {
+          "@odata.type": "#microsoft.graph.callStartedEventMessageDetail",
+          "callId": "05f2b248-3690-40ba-b4d5-3fa491b0a186",
+          "callEventType": "meeting",
+          "initiator": {
+            "application": null,
+            "device": null,
+            "user": {
+              "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+              "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+              "displayName": null,
+              "userIdentityType": "aadUser",
+              "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+            }
+          }
+        }
+      }
+    ]
+  }
+}
