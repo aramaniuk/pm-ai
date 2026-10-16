@@ -7,7 +7,9 @@ Everything in this file is checkable without running the daemon.
 from __future__ import annotations
 
 import ast
+import hashlib
 import pathlib
+import re
 
 import pytest
 
@@ -813,11 +815,23 @@ def test_story_4a_tomllib_is_imported_by_exactly_one_module():
 # gave `config.toml` a reader.
 RETIRED_PM_LITERAL = "andrei@example.com"
 
-# The maintainer's real address, which is not an example and must not become a
-# fixture. Story 4a's own first draft used it as one — in the tests of the story
+# The maintainer's real e-mail domain, which is not an example and must not become
+# a fixture. Story 4a's own first draft used it as one — in the tests of the story
 # whose job was to remove a personal address from the package, and invisible to
-# a sweep that looked only for the literal above.
-PERSONAL_DOMAIN = "itspartner.net"
+# a sweep that looked only for the literal above. Kept as its SHA-256 rather than
+# spelled out (2026-10-16): this repository is public, and a guard should not
+# publish what it guards.
+PERSONAL_DOMAIN_SHA256 = "3f6626b39cdbaf9f365045724645c8ad230949909a22879bed32726f6aa11a0b"
+_DOMAIN = re.compile(r"(?<![\w.-])(?:[a-z0-9-]+\.)+[a-z]{2,24}(?![\w-])")
+_SWEPT_SUFFIXES = (".py", ".json", ".vtt", ".txt", ".toml", ".md")
+
+
+def _names_the_personal_domain(text: str) -> bool:
+    """Whether any domain-shaped token in `text` hashes to the guarded one."""
+    return any(
+        hashlib.sha256(found.encode()).hexdigest() == PERSONAL_DOMAIN_SHA256
+        for found in set(_DOMAIN.findall(text.lower()))
+    )
 
 
 def test_story_4a_no_developer_address_is_compiled_into_the_package():
@@ -838,17 +852,17 @@ def test_no_real_personal_address_is_used_as_a_fixture():
     """A reserved example domain in code, always — tests included.
 
     Swept over `tests/` as well as `pm_ai/`, because that is where the slip
-    happened. This file names the domain in order to look for it, so it is the
-    one file excluded — the same exemption `environment.py` gets from the sweep
-    that forbids naming the encryption variable.
+    happened, and over fixtures (JSON, VTT, text) as well as code since real
+    pages are recorded into them. The domain is compared by hash, so this file
+    no longer names it and needs no exemption.
     """
     roots = [PACKAGE_ROOT, REPO_ROOT / "tests"]
     holders = []
     for root in roots:
-        for path in sorted(root.rglob("*.py")):
-            if "__pycache__" in path.parts or path == pathlib.Path(__file__):
+        for path in sorted(root.rglob("*")):
+            if "__pycache__" in path.parts or path.suffix not in _SWEPT_SUFFIXES or not path.is_file():
                 continue
-            if PERSONAL_DOMAIN in path.read_text(encoding="utf-8"):
+            if _names_the_personal_domain(path.read_text(encoding="utf-8", errors="replace")):
                 holders.append(str(path.relative_to(REPO_ROOT)))
     assert not holders, format_violations(
         holders,
