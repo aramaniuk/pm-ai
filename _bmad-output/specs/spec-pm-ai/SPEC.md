@@ -242,7 +242,7 @@ An engineering PM's judgement is spent on retrieval: reconstructing what a team 
 - **No real-time audio interruption.** pm-ai never speaks during a meeting or interrupts a speaker; transcript work is post-meeting or on demand.
 - **No unsanctioned autonomous external writes for implicit extractions.** Implicit discussion never mutates external state without explicit approval.
 - **No unsolicited mid-work interruptions.** Pushes are bounded to scheduled pre-meeting prep cards and post-meeting summary/approval reports.
-- **No public enterprise surveillance or anti-burnout alarms.** Workload telemetry, burnout indicators, and coaching logs never appear on project dashboards, enterprise IT monitoring, or team channels.
+- **No public enterprise surveillance or anti-burnout alarms.** Burnout indicators and coaching logs never appear on project dashboards, enterprise IT monitoring, or team channels. A project dashboard may show each member's recent activity against that member's own tasks and priorities — what moved and what did not — but never rankings, comparisons between people, or any personal-scope data (amended 2026-10-16, Andrei).
 - **No cloud vector DB or heavy SaaS RAG.** No dependency on hosted vector databases or SaaS RAG infrastructure.
 - **No unauthenticated listening network ports.** The daemon never binds `0.0.0.0` or exposes unauthenticated HTTP/WebSocket ports.
 - **No pre-merge doc gatekeeping.** Developer Merge Requests are never blocked by documentation drift checks.
@@ -255,7 +255,7 @@ A PM finishes a 45-minute meeting, opens nothing, and within 10 minutes has the 
 
 - 10-second Whisper transcription latency is achievable locally on modern Apple Silicon using whisper.cpp base/small models.
 - Polling literature and web sources once every 24 hours is sufficient for non-urgent citations.
-- Reserving frontier calls for briefings, prep dashboards, research tasks, and 1:1s while running quantized local models keeps spend under the $20/month target at typical PM query volumes.
+- Reserving frontier calls for briefings, prep dashboards, research tasks, 1:1s, and a meeting summary the PM explicitly asks for — disclosed and logged with its cost — while running quantized local models keeps spend under the $20/month target at typical PM query volumes (amended 2026-10-16, Andrei).
 - Spoken anchor extraction with fuzzy matching reaches ≥85% confidence on minor phonetic recognition errors.
 - The numeric success-metric targets and the ≥80% question ratio are provisional first-release figures set on judgement rather than measurement, to be re-baselined after the first month of operation.
 - A 30-day default transcript retention window gives sufficient audit runway while keeping disk usage light.
