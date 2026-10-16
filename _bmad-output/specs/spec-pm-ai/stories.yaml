@@ -14,6 +14,8 @@
     Route every storage write through that resolver with an injected clock, so
     the open monthly segment filename is deterministic and testable. Holds the
     single-writer rule in storage-contract.md.
+  invoke_dev_with: >-
+    WAVE 3, decided 2026-10-16 (field test, Andrei): 1s private files stay private - every file pm-ai writes in both homes is 0600 and its folders 0700, an existing home tightened once at daemon start; a project's shared parts stay at the umask (AD-6 amendment).
 - id: "1c"
   title: Refuse unprotected captures
   spec_checkpoint: true
@@ -269,6 +271,7 @@
     enforced layer stack, so importing wiring.build would invert it - 4c puts
     main() in pm_ai/app/entry.py and leaves dispatch in surfaces.
     WAVE 2, decided 2026-10-09: 4e the daemon and loopback-only API (AD-21 narrowed: the 5-second ack rule binds the daemon's request path; foreground commands declare their own bound), 4f the REPL run locally (no model in this build, so an open prompt is answered with a stated sentence), 4q the REPL through the daemon (the loopback client; after 4e, 4f and 4r), 4r a line is answered or acknowledged with a job (the prompt and job endpoints, the requests table, the stream; after 4e), plus 4n doctor and setup name the connectors, 4o personal and application commands run with nothing enrolled (Andrei confirmed), 4p setup offers the Graph connector step.
+    WAVE 3, decided 2026-10-16 (field test and first-use feedback, Andrei): 4t goals listed, shown, updated and deleted; 4u the prompt completes and hints (prompt_toolkit, loaded only when the prompt opens); 4v jobs report themselves (results shown as they arrive, a running-job count, elapsed progress; supersedes 4q's next-prompt rule); 4w pm-ai logs (readable, follow, level filter; never through the daemon); 4s small fixes (true enrolment endings, a daemon stop line, pm-ai connector categories).
 
 - id: "5"
   title: Telegram bridge and cryptographic pairing
@@ -307,6 +310,7 @@
     unload a model. Benchmark concurrent transcription and parsing at the 16GB
     baseline and report the numbers; the hardware floor is an open question
     that this story is meant to answer.
+    WAVE 3, decided 2026-10-16 (Andrei): story 7 comes forward - local model first, a disclosed Claude summary on request. 7a the local model behind the port (Ollama over loopback only, benchmarked; Whisper not needed this wave); 7b a transcript yields summary, decisions and action items (in parts for long meetings, in the meeting's language; decision:<meeting>_<digest> references need AD-34 first); 7e transcripts update member priorities (names through the saved alias table, never guessed; model-matched issues shown as such); 7c a frontier summary on request (disclosed, cost monitored not capped; kernel frontier reservation re-derived first); 7d summaries and actions on the dashboard.
 - id: "8"
   title: Connector framework and credential lifecycle
   spec_checkpoint: true
@@ -378,6 +382,7 @@
     makes its input honest before it is built on.
     WAVE 2, 2026-10-09: 8m pm-ai connector sign-in <instance> (the interim for AD-39's re-consent Proposal), 8q the sign-in records who signed in (user_id, read by 23c), 8p a result says when the provider answered (HarvestResult.answered_at; AD-9 amended), 8n GitLab commit transport (the harvest was entirely stubbed: no socket, invented row shape, instance derived from the project path), 8o connector add gitlab (probe is one commits request; 403 refuses).
     WAVE 2, 2026-10-11: 8q also makes a second claim on a path the same thread already holds a programming error, never ArtifactBusy, while another thread of this process holding it is ArtifactBusy (AD-5, per thread since 2026-10-12; 8m runs 8q's row update under the claim), and accepts the home_account_id fallback only when its tenant matches the row's.
+    WAVE 3, decided 2026-10-16 (field test, Andrei): 8r an honest clock check (skew from the token answer's Date header, not the backdated iat); 8s first runs reach back far enough (Graph default 5 days, GitLab 30, https assumed for a bare host); 8t GitLab issues, merge requests and members harvested into the operational store for the team view.
 
 - id: "9"
   title: Passive telemetry radar
@@ -517,6 +522,7 @@
     needs 33e.
     WAVE 2, decided 2026-10-09 (step 3): one record per meeting per scope and the first record keeps its id - a hand drop binds by title and start, a calendar harvest adopts a manual-only record. 11b wires the real transcript path (the typed extraction carrier, the VTT reader, the binding rule, the Graph capture 33e stores) and 11c adds the `pm-ai transcript drop` command (.vtt/.txt; .docx deferred); the citation guard uses the meeting's scope; Extraction.detail is typed; the path reaches no model.
     WAVE 2, 2026-10-11 (Andrei, AD-34/AD-32): who spoke is decided by pm_identity() against the utterance's person handle (2o), and a speaker label is never a handle - a Graph transcript stages because its utterances carry no handle. 11b lands after 2o.
+    WAVE 3, decided 2026-10-16 (Andrei): 11d transcript drop reads .vtt, .txt, .md and .docx (standard library only) and says how a path is resolved.
 
 - id: "12"
   title: Spoken anchor resolution and fuzzy recovery
@@ -734,6 +740,7 @@
     CAP-9's section title is what misled the earlier reading.
     WAVE 2, decided 2026-10-09: 23c fills Proactive Enablement from real message entries read through 2m's decoder; a failed or unreadable log read is STATED in the section, not fatal (supersedes 23b's exit-3 row); mentions of the PM first, a 20-line cap with the rest counted; the 24-hour window stays until 9a records the last render.
     WAVE 2, 2026-10-11 (Andrei, AD-34): 23c decides 'mentions you' by pm_identity() (2o) - graph: handles of every Graph row, enabled or disabled - never a raw user_id; user_id is saved by 8q. Lands after 2o.
+    WAVE 3, decided 2026-10-16 (field test and first-use feedback, Andrei): 23e the dashboard reads the whole local day (was the 4-hour harvest window: 3 of 7 meetings at 07:00); 23f readable message signals (posted-time label, sender display name beside the handle, no literal line breaks); 23g Team Activity on the project page - each member's GitLab tasks and priorities and what moved (commits by #iid, merge requests), never rankings; needs the kernel's project-telemetry line re-derived first.
 
 - id: "24"
   title: Socratic 1:1 protocol and meta-coaching scorecard
@@ -859,3 +866,4 @@
     msal is a new runtime dependency and needs a pin.
     WAVE 2, decided 2026-10-09: 33d channel messages (listed channels, replies are events, a 280-character excerpt), 33f listed chats only (Andrei: never every chat - a chat with a direct report belongs to the team-member scope and no registry of people exists yet), 33e transcripts (join URL -> online meeting -> transcript per occurrence matched by time, content fetched separately as VTT, a tenant's 403 degrades that meeting only). Specs under stories/.
     WAVE 2, 2026-10-11 (Andrei, AD-34): 33d writes the sender and each mention as graph:<user id> handles from 2n's producer (never resolved when written, never raw ids) and a bot sender as graph_app:<application id>. Lands after 2n.
+    WAVE 3, decided 2026-10-15/16 (field test and recorded fixtures, Andrei): 33h fresh replies in older channel threads are read (threads come in first-post order; a 90-day horizon); 33g every part of a meeting's transcript is kept; 33i a listed channel may file into the personal scope.
