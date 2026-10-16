@@ -94,7 +94,7 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] scratch script, not committed -- re-run the spike on one listed channel with the existing auth and client; save the redacted page as `tests/connectors/fixtures/graph/channel_messages.json` -- OWED (2026-10-12): hand-written fixture accepted for now
+- [x] scratch script, not committed -- re-run the spike on one listed channel with the existing auth and client; save the redacted page as `tests/connectors/fixtures/graph/channel_messages.json` -- done 2026-10-16: the page was captured 2026-10-15 through pm-ai's own Graph client, redacted, and saved as `tests/connectors/fixtures/graph/channel_messages_recorded.json` beside the hand-written fixture — a change from this task's filename, so the hand-written page and the tests that assert its values stay. The page shows threads listed by first-post creation time, not latest activity: see the deferred-work entry "Data loss in busy channels" (`_bmad-output/implementation-artifacts/deferred-work.md`)
 - [x] `pm_ai/app/pipelines.py` (`_ask`) and the Graph connector -- the dashboard's live read is calendar-only; a render with listed channels sends no channel request and a failing channel leaves the calendar read
 - [x] `pm_ai/connectors/graph/channels.py` -- new: message row, HTML-to-text, newest-first walk with the thread-activity cut and creation-time emission, the cap/budget position rule, per-row refusals, clock readings, per-channel 403/404/400 readings
 - [x] `pm_ai/connectors/graph/__init__.py` -- `channels` reader with refusals at construction; per-resource cursor reading the old form; the message event; `emits()`; one shared budget; the built window; the combined failure; stop after a calendar sign-in failure

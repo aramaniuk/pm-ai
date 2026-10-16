@@ -1,0 +1,410 @@
+{
+  "_provenance": "Captured from a real tenant on 2026-10-15 through pm-ai's own Graph client: the first page of GET /me/onlineMeetings/{id}/transcripts for a recurring Teams meeting the PM organises, the online meeting found by the join-link lookup the adapter makes. Redacted before it left the machine. Ids come from HMAC-SHA256 under a random 32-byte key that was never written down, so the mapping cannot be reproduced, or confirmed by hashing a guessed real value: GUIDs come out v4-shaped, Teams ids keep their shape (`19:...@thread.tacv2`, `19:meeting_...@thread.v2`, `..._...@unq.gbl.spaces`), and online-meeting and other opaque ids keep their length and alphabet. People are mapped per user id: one id is one 'Person N' across the channel and chat fixtures, and `mentionText` and the text inside `<at>` carry the same label. Free text: every word is replaced by lowercase letters of random length (2 to 9) in its own script, digits become 0, and punctuation, spacing and HTML entities are kept. Kept as recorded: keys, value types, timestamps (the real instants), Graph enumerations (keys ending in Type or Status, `@odata.type`, `contentType`, `messageType` and the like), the JSON keys inside card attachments, HTML tag names and structural attributes. `href` and `src` become https://example.invalid/<token>; URL fields become https://graph.microsoft.com/v1.0/redacted/<token>, keeping `?$skiptoken=` where the original had one. Kept whole: all 20 rows, which arrive newest first. The occurrence of 2026-10-15 holds two transcripts that do not overlap, 08:33:21-08:39:41 and 08:46:21-09:02:20 UTC: transcription was stopped and started again within one meeting. The calendar slot of the occurrences was not captured. transcript_recorded.vtt beside this file is a real transcript body as Graph returned it, captured separately and redacted the same way for its words; its voices are 'Speaker 1' to 'Speaker 4', unrelated to any 'Person N', and its cue timings are as recorded. Which transcript it is, is not recorded.",
+  "page": {
+    "@odata.context": "https://graph.microsoft.com/v1.0/redacted/d46c9505b8941bc7805f5770",
+    "@odata.count": 20,
+    "@odata.nextLink": "https://graph.microsoft.com/v1.0/redacted/1a585f05b5324afda910398b?$skiptoken=Wq3euKAg8dTa5e2ErQ3nGEmcefxAN7SaFKqiTJjD",
+    "value": [
+      {
+        "id": "uTiSYucbt8XoYHQB07aInKjsQn2CopZwZjSIF4u349m5OJJi5xu3xehgdAHTtoicqOxCfYKilnBmNIgXi7fj2bk4kmLnG7fF6GB0AdO2iJyo7EJ9gqKWcGY0iBeLtAPZuTiSYucbt8XoYHQB07aInKjsQn2CopZwZjSIF4u349m5OJJi5xu3xehgdAHTtoicqOxCfYKi",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "b7110c46-1aac-49e9-9e47-c6bec2f3ea0e",
+        "contentCorrelationId": "2eauQDoIPd0ujwx6NGgrdGHF9XABwk5jA7Kq2Bsy6qLZ5q5AOgg9",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/1dbe3fef2ec588fd31016d83",
+        "createdDateTime": "2026-10-15T08:46:21.0385744Z",
+        "endDateTime": "2026-10-15T09:02:20.944236Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "mDbtf2Mq1XnkkWWVeHZSSC5EnHZJSt0XfpqC6y0eoDGYNu1BYyrVeeSRZZV4dlJILkScdklK3RdAmoLrLR6gMZg27X9jKtV55JFllXh2UkguRJx2SUrdF36agustHqAxmDbtf2Mq1XnkkWWVeHZSSC5EnHZJSt0XfpqC6y0eoDGYNu1BYyrVeeSRZZV4dlJILkScdklK",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "92f22e5f-8d13-4197-912e-d0fb1a0aa528",
+        "contentCorrelationId": "fQbXOdi3HBAeAsK3CJv0DtwnQzjG7qNc5QBkOZ8ZYG59Btc52Lcf",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/11ac806ec197435037ba97f9",
+        "createdDateTime": "2026-10-15T08:33:21.243328Z",
+        "endDateTime": "2026-10-15T08:39:41.363328Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "yFFSu2cmBknGAYlNVnFL2BjtxBGIbNXMNqOgg8tIQAjIUVK7ZyYGScb5iU1WcUvbAO3EEYhs1cw2o6CDy0hACMhRUrtnJgZJxvmJTVZxS9v47cQRiGzVzDajoIPLSEAIyFFSu2cmBknGAYlNVnFL2BjtxBGIbNXMNqOgg8tIQAjIUVK7ZyYGScb5iU1WcUvbAO3EEYhs",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "0afd6169-c29a-4555-91fd-4c605f2ad5bb",
+        "contentCorrelationId": "4oenWPZkz2iURoKzM1WoHrCBWxhQXAOvSrotARbydkTih6dY9mTP",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/9ada3a22d0198f7596f373c0",
+        "createdDateTime": "2026-10-12T08:32:46.8366341Z",
+        "endDateTime": "2026-10-12T08:57:45.1966341Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "N6B7sQUICryLhCIk9aNLZcVXrkmrUxTEHArOuOQoUKs3oHuxBQgKvIuEIiT1o0tlxVeuSatTFMQcCs645ChQqzege7EFCAq8i4QiJPWjS2XFV65Jq1MUxBwKzrjkKFCrN6B7sQUICryLhCIk9aNLZcVXrkmrUxTEHArOuOQoUKs3oHuxBQgKvIuEIiT1o0tlxVeuSatT",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "a1e2cf9b-ffde-48e4-88f8-ad4ccacdda48",
+        "contentCorrelationId": "dQ2nVxdkpcVu70nZrAsd1Ou5yAdYdWBcCs12mxPk37N1DadXF2Sl",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/d24ec550ece128843ec973bb",
+        "createdDateTime": "2026-10-08T08:31:38.8525486Z",
+        "endDateTime": "2026-10-08T08:55:57.7125486Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "CBU4umzG7icr2VqDwueGXP3kw7MyjZ1ZoGpVkw8HS0sIFTi6bMbuJyvZWoPC54ZcBeTDszKNnVmgalWTDwdLSwgVOLpsxu4nK9lag8Lnhlz95MOzMo2dWaBqVZMPB0tLCBU4umzG7icr2VqDwueGXP3kw7MyjZ1ZoGpVkw8HS0sIFTi6bMbuJyvZWoPC54ZcBeTDszKN",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "67426283-df62-4310-ac92-e5ec533e0fc5",
+        "contentCorrelationId": "PRQVEtgoUmaAJNokF3gBWpiXL0t2QaKfHhByMKeq6Ps9FBUS2ChS",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/2cc18614fe043707169413a3",
+        "createdDateTime": "2026-10-01T08:30:57.7408732Z",
+        "endDateTime": "2026-10-01T08:37:47.1008732Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "LaZhgi5EwaFpb3u0QAzvEAIjuJlhOuIEjJ1OJFp3shAtpmGCLkTBoWlve7RD7O8QAiO4mWE64gSMnU4kWneyEC2mYYIuRMGhaW97tEPs7xACI7iZYTriBIydTiRad7IQLaZhgi5EwaFpb3u0QAzvEAIjuJlhOuIEjJ1OJFp3shAtpmGCLkTBoWlve7RD7O8QAiO4mWE6",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "a7ac2211-5ab2-4532-bee9-35bb19c7a316",
+        "contentCorrelationId": "HAfAO7hsk7tzMmBsnT3snszxQ5ua3oZWwWX7Z5oxuUUf5B47uGyT",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/7aee53f5c8b0454842abb3e2",
+        "createdDateTime": "2026-09-28T08:31:26.8047994Z",
+        "endDateTime": "2026-09-28T08:50:36.7647994Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "aEgx1qszlqlXE7f7jxuD10sc5urPrgWe5dHbDi0Q779oSDHWqzOWqVcTtBuPG4PXSxzm6sAuBZ7l0dsOLRDvv2hIMdarM5apVxO3A48bg9dLHObqz64FnuXR2w4tEOABaEgx1qszlqlXE7f7jxuD10sc5urPrgWe5dHbDi0Q779oSDHWqzOWqVcTtBuPG4PXSxzm6sAu",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "51c24a21-72c1-41ce-907e-253d4d7689a7",
+        "contentCorrelationId": "kiH4nR0WdOexlQhubPLBDIUhUDHBm61cZPpSUVgr6NKSIfidHRZ0",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/4eb07139c769a8097f95d2da",
+        "createdDateTime": "2026-09-24T08:30:21.5639176Z",
+        "endDateTime": "2026-09-24T09:00:17.1439176Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "fLMfQcXK0ZOrCDsBQtSuxFy3XWouQtPgAW3k8LoXl3V8sx9BxcrRk6sIOz9C1K7EXLddai5C0AD5beTwuheXdXyzH0HFytGTqwg7P0LUrsRct11qLkLT4Plt5PC6F5d1fLMfQcXK0ZOrCDsBQtSuxFy3XWouQtPgAW3k8LoXl3V8sx9BxcrRk6sIOz9C1K7EXLddai5C",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "e2948e64-e4ce-4bf3-b3d1-dd4d8cc0b560",
+        "contentCorrelationId": "tF09Zvx2PgStrFcVWNnaKg24Z8NgRA82coHitWbFNDA0XT1mBHYA",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/d1ba676791b477b080e4d876",
+        "createdDateTime": "2026-09-21T08:30:28.9130822Z",
+        "endDateTime": "2026-09-21T08:36:22.6330822Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "jK6p7l5HV4Bc2GGOQr8OWwAMtQgobrzMKcWdEUkcT6aMrqnuXkdXj9zYYY5Cvw5bD4y1CChuvMwpxZ0RSRxPpoyuqe5eR1eP3NhhjkKBDlsPjLUIKG68zCnFnRFJHEAmjK6p7l5HV4Bc2GGOQr8OWwAMtQgobrzMKcWdEUkcT6aMrqnuXkdXj9zYYY5Cvw5bD4y1CChu",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "41f6404c-b848-46b9-9057-9fac2e9dc9c4",
+        "contentCorrelationId": "fccHniTa03BeKqgAsvH2DqdjSFAIc2NJBbZMUYf9B0V9xweeJNrT",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/4ae1654f762be90cab630019",
+        "createdDateTime": "2026-09-17T08:31:26.3709397Z",
+        "endDateTime": "2026-09-17T08:49:26.4509397Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "ahRP8H2Zsbt5E4WGqYLEThftDQcF4tPQARozO6lTy4FqFEBwfZmxu3kThYapgsROFA0NBwXi09ABGjM7qVPLgWoUTBB9mbG7eROFhqmCxE4X7Q0HBeLT0AEaMzupU8uBahRP8H2Zsbt5E4WGqYLEThftDQcF4tPQARozO6lTy4FqFEBwfZmxu3kThYapgsROFA0NBwXi",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "dbff9760-9006-4558-bdcc-0de1262b8d0c",
+        "contentCorrelationId": "6Tr1UrWPBNWRq0ox88YIIKFYdMnmBVOm198XaejgkJvpOvVStY8E",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/ef08f696060d1476ff4840c3",
+        "createdDateTime": "2026-09-14T08:30:26.0272728Z",
+        "endDateTime": "2026-09-14T08:50:20.6672728Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "bFgffm4O9AxHqJ7RCwOwafXZwkUv6YPNs6CM46mO6YhsWB9Abg70DEeontELA7Bp9dnCRSBpg82zoIzjqY7piGxYH35uDvQMR6ie0QsDsGn12cJFLAmDzbOgjOOpjumIbFgffm4O9AxHqJ7RCwOwafXZwkUv6YPNs6CM46mO6YhsWB9Abg70DEeontELA7Bp9dnCRSBp",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "a98bd3c7-c0cc-4d02-90d3-fa6543332724",
+        "contentCorrelationId": "9sdTgccAFJpOD7lryAuXMBu77KAB9uGpIykGnaXKU6H2x1OBxwAU",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/5fee09b83435e2760c480f00",
+        "createdDateTime": "2026-09-10T08:30:59.4647817Z",
+        "endDateTime": "2026-09-10T08:46:50.0247817Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "VV8ZwsQAv8VrURMAj5D7t9FENR93m6NyNdoUrJtjEt1VXxnCxACBxWtREwCPkPu30UQ1H3ebo3I12hSsm2MS3VVfGcLEALBFa1ETAIAQA7fRRDUfd5ujcjXaFKybYxLdVV8ZwsQAv8VrURMAj5D7t9FENR93m6NyNdoUrJtjEt1VXxnCxACBxWtREwCPkPu30UQ1H3eb",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "1709bcf0-5b88-48a7-8f0a-709964d2738e",
+        "contentCorrelationId": "BfBfGjAWQTW3BdKpQIv4TXSdHoiS9gQAyWBzsRqBINX98F8aMBZB",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/9e673fad1be1fb23962eebde",
+        "createdDateTime": "2026-09-07T08:01:24.8108461Z",
+        "endDateTime": "2026-09-07T08:19:50.9508461Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "dXPVaDLPqBtNPgM1qtWfGxhc2AdvbRSYzOfuiL7aM3l1c9VoMsArA00AAzWq1Z8bGFzb529tFJjM5A6IvtozeXVz1Wgyz6v7TT4DNarVnxsYXNvnb20UmMzn7oiA2jN5dXPVaDLPqBtNPgM1qtWfGxhc2AdvbRSYzOfuiL7aM3l1c9VoMsArA00AAzWq1Z8bGFzb529t",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "6598be4d-23f3-45ad-8dad-d95fc436d272",
+        "contentCorrelationId": "wUX2d42jst9AmpRQEh6RjSPgMizUjMtBQYeYuu73tWXBRfZ3jaOy",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/90e075dab2f2c118f417a833",
+        "createdDateTime": "2026-09-03T08:01:03.6321062Z",
+        "endDateTime": "2026-09-03T08:22:29.9121062Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "GrQJh3p0G8deTAYll7j4Dol1LDJAc0LVbu0MxJ1DupwatAmHenQbx15MBiWXuPgOiXUsMn5zQtVu7QzEnUO6nBq0CYd6dBvHXkwGJZe4AA6JdSwyfnNC1W7tDMSdQ7qcGrQJh3p0G8deTAYll7j4Dol1LDJAc0LVbu0MxJ1DupwatAmHenQbx15MBiWXuPgOiXUsMn5z",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "5ee57ac0-7c02-4069-84bc-c95dbc6ab2ee",
+        "contentCorrelationId": "xyydbGaKQtuITQVNuqmV2BlOacSxFrWR3J0XxvYx4sbHLJ1sZopC",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/f78b0a2407099aad6e5c70a4",
+        "createdDateTime": "2026-08-31T08:03:30.7811464Z",
+        "endDateTime": "2026-08-31T08:46:11.2811464Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "OEOhPMgu3ue7dRfrPN3rJldRQFAm2uAkWVTGyioDZpk4Q6E8yC7e57t1FAs83esmV1FAX6ba4CRZVMbKKgNmmThDoTzILt7nu3UX6zzd6yZXUUBfptrgJFlUxsoqA2aZOEOhPMgu3ue7dRfrPN3rJldRQFAm2uAkWVTGyioDZpk4Q6E8yC7e57t1FAs83esmV1FAX6ba",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "f96066fd-5b3b-4a08-a3f3-d6d1af6bb00e",
+        "contentCorrelationId": "WKgDUj9ObXRmIcqA7vGJDNZADpJ9M1uRaBBgPQohv7hYqANSP05t",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/e83f98bc103f086c22708bdc",
+        "createdDateTime": "2026-08-24T08:01:14.8902162Z",
+        "endDateTime": "2026-08-24T08:24:23.7702162Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "wfgWNSmzca7aJTeMQEHDyZBqinyTYgu5NUbZeBjK7dPBABY1KbNxrtolN4xAQcPJkGqKfJNiC7k1Rtl7AMrt08H4FjUps3Gu2iU3jEBBw8mQaop8k2ILuTVG2Xv4yu3TwfgWNSmzca7aJTeMQEHDyZBqinyTYgu5NUbZeBjK7dPBABY1KbNxrtolN4xAQcPJkGqKfJNi",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "d55dca21-2e8e-462a-b129-b776ff4b579e",
+        "contentCorrelationId": "NBTFqAevEeIA6k1w0s8wSD6EMvWt9CE9trTYxYeEBHE0FMWr568R",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/8c97aefa49bc6b210952700d",
+        "createdDateTime": "2026-08-20T08:00:29.9847764Z",
+        "endDateTime": "2026-08-20T08:13:59.3847764Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "76k8Fm2Yj7QrmOA7XmyOpUvBQxZZhf4wKnqhbeydjkLvqTwWbZiPtCuY77tebI6lSB9DFlmFBjAqeqFt7J2OQuApPBZtmIA0K5jvu15sjqVLB0MWWYXAMCp6oW3snY5C76k8Fm2Yj7QrmOA7XmyOpUvBQxZZhf4wKnqhbeydjkLvqTwWbZiPtCuY77tebI6lSB9DFlmF",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "1fb1cca0-3b65-41cf-ab7e-3c1060392228",
+        "contentCorrelationId": "lxEOjB6Dvi6RAGkRNChwZQ7Muanas6LWvdSXpNJcZ1WXEQ6MHoOA",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/b19aae0a940a02d6128d0632",
+        "createdDateTime": "2026-08-17T08:01:37.5997749Z",
+        "endDateTime": "2026-08-17T08:13:08.6597749Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "aws5RDMnDhA8BfWL88rpEMpuRECTZ5oo7wdLP4hvC5trCzlEMycOEDwF9YvzyukQym5EQJNnmijvB0sBiG8Lm2sLOUQzJw4QPAX1iBPK6RDKbkRAk2eaKO8HSzAIbwubaws5RDMnDhA8BfWL88rpEMpuRECTZ5oo7wdLP4hvC5trCzlEMycOEDwF9YvzyukQym5EQJNn",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "f5be765a-69b9-45c0-ac44-109bc359ef3e",
+        "contentCorrelationId": "A5Odj6Pw8dxthTB7rOTN7rVkJhhD84dsvccxwe7Egzn7k52PoBDx",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/88df1d9e79ea9adc27680ca1",
+        "createdDateTime": "2026-08-13T08:00:29.4130291Z",
+        "endDateTime": "2026-08-13T08:20:09.9530291Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "gHwAIEuShlXT2yOIQDc1Sh6s6ZBaIdmfnjH9UWTzgbWAfAAgS5KGVdPbI4hANzVKHqzpn9oh2ZAeMf1RZPOBtYB8ACBLkoZV09sjiEA3NUoerOmf2iHZn54xBVFk84G1gHwAIEuShlXT2yOIQDc1Sh6s6ZBaIdmfnjH9UWTzgbWAfAAgS5KGVdPbI4hANzVKHqzpn9oh",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "6db88978-9cf5-4ab8-9e0d-ef6918a226e6",
+        "contentCorrelationId": "XnkLv0rFqapZtJsX2Nlpes0gxRU7pSM0R1LZUmYdQUReeQuBSsWp",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/9acda147b92fc13baa76e038",
+        "createdDateTime": "2026-08-10T08:01:55.8634883Z",
+        "endDateTime": "2026-08-10T08:23:14.4634883Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      },
+      {
+        "id": "qvEY7EABYjyXzGf1AkpHx7XDVn3KlTAWhiq248mRQuSq8RjsT79iPJfMZBX6SkfHtcNWfcqVMBaGKrbjyZFC5KrxGOxPv2I8l8xn9fpKR8e1w1Z9ypUwFoYqtuPJkULkqvEY7EABYjyXzGf1AkpHx7XDVn3KlTAWhiq248mRQuSq8RjsT79iPJfMZBX6SkfHtcNWfcqV",
+        "meetingId": "QgW0BUAyAA9e8qiOK7nuQ31zwUBaLAsZG4OAkDRC5EdCBbQFT7ID717yqI4rue5DfXPBQFosCxkbg4CQNELkR0IFtAVPsgPvXvKojiu57kN9c8FAWiwLGRuDgJA0QuRHQgW0BUAyAA9e8qiOK7nu",
+        "callId": "e02c84ed-b3be-4129-8d99-854ad76fcd7c",
+        "contentCorrelationId": "DeVdOnvW3HyGPzo5WWVhxZkLMOcVGkT1ZhqDpm6JRMsN5V06e9bc",
+        "transcriptContentUrl": "https://graph.microsoft.com/v1.0/redacted/81cc4b37a3c5b12bf43f3745",
+        "createdDateTime": "2026-08-06T08:00:30.1756406Z",
+        "endDateTime": "2026-08-06T08:20:46.0066406Z",
+        "meetingOrganizer": {
+          "application": null,
+          "device": null,
+          "user": {
+            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+            "id": "a5fc2100-8762-4d53-b195-9f2981b26151",
+            "displayName": null,
+            "userIdentityType": "aadUser",
+            "tenantId": "e2b9a732-365a-4772-a5cc-68f57bf7fbe1"
+          }
+        }
+      }
+    ]
+  }
+}

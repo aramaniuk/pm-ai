@@ -6,10 +6,17 @@ written by hand in the connector's settings file, one entry per channel.
 
 ## Two timestamps, two jobs
 
-Microsoft returns a channel's threads newest first, fifty per page, ordered by
-each thread's **latest activity** — the root message or its newest reply. A
-root's own creation time says nothing about where its thread sits in the list.
-So the two times do different work here:
+Microsoft's reference says a channel's threads come newest first, fifty per
+page, ordered by each thread's **latest activity** — the root message or its
+newest reply — and this walk is built on that reading. **A real tenant's page
+(recorded 2026-10-15) contradicts it:** the threads were in order of each
+root's own `createdDateTime`, and a thread created months earlier with replies
+from that morning sat 33rd of 49. Under that order the stop rule below can end
+the walk before an older-rooted thread with fresh replies on a later page; see
+`tests/connectors/test_graph_channel_messages_recorded.py::
+test_a_fresh_reply_listed_behind_a_wholly_older_page_is_still_emitted` (a strict
+xfail) and the deferred-work entry on channel thread order. The two times do
+different work here:
 
 - **Thread activity decides where the walk stops.** The walk ends after the
   first page on which *every* thread is older than the channel's position. A
@@ -796,10 +803,12 @@ def _mentions(raw: Mapping[str, Any]) -> tuple[str, ...] | None:
 def _activity(raw: Mapping[str, Any]) -> datetime | None:
     """A thread's latest activity: the newest time on the root or any reply.
 
-    The list is ordered by it, so it is what the cut reads. Creation and
-    modification times both count — Microsoft orders by "the last modified date
-    of the entire reply chain" — and an unreadable one is left out rather than
-    guessed. `None` when nothing on the thread can be read, and such a thread
+    The cut reads it because Microsoft's reference says the list is ordered
+    by "the last modified date of the entire reply chain". A recorded real
+    page is ordered by the root's creation time instead (see the module
+    docstring and the strict xfail it names), so a page wholly older by this
+    reading does not prove the later pages are. Creation and modification
+    times both count, and an unreadable one is left out rather than guessed. `None` when nothing on the thread can be read, and such a thread
     never counts as older.
     """
     times = [
