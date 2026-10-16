@@ -21,12 +21,12 @@ context:
 **Always:**
 - **Prerequisite: the kernel amendment.** SPEC.md's constraint that workload telemetry never appears on project dashboards (`SPEC.md:245`) must be re-derived before this slice is built. The re-derivation follows Andrei's decision of 2026-10-16: per-member activity against that member's own tasks and priorities may appear on project pages, never as rankings or comparisons between people. If the line is not yet re-derived, this slice does not start.
 - **The sources are stored, and project-scope only.** Team Activity reads two things, with no GitLab request and no model at render time:
-  - `8t`'s record of members, issues and merge requests, through its one reader, `StoragePort.project_work(scope) -> ProjectWork` (`pm_ai/domain/work.py`). `8t` keeps it in the operational store, keyed by the project's scope, on the PM's machine.
+  - `8t`'s record of members, issues and merge requests, through its one reader, `StoragePort.project_work(scope) -> ProjectWork` (`pm_ai/domain/work.py`). `8t` keeps it in the operational store, keyed by the project's scope and its one GitLab connector instance (AD-3, AD-10 as amended at the spine gate), on the PM's machine.
   - The project's event log, for its `commit_pushed` entries.
 
   Nothing is read from the personal scope, the people scope or the personal store (AD-25). Both are read on the worker, never inside the bounded step, which `9b` keeps for the live calendar read alone.
 - **What this slice relies on from `8t`'s record:**
-  - members: a `gitlab:<numeric user id>` handle, a display name, a username and a state;
+  - members: a `gitlab:<host>:<numeric user id>` handle (AD-34 as amended 2026-10-16), a display name, a username and a state;
   - issues: iid, title, state, assignees, milestone title and due date, labels;
   - merge requests: iid, state, draft flag, `updated_at`, `merged_at`, and the iids of this project's issues they are linked to;
   - for each section (members, issues, merge requests): whether the last harvest could not read it, with its reason, and the instant of its last complete read;
@@ -217,6 +217,8 @@ Verified against `a1182f8` on 2026-10-16. `8t` (`StoragePort.project_work(scope)
     - Opening the merge-request window at the last successful harvest: the render reads no harvest state, so a missed cycle is a stated limit instead.
     - Showing `7e`'s match kind here: `7e` now renders its rows, and its rows carry the marker.
 - **2026-10-16, review (cross-spec consistency).** `8t`'s reader named as `StoragePort.project_work(scope) -> ProjectWork` (`pm_ai/domain/work.py`) in the operational store, replacing `pm_ai/core/gitlab_work.py`; members `8t` marks as bots excluded, those not stated listed (the earlier "Rejected: bots" entry withdrawn); each section's last complete read used to say when what is shown is older than one harvest cycle plus jitter (the earlier stale-data rejection withdrawn); the non-calendar reads stated as outside the bounded step.
+- **2026-10-16, spine gate:** frozen block edited (recorded here), one sentence: the GitLab record is keyed by scope and connector instance, one GitLab instance per project scope (AD-3, AD-10); nothing this slice reads changes.
+- **2026-10-16, spine gate:** frozen block edited (recorded here): members' handles are `gitlab:<host>:<numeric user id>` (Andrei 2026-10-16, AD-34); nothing this slice shows changes.
 
 ## Design Notes
 

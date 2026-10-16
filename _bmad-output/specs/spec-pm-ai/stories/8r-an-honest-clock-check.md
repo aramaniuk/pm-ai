@@ -29,7 +29,8 @@ context:
 - **`requests` is declared in the runtime extra** at the locked 2.34.2 (there today as MSAL's dependency), imported at call time like `msal`; the lock gains no package. Accepted as routine (2026-10-16).
 - **The warning's purpose stands:** a clock more than five minutes off either way still turns the Graph line `[warning]`, with the same sentence and "Fix the clock" remedy.
 
-**Ask First:** Nothing.
+**Ask First:**
+- At the spec checkpoint, open: whether the `requests` session handed to MSAL ignores the environment (`trust_env=False`), as the frontier and local-model clients do (AD-1), or keeps MSAL's default and takes proxies, `REQUESTS_CA_BUNDLE` and `.netrc` from the environment as stated above. Raised by the spine's tech-currency review (2026-10-16, F7); not decided there.
 
 **Never:** No subtraction of a guessed five minutes from `iat`. No extra request to measure the clock. No change to the tolerance, the expiry arithmetic (relative `expires_in`), or what `8q` records about who signed in.
 
@@ -81,6 +82,7 @@ context:
 - **2026-10-16, created.** Carries: skew from the token endpoint answer's HTTP `Date` against arrival, through an HTTP client handed to MSAL, replacing `iat` (five-minute backdating, undocumented, measured 5:00.5 on a synchronised clock); tolerance, warning and remedy unchanged; a cached answer unmeasured; `requests` declared directly (accepted as routine, 2026-10-16); two-argument factories kept.
 - **2026-10-16, review:** the recorder mechanism made one thing (an adapter field the default factory is bound to; fakes write into it) and production's no-factory path tested; readings tied to their acquisition per thread, with rows for concurrent and repeated acquisitions; the token endpoint identified by method and path; arrival stamped with the injected clock; the whole-second `Date` compared at its midpoint with boundary rows; the session's verify, proxies, timeout and retry stated and the retry tested; the deferred-work task's dependency on PR #71 named; ACs no longer repeat matrix rows.
 - **2026-10-16, review (consistency):** depends on spine amendment: Stack — a row for `requests` (2.34.2, imported directly by the Graph auth adapter for the recording HTTP client), made through `bmad-architecture` before this slice is built.
+- **2026-10-16, spine gate:** frozen block edited (recorded here): an Ask First for the spec checkpoint — whether the `requests` session handed to MSAL sets `trust_env=False` or keeps MSAL's default (tech-currency F7); undecided, Andrei asked that it be raised here.
 
 ## Design Notes
 
