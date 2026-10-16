@@ -1307,8 +1307,60 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 ## Surfaced by the story-9b review (2026-10-15)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/9b-morning-render.md`
-  summary: **Needs Andrei's decision.** Proactive Enablement's window filters signals on their own timestamps from the last render, so a message timestamped before a render but harvested after it (the harvest cycle is 240 minutes) never appears on any page.
+  summary: **WITHDRAWN 2026-10-16 (field test): the claim was wrong.** The window filters on `ingested_at` (`core/rendering.py:708`), so a message harvested after a render appears on the next page; measured in `field-test-2026-10-15.md` (correction 24). No decision is needed. Was: Proactive Enablement's window filters signals on their own timestamps from the last render, so a message timestamped before a render but harvested after it (the harvest cycle is 240 minutes) never appears on any page.
   evidence: The frozen block defines the look-back as "back to the last successful render of that scope"; filtering on harvest time, or starting the window no later than the harvest coverage at the last render, changes that contract.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/9b-morning-render.md`
   summary: A hand-run `pm-ai dashboard` and the daemon's render of one scope in two processes can record `last_success` a few minutes backwards when the earlier-started one publishes second.
   evidence: The frozen block requires the `renders` upsert's new value never depend on the old one, so a `MAX` is ruled out; the daemon's own renders are serialized by the per-scope slot and read the clock inside it.
+
+## Surfaced by the field test (2026-10-15/16)
+
+From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which holds the measurements; numbers below are its finding numbers.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: R1 (Andrei, 2026-10-15): every part of a meeting's transcript is kept — when transcription is stopped and started again, all non-overlapping parts are stored and ingested in time order; overlapping ones stay refused as duplicates.
+  evidence: Finding 11: a real meeting's two sequential parts were both discarded by `33e`'s 'a recording restarted, so none is stored' rule. Amends `33e`'s frozen block through `bmad-spec`.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: R2 (Andrei, 2026-10-15): a listed Teams channel may file into the personal scope, not only into an enrolled project.
+  evidence: Finding 18: four of five channels the PM wanted to follow belong to no project and could not be listed (`connectors/graph/channels.py:132`). Amends `33d`'s frozen block.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: The Graph clock-skew warning is false for every Microsoft sign-in: it is computed from the ID token's `iat`, which Microsoft backdates by five minutes, so `connector check` exits 4 on a healthy machine.
+  evidence: Finding 1: measured 5:00.5 'ahead' with the clock within 0.15 s (`connectors/graph/auth.py:1620`). Measure against the token endpoint's `Date` header, or allow for the backdating.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: Both connector-enrolment endings are stale: Graph's says nothing harvests until scheduled harvesting exists, GitLab's that it becomes active at the next start.
+  evidence: Findings 2 and 6 (`surfaces/cli/dispatch.py:1224`, `:1330`; docstrings at `core/connector_enrolment.py:51`, `app/wiring.py:868`). Rows are read fresh per job since `4r` and picked up at the timer's next read since `9a`.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: File modes leak the day's meeting list and logs to other local users: the personal dashboard and `~/.manager-ai` 0644/0755, `connectors/`, `logs/`, `transcripts/` 0755, `daemon.log`, `config.toml`, `projects.toml` 0644, and an existing `~/.pm-ai` is never tightened.
+  evidence: Findings 3, 8 and 14; the project copy and transcript files are already 0600, so the rule exists and is applied unevenly. `operational.db` is the 9a entry above.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: A Proactive Enablement signal is labelled with its harvest time, not the time it was posted.
+  evidence: Finding 15: every signal read the harvest minute for messages posted hours earlier (`core/rendering.py:708`, `_signal_line`). Keep filtering on `ingested_at`; label with `occurred_at`.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: Signal senders render as raw `graph:<user id>` handles.
+  evidence: Finding 16: unreadable without looking ids up; nothing resolves a handle for display (`core/rendering.py:900`). Needs a display-name source that respects `33d`'s ids-not-names decision.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: A multi-line message's excerpt shows a literal `\n`.
+  evidence: Finding 17: the one-line escape writes the two characters `\` `n` (`core/rendering.py:1124`); a space or a separator reads better.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: GitLab's first run reaches back 7 days while every later run asks from 30 days before the cursor, so the second run back-fills three more weeks.
+  evidence: Finding 19 (`connectors/gitlab/__init__.py:106`, `:124`): 38 then 189 commits on a real project; a 30-day first run would be consistent.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: An accepted meeting's join-link lookup answers 404, so its transcript is recorded as not the PM's to read.
+  evidence: Finding 12: reproduced through pm-ai's own client; another attendee-only meeting resolves, so the cause is not organiser-only access. Investigate cross-tenant organisers and group invitations.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: Small surface gaps from the field test: no `goal list`/show command, no quoting hint for an unquoted path with spaces, no `https://` assumed for a GitLab host, nothing printed when the daemon stops, and a cancelled-but-ended meeting recorded while the dashboard leaves it out.
+  evidence: Findings 23, 21, the host prompt, 13 and 7 in the field-test report.
+
+- source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
+  summary: Whether `transcript drop` should read transcripts exported from Teams as `.docx` (or converted from it).
+  evidence: Finding 22: a real export was refused; depends on how transcripts arrive outside Graph — Andrei to say.
