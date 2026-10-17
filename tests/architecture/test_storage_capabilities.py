@@ -271,19 +271,39 @@ def test_an_encrypted_artifact_keeps_story_1fs_modes_exactly(storage):
 
 
 def test_the_declared_mode_is_read_off_the_trees_not_a_second_table():
-    """The rule is the `gitignored` declaration, per scope, per qualified key."""
+    """The rule is where the artifact lives, per scope, per qualified key (story 1s).
+
+    Both homes whole; in a project, only `memory/` and `transcripts/`. Flipped
+    by 1s: `config.toml` and personal `persona.md` were `None` while the rule
+    was the `gitignored` declaration.
+    """
     assert restricted_mode(ScopeKind.APPLICATION, "connectors/") == RESTRICTED_FILE_MODE
     assert restricted_mode(ScopeKind.APPLICATION, "config.json") == RESTRICTED_FILE_MODE
-    assert restricted_mode(ScopeKind.APPLICATION, "config.toml") is None
-    assert restricted_mode(ScopeKind.PERSONAL, "persona.md") is None
+    assert restricted_mode(ScopeKind.APPLICATION, "config.toml") == RESTRICTED_FILE_MODE
+    assert restricted_mode(ScopeKind.PERSONAL, "persona.md") == RESTRICTED_FILE_MODE
+    assert restricted_mode(ScopeKind.PROJECT, "rules/persona.md") is None
+    assert restricted_mode(ScopeKind.PROJECT, "daily_dashboard.md") == RESTRICTED_FILE_MODE
 
 
-def test_a_declared_plaintext_artifact_still_answers_to_the_umask(storage):
-    """`None` rather than `0o644`: an artifact that never asked keeps the operator's answer."""
+def test_config_toml_is_private_under_an_ordinary_umask(storage):
+    """Flipped by story 1s: `config.toml` names an hourly rate and a time zone."""
     previous = os.umask(0o022)
     try:
         written = storage.write_artifact(
             b"pm_handle = 'x'\n", scope=APPLICATION, artifact="config.toml"
+        )
+    finally:
+        os.umask(previous)
+
+    assert _mode(written) == RESTRICTED_FILE_MODE
+
+
+def test_a_projects_shared_artifact_still_answers_to_the_umask(storage):
+    """`None` rather than `0o644`: a file the team checks out keeps the operator's answer."""
+    previous = os.umask(0o022)
+    try:
+        written = storage.write_artifact(
+            b"# persona\n", scope=PROJECT, artifact="rules/persona.md"
         )
     finally:
         os.umask(previous)
@@ -810,7 +830,7 @@ def test_a_holder_killed_with_sigkill_leaves_the_claim_free(tmp_path):
 def test_claiming_a_sealed_artifact_does_not_create_a_world_listable_enclave(locked):
     """A claim must not open `private/` a moment before the write would seal it.
 
-    Stated as *create*, not *is*: `_mkdir_enclave` leaves an existing directory
+    Stated as *create*, not *is*: `_mkdir_private` leaves an existing directory
     alone on purpose — its mode is its owner's decision — and `ScopePaths.rooted`
     has already made `private/` at the umask by the time any test runs. So the
     enclave is removed first, and the claim is what brings it back. The platform
@@ -906,7 +926,11 @@ def test_a_second_entry_leaves_the_segment_at_its_declared_mode(storage):
 
 
 def test_a_segment_from_before_1q_keeps_its_mode(storage):
-    """No `chmod` of an existing file: its mode may be the operator's decision."""
+    """An append changes no existing file's mode.
+
+    Since story 1s what tightens an existing segment is the daemon's start-up
+    walk, never a write: the append opens the file as it finds it.
+    """
     segment = _segment(storage, PROJECT)
     segment.parent.mkdir(parents=True, exist_ok=True)
     segment.write_text("", encoding="utf-8")
@@ -1010,12 +1034,16 @@ def test_a_team_members_segment_is_created_at_its_declared_mode(storage):
     assert _mode(_segment(storage, PEOPLE)) == RESTRICTED_FILE_MODE
 
 
-def test_a_ledger_declared_without_a_mode_answers_to_the_umask(storage):
-    """The personal event log's declaration names no mode; that is not an oversight."""
+def test_the_personal_event_log_is_private(storage):
+    """Flipped by story 1s: the personal scope is private whole, its ledger included.
+
+    It answered to the umask (`0644`) while the mode followed the `gitignored`
+    declaration, which the personal scope answers "no" to.
+    """
     _under_umask(0o022, lambda: storage.append_event_log(_entry("me"), scope=PERSONAL))
 
-    assert restricted_mode(ScopeKind.PERSONAL, EVENT_LOG) is None
-    assert _mode(_segment(storage, PERSONAL)) == 0o644
+    assert restricted_mode(ScopeKind.PERSONAL, EVENT_LOG) == RESTRICTED_FILE_MODE
+    assert _mode(_segment(storage, PERSONAL)) == RESTRICTED_FILE_MODE
 
 
 def test_an_owner_stripping_umask_cannot_lock_pm_ai_out_of_its_ledger(storage):

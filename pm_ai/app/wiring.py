@@ -3308,7 +3308,9 @@ def onboard_project(
         )
         for node in PROJECT_TREE:
             if node.is_dir:
-                known.resolve(scope, node.key, create=True)
+                # Through the storage helper (story 1s): `memory/` and
+                # `transcripts/` at 0700, `rules/` and `skills/` at the umask.
+                storage.prepare_directory(scope=scope, artifact=node.key)
         if not already:
             storage.write_artifact(
                 scope=DataScope(ScopeKind.APPLICATION),
@@ -3468,7 +3470,9 @@ def onboard_in_daemon(
             gitignore = storage.write_project_gitignore(project_id, rules)
             for node in PROJECT_TREE:
                 if node.is_dir:
-                    known.resolve(scope, node.key, create=True)
+                    # Through the storage helper (story 1s): `memory/` and
+                    # `transcripts/` at 0700, `rules/` and `skills/` at the umask.
+                    storage.prepare_directory(scope=scope, artifact=node.key)
             if registry is not None:
                 storage.write_artifact(
                     scope=application, artifact=REGISTRY_ARTIFACT, payload=registry
@@ -3585,6 +3589,8 @@ NEVER_FROM_A_JOB: frozenset[str] = frozenset(
         "close",
         "seeing",  # a view of the unhanded writer
         "prepare_private_dir",  # the daemon's own, at start
+        "tighten_modes",  # the daemon's own start-up walk, before the writer thread
+        "prepare_directory",  # project onboarding's own, inside its handed step
         "diagnostic_log",  # opens a file for writing: the daemon's own, at start
     }
 )

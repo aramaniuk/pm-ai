@@ -210,7 +210,9 @@ def test_the_request_log_has_the_path_and_never_the_query_or_the_token(running):
     home.get("/v1/anything?x=1", token)
     home.get("/v1/status", token)
 
-    lines = home.log_lines()
+    # The request log's own lines: since story 1s the daemon's start-up mode
+    # walk also writes to this file (this fixture's home is `0755`/`0644`).
+    lines = [line for line in home.log_lines() if line["logger"] == "pm_ai.api.requests"]
     messages = [line["message"] for line in lines]
     assert messages == ["GET /v1/status 401", "GET /v1/anything 404", "GET /v1/status 200"]
     text = "\n".join(path.read_text() for path in (home.application / "logs").iterdir())
@@ -355,15 +357,56 @@ def test_a_bad_token_file_refuses_the_start_naming_it_and_is_unchanged(
     assert "Traceback" not in err
 
 
-def test_a_group_readable_token_file_refuses_the_start(machine, capsys):
+def test_a_group_readable_token_file_is_tightened_at_start_and_refused_by_a_reader(
+    machine, capsys
+):
+    """Since story 1s the start-up mode walk runs before the token is read.
+
+    So a daemon start narrows a group-readable token to `0600` (its content
+    untouched) and then reads it, rather than refusing it — 1s forbids refusing a start because
+    something on disk is too open. The refusal itself still stands for any
+    reader that meets such a file: asked directly, the store refuses it,
+    naming the file and never the token.
+    """
+    from pm_ai.app.wiring import build
+    from pm_ai.domain.api_token import ApiTokenRefused
+    from pm_ai.domain.identity import DataScope, ScopeKind
+    from pm_ai.platform.paths import ScopePaths
+
     machine.token_file.parent.mkdir(parents=True)
     machine.token_file.write_text("g" * 43)
     machine.token_file.chmod(0o640)
-    assert entry.main(["daemon", "run"]) == EXIT_REFUSAL
-    err = capsys.readouterr().err
-    assert str(machine.token_file) in err
-    assert "g" * 43 not in err
-    assert (machine.token_file.stat().st_mode & 0o777) == 0o640
+    daemon = build(
+        None,
+        DataScope(ScopeKind.APPLICATION),
+        paths=ScopePaths.production(home=machine.root),
+        keychain=_Keychain(),
+        encryption_disabled=True,
+    )
+    try:
+        with pytest.raises(ApiTokenRefused) as refused:
+            daemon.storage.read_api_token()
+    finally:
+        daemon.storage.close()
+    assert str(machine.token_file) in str(refused.value)
+    assert "g" * 43 not in str(refused.value)
+
+    # The start's order, without serving: the walk, then the token.
+    daemon = build(
+        None,
+        DataScope(ScopeKind.APPLICATION),
+        paths=ScopePaths.production(home=machine.root),
+        keychain=_Keychain(),
+        encryption_disabled=True,
+    )
+    try:
+        daemon_module.tighten_private_modes(daemon, announce=lambda line: None)
+        assert daemon_module.take_token(daemon) == "g" * 43
+    finally:
+        daemon.storage.close()
+    assert "g" * 43 not in capsys.readouterr().err
+    assert (machine.token_file.stat().st_mode & 0o777) == 0o600
+    assert machine.token_file.read_text() == "g" * 43
 
 
 def test_an_unreadable_token_file_refuses_the_start(machine, capsys):

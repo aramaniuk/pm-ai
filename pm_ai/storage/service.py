@@ -69,7 +69,7 @@ from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.payload_fields import encode_payload
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.renders import RenderRecord
-from pm_ai.domain.scope_model import CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
+from pm_ai.domain.scope_model import ADDRESS, CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
 from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS, TranscriptState, TranscriptStateKind
 from pm_ai.domain.storage_tiers import (
@@ -85,8 +85,11 @@ from pm_ai.domain.storage_tiers import (
     assert_is_collection,
     gitignore_rule_for,
     is_append_only,
+    private_top,
     requires_git_exclusion,
     restricted_mode,
+    RESTRICTED_FILE_MODE,
+    PRIVATE_DIR_MODE,
 )
 from pm_ai.domain.vcs import VcsUnavailable
 from pm_ai.ports import (
@@ -312,7 +315,9 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 _APPEND_OPEN_ATTEMPTS = 3
 
 
-def _open_for_append(path: Path, creation_mode: int) -> tuple[int, bool]:
+def _open_for_append(
+    path: Path, creation_mode: int, *, extra_flags: int = 0
+) -> tuple[int, bool]:
     """Open `path` for append, creating it exclusively if absent.
 
     Returns the descriptor and whether this call created the file. Creation and
@@ -327,7 +332,7 @@ def _open_for_append(path: Path, creation_mode: int) -> tuple[int, bool]:
             return (
                 os.open(
                     path,
-                    os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL,
+                    os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | extra_flags,
                     creation_mode,
                 ),
                 True,
@@ -335,29 +340,104 @@ def _open_for_append(path: Path, creation_mode: int) -> tuple[int, bool]:
         except FileExistsError:
             pass
         try:
-            return os.open(path, os.O_WRONLY | os.O_APPEND), False
+            return os.open(path, os.O_WRONLY | os.O_APPEND | extra_flags), False
         except FileNotFoundError:
             if attempt == _APPEND_OPEN_ATTEMPTS - 1:
                 raise
     raise AssertionError("unreachable: the last attempt returns or raises")
 
 
-def _mkdir_enclave(directory: Path) -> None:
-    """Create `directory` and any missing ancestors, each at `ENCLAVE_DIR_MODE`.
+def _mkdir_private(directory: Path, *, enclave: bool = False) -> None:
+    """Create `directory` and its missing ancestors, the private ones at `0700`.
 
-    `mkdir(parents=True, mode=...)` applies the mode only to the last component;
-    the ancestors it creates get the umask default, which for an enclave means a
-    world-readable `private/` around 0700 leaves. Walked explicitly so every
-    directory this write brings into existence is 0700 (story 1f). Directories
-    that already exist are left alone — their mode is their owner's decision.
+    The one helper every private folder is made through (story 1s, AD-6). What
+    is private is read off the path (`private_top`): both homes whole, and a
+    project's `memory/` and `transcripts/`. Every missing folder from that
+    private top down to `directory` is created at `PRIVATE_DIR_MODE` and then
+    set to it again, because `mkdir`'s mode is masked by the umask and a umask
+    of `200` would otherwise leave it `0500` — a folder pm-ai could not write
+    into. What is missing *above* the private top — `.project-ai/`, a
+    repository, a home's parent — is created at the umask, as before; so is all
+    of `directory` when it is a project's shared part (`rules/`, `skills/`).
+
+    `enclave` is for an encrypted artifact (story 1f): when its path lies in no
+    known private tree, every missing folder is still made `0700`, as the
+    enclave always was.
+
+    Folders that already exist are left alone — a write never changes an
+    existing folder's mode; the daemon's start-up walk tightens those.
     """
+    top = private_top(directory)
+    if top is None and not enclave:
+        directory.mkdir(parents=True, exist_ok=True)
+        return
     missing: list[Path] = []
     for candidate in (directory, *directory.parents):
         if candidate.exists():
             break
         missing.append(candidate)
+        if top is not None and candidate == top:
+            # Above the private top keeps the umask.
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            break
     for candidate in reversed(missing):
-        candidate.mkdir(mode=ENCLAVE_DIR_MODE, exist_ok=True)
+        try:
+            candidate.mkdir(mode=PRIVATE_DIR_MODE)
+        except FileExistsError:
+            # Made by someone else meanwhile: theirs, and left as it is.
+            continue
+        # Not by a path that could follow a link swapped in after the `mkdir`.
+        os.chmod(candidate, PRIVATE_DIR_MODE, follow_symlinks=False)
+
+
+def _create_private_file(path: Path) -> None:
+    """Create an empty file at `0600` if absent; leave an existing one untouched.
+
+    For a file another library opens by name — `operational.db`, which SQLite
+    opens itself. Created exclusively at `0600` and set again on the open
+    descriptor, so it never exists wider and an owner-stripping umask cannot
+    lock pm-ai out of it. SQLite gives its `-wal` and `-shm` files the
+    database's own mode, so they follow.
+    """
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            RESTRICTED_FILE_MODE,
+        )
+    except FileExistsError:
+        return
+    try:
+        os.fchmod(descriptor, RESTRICTED_FILE_MODE)
+    finally:
+        os.close(descriptor)
+
+
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """A rotating handler whose every new file is created at `0600` (story 1s).
+
+    Rotation stays the standard one, by rename: the full file becomes
+    `<name>.1` and a new `<name>` is created — which `pm-ai logs`'s follow
+    relies on (4w). Only the open changes: a new file is created exclusively
+    at `0600` and set again on the descriptor; an existing one is opened for
+    append with its mode untouched.
+    """
+
+    def _open(self):  # type: ignore[no-untyped-def]
+        # `O_NOFOLLOW`, as the lock files and the walk: a `daemon.log` that is a
+        # link is refused rather than written through.
+        descriptor, created = _open_for_append(
+            Path(self.baseFilename), RESTRICTED_FILE_MODE, extra_flags=os.O_NOFOLLOW
+        )
+        try:
+            if created:
+                os.fchmod(descriptor, RESTRICTED_FILE_MODE)
+            return open(  # noqa: SIM115 — the handler owns and closes it
+                descriptor, "a", encoding=self.encoding, errors=self.errors
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
 
 
 def _fsync_dir(directory: Path) -> None:
@@ -500,6 +580,290 @@ def _load_proposal(body: str) -> Proposal:
         version=d["version"],
         ttl=timedelta(seconds=d["ttl_seconds"]),
     )
+
+
+# ── The start-up mode walk (story 1s, AD-5, AD-6) ────────────────────────────
+#
+# Tightening is not a write: it touches no content and no store row, and only
+# ever removes the group and other bits. It is set on a descriptor opened
+# `O_NOFOLLOW`, from that descriptor's own `fstat`, never by path — so a file
+# another command publishes by rename mid-walk never receives another file's
+# mode, and a path swapped for a link changes nothing outside.
+
+_GROUP_AND_OTHER = 0o077
+
+
+@dataclass(frozen=True, slots=True)
+class ModeTightened:
+    """One path whose mode the walk narrowed, relative to its root."""
+
+    root: str
+    path: str
+    old: int
+    new: int
+    is_dir: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ModeNotTightened:
+    """One path the walk could not narrow, and why. Counted, never fatal."""
+
+    root: str
+    path: str
+    reason: str
+
+
+@dataclass(slots=True)
+class ModeWalk:
+    """What one start's walk did: changes, refusals, roots skipped, an overrun."""
+
+    tightened: list[ModeTightened] = field(default_factory=list)
+    refused: list[ModeNotTightened] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    overrun: str | None = None
+    """Where the walk stopped when its time budget ran out; `None` when it finished."""
+
+    @property
+    def folders(self) -> int:
+        return sum(1 for change in self.tightened if change.is_dir)
+
+    @property
+    def files(self) -> int:
+        return sum(1 for change in self.tightened if not change.is_dir)
+
+
+def _lstat_at(name: str, directory: int) -> os.stat_result:
+    return os.stat(name, dir_fd=directory, follow_symlinks=False)
+
+
+def _open_at(name: str, flags: int, directory: int) -> int:
+    return os.open(name, flags, dir_fd=directory)
+
+
+@dataclass(frozen=True, slots=True)
+class ModeCalls:
+    """The walk's system calls, injectable so a test can refuse, ignore or swap.
+
+    `lstat` and `open` are relative to a parent folder's descriptor; `fchmod`
+    and `fstat` act on the entry's own. The defaults are the operating
+    system's. A test that needs "another owner", "a mode the filesystem does
+    not keep" or "a file swapped for a link mid-walk" replaces one of them
+    rather than needing another account or another filesystem.
+    """
+
+    lstat: Callable[[str, int], os.stat_result] = _lstat_at
+    open: Callable[[str, int, int], int] = _open_at
+    fstat: Callable[[int], os.stat_result] = os.fstat
+    fchmod: Callable[[int, int], None] = os.fchmod
+    clock: Callable[[], float] = time.monotonic
+
+
+_WALK_OPEN = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+class _Overrun(Exception):
+    """The walk's time budget ran out; unwinds to the root, which records where."""
+
+    def __init__(self, where: str) -> None:
+        super().__init__(where)
+        self.where = where
+
+
+class _RootWalk:
+    """One root's walk: depth first, one descriptor per level held at a time."""
+
+    def __init__(
+        self,
+        label: str,
+        report: ModeWalk,
+        *,
+        skip: frozenset[tuple[int, int]],
+        deadline: float,
+        calls: ModeCalls,
+    ) -> None:
+        self.label = label
+        self.report = report
+        self.skip = skip
+        self.deadline = deadline
+        self.calls = calls
+
+    def refuse(self, rel: str, reason: str) -> None:
+        self.report.refused.append(ModeNotTightened(self.label, rel, reason))
+
+    def entry(self, descriptor: int, rel: str) -> None:
+        """Narrow the entry open on `descriptor`, then walk it if it is a folder."""
+        try:
+            status = self.calls.fstat(descriptor)
+        except OSError as unreadable:
+            self.refuse(rel, f"its mode could not be read ({_why(unreadable)})")
+            return
+        is_dir = stat.S_ISDIR(status.st_mode)
+        if not is_dir and not stat.S_ISREG(status.st_mode):
+            return  # neither a file nor a folder: not this rule's business
+        if is_dir and rel != "." and (status.st_dev, status.st_ino) in self.skip:
+            return  # a registered project repository inside the home
+        old = stat.S_IMODE(status.st_mode)
+        new = old & ~_GROUP_AND_OTHER
+        if new != old:
+            if not is_dir and status.st_nlink > 1:
+                # Refused only when tightening would change it: a hard-linked
+                # file already owner-only is nothing to report.
+                self.refuse(
+                    rel,
+                    f"not tightened: it has {status.st_nlink} names (a hard link), "
+                    f"and another may be outside this root",
+                )
+                return
+            self.narrow(descriptor, rel, old, new, is_dir=is_dir)
+        if is_dir:
+            self.children(descriptor, rel)
+
+    def narrow(self, descriptor: int, rel: str, old: int, new: int, *, is_dir: bool) -> None:
+        try:
+            self.calls.fchmod(descriptor, new)
+        except OSError as refused:
+            self.refuse(rel, f"not tightened from {old:04o}: {_why(refused)}")
+            return
+        try:
+            kept = stat.S_IMODE(self.calls.fstat(descriptor).st_mode)
+        except OSError as unreadable:
+            self.refuse(rel, f"not tightened: the mode could not be read back ({_why(unreadable)})")
+            return
+        if kept != new:
+            self.refuse(
+                rel,
+                f"not tightened: the filesystem did not keep {new:04o} "
+                f"(it reads back {kept:04o})",
+            )
+            return
+        self.report.tightened.append(ModeTightened(self.label, rel, old, new, is_dir))
+
+    def children(self, descriptor: int, rel: str) -> None:
+        try:
+            names = sorted(os.listdir(descriptor))
+        except FileNotFoundError:
+            return
+        except OSError as unreadable:
+            self.refuse(rel, f"its contents were not walked: the folder could not be read ({_why(unreadable)})")
+            return
+        for name in names:
+            child = name if rel == "." else f"{rel}/{name}"
+            if self.calls.clock() > self.deadline:
+                raise _Overrun(child)
+            try:
+                listed = self.calls.lstat(name, descriptor)
+            except FileNotFoundError:
+                continue  # removed mid-walk
+            except OSError as unreadable:
+                self.refuse(child, f"not tightened: it could not be read ({_why(unreadable)})")
+                continue
+            if stat.S_ISLNK(listed.st_mode):
+                continue  # links inside a root are neither followed nor changed
+            listed_dir = stat.S_ISDIR(listed.st_mode)
+            if not listed_dir and not stat.S_ISREG(listed.st_mode):
+                continue
+            if listed_dir and (listed.st_dev, listed.st_ino) in self.skip:
+                continue
+            flags = _WALK_OPEN | (os.O_DIRECTORY if listed_dir else 0)
+            try:
+                opened = self.calls.open(name, flags, descriptor)
+            except FileNotFoundError:
+                continue  # removed mid-walk
+            except OSError as refused:
+                if refused.errno in (errno.ELOOP, errno.ENOTDIR):
+                    continue  # swapped for a link or a file mid-walk: nothing changes
+                self.refuse(
+                    child,
+                    f"not tightened: it could not be opened ({_why(refused)})"
+                    + ("; its contents were not walked" if listed_dir else ""),
+                )
+                continue
+            try:
+                self.entry(opened, child)
+            finally:
+                os.close(opened)
+
+
+def _why(error: OSError) -> str:
+    return error.strerror or type(error).__name__
+
+
+def tighten_modes(
+    root: Path,
+    *,
+    label: str,
+    report: ModeWalk,
+    deadline: float,
+    skip: Sequence[Path] = (),
+    calls: ModeCalls | None = None,
+) -> None:
+    """Narrow every file and folder in `root`, the root included, into `report`.
+
+    The old mode minus the group and other bits, and nothing else: owner bits,
+    the executable bit and setuid, setgid and sticky are kept. A root that is
+    missing is skipped silently and never created. A root that is itself a link
+    is followed once — that is where the person keeps the scope — and a link to
+    nothing or to a file is recorded in `report.skipped`. Inside, links are
+    neither followed nor changed, a file with more than one name is refused,
+    and a folder in `skip` (a registered repository) is not entered. Raises
+    nothing for a path: every refusal is recorded and the walk goes on. When
+    `deadline` passes, it stops and records where in `report.overrun`.
+
+    Its cost, measured 2026-10-17 (`test_the_walks_cost_on_a_generated_home`):
+    5,000 files in 50 folders, 0.32 s to tighten, 0.22 s when already private,
+    on the development Mac. The daemon's budget is `MODE_WALK_BUDGET_SECONDS`.
+    """
+    calls = calls or ModeCalls()
+    try:
+        status = os.lstat(root)
+    except FileNotFoundError:
+        return
+    except OSError as unreadable:
+        report.skipped.append(f"{label}: {root} was skipped ({_why(unreadable)})")
+        return
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC
+    if stat.S_ISLNK(status.st_mode):
+        try:
+            target = os.stat(root)
+        except OSError:
+            report.skipped.append(f"{label}: {root} is a link to nothing; skipped")
+            return
+        if not stat.S_ISDIR(target.st_mode):
+            report.skipped.append(f"{label}: {root} is a link to something not a folder; skipped")
+            return
+    elif not stat.S_ISDIR(status.st_mode):
+        report.skipped.append(f"{label}: {root} is not a folder; skipped")
+        return
+    else:
+        flags |= os.O_NOFOLLOW
+    fenced: set[tuple[int, int]] = set()
+    for repository in skip:
+        try:
+            held = os.stat(repository)
+        except OSError:
+            continue
+        fenced.add((held.st_dev, held.st_ino))
+    try:
+        descriptor = os.open(root, flags)
+    except FileNotFoundError:
+        return
+    except OSError as refused:
+        report.refused.append(
+            ModeNotTightened(label, ".", f"not walked: the root could not be opened ({_why(refused)})")
+        )
+        return
+    walk = _RootWalk(label, report, skip=frozenset(fenced), deadline=deadline, calls=calls)
+    try:
+        here = os.fstat(descriptor)
+        if (here.st_dev, here.st_ino) in fenced:
+            # The root is itself a registered repository: its shared parts are
+            # the team's, and its private folders are roots of their own.
+            return
+        walk.entry(descriptor, ".")
+    except _Overrun as overrun:
+        report.overrun = f"{label}: {overrun.where}"
+    finally:
+        os.close(descriptor)
 
 
 class ProposalNotFound(KeyError):
@@ -1077,9 +1441,12 @@ class StorageService:
         # cannot reach this, which is the structural guarantee AD-3 asks for.
         # The enclave first, by story 1f's rule: on a fresh home this is the
         # first write under `~/.pm-ai`, and `resolve(create=True)` would make
-        # `~/.pm-ai` and `private/` at the umask's mode (story 9a).
-        _mkdir_enclave(Path(paths.resolve(APPLICATION, OPERATIONAL_DB)).parent)
-        store = paths.resolve(APPLICATION, OPERATIONAL_DB, create=True)
+        # `~/.pm-ai` and `private/` at the umask's mode (story 9a). Then the
+        # file itself at 0600 before SQLite opens it (story 1s): SQLite gives
+        # its `-wal` and `-shm` files the database's own mode, so they follow.
+        store = paths.resolve(APPLICATION, OPERATIONAL_DB)
+        _mkdir_private(Path(store).parent, enclave=True)
+        _create_private_file(Path(store))
         self._store = Path(store)
         try:
             # No `timeout=`: the standard library's five-second busy wait is
@@ -1573,7 +1940,30 @@ class StorageService:
         even leave behind the directory it was about to fill.
         """
         self._assert_git_excludes(scope, artifact)
-        return self._paths.resolve(scope, artifact, create=True)
+        return self._prepared(scope, artifact)
+
+    def _prepared(self, scope: DataScope, artifact: str) -> Path:
+        """Resolve `artifact` and make the directory it needs, private where it lives.
+
+        What `resolve(create=True)` did, by story 1s's rule instead of the
+        umask's: the directory itself for a directory artifact, its parent for
+        a file, each missing private folder at 0700 (`_mkdir_private`), a
+        project's shared part at the umask.
+        """
+        target = Path(self._paths.resolve(scope, artifact))
+        placement = ADDRESS[scope.kind].get(artifact)
+        is_dir = placement.node.is_dir if placement is not None else artifact.endswith("/")
+        _mkdir_private(target if is_dir else target.parent)
+        return target
+
+    def prepare_directory(self, *, scope: DataScope, artifact: str) -> Path:
+        """Create a declared directory artifact by the private-folder rule (story 1s).
+
+        Project onboarding's one door: `memory/` and `transcripts/` come out
+        0700, `rules/` and `skills/` at the umask, `.project-ai/` and the
+        repository at the umask as before. Asks no git and writes no file.
+        """
+        return self._prepared(scope, artifact)
 
     def _assert_git_excludes(
         self, scope: DataScope, artifact: str, *, cached: bool = True
@@ -1768,6 +2158,8 @@ class StorageService:
         that segment with the operating system's permission error until someone
         restores owner-write by hand. Changing an existing file's mode is not
         this writer's call (story 1q), so it is stated here rather than repaired.
+        The daemon's start-up walk (story 1s) does not repair it either: it only
+        ever removes group and other bits, never adds an owner bit.
         """
         if is_encrypted(str(path)):
             raise AppendToSealedArtifact(
@@ -1911,12 +2303,15 @@ class StorageService:
             # applies the mode to the final directory only, so a missing
             # `private/` above `telegram_cache/` used to land at umask default —
             # publishing the names, sizes and mtimes the enclave exists to hide.
-            _mkdir_enclave(parent)
+            _mkdir_private(parent, enclave=True)
             if stat.S_IMODE(parent.stat().st_mode) != ENCLAVE_DIR_MODE:
                 parent.chmod(ENCLAVE_DIR_MODE)
-            _mkdir_enclave(staging)
+            _mkdir_private(staging, enclave=True)
         else:
-            staging.mkdir(parents=True, exist_ok=True)
+            # Private by where it lives (story 1s): a missing folder inside a
+            # home or a project's `memory/`/`transcripts/` is made 0700; a
+            # project's shared part keeps the umask.
+            _mkdir_private(staging)
 
         staged = staging / f".{target.name}.{_ulid()}.part"
         descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode or 0o666)
@@ -2071,9 +2466,10 @@ class StorageService:
         The entry point for the encrypted set — the credential store and the PM's
         voice notes — and the reason no caller decides whether to encrypt. Callers
         name *what* they are writing; the declaration in the scope trees decides
-        *how*. Since story 8f that covers the file mode as well: an artifact the
-        trees declare gitignored lands at 0600 whether or not it is encrypted,
-        and no signature grew a `mode` argument to say so.
+        *how*. Since story 8f that covers the file mode as well, and since 1s
+        the mode follows where the artifact lives: everything in both homes and
+        in a project's `memory/` and `transcripts/` lands at 0600 whether or not
+        it is encrypted, and no signature grew a `mode` argument to say so.
 
         `name` is for an artifact whose members are created at runtime: a
         `Collection` resolves to its directory, so the file inside it has to be
@@ -2180,12 +2576,12 @@ class StorageService:
     def prepare_private_dir(self) -> Path:
         """The application scope's `private/`, every missing directory made at 0700.
 
-        By story 1f's rule (`_mkdir_enclave`): the daemon's lifetime lock is
+        By story 1f's rule (`_mkdir_private`): the daemon's lifetime lock is
         the first thing a fresh home may write there (story 9a), and its
         directories must not come out at the umask's mode.
         """
         directory = self.daemon_lock_path().parent
-        _mkdir_enclave(directory)
+        _mkdir_private(directory, enclave=True)
         return directory
 
     def create_api_token(self, token: str) -> Path:
@@ -2209,11 +2605,35 @@ class StorageService:
         removes and closes it when it stops. `name` is validated as a capture's
         is, since it becomes a path component.
         """
-        directory = self._paths.resolve(APPLICATION, DIAGNOSTIC_LOGS, create=True)
+        directory = self._prepared(APPLICATION, DIAGNOSTIC_LOGS)
         target = directory / _capture_name(name)
-        return logging.handlers.RotatingFileHandler(
+        # Every file it creates — the first, and the new one after each
+        # rollover — at 0600 (story 1s); rotation stays by rename.
+        return _PrivateRotatingFileHandler(
             target, maxBytes=_DIAGNOSTIC_LOG_BYTES, backupCount=_DIAGNOSTIC_LOG_BACKUPS,
             encoding="utf-8",
+        )
+
+    def tighten_modes(
+        self,
+        root: Path,
+        *,
+        label: str,
+        report: ModeWalk,
+        deadline: float,
+        skip: Sequence[Path] = (),
+        calls: ModeCalls | None = None,
+    ) -> None:
+        """Narrow what already exists in one private root (story 1s, AD-6).
+
+        The daemon's start-up walk, one root at a time: `tighten_modes` above,
+        which says what it does and does not change. Not a write in AD-5's
+        sense — it touches no content and no store row — so it takes no claim
+        and is never handed to the writer thread; the daemon runs it before
+        that thread starts.
+        """
+        tighten_modes(
+            root, label=label, report=report, deadline=deadline, skip=skip, calls=calls
         )
 
     def close(self) -> None:
@@ -2433,10 +2853,7 @@ class StorageService:
         # would be created under, so claiming a sealed artifact does not open a
         # world-listable `private/` a moment before the enclave would have been —
         # the platform lock's own `mkdir` runs at the umask.
-        if is_encrypted(str(target)):
-            _mkdir_enclave(target.parent)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
+        _mkdir_private(target.parent, enclave=is_encrypted(str(target)))
         with contextlib.ExitStack() as held:
             try:
                 held.enter_context(self._claims.exclusive(target))
@@ -2536,9 +2953,7 @@ class StorageService:
         # No git check: `assert_writable` above refuses every scope but the
         # application one, and that scope is outside every working tree. A guard
         # whose refusal has no reachable path reads as protection and is not.
-        target = self._paths.resolve(
-            destination, DISCLOSURE_LEDGER_ARTIFACT, create=True
-        )
+        target = self._prepared(destination, DISCLOSURE_LEDGER_ARTIFACT)
         self._append(
             target,
             render_disclosure(record) + "\n",
@@ -2672,7 +3087,7 @@ class StorageService:
             self._create_exclusively(
                 capture,
                 body,
-                staging=self._paths.resolve(scope, CAPTURE_STAGING, create=True),
+                staging=self._prepared(scope, CAPTURE_STAGING),
                 # The same declaration `write_artifact` reads, asked here too so
                 # the trees' answer is honoured by both writers rather than by
                 # whichever one somebody remembered. `transcripts/` is declared

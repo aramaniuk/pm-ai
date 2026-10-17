@@ -23,9 +23,9 @@ Meeting records are not affected: each is one file written whole, and that path 
 
 **Always:**
 - **The mode is applied when the segment file is created, and only then.** The file never exists at a wider mode, not even for an instant. A later append to the same file does not touch its permissions.
-- **An existing segment's mode is left as it is**, including one created before this slice at the wrong mode. Changing modes on files the operator may have set deliberately is not this slice's call; it is recorded as deferred.
+- **An existing segment's mode is left as it is by the append**, including one created before this slice at the wrong mode. Changing modes on files the operator may have set deliberately is not this slice's call. Since 1s the daemon's start-up walk tightens existing segments and their folders; an append still changes no existing file's mode.
 - **The three writers share one rule.** The declaration in the scope trees decides the mode; the caller that knows the scope and the artifact passes the declared answer, and no writer invents a mode of its own.
-- **The personal event log is declared without a restricted mode and stays at the umask.** That is its declaration, not an oversight, and `33d` must not claim otherwise.
+- **The personal event log is private (`0600`) since 1s**, which decides a file's mode by where it lives rather than by its `gitignored` declaration. Until 1s it was declared without a restricted mode and stayed at the umask.
 - **The declared mode is set regardless of the umask**, as the whole-file writers already do: the mask can strip owner bits and leave pm-ai unable to append to its own ledger. A ledger declared without a mode under such a mask fails on its second append today and still will; this slice does not change that.
 - **Nothing else about appending changes**: a ledger declared encrypted is still refused before any file exists, an entry for a sealed month is still refused, a segment the operator made read-only still refuses with the operating system's own error, and the bytes appended are identical.
 - **The 1n test that pins the wrong mode flips to pin the right one**, and 1n's Spec Change Log gains a dated line saying so — the test's own failure message asks for both.
@@ -33,7 +33,7 @@ Meeting records are not affected: each is one file written whole, and that path 
 **Ask First:** Nothing. Reporting an existing segment at the wrong mode in `pm-ai doctor` is recorded as deferred (`deferred-work.md`, "Surfaced while writing the wave-2 specs"), since `doctor` would need to walk every project's and person's ledger directory.
 
 **Never:**
-- No `chmod` of any existing file, and no directory modes — directories at `0700` (owner-only) are a separate, already-recorded item.
+- No `chmod` of any existing file by the append path, and no directory modes in this slice — both arrived with 1s: new private folders at `0700`, and the daemon's start-up walk for what already exists.
 - No widening to "every plaintext file at `0600`"; that is its own recorded item with its own matrix.
 - No change to how appends are flushed or made durable, and no change to any declaration in the scope trees.
 
@@ -47,7 +47,7 @@ Meeting records are not affected: each is one file written whole, and that path 
 | Harvest batch creates the segment | several events, no segment yet; the month's directory may or may not exist yet | directory created if needed; segment created at `0600`, one write | N/A |
 | Disclosure ledger, first record | umask `022`, no file yet | `disclosure.md` created at `0600` | N/A |
 | Team-member event log, first entry | umask `022`, no segment yet | segment created at `0600` | N/A |
-| Ledger declared without a mode | personal event log, umask `022` | segment created at `0644` — the umask's answer | N/A |
+| Personal event log (since 1s) | personal event log, umask `022` | segment created at `0600` — the personal scope is private | N/A |
 | Umask strips owner bits | umask `200`, declared `0600` | segment created at `0600`; the append succeeds | N/A |
 | Existing segment is read-only | segment at `0400` by hand | refused with the operating system's own error, as today; the file untouched | permission error, named |
 | Ledger declared encrypted | an encrypted declaration, by test | refused before any file exists, as today | the sealed-artifact refusal, unchanged |
@@ -121,6 +121,8 @@ An empty segment left behind by a failure between the exclusive create and the w
 - `uv run lint-imports` -- expected: all contracts kept
 
 ## Spec Change Log
+
+- **2026-10-17, frozen text edited by 1s (private files stay private).** Since 1s the personal event log is private (`0600`): a file's mode follows where it lives, not its `gitignored` declaration. The daemon's start-up walk tightens existing segments and folders; an append still changes no existing file's mode. The "Always" and "Never" lines and the matrix row on the personal event log say so.
 
 - **2026-10-10, Design Notes corrected after the blind-hunter review.** The review found that the sentence calling an empty segment left between the exclusive create and the write "harmless" is false under an owner-stripping umask: the create yields `0400` at umask `200`, and a kill before `fchmod` leaves a segment the next append opens as existing without restoring owner-write, so pm-ai is locked out of it. The sentence now says so, and `_append`'s docstring says the same. Code behaviour is unchanged by this entry — no `chmod` of an existing file was added, which the Never list forbids.
 

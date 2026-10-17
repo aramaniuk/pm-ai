@@ -131,9 +131,7 @@ def exclusive(guarded: Path) -> Iterator[None]:
     # `O_NONBLOCK` so a sidecar that is a FIFO opens at once rather than waiting
     # for a writer, and is then refused by the plain-file check below. It has no
     # effect on a regular file or on `flock`, which is asked non-blocking anyway.
-    descriptor = os.open(
-        claim, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
-    )
+    descriptor = _open_lock_file(claim)
     try:
         # Darwin opens an existing directory under `O_CREAT` without complaint,
         # and `flock` on it succeeds — so "a plain file" is checked, not assumed.
@@ -172,6 +170,49 @@ def exclusive(guarded: Path) -> Iterator[None]:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
+
+
+LOCK_FILE_MODE = 0o600
+"""Owner-only: every lock file pm-ai creates is private (story 1s, AD-6)."""
+
+
+def _open_lock_file(path: Path) -> int:
+    """Open a lock file read-only, creating it at `0600` if absent.
+
+    Created exclusively, so creation is told apart from opening by the kernel,
+    and the mode set again on the open descriptor: `os.open`'s mode is masked
+    by the umask, and at umask `200` it would land `0400`. An existing lock
+    file's mode is never changed here — the daemon's start-up walk does that.
+    `O_NOFOLLOW` refuses a link either way; `O_NONBLOCK` keeps a FIFO from
+    hanging the open.
+    """
+    for attempt in range(_LOCK_OPEN_ATTEMPTS):
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+                LOCK_FILE_MODE,
+            )
+        except FileExistsError:
+            try:
+                return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                # Removed between the two opens: create it again, a bounded
+                # number of times, then let the error propagate — as the
+                # storage service's append open does.
+                if attempt == _LOCK_OPEN_ATTEMPTS - 1:
+                    raise
+                continue
+        try:
+            os.fchmod(descriptor, LOCK_FILE_MODE)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+    raise AssertionError("unreachable: the last attempt returns or raises")
+
+
+_LOCK_OPEN_ATTEMPTS = 3
 
 
 class FlockClaims:
@@ -213,9 +254,7 @@ def hold_for_life(path: Path) -> LifetimeLock:
     filesystem without `flock` — is an `OSError` naming the file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
-    )
+    descriptor = _open_lock_file(path)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise IsADirectoryError(

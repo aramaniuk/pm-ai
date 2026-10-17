@@ -57,7 +57,7 @@ from pm_ai.domain.scope_model import (
     PERSONAL_DIRNAME,
     PROJECT_DIRNAME,
 )
-from pm_ai.domain.storage_tiers import RESTRICTED_FILE_MODE
+from pm_ai.domain.storage_tiers import PRIVATE_DIR_MODE, RESTRICTED_FILE_MODE
 from pm_ai.ports import AES_KEY_BYTES, CryptoPort, DecryptionFailed, KeychainPort, KeyNotFound
 
 __all__ = [
@@ -163,8 +163,9 @@ _NONCE_BYTES = 12
 # Directories holding encrypted artifacts. A `0600` file inside a world-readable
 # directory still publishes its name, size and mtime — enough to show that a 1:1
 # with a named report happened on a given day, which is the fact the enclave
-# exists to hide.
-ENCLAVE_DIR_MODE = 0o700
+# exists to hide. An alias since story 1s: every private folder is made at this
+# mode, and `pm_ai.domain.storage_tiers.PRIVATE_DIR_MODE` is the one constant.
+ENCLAVE_DIR_MODE = PRIVATE_DIR_MODE
 
 # *Re-exported*, not defined, since story 8f: `pm_ai.domain.storage_tiers` names
 # the same 0600 as `RESTRICTED_FILE_MODE`, because an unencrypted artifact the
