@@ -1526,3 +1526,121 @@ def test_a_pipeline_refusal_is_exit_3_with_its_own_sentence(dropped_file, capsys
     err = capsys.readouterr().err
     assert "no meeting 'mtg_x' is recorded in personal." in err
     assert "\"no meeting" not in err
+
+
+# ── Story 4t — the `goal` subcommands, flags and subcommand help ─────────────
+
+from pm_ai.surfaces.cli import repl as _repl  # noqa: E402
+
+
+def test_the_goal_usage_lists_the_five_subcommands_in_order():
+    listed = cli.usage(group="goal")
+    order = [listed.index(f"  {leaf}") for leaf in ("set", "update", "delete", "list", "show")]
+    assert order == sorted(order)
+    assert "create" not in cli.TABLE["goal"].leaves
+
+
+def test_a_flag_is_spelled_in_square_brackets_in_the_usage():
+    assert "delete <id> [--yes]" in cli.usage(group="goal")
+    assert "set [id] [--domain <domain>] [--horizon <horizon>] [--title <title>]" in cli.usage(
+        group="goal"
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["goal", "delete", "g_a", "--yes"], ["goal", "delete", "--yes", "g_a"]],
+    ids=["after", "before"],
+)
+def test_a_flag_never_takes_the_word_after_it(argv):
+    parsed = cli.parse(argv)
+    assert isinstance(parsed, cli.Parsed)
+    assert parsed.arguments == ("g_a",)
+    assert parsed.flags == frozenset({"yes"})
+    assert parsed.options == {}
+
+
+@pytest.mark.parametrize(
+    ("argv", "said"),
+    [
+        (["goal", "delete", "g_a", "--yes=1"], "takes no value"),
+        (["goal", "delete", "g_a", "--yes", "--yes"], "twice"),
+        (["goal", "delete", "g_a", "--force"], "has no `--force` option"),
+        (["goal", "list", "--yes"], "takes no arguments"),
+    ],
+    ids=["valued", "twice", "undeclared", "none-declared"],
+)
+def test_a_misused_flag_is_a_usage_error(argv, said):
+    answered = cli.parse(argv)
+    assert isinstance(answered, cli.Answered)
+    assert answered.code == EXIT_USAGE
+    assert said in answered.text
+
+
+@pytest.mark.parametrize("word", ["--help", "-h"])
+def test_a_subcommand_answers_help_with_its_usage_line_and_summary(word):
+    answered = cli.parse(["goal", "update", word])
+    assert isinstance(answered, cli.Answered)
+    assert answered.code == EXIT_OK
+    assert answered.text == (
+        "usage: pm-ai goal update <id> [--domain <domain>] [--horizon <horizon>] "
+        "[--title <title>]\n\nrevise one goal on file; never creates one"
+    )
+
+
+def test_subcommand_help_works_for_a_leaf_without_options():
+    answered = cli.parse(["config", "show", "--help"])
+    assert isinstance(answered, cli.Answered) and answered.code == EXIT_OK
+    assert answered.text.startswith("usage: pm-ai config show\n")
+
+
+def test_list_and_show_compose_nothing_and_the_writers_need_a_terminal():
+    for leaf in ("list", "show"):
+        assert cli.TABLE["goal"].leaves[leaf].composes is False
+        assert ("goal", leaf) not in cli.TERMINAL_BOUND
+    for leaf in ("set", "update", "delete"):
+        assert cli.TABLE["goal"].leaves[leaf].composes is True
+        assert ("goal", leaf) in cli.TERMINAL_BOUND
+
+
+def test_the_words_sent_to_the_daemon_keep_their_flags(monkeypatch, tmp_path):
+    """`_absolute_paths` rebuilds words from the parse; a flag must survive it."""
+    drop = cli.TABLE["transcript"].leaves["drop"]
+    monkeypatch.setitem(
+        cli.TABLE["transcript"].leaves, "drop", dataclasses.replace(drop, flags=("yes",))
+    )
+    monkeypatch.chdir(tmp_path)
+    words = _repl._absolute_paths(  # noqa: SLF001
+        ["transcript", "drop", "--yes", "notes.vtt", "--scope", "personal"]
+    )
+    assert words == [
+        "transcript",
+        "drop",
+        str(tmp_path / "notes.vtt"),
+        "--scope",
+        "personal",
+        "--yes",
+    ]
+
+
+def test_goal_list_reaches_no_daemon_and_no_writer():
+    """Through `dispatch` with only a reader: a broken machine still lists."""
+
+    class Reader:
+        path = Path("/nowhere/strategic_goals.md")
+
+        def read(self):
+            from pm_ai.core.goal_register import GoalRegister
+
+            return GoalRegister(present=False)
+
+    assert (
+        cli.dispatch(
+            ["goal", "list"],
+            daemon=None,
+            diagnose=lambda: (_ for _ in ()).throw(AssertionError("diagnosed")),
+            probe_connectors=None,
+            goal_reader=Reader(),
+        )
+        == EXIT_OK
+    )

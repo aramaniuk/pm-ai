@@ -91,23 +91,7 @@ from pm_ai.app.wiring import (
 )
 from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import Config, ConfigRefused, load_config, read_daemon_port
-from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
-from pm_ai.core.goal_register import (
-    GOALS_SCOPE,
-    GoalRegister,
-    GoalUnrecorded,
-    MalformedGoals,
-    parse_goals,
-    set_goal,
-)
-from pm_ai.domain.event_entries import (
-    DAEMON_ACTOR,
-    EventEntry,
-    MalformedEntry,
-    SelfActionType,
-    render_entry,
-)
-from pm_ai.domain.goals import Goal
+from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
 from pm_ai.domain.health import EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry, parse_registry
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -155,7 +139,16 @@ from pm_ai.surfaces.cli.dispatch import (
 from pm_ai.surfaces.cli import repl
 from pm_ai.surfaces.cli.loopback import LoopbackClient
 
-__all__ = ["CONFIG_ARTIFACT", "GoalBook", "GoalWritten", "main", "read_optional"]
+__all__ = [
+    "CONFIG_ARTIFACT",
+    "GoalBook",
+    "GoalChanged",
+    "GoalDeleted",
+    "GoalReader",
+    "GoalWritten",
+    "main",
+    "read_optional",
+]
 
 CONFIG_ARTIFACT = "config.toml"
 
@@ -195,6 +188,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(parsed, Answered):
             return parsed.deliver()
         keychain = MacOSKeychainAdapter()
+        if not parsed.composes:
+            # Story 4t: `goal list` and `goal show` read `strategic_goals.md`
+            # by its path and compose nothing, so a broken `config.toml`, an
+            # unreadable registry or an empty keychain does not stop them. The
+            # reader is over storage that knows no project; the file is
+            # personal and not sealed, so no key is asked for.
+            return dispatch(
+                parsed,
+                daemon=None,
+                diagnose=lambda: Report(()),
+                probe_connectors=None,
+                goal_reader=GoalReader(application_storage(keychain)),
+            )
         composed = _compose(keychain, parsed.target)
         daemon, failure = composed.daemon, composed.failure
         return dispatch(
@@ -439,6 +445,9 @@ DAEMON_BOUNDS: Mapping[tuple[str, ...], Callable[[Daemon], float]] = {
     ("project", "add"): lambda daemon: ONBOARD_BOUND_SECONDS,
     ("doctor",): lambda daemon: DOCTOR_BOUND_SECONDS,
     ("config", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    # Story 4t: a read of one local file and a print, `config show`'s shape.
+    ("goal", "list"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    ("goal", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
     ("daemon", "run"): lambda daemon: DAEMON_RUN_BOUND_SECONDS,
 }
 """Every command the daemon runs, with its declared bound (AD-21, story 4r).
@@ -613,108 +622,6 @@ class _FirstRun:
             _Composition(None, None, read.config, read.registry, read.connectors)
         )
         return Report((*report.probes, connectors_enrolled(read.connectors), renders))
-
-
-@dataclass(frozen=True, slots=True)
-class GoalWritten:
-    """What one `GoalBook.set` did, read off the file it merged onto.
-
-    `revised` comes from the fresh read `set` makes, not from anything a
-    surface read before its prompts — a goal someone else set meanwhile is a
-    revision, and saying "set" over it would be false. `path` is `None` exactly
-    when `changed` is false: nothing was written, so there is no write to name.
-    """
-
-    path: Path | None
-    revised: bool
-    changed: bool
-
-
-# How long the writer's own stamps make a line, measured with stand-ins of the
-# same length: `evt_` and twenty hex digits, and a microsecond UTC isoformat.
-_PROBE_ID = "evt_" + "0" * 20
-_PROBE_AT = "0000-00-00T00:00:00.000000+00:00"
-
-
-class GoalBook:
-    """`strategic_goals.md`, read and set through the single reader and writer.
-
-    The CLI names this shape structurally (`dispatch.GoalBook`) because
-    `surfaces` may not reach storage (AD-30). `core` renders and opens nothing,
-    so the read, the write and the event-log entry are all made here — and
-    Telegram, the second channel, will hold one of these with its own `channel`.
-    """
-
-    def __init__(self, storage: StoragePort, *, channel: str) -> None:
-        self._storage = storage
-        self._channel = channel
-
-    def read(self) -> GoalRegister:
-        """The register as the file says now; `MalformedGoals` if it cannot say."""
-        return parse_goals(self._raw(), scope=GOALS_SCOPE)
-
-    def set(self, goal: Goal) -> GoalWritten:
-        """Merge `goal` into the file, write it, then record the act (CAP-10).
-
-        Everything that can refuse runs before the write: the file is parsed and
-        merged (`set_goal` refuses a file the parser refuses, so a hand-broken
-        `strategic_goals.md` stays byte-identical), and the entry is built and
-        rendered at full length, so a title too long for one ledger line is a
-        `MalformedGoals` with nothing written rather than a `MalformedEntry`
-        after the file already changed.
-
-        A goal identical to the one on file is a no-op: no write, no entry. Only
-        the append can fail after the write, and that is `GoalUnrecorded`, which
-        says the file changed and the log did not.
-        """
-        raw = self._raw()
-        current = parse_goals(raw, scope=GOALS_SCOPE).get(goal.goal_id)
-        if current == goal:
-            return GoalWritten(path=None, revised=True, changed=False)
-        payload = set_goal(raw, goal)
-        entry = EventEntry(
-            category=SelfActionType.GOAL_SET,
-            actor=DAEMON_ACTOR,
-            fields=(
-                ("goal_id", goal.goal_id),
-                ("domain", goal.domain.value),
-                ("horizon", goal.horizon.value),
-                ("title", goal.title),
-                ("channel", self._channel),
-            ),
-        )
-        _assert_recordable(entry)
-        path = self._storage.write_artifact(payload, scope=GOALS_SCOPE, artifact=GOALS_ARTIFACT)
-        try:
-            self._storage.append_event_log(entry, scope=GOALS_SCOPE)
-        except (OSError, ArtifactBusy, ValueError) as unrecorded:
-            raise GoalUnrecorded(
-                f"{goal.goal_id} WAS written to {path}, but its goal_set entry "
-                f"could not be appended to the personal event log, so the log "
-                f"does not record this change: {unrecorded}"
-            ) from unrecorded
-        return GoalWritten(path=path, revised=current is not None, changed=True)
-
-    def _raw(self) -> bytes | None:
-        return self._storage.read_artifact(scope=GOALS_SCOPE, artifact=GOALS_ARTIFACT)
-
-
-def _assert_recordable(entry: EventEntry) -> None:
-    """Refuse, before any write, an entry the ledger writer would refuse after it."""
-    stamped = replace(
-        entry,
-        entry_id=_PROBE_ID,
-        fields=(("ingested_at", _PROBE_AT), *entry.fields),
-    )
-    try:
-        # `render_entry` is the writer's own check, `MAX_ENTRY_LENGTH` included,
-        # so this refuses exactly what `append_event_log` would.
-        render_entry(stamped)
-    except MalformedEntry as refused:
-        raise MalformedGoals(
-            f"this goal cannot be recorded in the event log, so nothing was "
-            f"written: {refused}"
-        ) from refused
 
 
 def read_optional(

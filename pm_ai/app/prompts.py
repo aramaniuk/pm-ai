@@ -59,6 +59,7 @@ from pm_ai.app.concurrency import (
     WriterStopped,
     WriterThread,
 )
+from pm_ai.app.goals import GoalReader
 from pm_ai.app.pipelines import (
     CALENDAR_FETCH_BUDGET_SECONDS,
     FetchAbandoned,
@@ -872,6 +873,10 @@ class RequestPath:
             # extraction are bounded steps; each write is handed over.
             transcript_drop=functools.partial(drop_transcript, handed_daemon(fresh, hand=hand)),
             serve=_already_serving,
+            # `goal list` and `goal show` (story 4t): `strategic_goals.md` read
+            # afresh for this line (AD-7), and only read — setting, updating and
+            # deleting a goal are `TERMINAL_BOUND` and never reach the daemon.
+            goal_reader=GoalReader(fresh.storage),
             unbuilt_connectors=fresh.unbuilt,
             out=out,
             err=err,

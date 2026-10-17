@@ -1114,7 +1114,7 @@ def test_4o_goal_set_without_a_terminal_is_refused_for_the_terminal_first(
     assert entry.main(["goal", "set"]) == EXIT_REFUSAL
 
     err = capsys.readouterr().err
-    assert "can only run at a terminal" in err
+    assert "goal set without a terminal cannot ask" in err
     assert "no project is enrolled" not in err
 
 
