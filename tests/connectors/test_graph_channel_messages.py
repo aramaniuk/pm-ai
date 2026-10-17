@@ -46,6 +46,7 @@ from pm_ai.connectors.graph.auth import (
 from pm_ai.connectors.graph.calendar import GraphCalendarFetch, WindowPolicy
 from pm_ai.connectors.graph.channels import (
     EXCERPT_LENGTH,
+    THREAD_HORIZON,
     GraphChannelFetch,
     plain_text,
 )
@@ -529,32 +530,162 @@ def test_a_message_edited_after_harvest_is_not_emitted_again(tmp_path):
     assert "edited" not in _log(daemon, ALPHA)
 
 
-def test_an_old_thread_with_a_fresh_reply_emits_the_reply_and_the_walk_continues():
-    root = _message("1600000000000", at=NOW - timedelta(days=365))
-    reply = _message("1700000000777", at=NOW - timedelta(minutes=5))
-    reply["replyToId"] = root["id"]
+# The stop rule reads first-post creation times against a horizon 90 days
+# before the position (story 33h): Microsoft lists threads by when their first
+# post was created, so a fresh reply can sit on any page.
+
+NEXT_3 = f"{GRAPH_BASE}/teams/{TEAM}/channels/{CHANNEL_A}/messages?$skiptoken=page3"
+NEXT_4 = f"{GRAPH_BASE}/teams/{TEAM}/channels/{CHANNEL_A}/messages?$skiptoken=page4"
+POSITION = NOW - timedelta(days=1)
+HORIZON = POSITION - THREAD_HORIZON
+
+
+def _thread_with_reply(root_id: str, started: datetime, reply_id: str, replied: datetime) -> dict:
+    root = _message(root_id, at=started)
+    reply = _message(reply_id, at=replied)
+    reply["replyToId"] = root_id
     root["replies"] = [reply]
-    older = _message("1600000000001", at=NOW - timedelta(days=30))
-    position = NOW - timedelta(days=1)
+    return root
 
-    result, routes = _harvest(
-        _page(root, next_link=NEXT),
-        _page(older),
-        since=_cursor(**{CHANNEL_A: position}),
+
+def test_the_horizon_is_ninety_days():
+    assert THREAD_HORIZON == timedelta(days=90)
+
+
+def test_an_old_thread_with_a_fresh_reply_on_a_later_page_is_read():
+    """Page one is wholly older than the position but inside the horizon."""
+    older = _message("1600000000001", at=NOW - timedelta(days=10))
+    started = _thread_with_reply(
+        "1600000000002", NOW - timedelta(days=59), "1700000000777", NOW - timedelta(minutes=5)
     )
-
-    assert list(_by_id(result)) == ["1700000000777"]
-    assert len(routes.asked(CHANNEL_A)) == 2, "the reply kept the first page in range"
-
-
-def test_a_page_wholly_older_than_the_position_stops_the_walk():
-    position = NOW - timedelta(days=1)
     result, routes = _harvest(
-        _page(_message("1600000000002", at=NOW - timedelta(days=2)), next_link=NEXT),
-        since=_cursor(**{CHANNEL_A: position}),
+        _page(older, next_link=NEXT),
+        _page(started),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert len(routes.asked(CHANNEL_A)) == 2
+    assert list(_by_id(result)) == ["1700000000777"], "the reply, not the root"
+    assert result.failure is None
+
+
+def test_an_old_thread_last_on_a_recent_page_emits_its_reply_and_the_walk_stops():
+    recent = _message("1700000000778", at=NOW - timedelta(hours=1))
+    year_old = _thread_with_reply(
+        "1500000000001", NOW - timedelta(days=365), "1700000000779", NOW - timedelta(minutes=5)
+    )
+    result, routes = _harvest(
+        _page(recent, year_old, next_link=NEXT),
+        _page(_message("1400000000001", at=NOW - timedelta(days=400))),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert sorted(_by_id(result)) == ["1700000000778", "1700000000779"]
+    assert len(routes.asked(CHANNEL_A)) == 1
+
+
+def test_a_thread_started_before_the_horizon_on_a_later_page_is_not_read():
+    """The admitted limit: no request, no refusal."""
+    crossing = _message("1500000000002", at=POSITION - timedelta(days=120))
+    beyond = _thread_with_reply(
+        "1500000000003", POSITION - timedelta(days=121), "1700000000780", NOW - timedelta(minutes=5)
+    )
+    result, routes = _harvest(
+        _page(crossing, next_link=NEXT),
+        _page(beyond),
+        since=_cursor(**{CHANNEL_A: POSITION}),
     )
     assert len(routes.asked(CHANNEL_A)) == 1
     assert _messages(result) == []
+    assert result.refusals == ()
+    assert result.failure is None
+
+
+def test_a_page_crossing_the_horizon_is_the_only_request():
+    result, routes = _harvest(
+        _page(
+            _message("1700000000781", at=NOW - timedelta(hours=1)),
+            _message("1500000000004", at=HORIZON - timedelta(seconds=1)),
+            next_link=NEXT,
+        ),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert len(routes.asked(CHANNEL_A)) == 1
+    assert list(_by_id(result)) == ["1700000000781"]
+    assert result.failure is None
+
+
+def test_a_first_post_exactly_at_the_horizon_is_not_older_and_the_walk_continues():
+    result, routes = _harvest(
+        _page(_message("1500000000005", at=HORIZON), next_link=NEXT),
+        _page(),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert len(routes.asked(CHANNEL_A)) == 2
+    assert result.failure is None
+
+
+def test_first_posts_out_of_order_within_a_page_do_not_stop_the_walk():
+    """An older first post before a newer one: the page's oldest is past the
+    horizon, but the order cannot be trusted, and the newer first post is
+    inside it, so the page does not stop the walk."""
+    result, routes = _harvest(
+        _page(
+            _message("1500000000006", at=HORIZON - timedelta(days=1)),
+            _message("1600000000007", at=NOW - timedelta(days=10)),
+            next_link=NEXT,
+        ),
+        _page(),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert len(routes.asked(CHANNEL_A)) == 2
+    assert result.failure is None
+
+
+def test_first_posts_out_of_order_across_pages_stop_the_walk_only_on_a_wholly_older_page():
+    """Page two's first post is newer than page one's oldest: from then on the
+    walk stops only on a page whose every first post is before the horizon."""
+    result, routes = _harvest(
+        _page(_message("1600000000008", at=NOW - timedelta(days=10)), next_link=NEXT),
+        _page(
+            _message("1600000000009", at=NOW - timedelta(days=5)),
+            _message("1500000000010", at=HORIZON - timedelta(days=30)),
+            next_link=NEXT_3,
+        ),
+        _page(_message("1500000000011", at=HORIZON - timedelta(days=40)), next_link=NEXT_4),
+        _page(_message("1500000000012", at=HORIZON - timedelta(days=50))),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert len(routes.asked(CHANNEL_A)) == 3
+    assert result.failure is None
+
+
+def test_tied_first_posts_are_in_order():
+    at = NOW - timedelta(days=10)
+    result, routes = _harvest(
+        _page(_message("1600000000013", at=at), next_link=NEXT),
+        _page(
+            _message("1600000000014", at=at),
+            _message("1500000000015", at=HORIZON - timedelta(days=1)),
+            next_link=NEXT_3,
+        ),
+        _page(),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert len(routes.asked(CHANNEL_A)) == 2
+    assert result.failure is None
+
+
+def test_one_readable_first_post_older_than_the_horizon_stops_the_walk():
+    undatable = _message("1600000000016", createdDateTime="not a time")
+    result, routes = _harvest(
+        _page(
+            undatable,
+            _message("1500000000017", at=HORIZON - timedelta(days=1)),
+            "not a thread",
+            next_link=NEXT,
+        ),
+        since=_cursor(**{CHANNEL_A: POSITION}),
+    )
+    assert len(routes.asked(CHANNEL_A)) == 1
     assert result.failure is None
 
 
@@ -622,6 +753,8 @@ def test_a_walk_cut_by_the_page_cap_advances_to_the_newest_and_says_what_it_skip
     assert result.failure is not None and result.failure.retryable is True
     assert "Build room" in result.failure.reason
     assert "skipped" in result.failure.reason
+    assert f"messages and replies created at or after {position.isoformat()}" in result.failure.reason
+    assert "horizon" not in result.failure.reason
     assert newest.isoformat() in result.failure.reason
     assert result.coverage is None
 
@@ -871,7 +1004,9 @@ def test_a_cut_that_saw_only_older_messages_says_the_position_did_not_move():
     assert "skipped" not in result.failure.reason
 
 
-def test_a_cut_never_names_a_loss_below_the_stored_position():
+def test_a_cut_after_the_position_names_the_horizon_and_is_not_retryable():
+    """Cut after a first post older than the position: only replies in threads
+    started between the horizon and the oldest first post walked are lost."""
     position = NOW - timedelta(days=1)
     newest = NOW - timedelta(hours=1)
     result, _ = _harvest(
@@ -879,9 +1014,85 @@ def test_a_cut_never_names_a_loss_below_the_stored_position():
         since=_cursor(**{CHANNEL_A: position}),
         page_cap=1,
     )
-    reason = result.failure.reason
-    assert (NOW - timedelta(days=3)).isoformat() not in reason, "below the position"
-    assert f"at or after {position.isoformat()}" in reason
+    assert datetime.fromisoformat(_positions(result.cursor)["channels"][CHANNEL_A]) == newest
+    failure = result.failure
+    assert failure is not None and failure.retryable is False
+    assert failure.retry_after is None
+    reason = failure.reason
+    assert "Build room" in reason
+    assert f"horizon {(position - THREAD_HORIZON).isoformat()}" in reason
+    assert f"replies created at or after {position.isoformat()}" in reason, (
+        "the loss never reaches below the stored position"
+    )
+    assert f"up to {(NOW - timedelta(days=3)).isoformat()}, the oldest first post walked" in reason
+    assert result.coverage is None
+
+
+def test_a_cut_by_the_budget_after_the_position_is_not_retryable_either():
+    clock = [NOW]
+
+    def _advance(request: GraphRequest) -> None:
+        if "/channels/" in request.url:
+            clock[0] = NOW + timedelta(hours=1)
+
+    newest = NOW - timedelta(hours=1)
+    routes = Routes(
+        channels={
+            CHANNEL_A: [_page(_message("1700000001009", at=newest), _edited_old_root(), next_link=NEXT)]
+        },
+        on_request=_advance,
+    )
+    result = _connector(routes, clock=lambda: clock[0]).harvest(
+        _cursor(**{CHANNEL_A: NOW - timedelta(days=1)})
+    )
+    assert datetime.fromisoformat(_positions(result.cursor)["channels"][CHANNEL_A]) == newest
+    failure = result.failure
+    assert failure is not None and failure.retryable is False
+    assert failure.retry_after is None
+    assert "time budget" in failure.reason
+    assert "Build room" in failure.reason
+    assert "horizon" in failure.reason
+    assert f"replies created at or after {(NOW - timedelta(days=1)).isoformat()}" in failure.reason
+    assert result.coverage is None
+
+
+def test_a_cut_whose_oldest_first_post_is_exactly_at_the_position_is_the_retryable_loss():
+    """A first post created at the position is not older than it."""
+    position = NOW - timedelta(days=1)
+    result, _ = _harvest(
+        _page(
+            _message("1700000001010", at=NOW - timedelta(hours=1)),
+            _message("1700000001011", at=position),
+            next_link=NEXT,
+        ),
+        since=_cursor(**{CHANNEL_A: position}),
+        page_cap=1,
+    )
+    failure = result.failure
+    assert failure is not None and failure.retryable is True
+    assert "horizon" not in failure.reason
+    assert f"messages and replies created at or after {position.isoformat()}" in failure.reason
+
+
+def test_a_cut_after_the_first_posts_went_out_of_order_states_the_unbounded_loss():
+    """Out of order, a later page may hold threads started after the position,
+    so the cut names messages and replies, not the horizon's replies alone."""
+    position = NOW - timedelta(days=1)
+    result, _ = _harvest(
+        _page(
+            _message("1700000001012", at=NOW - timedelta(days=3)),
+            _message("1700000001013", at=NOW - timedelta(hours=1)),
+            next_link=NEXT,
+        ),
+        since=_cursor(**{CHANNEL_A: position}),
+        page_cap=1,
+    )
+    failure = result.failure
+    assert failure is not None and failure.retryable is True
+    assert "out of order" in failure.reason
+    assert "horizon" not in failure.reason
+    assert f"messages and replies created at or after {position.isoformat()}" in failure.reason
+    assert result.coverage is None
 
 
 def test_a_channel_sign_in_failure_stops_the_run_and_names_what_was_not_attempted():

@@ -1326,7 +1326,7 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   evidence: Finding 18: most channels the PM wanted to follow belong to no project and could not be listed (`connectors/graph/channels.py:132`). Amends `33d`'s frozen block.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `8r` (pull request #74).** The Graph clock-skew warning is false for every Microsoft sign-in: it is computed from the ID token's `iat`, which Microsoft backdates by five minutes, so `connector check` exits 4 on a healthy machine.
+  summary: **RESOLVED 2026-10-17 by `8r`** — skew is now read from the token endpoint answer's HTTP `Date` against this machine's clock at arrival; `iat` is no longer read. Was: The Graph clock-skew warning is false for every Microsoft sign-in: it is computed from the ID token's `iat`, which Microsoft backdates by five minutes, so `connector check` exits 4 on a healthy machine.
   evidence: Finding 1: measured 5:00.5 'ahead' with the clock within 0.15 s (`connectors/graph/auth.py:1620`). Measure against the token endpoint's `Date` header, or allow for the backdating.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
@@ -1368,8 +1368,12 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 ## Surfaced by the recorded Graph fixtures (2026-10-16)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md`
-  summary: **Data loss in busy channels** (planned as slice `33h`, #74). Microsoft lists a channel's threads newest first by the time each thread's first post was created, not by the latest activity in the thread as story 33d's frozen block says. The channel walk stops at the first page on which every thread is older than the stored position, so it never reaches new replies in an older thread listed on a later page.
+  summary: **RESOLVED by `33h`** — the channel walk stops by first-post creation time: after the first page whose readable first posts are in order and the oldest was created before a horizon 90 days before the channel's position (`THREAD_HORIZON`, `graph/channels.py`); `test_a_fresh_reply_listed_behind_a_wholly_older_page_is_still_emitted` passes, its strict expected failure gone. The horizon's own limit is the next entry. Was: **Data loss in busy channels** (planned as slice `33h`, #74). Microsoft lists a channel's threads newest first by the time each thread's first post was created, not by the latest activity in the thread as story 33d's frozen block says. The channel walk stops at the first page on which every thread is older than the stored position, so it never reaches new replies in an older thread listed on a later page.
   evidence: On the recorded page (49 threads) the threads are in exact order of their first post's `createdDateTime`. They are not in order of their latest reply: the thread with the newest reply (2026-10-15) was started 2026-08-17 and sat 33rd. They are not in order of the first post's `lastModifiedDateTime` either: that thread's first post reads 2026-10-15, and two other pairs on the page break that order too. `tests/connectors/test_graph_channel_messages_recorded.py::test_a_fresh_reply_listed_behind_a_wholly_older_page_is_still_emitted`, a strict expected failure, serves recorded threads in that order as two pages and shows the walk stopping after the first. In the field test the walk is taken to have read one page — inferred, not measured: the capture fetched only the first page — and that thread was on it, so nothing is known to have been lost there. Ways to fix it: page each thread's replies; read the channel through `messages/delta`, filtered on `lastModifiedDateTime`; or keep walking pages until the first posts are older than a set creation-time horizon. Any fix changes the ordering sentence in story 33d's frozen block and its "old thread, fresh reply" row, so it goes through `bmad-spec`.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33h-fresh-replies-in-older-threads.md`
+  summary: **Admitted limit of the 90-day thread horizon.** A fresh reply in a channel thread started more than 90 days before the channel's position, listed on a page after the one that stopped the walk, is never read, and nothing says so — coverage does not show it. A recurring channel meeting keeps one thread for the life of its series, so a series older than the horizon loses its fresh replies.
+  evidence: Andrei's decision of 2026-10-16 (memlog, "33h horizon"), chosen over paging each thread's replies and `messages/delta`. Follow-up: page the replies of known long-lived threads (`GET …/messages/{id}/replies`), which reads threads the walk already knows of rather than pages it never asks for.
 
 ## Surfaced by the story-23e review (2026-10-17)
 
@@ -1379,6 +1383,21 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23e-dashboard-reads-the-whole-local-day.md`
   summary: How Graph spells an all-day row's start under `Prefer: outlook.timezone="UTC"` has not been measured. Placing by date assumes the `dateTime` is the entry's own midnight, not shifted into UTC.
   evidence: No recorded fixture holds an all-day row (23e Design Notes), and the tests use midnight UTC. If Graph does shift it, an all-day entry created east of UTC would carry the previous date. The fix is a redacted all-day row added to the recorded fixtures from the next real-account capture.
+
+## Surfaced by the story-33h review (2026-10-17)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33h-fresh-replies-in-older-threads.md`
+  summary: **Needs Andrei's decision.** A cut after the position is not retryable, as 33h's frozen block says, and that takes the whole harvest off the retry ladder and logs it as needing a person. A busy channel cut by the cap or budget can therefore cancel the retry another resource in the same run would have had, for example a throttled calendar's `retry_after`.
+  evidence: `_one_failure` (`pm_ai/connectors/graph/__init__.py`) marks a run's failure retryable only when every resource's failure is. The non-retry path in `pm_ai/app/ticks.py` logs that the attempt "needs a person (`pm-ai doctor` …)", while the cut's own reason says the next scheduled harvest walks again. No test or matrix row combines a horizon cut with another resource's retryable failure. Options: keep it as frozen; or let the merged outcome ignore a horizon cut when another resource is retryable, with its own log wording.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/33h-fresh-replies-in-older-threads.md`
+  summary: **Needs Andrei's decision.** 33h's frozen block names two cut-short losses and assumes the first posts are in order. When they went out of order the second loss ("only replies in threads started between the horizon and the oldest first post walked") is not true: a later page may hold threads started after the position. The build states the first loss in that case and keeps it retryable.
+  evidence: All three reviewers found `_cut_short` ignored the order check, which would have named a narrower loss than the real one and, out of order, a range whose ends were inverted. Patched in `_cut_short`; covered by `test_a_cut_after_the_first_posts_went_out_of_order_states_the_unbounded_loss`. Whether that case should be retryable (as built) or not retryable like the second loss is Andrei's call.
+
+## Surfaced by the story-8r review (2026-10-17)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8r-an-honest-clock-check.md`
+  summary: **Needs Andrei's decision.** The `requests` session handed to MSAL has no timeout, so a token endpoint that accepts the connection and then stalls holds an I/O pool thread — and the health probe or harvest on it — indefinitely.
+  evidence: Raised by 8r's review (edge-case and blind hunters). 8r's frozen transport bullet keeps MSAL's default timeout (none), which is also what ran before 8r, so this is not a regression; but 8r now builds the session itself (`_msal_session` in `pm_ai/connectors/graph/auth.py`) and could bound it with `functools.partial(session.request, timeout=(connect, read))`. Changing it renegotiates the frozen bullet.
 
 ## Surfaced by the story-4t review (2026-10-17)
 

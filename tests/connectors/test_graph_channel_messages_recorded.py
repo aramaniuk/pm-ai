@@ -21,7 +21,12 @@ import pytest
 
 from pm_ai.connectors.graph import CategoryScopes, ChannelListing, GraphConnector
 from pm_ai.connectors.graph.calendar import GraphCalendarFetch, WindowPolicy
-from pm_ai.connectors.graph.channels import MESSAGE_TYPE, GraphChannelFetch, read_message
+from pm_ai.connectors.graph.channels import (
+    MESSAGE_TYPE,
+    THREAD_HORIZON,
+    GraphChannelFetch,
+    read_message,
+)
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.domain.events import MessagePayload
 from pm_ai.domain.harvest import Cursor, HarvestOutcome
@@ -314,9 +319,9 @@ def test_the_position_moves_to_the_newest_message_created():
 
 
 def test_threads_are_in_order_of_root_creation_not_of_their_latest_reply():
-    """What the page shows, recorded so the xfail below has its evidence.
+    """What the page shows, the evidence for story 33h's stop rule.
 
-    Story 33d reads Microsoft's reference as ordering threads by the latest
+    Story 33d read Microsoft's reference as ordering threads by the latest
     activity on them. The recorded page is in order of each root's own
     `createdDateTime`, newest first. The meeting thread shows the difference:
     created 2026-08-17, with replies up to 2026-10-15, it sits behind a thread
@@ -339,24 +344,16 @@ def test_threads_are_in_order_of_root_creation_not_of_their_latest_reply():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "33d's walk stops at the first page whose threads are all older than the "
-        "position, assuming threads are listed by latest activity; Microsoft lists "
-        "them by root creation, so a fresh reply in an older-rooted thread on a "
-        "later page is never read (33d's 'old thread, fresh reply' row)"
-    ),
-)
 def test_a_fresh_reply_listed_behind_a_wholly_older_page_is_still_emitted():
-    """The recorded threads in Microsoft's order, served as two pages.
+    """The recorded threads in Microsoft's order, served as two pages (33h).
 
     Page one is the kept threads between the newest one and the meeting thread
     (created 2026-10-09 back to 2026-08-17, none touched after 2026-10-09); page
     two is the meeting thread. With the position at 2026-10-10, page one is
-    wholly older — and the meeting thread's replies created after 2026-10-10
-    are what the story says the walk must still emit.
+    wholly older than the position, but its oldest first post is inside the
+    horizon, so the walk reads page two and emits the meeting thread's replies
+    created after the position — and refuses that thread by name for the
+    replies that did not arrive inline.
     """
     at = THREADS.index(MEETING_THREAD)
     older = THREADS[1:at]
@@ -364,6 +361,7 @@ def test_a_fresh_reply_listed_behind_a_wholly_older_page_is_still_emitted():
     for thread in older:
         for row in [thread, *thread["replies"]]:
             assert graph_time(row["lastModifiedDateTime"]) < position
+    assert min(graph_time(t["createdDateTime"]) for t in older) >= position - THREAD_HORIZON
     fresh = [
         reply["id"]
         for reply in MEETING_THREAD["replies"]
@@ -377,10 +375,20 @@ def test_a_fresh_reply_listed_behind_a_wholly_older_page_is_still_emitted():
     )
     result = _harvest(transport, position=position)
 
-    # Why it fails today: the walk read the older page and stopped there, with
-    # no failure and no refusal to say so.
-    assert len(transport.resource_requests()) == 1
-    assert result.failure is None
-    assert result.refusals == ()
-    # What the story asks for.
+    assert len(transport.resource_requests()) == 2
     assert sorted(message_events(result)) == sorted(fresh)
+    (refusal,) = result.refusals
+    assert refusal.identifier == f"{CHANNEL}/{MEETING_THREAD['id']}"
+    assert "more replies" in refusal.reason
+
+
+def test_the_recorded_page_alone_reaches_past_the_horizon_in_one_request():
+    """Position 2026-10-15T12:00Z: the page's oldest first post is more than a
+    year old, before the horizon, so its next-page link is not followed."""
+    position = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+    oldest = min(graph_time(thread["createdDateTime"]) for thread in THREADS)
+    assert oldest < position - THREAD_HORIZON
+    assert "@odata.nextLink" in PAGE, "a next page exists to be left unread"
+    transport = Recorded(PAGE)
+    _harvest(transport, position=position)
+    assert len(transport.resource_requests()) == 1
