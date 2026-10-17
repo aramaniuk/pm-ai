@@ -1326,7 +1326,7 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   evidence: Finding 18: most channels the PM wanted to follow belong to no project and could not be listed (`connectors/graph/channels.py:132`). Amends `33d`'s frozen block.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `8r` (pull request #74).** The Graph clock-skew warning is false for every Microsoft sign-in: it is computed from the ID token's `iat`, which Microsoft backdates by five minutes, so `connector check` exits 4 on a healthy machine.
+  summary: **RESOLVED 2026-10-17 by `8r`** — skew is now read from the token endpoint answer's HTTP `Date` against this machine's clock at arrival; `iat` is no longer read. Was: The Graph clock-skew warning is false for every Microsoft sign-in: it is computed from the ID token's `iat`, which Microsoft backdates by five minutes, so `connector check` exits 4 on a healthy machine.
   evidence: Finding 1: measured 5:00.5 'ahead' with the clock within 0.15 s (`connectors/graph/auth.py:1620`). Measure against the token endpoint's `Date` header, or allow for the backdating.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
@@ -1379,3 +1379,7 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23e-dashboard-reads-the-whole-local-day.md`
   summary: How Graph spells an all-day row's start under `Prefer: outlook.timezone="UTC"` has not been measured. Placing by date assumes the `dateTime` is the entry's own midnight, not shifted into UTC.
   evidence: No recorded fixture holds an all-day row (23e Design Notes), and the tests use midnight UTC. If Graph does shift it, an all-day entry created east of UTC would carry the previous date. The fix is a redacted all-day row added to the recorded fixtures from the next real-account capture.
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8r-an-honest-clock-check.md`
+  summary: **Needs Andrei's decision.** The `requests` session handed to MSAL has no timeout, so a token endpoint that accepts the connection and then stalls holds an I/O pool thread — and the health probe or harvest on it — indefinitely.
+  evidence: Raised by 8r's review (edge-case and blind hunters). 8r's frozen transport bullet keeps MSAL's default timeout (none), which is also what ran before 8r, so this is not a regression; but 8r now builds the session itself (`_msal_session` in `pm_ai/connectors/graph/auth.py`) and could bound it with `functools.partial(session.request, timeout=(connect, read))`. Changing it renegotiates the frozen bullet.
