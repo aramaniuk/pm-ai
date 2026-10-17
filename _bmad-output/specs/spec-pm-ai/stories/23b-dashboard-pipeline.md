@@ -123,6 +123,8 @@ Re-derived against `dd2e537` on 2026-09-15; every address below was bounds-check
 
 ## Spec Change Log
 
+- **2026-10-17, the dashboard no longer depends on the harvest width (`23e`).** The Code Map note on `WindowPolicy.width` — that its forward reach "is what makes the day ahead readable at all" — is no longer true. The render now asks each calendar for exactly its display day, local midnight to the next local midnight in `display_timezone`, through `CalendarReadPort.read_calendar(start, end)`; the harvest's window, width and reach-back are unchanged and play no part in the render.
+
 - **2026-10-13, the "Malformed event-log segment" row is superseded by `23c`.**
   A segment that cannot be read — a line that is not a well-formed entry, an entry of an unknown kind, a segment that is not UTF-8 text, or one that could not be read from disk — no longer refuses the command with exit `3`. `run_dashboard` turns the refusal into a `HarvestFailure` handed only to the renderer, writes the file, and exits zero; the Proactive Enablement section names the segment and the reason, and the other sections render from their own inputs. `tests/slice/test_dashboard_slice.py` flipped the refusal test accordingly. The frozen row above is left as written; this entry is its supersession.
 

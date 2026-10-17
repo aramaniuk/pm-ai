@@ -105,8 +105,14 @@ class CalendarReadPort(Protocol):
     unread.
     """
 
-    def read_calendar(self, since: Cursor) -> HarvestResult:
-        """The calendar, read exactly as `harvest` reads it, and nothing else."""
+    def read_calendar(self, start: datetime, end: datetime) -> HarvestResult:
+        """The calendar alone over `start` to `end`, two aware UTC instants (`23e`).
+
+        The render names its day: local midnight to the next local midnight in
+        `display_timezone`, so a daylight-saving day is 23 or 25 hours. The
+        harvest's window, cursor and coverage play no part — the read persists
+        nothing, and its caller saves no cursor and records no coverage from it.
+        """
 
 
 class DuplicateConnector(Exception):

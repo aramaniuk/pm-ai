@@ -555,6 +555,21 @@ def _scheduled(
     if not ordered:
         return f"{NO_MEETINGS} — the calendar answered, and the day held nothing."
 
+    # All-day markers first, each on its own line, and never part of the
+    # collapse below (`23e`): a marker is placed by its own date, has no span
+    # anybody sat through, and "has ended" at 07:00 would be a claim about a
+    # day still in progress. The collapse, its count and its last finish are
+    # decided over timed meetings only.
+    markers = [meeting for meeting in ordered if meeting.all_day_date is not None]
+    timed = [meeting for meeting in ordered if meeting.all_day_date is None]
+    lines = [_meeting_line(meeting, now=now, tz=tz) for meeting in markers]
+    if timed:
+        lines.append(_timed(timed, now=now, tz=tz))
+    return "\n".join(lines)
+
+
+def _timed(ordered: Sequence[Meeting], *, now: datetime, tz: tzinfo) -> str:
+    """The day's timed meetings: one line each, or one sentence when all ended."""
     if all(_ended(meeting, now=now) for meeting in ordered):
         # Not `NO_MEETINGS`, which by mid-afternoon would be a false claim about
         # a day that had four meetings in it — in the artifact whose stated
@@ -575,16 +590,26 @@ def _meeting_line(meeting: Meeting, *, now: datetime, tz: tzinfo) -> str:
     """One meeting, with the four things that decide whether to act on it."""
     title = escape(meeting.title) or "(untitled)"
     attendees = len(meeting.attendees)
-    facts = [
-        _state(meeting, now=now),
-        f"{meeting.duration_minutes} min",
-        f"{attendees} attendee" + ("" if attendees == 1 else "s"),
-    ]
+    count = f"{attendees} attendee" + ("" if attendees == 1 else "s")
+    # An all-day marker (`23e`) has no start time in the display zone worth
+    # showing — west of UTC its midnight-UTC start reads as yesterday evening —
+    # and no state or duration: it is a marker on the date, not a span.
+    all_day = meeting.all_day_date is not None
+    facts = (
+        [count]
+        if all_day
+        else [_state(meeting, now=now), f"{meeting.duration_minutes} min", count]
+    )
     if meeting.tentative:
         # Carried in memory and written to no file (`meetings.py`), so a surface
         # that reads the calendar live is the only place it can be said at all.
         facts.append("your response is tentative")
-    when = _local(meeting.start, tz=tz, now=now)
+    if meeting.cancelled:
+        # An ended meeting the calendar now says was cancelled (`23e`, finding
+        # 7). In memory only, as `tentative` is; a cancelled meeting not yet
+        # ended never reaches this page.
+        facts.append("cancelled")
+    when = "all day" if all_day else _local(meeting.start, tz=tz, now=now)
     return f"- **{when}** {title} — {', '.join(facts)}"
 
 

@@ -181,6 +181,7 @@ def _connector(
     *channels: ChannelListing,
     clock=lambda: NOW,
     page_cap: int | None = None,
+    windows: WindowPolicy | None = None,
 ) -> GraphConnector:
     identity = Auth()
     client = GraphClient(auth=identity, transport=routes, now=clock)
@@ -191,7 +192,7 @@ def _connector(
         calendar=GraphCalendarFetch(
             client=client,
             instance=INSTANCE,
-            windows=WindowPolicy(width=WIDTH, first_run_reach_back=REACH_BACK),
+            windows=windows or WindowPolicy(width=WIDTH, first_run_reach_back=REACH_BACK),
             now=clock,
         ),
         categories=CategoryScopes(projects={}, registered=lambda project: True),
@@ -1099,19 +1100,26 @@ TODAY = (
 )
 
 
-def _dashboard(tmp_path: Path, connector: GraphConnector) -> str:
+def _dashboard(
+    tmp_path: Path,
+    connector: GraphConnector,
+    *,
+    now: datetime = NOW,
+    zone: str = "UTC",
+    others: dict[str, GraphConnector] | None = None,
+) -> str:
     from pm_ai.app.pipelines import DASHBOARD_ARTIFACT, run_dashboard
     from pm_ai.core.config import Config
 
     daemon = build(
         tmp_path,
         "alpha",
-        now=lambda: NOW,
+        now=lambda: now,
         keychain=_NoKey(),
-        config=Config(display_timezone="UTC"),
+        config=Config(display_timezone=zone),
     )
-    daemon.connectors = {INSTANCE: connector}
-    run_dashboard(daemon, now=NOW)
+    daemon.connectors = {INSTANCE: connector, **(others or {})}
+    run_dashboard(daemon, now=now)
     raw = daemon.storage.read_artifact(scope=PERSONAL, artifact=DASHBOARD_ARTIFACT)
     assert raw is not None
     return raw.decode("utf-8")
@@ -1156,14 +1164,25 @@ def test_todays_meetings_render_exactly_as_a_calendar_only_connector_renders_the
     assert "Morning review" in without and "Release sync" in without
 
 
-def test_read_calendar_reads_the_calendar_exactly_as_harvest_does():
-    """Same calendar answer, no channel attempted or named."""
-    listed = _connector(Routes(calendar=[_page(*TODAY)], channels={CHANNEL_A: []}))
-    alone = _connector(Routes(calendar=[_page(*TODAY)]))
-    alone.channels = ()
-    read = listed.read_calendar(Cursor())
-    harvested = alone.harvest(Cursor())
-    assert read == harvested
+def test_read_calendar_reads_the_named_range_and_the_harvest_keeps_its_window():
+    """`23e`: the calendar-only read asks for exactly the range it is handed, no
+    channel attempted; the harvest still asks for `WindowPolicy.window`."""
+    day_start = datetime(2026, 10, 9, 0, 0, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    listed_routes = Routes(calendar=[_page(*TODAY)], channels={CHANNEL_A: []})
+    read = _connector(listed_routes).read_calendar(day_start, day_end)
+    (asked,) = listed_routes.requests
+    assert _range_of(asked) == (day_start, day_end)
+    assert [meeting.title for meeting in (*read.records, *read.live)] == [
+        "Morning review",
+        "Release sync",
+    ]
+
+    harvest_routes = Routes(calendar=[_page(*TODAY)], channels={CHANNEL_A: [_page()]})
+    _connector(harvest_routes).harvest(Cursor())
+    calendar_asks = [r for r in harvest_routes.requests if "/me/calendarView" in r.url]
+    (harvested,) = calendar_asks
+    assert _range_of(harvested) == (NOW - REACH_BACK, NOW + WIDTH)
 
 
 def test_the_scheduled_harvest_still_walks_every_listed_channel(tmp_path):
@@ -1195,3 +1214,337 @@ def test_a_busy_credentials_file_on_a_channel_is_retryable_only_when_nothing_was
     result = connector.harvest(Cursor())
     assert result.failure is not None and result.failure.retryable is retryable
     assert "busy" in result.failure.reason
+
+
+# ── Story 23e — the dashboard reads the whole local day ──────────────────────
+#
+# Every row is the real path: a scripted Graph answer, `GraphConnector`'s
+# calendar-only read, and the dashboard's selection and render. The range the
+# render asked for is asserted on the recorded request URL.
+
+BOGOTA = "America/Bogota"  # UTC−5 all year, so no daylight saving in the way
+SEVEN_BOGOTA = NOW  # 2026-10-09 12:00 UTC is 07:00 in Bogotá
+BOGOTA_DAY = (
+    datetime(2026, 10, 9, 5, 0, tzinfo=timezone.utc),
+    datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc),
+)
+
+
+def _range_of(request: GraphRequest) -> tuple[datetime, datetime]:
+    """The `startDateTime` and `endDateTime` a recorded calendarView request carried."""
+    from urllib.parse import parse_qs, urlsplit
+
+    query = parse_qs(urlsplit(request.url).query)
+    (start,) = query["startDateTime"]
+    (end,) = query["endDateTime"]
+    return datetime.fromisoformat(start), datetime.fromisoformat(end)
+
+
+def _calendar_asks(routes: Routes) -> list[GraphRequest]:
+    return [r for r in routes.requests if "/me/calendarView" in r.url]
+
+
+def _bogota(hour: int, minute: int = 0, *, days: int = 0) -> datetime:
+    """A wall-clock time in Bogotá on 2026-10-09 (plus `days`), as UTC."""
+    return datetime(2026, 10, 9, hour, minute, tzinfo=timezone.utc) + timedelta(hours=5, days=days)
+
+
+def _spanning(event_id: str, subject: str, start: datetime, end: datetime, **fields) -> dict:
+    event = _calendar_event(event_id, subject, start)
+    event["end"] = {"dateTime": end.replace(tzinfo=None).isoformat() + ".0000000", "timeZone": "UTC"}
+    event.update(fields)
+    return event
+
+
+def _all_day(event_id: str, subject: str, on: datetime) -> dict:
+    """An all-day entry as midnight UTC to the next midnight UTC on its own date."""
+    midnight = on.replace(hour=0, minute=0, second=0, microsecond=0)
+    return _spanning(event_id, subject, midnight, midnight + timedelta(days=1), isAllDay=True)
+
+
+def _schedule(text: str) -> str:
+    return text.split("## Time-Critical Activities", 1)[1].split("\n## ", 1)[0]
+
+
+def _calendar_only(routes: Routes, **options) -> GraphConnector:
+    connector = _connector(routes, **options)
+    connector.channels = ()
+    return connector
+
+
+def test_a_0700_render_asks_for_the_whole_local_day_and_lists_the_afternoon(tmp_path):
+    """Matrix: 07:00 render, UTC−5 — all four listed; the read was handed the day."""
+    times = [(9, 0), (11, 30), (14, 0), (16, 30)]
+    routes = Routes(
+        calendar=[
+            _page(*(_calendar_event(f"AAMk-{h}{m}", f"Meeting {h:02d}{m:02d}", _bogota(h, m)) for h, m in times))
+        ]
+    )
+    text = _dashboard(tmp_path, _calendar_only(routes), now=SEVEN_BOGOTA, zone=BOGOTA)
+    (asked,) = _calendar_asks(routes)
+    assert _range_of(asked) == BOGOTA_DAY
+    for h, m in times:
+        assert f"Meeting {h:02d}{m:02d}" in _schedule(text)
+
+
+def test_the_render_and_the_scheduled_harvest_each_ask_for_their_own_range(tmp_path):
+    """Acceptance: one daemon, one Graph connector. The 07:00 render covered the
+    display day and the scheduled harvest after it the range `WindowPolicy.window`
+    computes for a first run — so the render left no cursor or coverage behind."""
+    from pm_ai.app.pipelines import run_dashboard
+    from pm_ai.core.config import Config
+
+    routes = Routes(
+        calendar=[_page(*TODAY), _page(*TODAY)], channels={CHANNEL_A: [_page()]}
+    )
+    daemon = build(
+        tmp_path, "alpha", now=lambda: SEVEN_BOGOTA, config=Config(display_timezone=BOGOTA)
+    )
+    daemon.connectors = {INSTANCE: _connector(routes)}
+
+    run_dashboard(daemon, now=SEVEN_BOGOTA)
+    assert daemon.storage.coverage_windows(INSTANCE) == []
+    run_harvest(daemon, INSTANCE)
+
+    render_ask, harvest_ask = _calendar_asks(routes)
+    assert _range_of(render_ask) == BOGOTA_DAY
+    window = WindowPolicy(width=WIDTH, first_run_reach_back=REACH_BACK).window(now=SEVEN_BOGOTA)
+    assert _range_of(harvest_ask) == (window.start, window.end)
+    assert window.start == SEVEN_BOGOTA - REACH_BACK and window.end == SEVEN_BOGOTA + WIDTH
+    # The render walked no channel; the harvest walked the listed one.
+    assert len(routes.asked(CHANNEL_A)) == 1
+
+
+def test_a_late_evening_render_lists_the_morning_and_nothing_from_tomorrow(tmp_path):
+    """Matrix: 23:30 local, meetings at 08:00 and 13:00 ended, reach-back 4 h."""
+    late = _bogota(23, 30)
+    routes = Routes(
+        calendar=[
+            _page(
+                _calendar_event("AAMk-8", "Breakfast sync", _bogota(8)),
+                _calendar_event("AAMk-13", "Lunch review", _bogota(13)),
+                _calendar_event("AAMk-tmrw", "Tomorrow standup", _bogota(8, days=1)),
+            )
+        ]
+    )
+    short = WindowPolicy(width=timedelta(minutes=240), first_run_reach_back=timedelta(hours=4))
+    connector = _calendar_only(routes, clock=lambda: late, windows=short)
+    text = _dashboard(tmp_path, connector, now=late, zone=BOGOTA)
+    (asked,) = _calendar_asks(routes)
+    assert _range_of(asked) == BOGOTA_DAY
+    schedule = _schedule(text)
+    # The source answered with tomorrow's 08:00 too, which has not ended at
+    # 23:30: had it been selected, the section could not collapse to "all
+    # ended", and the count would be three.
+    assert "All 2 of today's meetings have ended" in schedule
+    assert "The last finished at 2026-10-09 13:30" in schedule
+
+
+@pytest.mark.parametrize(
+    ("subject", "start", "end"),
+    [
+        ("Into today", _bogota(23, days=-1), _bogota(1)),
+        ("Out of today", _bogota(23, 30), _bogota(0, 30, days=1)),
+        ("Just before midnight", _bogota(23, 58), _bogota(23, 58) + timedelta(minutes=30)),
+    ],
+    ids=["crossing-into-today", "crossing-out-of-today", "starting-at-2358"],
+)
+def test_a_meeting_touching_the_day_at_either_midnight_is_listed(tmp_path, subject, start, end):
+    """Matrix: crossing midnight into and out of today, and starting at 23:58."""
+    routes = Routes(
+        calendar=[
+            _page(
+                _spanning("AAMk-edge", subject, start, end),
+                # Upcoming, so the section lists lines rather than collapsing.
+                _calendar_event("AAMk-noon", "Noon sync", _bogota(12)),
+            )
+        ]
+    )
+    text = _dashboard(tmp_path, _calendar_only(routes), now=SEVEN_BOGOTA, zone=BOGOTA)
+    assert subject in _schedule(text)
+
+
+def test_a_meeting_starting_at_2358_is_not_marked_as_starting_after_the_range():
+    from pm_ai.connectors.graph.calendar import CalendarWindow
+
+    routes = Routes(calendar=[_page(_calendar_event("AAMk-2358", "Late", _bogota(23, 58)))])
+    fetch = _calendar_only(routes).calendar.fetch(window=CalendarWindow(*BOGOTA_DAY))
+    (row,) = fetch.rows
+    assert row.clock_flag is None
+    assert fetch.window == CalendarWindow(*BOGOTA_DAY)
+
+
+def test_an_all_day_entry_west_of_utc_is_listed_on_its_own_date(tmp_path):
+    """Matrix: UTC−5 — its midnight-UTC start is 19:00 yesterday in Bogotá, and
+    it is still today's."""
+    routes = Routes(
+        calendar=[
+            _page(
+                _all_day("AAMk-allday", "Company holiday", datetime(2026, 10, 9, tzinfo=timezone.utc)),
+                _calendar_event("AAMk-noon", "Noon sync", _bogota(12)),
+            )
+        ]
+    )
+    text = _dashboard(tmp_path, _calendar_only(routes), now=SEVEN_BOGOTA, zone=BOGOTA)
+    (line,) = [line for line in _schedule(text).split("\n") if "Company holiday" in line]
+    assert line.startswith("- **all day** Company holiday — ")
+    assert "2026-10-08" not in line and "19:00" not in line
+    assert "ended" not in line and "0 min" not in line
+
+
+def test_an_all_day_entry_east_of_utc_is_listed_only_on_its_own_date(tmp_path):
+    """Matrix: UTC+9 — yesterday's and today's all-day entries; only today's."""
+    tokyo_evening = datetime(2026, 10, 9, 11, 0, tzinfo=timezone.utc)  # 20:00 in Tokyo
+    routes = Routes(
+        calendar=[
+            _page(
+                _all_day("AAMk-yday", "Yesterday's holiday", datetime(2026, 10, 8, tzinfo=timezone.utc)),
+                _all_day("AAMk-today", "Today's holiday", datetime(2026, 10, 9, tzinfo=timezone.utc)),
+                # Upcoming at 23:00 Tokyo, so the section lists lines.
+                _calendar_event("AAMk-late", "Late sync", datetime(2026, 10, 9, 14, 0, tzinfo=timezone.utc)),
+            )
+        ]
+    )
+    connector = _calendar_only(routes, clock=lambda: tokyo_evening)
+    text = _dashboard(tmp_path, connector, now=tokyo_evening, zone="Asia/Tokyo")
+    (asked,) = _calendar_asks(routes)
+    assert _range_of(asked) == (
+        datetime(2026, 10, 8, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 9, 15, 0, tzinfo=timezone.utc),
+    )
+    schedule = _schedule(text)
+    assert "Today's holiday" in schedule
+    assert "Yesterday's holiday" not in schedule
+
+
+def test_an_all_day_row_carries_its_own_date_and_nothing_else_does():
+    routes = Routes(
+        calendar=[
+            _page(
+                _all_day("AAMk-allday", "Holiday", datetime(2026, 10, 9, tzinfo=timezone.utc)),
+                _calendar_event("AAMk-noon", "Noon sync", _bogota(12)),
+            )
+        ]
+    )
+    result = _calendar_only(routes).read_calendar(*BOGOTA_DAY)
+    by_title = {meeting.title: meeting for meeting in (*result.records, *result.live)}
+    assert by_title["Holiday"].all_day_date == datetime(2026, 10, 9).date()
+    assert by_title["Noon sync"].all_day_date is None
+
+
+def test_a_declined_meeting_is_left_out(tmp_path):
+    """Matrix: declined, any time today."""
+    routes = Routes(
+        calendar=[
+            _page(
+                _calendar_event("AAMk-no", "Declined review", _bogota(15))
+                | {"responseStatus": {"response": "declined"}},
+                _calendar_event("AAMk-noon", "Noon sync", _bogota(12)),
+            )
+        ]
+    )
+    text = _dashboard(tmp_path, _calendar_only(routes), now=SEVEN_BOGOTA, zone=BOGOTA)
+    assert "Declined review" not in text
+    assert "Noon sync" in _schedule(text)
+
+
+def test_a_cancelled_meeting_not_yet_ended_is_left_out(tmp_path):
+    """Matrix: cancelled, 15:00 today, render at 07:00."""
+    routes = Routes(
+        calendar=[
+            _page(
+                _calendar_event("AAMk-x", "Cancelled review", _bogota(15)) | {"isCancelled": True},
+                _calendar_event("AAMk-noon", "Noon sync", _bogota(12)),
+            )
+        ]
+    )
+    text = _dashboard(tmp_path, _calendar_only(routes), now=SEVEN_BOGOTA, zone=BOGOTA)
+    assert "Cancelled review" not in text
+    assert "Noon sync" in _schedule(text)
+
+
+def test_an_ended_cancelled_meeting_is_listed_as_ended_and_marked_cancelled(tmp_path):
+    """Matrix: cancelled, 08:00 today, render at 10:00 — its facts include `cancelled`."""
+    ten = _bogota(10)
+    routes = Routes(
+        calendar=[
+            _page(
+                _calendar_event("AAMk-x", "Cancelled review", _bogota(8)) | {"isCancelled": True},
+                _calendar_event("AAMk-noon", "Noon sync", _bogota(12)),
+            )
+        ]
+    )
+    connector = _calendar_only(routes, clock=lambda: ten)
+    lines = _schedule(_dashboard(tmp_path, connector, now=ten, zone=BOGOTA)).split("\n")
+    (cancelled,) = [line for line in lines if "Cancelled review" in line]
+    assert "ended" in cancelled and "cancelled" in cancelled
+    (noon,) = [line for line in lines if "Noon sync" in line]
+    assert "cancelled" not in noon
+
+
+def test_two_tenants_are_each_asked_for_the_same_local_day(tmp_path):
+    """Matrix: two Graph rows — each read for the day; merged and deduplicated."""
+    shared = _calendar_event("AAMk-a", "Weekly sync", _bogota(12)) | {"iCalUId": "uid-weekly"}
+    work = Routes(calendar=[_page(shared)])
+    other = Routes(
+        calendar=[
+            _page(
+                shared | {"id": "AAMk-b"},
+                _calendar_event("AAMk-c", "Vendor call", _bogota(15)),
+            )
+        ]
+    )
+    text = _dashboard(
+        tmp_path,
+        _calendar_only(work),
+        now=SEVEN_BOGOTA,
+        zone=BOGOTA,
+        others={"graph:other": _calendar_only(other)},
+    )
+    assert [_range_of(r) for r in _calendar_asks(work)] == [BOGOTA_DAY]
+    assert [_range_of(r) for r in _calendar_asks(other)] == [BOGOTA_DAY]
+    schedule = _schedule(text)
+    assert schedule.count("Weekly sync") == 1
+    assert "Vendor call" in schedule
+
+
+def test_two_tenants_one_failing_is_a_partial_day(tmp_path):
+    work = Routes(calendar=[_page(_calendar_event("AAMk-a", "Weekly sync", _bogota(12)))])
+    other = Routes(calendar=[_status(403)])
+    text = _dashboard(
+        tmp_path,
+        _calendar_only(work),
+        now=SEVEN_BOGOTA,
+        zone=BOGOTA,
+        others={"graph:other": _calendar_only(other)},
+    )
+    schedule = _schedule(text)
+    assert "Weekly sync" in schedule
+    assert "The calendar could not be read" not in schedule
+    assert "graph:other" in schedule
+    assert [_range_of(r) for r in _calendar_asks(other)] == [BOGOTA_DAY]
+
+
+def test_a_fetch_handed_both_a_cursor_and_a_range_refuses_naming_both():
+    """Matrix: both range and cursor — a bug, refused rather than mixed."""
+    from pm_ai.connectors.graph.calendar import CalendarWindow
+
+    routes = Routes()
+    fetch = _calendar_only(routes).calendar
+    with pytest.raises(ValueError, match=r"since=.*window="):
+        fetch.fetch(since=NOW - timedelta(hours=1), window=CalendarWindow(*BOGOTA_DAY))
+    assert routes.requests == []
+
+
+def test_the_harvest_after_the_fix_asks_for_the_same_range_as_before():
+    """Matrix: the scheduled harvest — first run and resumed both unchanged."""
+    first = Routes(calendar=[_page()], channels={CHANNEL_A: [_page()]})
+    _connector(first).harvest(Cursor())
+    (asked,) = _calendar_asks(first)
+    assert _range_of(asked) == (NOW - REACH_BACK, NOW + WIDTH)
+
+    resumed = Routes(calendar=[_page()], channels={CHANNEL_A: [_page()]})
+    position = NOW - timedelta(days=2)
+    _connector(resumed).harvest(_cursor(calendar=position))
+    (asked,) = _calendar_asks(resumed)
+    assert _range_of(asked) == (position, NOW + WIDTH)

@@ -57,7 +57,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -717,6 +717,14 @@ class CalendarRow:
     replaced from the local clock is well-formed, plausible and wrong, and
     nothing downstream could tell it from a real one.
     """
+    all_day_date: date | None = None
+    """An all-day row's own calendar date, as Graph wrote it; `None` otherwise (`23e`).
+
+    The wall-clock date of `start.dateTime`, read before any conversion. An
+    all-day entry is a zero-length marker placed by this date, never by its
+    start converted to a display zone: west of UTC, that conversion would move
+    a midnight-UTC start onto the previous day.
+    """
 
     def __post_init__(self) -> None:
         for name, value in (("start", self.start), ("end", self.end)):
@@ -861,7 +869,11 @@ class GraphCalendarFetch:
     max_span: timedelta = MAX_SERVABLE_SPAN
 
     def fetch(
-        self, *, since: datetime | None = None, deadline: datetime | None = None
+        self,
+        *,
+        since: datetime | None = None,
+        deadline: datetime | None = None,
+        window: CalendarWindow | None = None,
     ) -> CalendarFetch:
         """Walk every span of the window, and report what actually happened.
 
@@ -888,9 +900,23 @@ class GraphCalendarFetch:
         fetch takes the client's whole budget from its own start, as before, and
         returns the instant on `CalendarFetch.deadline` so the connector's
         channels spend the same budget (`33d`).
+
+        `window` is a range the caller names (`23e`): the dashboard's display
+        day, walked instead of the policy's window. The harvest passes none and
+        its range is `WindowPolicy.window`, unchanged. A range and a cursor
+        together are refused with a `ValueError` naming both — one range, never
+        two mixed.
         """
+        if window is not None and since is not None:
+            raise ValueError(
+                f"fetch was handed both a cursor (since={since.isoformat()}) and "
+                f"a range (window={window.start.isoformat()} to "
+                f"{window.end.isoformat()}). It walks one or the other, never a "
+                f"mix of the two."
+            )
         started = self.now()
-        window = self.windows.window(now=started, since=since)
+        if window is None:
+            window = self.windows.window(now=started, since=since)
         if deadline is None:
             deadline = started + self.client.budget
 
@@ -1103,6 +1129,7 @@ class GraphCalendarFetch:
             )
         start = to_utc(raw.get("start"), field_name="start", event_id=event_id)
         end = to_utc(raw.get("end"), field_name="end", event_id=event_id)
+        is_all_day = bool(raw.get("isAllDay"))
         return CalendarRow(
             event_id=event_id,
             start=start,
@@ -1113,7 +1140,7 @@ class GraphCalendarFetch:
             # cross-tenant invitation lands in.
             ical_uid=_text(raw.get("iCalUId")),
             subject=_text(raw.get("subject")),
-            is_all_day=bool(raw.get("isAllDay")),
+            is_all_day=is_all_day,
             is_cancelled=bool(raw.get("isCancelled")),
             kind=_text(raw.get("type")),
             series_master_id=_text(raw.get("seriesMasterId")),
@@ -1124,6 +1151,7 @@ class GraphCalendarFetch:
             response=_response(raw.get("responseStatus")),
             source_timezone=_stated_zone(raw.get("start")),
             clock_flag=_clock_flag(start, end, window=window, event_id=event_id),
+            all_day_date=_stated_date(raw["start"], event_id=event_id) if is_all_day else None,
         )
 
     def _failure(
@@ -1189,6 +1217,16 @@ def _text(value: Any) -> str | None:
     handle rather than two.
     """
     return value.strip() or None if isinstance(value, str) else None
+
+
+def _stated_date(stamp: Mapping[str, Any], *, event_id: str) -> date:
+    """The wall-clock date of a `{dateTime, timeZone}` pair, before conversion.
+
+    Called only after `to_utc` accepted the same stamp, which refuses one that
+    is not an object or carries no parsable `dateTime` string — so this only
+    reads the date Graph wrote off a string known to parse.
+    """
+    return _parsed(str(stamp["dateTime"]).strip(), field_name="start", event_id=event_id).date()
 
 
 def _stated_zone(stamp: Any) -> str | None:

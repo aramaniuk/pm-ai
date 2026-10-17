@@ -821,7 +821,8 @@ def test_chats_are_walked_after_the_channels_under_the_one_budget():
 
 def test_the_dashboards_calendar_read_sends_no_chat_request():
     routes = Routes(chats={CHAT_A: []})
-    _connector(routes).read_calendar(Cursor())
+    day = datetime(2026, 10, 9, tzinfo=timezone.utc)
+    _connector(routes).read_calendar(day, day + timedelta(days=1))
     assert [r for r in routes.requests if "/chats/" in r.url] == []
 
 

@@ -69,6 +69,7 @@ from pm_ai.connectors.graph.calendar import (
     CalendarAttendee,
     CalendarFetch,
     CalendarRow,
+    CalendarWindow,
     GraphCalendarFetch,
     WindowPolicy,
 )
@@ -1000,8 +1001,8 @@ class GraphConnector:
         """
         return self._read(since, channels=self.channels, chats=self.chats)
 
-    def read_calendar(self, since: Cursor) -> HarvestResult:
-        """The calendar alone, read exactly as `harvest` reads it (`CalendarReadPort`).
+    def read_calendar(self, start: datetime, end: datetime) -> HarvestResult:
+        """The calendar alone over `start` to `end` (`CalendarReadPort`, `23e`).
 
         What the dashboard's live read calls (Andrei, 2026-10-12): meetings not
         yet held are never stored, so the day ahead is a live read — and a live
@@ -1009,8 +1010,13 @@ class GraphConnector:
         channel it did not need mark the calendar unread. No channel or chat is
         attempted or named. The scheduled harvest (`harvest`) still reads the
         calendar and every listed channel and chat.
+
+        The range is the render's display day, never the harvest's window: the
+        window reaches back only as far as the first-run reach-back and forward
+        only as far as its width, which at 07:00 missed the afternoon. The split
+        between ended and not-yet-ended meetings is the harvest's.
         """
-        return self._read(since, channels=(), chats=())
+        return self._read(Cursor(), channels=(), chats=(), span=(start, end))
 
     def _read(
         self,
@@ -1018,6 +1024,7 @@ class GraphConnector:
         *,
         channels: tuple[ChannelListing, ...],
         chats: tuple[ChatListing, ...],
+        span: tuple[datetime, datetime] | None = None,
     ) -> HarvestResult:
         """The calendar, then `channels`, then `chats`, as one result. See `harvest`."""
         try:
@@ -1044,7 +1051,12 @@ class GraphConnector:
         try:
             # The run's one budget is read by the calendar fetch when it starts,
             # and handed back on `fetched.deadline` for every channel to share.
-            fetched = self.calendar.fetch(since=positions.calendar)
+            # A named range (`read_calendar`, `23e`) or the cursor, never both:
+            # `fetch` refuses the mix, and that refusal is caught just below.
+            fetched = self.calendar.fetch(
+                since=positions.calendar,
+                window=None if span is None else CalendarWindow(start=span[0], end=span[1]),
+            )
         except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
             # `GraphCalendarFetch.fetch` converts every transport and auth
             # refusal into a `CalendarFetch.failure` itself, so this catches what
@@ -1638,6 +1650,13 @@ class GraphConnector:
             # this is the one identifier a surface reading both mailboxes can
             # match the two copies on.
             ical_uid=row.ical_uid,
+            # In memory only, as `tentative` is (`23e`, finding 7). Only an
+            # ended cancelled row gets this far — `_is_the_pms_meeting` leaves
+            # out one not yet ended — and the dashboard marks it cancelled.
+            cancelled=row.is_cancelled,
+            # In memory only (`23e`): the date Graph gave an all-day row, by
+            # which the dashboard places the marker.
+            all_day_date=row.all_day_date,
         )
 
     def _to_event(self, meeting: Meeting, row: CalendarRow) -> NormalizedEvent:

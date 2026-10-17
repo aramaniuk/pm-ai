@@ -22,7 +22,7 @@ import errno
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -1870,12 +1870,16 @@ def _todays_calendar(
         # report attributed to a connector nobody enrolled.
         return NoCalendarConnector()
 
+    # The day asked for and the day shown are the same two instants (`23e`):
+    # each calendar is read over exactly this range, and `_on_day` selects the
+    # meetings shown by it.
     day_start, day_end = _day_bounds(now, zone=zone)
+    day = day_start.astimezone(zone).date()
     collected: list[Meeting] = []
     unread: list[UnreadCalendar] = []
     answered = 0
     for instance in instances:
-        result = _ask_within(daemon, instance, bound)
+        result = _ask_within(daemon, instance, bound, start=day_start, end=day_end)
         if result.failure is not None:
             unread.append(UnreadCalendar(instance=instance, failure=result.failure))
         else:
@@ -1896,7 +1900,7 @@ def _todays_calendar(
         collected.extend(
             meeting
             for meeting in (*result.records, *result.live)
-            if _on_day(meeting, start=day_start, end=day_end)
+            if _on_day(meeting, start=day_start, end=day_end, day=day)
             and _belongs(meeting, scope=scope)
         )
 
@@ -1919,11 +1923,16 @@ def _todays_calendar(
     return _one_failure(unread)
 
 
-def _ask_within(daemon: Daemon, instance: str, bound: ReadBound) -> HarvestResult:
+def _ask_within(
+    daemon: Daemon, instance: str, bound: ReadBound, *, start: datetime, end: datetime
+) -> HarvestResult:
     """`_ask` as a bounded step (story 9b): abandoned at its deadline, it is a
     calendar that could not be read, never a failed render."""
     try:
-        return bound(lambda: _ask(daemon, instance), f"{instance}'s calendar read")
+        return bound(
+            lambda: _ask(daemon, instance, start=start, end=end),
+            f"{instance}'s calendar read",
+        )
     except FetchAbandoned as abandoned:
         return HarvestResult(
             events=(),
@@ -1933,11 +1942,14 @@ def _ask_within(daemon: Daemon, instance: str, bound: ReadBound) -> HarvestResul
         )
 
 
-def _ask(daemon: Daemon, instance: str) -> HarvestResult:
+def _ask(daemon: Daemon, instance: str, *, start: datetime, end: datetime) -> HarvestResult:
     """One connector's calendar read, with a contract breach costing only that one.
 
-    `CalendarReadPort.read_calendar` when the connector offers it, and its
-    `harvest` otherwise — so Graph's listed channels are not walked on a render.
+    `CalendarReadPort.read_calendar` over the display day (`start` to `end`,
+    `23e`) when the connector offers it, and its `harvest` otherwise — so
+    Graph's listed channels are not walked on a render, and the day asked for
+    is the day shown. A connector without the calendar-only read answers with
+    its harvest's window, and `_on_day` selects the day from what it returns.
 
     `ConnectorPort.harvest` reports rather than raises, and both connectors in
     this build honour it. The guard is here anyway because the whole point of
@@ -1955,7 +1967,7 @@ def _ask(daemon: Daemon, instance: str) -> HarvestResult:
         # read of the day walks no Teams channel, so a channel it did not need
         # cannot cost a render time or mark this calendar unread.
         if isinstance(connector, CalendarReadPort):
-            return connector.read_calendar(Cursor())
+            return connector.read_calendar(start, end)
         return connector.harvest(Cursor())
     except Exception as unexpected:  # noqa: BLE001 — a failure is a value here
         return HarvestResult(
@@ -2011,7 +2023,7 @@ def _day_bounds(now: datetime, *, zone: tzinfo) -> tuple[datetime, datetime]:
     )
 
 
-def _on_day(meeting: Meeting, *, start: datetime, end: datetime) -> bool:
+def _on_day(meeting: Meeting, *, start: datetime, end: datetime, day: date) -> bool:
     """Whether a meeting touches the display day at all.
 
     Overlap rather than "starts today", so a meeting that began yesterday
@@ -2020,9 +2032,16 @@ def _on_day(meeting: Meeting, *, start: datetime, end: datetime) -> bool:
     dropping that meeting here would be this function silently deciding the PM
     is not in it.
 
-    A zero-length row — an all-day marker, which `33c` records as zero minutes —
-    has no span to overlap with, so it is placed by its start.
+    An all-day marker that carries its own date is placed by that date (`23e`):
+    it is on the page when the date equals the display date `day`. Converting
+    its start to the display zone instead would, west of UTC, move a
+    midnight-UTC start onto the previous day — and the request range overlaps a
+    neighbouring day's all-day entry by up to the zone's offset, which this
+    drops. Any other zero-length row has no span to overlap with, so it is
+    placed by its start.
     """
+    if meeting.all_day_date is not None:
+        return meeting.all_day_date == day
     if meeting.start >= end:
         return False
     finishes = meeting.start + timedelta(minutes=meeting.duration_minutes)
