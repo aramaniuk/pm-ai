@@ -2,7 +2,8 @@
 title: 'The dashboard reads the whole local day'
 type: 'bugfix'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: 'ac7de7b231dd90fa892e1a2c897028736da0c7f9'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -73,7 +74,7 @@ context:
 
 ## Code Map
 
-Verified against `a1182f8` on 2026-10-16.
+Verified against `a1182f8` on 2026-10-16; re-verified against `ac7de7b` on 2026-10-17 (no file in this map changed; `prepare_dashboard` starts at `:1602`, `:1627` is its `_todays_calendar` call).
 
 - `pm_ai/connectors/graph/calendar.py:602-633` -- `WindowPolicy.window`, the harvest's range: `start = now - first_run_reach_back` with no cursor (`:624`), `end = now + width` (`:633`). Unchanged.
 - `pm_ai/connectors/graph/calendar.py:863`, `:893` -- `GraphCalendarFetch.fetch`, which takes its range from the policy at `:893` and gains a given range. Also used:
@@ -107,14 +108,14 @@ Verified against `a1182f8` on 2026-10-16.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/ports/__init__.py` -- `CalendarReadPort.read_calendar(start, end)`, aware UTC, replacing the always-empty cursor; the docstring says it reads the calendar alone over that range -- the render names its day
-- [ ] `pm_ai/connectors/graph/calendar.py` -- `fetch` takes an optional given range and walks it instead of the policy's window; a range given together with a cursor is refused -- one fetch, two callers
-- [ ] `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py` -- `read_calendar` builds the range and reads over it; an all-day row's own date is carried on `Meeting` in memory only, absent from the record fields like `tentative` -- the harvest stays as it was
-- [ ] `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py`, `pm_ai/core/rendering.py` -- `Meeting.cancelled` set from the row's `is_cancelled`, in memory only and absent from the record fields; `_meeting_line` adds `cancelled` -- an ended cancellation is shown and marked (finding 7)
-- [ ] `pm_ai/app/pipelines.py` -- `_todays_calendar` hands `_day_bounds`' instants through `_ask_within` and `_ask`; `_on_day` places a marker that carries a date by that date -- the day asked is the day shown
-- [ ] `tests/slice/test_dashboard_slice.py` -- a double implementing `read_calendar(start, end)` that records its arguments, and a port test that asserts the parameter names -- a structural `isinstance` check passes with the old signature too, so the range must be asserted, not inferred
-- [ ] `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_chat_messages.py`, `tests/slice/test_dashboard_slice.py` -- one test per matrix row; the request's `startDateTime` and `endDateTime` asserted on the recorded URL; the "exactly as harvest" test replaced by one asserting the harvest's range is unchanged -- the matrix is the contract
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/23b-dashboard-pipeline.md` -- a dated Change Log line saying the dashboard no longer depends on the harvest width (`:80`) -- the stale note is on record
+- [x] `pm_ai/ports/__init__.py` -- `CalendarReadPort.read_calendar(start, end)`, aware UTC, replacing the always-empty cursor; the docstring says it reads the calendar alone over that range -- the render names its day
+- [x] `pm_ai/connectors/graph/calendar.py` -- `fetch` takes an optional given range and walks it instead of the policy's window; a range given together with a cursor is refused -- one fetch, two callers
+- [x] `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py` -- `read_calendar` builds the range and reads over it; an all-day row's own date is carried on `Meeting` in memory only, absent from the record fields like `tentative` -- the harvest stays as it was
+- [x] `pm_ai/connectors/graph/__init__.py`, `pm_ai/domain/meetings.py`, `pm_ai/core/rendering.py` -- `Meeting.cancelled` set from the row's `is_cancelled`, in memory only and absent from the record fields; `_meeting_line` adds `cancelled` -- an ended cancellation is shown and marked (finding 7)
+- [x] `pm_ai/app/pipelines.py` -- `_todays_calendar` hands `_day_bounds`' instants through `_ask_within` and `_ask`; `_on_day` places a marker that carries a date by that date -- the day asked is the day shown
+- [x] `tests/slice/test_dashboard_slice.py` -- a double implementing `read_calendar(start, end)` that records its arguments, and a port test that asserts the parameter names -- a structural `isinstance` check passes with the old signature too, so the range must be asserted, not inferred
+- [x] `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_chat_messages.py`, `tests/slice/test_dashboard_slice.py` -- one test per matrix row; the request's `startDateTime` and `endDateTime` asserted on the recorded URL; the "exactly as harvest" test replaced by one asserting the harvest's range is unchanged -- the matrix is the contract
+- [x] `_bmad-output/specs/spec-pm-ai/stories/23b-dashboard-pipeline.md` -- a dated Change Log line saying the dashboard no longer depends on the harvest width (`:80`) -- the stale note is on record
 
 **Acceptance Criteria:**
 - Given the daemon with one Graph connector, when the 07:00 render and a scheduled harvest both run, then the render's calendar request covered the display day and the harvest's covered the range `WindowPolicy.window` computes, each asserted on the recorded URLs.
@@ -136,6 +137,13 @@ Verified against `a1182f8` on 2026-10-16.
   - **Rejected:** changing `_day_bounds` for zones that change clocks at midnight. Measured on 2026-10-16, it already yields the correct 23- and 25-hour days there, so that finding became a matrix row and a test instead.
 - **2026-10-16, Andrei's decision on field-test finding 7.** An ended cancelled meeting is shown on the dashboard, marked as cancelled, not left out; a cancelled meeting not yet ended stays left out. Read against the code: the connector already keeps the ended row, so the change is the in-memory flag and the line's mark. Always bullet, matrix row, Code Map line and task added.
 
+- **2026-10-17, build review (blind hunter, edge-case hunter, verification gap).** Patched in the code, with the frozen block unchanged:
+  - **All-day lines.** An all-day marker's line reads `all day`, with no start time, no ended/in progress/upcoming state and no `0 min`, and markers come before the timed lines. The "have ended" collapse, its count and its "last finished at" are decided over timed meetings only. Without this, west of UTC a correctly placed marker would read as yesterday 19:00 and "ended", and a day of markers alone would say its meetings had ended.
+  - `isAllDay` is read once.
+  - The display date is derived from `_day_bounds`' start.
+  - Test assertions that could not fail were fixed. Acceptance criterion 1 is now tested with one daemon and one connector, and the partial-day Graph test names the failing tenant.
+  - **Deferred** to `deferred-work.md`: multi-day all-day entries (Andrei's decision, since the frozen rule places a marker by its start date), and Graph's wire spelling of an all-day start (to be measured from a recorded row).
+
 ## Design Notes
 
 **Why the port's argument changes instead of adding a method.** `read_calendar` has one caller, which always passes an empty cursor. A cursor means "where the last harvest stopped", which a live read of one day does not have, so handing the method the day makes it say what it reads. `CalendarWindow` still refuses a naive or reversed range, and `_clock_flag` measures a row's start against the range's end, so a meeting starting at 23:58 is not marked.
@@ -154,3 +162,55 @@ Verified against `a1182f8` on 2026-10-16.
 
 **Manual checks (if no CLI):**
 - On a day with an afternoon meeting, `pm-ai dashboard` run before 11:00 lists it.
+
+## Suggested Review Order
+
+**The day asked is the day shown**
+
+- Entry point: the render computes the display day once and asks for exactly it.
+  [`pipelines.py:1877`](../../../../pm_ai/app/pipelines.py#L1877)
+
+- Calendar-only read gets the range; connectors without it fall back to harvest.
+  [`pipelines.py:1970`](../../../../pm_ai/app/pipelines.py#L1970)
+
+- The port now takes the day's two UTC instants instead of an always-empty cursor.
+  [`ports/__init__.py:108`](../../../../pm_ai/ports/__init__.py#L108)
+
+- Graph passes the range as a span; the harvest path is untouched.
+  [`graph/__init__.py:1019`](../../../../pm_ai/connectors/graph/__init__.py#L1019)
+
+- One range, never two: a cursor plus a range is refused.
+  [`calendar.py:910`](../../../../pm_ai/connectors/graph/calendar.py#L910)
+
+**All-day entries placed by their own date**
+
+- The date Graph wrote, read before any zone conversion.
+  [`calendar.py:1154`](../../../../pm_ai/connectors/graph/calendar.py#L1154)
+
+- A marker carrying a date is on the page only on that date.
+  [`pipelines.py:2043`](../../../../pm_ai/app/pipelines.py#L2043)
+
+- All-day line form; timed meetings alone decide the "have ended" collapse.
+  [`rendering.py:571`](../../../../pm_ai/core/rendering.py#L571)
+
+**Ended cancelled meetings, marked**
+
+- In-memory flags on tentative's precedent; no record field.
+  [`meetings.py:174`](../../../../pm_ai/domain/meetings.py#L174)
+
+- The line adds `cancelled` to its facts.
+  [`rendering.py:611`](../../../../pm_ai/core/rendering.py#L611)
+
+- `as_stored` clears both flags so the record round-trip holds.
+  [`meeting_records.py:374`](../../../../pm_ai/core/meeting_records.py#L374)
+
+**Tests**
+
+- Acceptance criterion 1: one daemon, render then harvest, each URL range asserted.
+  [`test_graph_channel_messages.py:1290`](../../../../tests/connectors/test_graph_channel_messages.py#L1290)
+
+- All-day west of UTC: listed today, rendered as `all day`.
+  [`test_graph_channel_messages.py:1377`](../../../../tests/connectors/test_graph_channel_messages.py#L1377)
+
+- Recording double for `read_calendar(start, end)`; slice matrix rows follow.
+  [`test_dashboard_slice.py:1433`](../../../../tests/slice/test_dashboard_slice.py#L1433)
