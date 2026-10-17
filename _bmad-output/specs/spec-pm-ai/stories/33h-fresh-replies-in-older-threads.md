@@ -2,7 +2,8 @@
 title: 'Fresh replies in older channel threads are read'
 type: 'bugfix'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '0d20d0fdfe4636f046323ec4004f43f5c88670ff'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -67,11 +68,11 @@ Lines as of PR #72 (its docstring edit shifts `channels.py` by 7 lines); 33h lan
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/channels.py` -- `THREAD_HORIZON = timedelta(days=90)`; `_read` returns "stop" by the first-post rule with the order check carried across pages; `_cut_short` gains its two cases; `_activity` deleted; the module docstring states the measured order, the horizon and the admitted limit -- the fix
-- [ ] `tests/connectors/test_graph_channel_messages.py` -- rewrite `:531` and `:549`, keep `:817`, extend the cut tests -- one test per matrix row
-- [ ] `tests/connectors/test_graph_channel_messages_recorded.py` -- drop the xfail marker and the cause lines; assert two requests and the meeting thread's refusal for its unread replies -- the recorded proof
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md` -- when this slice is built: edit the frozen text at `:26`, `:29`, `:64`, `:71` and add a Change Log line dated that day, "amended by `33h`". 33d is amended in build order `23f`, `33h`, `33i`; re-read its lines first, since `23f` edits it before this slice
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark "Data loss in busy channels" resolved by `33h`; add the horizon's admitted limit with paging long-lived threads as the follow-up
+- [x] `pm_ai/connectors/graph/channels.py` -- `THREAD_HORIZON = timedelta(days=90)`; `_read` returns "stop" by the first-post rule with the order check carried across pages; `_cut_short` gains its two cases; `_activity` deleted; the module docstring states the measured order, the horizon and the admitted limit -- the fix
+- [x] `tests/connectors/test_graph_channel_messages.py` -- rewrite `:531` and `:549`, keep `:817`, extend the cut tests -- one test per matrix row
+- [x] `tests/connectors/test_graph_channel_messages_recorded.py` -- drop the xfail marker and the cause lines; assert two requests and the meeting thread's refusal for its unread replies -- the recorded proof
+- [x] `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md` -- when this slice is built: edit the frozen text at `:26`, `:29`, `:64`, `:71` and add a Change Log line dated that day, "amended by `33h`". 33d is amended in build order `23f`, `33h`, `33i`; re-read its lines first, since `23f` edits it before this slice
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark "Data loss in busy channels" resolved by `33h`; add the horizon's admitted limit with paging long-lived threads as the follow-up
 
 **Acceptance Criteria:**
 - Given the recorded threads served as two pages and a position of 2026-10-10T00:00Z, when the channel is harvested, then two requests are made, the three replies created after the position in the meeting thread are emitted, and that thread is refused by name for its unread replies.
@@ -83,6 +84,7 @@ Lines as of PR #72 (its docstring edit shifts `channels.py` by 7 lines); 33h lan
 - **2026-10-16, created.** Carries: the measured order (first-post creation, PR #72) replacing `33d`'s latest-activity reading; the stop rule — a 90-day first-post horizon behind the position, chosen over per-thread reply paging and `messages/delta`; emission, position, page cap, budget, the inline-replies refusal and the permissions unchanged; replies in threads older than the horizon an admitted limit.
 - **2026-10-16, review:** order check defined (ties allowed, carried across pages); strict horizon comparison with a row; first posts whose creation time cannot be read defined; the cut-short failure split into two cases, the second not retryable, and `33d`'s cut-short bullet and row added to the amendments; coverage stated not to show the horizon; AC positions pinned; anchors re-based on PR #72; Problem shortened; Andrei's horizon decision cited. Depends on no spine amendment.
 - **2026-10-16, review (consistency):** the 33d amendment follows the one method shared with `33i`: frozen text edited and a dated Change Log line added when this slice is built, in build order `23f`, `33h`, `33i`.
+- **2026-10-17, built and reviewed** (blind hunter, edge-case hunter, verification gap). Patched: a cut after the first posts went out of order states the broad, retryable loss rather than the horizon's (the frozen second case assumes order); a test for a first post exactly at the position; tighter assertions on the stop-rule and budget-cut tests. Two entries in deferred-work marked "Needs Andrei's decision": that out-of-order case's retryability, and a non-retryable horizon cut taking the whole harvest off the retry ladder.
 
 ## Design Notes
 
@@ -101,3 +103,46 @@ Lines as of PR #72 (its docstring edit shifts `channels.py` by 7 lines); 33h lan
 - `uv run pytest -q` -- expected: all pass
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**The stop rule**
+
+- Entry point: the page's stop decision by first-post creation and the horizon.
+  [`channels.py:497`](../../../../pm_ai/connectors/graph/channels.py#L497)
+
+- In order: oldest before the horizon stops; out of order: every first post must be.
+  [`channels.py:556`](../../../../pm_ai/connectors/graph/channels.py#L556)
+
+- The order check carried across pages, ties allowed.
+  [`channels.py:332`](../../../../pm_ai/connectors/graph/channels.py#L332)
+
+- The horizon constant, 90 days, not a setting.
+  [`channels.py:137`](../../../../pm_ai/connectors/graph/channels.py#L137)
+
+**The cut-short failure**
+
+- Two losses; out of order falls back to the broad, retryable one.
+  [`channels.py:626`](../../../../pm_ai/connectors/graph/channels.py#L626)
+
+- The horizon loss: names the horizon, not retryable.
+  [`channels.py:659`](../../../../pm_ai/connectors/graph/channels.py#L659)
+
+**The account in the docstring**
+
+- The measured order, the horizon and the admitted limit.
+  [`channels.py:7`](../../../../pm_ai/connectors/graph/channels.py#L7)
+
+**Tests and amended contract**
+
+- The recorded proof, strict xfail gone.
+  [`test_graph_channel_messages_recorded.py:347`](../../../../tests/connectors/test_graph_channel_messages_recorded.py#L347)
+
+- One test per matrix row starts here.
+  [`test_graph_channel_messages.py:555`](../../../../tests/connectors/test_graph_channel_messages.py#L555)
+
+- The out-of-order cut added in review.
+  [`test_graph_channel_messages.py:1077`](../../../../tests/connectors/test_graph_channel_messages.py#L1077)
+
+- 33d's frozen ordering sentence and cut-short bullet, amended.
+  [`33d-graph-channel-messages.md:26`](33d-graph-channel-messages.md#L26)
