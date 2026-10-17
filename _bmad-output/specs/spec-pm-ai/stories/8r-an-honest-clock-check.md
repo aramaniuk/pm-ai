@@ -26,12 +26,12 @@ context:
 - **Replaced on every adoption, never carried over.** A token MSAL served from its cache without a request, or an answer MSAL's throttle wrapper replayed from memory, carries no reading: skew is unmeasured (`None`). The health probe still forces a refresh, as it does today, so `connector check` and `doctor` always measure.
 - **Unmeasured stays unmeasured:** no `Date`, an unparseable one, or one without a timezone is `None` — never zero, never a crash.
 - **The recorder's mechanism.** The auth adapter owns the recorder as a field. The default client factory is bound to it when the adapter is built, so production — where wiring passes no factory (`wiring.py:1688-1690` passes one only when a test injects it) — always records. An injected two-argument factory keeps its signature; a test simulates an answer by writing a reading into `auth`'s recorder. A test asserts that a connector built by wiring with no injected factory uses the recording client.
-- **The recording client's transport is MSAL's default, with the environment ignored:** a `requests` session with `trust_env=False` — no proxies, `REQUESTS_CA_BUNDLE` or `.netrc` taken from the environment, as the frontier and local-model clients do (AD-1) — certificate verification on, MSAL's default timeout (none), and one retry on a connection error through a mounted adapter (msal 1.38.0 `application.py:702-719`). MSAL still wraps it in its throttle handling.
+- **The recording client's transport is MSAL's default, stated:** a `requests` session with certificate verification on, proxies taken from the environment as `requests` does, MSAL's default timeout (none), and one retry on a connection error through a mounted adapter (msal 1.38.0 `application.py:702-719`). MSAL still wraps it in its throttle handling.
 - **`requests` is declared in the runtime extra** at the locked 2.34.2 (there today as MSAL's dependency), imported at call time like `msal`; the lock gains no package. Accepted as routine (2026-10-16).
 - **The warning's purpose stands:** a clock more than five minutes off either way still turns the Graph line `[warning]`, with the same sentence and "Fix the clock" remedy.
 
 **Ask First:**
-- Nothing (answered 2026-10-17).
+- Nothing (answered 2026-10-17, revised the same day).
 
 **Never:** No subtraction of a guessed five minutes from `iat`. No extra request to measure the clock. No change to the tolerance, the expiry arithmetic (relative `expires_in`), or what `8q` records about who signed in.
 
@@ -52,7 +52,7 @@ context:
 | Other endpoints | `/devicecode`, discovery, OpenID configuration | never read | N/A |
 | Two acquisitions at once | probe and harvest refresh on two threads, `Date`s differing by an hour | each adopts its own reading | N/A |
 | Rotated credential | one refresh calls MSAL twice | the reading of the call whose token is adopted | N/A |
-| Environment ignored | the session handed to MSAL | its `trust_env` is False; verification on | N/A |
+| Environment kept | the session handed to MSAL | the session keeps the environment: its `trust_env` is True; verification on | N/A |
 
 </frozen-after-approval>
 
@@ -86,8 +86,8 @@ context:
 - **2026-10-16, review (consistency):** depends on spine amendment: Stack — a row for `requests` (2.34.2, imported directly by the Graph auth adapter for the recording HTTP client), made through `bmad-architecture` before this slice is built.
 - **2026-10-16, spine gate:** frozen block edited (recorded here): an Ask First for the spec checkpoint — whether the `requests` session handed to MSAL sets `trust_env=False` or keeps MSAL's default (tech-currency F7); undecided, Andrei asked that it be raised here.
 - **2026-10-17, Andrei's decision: `trust_env=False`.** The session handed to MSAL ignores the environment — no proxies, `REQUESTS_CA_BUNDLE` or `.netrc` — as the frontier and local-model clients do (AD-1); certificate verification stays on. Known cost: a user behind a corporate proxy cannot sign in. Frozen transport bullet edited, the Ask First closed, a matrix row added.
-
 - **2026-10-17, built and reviewed.** Three reviewers (blind, edge case, verification gap); patched: the warning's drift rounds up to whole seconds so a warning never prints a drift equal to the tolerance (5:00.3 reads 0:05:01; 2:04:59.5 still reads 2:05:00); the default factory is resolved at `_build_application`, not stored in the field, so a copied adapter keeps its own recorder; the session is closed if MSAL refuses to build; tests added for a redemption that made no request (the `_call` clear was unprotected), for real msal 1.38.0 driven through the recording client over a stub transport, and for numeric-offset and `-0000` dates. Deferred, needs Andrei's decision: the session has no timeout (frozen here as MSAL's default). Rejected: proxy cost (decided), network latency counted as skew (sub-second against five minutes), the v2 path match (the authority is fixed).
+- **2026-10-17, Andrei's decision (revised): MSAL's default environment handling**, superseding `trust_env=False` the same day — the Graph and GitLab data clients already take proxies from the environment, so sign-in matches them; a corporate-proxy network works end to end. Making every connector ignore the environment would be its own slice with a spine amendment. Frozen transport bullet restored to its original wording, the matrix row now asserts the session keeps the environment, the Ask First re-dated.
 
 ## Design Notes
 
@@ -118,7 +118,7 @@ The field test's own clock check used the same signal: two providers' `Date` hea
 - One slot per thread, so concurrent acquisitions never swap readings.
   [`auth.py:242`](../../../../pm_ai/connectors/graph/auth.py#L242)
 
-- The session handed to MSAL: `trust_env=False`, verify on, one retry.
+- The session handed to MSAL: MSAL's defaults, environment kept, verify on, one retry.
   [`auth.py:307`](../../../../pm_ai/connectors/graph/auth.py#L307)
 
 **How an acquisition owns its reading**
