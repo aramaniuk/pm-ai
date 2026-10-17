@@ -102,6 +102,11 @@ class SelfActionType(Enum):
     # a `SourceRef` and `persist_events` dedups on the key derived from it: the
     # second revision of one goal would share the first's key and vanish.
     GOAL_SET = "goal_set"
+    # A goal removed from `strategic_goals.md` by `pm-ai goal delete` (story
+    # 4t). Its own member rather than a `goal_set` with an empty title: the
+    # earlier `goal_set` entries stay (AD-5), and a reader of the log alone has
+    # to be able to say which goal went and what it read before it went.
+    GOAL_DELETED = "goal_deleted"
 
 
 SELF_ACTION_FIELDS: dict[SelfActionType, tuple[str, ...]] = {
@@ -120,6 +125,10 @@ SELF_ACTION_FIELDS: dict[SelfActionType, tuple[str, ...]] = {
     # carries all four — plus the surface that set it, since the CLI is the
     # first of several (story 22b).
     SelfActionType.GOAL_SET: ("goal_id", "domain", "horizon", "title", "channel"),
+    # The goal as it read just before the delete, and the surface that deleted
+    # it. A title too long for one line is cut with `…` (story 4t): the file
+    # held it whole, and the entry's job is to say which goal went.
+    SelfActionType.GOAL_DELETED: ("goal_id", "domain", "horizon", "title", "channel"),
 }
 """What each pm-ai action must record, by field name.
 

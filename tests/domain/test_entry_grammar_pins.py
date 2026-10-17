@@ -92,6 +92,7 @@ SELF_ACTIONS: dict[str, tuple[str, ...]] = {
     # exemption: the skill name moved out of the actor, which is now `pm-ai`.
     "skill_invoked": ("skill", "target", "external_id", "idempotency_key"),
     "goal_set": ("goal_id", "domain", "horizon", "title", "channel"),
+    "goal_deleted": ("goal_id", "domain", "horizon", "title", "channel"),
 }
 
 OBSERVED: dict[str, str] = {
@@ -113,6 +114,7 @@ SELF_ACTION_MEMBERS: dict[str, str] = {
     "SECURITY": "security",
     "SKILL_INVOKED": "skill_invoked",
     "GOAL_SET": "goal_set",
+    "GOAL_DELETED": "goal_deleted",
 }
 
 

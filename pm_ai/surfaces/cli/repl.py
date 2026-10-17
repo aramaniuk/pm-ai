@@ -202,7 +202,8 @@ def _absolute_paths(words: Sequence[str]) -> list[str]:
     The daemon does not run in the directory the line was typed in, and refuses
     a relative path (`TAKES_A_PATH`, story 4r); the prompt does, so it resolves
     the path as `pm-ai <words>` here would before sending. The words are rebuilt
-    from the one parse of them, so an option before the path changes nothing.
+    from the one parse of them, so an option or a flag before the path changes
+    nothing.
     """
     if tuple(words[:2]) not in TAKES_A_PATH:
         return list(words)
@@ -214,7 +215,10 @@ def _absolute_paths(words: Sequence[str]) -> list[str]:
     if path.is_absolute():
         return list(words)
     options = [part for name, value in parsed.options.items() for part in (f"--{name}", value)]
-    return [*words[:2], str(Path.cwd() / path), *rest, *options]
+    # Story 4t: value-less flags are rebuilt too, or one would be lost on the
+    # way to the daemon.
+    flags = [f"--{flag}" for flag in sorted(parsed.flags)]
+    return [*words[:2], str(Path.cwd() / path), *rest, *options, *flags]
 
 
 def _through_daemon(words: Sequence[str], client: DaemonClient, jobs: _Jobs) -> None:

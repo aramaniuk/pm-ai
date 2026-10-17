@@ -263,10 +263,14 @@ def test_a_revision_offers_the_current_values_and_empty_keeps_them(
 
 
 def test_a_non_interactive_invocation_is_refused_without_prompting(tmp_path, monkeypatch, capsys):
+    """Since `4t` the refusal names what would let it run without a terminal."""
     built = daemon(tmp_path)
     code = run(built, ["goal", "set"], monkeypatch, tty=False)
     assert code == EXIT_REFUSAL
-    assert "TTY" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "TTY" in err
+    for named in ("`<id>`", "--domain", "--horizon", "--title"):
+        assert named in err
     assert on_disk(built) is None
     assert goal_entries(built) == []
 
@@ -299,9 +303,10 @@ def test_a_malformed_file_is_refused_before_the_first_prompt(tmp_path, monkeypat
     assert on_disk(built) == BROKEN
 
 
-def test_goal_set_takes_no_arguments(tmp_path, monkeypatch):
+def test_goal_set_takes_one_id_at_most(tmp_path, monkeypatch):
+    """`4t` gave `goal set` an optional `<id>`; a second word is still refused."""
     built = daemon(tmp_path)
-    assert run(built, ["goal", "set", "g_a"], monkeypatch) == EXIT_USAGE
+    assert run(built, ["goal", "set", "g_a", "g_b"], monkeypatch) == EXIT_USAGE
 
 
 # ── Review patches: nothing refused after the write, and no false sentences ──

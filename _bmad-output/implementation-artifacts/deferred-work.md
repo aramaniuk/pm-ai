@@ -1398,3 +1398,12 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8r-an-honest-clock-check.md`
   summary: **Needs Andrei's decision.** The `requests` session handed to MSAL has no timeout, so a token endpoint that accepts the connection and then stalls holds an I/O pool thread — and the health probe or harvest on it — indefinitely.
   evidence: Raised by 8r's review (edge-case and blind hunters). 8r's frozen transport bullet keeps MSAL's default timeout (none), which is also what ran before 8r, so this is not a regression; but 8r now builds the session itself (`_msal_session` in `pm_ai/connectors/graph/auth.py`) and could bound it with `functools.partial(session.request, timeout=(connect, read))`. Changing it renegotiates the frozen bullet.
+
+## Surfaced by the story-4t review (2026-10-17)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4t-goals-listed-shown-updated-deleted.md`
+  summary: A goal write at the command line is not atomic against another writer: `GoalBook.set` (since `22b`) and `GoalBook.delete` read `strategic_goals.md`, build the new bytes and write them with no claim or compare-and-swap between the read and the write.
+  evidence: `pm_ai/app/goals.py` reads with `read_artifact` and writes with `write_artifact`; nothing in between holds the file. A `goal set` from a second terminal, or a hand edit saved in that window, is overwritten. The delete's re-read after the answer narrows the window to the time between that read and the write; it does not close it. Pre-existing with `goal set`; the fix belongs in the storage writer (a write that names the bytes it replaces).
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4t-goals-listed-shown-updated-deleted.md`
+  summary: `goal list`, `goal show` and the delete's preview print a hand-edited goal's title and lines as they are, control characters included.
+  evidence: The parser takes a title from a hand-editable file and the CLI echoes it unchanged, so an escape sequence typed or pasted into `strategic_goals.md` reaches the terminal. Low risk (the file is the PM's own), and the same holds for other places the CLI prints file text; a fix is one shared printable-text rule for the CLI rather than one for goals.

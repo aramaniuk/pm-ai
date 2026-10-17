@@ -52,13 +52,15 @@ from pm_ai.core.config import Config, ConfigRefused, load_config, render_config
 from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
 from pm_ai.core.goal_register import (
     GOALS_SCOPE,
+    GoalAbsent,
+    GoalChanged,
     GoalRegister,
     GoalUnrecorded,
     MalformedGoals,
     declare_goal,
 )
 from pm_ai.domain.renders import RenderUnrecorded
-from pm_ai.domain.goals import Goal
+from pm_ai.domain.goals import Goal, GoalDomain, GoalHorizon
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report, UnbuiltConnector
 from pm_ai.core.project_registry import RegistryRefused
@@ -350,10 +352,28 @@ class ConnectorsOnDisk(Protocol):
 
 
 @runtime_checkable
-class GoalBook(Protocol):
-    """What `pm-ai goal set` needs, handed in by the composition root (story 22b).
+class GoalReader(Protocol):
+    """What `pm-ai goal list` and `goal show` need (story 4t): a read and a path.
 
-    `pm_ai.app.entry.GoalBook` is the real one. Named structurally because the
+    `pm_ai.app.goals.GoalReader` is the real one, built before anything is
+    composed at the command line and afresh for every line in the daemon.
+    """
+
+    @property
+    def path(self) -> Path:
+        """Where `strategic_goals.md` lives, whether or not it exists."""
+        ...
+
+    def read(self) -> GoalRegister:
+        """`strategic_goals.md` as it is now; `MalformedGoals` if unreadable."""
+        ...
+
+
+@runtime_checkable
+class GoalBook(Protocol):
+    """What `pm-ai goal set`, `update` and `delete` need (stories 22b, 4t).
+
+    `pm_ai.app.goals.GoalBook` is the real one. Named structurally because the
     read, the write and the event-log entry all go through storage, which
     `surfaces` may not reach (AD-30).
     """
@@ -365,6 +385,30 @@ class GoalBook(Protocol):
     def set(self, goal: Goal) -> GoalOutcome:
         """Merge, write and record one goal; `MalformedGoals` leaves the file be."""
         ...
+
+    def preview(self, goal_id: str) -> GoalPreview:
+        """What deleting `goal_id` would remove; writes nothing."""
+        ...
+
+    def delete(self, goal_id: str, shown: Sequence[str] | None) -> GoalRemoval:
+        """Remove, write and record; `GoalChanged` if `shown` is not what it removes."""
+        ...
+
+
+@runtime_checkable
+class GoalPreview(Protocol):
+    """`pm_ai.core.goal_register.GoalDeletion`, named by the one field read here."""
+
+    @property
+    def removed(self) -> tuple[str, ...]: ...
+
+
+@runtime_checkable
+class GoalRemoval(Protocol):
+    """What `GoalBook.delete` did — `pm_ai.app.goals.GoalDeleted`, named by shape."""
+
+    @property
+    def path(self) -> Path: ...
 
 
 @runtime_checkable
@@ -773,6 +817,12 @@ class Context:
     goals: GoalBook | None = None
     """`strategic_goals.md`'s reader and writer. `None` refuses `goal set`."""
 
+    goal_reader: GoalReader | None = None
+    """`strategic_goals.md`'s reader alone, for `goal list` and `goal show` (4t)."""
+
+    flags: frozenset[str] = frozenset()
+    """The value-less flags this invocation carried (`--yes`), by name (4t)."""
+
     transcript_drop: TranscriptDrop | None = None
     """`pm-ai transcript drop`'s read, bind, capture and ingest (story 11c).
 
@@ -932,9 +982,24 @@ class Command:
     Declared on the table for `takes`' reason — one place decides what a command
     accepts, so the refusal and the usage line cannot disagree — and closed, so
     an option nobody declared is a usage error rather than a word that vanishes.
-    Every one of them takes a value; there are no flags here, because a flag
-    that is absent and a flag that is false are the same word on a command line
-    and no command in this table needs to tell them apart.
+    Every one of them takes a value; the value-less ones are `flags`, below.
+    """
+
+    flags: tuple[str, ...] = ()
+    """The long options this command accepts that take no value (story 4t).
+
+    `goal delete --yes` is the first. A flag never takes the word after it as
+    its value — `goal delete --yes g_a` reads `g_a` as the id — and a flag given
+    a value (`--yes=1`) or given twice is a usage error. Spelled `[--yes]` in
+    the usage line. `4w`'s `--follow` and `4u`'s completion read this field.
+    """
+
+    composes: bool = True
+    """`False` for a command that reads one plain file and needs nothing else.
+
+    `goal list` and `goal show` (story 4t): the composition root hands them a
+    reader and composes no daemon, so a broken `config.toml` or no keychain does
+    not stop them.
     """
 
     requires: tuple[str, ...] = ()
@@ -2374,10 +2439,24 @@ def _setup(context: Context) -> int:
     return EXIT_OK if report.healthy else EXIT_UNHEALTHY
 
 
-# ── `pm-ai goal set` (story 22b) ─────────────────────────────────────────────
+# ── `pm-ai goal` (stories 22b, 4t) ───────────────────────────────────────────
+
+GOAL_OPTIONS = ("domain", "horizon", "title")
+"""What `goal set` and `goal update` take, so a goal can be written without a
+question. The values are read by `declare_goal`'s closed spellings; nothing here
+decides what a goal may be."""
+
+YES_FLAG = "yes"
+"""`goal delete --yes`: skip the confirmation, for a script."""
+
+_GOAL_QUESTIONS = {
+    "domain": "domain (project, team or personal)",
+    "horizon": "horizon (short, medium or long)",
+    "title": "title",
+}
 
 
-def _goal_prompt(question: str, default: str | None) -> str:
+def _goal_prompt(question: str, default: str | None, *, command: str = "goal set") -> str:
     """One answer, the default for an empty one, or a refusal if input stops."""
     prompt = f"{question} [{default}]: " if default else f"{question}: "
     try:
@@ -2389,29 +2468,12 @@ def _goal_prompt(question: str, default: str | None) -> str:
         ) from None
     except (EOFError, KeyboardInterrupt) as closed:
         raise Refusal(
-            "goal set was interrupted at a prompt, so nothing was written."
+            f"{command} was interrupted at a prompt, so nothing was written."
         ) from closed
     return answer if answer.strip() or default is None else default
 
 
-def _goal_set(context: Context) -> int:
-    """`pm-ai goal set` — ask for one goal, then hand it to `22b`'s writer.
-
-    Four questions: the id, then the domain, horizon and title, each offering
-    the goal's current value when the id is already set, so a revision is four
-    presses of Enter and the one word that changed. Nothing is decided here —
-    the closed vocabularies and the id charset are `declare_goal`'s, the merge
-    is `set_goal`'s — and every refusal is passed through verbatim.
-
-    The file is read before the first prompt, so a `strategic_goals.md` the
-    parser refuses is refused before anything is asked, and is not written.
-    """
-    if not _stdin_is_terminal():
-        raise Refusal(
-            "goal set asks questions and can only run at a terminal. stdin is "
-            "not a TTY here — a pipe, a cron job or a CI step — so nothing was "
-            "asked and nothing was written."
-        )
+def _goal_book(context: Context) -> GoalBook:
     context.require_daemon()
     goals = context.goals
     if goals is None:
@@ -2419,26 +2481,90 @@ def _goal_set(context: Context) -> int:
             "no goal writer was supplied to the CLI, so nothing was written. "
             "This is a wiring fault in pm-ai, not something wrong with the goal."
         )
+    return goals
+
+
+def _goal_reader(context: Context) -> GoalReader:
+    reader = context.goal_reader
+    if reader is None:
+        raise Refusal(
+            "no goal reader was supplied to the CLI, so nothing was read. This "
+            "is a wiring fault in pm-ai, not something wrong with the goals."
+        )
+    return reader
+
+
+def _spelled_options(names: Sequence[str]) -> str:
+    return _listed_words([f"`--{name} <{name}>`" for name in names])
+
+
+def _listed_words(words: Sequence[str]) -> str:
+    if len(words) <= 1:
+        return "".join(words)
+    return f"{', '.join(words[:-1])} and {words[-1]}"
+
+
+def _goal_set(context: Context) -> int:
+    """`pm-ai goal set [<id>] [--domain] [--horizon] [--title]` — create or revise.
+
+    The create path (story 22b), which since `4t` also takes its values as
+    options, so a goal can be written from a script. One rule for questions:
+    for an id on file, any option given means nothing else is asked; none at a
+    terminal asks all three, offering the current values; none without a
+    terminal is refused. For a new id, each value not given is asked at a
+    terminal and named in the refusal without one. With no id, the id is asked
+    first at a terminal and named without one.
+    """
+    return _goal_write(context, command="goal set", creates=True)
+
+
+def _goal_update(context: Context) -> int:
+    """`pm-ai goal update <id> [options]` — revise a goal on file, never create one.
+
+    The same rule for questions as `goal set`; an id not on file is refused
+    naming `goal set`, so a mistyped id never creates a goal (story 4t).
+    """
+    return _goal_write(context, command="goal update", creates=False)
+
+
+def _goal_write(context: Context, *, command: str, creates: bool) -> int:
+    """`goal set` and `goal update`: collect the three values, then hand them to `22b`'s writer.
+
+    Nothing is decided here — the closed vocabularies and the id charset are
+    `declare_goal`'s, the merge is `set_goal`'s — and every refusal is passed
+    through verbatim. The file is read before the first question, so a
+    `strategic_goals.md` the parser refuses is refused before anything is
+    asked, and is not written. Nothing is written before any refusal.
+    """
+    given = {name: context.options[name] for name in GOAL_OPTIONS if name in context.options}
+    terminal = _stdin_is_terminal()
+    named = context.arguments[0] if context.arguments else None
+    if named is None and not terminal:
+        missing = ["`<id>`", *(f"`--{name} <{name}>`" for name in GOAL_OPTIONS if name not in given)]
+        raise Refusal(
+            f"{command} without a terminal cannot ask, so it needs "
+            f"{_listed_words(missing)} on its command line. stdin is not a TTY "
+            f"here — a pipe, a cron job or a CI step — so nothing was asked and "
+            f"nothing was written."
+        )
+    goals = _goal_book(context)
     try:
         register = goals.read()
-        goal_id = _goal_prompt("goal id, e.g. g_payments_latency", None).strip()
+        goal_id = (
+            named
+            if named is not None
+            else _goal_prompt("goal id, e.g. g_payments_latency", None, command=command)
+        ).strip()
         current = register.get(goal_id)
-        domain = _goal_prompt(
-            "domain (project, team or personal)",
-            None if current is None else current.domain.value,
-        )
-        horizon = _goal_prompt(
-            "horizon (short, medium or long)",
-            None if current is None else current.horizon.value,
-        )
-        title = _goal_prompt("title", None if current is None else current.title)
-        goal = declare_goal(
-            goal_id=goal_id,
-            domain=domain,
-            horizon=horizon,
-            title=title,
-            scope=GOALS_SCOPE,
-        )
+        if current is None and not creates:
+            raise Refusal(
+                f"{goal_id!r} is not a goal in strategic_goals.md, so nothing was "
+                f"written. `goal update` revises a goal on file and never creates "
+                f"one; `pm-ai goal set {goal_id}` creates it, and `pm-ai goal "
+                f"list` lists the ids on file."
+            )
+        values = _goal_values(current, given, terminal=terminal, command=command)
+        goal = declare_goal(goal_id=goal_id, scope=GOALS_SCOPE, **values)
         outcome = goals.set(goal)
     except (MalformedGoals, GoalUnrecorded) as refused:
         # `GoalUnrecorded` is the one refusal after which the file *has*
@@ -2457,6 +2583,177 @@ def _goal_set(context: Context) -> int:
     verb = "revised" if outcome.revised else "set"
     _echo(f"{goal.goal_id} is {verb} in {outcome.path}")
     return EXIT_OK
+
+
+def _goal_values(
+    current: Goal | None, given: Mapping[str, str], *, terminal: bool, command: str
+) -> dict[str, str]:
+    """The domain, horizon and title to declare, by `4t`'s one rule for questions."""
+    if current is not None:
+        on_file = {
+            "domain": current.domain.value,
+            "horizon": current.horizon.value,
+            "title": current.title,
+        }
+        if given:
+            return {name: given.get(name, on_file[name]) for name in GOAL_OPTIONS}
+        if not terminal:
+            raise Refusal(
+                f"{command} {current.goal_id} without a terminal cannot ask what "
+                f"to change, so it needs at least one of "
+                f"{_spelled_options(GOAL_OPTIONS)}. Nothing was written."
+            )
+        return {
+            name: _goal_prompt(_GOAL_QUESTIONS[name], on_file[name], command=command)
+            for name in GOAL_OPTIONS
+        }
+    missing = [name for name in GOAL_OPTIONS if name not in given]
+    if missing and not terminal:
+        raise Refusal(
+            f"{command} without a terminal cannot ask, so a new goal needs "
+            f"{_spelled_options(missing)} on its command line. Nothing was written."
+        )
+    values = dict(given)
+    for name in missing:
+        values[name] = _goal_prompt(_GOAL_QUESTIONS[name], None, command=command)
+    return {name: values[name] for name in GOAL_OPTIONS}
+
+
+def _goal_delete(context: Context) -> int:
+    """`pm-ai goal delete <id> [--yes]` — remove a goal and its detail lines (story 4t).
+
+    At a terminal the lines it will remove are printed first and a `(y/n)` is
+    asked; `y` or `yes`, in any case and padding, deletes, and anything else —
+    end of input and Ctrl-C included — writes nothing. The file is read again
+    after the answer, and the delete is refused if the block is not the one
+    shown. `--yes` skips the question; without a terminal it is required.
+    """
+    goal_id = context.arguments[0]
+    confirm = YES_FLAG not in context.flags
+    if confirm and not _stdin_is_terminal():
+        raise Refusal(
+            f"goal delete asks before it removes anything, and stdin is not a "
+            f"TTY here — a pipe, a cron job or a CI step. Give `--{YES_FLAG}` to "
+            f"delete without the question. Nothing was deleted."
+        )
+    goals = _goal_book(context)
+    shown: tuple[str, ...] | None = None
+    try:
+        if confirm:
+            # `preview` reads and refuses as `delete` does — an id not on file
+            # is `GoalAbsent` from either — so no separate read comes first.
+            try:
+                preview = goals.preview(goal_id)
+            except (OSError, ArtifactBusy) as unreadable:
+                raise Refusal(
+                    f"strategic_goals.md could not be read, so nothing was "
+                    f"deleted: {unreadable}"
+                ) from unreadable
+            _echo(f"goal delete {goal_id} removes these lines from strategic_goals.md:")
+            for line in preview.removed:
+                _echo(f"  {line}")
+            if not _confirmed(f"delete {goal_id}? (y/n): "):
+                raise Refusal(f"{goal_id} was not deleted; nothing was written.")
+            shown = preview.removed
+        try:
+            deleted = goals.delete(goal_id, shown)
+        except (OSError, ArtifactBusy) as unwritable:
+            raise Refusal(
+                f"strategic_goals.md could not be written, so nothing changed: "
+                f"{unwritable}"
+            ) from unwritable
+    except GoalAbsent:
+        raise Refusal(
+            f"{goal_id!r} is not a goal in strategic_goals.md, so nothing was "
+            f"deleted. `pm-ai goal list` lists the ids on file."
+        ) from None
+    except (MalformedGoals, GoalUnrecorded, GoalChanged) as refused:
+        raise Refusal(str(refused)) from refused
+    _echo(
+        f"{goal_id} is deleted from {deleted.path}. The dashboard's goals "
+        f"section drops it at its next render."
+    )
+    return EXIT_OK
+
+
+def _confirmed(prompt: str) -> bool:
+    """A `(y/n)` answer: `y` or `yes`, any case and padding, is yes; all else is no."""
+    try:
+        answer = input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        # The terminal's cursor is still on the prompt line; the refusal that
+        # follows starts on a line of its own.
+        _echo()
+        return False
+    except UnicodeDecodeError:
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
+
+
+_HORIZON_WIDTH = max(len(f"({horizon.value})") for horizon in GoalHorizon)
+"""`(medium)`'s width, so every title in `goal list` starts in one column."""
+
+
+def _goal_list(context: Context) -> int:
+    """`pm-ai goal list` — the goals on file, grouped by domain (story 4t).
+
+    The dashboard's order (`rendering._strategic_milestones`): `GoalDomain`'s,
+    and by id within a domain. Only reads, and needs no daemon.
+    """
+    register = _read_goals(context)
+    if not register:
+        if register.present:
+            _echo("strategic_goals.md holds no goals yet; `pm-ai goal set` adds one.")
+        else:
+            _echo("No goals are set yet; `pm-ai goal set` creates strategic_goals.md with the first.")
+        return EXIT_OK
+    for domain in GoalDomain:
+        tier = sorted(
+            (goal for goal in register.values() if goal.domain is domain),
+            key=lambda goal: goal.goal_id,
+        )
+        if not tier:
+            continue
+        _echo(domain.value.capitalize())
+        width = max(len(goal.goal_id) for goal in tier)
+        for goal in tier:
+            horizon = f"({goal.horizon.value})"
+            _echo(f"  {goal.goal_id:<{width}}  {horizon:<{_HORIZON_WIDTH}}  {goal.title}")
+    return EXIT_OK
+
+
+def _goal_show(context: Context) -> int:
+    """`pm-ai goal show <id>` — one goal, its citation form and its file (story 4t)."""
+    goal_id = context.arguments[0]
+    register = _read_goals(context)
+    goal = register.get(goal_id)
+    if goal is None:
+        raise Refusal(
+            f"{goal_id!r} is not a goal in strategic_goals.md. `pm-ai goal list` "
+            f"lists the ids on file."
+        )
+    rows = (
+        ("id", goal.goal_id),
+        ("cited as", f"goal:{goal.goal_id}"),
+        ("domain", goal.domain.value),
+        ("horizon", goal.horizon.value),
+        ("title", goal.title),
+        ("file", str(_goal_reader(context).path)),
+    )
+    width = max(len(label) for label, _ in rows)
+    for label, value in rows:
+        _echo(f"{label:<{width}}  {value}")
+    return EXIT_OK
+
+
+def _read_goals(context: Context) -> GoalRegister:
+    """The register, or the parser's own refusal (its line included)."""
+    try:
+        return _goal_reader(context).read()
+    except MalformedGoals as refused:
+        raise Refusal(str(refused)) from refused
+    except (OSError, ArtifactBusy) as unreadable:
+        raise Refusal(f"strategic_goals.md could not be read: {unreadable}") from unreadable
 
 
 # ── `pm-ai transcript drop` (story 11c) ──────────────────────────────────────
@@ -2768,6 +3065,8 @@ this constant, never a sentence of their own.
 TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
     {
         ("goal", "set"),
+        ("goal", "update"),
+        ("goal", "delete"),
         ("setup",),
         ("connector", "add"),
         ("connector", "sign-in"),
@@ -2858,7 +3157,36 @@ TABLE: Mapping[str, Command] = {
             "set": Command(
                 "create or revise one goal in strategic_goals.md",
                 _goal_set,
+                optional=("id",),
+                options=GOAL_OPTIONS,
                 target=_goals_target,
+            ),
+            "update": Command(
+                "revise one goal on file; never creates one",
+                _goal_update,
+                takes=("id",),
+                options=GOAL_OPTIONS,
+                target=_goals_target,
+            ),
+            "delete": Command(
+                "remove one goal and its detail lines, asking first",
+                _goal_delete,
+                takes=("id",),
+                flags=(YES_FLAG,),
+                target=_goals_target,
+            ),
+            "list": Command(
+                "list the goals on file, by domain",
+                _goal_list,
+                target=_goals_target,
+                composes=False,
+            ),
+            "show": Command(
+                "show one goal, its citation and its file",
+                _goal_show,
+                takes=("id",),
+                target=_goals_target,
+                composes=False,
             ),
         },
     ),
@@ -2902,6 +3230,10 @@ TABLE: Mapping[str, Command] = {
 
 _HELP_FLAGS = frozenset({"-h", "--help", "help"})
 
+_SUBCOMMAND_HELP = frozenset({"-h", "--help"})
+"""What asks for one subcommand's help after its name (story 4t). Not the bare
+word `help`, which could be a positional — a goal id, say."""
+
 
 def names_a_command(word: str) -> bool:
     """Whether `word`, as a first word, names something `parse` runs or answers.
@@ -2926,7 +3258,8 @@ def _spelled(name: str, command: Command) -> str:
         f" --{option} <{option}>" if option in command.requires else f" [--{option} <{option}>]"
         for option in command.options
     )
-    return f"{name}{required}{positional}{optional}"
+    flagged = "".join(f" [--{flag}]" for flag in command.flags)
+    return f"{name}{required}{positional}{optional}{flagged}"
 
 
 def usage(*, group: str | None = None) -> str:
@@ -2980,6 +3313,12 @@ class Parsed:
     options: Mapping[str, str] = field(default_factory=dict)
     target: DataScope | None = None
     """The command's target; `None` for a command that needs no daemon."""
+
+    flags: frozenset[str] = frozenset()
+    """The value-less flags given (story 4t)."""
+
+    composes: bool = True
+    """`Command.composes`, carried so the composition root can skip composing."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -3044,32 +3383,41 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
             f"both shadows every leaf it has."
         )
     if command.run is not None:
-        if rest and not command.options:
+        if rest and not command.options and not command.flags:
             return _misused(f"`{name}` takes no arguments")
         # `23b`'s mechanism, and it narrows rather than relaxes the rule above:
         # a command declaring no options still refuses every trailing word, and
         # one that declares some refuses every word that is not one of them. The
         # flag an operator invented to be careful with must never be the thing
         # that silently vanishes.
-        named, misread = _options(rest, allowed=command.options)
+        named, given, misread = _options(rest, allowed=command.options, flags=command.flags)
         if misread is not None:
             return _misused(f"`{name}` {misread}")
         absent = _missing(command, named)
         if absent is not None:
             return _misused(f"`{name}` {absent}")
-        return _parsed(command, command.run, options=named)
+        return _parsed(command, command.run, options=named, flags=given)
     leaf = command.leaves.get(rest[0]) if rest else None
     if leaf is None or leaf.run is None:
         return Answered(EXIT_USAGE, usage(group=name))
+    if len(rest) == 2 and rest[1] in _SUBCOMMAND_HELP:
+        # Story 4t: one subcommand's own usage line and summary. `11d` relies
+        # on it; before, `--help` here was an option nobody declared.
+        return Answered(
+            EXIT_OK, f"usage: pm-ai {name} {_spelled(rest[0], leaf)}\n\n{leaf.summary}"
+        )
     supplied = tuple(rest[1:])
     leaf_options: Mapping[str, str] = {}
-    if leaf.options:
+    leaf_flags: frozenset[str] = frozenset()
+    if leaf.options or leaf.flags:
         # Story 11c: a leaf with options as well as positionals. The words are
         # split first — every `--name` with its value, the rest in order — so
         # `drop <file> --scope personal` and `drop --scope personal <file>`
         # read alike, and each half meets the refusal it always met.
-        supplied, option_words = _split_options(supplied)
-        leaf_options, misread = _options(option_words, allowed=leaf.options)
+        supplied, option_words = _split_options(supplied, flags=leaf.flags)
+        leaf_options, leaf_flags, misread = _options(
+            option_words, allowed=leaf.options, flags=leaf.flags
+        )
         if misread is not None:
             return _misused(f"`{name} {rest[0]}` {misread}", group=name)
         absent = _missing(leaf, leaf_options)
@@ -3094,7 +3442,9 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
             else "no arguments"
         )
         return _misused(f"`{name} {rest[0]}` takes {expected}", group=name)
-    return _parsed(leaf, leaf.run, arguments=supplied, options=leaf_options, group=name)
+    return _parsed(
+        leaf, leaf.run, arguments=supplied, options=leaf_options, flags=leaf_flags, group=name
+    )
 
 
 def _parsed(
@@ -3103,6 +3453,7 @@ def _parsed(
     *,
     arguments: tuple[str, ...] = (),
     options: Mapping[str, str] | None = None,
+    flags: frozenset[str] = frozenset(),
     group: str | None = None,
 ) -> Parsed | Answered:
     """The parsed command with its target read, or the usage error naming why not."""
@@ -3111,7 +3462,14 @@ def _parsed(
         target = None if command.target is None else command.target(named)
     except _Misread as misread:
         return _misused(str(misread), group=group)
-    return Parsed(run, arguments=arguments, options=named, target=target)
+    return Parsed(
+        run,
+        arguments=arguments,
+        options=named,
+        target=target,
+        flags=flags,
+        composes=command.composes,
+    )
 
 
 def dispatch(
@@ -3127,6 +3485,7 @@ def dispatch(
     dashboard: Callable[[DataScope], Path] = _no_dashboard,
     first_run: FirstRun | None = None,
     goals: GoalBook | None = None,
+    goal_reader: GoalReader | None = None,
     transcript_drop: TranscriptDrop | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
@@ -3157,6 +3516,7 @@ def dispatch(
             dashboard=dashboard,
             first_run=first_run,
             goals=goals,
+            goal_reader=goal_reader,
             transcript_drop=transcript_drop,
             serve=serve,
             unavailable=unavailable,
@@ -3185,6 +3545,7 @@ def _dispatch(
     dashboard: Callable[[DataScope], Path],
     first_run: FirstRun | None,
     goals: GoalBook | None,
+    goal_reader: GoalReader | None,
     transcript_drop: TranscriptDrop | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
@@ -3208,6 +3569,7 @@ def _dispatch(
         dashboard=dashboard,
         first_run=first_run,
         goals=goals,
+        goal_reader=goal_reader,
         transcript_drop=transcript_drop,
         serve=serve,
         unavailable=unavailable,
@@ -3215,6 +3577,7 @@ def _dispatch(
         unbuilt_connectors=unbuilt_connectors,
         arguments=parsed.arguments,
         options=parsed.options,
+        flags=parsed.flags,
         target=parsed.target,
         out=out,
         err=err,
@@ -3224,57 +3587,64 @@ def _dispatch(
 
 
 def _options(
-    words: Sequence[str], *, allowed: tuple[str, ...]
-) -> tuple[Mapping[str, str], str | None]:
-    """`--name value` and `--name=value` pairs, or the sentence refusing them.
+    words: Sequence[str], *, allowed: tuple[str, ...], flags: tuple[str, ...] = ()
+) -> tuple[Mapping[str, str], frozenset[str], str | None]:
+    """`--name value` and `--name=value` pairs and bare `--flag`s, or the sentence refusing them.
 
     Hand-rolled for `dispatch`'s own reason: `argparse` answers a parse error by
     raising `SystemExit` from inside the parse, which is the control flow an
     explicitly-passed `argv` exists to avoid.
 
     A refusal is returned rather than raised because it is a *usage* error, and
-    usage errors exit `2` while `Refusal` exits `3`. The four it can name are the
-    four ways a command line goes wrong here, and each says which word was the
-    problem: a bare positional, an option nobody declared, one given twice, and
-    one with nothing after it.
+    usage errors exit `2` while `Refusal` exits `3`. Each says which word was
+    the problem: a bare positional, an option nobody declared, one given twice,
+    one with nothing after it, and a flag given a value (story 4t).
     """
     parsed: dict[str, str] = {}
+    given: set[str] = set()
     remaining = list(words)
     while remaining:
         word = remaining.pop(0)
         if not word.startswith("--"):
-            return {}, f"takes options, not `{word}`"
+            return {}, frozenset(), f"takes options, not `{word}`"
         option, assigned, inline = word[2:].partition("=")
+        if option in flags:
+            if assigned:
+                return {}, frozenset(), f"was given `{word}`; `--{option}` takes no value"
+            if option in given:
+                return {}, frozenset(), f"was given `--{option}` twice"
+            given.add(option)
+            continue
         if option not in allowed:
-            spelled = ", ".join(f"--{name}" for name in allowed)
-            return {}, f"has no `--{option}` option; it takes {spelled}"
+            spelled = ", ".join(f"--{name}" for name in (*allowed, *flags))
+            return {}, frozenset(), f"has no `--{option}` option; it takes {spelled}"
         if option in parsed:
             # Not "last one wins": two values for one option is an operator who
             # believes something other than what would happen, and picking one
             # silently is how they go on believing it.
-            return {}, f"was given `--{option}` twice"
+            return {}, frozenset(), f"was given `--{option}` twice"
         if assigned:
             if not inline:
                 # `--scope=` is an operator who meant to type a value and did
                 # not. Passed through, it reaches the handler as `""` and is
                 # refused as "not a scope" — a message about a word nobody
                 # wrote.
-                return {}, f"was given `--{option}=` with an empty value"
+                return {}, frozenset(), f"was given `--{option}=` with an empty value"
             parsed[option] = inline
             continue
         if not remaining:
-            return {}, f"was given `--{option}` with no value after it"
+            return {}, frozenset(), f"was given `--{option}` with no value after it"
         if remaining[0].startswith("--"):
             # `--scope --bogus` is a missing value, not a scope named
             # `--bogus`. Swallowing the next option as a value produced a
             # refusal about the wrong word entirely, and hid the option the
             # operator forgot to fill in.
-            return {}, (
+            return {}, frozenset(), (
                 f"was given `--{option}` with no value after it — "
                 f"`{remaining[0]}` is another option"
             )
         parsed[option] = remaining.pop(0)
-    return parsed, None
+    return parsed, frozenset(given), None
 
 
 def _missing(command: Command, named: Mapping[str, str]) -> str | None:
@@ -3289,13 +3659,16 @@ def _missing(command: Command, named: Mapping[str, str]) -> str | None:
     return "needs " + ", ".join(f"`--{option} <{option}>`" for option in absent)
 
 
-def _split_options(words: Sequence[str]) -> tuple[tuple[str, ...], list[str]]:
-    """Positionals in order, and every `--name value` / `--name=value` word.
+def _split_options(
+    words: Sequence[str], *, flags: tuple[str, ...] = ()
+) -> tuple[tuple[str, ...], list[str]]:
+    """Positionals in order, and every `--name value` / `--name=value` / `--flag` word.
 
     A `--name` takes the word after it as its value unless that word is another
-    option, so `_options` still names a missing value as missing. A bare `--`
-    ends the options: every word after it is positional, so a file whose name
-    starts with `--` can still be named.
+    option, so `_options` still names a missing value as missing. A declared
+    flag never takes the word after it (story 4t): `goal delete --yes g_a`
+    reads `g_a` as the id. A bare `--` ends the options: every word after it is
+    positional, so a file whose name starts with `--` can still be named.
     """
     positional: list[str] = []
     options: list[str] = []
@@ -3309,6 +3682,8 @@ def _split_options(words: Sequence[str]) -> tuple[tuple[str, ...], list[str]]:
             positional.append(word)
             continue
         options.append(word)
+        if word[2:] in flags:
+            continue
         if "=" not in word and remaining and not remaining[0].startswith("--"):
             options.append(remaining.pop(0))
     return tuple(positional), options

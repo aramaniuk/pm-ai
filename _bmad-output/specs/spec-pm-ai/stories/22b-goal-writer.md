@@ -27,7 +27,7 @@ review_loop_iteration: 0
 
 **Ask First:** Nothing.
 
-**Never:** No parsing — `22a` owns it. No goal *deletion*: retiring a goal raises what happens to recommendations citing it, and nothing in wave 1 needs it. No alignment logic, no `resolve`, no `alignment_tag`. No model call of any kind.
+**Never:** No parsing — `22a` owns it. ~~No goal *deletion*~~ — lifted by `4t` (2026-10-17): `pm-ai goal delete` removes a goal and its detail lines, and the question this line raised — what happens to recommendations citing it — is answered there (nothing stored cites a goal yet; a later citation to a deleted id renders unresolved). No alignment logic, no `resolve`, no `alignment_tag`. No model call of any kind.
 
 ## I/O & Edge-Case Matrix
 
@@ -79,6 +79,7 @@ review_loop_iteration: 0
 
 - **2026-09-03, split from `22a` by decision.** `22a` was written as a parser only, and the human established that goals are not normally typed by hand: they are set in a 1:1 with pm-ai, or through the CLI or a Telegram voice command, with hand-editing retained as a possibility. That made `22a` a reader for a writable artifact — exactly what `4a` was for `config.toml` — so this slice is the `4g` of goals.
   Three things follow from the grammar decided that day (domain from the heading, `[id]` and `(horizon)` structured, title free text). The round trip must preserve **prose**, which is strictly harder than `4g`'s three typed keys. A hand-edited file's section order and comments must survive a set, which a regenerate-from-model renderer would silently normalise while passing a round-trip test. And the mutation needs `goal_set` on `SelfActionType`, for the same reason `meeting_amended` cannot be an `ObservedEventType`: `persist_events` would dedup the second revision of one goal away.
+- **2026-10-17, frozen block amended by `4t`** (goals listed, shown, updated and deleted). The Never line "No goal *deletion*" is lifted: `goal delete` removes a goal's line and its detail lines through this slice's writer conventions and records a `goal_deleted` entry; its reason is answered by `4t`'s references bullet.
 
 ## Verification
 
