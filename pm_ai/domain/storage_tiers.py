@@ -23,8 +23,9 @@ This module keeps what operates on that model rather than restating it:
   exclude, and a directory already in the index each make it disagree with git,
   the first two in the direction that publishes a transcript. See
   `pm_ai.domain.vcs`.
-- `restricted_mode` — the file mode a declared artifact lands at, derived from
-  the same `gitignored` declaration `requires_git_exclusion` reads.
+- `restricted_mode`, `private_dir_mode` and `private_top` — the file and folder
+  modes an artifact lands at, decided by where it lives (story 1s): both homes
+  whole, and a project's `memory/` and `transcripts/`.
 - `assert_is_collection` — whether an artifact has runtime members to list at
   all, which is the question `StoragePort.list_collection` asks first.
 - `EVENT_LOG`, `OPERATIONAL_DB` and `CAPTURES` — the three artifact keys that
@@ -44,6 +45,7 @@ from pathlib import Path
 from pm_ai.domain.identity import ScopeKind
 from pm_ai.domain.scope_model import (
     ADDRESS,
+    APPLICATION_DIRNAME,
     ARTIFACT_TIER,
     BACKUP_TARGETS,
     DIAGNOSTIC_ONLY,
@@ -54,6 +56,9 @@ from pm_ai.domain.scope_model import (
     REBUILD_TARGETS,
     RETENTION_MANAGED,
     OutsideTierModel,
+    PERSONAL_DIRNAME,
+    PROJECT_DIRNAME,
+    PROJECT_TREE,
     ScopeResolutionError,
     Tier,
 )
@@ -73,6 +78,7 @@ __all__ = [
     "OPERATIONAL_DB",
     "API_TOKEN",
     "OutsideTierModel",
+    "PRIVATE_DIR_MODE",
     "REBUILD_TARGETS",
     "RESTRICTED_FILE_MODE",
     "RETENTION_MANAGED",
@@ -86,6 +92,9 @@ __all__ = [
     "assert_reindex_safe",
     "gitignore_rule_for",
     "is_append_only",
+    "private_dir_mode",
+    "private_top",
+    "project_private_dirs",
     "requires_git_exclusion",
     "restricted_mode",
 ]
@@ -194,46 +203,102 @@ def is_append_only(scope_kind: ScopeKind, artifact: str) -> bool:
 # ── What mode an artifact's file lands at ────────────────────────────────────
 
 RESTRICTED_FILE_MODE = 0o600
-"""Owner-only. The mode a declared-restricted artifact's file is created at.
+"""Owner-only. The mode every private file is created at (AD-6, story 1s).
 
 The same number `pm_ai.storage.crypto` spells as `ENCRYPTED_FILE_MODE`, and now
 the same object — that constant is an alias of this one. A cipher's file mode
-and a plaintext credential neighbourhood's file mode are one decision, and two
-literals are how one decision becomes two that can disagree.
+and a plaintext private file's mode are one decision, and two literals are how
+one decision becomes two that can disagree.
 """
+
+PRIVATE_DIR_MODE = 0o700
+"""Owner-only. The mode every private folder is created at (AD-6, story 1s).
+
+`pm_ai.storage.crypto.ENCLAVE_DIR_MODE` is an alias of this one, for the same
+reason `ENCRYPTED_FILE_MODE` aliases `RESTRICTED_FILE_MODE`.
+"""
+
+# The scopes that are private whole: `~/.pm-ai` (the team-member scope inside
+# it) and `~/.manager-ai`. A project is the one scope split in two.
+_PRIVATE_SCOPES = frozenset({ScopeKind.APPLICATION, ScopeKind.PEOPLE, ScopeKind.PERSONAL})
+
+
+def _is_private(scope_kind: ScopeKind, artifact: str) -> bool:
+    if scope_kind in _PRIVATE_SCOPES:
+        return True
+    # In a project, the machine-local half — `memory/` and `transcripts/` and
+    # everything inside them — is exactly what the tree declares gitignored.
+    # The axis is still *where the file lives*; the project tree happens to
+    # draw that line where it draws the exclusion line.
+    return _qualified(scope_kind, artifact) in GITIGNORED[scope_kind]
 
 
 def restricted_mode(scope_kind: ScopeKind, artifact: str) -> int | None:
     """The mode this artifact's file must be created at, or `None` for the umask.
 
-    Derived from the trees, beside the tier and exclusion answers, rather than
-    from a second table of restricted artifacts: the axis is `gitignored`. An
-    artifact declared "must never enter version control" (AD-23, AD-38, AD-43)
-    is one whose content is this machine's own business, and `connectors/` is
-    the case that forced the question. It is unencrypted by design — what it
-    needs is integrity, not confidentiality, and a cipher over executed modules
-    would have given neither — so `_replace` passed no mode for it and one file
-    per connector instance landed at the umask, typically 0644, next to the
-    credential store.
+    **The axis is where the file lives** (story 1s, AD-6), not its `gitignored`
+    declaration. Everything in the application, team-member and personal scopes
+    is private — `0600` — and so is a project's machine-local half (`memory/`
+    and `transcripts/`). A project's shared half (`rules/`, `skills/`) answers
+    `None`: it travels through the repository, and `0600` on a file git checks
+    out for teammates would only break a shared checkout.
 
-    Reads `GITIGNORED` directly rather than calling `requires_git_exclusion`,
-    which reads the same set: that function answers "must the writer ask git
-    first", this one answers "who may read the file", and collapsing them would
-    make either one's rule impossible to change without changing the other's.
+    Why `gitignored` no longer decides it: the two answer different questions.
+    `gitignored` says whether a write must ask git first, and the personal
+    scope answers "no" because the person may keep it as their own private
+    repository — which is exactly why its dashboard landed at `0644` inside a
+    `0755` home (field test, 2026-10-15). Who may read a file depends on whose
+    home it is in. `requires_git_exclusion` keeps its own job unchanged.
 
-    What this does NOT carry is the *enclave*. 0700 on every parent directory is
-    right for the encrypted set, where a listable directory publishes the names,
-    sizes and mtimes the enclave exists to hide, and wrong here: tightening
-    `~/.pm-ai` as a side effect of writing one connector file is a change nobody
-    asked for and nobody would notice. The caller applies the two separately.
-
-    `None` rather than `0o644`: the umask is the operator's answer for an
-    artifact that never asked for one, and naming a permissive mode here would
-    override it everywhere.
+    `None` rather than `0o644`: the umask is the operator's answer for a file
+    the team shares, and naming a permissive mode here would override it.
     """
-    if _qualified(scope_kind, artifact) in GITIGNORED[scope_kind]:
-        return RESTRICTED_FILE_MODE
+    return RESTRICTED_FILE_MODE if _is_private(scope_kind, artifact) else None
+
+
+def private_dir_mode(scope_kind: ScopeKind, artifact: str) -> int | None:
+    """The folder counterpart of `restricted_mode`: `0700` for the same set, else `None`."""
+    return PRIVATE_DIR_MODE if _is_private(scope_kind, artifact) else None
+
+
+# The top-level project folders that are machine-local, derived from the tree
+# rather than spelled: `memory/` and `transcripts/` today.
+_PROJECT_PRIVATE_DIRS = frozenset(
+    node.name
+    for node in PROJECT_TREE
+    if node.is_dir and node.key in GITIGNORED[ScopeKind.PROJECT]
+)
+
+
+def private_top(path: Path) -> Path | None:
+    """The outermost private folder `path` lies in (or is), or `None` if it is shared.
+
+    Read off the path's own components, as `pm_ai.storage.crypto.is_encrypted`
+    reads its scope: the nearest scope directory name above `path` decides. A
+    `.pm-ai` or `.manager-ai` answers itself — the home is private whole, the
+    root included. A `.project-ai` answers `.project-ai/memory` or
+    `.project-ai/transcripts` when `path` is inside one of them, and `None` for
+    its shared parts and for `.project-ai/` itself. Nearest wins, so a project
+    repository kept inside `~/.manager-ai` is a project, not the home.
+
+    What a writer creates between this folder and `path` is made `0700`; what
+    it creates above it — `.project-ai/`, a repository — keeps the umask.
+    """
+    parts = path.parts
+    for index in range(len(parts) - 1, -1, -1):
+        name = parts[index]
+        if name == PROJECT_DIRNAME:
+            if index + 1 < len(parts) and parts[index + 1] in _PROJECT_PRIVATE_DIRS:
+                return Path(*parts[: index + 2])
+            return None
+        if name in (APPLICATION_DIRNAME, PERSONAL_DIRNAME):
+            return Path(*parts[: index + 1])
     return None
+
+
+def project_private_dirs() -> tuple[str, ...]:
+    """The project's machine-local folders, as artifact keys (`memory/`, `transcripts/`)."""
+    return tuple(sorted(f"{name}/" for name in _PROJECT_PRIVATE_DIRS))
 
 
 # ── Which artifacts have runtime members to enumerate ────────────────────────

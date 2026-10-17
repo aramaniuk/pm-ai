@@ -36,6 +36,13 @@ second daemon reading another `daemon_port` binds its port and is refused
 there, naming the file, before its writer thread exists or any timer is
 attached. It is not an AD-5 claim, and no command takes it.
 
+Story 1s put the start-up mode walk right after it, before the writer thread
+starts: both homes and every loaded project's `memory/` and `transcripts/`
+are narrowed to owner-only (the old mode minus the group and other bits), each
+change and refusal is a line in `daemon.log`, and one console line counts them.
+It is not a write in AD-5's sense, is bounded by a time budget, and never
+refuses the start.
+
 ## One loop, one writer thread, one I/O pool (AD-5, AD-19, story 4r)
 
 The daemon composed once, before this module was reached. The event loop only
@@ -85,6 +92,7 @@ import traceback
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from types import FrameType
 from typing import Any
 
@@ -100,10 +108,16 @@ from pm_ai.app.ticks import HarvestTimers, RenderTimers
 from pm_ai.app.wiring import Daemon
 from pm_ai.domain.api_token import TOKEN_BYTES, ApiTokenRefused
 from pm_ai.domain.health import Report
+from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.scope_model import ScopeResolutionError
+from pm_ai.domain.storage_tiers import project_private_dirs
 from pm_ai.platform.claims import LifetimeLock, LifetimeLockHeld, hold_for_life
+from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import DaemonRefused, KeychainUnavailable
 from pm_ai.storage.crypto import LazyKeyCrypto
 from pm_ai.storage.service import (
+    ModeCalls,
+    ModeWalk,
     OperationalStoreStuck,
     OperationalStoreUnavailable,
     SchemaVersionChanged,
@@ -210,6 +224,10 @@ def _serve(
         listener.close()
         raise
     try:
+        # Then the start-up mode walk (story 1s, AD-5, AD-6): after the lock,
+        # before the writer thread exists or any request is served. Never a
+        # refusal — whatever it cannot change is logged and the start goes on.
+        tighten_private_modes(daemon, announce=announce or _announce)
         return _serve_locked(
             daemon, uvicorn, port, listener,
             probes=probes, announce=announce, diagnose=diagnose, bounds=bounds,
@@ -218,6 +236,158 @@ def _serve(
     finally:
         # Released when the daemon is done, which is when the process ends.
         lifetime.release()
+
+
+MODE_WALK_BUDGET_SECONDS = 10.0
+"""The start-up mode walk's time budget (story 1s).
+
+Measured 2026-10-17 by `tests/architecture/test_private_modes.py`
+(`test_the_walks_cost_on_a_generated_home`): 5,000 files in 50 folders took
+0.32 s to tighten and 0.22 s to walk once already private, on the development
+Mac (macOS 26.6, 12 cores). Ten seconds is therefore about thirty times that
+home — room for a person's own repository kept in `~/.manager-ai`. On overrun
+the walk stops, logs where, and the next start walks again.
+"""
+
+
+def _private_roots(daemon: Daemon) -> tuple[list[tuple[str, Path]], list[Path]]:
+    """Every root the walk covers, labelled, and the repositories the homes skip.
+
+    The two homes — `application` (the team-member scope inside it) and
+    `personal` — and each loaded project's `memory/` and `transcripts/`,
+    labelled by its project id. A registered repository inside a home (the
+    home root itself included) is skipped by the home's walk, and its private
+    folders are roots of their own whether or not the project is loaded, since
+    the home's walk would otherwise have covered them. A registered repository
+    outside the homes is walked only when it is loaded.
+    """
+    paths = daemon.storage.paths
+    if not isinstance(paths, ScopePaths):
+        return [], []
+    roots: list[tuple[str, Path]] = [
+        ("application", paths.application_root),
+        ("personal", paths.personal_root),
+    ]
+    homes = (paths.application_root, paths.personal_root)
+    repositories: list[Path] = list(paths.project_roots.values())
+    inside_a_home = [
+        project
+        for project, repository in paths.project_roots.items()
+        if any(_within(repository, home) for home in homes)
+    ]
+    walked: set[str] = set()
+    for project in (*daemon.watched, *inside_a_home):
+        if project in walked:
+            continue
+        walked.add(project)
+        scope = DataScope(ScopeKind.PROJECT, project)
+        try:
+            repositories.append(paths.repository(project))
+            for artifact in project_private_dirs():
+                roots.append((project, paths.resolve(scope, artifact)))
+        except ScopeResolutionError:
+            continue
+    return roots, repositories
+
+
+def _within(path: Path, home: Path) -> bool:
+    """Whether `path` is `home` or inside it, as written or once links are resolved."""
+    if path == home or path.is_relative_to(home):
+        return True
+    try:
+        real, real_home = path.resolve(), home.resolve()
+    except OSError:
+        return False
+    return real == real_home or real.is_relative_to(real_home)
+
+
+def _log_path(daemon: Daemon) -> str:
+    """Where `daemon.log` is, with `~` for the home, for the console line."""
+    paths = daemon.storage.paths
+    root = paths.application_root if isinstance(paths, ScopePaths) else None
+    if root is None:
+        return f"~/.pm-ai/logs/{REQUEST_LOG}"
+    target = root / "logs" / REQUEST_LOG
+    home = Path.home()
+    if target.is_relative_to(home):
+        return f"~/{target.relative_to(home).as_posix()}"
+    return str(target)
+
+
+def tighten_private_modes(
+    daemon: Daemon,
+    *,
+    announce: Callable[[str], None],
+    budget: float = MODE_WALK_BUDGET_SECONDS,
+    calls: ModeCalls | None = None,
+) -> ModeWalk:
+    """Tighten what already exists in every private root; log it; one console line.
+
+    Story 1s (AD-6): each mode becomes the old mode minus the group and other
+    bits. One `daemon.log` line per path changed, naming its root, the path
+    relative to it, and the old and new mode; one per path refused, with the
+    reason. Then one line on the console when anything was changed or refused.
+    Raises nothing: the daemon starts whatever this finds.
+    """
+    report = ModeWalk()
+    clock = (calls or ModeCalls()).clock
+    deadline = clock() + budget
+    unreached: list[str] = []
+    try:
+        roots, repositories = _private_roots(daemon)
+    except Exception:  # noqa: BLE001 — tightening never stops the daemon
+        _log.warning("the start-up mode walk could not list its roots", exc_info=True)
+        roots, repositories = [], []
+    for label, root in roots:
+        if report.overrun is not None:
+            unreached.append(f"{label} {root}")
+            continue
+        try:
+            daemon.storage.tighten_modes(
+                root,
+                label=label,
+                report=report,
+                deadline=deadline,
+                skip=repositories if label in ("application", "personal") else (),
+                calls=calls,
+            )
+        except Exception:  # noqa: BLE001 — one root failing never stops the others
+            _log.warning(
+                "the start-up mode walk of %s (%s) stopped; the other roots are "
+                "still walked", label, root, exc_info=True,
+            )
+    for change in report.tightened:
+        _log.info(
+            "mode tightened: %s %s %04o -> %04o",
+            change.root, change.path, change.old, change.new,
+        )
+    for refusal in report.refused:
+        _log.warning("mode not tightened: %s %s: %s", refusal.root, refusal.path, refusal.reason)
+    for skipped in report.skipped:
+        _log.warning("mode walk: %s", skipped)
+    if report.overrun is not None:
+        _log.warning(
+            "the mode walk stopped at its %ss budget at %s, skipping the rest of "
+            "that root%s; what it did not reach is walked at the next start",
+            f"{budget:g}", report.overrun,
+            f" and {', '.join(unreached)}" if unreached else "",
+        )
+    if report.tightened or report.refused or report.overrun is not None:
+        stopped = (
+            "; it stopped at its time budget and the next start walks the rest"
+            if report.overrun is not None
+            else ""
+        )
+        announce(
+            f"pm-ai: made {_count(report.folders, 'folder')} and "
+            f"{_count(report.files, 'file')} owner-only; {len(report.refused)} "
+            f"could not be{stopped}. {_log_path(daemon)} names each."
+        )
+    return report
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" + ("" if number == 1 else "s")
 
 
 def take_lifetime_lock(daemon: Daemon) -> LifetimeLock:

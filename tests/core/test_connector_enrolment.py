@@ -143,7 +143,11 @@ def test_the_configuration_holds_no_credential_and_lands_at_600(storage, tmp_pat
 
 
 def test_the_application_root_mode_is_untouched(storage, tmp_path):
-    """A restricted file must not drag its parents into an enclave (8f's B13)."""
+    """A write never changes an existing folder's mode (8f's B13).
+
+    Since story 1s the daemon's start-up walk does tighten an existing
+    `~/.pm-ai`; a write still leaves every folder it did not create alone.
+    """
     root = tmp_path / ".pm-ai"
     root.mkdir(parents=True, exist_ok=True)
     before = stat.S_IMODE(root.stat().st_mode)
