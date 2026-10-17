@@ -28,9 +28,11 @@ import pytest
 from pm_ai.app import entry, wiring
 from pm_ai.app.wiring import GraphEnrolment, bootstrap, build
 from pm_ai.connectors.graph import MAX_SETTING_MINUTES, GraphConnector
+from pm_ai.connectors.graph import auth as graph_auth
 from pm_ai.connectors.graph.auth import (
     GRAPH_RESOURCE_SCOPES,
     GraphDeviceCodeAuth,
+    RecordingHttpClient,
     SealedCredential,
 )
 from pm_ai.core.connector_enrolment import MalformedSettings, stored_credentials
@@ -587,16 +589,43 @@ def test_a_failure_quoting_the_sign_in_token_does_not_print_it(
     _nothing_saved(home)
 
 
+EPOCH_DATE = "Thu, 01 Jan 1970 00:00:00 GMT"
+
+
+def _answering_from_the_epoch(monkeypatch):
+    """Make every token answer read as sent at the epoch (story 8r).
+
+    Skew is read off the token endpoint answer's `Date`, which the real client
+    records into the adapter's `clock`. A fake MSAL has no HTTP client, so it
+    records there itself: this keeps every adapter built, and returns a
+    function the fake calls during its answer.
+    """
+    adapters: list[GraphDeviceCodeAuth] = []
+    built = GraphDeviceCodeAuth.__post_init__
+
+    def capturing(self):
+        built(self)
+        adapters.append(self)
+
+    monkeypatch.setattr(GraphDeviceCodeAuth, "__post_init__", capturing)
+
+    def answer() -> None:
+        for adapter in adapters:
+            adapter.clock.record({"Date": EPOCH_DATE})
+
+    return answer
+
+
 def test_a_health_check_that_warns_saves_and_says_so(machine, monkeypatch, capsys):
     """A working credential on a machine whose clock is far from Microsoft's."""
     home, keychain = machine
+    from_the_epoch = _answering_from_the_epoch(monkeypatch)
 
     class Skewed(Microsoft):
         def acquire_token_by_refresh_token(self, refresh_token, scopes):
-            answer = super().acquire_token_by_refresh_token(refresh_token, scopes)
-            # Minted at the epoch, so this machine reads as decades ahead.
-            answer["id_token_claims"] = {**ACCOUNT_CLAIMS, "iat": 0}
-            return answer
+            # Answered at the epoch, so this machine reads as decades ahead.
+            from_the_epoch()
+            return super().acquire_token_by_refresh_token(refresh_token, scopes)
 
     _microsoft(monkeypatch, Skewed())
 
@@ -1027,6 +1056,44 @@ def test_connector_check_lists_the_added_connector_as_healthy(
     out = capsys.readouterr().out
     (line,) = [line for line in out.splitlines() if f"] {INSTANCE}:" in line]
     assert f"[{Health.OK.value:>7}]" in line, out
+
+
+def test_a_connector_built_with_no_injected_factory_uses_the_recording_client(
+    machine, monkeypatch, capsys
+):
+    """Story 8r: production passes no factory, and must still measure the clock.
+
+    The next start's connector — what `connector check` and `doctor` probe —
+    is built by wiring without a factory, and MSAL is replaced at its import
+    so nothing reaches the network. It must hand MSAL the recording client,
+    bound to that adapter's own clock.
+    """
+    _, keychain = machine
+    _microsoft(monkeypatch, Microsoft())
+    assert _add(monkeypatch, VALID)[0] == EXIT_OK
+
+    built: list[dict] = []
+
+    class Msal:
+        @staticmethod
+        def PublicClientApplication(client_id, *, authority, http_client):
+            built.append({"client_id": client_id, "http_client": http_client})
+            return Microsoft()
+
+    monkeypatch.setattr(graph_auth, "require_msal", lambda: Msal)
+
+    composed = entry._compose(keychain, APPLICATION)
+    assert composed.daemon is not None
+    connector = composed.daemon.connectors.get(INSTANCE)
+    assert isinstance(connector, GraphConnector), capsys.readouterr().err
+    connector.auth._application()
+
+    (made,) = built
+    assert made["client_id"] == CLIENT_ID
+    client = made["http_client"]
+    assert isinstance(client, RecordingHttpClient)
+    assert client.clock is connector.auth.clock
+    assert client.session.trust_env is False
 
 
 def test_a_hand_edited_tenant_that_is_not_one_builds_no_connector(

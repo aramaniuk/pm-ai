@@ -16,13 +16,17 @@ against msal 1.38.0 rather than remembered: `initiate_device_flow` returns
 
 from __future__ import annotations
 
+import dataclasses
 import re
+import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
 import pytest
 
+from pm_ai.connectors.graph import auth as auth_module
 from pm_ai.connectors.graph.auth import (
     CLOCK_SKEW_TOLERANCE,
     EXPIRY_MARGIN,
@@ -37,8 +41,11 @@ from pm_ai.connectors.graph.auth import (
     GraphUnreachable,
     InMemoryRefreshTokenStore,
     InteractionRequired,
+    RecordingHttpClient,
     SealedCredential,
+    TokenEndpointClock,
     _WITHHELD,
+    _msal_session,
 )
 from pm_ai.domain.health import Health
 
@@ -724,21 +731,96 @@ def test_expiry_is_judged_with_a_margin_and_from_the_relative_lifetime():
     )
 
 
-def test_a_skewed_local_clock_is_reported_as_its_own_state():
-    """Not stale, not unreachable — the remedy is fixing the clock.
+# ── The clock check (story 8r) ───────────────────────────────────────────────
+#
+# Skew is read off the token endpoint answer's HTTP `Date`, paired with this
+# machine's clock when the answer arrived. The fakes below stand in for the
+# recording HTTP client: during the acquisition, they record a `Date` into the
+# adapter's own `clock`, exactly where the real client writes it, and arrival is
+# stamped with the adapter's `now`.
 
-    Measured against the id token's `iat`, which is what the provider's clock
-    said when it minted this token. An unmeasured skew is reported as nothing at
-    all rather than as zero.
+_NO_REQUEST = object()
+"""A scripted answer MSAL served without a request: nothing is recorded."""
+
+
+def _http_date(moment: datetime) -> str:
+    return format_datetime(moment, usegmt=True)
+
+
+class DatedMsal(FakeMsal):
+    """`FakeMsal` whose token-endpoint answers carry a `Date`.
+
+    `dates` is one entry per refresh, the last repeating: an instant (sent as
+    an HTTP date), a raw header string, `None` for an answer without the header,
+    or `_NO_REQUEST`. `polls` is the device flow's answers on the token
+    endpoint, in order, the last one carrying the token.
     """
-    adrift = NOW + CLOCK_SKEW_TOLERANCE + timedelta(hours=2)
-    client = FakeMsal(
+
+    def __init__(self, *, dates: list | None = None, polls: list | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self._dates = list(dates or [NOW])
+        self._polls = list(polls or [NOW])
+        self.clock = None
+
+    def _answer(self, date) -> None:
+        if date is _NO_REQUEST:
+            return
+        if date is None:
+            self.clock.record({})
+        else:
+            self.clock.record({"Date": _http_date(date) if isinstance(date, datetime) else date})
+
+    def acquire_token_by_refresh_token(self, refresh_token, scopes):
+        date = self._dates.pop(0) if len(self._dates) > 1 else self._dates[0]
+        self._answer(date)
+        return super().acquire_token_by_refresh_token(refresh_token, scopes)
+
+    def acquire_token_by_device_flow(self, flow, *args, **kwargs):
+        for date in self._polls:
+            self._answer(date)
+        return super().acquire_token_by_device_flow(flow, *args, **kwargs)
+
+
+def _dated(client: DatedMsal, *, store=None, **kwargs) -> GraphDeviceCodeAuth:
+    """The adapter, with `client` recording into its clock."""
+    if store is None:
+        auth = _auth(client, credential=_enrolled(), **kwargs)
+    else:
+        auth = GraphDeviceCodeAuth(
+            client_id=CLIENT_ID,
+            store=store,
+            client_factory=lambda client_id, authority: client,
+            now=kwargs.get("now") or (lambda: NOW),
+        )
+    client.clock = auth.clock
+    return auth
+
+
+def test_a_healthy_clock_reads_ok_although_iat_is_backdated():
+    """The field test's row: `iat` five minutes back, the clock synchronised.
+
+    Read off `iat`, every sign-in was "5:00.5 ahead" and the Graph line was
+    always `[warning]`. Read off the answer's `Date`, the skew is the half
+    second of the header's resolution.
+    """
+    backdated = int((NOW - timedelta(minutes=5)).timestamp())
+    client = DatedMsal(
+        dates=[NOW],
         refresh_results=[
             _token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id",
-                                    "iat": int(NOW.timestamp())})
-        ]
+                                    "iat": backdated})
+        ],
     )
-    auth = _auth(client, credential=_enrolled(), now=lambda: adrift)
+    auth = _dated(client)
+
+    assert auth.check_health().health is Health.OK
+    assert auth._skew is not None and abs(auth._skew) < timedelta(seconds=1)
+
+
+def test_a_skewed_local_clock_is_reported_as_its_own_state():
+    """Not stale, not unreachable — the remedy is fixing the clock."""
+    adrift = NOW + CLOCK_SKEW_TOLERANCE + timedelta(hours=2)
+    auth = _dated(DatedMsal(dates=[NOW]), now=lambda: adrift)
 
     probe = auth.check_health()
 
@@ -748,75 +830,124 @@ def test_a_skewed_local_clock_is_reported_as_its_own_state():
 
 
 def test_a_clock_ahead_of_the_provider_is_reported_in_readable_units():
-    """`abs()` in the sentence, not only in the comparison.
+    """`abs()` in the sentence, and whole seconds.
 
-    A machine *behind* the provider gives a positive `timedelta` and reads
-    fine; one ahead gives a negative, which `str()` renders as "-1 day,
-    21:55:00" — an operator has to do modular arithmetic to learn their clock is
-    two hours and five minutes fast.
+    One ahead gives a negative `timedelta` the other way round, which `str()`
+    renders as "-1 day, 21:55:00"; and against the `Date`'s midpoint the
+    reading is 2:04:59.5, which is noise to an operator.
     """
     ahead = NOW + timedelta(hours=2, minutes=5)
-    client = FakeMsal(
-        refresh_results=[
-            _token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id",
-                                    "iat": int(NOW.timestamp())})
-        ]
-    )
-    auth = _auth(client, credential=_enrolled(), now=lambda: ahead)
+    auth = _dated(DatedMsal(dates=[NOW]), now=lambda: ahead)
 
     probe = auth.check_health()
 
     assert probe.health is Health.WARNING
     assert "-1 day" not in probe.detail, "a negative timedelta reached the operator"
-    assert "2:05:00" in probe.detail
-    assert "ahead of" in probe.detail
+    assert "2:05:00 ahead of the provider's" in probe.detail
 
 
-def test_a_healthy_credential_with_no_measurable_skew_reports_ok():
-    """No `iat` at all — the genuinely *unmeasured* case.
+def test_a_clock_behind_the_provider_is_reported_as_behind():
+    behind = NOW - timedelta(minutes=10)
+    auth = _dated(DatedMsal(dates=[NOW]), now=lambda: behind)
 
-    This row supplied `iat == NOW` and called it unmeasurable, which is a
-    measured skew of exactly zero: the opposite state, and one that passes
-    whether or not the adapter can tell "no reading" from "a reading of zero".
-    """
-    client = FakeMsal(
-        refresh_results=[_token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id"})]
-    )
-    auth = _auth(client, credential=_enrolled())
+    probe = auth.check_health()
+
+    assert probe.health is Health.WARNING
+    assert "behind the provider's" in probe.detail
+    assert "Fix the clock" in probe.remediation
+
+
+def test_just_inside_the_tolerance_against_the_date_midpoint_is_ok():
+    """5:00.4 after `Date` is 4:59.9 after its midpoint: inside."""
+    arrived = NOW + timedelta(minutes=5, milliseconds=400)
+    auth = _dated(DatedMsal(dates=[NOW]), now=lambda: arrived)
 
     assert auth.check_health().health is Health.OK
+    assert auth._skew == timedelta(minutes=4, seconds=59, milliseconds=900)
+
+
+def test_just_outside_the_tolerance_warns():
+    arrived = NOW + timedelta(minutes=5, seconds=1)
+    auth = _dated(DatedMsal(dates=[NOW]), now=lambda: arrived)
+
+    assert auth.check_health().health is Health.WARNING
+
+
+def test_a_warning_never_prints_a_drift_equal_to_the_tolerance():
+    """Rounded up: 5:00.3 warns, so it must not read as "0:05:00"."""
+    arrived = NOW + timedelta(minutes=5, milliseconds=800)
+    auth = _dated(DatedMsal(dates=[NOW]), now=lambda: arrived)
+
+    probe = auth.check_health()
+
+    assert auth._skew == timedelta(minutes=5, milliseconds=300)
+    assert probe.health is Health.WARNING
+    assert "0:05:01 ahead of the provider's" in probe.detail
+
+
+@pytest.mark.parametrize(
+    "date",
+    [
+        pytest.param(None, id="no Date header"),
+        pytest.param("yesterday", id="unparseable"),
+        pytest.param("Sun, 06 Sep 2026 09:00:00", id="no timezone"),
+        pytest.param("Sun, 06 Sep 2026 09:00:00 -0000", id="-0000, an unknown zone"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_an_answer_without_a_usable_date_is_unmeasured_and_not_a_crash(date):
+    """Unmeasured stays unmeasured — never zero, never an exception."""
+    adrift = NOW + timedelta(hours=3)
+    auth = _dated(DatedMsal(dates=[date]), now=lambda: adrift)
+
+    assert auth.access_token() == ACCESS
     assert auth._skew is None, "an unmeasured skew was recorded as a measurement"
+    assert auth.check_health().health is Health.OK
 
 
-def test_a_measured_skew_inside_the_tolerance_still_reports_ok():
-    client = FakeMsal(
-        refresh_results=[
-            _token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id",
-                                    "iat": int(NOW.timestamp())})
-        ]
-    )
-    auth = _auth(client, credential=_enrolled())
+def test_a_date_with_a_numeric_offset_is_read_in_that_offset():
+    """`+0100` is an hour ahead of UTC: 10:00 there is `NOW`."""
+    auth = _dated(DatedMsal(dates=["Sun, 06 Sep 2026 10:00:00 +0100"]))
 
     assert auth.check_health().health is Health.OK
-    assert auth._skew == timedelta(0)
+    assert auth._skew == timedelta(milliseconds=-500)
+
+
+def test_a_token_from_the_cache_is_unmeasured_and_not_the_previous_reading():
+    """MSAL answered from its cache: no request, so no reading.
+
+    The previous acquisition's reading — two hours adrift — must not be
+    adopted with a token it did not come with.
+    """
+    adrift = NOW + timedelta(hours=2)
+    client = DatedMsal(dates=[NOW], accounts=[{"home_account_id": ACCOUNT}])
+    auth = _dated(client, now=lambda: adrift)
+    assert auth.check_health().health is Health.WARNING
+
+    client._silent_result = _token()  # served by MSAL without a request
+    assert auth.check_health().health is Health.OK
+    assert auth._skew is None
+
+
+def test_a_redemption_that_made_no_request_is_unmeasured():
+    """The `_call` path: no cached account, so the refresh token is redeemed.
+
+    MSAL answered it without a request — its throttle replaying an answer — so
+    the earlier acquisition's reading on this thread, two hours off, must not
+    be adopted with it.
+    """
+    adrift = NOW + timedelta(hours=2)
+    auth = _dated(DatedMsal(dates=[NOW, _NO_REQUEST]), now=lambda: adrift)
+
+    assert auth.check_health().health is Health.WARNING
+    assert auth.check_health().health is Health.OK
+    assert auth._skew is None
 
 
 def test_a_fixed_clock_clears_the_skew_warning():
-    """The reading is replaced on every acquisition, including with "no reading".
-
-    Assigned only when an `iat` was present, a `WARNING` measured once outlived
-    the repair: every later response without an `iat` left the stale reading in
-    place, so an operator who fixed their clock kept being told to fix it.
-    """
+    """The reading is replaced on every adoption."""
     adrift = NOW + CLOCK_SKEW_TOLERANCE + timedelta(hours=2)
-    claims = {"oid": "an-object-id", "tid": "a-tenant-id"}
-    client = FakeMsal(
-        refresh_results=[
-            _token(id_token_claims={**claims, "iat": int(NOW.timestamp())}),
-            _token(id_token_claims=claims),
-        ]
-    )
-    auth = _auth(client, credential=_enrolled(), now=lambda: adrift)
+    auth = _dated(DatedMsal(dates=[NOW, adrift]), now=lambda: adrift)
 
     assert auth.check_health().health is Health.WARNING
     assert auth.check_health().health is Health.OK, (
@@ -824,24 +955,239 @@ def test_a_fixed_clock_clears_the_skew_warning():
     )
 
 
-def test_an_uninterpretable_issued_at_is_an_unmeasured_skew_and_not_a_crash():
-    """An `iat` no calendar can hold used to escape as `OverflowError`/`OSError`.
+@pytest.mark.parametrize(
+    ("polls", "skew"),
+    [
+        pytest.param(
+            [NOW - timedelta(hours=3), NOW - timedelta(hours=3), NOW],
+            timedelta(milliseconds=-500),
+            id="pending answers adrift, the token's synchronised",
+        ),
+        pytest.param(
+            [NOW, NOW, NOW - timedelta(hours=2)],
+            timedelta(hours=2, milliseconds=-500),
+            id="pending answers synchronised, the token's adrift",
+        ),
+    ],
+)
+def test_a_device_code_sign_in_reads_the_answer_that_carried_the_token(polls, skew):
+    """Polling answers on the token endpoint too; only the last carried the token.
 
-    Neither is a `GraphAuthError`, so it went past every caller's `except` and
-    reached `check_health`'s catch-all as "a bug in pm-ai" — for a provider
-    response with one implausible field in it.
+    Asserted on the adopted skew rather than through `check_health`: the probe
+    forces a refresh, which would measure the refresh's answer, not the
+    sign-in's.
     """
-    client = FakeMsal(
-        refresh_results=[
-            _token(id_token_claims={"oid": "an-object-id", "tid": "a-tenant-id",
-                                    "iat": 1e30})
-        ]
-    )
+    client = DatedMsal(polls=polls)
+    auth = _auth(client)
+    client.clock = auth.clock
+
+    auth.sign_in(lambda message: None)
+
+    assert auth._skew == skew
+
+
+def test_two_acquisitions_at_once_each_adopt_their_own_reading():
+    """A health probe and a harvest refresh on one auth object, on two threads.
+
+    Both answers are recorded before either is adopted — the barrier holds each
+    acquisition until the other's answer is in — so a shared slot would hand
+    one of them the other's `Date`, an hour off.
+    """
+    dates = {"probe": NOW, "harvest": NOW - timedelta(hours=1)}
+    both_answered = threading.Barrier(2, timeout=5)
+
+    class Concurrent(FakeMsal):
+        clock = None
+
+        def acquire_token_by_refresh_token(self, refresh_token, scopes):
+            name = threading.current_thread().name
+            self.clock.record({"Date": _http_date(dates[name])})
+            both_answered.wait()
+            return super().acquire_token_by_refresh_token(refresh_token, scopes)
+
+    client = Concurrent()
     auth = _auth(client, credential=_enrolled())
+    client.clock = auth.clock
+    adopted: dict[str, object] = {}
+    measured = auth._measured_skew
+
+    def measuring():
+        skew = measured()
+        adopted[threading.current_thread().name] = skew
+        return skew
+
+    auth._measured_skew = measuring
+    failures: list[BaseException] = []
+
+    def acquire():
+        try:
+            auth.access_token(force_refresh=True)
+        except BaseException as failed:  # noqa: BLE001 — reported below
+            failures.append(failed)
+
+    threads = [threading.Thread(target=acquire, name=name) for name in dates]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads), "an acquisition hung"
+    assert failures == []
+    assert adopted == {
+        "probe": timedelta(milliseconds=-500),
+        "harvest": timedelta(hours=1, milliseconds=-500),
+    }
+
+
+def test_a_rotated_credential_adopts_the_reading_of_the_call_whose_token_is_adopted():
+    """One refresh calls MSAL twice; the first answer, refused, was two hours off."""
+    client = DatedMsal(
+        dates=[NOW - timedelta(hours=2), NOW],
+        refresh_results=[
+            {"error": "invalid_grant", "error_description": "already redeemed"},
+            _token(refresh_token="a-third-refresh-token"),
+        ],
+    )
+    store = RotatingStore(before=_enrolled(), after=_enrolled("the-winners-token"))
+    auth = _dated(client, store=store)
 
     assert auth.access_token() == ACCESS
-    assert auth._skew is None
-    assert auth.check_health().health is Health.OK
+    assert len(client.refreshed_with) == 2
+    assert auth._skew == timedelta(milliseconds=-500)
+
+
+# ── The recording HTTP client (story 8r) ─────────────────────────────────────
+
+
+class StubTransport:
+    """A `requests` transport adapter that answers from memory. No socket."""
+
+    def __init__(self, date: str | None = "Sun, 06 Sep 2026 09:00:00 GMT") -> None:
+        self.date = date
+        self.sent: list[tuple[str, str]] = []
+
+    def send(self, request, **kwargs):
+        import requests
+
+        self.sent.append((request.method, request.url))
+        response = requests.Response()
+        response.status_code = 200
+        response.url = request.url
+        response.request = request
+        response._content = b"{}"
+        if self.date is not None:
+            response.headers["Date"] = self.date
+        return response
+
+    def close(self):
+        pass
+
+
+def _recording(transport: StubTransport, *, now=lambda: NOW):
+    session = _msal_session()
+    session.mount("https://", transport)
+    clock = TokenEndpointClock(now)
+    clock.clear()
+    return RecordingHttpClient(session, clock), clock
+
+
+AUTHORITY = "https://login.microsoftonline.com/organizations"
+
+
+def test_the_recording_client_records_a_token_endpoint_post():
+    arrived = NOW + timedelta(hours=1)
+    client, clock = _recording(StubTransport(), now=lambda: arrived)
+
+    response = client.post(f"{AUTHORITY}/oauth2/v2.0/token", data={"grant_type": "x"})
+
+    assert response.status_code == 200, "the answer was not handed back unchanged"
+    reading = clock.reading()
+    assert reading is not None
+    assert reading.provider == NOW
+    assert reading.arrived == arrived
+    assert reading.skew == timedelta(minutes=59, seconds=59, milliseconds=500)
+
+
+@pytest.mark.parametrize(
+    ("method", "url"),
+    [
+        pytest.param("post", f"{AUTHORITY}/oauth2/v2.0/devicecode", id="device code"),
+        pytest.param("get", f"{AUTHORITY}/oauth2/v2.0/token", id="GET on the token path"),
+        pytest.param(
+            "get",
+            "https://login.microsoftonline.com/common/discovery/instance"
+            "?api-version=1.1&authorization_endpoint=x",
+            id="instance discovery",
+        ),
+        pytest.param(
+            "get", f"{AUTHORITY}/v2.0/.well-known/openid-configuration", id="OpenID configuration"
+        ),
+        pytest.param("post", f"{AUTHORITY}/oauth2/v2.0/token/extra", id="another path"),
+    ],
+)
+def test_the_recording_client_reads_nothing_else(method, url):
+    transport = StubTransport()
+    client, clock = _recording(transport)
+
+    getattr(client, method)(url)
+
+    assert transport.sent, "the request was not sent through the session"
+    assert clock.reading() is None
+
+
+def test_the_recording_client_records_an_answer_without_a_date_as_none():
+    client, clock = _recording(StubTransport(date="Sun, 06 Sep 2026 09:00:00 GMT"))
+    client.post(f"{AUTHORITY}/oauth2/v2.0/token")
+    assert clock.reading() is not None
+
+    client.session.mount("https://", StubTransport(date=None))
+    client.post(f"{AUTHORITY}/oauth2/v2.0/token")
+    assert clock.reading() is None, "an answer without a Date kept the previous reading"
+
+
+def test_the_session_handed_to_msal_ignores_the_environment_and_retries_once():
+    """MSAL's default transport, with `trust_env=False` (AD-1)."""
+    session = _msal_session()
+
+    assert session.trust_env is False
+    assert session.verify is True
+    assert not session.proxies
+    for scheme in ("https://", "http://"):
+        adapter = session.get_adapter(f"{scheme}login.microsoftonline.com")
+        assert adapter.max_retries.total == 1, "MSAL's one retry was not mounted"
+
+
+def test_readings_are_held_per_thread():
+    clock = TokenEndpointClock(lambda: NOW)
+    clock.record({"Date": _http_date(NOW)})
+    elsewhere: list = []
+    worker = threading.Thread(target=lambda: elsewhere.append(clock.reading()))
+    worker.start()
+    worker.join()
+
+    assert elsewhere == [None]
+    assert clock.reading() is not None
+
+
+def test_the_default_factory_hands_msal_the_recording_client(monkeypatch):
+    """No factory injected: MSAL is built with a client recording into this auth's clock."""
+    built: dict = {}
+
+    class FakeModule:
+        @staticmethod
+        def PublicClientApplication(client_id, *, authority, http_client):
+            built.update(client_id=client_id, authority=authority, http_client=http_client)
+            return FakeMsal()
+
+    monkeypatch.setattr(auth_module, "require_msal", lambda: FakeModule)
+    auth = GraphDeviceCodeAuth(client_id=CLIENT_ID, store=InMemoryRefreshTokenStore())
+
+    auth._application()
+
+    client = built["http_client"]
+    assert isinstance(client, RecordingHttpClient)
+    assert client.clock is auth.clock
+    assert client.session.trust_env is False
 
 
 # ── The MSAL account cache ───────────────────────────────────────────────────
@@ -1538,3 +1884,108 @@ def test_a_write_back_that_lost_the_race_keeps_the_stored_credential_and_uses_it
     assert auth.access_token() == ACCESS
     assert [token for token, _ in client.refreshed_with] == [REFRESH, "the-new-sign-in"]
     assert SealedCredential.decode(store.read()).refresh_token == "successor-of-the-new-sign-in"
+
+
+def test_the_default_factory_is_resolved_at_build_and_not_stored():
+    """A copy of the adapter records into its own clock, not the original's."""
+    auth = GraphDeviceCodeAuth(client_id=CLIENT_ID, store=InMemoryRefreshTokenStore())
+    assert auth.client_factory is None
+
+    copy = dataclasses.replace(auth)
+    assert copy.clock is not auth.clock
+    assert copy.client_factory is None
+
+
+class MicrosoftOverHttp(StubTransport):
+    """The token endpoint and its OpenID configuration, as a `requests` transport.
+
+    Real msal 1.38.0 reads the configuration while it is built and then posts
+    to the token endpoint. Each answer carries its own `Date`, the
+    configuration's an hour off, so only the token answer's can produce the
+    reading asserted.
+    """
+
+    BASE = "https://login.microsoftonline.com/organizations"
+
+    def send(self, request, **kwargs):
+        import json
+
+        response = super().send(request, **kwargs)
+        response.headers["Content-Type"] = "application/json"
+        if "openid-configuration" in request.url:
+            response.headers["Date"] = _http_date(NOW - timedelta(hours=1))
+            body = {
+                "authorization_endpoint": f"{self.BASE}/oauth2/v2.0/authorize",
+                "token_endpoint": f"{self.BASE}/oauth2/v2.0/token",
+                "device_authorization_endpoint": f"{self.BASE}/oauth2/v2.0/devicecode",
+                "issuer": "https://login.microsoftonline.com/{tenantid}/v2.0",
+            }
+        elif "discovery/instance" in request.url:
+            response.headers["Date"] = _http_date(NOW - timedelta(hours=1))
+            body = {"tenant_discovery_endpoint": "unused", "metadata": []}
+        else:
+            response.headers["Date"] = _http_date(NOW)
+            body = {
+                "access_token": ACCESS,
+                "refresh_token": REFRESH,
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "scope": GRANTED,
+            }
+        response._content = json.dumps(body).encode()
+        return response
+
+
+def test_real_msal_through_the_recording_client_measures_the_token_answer(monkeypatch):
+    """msal 1.38.0 itself, with no factory injected and no network.
+
+    The stub transport is mounted on the session `_msal_session` builds, so
+    MSAL's own calls — its configuration read and the token `POST` — go through
+    `RecordingHttpClient` exactly as in production.
+    """
+    transport = MicrosoftOverHttp()
+    built = auth_module._msal_session
+
+    def stubbed():
+        session = built()
+        session.mount("https://", transport)
+        return session
+
+    monkeypatch.setattr(auth_module, "_msal_session", stubbed)
+    arrived = NOW + timedelta(minutes=1)
+    auth = GraphDeviceCodeAuth(
+        client_id=CLIENT_ID,
+        store=InMemoryRefreshTokenStore(_enrolled()),
+        now=lambda: arrived,
+    )
+
+    assert auth.access_token() == ACCESS
+
+    assert ("POST", f"{MicrosoftOverHttp.BASE}/oauth2/v2.0/token") in transport.sent
+    assert auth._skew == timedelta(seconds=59, milliseconds=500)
+
+
+def test_the_session_is_closed_when_msal_refuses_to_build(monkeypatch):
+    """MSAL validates the authority while it is built; a refusal leaks no pool."""
+
+    class Session:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    session = Session()
+
+    class Refusing:
+        @staticmethod
+        def PublicClientApplication(client_id, *, authority, http_client):
+            raise ValueError("an authority MSAL will not use")
+
+    monkeypatch.setattr(auth_module, "_msal_session", lambda: session)
+    monkeypatch.setattr(auth_module, "require_msal", lambda: Refusing)
+
+    with pytest.raises(ValueError):
+        auth_module._msal_public_client(
+            CLIENT_ID, AUTHORITY, clock=TokenEndpointClock(lambda: NOW)
+        )
+    assert session.closed

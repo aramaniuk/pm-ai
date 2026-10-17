@@ -65,6 +65,12 @@ runtime = [
     # without this extra and a missing install is a typed refusal rather than a
     # skipped test that reads as coverage.
     "msal==1.38.0",
+    # Story 8r: one use. `pm_ai.connectors.graph.auth` builds the HTTP client it
+    # hands MSAL from a `requests` session (environment ignored, MSAL's one
+    # retry kept), so the clock check can read the token endpoint's `Date`
+    # header. Already MSAL's dependency at this version; declared because it is
+    # now imported directly, at call time like `msal`. The lock gains no package.
+    "requests==2.34.2",
     # AES-256-GCM for the two encrypted files (AD-6). Wheels for macOS arm64, so
     # no source build — the property `sqlcipher3` lacked. Imported lazily in
     # `pm_ai.storage.crypto`, so the package loads without this extra.
