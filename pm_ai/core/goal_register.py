@@ -110,7 +110,8 @@ bytes and the composition root writes them, the mirror of `parse_goals` taking
 bytes and opening nothing. Goals are normally *set* — `pm-ai goal set` today, a
 1:1 or a Telegram voice command later — and hand-editing stays supported (AD-3),
 which is why `set_goal` edits the PM's lines in place rather than regenerating
-the file. No deletion. And no goal invention — an absent file yields an absent
+the file. `delete_goal` (story `4t`) removes one goal and its detail lines the
+same way, every other byte kept. And no goal invention — an absent file yields an absent
 register, a state the renderer states rather than one the parser papers over.
 """
 
@@ -130,12 +131,16 @@ __all__ = [
     "GOAL_ID",
     "GOALS_SCOPE",
     "HEADER",
+    "GoalAbsent",
+    "GoalChanged",
+    "GoalDeletion",
     "HORIZON_SPELLINGS",
     "ID_CHARSET",
     "GoalRegister",
     "GoalUnrecorded",
     "MalformedGoals",
     "declare_goal",
+    "delete_goal",
     "parse_goals",
     "render_goals",
     "set_goal",
@@ -255,6 +260,24 @@ class GoalUnrecorded(Exception):
     Not a `MalformedGoals`: nothing about the goal or the file was wrong, and
     the file *changed*. Raised by whatever writes the file and then the event
     log, so a surface can say exactly that instead of "could not be written".
+    """
+
+
+class GoalAbsent(LookupError):
+    """The id named is not a goal `strategic_goals.md` holds (story `4t`).
+
+    Neither `MalformedGoals` — the file read fine — nor `UnresolvedGoal`, which
+    is a citation's failure. A surface turns it into a sentence naming where the
+    ids on file are listed.
+    """
+
+
+class GoalChanged(Exception):
+    """A goal's lines on file are no longer the ones shown before the answer.
+
+    Raised by the composition root's delete after its fresh read, before
+    anything is written (story `4t`): removing lines the person did not see is
+    the one thing a confirmed delete must not do.
     """
 
 
@@ -987,3 +1010,76 @@ def _insert(
         "",
     ]
 
+
+# ── Deletion (story 4t) ──────────────────────────────────────────────────────
+
+
+class GoalDeletion(NamedTuple):
+    """What `delete_goal` would do: the new bytes, and exactly what it removes.
+
+    `removed` holds the goal's line and the detail lines indented beneath it, as
+    an editor shows them — no line endings — so a surface can print them before
+    it asks, and compare them with a fresh reading after the answer.
+    """
+
+    payload: bytes
+    removed: tuple[str, ...]
+    goal: Goal
+
+
+def delete_goal(
+    raw: bytes | None, goal_id: str, *, scope: DataScope = GOALS_SCOPE
+) -> GoalDeletion:
+    """`raw` without the goal `goal_id`, its detail lines going with it.
+
+    The block removed is the one `set_goal` moves when a goal changes domain:
+    the goal's line and every line indented past it, blank lines between them
+    included, a trailing blank run excluded (`_block_end`). Every other byte is
+    kept — a BOM, `\r\n` endings, list markers, prose and headings — because
+    the removal works on the file's own lines with their endings attached.
+
+    Refused, with nothing produced: a file the parser refuses (its own
+    message); an id not on file (`GoalAbsent`); a goal-shaped line inside the
+    block, which is a second goal the delete would take with it; and a result
+    that does not parse back as the register without `goal_id`.
+    """
+    register, layout = _scan(raw, scope=scope)
+    goal = register.get(goal_id)
+    if raw is None or goal is None:
+        raise GoalAbsent(goal_id)
+    bom = raw.startswith(_BOM)
+    text = _decode(raw)
+    segments = re.findall(r"[^\n]*\n|[^\n]+$", text)
+    lines = [segment.removesuffix("\n") for segment in segments]
+    index = layout.goals[goal_id] - 1
+    end = _block_end(lines, index)
+    nested = sorted(
+        other
+        for other, number in layout.goals.items()
+        if other != goal_id and index + 2 <= number <= end
+    )
+    if nested:
+        # "and", not `_listed`'s "or": every one of them would go.
+        names = [f"`{other}`" for other in nested]
+        both = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+        raise MalformedGoals(
+            f"{both} {'is' if len(nested) == 1 else 'are'} written "
+            f"inside {goal_id!r}'s detail lines, indented beneath it, so "
+            f"deleting {goal_id!r} would delete "
+            f"{'it' if len(nested) == 1 else 'them'} too. Nothing was "
+            f"deleted. Move {'that goal' if len(nested) == 1 else 'those goals'} "
+            f"out from under {goal_id!r} first, or edit {ARTIFACT} by hand."
+        )
+    removed = tuple(line.removesuffix("\r") for line in lines[index:end])
+    kept = "".join(segments[:index] + segments[end:])
+    out = (_BOM if bom else b"") + kept.encode("utf-8")
+    expected = {key: value for key, value in register.items() if key != goal_id}
+    written = _scan(out, scope=scope)[0]
+    if dict(written) != expected:
+        raise MalformedGoals(
+            f"deleting {goal_id!r} would not read back as the register without "
+            f"it, so nothing was deleted. The file's layout around that goal is "
+            f"one this writer cannot remove it from safely; delete its line by "
+            f"hand."
+        )
+    return GoalDeletion(payload=out, removed=removed, goal=goal)

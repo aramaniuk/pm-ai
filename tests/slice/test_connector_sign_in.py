@@ -40,6 +40,7 @@ from test_connector_add_graph import (  # noqa: F401 — `machine` is a fixture
     VALID,
     Microsoft,
     Terminal,
+    _answering_from_the_epoch,
     _faked_auth,
     _token,
     machine,
@@ -483,12 +484,12 @@ def test_a_health_check_past_its_bound_leaves_it_untouched(enrolled, monkeypatch
 
 def test_a_health_check_that_warns_saves_and_says_so(enrolled, monkeypatch, capsys):
     home, keychain = enrolled
+    from_the_epoch = _answering_from_the_epoch(monkeypatch)
 
     class Skewed(Microsoft):
         def acquire_token_by_refresh_token(self, refresh_token, scopes):
-            answer = super().acquire_token_by_refresh_token(refresh_token, scopes)
-            answer["id_token_claims"] = {**ACCOUNT_CLAIMS, "iat": 0}
-            return answer
+            from_the_epoch()
+            return super().acquire_token_by_refresh_token(refresh_token, scopes)
 
     code, _ = _sign_in(monkeypatch, Skewed(device=_token(NEW_SIGNED_IN), issue=NEW_ROTATED))
 
