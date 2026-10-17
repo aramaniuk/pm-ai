@@ -741,6 +741,7 @@
     WAVE 2, decided 2026-10-09: 23c fills Proactive Enablement from real message entries read through 2m's decoder; a failed or unreadable log read is STATED in the section, not fatal (supersedes 23b's exit-3 row); mentions of the PM first, a 20-line cap with the rest counted; the 24-hour window stays until 9a records the last render.
     WAVE 2, 2026-10-11 (Andrei, AD-34): 23c decides 'mentions you' by pm_identity() (2o) - graph: handles of every Graph row, enabled or disabled - never a raw user_id; user_id is saved by 8q. Lands after 2o.
     WAVE 3, decided 2026-10-16 (field test and first-use feedback, Andrei): 23e the dashboard reads the whole local day (was the 4-hour harvest window: 3 of 7 meetings at 07:00); 23f readable message signals (posted-time label, sender display name beside the handle, no literal line breaks); 23g Team Activity on the project page - each member's GitLab tasks and priorities and what moved (commits by #iid, merge requests), never rankings; needs the kernel's project-telemetry line re-derived first.
+    WAVE 3, decided 2026-10-17 (batch-1 review, Andrei): 23h four fixes - multi-day all-day entries on every day they cover; a cut channel walk no longer logged as needing a person; a sign-in timeout (10 s connect, 30 s read); project add refuses ~/.pm-ai, ~/.manager-ai and .project-ai folders.
 
 - id: "24"
   title: Socratic 1:1 protocol and meta-coaching scorecard

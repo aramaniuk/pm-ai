@@ -12,7 +12,7 @@ context:
 
 ## Intent
 
-**Problem:** A new connector's first harvest sees too little, and each connector's first run disagrees with what follows. For Microsoft Graph, setup and `pm-ai connector add graph` ask "First-run reach-back in minutes (at least {window}, the window)" with no default, so a person who takes the smallest window (240 minutes) and the smallest reach-back it allows gets a first dashboard with four hours of history. For GitLab, the first run asks from 7 days back (`FIRST_RUN_REACH_BACK`) while every later run asks from 30 days before its cursor (`MERGE_LAG_DAYS`), so the second run quietly back-fills about three weeks: 38 commits on the first run and 189 on the second (finding 19 in `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which lands with PR #71). And a GitLab host typed without `https://` is refused, though https is the only scheme pm-ai would accept anyway.
+**Problem:** A new connector's first harvest sees too little, and each connector's first run disagrees with what follows. For Microsoft Graph, setup and `pm-ai connector add graph` ask "First-run reach-back in minutes (at least {window}, the window)" with no default, so a person who takes the smallest window (240 minutes) and the smallest reach-back it allows gets a first harvest that records only four hours back, so recent meetings, messages and transcripts are missing from what pm-ai has stored. For GitLab, the first run asks from 7 days back (`FIRST_RUN_REACH_BACK`) while every later run asks from 30 days before its cursor (`MERGE_LAG_DAYS`), so the second run quietly back-fills about three weeks: 38 commits on the first run and 189 on the second (finding 19 in `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which lands with PR #71). And a GitLab host typed without `https://` is refused, though https is the only scheme pm-ai would accept anyway.
 
 **Approach:** The Graph reach-back question offers five days (7200 minutes) as what Enter keeps; GitLab's first run asks from as far back as every later run does, 30 days; a GitLab host typed with no scheme is taken as `https://` and the person is told what was read. Rows already on disk are not rewritten.
 
@@ -59,23 +59,23 @@ context:
 
 ## Code Map
 
-Verified against `a1182f8` on 2026-10-16.
+Re-verified against `ba0b747` on 2026-10-17.
 
-- `pm_ai/surfaces/cli/dispatch.py:1125-1200` -- `_connector_add_graph`; the window question (`:1185-1188`, no default) and the reach-back question (`:1189-1192`), both through `_ask_minutes`; the docstring's step 3 names "no default"
-- `pm_ai/surfaces/cli/dispatch.py:1397-1424` -- `_ask_minutes`: blank is refused ("this has no default"), and its docstring says neither width has a default; gains an optional default
-- `pm_ai/surfaces/cli/dispatch.py:2202-2240` -- setup's `_setup_connector`, which runs `_connector_add_graph` itself (4p); nothing to change there
+- `pm_ai/surfaces/cli/dispatch.py:1190-1297` -- `_connector_add_graph`; the window question (`:1250-1253`, no default) and the reach-back question (`:1254-1257`), both through `_ask_minutes`; the docstring's step 3 names "no default"
+- `pm_ai/surfaces/cli/dispatch.py:1462-1489` -- `_ask_minutes`: blank is refused ("this has no default"), and its docstring says neither width has a default; gains an optional default, which stays optional because a second caller, the drop duration (`:2883`), keeps no default
+- `pm_ai/surfaces/cli/dispatch.py:2267-2305` -- setup's `_setup_connector`, which runs `_connector_add_graph` itself (4p); nothing to change there
 - `pm_ai/app/wiring.py:1524`, `:1576-1582`, `:1611-1655` -- `GraphEnrolment`: `minimum_window_minutes` (the pattern for the default it will also expose), `refusal(width=, reach_back=)`
 - `pm_ai/connectors/graph/calendar.py:571-602` -- `WindowPolicy.first_run_reach_back` and the "at least the window" refusal; `:624` the first run's start; `:146` `MAX_SERVABLE_SPAN`
-- `pm_ai/connectors/graph/client.py:155`, `:181` -- `PAGE_CAP = 200`, `FETCH_BUDGET = 10 minutes`; `pm_ai/connectors/graph/channels.py:520-530`, `chats.py:524-535` -- the stated loss when either stops a walk; both walks start from the reach-back on a first run (`channels.py:319`, `chats.py:291`)
+- `pm_ai/connectors/graph/client.py:155`, `:181` -- `PAGE_CAP = 200`, `FETCH_BUDGET = 10 minutes`; `pm_ai/connectors/graph/channels.py:520-530`, `chats.py:524-535` -- the stated loss when either stops a walk; both walks start from the reach-back on a first run (`channels.py:376`, `chats.py:291`); `channels.py:586-610` `_cut_short`
 - `pm_ai/app/pipelines.py:725-765` -- transcript acquisition after every calendar harvest, from `now - first_run_reach_back`, every run; `pm_ai/core/transcript_acquisition.py:130-176` the selection; `pm_ai/domain/transcripts.py:293-299` `closes`: `absent` and `skipped` never close
 - `tests/connectors/test_graph_transcripts.py:245` -- the recorded-transport client the request count is taken on
 - `pm_ai/connectors/gitlab/__init__.py:15-21`, `:652-664` -- the cursor is the newest commit date seen on a complete walk (`_advanced`); `:100-126` `REACH_BACK_KEY`, `MERGE_LAG_DAYS = 30`, `FIRST_RUN_REACH_BACK = timedelta(days=7)`; `:221`, `:395` where it applies; `:128` `PAGE_CAP = 500`; `pm_ai/connectors/gitlab/client.py:103`, `:118` `PER_PAGE = 100`, `FETCH_BUDGET`
 - `pm_ai/connectors/gitlab/client.py:155-187` -- `host_refusal`: "its scheme is 'missing'"
 - `pm_ai/app/wiring.py:2110-2135` -- `GitLabEnrolment.refusal(host=)`, adding the `/api/v4` rule; its sentence quotes `{host!r}` (`:2131`); `:2247` the row's settings hold only `host`, so enrolled GitLab rows carry no reach-back key
-- `pm_ai/surfaces/cli/dispatch.py:1283-1289` -- the host question
+- `pm_ai/surfaces/cli/dispatch.py:1348-1354` -- the host question
 - `pm_ai/app/wiring.py:1104-1142` -- `_gitlab_connector` reading the row's optional reach-back
 - `tests/connectors/test_coverage_honesty.py:575-583` -- `test_a_first_run_reaches_back_seven_days_or_the_rows_override` asserts `NOW - timedelta(days=7)`
-- `tests/slice/test_connector_add_graph.py:277-305` -- the happy path asserting four prompts and the saved reach-back; `tests/slice/test_connector_add_gitlab.py:250-262`; `tests/connectors/test_gitlab_transport.py:664-717`; `tests/slice/test_setup_connector_step.py`
+- `tests/slice/test_connector_add_graph.py:280-305` -- the happy path asserting four prompts and the saved reach-back; `tests/slice/test_connector_add_gitlab.py:250-262`; `tests/connectors/test_gitlab_transport.py:664-717`; `tests/slice/test_setup_connector_step.py`
 
 ## Tasks & Acceptance
 
@@ -94,7 +94,7 @@ Verified against `a1182f8` on 2026-10-16.
 - [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved the field test's GitLab first-run entry (finding 19) and the host part of its small-gaps entry -- what this closes
 
 **Acceptance Criteria:**
-- Given a clean machine, when `connector add graph` is answered with a 240-minute window and Enter at the reach-back, and the daemon then harvests the new connector once, then the first calendar request starts five days before the run and the dashboard rendered after it lists meetings from those five days.
+- Given a clean machine, when `connector add graph` is answered with a 240-minute window and Enter at the reach-back, and the daemon then harvests the new connector once, then the first harvest's calendar request, read from its recorded URL, starts five days before the run and ends 240 minutes after it (the window), and the meetings that harvest records include ones from those five days.
 - Given a GitLab connector enrolled through `connector add gitlab` with a scheme-less host, when the daemon harvests it twice against a fake GitLab, then every request went to the `https://` address and the second run's range started at the newest commit date 
 of the first minus 30 days.
 - Given the change, when `uv run pytest` runs, then everything passes and the skip count is unchanged from the baseline at the slice's start.
@@ -105,6 +105,8 @@ of the first minus 30 days.
 - **2026-10-16, review:** the GitLab second-run claim corrected (the cursor is the newest commit's date, so the second run can add the span from that date to the first run; pinned on a fixture); a row for a hand-set short reach-back; the host prefix applied only to a bare answer (a mistyped scheme is judged as typed), "taken as" printed only for an accepted answer, a refusal quoting the typed text and how it was read; a row for Enter at the window; the transcript request count taken on the recorded Graph transport; `test_coverage_honesty.py`'s seven-day test added to the tasks; change-log tasks for 8l, 8n and 8o spelled out; the field-test timing quoted as reported; the four-hours claim tied to the 240-minute window; build order with 4s stated; repeated acceptance criteria replaced by system-level ones. Depends on no spine amendment.
 - **2026-10-16, review (cross-spec):** the Change Log moved before Design Notes; tasks amending done specs say their frozen text is edited, with a dated Change Log line, when this slice is built.
 - **2026-10-16, Andrei's decision on the request ceiling.** No per-harvest ceiling on Graph transcript requests; the existing fetch budget bounds the run and meetings not reached wait for the next. One sentence added to the transcripts bullet, since the slice left the point open.
+- **2026-10-17, frozen block amended by Andrei's decision B:** since 23e the dashboard reads only the display day, so the Problem sentence and acceptance criterion 1 now speak of what the first harvest requests and records.
+- **2026-10-17, Code Map re-verified** against `ba0b747`: `dispatch.py` lines moved by slice 4t, `_ask_minutes`'s second caller noted, the channel walk's first-run start and `_cut_short` added, the 33h horizon note added to Design Notes.
 
 ## Design Notes
 
@@ -117,6 +119,8 @@ GitLab's second run (choice, review 2026-10-16): a 30-day first run cannot make 
 Host reading (choice, review 2026-10-16): only a bare answer is prefixed; anything that already looks like a scheme, mistyped or not, is judged as typed, so a typo is shown back rather than silently turned into a different address.
 
 The field-test report gives the first harvest of 1 channel and 13 chats as about 12 seconds, without stating the reach-back it ran at; nothing was measured at five days.
+
+Channel threads (33h, no behaviour change): the channel walk's 90-day thread horizon is measured back from the position, so on a first run with a five-day reach-back it sits about 95 days back; the walk may read a few more pages, still within the 200-page cap and the fetch budget.
 
 Build order: 8s comes before 4s in wave 3. Both change `_connector_add_graph`, `_ask_minutes` and the prompt-count assertions in `tests/slice/test_connector_add_graph.py`; 4s re-baselines them after this slice.
 
