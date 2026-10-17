@@ -1379,3 +1379,12 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23e-dashboard-reads-the-whole-local-day.md`
   summary: How Graph spells an all-day row's start under `Prefer: outlook.timezone="UTC"` has not been measured. Placing by date assumes the `dateTime` is the entry's own midnight, not shifted into UTC.
   evidence: No recorded fixture holds an all-day row (23e Design Notes), and the tests use midnight UTC. If Graph does shift it, an all-day entry created east of UTC would carry the previous date. The fix is a redacted all-day row added to the recorded fixtures from the next real-account capture.
+
+## Surfaced by the story-4t review (2026-10-17)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4t-goals-listed-shown-updated-deleted.md`
+  summary: A goal write at the command line is not atomic against another writer: `GoalBook.set` (since `22b`) and `GoalBook.delete` read `strategic_goals.md`, build the new bytes and write them with no claim or compare-and-swap between the read and the write.
+  evidence: `pm_ai/app/goals.py` reads with `read_artifact` and writes with `write_artifact`; nothing in between holds the file. A `goal set` from a second terminal, or a hand edit saved in that window, is overwritten. The delete's re-read after the answer narrows the window to the time between that read and the write; it does not close it. Pre-existing with `goal set`; the fix belongs in the storage writer (a write that names the bytes it replaces).
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4t-goals-listed-shown-updated-deleted.md`
+  summary: `goal list`, `goal show` and the delete's preview print a hand-edited goal's title and lines as they are, control characters included.
+  evidence: The parser takes a title from a hand-editable file and the CLI echoes it unchanged, so an escape sequence typed or pasted into `strategic_goals.md` reaches the terminal. Low risk (the file is the PM's own), and the same holds for other places the CLI prints file text; a fix is one shared printable-text rule for the CLI rather than one for goals.

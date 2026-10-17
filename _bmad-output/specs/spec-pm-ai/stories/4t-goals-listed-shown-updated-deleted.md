@@ -2,7 +2,8 @@
 title: 'Goals can be listed, shown, updated and deleted'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '0d20d0fdfe4636f046323ec4004f43f5c88670ff'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -76,7 +77,7 @@ context:
 
 - `pm_ai/core/goal_register.py:755` -- `set_goal`, the in-place writer to mirror; `:808` `_read_back`, the parse-back check (its "setting … would not read back" sentence is not the delete's); `:919` `_block_end`, a goal's detail block; `:385-389` where the parser reads nested goal-shaped lines; `:694` `declare_goal`; `:159`, `:169` the closed spellings; `:659` `HEADER`, which names `goal set`
 - `pm_ai/domain/goals.py:85` -- `resolve`, which already raises `UnresolvedGoal` for a cited id not on file; `Recommendation` is constructed nowhere else in `pm_ai/` (checked with grep)
-- `pm_ai/domain/event_entries.py:104` -- `SelfActionType.GOAL_SET`; `:122` its required fields; `:203` `MAX_ENTRY_LENGTH`; `pm_ai/core/rendering.py:848` lists every member in a sentence
+- `pm_ai/domain/event_entries.py:104` -- `SelfActionType.GOAL_SET`; `:122` its required fields; `:203` `MAX_ENTRY_LENGTH`; `pm_ai/core/rendering.py:873` lists every member in a sentence
 - `pm_ai/app/entry.py:639` -- `GoalBook` (`read`, `set` at `:656`: check entry, write, append, `GoalUnrecorded`); `:269` where the CLI is given it; `:435` `DAEMON_BOUNDS`; `:198` composition for every parsed command
 - `pm_ai/app/prompts.py:856` -- `_command`, the daemon's line runner, which passes no goal reader today; `:369` the refusal of a `TERMINAL_BOUND` line
 - `pm_ai/surfaces/cli/dispatch.py:353` -- `GoalBook` protocol; `:2380` `_goal_prompt`, `:2397` `_goal_set`; `:2855` the `goal` group; `:890` `Command` (its `options` docstring says there are no flags); `:2768` `TERMINAL_BOUND`; `:2915` `_spelled`; `:3026` help words; `:3047`, `:3054` the top-level branch and `:3066` the leaf branch, both reading options only when `options` is declared; `:3226` `_options`, `:3292` `_split_options`, which would take the word after `--yes` as its value
@@ -86,15 +87,15 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/goal_register.py` -- `delete_goal(raw, goal_id)` returning the new bytes and the removed lines together; every other byte kept; parsed back as the register without the id; a nested goal refused with its own sentence -- the pure half
-- [ ] `pm_ai/domain/event_entries.py` -- `SelfActionType.GOAL_DELETED = "goal_deleted"` with fields `goal_id`, `domain`, `horizon`, `title`, `channel` -- CAP-10
-- [ ] `pm_ai/app/entry.py` -- `GoalBook.delete(goal_id, shown)` (read again, refuse if the block differs from `shown`, cut a long title for the entry, check the entry, write, append, `GoalUnrecorded`) and `GoalBook.path`; list and show at the command line read the file by path before anything is composed; `DAEMON_BOUNDS` gains `goal list` and `goal show` at `config show`'s bound -- the writer, the reader, the bounds
-- [ ] `pm_ai/app/prompts.py` -- `_command` passes a goal reader that reads the file afresh per line -- the daemon's reader
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `Command.flags`, read in both parser branches, never taking a value, refused when given one or twice; `Parsed` carries the flags; `_spelled` prints `[--flag]`; subcommand `--help`; `goal set [<id>]` with options and the question rule; `goal update`, `goal delete`, `goal list`, `goal show`; `TERMINAL_BOUND` gains update and delete -- the commands
-- [ ] `pm_ai/surfaces/cli/repl.py` -- `_absolute_paths` keeps the flags in the words it rebuilds -- no flag lost on the way to the daemon
-- [ ] `tests/domain/test_entry_grammar_pins.py`, `tests/core/test_goal_render.py`, the goldens holding `rendering.py:848`'s sentence, `tests/slice/test_goal_setting.py:265`, `:302`, `tests/slice/test_every_enrolled_project.py:1109-1118` -- updated for `goal_deleted`, the new subcommands and the subcommand help -- existing tests that name the old surface
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/22b-goal-writer.md`, `4q-repl-through-the-daemon.md` -- when this slice is built: edit the amended frozen text in each and add a dated Change Log line naming what this slice amends (`22b`'s Never "No goal deletion"; `4q`'s list of commands that need this terminal) -- earlier frozen blocks say they were amended
-- [ ] `tests/surfaces/test_cli_subcommands.py`, `tests/slice/test_goal_commands.py` -- one test per matrix row, the slice ones through `main()` against a temporary home, every "nothing written" row comparing the file's bytes before and after -- the matrix is the contract
+- [x] `pm_ai/core/goal_register.py` -- `delete_goal(raw, goal_id)` returning the new bytes and the removed lines together; every other byte kept; parsed back as the register without the id; a nested goal refused with its own sentence -- the pure half
+- [x] `pm_ai/domain/event_entries.py` -- `SelfActionType.GOAL_DELETED = "goal_deleted"` with fields `goal_id`, `domain`, `horizon`, `title`, `channel` -- CAP-10
+- [x] `pm_ai/app/entry.py` -- `GoalBook.delete(goal_id, shown)` (read again, refuse if the block differs from `shown`, cut a long title for the entry, check the entry, write, append, `GoalUnrecorded`) and `GoalBook.path`; list and show at the command line read the file by path before anything is composed; `DAEMON_BOUNDS` gains `goal list` and `goal show` at `config show`'s bound -- the writer, the reader, the bounds
+- [x] `pm_ai/app/prompts.py` -- `_command` passes a goal reader that reads the file afresh per line -- the daemon's reader
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `Command.flags`, read in both parser branches, never taking a value, refused when given one or twice; `Parsed` carries the flags; `_spelled` prints `[--flag]`; subcommand `--help`; `goal set [<id>]` with options and the question rule; `goal update`, `goal delete`, `goal list`, `goal show`; `TERMINAL_BOUND` gains update and delete -- the commands
+- [x] `pm_ai/surfaces/cli/repl.py` -- `_absolute_paths` keeps the flags in the words it rebuilds -- no flag lost on the way to the daemon
+- [x] `tests/domain/test_entry_grammar_pins.py`, `tests/core/test_goal_render.py`, the goldens holding `rendering.py:873`'s sentence, `tests/slice/test_goal_setting.py:265`, `:302`, `tests/slice/test_every_enrolled_project.py:1109-1118` -- updated for `goal_deleted`, the new subcommands and the subcommand help -- existing tests that name the old surface
+- [x] `_bmad-output/specs/spec-pm-ai/stories/22b-goal-writer.md`, `4q-repl-through-the-daemon.md` -- when this slice is built: edit the amended frozen text in each and add a dated Change Log line naming what this slice amends (`22b`'s Never "No goal deletion"; `4q`'s list of commands that need this terminal) -- earlier frozen blocks say they were amended
+- [x] `tests/surfaces/test_cli_subcommands.py`, `tests/slice/test_goal_commands.py` -- one test per matrix row, the slice ones through `main()` against a temporary home, every "nothing written" row comparing the file's bytes before and after -- the matrix is the contract
 
 **Acceptance Criteria:**
 - Given two goals set, when `pm-ai goal delete g_a --yes` runs without a terminal, then `strategic_goals.md` holds only the other goal with every other byte unchanged, the personal event log's last entry is `goal_deleted` naming `g_a` with its domain, horizon and title, and the exit is 0.
@@ -107,6 +108,7 @@ context:
 - **2026-10-16, created** from Andrei's field-test feedback (finding 23, memlog UX decision "goals can be listed, shown, updated and deleted"). Decisions it carries: `goal set` stays the create path and still revises; `goal update` revises only and refuses an unknown id; `goal create` is not added; delete removes the goal's detail block, confirms at a terminal, `--yes` for scripts; deletion is never refused for references because nothing stored cites a goal at this commit, and a later citation to a deleted id renders unresolved (CAP-11); a new `goal_deleted` self-action; the command table gains value-less `flags`, which `4u` and `4w` reuse; set, update and delete run in the prompt's process, list and show through the daemon.
 - **2026-10-16, review:** the question rule made one rule (any option on an existing id asks nothing else; none at a terminal asks all three; none without a terminal refused); the delete confirmation's answers, the re-read after the answer, nested goals, long titles in the entry; list and show compose nothing at the command line and are read afresh per line in the daemon with a declared bound; flags read in both parser branches, refused with a value or twice; subcommand `--help` added; rows for vocabulary refusals, flag position, no id, no options, broken settings; the existing tests this changes listed; the `prompts.py:383` task dropped (only `repl.py:199` rebuilds words); finding cited by file. Amends earlier frozen blocks: `22b`'s Never "No goal deletion" (lifted; its reason answered by the references bullet) and `4q`'s routing bullet (two more commands that need this terminal) — each spec's frozen text is edited and gains a dated Change Log line when this slice is built. Depends on spine amendment: AD-21 — `goal update`, `goal delete`, `goal list` and `goal show` join the foreground administrative commands parsed from the command line (the list already holds daemon-routed `dashboard` and `config show`). Depends on spine amendment: AD-7 — `strategic_goals.md` joins the files the daemon reads afresh for every line.
 - **2026-10-16, review (cross-spec):** Change Log moved before Design Notes; the AD-21 amendment restated as additions to the foreground administrative commands parsed from the command line; the amendment task now edits the frozen text of `22b` and `4q` and adds a dated line to each, when this slice is built.
+- **2026-10-17, built.** Three reviewers (blind hunter, edge-case hunter, verification gap); findings patched: a read failure in `goal delete` is no longer reported as a write failure; one read fewer per delete; an id too long to record even with the title cut to `…` gets its own refusal; `goal list`'s columns line up; core tests for `delete_goal`, a maximal-cut check for long titles, terminal tests for `goal set <id>` with options, and daemon-refusal tests that compare bytes. Two findings deferred (a goal write is not atomic against a second writer, pre-existing with `goal set`; file text printed with control characters). As built: `goal set`'s usage prints `[id]`, the table's existing spelling for an optional positional, not `[<id>]`; `GoalBook` and the new `GoalReader` moved to `pm_ai/app/goals.py` so the daemon's line runner can import them without an import cycle (`entry` re-exports them); `goal list` through the daemon still needs a readable `config.toml`, because the daemon reads it before every line — only the command line is promised to work with broken settings.
 
 ## Design Notes
 
@@ -122,3 +124,81 @@ context:
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai goal set g_a --domain project --horizon medium --title "Cut latency"`, then `goal list`, `goal update g_a --title "Under 150ms"`, `goal show g_a`, `goal delete g_a` (answer `y`) -- expected: each prints as the matrix says; the event log holds two `goal_set` entries and one `goal_deleted`
+
+## Suggested Review Order
+
+**Deleting a goal**
+
+- Entry point: the pure delete — one goal's block out, every other byte kept, parsed back.
+  [`goal_register.py:1030`](../../../../pm_ai/core/goal_register.py#L1030)
+
+- A goal nested in the block refuses the delete, naming it.
+  [`goal_register.py:1056`](../../../../pm_ai/core/goal_register.py#L1056)
+
+- Re-read after the answer; refuse if the block differs from what was shown.
+  [`goals.py:151`](../../../../pm_ai/app/goals.py#L151)
+
+- Long titles cut with `…` so a delete is never refused for its title.
+  [`goals.py:185`](../../../../pm_ai/app/goals.py#L185)
+
+- The surface: preview, `(y/n)`, `--yes`, refusals by cause.
+  [`dispatch.py:2622`](../../../../pm_ai/surfaces/cli/dispatch.py#L2622)
+
+- `y`/`yes` in any case and padding; everything else is no.
+  [`dispatch.py:2679`](../../../../pm_ai/surfaces/cli/dispatch.py#L2679)
+
+- The new self-action carrying the goal as it read before.
+  [`event_entries.py:109`](../../../../pm_ai/domain/event_entries.py#L109)
+
+**Setting and updating without questions**
+
+- One path for `set` and `update`; `update` refuses an unknown id naming `goal set`.
+  [`dispatch.py:2530`](../../../../pm_ai/surfaces/cli/dispatch.py#L2530)
+
+- The one rule for questions: existing id vs new id, terminal vs not.
+  [`dispatch.py:2588`](../../../../pm_ai/surfaces/cli/dispatch.py#L2588)
+
+**Listing and showing with nothing composed**
+
+- `composes=False` commands get a reader before config or keychain is touched.
+  [`entry.py:191`](../../../../pm_ai/app/entry.py#L191)
+
+- The daemon reads the file afresh per line.
+  [`prompts.py:879`](../../../../pm_ai/app/prompts.py#L879)
+
+- Declared bounds for the two daemon-routed reads.
+  [`entry.py:449`](../../../../pm_ai/app/entry.py#L449)
+
+- Grouped by domain in dashboard order, ids sorted.
+  [`dispatch.py:2697`](../../../../pm_ai/surfaces/cli/dispatch.py#L2697)
+
+- Id, citation form, values and file path.
+  [`dispatch.py:2725`](../../../../pm_ai/surfaces/cli/dispatch.py#L2725)
+
+**Parser: flags and subcommand help**
+
+- The new value-less `flags` field on the command table.
+  [`dispatch.py:988`](../../../../pm_ai/surfaces/cli/dispatch.py#L988)
+
+- Flags never take the next word; a value or a repeat is a usage error.
+  [`dispatch.py:3589`](../../../../pm_ai/surfaces/cli/dispatch.py#L3589)
+
+- `<group> <subcommand> --help` prints that subcommand's usage.
+  [`dispatch.py:3403`](../../../../pm_ai/surfaces/cli/dispatch.py#L3403)
+
+- `goal update` and `goal delete` run in the prompt's process.
+  [`dispatch.py:3069`](../../../../pm_ai/surfaces/cli/dispatch.py#L3069)
+
+- Flags survive the prompt's word rebuild on the way to the daemon.
+  [`repl.py:220`](../../../../pm_ai/surfaces/cli/repl.py#L220)
+
+**Tests**
+
+- One test per matrix row through `main()`, byte comparisons for "nothing written".
+  [`test_goal_commands.py`](../../../../tests/slice/test_goal_commands.py)
+
+- The pure delete's byte-exact cases.
+  [`test_goal_delete.py`](../../../../tests/core/test_goal_delete.py)
+
+- Flags, subcommand help, usage spelling and routing.
+  [`test_cli_subcommands.py`](../../../../tests/surfaces/test_cli_subcommands.py)
