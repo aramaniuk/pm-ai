@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from pm_ai.domain.identity import Actor, DataScope, SourceRef
 
@@ -162,6 +162,22 @@ class Meeting:
     # manual-only record is adopted, and adoption clears the mark. Stored in
     # the record, written only when set.
     manual_only: bool = False
+    # Carried in memory and written to no file, on `tentative`'s precedent
+    # (story 23e, Andrei's decision on field-test finding 7, 2026-10-16).
+    #
+    # The calendar row's `isCancelled`. A cancelled meeting not yet ended never
+    # reaches a `Meeting` — the connector leaves it out — so this is set only on
+    # one that has ended, which the dashboard lists marked as cancelled. Its
+    # record and citations are unchanged: `meeting_records._FIELDS` has no key
+    # for it. `False` by default because that is what a record read back off
+    # disk knows.
+    cancelled: bool = False
+    # Carried in memory and written to no file, on `tentative`'s precedent
+    # (story 23e). An all-day entry's own calendar date as the provider wrote
+    # it, `None` for every other meeting. The dashboard places an all-day
+    # marker by this date rather than by converting its start to the display
+    # zone, which west of UTC would move it onto the previous day.
+    all_day_date: date | None = None
 
     def __post_init__(self) -> None:
         count = len(self.attendees) if self.attendee_count is None else self.attendee_count

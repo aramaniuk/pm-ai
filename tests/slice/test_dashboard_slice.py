@@ -1425,3 +1425,306 @@ def test_connectors_that_cannot_be_listed_are_said(tmp_path, monkeypatch):
     ]
     assert "mentions you" not in section
     assert "Mentions could not be checked against `connectors/`: it could not be listed" in section
+
+
+# ── Story 23e — the render asks each calendar for the whole local day ────────
+
+
+class _DayCalendar(_Calendar):
+    """A calendar offering the calendar-only read, recording the range it is handed.
+
+    `harvest` stays available and refuses: a render asking a connector that has
+    the read through its harvest would be reading the harvest's window.
+    """
+
+    def __init__(self, instance: str, **answers: object) -> None:
+        super().__init__(instance, **answers)  # type: ignore[arg-type]
+        self.ranges: list[tuple[datetime, datetime]] = []
+
+    def read_calendar(self, start: datetime, end: datetime) -> HarvestResult:
+        self.ranges.append((start, end))
+        result = super().harvest(Cursor())
+        self.asked.clear()
+        return result
+
+    def harvest(self, since: Cursor) -> HarvestResult:
+        raise AssertionError("a connector with the calendar-only read is not harvested")
+
+
+_UTC = timezone.utc
+
+
+def test_the_port_names_the_range_it_reads():
+    """`isinstance` against a runtime protocol checks the name only, so a
+    connector with the old `read_calendar(since)` would still pass it."""
+    import inspect
+
+    from pm_ai.ports import CalendarReadPort
+
+    assert list(inspect.signature(CalendarReadPort.read_calendar).parameters) == [
+        "self",
+        "start",
+        "end",
+    ]
+
+
+def test_the_render_hands_the_calendar_its_display_day(tmp_path):
+    """12:30 in Warsaw (UTC+2): local midnight to the next local midnight, in UTC,
+    and the page shows what that read answered."""
+    calendar = _DayCalendar("graph:contoso", live=(meeting("m_1", "Read over the day"),))
+    built = daemon(tmp_path, calendar)
+    run_dashboard(built, now=NOW)
+    assert calendar.ranges == [
+        (datetime(2026, 9, 8, 22, 0, tzinfo=_UTC), datetime(2026, 9, 9, 22, 0, tzinfo=_UTC))
+    ]
+    assert "Read over the day" in sections(written(built))["Time-Critical Activities"]
+
+
+def test_a_0700_render_lists_the_afternoon(tmp_path):
+    """Matrix: UTC−5 at 07:00, meetings at 09:00, 11:30, 14:00, 16:30 local."""
+    seven = datetime(2026, 9, 9, 12, 0, tzinfo=_UTC)  # 07:00 in Bogotá
+    local = [(9, 0), (11, 30), (14, 0), (16, 30)]
+    calendar = _DayCalendar(
+        "graph:contoso",
+        live=tuple(
+            meeting(f"m_{h}{m}", f"Meeting {h:02d}:{m:02d}", start=datetime(2026, 9, 9, h + 5, m, tzinfo=_UTC))
+            for h, m in local
+        ),
+    )
+    built = daemon(tmp_path, calendar, zone="America/Bogota")
+    run_dashboard(built, now=seven)
+    assert calendar.ranges == [
+        (datetime(2026, 9, 9, 5, 0, tzinfo=_UTC), datetime(2026, 9, 10, 5, 0, tzinfo=_UTC))
+    ]
+    body = sections(written(built))["Time-Critical Activities"]
+    for h, m in local:
+        assert f"Meeting {h:02d}:{m:02d}" in body
+
+
+@pytest.mark.parametrize(
+    ("day", "start", "end", "hours"),
+    [
+        # Spring forward at 02:00: a 23-hour day.
+        (
+            datetime(2026, 3, 29, 10, 0, tzinfo=_UTC),
+            datetime(2026, 3, 28, 23, 0, tzinfo=_UTC),
+            datetime(2026, 3, 29, 22, 0, tzinfo=_UTC),
+            23,
+        ),
+        # Fall back at 03:00: a 25-hour day.
+        (
+            datetime(2026, 10, 25, 10, 0, tzinfo=_UTC),
+            datetime(2026, 10, 24, 22, 0, tzinfo=_UTC),
+            datetime(2026, 10, 25, 23, 0, tzinfo=_UTC),
+            25,
+        ),
+    ],
+    ids=["23-hour-day", "25-hour-day"],
+)
+def test_a_daylight_saving_day_is_asked_for_midnight_to_midnight(tmp_path, day, start, end, hours):
+    """Matrix: DST change at 02:00 — and a meeting in the last hour is listed."""
+    last_hour = end - timedelta(minutes=30)  # 23:30 local
+    calendar = _DayCalendar(
+        "graph:contoso",
+        live=(
+            meeting("m_late", "Late call", start=last_hour),
+            meeting("m_morning", "Morning", start=start + timedelta(hours=11)),
+        ),
+    )
+    built = daemon(tmp_path, calendar)
+    run_dashboard(built, now=day)
+    assert calendar.ranges == [(start, end)]
+    assert end - start == timedelta(hours=hours)
+    assert "Late call" in sections(written(built))["Time-Critical Activities"]
+
+
+@pytest.mark.parametrize(
+    ("day", "start", "end", "hours"),
+    [
+        # Havana's clocks jump from 00:00 to 01:00: the day starts at 01:00.
+        (
+            datetime(2026, 3, 8, 16, 0, tzinfo=_UTC),
+            datetime(2026, 3, 8, 5, 0, tzinfo=_UTC),
+            datetime(2026, 3, 9, 4, 0, tzinfo=_UTC),
+            23,
+        ),
+        # And fall back from 01:00 to 00:00: a 25-hour day.
+        (
+            datetime(2026, 11, 1, 16, 0, tzinfo=_UTC),
+            datetime(2026, 11, 1, 4, 0, tzinfo=_UTC),
+            datetime(2026, 11, 2, 5, 0, tzinfo=_UTC),
+            25,
+        ),
+    ],
+    ids=["spring-at-midnight", "fall-at-midnight"],
+)
+def test_a_zone_changing_clocks_at_midnight_starts_at_the_first_existing_instant(
+    tmp_path, day, start, end, hours
+):
+    """Matrix: DST change at midnight — and the display date is still the day's
+    own, so a meeting later today and an all-day marker dated today are listed."""
+    from dataclasses import replace
+    from zoneinfo import ZoneInfo
+
+    calendar = _DayCalendar(
+        "graph:contoso",
+        live=(
+            meeting("m_noon", "Noon in Havana", start=day + timedelta(hours=1)),
+            replace(
+                meeting("m_allday", "Havana holiday", start=start, minutes=0),
+                all_day_date=day.astimezone(ZoneInfo("America/Havana")).date(),
+            ),
+        ),
+    )
+    built = daemon(tmp_path, calendar, zone="America/Havana")
+    run_dashboard(built, now=day)
+    assert calendar.ranges == [(start, end)]
+    assert end - start == timedelta(hours=hours)
+    body = sections(written(built))["Time-Critical Activities"]
+    assert "Noon in Havana" in body and "Havana holiday" in body
+
+
+def test_two_tenants_are_each_read_for_the_same_local_day(tmp_path):
+    """Matrix: two tenants — each asked for the day, merged and deduplicated."""
+    apex = _DayCalendar("graph:apex", live=(meeting("m_a", "Weekly Sync", ical_uid="uid-1"),))
+    zebra = _DayCalendar(
+        "graph:zebra",
+        live=(
+            meeting("m_z", "Weekly Sync", ical_uid="uid-1"),
+            meeting("m_y", "Vendor call", start=_at(14, 0)),
+        ),
+    )
+    built = daemon(tmp_path, apex, zebra)
+    run_dashboard(built, now=NOW)
+    assert apex.ranges == zebra.ranges == [
+        (datetime(2026, 9, 8, 22, 0, tzinfo=_UTC), datetime(2026, 9, 9, 22, 0, tzinfo=_UTC))
+    ]
+    body = sections(written(built))["Time-Critical Activities"]
+    assert body.count("Weekly Sync") == 1
+    assert "Vendor call" in body
+
+
+def test_two_tenants_one_failing_is_partial(tmp_path):
+    apex = _DayCalendar("graph:apex", live=(meeting("m_a", "Weekly Sync"),))
+    zebra = _DayCalendar(
+        "graph:zebra", failure=HarvestFailure("graph:zebra is signed out", retryable=False)
+    )
+    built = daemon(tmp_path, apex, zebra)
+    run_dashboard(built, now=NOW)
+    body = sections(written(built))["Time-Critical Activities"]
+    assert "Weekly Sync" in body
+    assert "graph:zebra is signed out" in body
+    assert zebra.ranges == apex.ranges
+
+
+def test_a_read_abandoned_at_its_deadline_is_an_unread_calendar(tmp_path):
+    """Matrix: the bounded step's deadline passes — the calendar is unread, the
+    render is not failed."""
+    from pm_ai.app.pipelines import FetchAbandoned, prepare_dashboard
+
+    def abandon(call, label, *, own_budget=False):
+        raise FetchAbandoned(f"{label} did not answer within its 0.2 s budget")
+
+    calendar = _DayCalendar("graph:contoso", live=(meeting("m_1", "Standup"),))
+    built = daemon(tmp_path, calendar)
+    page = prepare_dashboard(built, scope=PERSONAL, now=NOW, bound=abandon).decode("utf-8")
+    body = sections(page)["Time-Critical Activities"]
+    assert "The calendar could not be read" in body
+    assert "did not answer within its 0.2 s budget" in body
+    assert calendar.ranges == []
+
+
+def test_a_render_through_the_day_read_writes_nothing_but_the_page(tmp_path, monkeypatch):
+    """Acceptance — no meeting record, cursor, coverage window or event entry."""
+    calendar = _DayCalendar(
+        "graph:contoso",
+        records=(meeting("m_done", "Review", start=_at(8, 0)),),
+        live=(meeting("m_next", "Standup", start=_at(13, 0)),),
+    )
+    built = daemon(tmp_path, calendar)
+    before = _log_bytes(built, PERSONAL)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a render must not write here")
+
+    for name in ("save_cursor", "append_event_log", "persist_events"):
+        monkeypatch.setattr(type(built.storage), name, refuse)
+    monkeypatch.setattr(type(built.meetings), "put", refuse)
+
+    run_dashboard(built, now=NOW)
+
+    assert calendar.ranges
+    assert _log_bytes(built, PERSONAL) == before
+    assert built.storage.list_collection(scope=PERSONAL, artifact="meetings/") == ()
+    assert built.storage.coverage_windows("graph:contoso") == []
+
+
+def test_a_connector_without_the_day_read_is_asked_through_its_harvest(tmp_path):
+    """The fallback: harvested, and the overlap rule selects the day."""
+    calendar = _Calendar(
+        "graph:contoso",
+        live=(
+            meeting("m_today", "Today's sync", start=_at(13, 0)),
+            meeting("m_tomorrow", "Tomorrow's sync", start=_at(13, 0) + timedelta(days=1)),
+        ),
+    )
+    built = daemon(tmp_path, calendar)
+    run_dashboard(built, now=NOW)
+    assert calendar.asked == [Cursor()]
+    body = sections(written(built))["Time-Critical Activities"]
+    assert "Today's sync" in body and "Tomorrow's sync" not in body
+
+
+def test_an_ended_cancelled_meeting_is_listed_marked_cancelled(tmp_path):
+    """Matrix: cancelled, ended — listed as ended, its facts including `cancelled`."""
+    from dataclasses import replace
+
+    calendar = _DayCalendar(
+        "graph:contoso",
+        records=(replace(meeting("m_gone", "Called-off review", start=_at(8, 0)), cancelled=True),),
+        live=(meeting("m_next", "Standup", start=_at(13, 0)),),
+    )
+    built = daemon(tmp_path, calendar)
+    run_dashboard(built, now=NOW)
+    lines = sections(written(built))["Time-Critical Activities"].split("\n")
+    (gone,) = [line for line in lines if "Called-off review" in line]
+    assert "ended" in gone and "cancelled" in gone
+    (standup,) = [line for line in lines if "Standup" in line]
+    assert "cancelled" not in standup
+
+
+def test_an_all_day_marker_is_listed_beside_the_collapse_and_not_counted_in_it(tmp_path):
+    """An ended meeting plus an all-day marker: the count is one, the marker listed."""
+    from dataclasses import replace
+
+    marker = replace(
+        meeting("m_allday", "Team offsite", start=_at(0, 0), minutes=0),
+        all_day_date=NOW.date(),
+    )
+    calendar = _DayCalendar(
+        "graph:contoso",
+        records=(meeting("m_done", "Morning Review", start=_at(8, 0)),),
+        live=(marker,),
+    )
+    built = daemon(tmp_path, calendar)
+    run_dashboard(built, now=NOW)
+    body = sections(written(built))["Time-Critical Activities"].split("\n")
+    assert body[0].startswith("- **all day** Team offsite — 2 attendees")
+    assert body[1].startswith("Today's one meeting has ended.")
+    assert "All 2" not in "\n".join(body)
+
+
+def test_a_day_of_only_an_all_day_marker_never_says_it_has_ended(tmp_path):
+    """07:00 in Warsaw, one all-day marker: listed, and nothing "has ended"."""
+    from dataclasses import replace
+
+    seven = datetime(2026, 9, 9, 5, 0, tzinfo=_UTC)
+    marker = replace(
+        meeting("m_allday", "Public holiday", start=datetime(2026, 9, 8, 22, 0, tzinfo=_UTC), minutes=0),
+        all_day_date=seven.date(),
+    )
+    built = daemon(tmp_path, _DayCalendar("graph:contoso", live=(marker,)))
+    run_dashboard(built, now=seven)
+    body = sections(written(built))["Time-Critical Activities"]
+    assert body == "- **all day** Public holiday — 2 attendees"
+    assert "has ended" not in body and "have ended" not in body
