@@ -23,7 +23,7 @@ Two mechanisms are missing beside it. Nothing lists a Tier-1 `Collection`, so `8
 - **The port declares what the service already does.** `write_artifact` and `read_artifact` exist; this slice adds no behaviour to either, only the declaration — the shape story `2h` used when it added the event-log methods for exactly this reason.
 - **The listing method returns names, not paths.** A caller in `core` may not learn where an artifact lives; `1a` made the resolver the only thing that knows, and a port handing out paths would route around it.
 - **A restricted mode is declared, never passed.** The caller names *what* it is writing and the scope trees decide *how* — the rule `write_artifact`'s own docstring states. So the mode comes from the declaration, and no signature grows a `mode` argument.
-- **A restricted mode applies to the file, never to its parents.** `_publish` treats a non-`None` mode as *enclave* and chmods every parent directory to 0700 (`service.py:941-953`), including `~/.pm-ai`. That is correct for the encrypted set and wrong here: tightening the application root as a side effect of one connector file is a change nobody asked for and nobody would notice.
+- **A restricted mode applies to the file, never to its existing parents.** `_publish` treats a non-`None` mode as *enclave* and chmods every parent directory to 0700 (`service.py:941-953`), including `~/.pm-ai`. That is correct for the encrypted set and wrong here: tightening the application root as a side effect of one connector file is a change nobody asked for and nobody would notice. Since 1s a file's mode is decided by where it lives, not by its `gitignored` declaration; new private folders and their missing parents are made `0700`; and the daemon's start tightens the application root and everything in it — a write still changes no existing folder's mode.
 - **Absence is a value, not an exception.** `read_artifact` ends in `path.read_bytes()` (`service.py:1079`), so a first run raises where every caller needs "not there yet". The port declares the form that can say so.
 
 **Ask First:** Nothing.
@@ -41,7 +41,7 @@ Two mechanisms are missing beside it. Nothing lists a Tier-1 `Collection`, so `8
 | List an empty collection | declared, nothing written | empty, not an error | N/A |
 | List a collection that is not one | a `File` key | refused — a collection listing over a single file is a caller error | propagated |
 | Write a declared-restricted artifact | `connectors/<name>.json` | file at 0600 | N/A |
-| Parent modes after that write | `~/.pm-ai` and the collection directory | **unchanged** | N/A |
+| Parent modes after that write | `~/.pm-ai` and the collection directory, already existing | **unchanged** by the write (since 1s the daemon's start tightens them) | N/A |
 | Write an encrypted artifact | `private/config.json` | 0600 file inside 0700 directories, exactly as today | N/A |
 
 </frozen-after-approval>
@@ -73,6 +73,8 @@ Two mechanisms are missing beside it. Nothing lists a Tier-1 `Collection`, so `8
 - Given a collection listing, then no member of the result is a path — asserted by shape, since a path would let `core` route around the resolver `1a` established.
 
 ## Spec Change Log
+
+- **2026-10-17, frozen text edited by 1s (private files stay private).** Since 1s a file's mode is decided by where it lives — both homes whole, a project's `memory/` and `transcripts/` — not by its `gitignored` declaration, which keeps its own job of asking git first. New private folders and their missing parents are made `0700`, and the daemon's start tightens the application root and everything in it. A write still changes no existing folder's mode, so the "parent modes" row holds for a write; the Always line and that row say so.
 
 - **2026-09-03, split from `8b` at the sizing gate.** Amending `8b` against the second multi-lens review took it to 2906 body tokens against wave 1's 1600. Three of its tasks were storage capabilities rather than credential lifecycle — the two port declarations, the collection listing its duplicate check needs, and the restricted-mode mechanism — and `11a` needs the same listing for `for_day`. Specifying them once, against the port, is what lets both slices be written against an interface instead of around one.
   This also closes the review's **A1**, which had no owner. It was filed as blocking, downgraded because `Daemon.storage` is the concrete class, and recorded in `deferred-work.md` on 2026-09-03 precisely because a downgrade is how a real inconsistency becomes invisible.

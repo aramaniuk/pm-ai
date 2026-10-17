@@ -2,7 +2,8 @@
 title: 'Private files stay private'
 type: 'bugfix'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '0d20d0fdfe4636f046323ec4004f43f5c88670ff'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -72,7 +73,7 @@ context:
 
 ## Code Map
 
-Verified against `a1182f8` on 2026-10-16.
+Verified against `a1182f8` on 2026-10-16; re-verified against `0d20d0f` on 2026-10-17 (the mapped files are unchanged).
 
 - `pm_ai/domain/storage_tiers.py:196`, `:206-236` -- `RESTRICTED_FILE_MODE` and `restricted_mode`, which answers `0600` only for an artifact in `GITIGNORED`; its docstring's "tightening `~/.pm-ai` … nobody asked for" is the decision this slice reverses
 - `pm_ai/storage/crypto.py:167`, `:174` -- `ENCLAVE_DIR_MODE = 0o700`, `ENCRYPTED_FILE_MODE` (an alias of `RESTRICTED_FILE_MODE`)
@@ -96,16 +97,16 @@ Verified against `a1182f8` on 2026-10-16.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/storage_tiers.py` -- `restricted_mode` answers `0600` for every artifact of the application, team-member and personal scopes, and for a project artifact in `GITIGNORED`; a folder counterpart answers `0700` for the same set, from one constant that `ENCLAVE_DIR_MODE` aliases; the docstring says the axis is where the file lives, and why `gitignored` no longer decides it -- one rule, from the trees
-- [ ] `pm_ai/storage/service.py` -- one helper creates a private folder and its missing ancestors at `0700` and sets the mode again after each `mkdir`, stopping at the scope's shared part in a project and never used for `rules/` or `skills/`; `_writable_dir`, the temporary-file folder, `exclusive`'s parent, the disclosure ledger's folder, `logs/`, the capture staging folder and the store's folder use it; `operational.db` created at `0600` before `sqlite3.connect`; `diagnostic_log` returns a rotating handler whose files are opened at `0600`, keeping the standard rotation by rename (the full file renamed to `daemon.log.1`, a new `daemon.log` created), which 4w's follow relies on; `_mkdir_enclave`'s docstring reworded; a method that tightens one root as the frozen block says, its `lstat` and change calls injectable so the not-permitted, not-kept and swapped-link rows are testable without another account -- every write path, and the walk
-- [ ] `pm_ai/platform/claims.py` -- the lock file and the lifetime lock set to `0600` on the open file after creating them -- under umask `200` they are `0400` today
-- [ ] `pm_ai/app/wiring.py` -- project onboarding creates the project's private folders through the storage helper, the shared ones as today -- onboarding was the one writer outside storage
-- [ ] `pm_ai/app/daemon.py` -- after the lifetime lock, before the writer thread and before serving, under a time budget (overrun logged, the rest left to the next start), each entry opened `O_NOFOLLOW` and set by `fchmod`: tighten both home roots (skipping registered project repositories inside them) and each loaded project's private folders; log each change and refusal with its root; one console line when anything changed or was refused -- the existing-home half
-- [ ] `tests/architecture/test_private_modes.py` -- new: one test per matrix row, each under a real process umask restored in `finally`; the fresh-machine row asserts before any daemon start, so the walk cannot hide a write path that creates the wrong mode; SQLite's `-wal` and `-shm` asserted on a real open store; rollover asserted by forcing one; the walk timed on a generated home of a stated number of files, the figure, the count and the date recorded beside the walk method -- the matrix is the contract, and the cost is measured
-- [ ] `tests/architecture/test_storage_capabilities.py`, `tests/core/test_connector_enrolment.py` -- flip the `config.toml`, personal `persona.md` and personal event-log rows to `0600`; reword the two docstrings named in the Code Map -- they pin or explain the old rule
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: since 1s the personal event log is private (`0600`), and the daemon's start-up walk tightens existing segments and folders, though an append still changes no existing file's mode -- its frozen text says the personal log stays at the umask and no existing file is changed
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: since 1s a file's mode is decided by where it lives, not by its `gitignored` declaration; new private folders and their missing parents are made `0700`; and the daemon's start tightens the application root and everything in it -- its frozen text says a restricted file never tightens its parents or `~/.pm-ai`
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: folder permissions left to the umask (1a), 600 for the whole plaintext set, segments created before 1q, `disclosure.md` from before 1q, `operational.db` 0644 (9a), and the field test's file-mode entry -- what this closes
+- [x] `pm_ai/domain/storage_tiers.py` -- `restricted_mode` answers `0600` for every artifact of the application, team-member and personal scopes, and for a project artifact in `GITIGNORED`; a folder counterpart answers `0700` for the same set, from one constant that `ENCLAVE_DIR_MODE` aliases; the docstring says the axis is where the file lives, and why `gitignored` no longer decides it -- one rule, from the trees
+- [x] `pm_ai/storage/service.py` -- one helper creates a private folder and its missing ancestors at `0700` and sets the mode again after each `mkdir`, stopping at the scope's shared part in a project and never used for `rules/` or `skills/`; `_writable_dir`, the temporary-file folder, `exclusive`'s parent, the disclosure ledger's folder, `logs/`, the capture staging folder and the store's folder use it; `operational.db` created at `0600` before `sqlite3.connect`; `diagnostic_log` returns a rotating handler whose files are opened at `0600`, keeping the standard rotation by rename (the full file renamed to `daemon.log.1`, a new `daemon.log` created), which 4w's follow relies on; `_mkdir_enclave`'s docstring reworded; a method that tightens one root as the frozen block says, its `lstat` and change calls injectable so the not-permitted, not-kept and swapped-link rows are testable without another account -- every write path, and the walk
+- [x] `pm_ai/platform/claims.py` -- the lock file and the lifetime lock set to `0600` on the open file after creating them -- under umask `200` they are `0400` today
+- [x] `pm_ai/app/wiring.py` -- project onboarding creates the project's private folders through the storage helper, the shared ones as today -- onboarding was the one writer outside storage
+- [x] `pm_ai/app/daemon.py` -- after the lifetime lock, before the writer thread and before serving, under a time budget (overrun logged, the rest left to the next start), each entry opened `O_NOFOLLOW` and set by `fchmod`: tighten both home roots (skipping registered project repositories inside them) and each loaded project's private folders; log each change and refusal with its root; one console line when anything changed or was refused -- the existing-home half
+- [x] `tests/architecture/test_private_modes.py` -- new: one test per matrix row, each under a real process umask restored in `finally`; the fresh-machine row asserts before any daemon start, so the walk cannot hide a write path that creates the wrong mode; SQLite's `-wal` and `-shm` asserted on a real open store; rollover asserted by forcing one; the walk timed on a generated home of a stated number of files, the figure, the count and the date recorded beside the walk method -- the matrix is the contract, and the cost is measured
+- [x] `tests/architecture/test_storage_capabilities.py`, `tests/core/test_connector_enrolment.py` -- flip the `config.toml`, personal `persona.md` and personal event-log rows to `0600`; reword the two docstrings named in the Code Map -- they pin or explain the old rule
+- [x] `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: since 1s the personal event log is private (`0600`), and the daemon's start-up walk tightens existing segments and folders, though an append still changes no existing file's mode -- its frozen text says the personal log stays at the umask and no existing file is changed
+- [x] `_bmad-output/specs/spec-pm-ai/stories/8f-storage-port-capabilities.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: since 1s a file's mode is decided by where it lives, not by its `gitignored` declaration; new private folders and their missing parents are made `0700`; and the daemon's start tightens the application root and everything in it -- its frozen text says a restricted file never tightens its parents or `~/.pm-ai`
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved: folder permissions left to the umask (1a), 600 for the whole plaintext set, segments created before 1q, `disclosure.md` from before 1q, `operational.db` 0644 (9a), and the field test's file-mode entry -- what this closes
 
 **Acceptance Criteria:**
 - Given a home with the field test's modes, when the daemon starts, then every path in the measured list is private, `daemon.log` holds one line per path changed with its root, old and new mode, the console shows one line with the counts, and a second start changes nothing and prints no such line.
@@ -118,6 +119,7 @@ Verified against `a1182f8` on 2026-10-16.
 - **2026-10-16, review:** the walk covers everything inside both homes, the person's own files included, and skips registered project repositories inside them except their private folders; folders set to `0700` again after creation (umask `200`); `logs/`, the disclosure ledger's folder and the lock files (`platform/claims.py`) brought under the rule; modes changed as old minus group and other bits, special bits kept, without following links; missing or broken roots skipped, unreadable folders, unkept modes and hard-linked files logged as not tightened; access-control lists out of scope; log lines name their root, the console line also counts refusals; matrix rows for captures and staging, `disclosure.md`, lock files, the API token, a connector row, goals, a linked root, special bits; the fresh-home row asserted before any daemon start; the walk's calls injectable and its cost measured by a task; Intent corrected on where `0700` is applied today; 1q and 8f change-log lines spelled out; two test docstrings reworded; repeated acceptance criteria replaced by a system-level one. Depends on spine amendment: AD-6 — a project's shared parts (`.project-ai/`, `rules/`, `skills/`, `.gitignore`) stay at the umask, narrowing "everything else on disk is plaintext at `0600` inside `0700`". Depends on spine amendment: AD-5 — the daemon's start-up mode walk is not a write in AD-5's sense and runs before the writer thread starts.
 - **2026-10-16, review (cross-spec):** the Change Log moved before Design Notes; the diagnostic log's `0600` handler keeps rotation by rename, which 4w's follow relies on; tasks amending done specs say their frozen text is edited, with a dated Change Log line, when this slice is built.
 - **2026-10-16, spine gate:** frozen block edited (recorded here): the walk runs after the port is bound and the lifetime lock held, before the writer thread and before any request is served; it is bounded by a time budget (overrun logged, resumed at the next start) and sets modes on descriptors opened `O_NOFOLLOW` with `fchmod`, never by path (AD-5, AD-6); the `daemon.py` line references corrected (`:203`, `:208`, `:245`, `:276`, `:348`).
+- **2026-10-17, built.** Code Map re-verified against `0d20d0f` (the mapped files were unchanged). Review (three reviewers) patched: a hard-linked file already owner-only is no longer refused; every registered repository inside a home has its private folders walked, loaded or not; a repository registered at a home root keeps the fence, so its shared parts are not tightened; the lock file's last-resort open removed (it skipped `fchmod`); new folders set without following a link; each root's walk guarded on its own and failures logged with a traceback; the console line's log path derived from the application root; `daemon.log` opened `O_NOFOLLOW`; tests added for a wide token through a real start, onboarding through the daemon, the lifetime lock under umask `200`, a walk that raises, wide `-wal`/`-shm`, and the gitignored project set matching the private folders. Deferred, two marked "Needs Andrei's decision" in `deferred-work.md`: a group-readable token is now tightened at start instead of refusing it; a repository registered at a home root; a blocking system call is not bounded by the walk's budget; private folders are read off folder names.
 
 ## Design Notes
 
@@ -129,6 +131,8 @@ Why outside the writer thread (choice, review 2026-10-16): AD-5 routes every wri
 
 Choices made in review (2026-10-16): a mode the filesystem does not keep is reported every start rather than remembered, since remembering it would need a store row; a hard-linked file is left alone because its other name may be outside the home; access-control lists are out of scope because the field test measured only permission bits.
 
+Measured 2026-10-17 (recorded beside `MODE_WALK_BUDGET_SECONDS` in `pm_ai/app/daemon.py`): a generated home of 5,000 files in 50 folders took 0.32 s to tighten and 0.22 s to walk once private, on the development Mac; the budget is 10 s, and the test asserts each walk stays under half of it.
+
 ## Verification
 
 **Commands:**
@@ -139,3 +143,49 @@ Choices made in review (2026-10-16): a mode the filesystem does not keep is repo
 
 **Manual checks (if no CLI):**
 - On a machine with a wave-2 home: `ls -la ~/.pm-ai ~/.pm-ai/* ~/.manager-ai ~/.manager-ai/memory` before and after one `pm-ai daemon run`; every entry `drwx------` or `-rw-------` (or `-rwx------`), and `daemon.log` names each change.
+
+## Suggested Review Order
+
+**The rule: private by where a file lives**
+
+- Entry point: every app, team-member and personal artifact is `0600`; in a project only the machine-local half.
+  [`storage_tiers.py:236`](../../../../pm_ai/domain/storage_tiers.py#L236)
+- Folder side of the rule, read off the path; nearest scope folder wins.
+  [`storage_tiers.py:273`](../../../../pm_ai/domain/storage_tiers.py#L273)
+
+**Creating at the mode**
+
+- One folder helper: missing private folders made `0700` and set again (umask `200`).
+  [`service.py:350`](../../../../pm_ai/storage/service.py#L350)
+- `operational.db` pre-created `0600` so SQLite's `-wal`/`-shm` follow.
+  [`service.py:1449`](../../../../pm_ai/storage/service.py#L1449)
+- Log files opened `0600`, `O_NOFOLLOW`; rotation still by rename for 4w's follow.
+  [`service.py:416`](../../../../pm_ai/storage/service.py#L416)
+- Lock files created exclusively at `0600` and `fchmod`ed; no unchecked fallback.
+  [`claims.py:179`](../../../../pm_ai/platform/claims.py#L179)
+- Onboarding's private folders now go through storage, the shared ones as before.
+  [`wiring.py:3475`](../../../../pm_ai/app/wiring.py#L3475)
+
+**The start-up walk**
+
+- Placement: after the lifetime lock, before the writer thread and the token read.
+  [`daemon.py:230`](../../../../pm_ai/app/daemon.py#L230)
+- Roots: both homes, registered repositories fenced, their private folders walked.
+  [`daemon.py:253`](../../../../pm_ai/app/daemon.py#L253)
+- Logging, console line, per-root guard.
+  [`daemon.py:317`](../../../../pm_ai/app/daemon.py#L317)
+- Per-entry: `O_NOFOLLOW` open, `fstat`, `fchmod`, read-back; refusals and hard links.
+  [`service.py:693`](../../../../pm_ai/storage/service.py#L693)
+- Budget and traversal; calls injectable through `ModeCalls`.
+  [`service.py:791`](../../../../pm_ai/storage/service.py#L791)
+
+**Tests**
+
+- The matrix, one test per row; the fresh home asserted before any daemon start.
+  [`test_private_modes.py:293`](../../../../tests/architecture/test_private_modes.py#L293)
+- The field test's home through a real start, twice.
+  [`test_private_modes.py:1162`](../../../../tests/architecture/test_private_modes.py#L1162)
+- A wide token tightened by a real start before it is read.
+  [`test_private_modes.py:1271`](../../../../tests/architecture/test_private_modes.py#L1271)
+- The old refusal test, rewritten: start tightens, a reader still refuses.
+  [`test_daemon_slice.py:360`](../../../../tests/slice/test_daemon_slice.py#L360)

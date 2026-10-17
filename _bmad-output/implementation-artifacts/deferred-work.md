@@ -320,7 +320,7 @@ Known debt this wave takes on, recorded so it is not discovered later:
   evidence: Three canonical sources agree against one test. The test currently skips, so nothing reports the disagreement; when 1e implements the classifier it would be validated against a path the resolver never returns, and the real location would default to unencrypted.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`
-  summary: Directory permissions are left to the umask. The enclave, the people directories, the personal enclave and transcript directories should be created at `0700`.
+  summary: **RESOLVED 2026-10-17 by `1s`** — every private folder and its missing parents are created at `0700` and set again (a umask of `200` included), and the daemon's start tightens existing ones. Was: Directory permissions are left to the umask. The enclave, the people directories, the personal enclave and transcript directories should be created at `0700`.
   evidence: The storage contract specifies `0600` for encrypted files but says nothing about the directories holding them. Material described as unreadable by a report's peers is currently created with default permissions. Belongs with story 1f, which owns file modes.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1a-scope-path-resolver.md`
@@ -358,7 +358,7 @@ Known debt this wave takes on, recorded so it is not discovered later:
   evidence: The story is still `ready-for-dev` with nothing depending on it yet — the derived tier it rebuilds is written by later stories. The decomposition table above lists 1h inside story 1; this entry records the explicit decision (review gate, 2026-08-28) to merge story 1 without it rather than hold a 70-file branch for an independent slice. It remains the next `ready-for-dev` story in the queue.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/SPEC.md` (constraint: "Everything else … is 600-permissioned and unencrypted")
-  summary: **Planned in wave 3 as `1s` (pull request #74).** Implement 600 permissions for the whole plaintext set — every file `_publish` writes plaintext, `operational.db` at creation, captures, and team-member records — as a follow-up story; today only the two encrypted files and their enclave directories are tightened (0600/0700).
+  summary: **RESOLVED 2026-10-17 by `1s`** — every file in both homes and in a project's `memory/` and `transcripts/` is created at `0600`, by where it lives rather than its `gitignored` declaration. Was: Implement 600 permissions for the whole plaintext set — every file `_publish` writes plaintext, `operational.db` at creation, captures, and team-member records — as a follow-up story; today only the two encrypted files and their enclave directories are tightened (0600/0700).
   evidence: `storage-contract.md` makes 600 the load-bearing substitute for the encryption dropped on 2026-08-23, and nothing implements it for the plaintext set (story-1 code review, 2026-08-28). Deferred by decision at the review gate: the change concentrates in the single writer but touches every write path and deserves its own matrix (umask interaction, git-committed project files, sqlite sidecar files) rather than riding a review patch.
 
 ## Deferred at the story-4a review gate (2026-09-02)
@@ -940,7 +940,7 @@ transcript.
 Found by the spec writers while reading the code each slice touches. Each names the slice that owns it, or says it has none.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md`
-  summary: **Planned in wave 3 as `1s` (pull request #74).** A ledger segment created before `1q` keeps whatever mode the umask gave it; nothing reports it and no migration changes it.
+  summary: **Mode RESOLVED 2026-10-17 by `1s`** — the daemon's start-up walk tightens existing segments and their folders. Still open: nothing *reports* a wrong mode while no daemon has started (a `doctor` line is 1s's Ask First). Was: A ledger segment created before `1q` keeps whatever mode the umask gave it; nothing reports it and no migration changes it.
   evidence: `1q` applies the declared mode only when it creates a file, by decision, so a segment already on disk at `0644` stays there. `doctor` would need to walk every project's and person's ledger directory to say so, which is a probe of its own. No owner.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4n-doctor-and-setup-name-the-connectors.md`
@@ -1069,7 +1069,7 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: A harvest batch is appended as one write of all its lines with no size bound, so a batch above 1 MiB is outside the concurrent-appender bound 1q measured.
   evidence: `_append_batch` joins every rendered line into a single `_append` call; the measurement note beside `MAX_ENTRY_LENGTH` covers single writes up to 1 MiB only. Bounded in practice by harvest page caps, but nothing asserts or chunks it. Moot once the daemon is the only writer.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md`
-  summary: `disclosure.md` is one file that never rolls over, so on a machine where it was created before 1q it stays at the umask's mode for good, unlike event-log segments, which reach `0600` at the next month.
+  summary: **Mode RESOLVED 2026-10-17 by `1s`** — the daemon's start-up walk tightens an existing `disclosure.md`. Still open: the `doctor` report of a wrong mode, as for segments. Was: `disclosure.md` is one file that never rolls over, so on a machine where it was created before 1q it stays at the umask's mode for good, unlike event-log segments, which reach `0600` at the next month.
   evidence: 1q leaves existing files' modes alone by decision; event logs self-correct through monthly segments, the disclosure ledger does not. The `doctor` wrong-mode entry under "Surfaced while writing the wave-2 specs" is where this would be reported; no deployed machine has a ledger today (`~/.pm-ai` holds `private/` only).
 
 ## Surfaced by the story-1r review (2026-10-10)
@@ -1301,7 +1301,7 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: At GitLab's page cap (50,000 events) persisting a harvest's events is one claimed step of about 1.7 s on the writer thread, longer than the 1 s a client request waits for the writer, so a request arriving then is answered 503; the batch is also far past AD-47's measured 1 MiB single write.
   evidence: Measured 2026-10-14 on an M3 Pro (Rosetta), median 1.71 s over three runs; recorded in 9a's Design Notes. Splitting the persist into several claimed steps needs its own design, since each must leave storage complete.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
-  summary: **Planned in wave 3 as `1s` (pull request #74).** `operational.db` and its WAL side files are created 0644, though the spine's private tier says 0600; 9a fixed only the directories (0700).
+  summary: **RESOLVED 2026-10-17 by `1s`** — `operational.db` is created at `0600` before SQLite opens it, so its `-wal` and `-shm` files take the same mode; an existing one is tightened at daemon start. Was: `operational.db` and its WAL side files are created 0644, though the spine's private tier says 0600; 9a fixed only the directories (0700).
   evidence: Pre-existing; found while fixing the lock's parent directories.
 
 ## Surfaced by the story-9b review (2026-10-15)
@@ -1334,7 +1334,7 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   evidence: Findings 2 and 6 (`surfaces/cli/dispatch.py:1224`, `:1330`; docstrings at `core/connector_enrolment.py:51`, `app/wiring.py:868`). Rows are read fresh per job since `4r` and picked up at the timer's next read since `9a`.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `1s` (pull request #74).** File modes leak the day's meeting list and logs to other local users: the personal dashboard and `~/.manager-ai` 0644/0755, `connectors/`, `logs/`, `transcripts/` 0755, `daemon.log`, `config.toml`, `projects.toml` 0644, and an existing `~/.pm-ai` is never tightened.
+  summary: **RESOLVED 2026-10-17 by `1s`** — both homes are private whole (files `0600`, folders `0700`), and each daemon start tightens what already exists, logging each change and printing one line. Was: File modes leak the day's meeting list and logs to other local users: the personal dashboard and `~/.manager-ai` 0644/0755, `connectors/`, `logs/`, `transcripts/` 0755, `daemon.log`, `config.toml`, `projects.toml` 0644, and an existing `~/.pm-ai` is never tightened.
   evidence: Findings 3, 8 and 14; the project copy and transcript files are already 0600, so the rule exists and is applied unevenly. `operational.db` is the 9a entry above.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
@@ -1379,3 +1379,19 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23e-dashboard-reads-the-whole-local-day.md`
   summary: How Graph spells an all-day row's start under `Prefer: outlook.timezone="UTC"` has not been measured. Placing by date assumes the `dateTime` is the entry's own midnight, not shifted into UTC.
   evidence: No recorded fixture holds an all-day row (23e Design Notes), and the tests use midnight UTC. If Graph does shift it, an all-day entry created east of UTC would carry the previous date. The fix is a redacted all-day row added to the recorded fixtures from the next real-account capture.
+
+## Surfaced by the story-1s review (2026-10-17)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1s-private-files-stay-private.md`
+  summary: **Needs Andrei's decision.** A group-readable `private/api_token` no longer refuses the daemon start. The start-up walk runs before the token is read, so the token is narrowed to `0600` and the start goes on. The walk's log line is the only trace, and nothing suggests rotating a token that other local accounts may already have read.
+  evidence: 1s's frozen order (walk after the lifetime lock, before the writer thread and before serving) and its "no refusal to start because something on disk is too open" mean the earlier refusal can no longer fire at start. A reader that meets a group-readable token still refuses it (`tests/slice/test_daemon_slice.py`). The options are to keep it as built, to rotate the token when the walk narrows it, or to warn on the console.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1s-private-files-stay-private.md`
+  summary: **Needs Andrei's decision.** If a registered project repository is a home root itself (`~/.manager-ai` registered as a project), two frozen rules collide: "the home whole is private" and "a registered repository inside a home is skipped except its private folders". As built, the project fence wins, and that home's own `rules/`, `skills/` and `.gitignore` are left alone.
+  evidence: The walk's fence compared paths below the root only, so before the review patch the root case tightened the project's shared parts, which is an Ask First item. The fence now applies to the root too.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1s-private-files-stay-private.md`
+  summary: The start-up walk's time budget is checked between entries, so one `lstat`, `open` or `listdir` that blocks (a hung network mount under a home) holds the daemon start for as long as the call blocks.
+  evidence: `tighten_modes` compares the clock before each child. A blocking system call is not interruptible from there. Bounding it would need the walk on a thread joined with a timeout. Nothing measured shows a home on such a mount today.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/1s-private-files-stay-private.md`
+  summary: Which folders are private is read off folder names (`.pm-ai`, `.manager-ai`, `.project-ai/memory|transcripts`; `private_top`), while file modes follow the scope. A resolver built with homes under other names would get `0600` files in umask folders.
+  evidence: The production and test resolvers both use the standard names, as `crypto.is_encrypted` already assumes. Deriving the private top from `ScopePaths`' roots would remove the coupling, but the lock-file code has no resolver at hand.
+
