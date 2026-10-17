@@ -4,7 +4,7 @@ Companion to `SPEC.md`. Four scopes, what each holds, and the rule deciding whic
 
 ## The four scopes
 
-**Application Scope (`~/.pm-ai/`)** — System-level state owned by the application: daemon settings, the registry of enrolled projects, per-project connector configuration, encrypted credentials, operational telemetry, diagnostic logs, and the disclosure ledger. Deliberately separate so no employer- or project-specific configuration lands in the sovereign personal scope.
+**Application Scope (`~/.pm-ai/`)** — System-level state owned by the application: daemon settings, the registry of enrolled projects, per-project connector configuration, encrypted credentials, operational telemetry, diagnostic logs, the disclosure ledger, and the saved alias table (since 2026-10-16). Deliberately separate so no employer- or project-specific configuration lands in the sovereign personal scope.
 
 **Sovereign Personal PM Scope (`~/.manager-ai/`)** — The independent personal coaching hub: leadership philosophy, 3-tier goals, Socratic 1:1 coaching logs, literature subscriptions, anti-burnout metrics. Contains **no** project-specific information or configuration. Survives independently across project, role, and company transitions. Governed by the User Privacy & Data Boundary Charter.
 
@@ -44,6 +44,10 @@ The application scope holds none, because it owns no meetings. **All three are e
 │
 ├── config.toml                        # Daemon settings & global defaults
 ├── disclosure.md                      # Frontier-call provenance & cost ledger - never committed
+├── aliases.md                         # Tier 1, append-only: PM-confirmed name -> person
+│                                      # handle, optionally for one meeting (7e,
+│                                      # 2026-10-16). A name -> handle row describes a
+│                                      # person, not a project, so it lives here
 ├── projects.toml                      # Registry of enrolled projects (pm-ai project add)
 ├── connectors/                        # Per-project & personal connector CONFIGURATION
 │                                      # and IMPLEMENTATION - the hot-loadable plugin
@@ -59,7 +63,11 @@ The application scope holds none, because it owns no meetings. **All three are e
 │
 └── private/                           # OPERATIONAL ENCLAVE (gitignored)
     ├── operational.db                 # Tier 2: job queue, cursors, executed-key ledger,
-    │                                  # staged proposals (600, never rebuilt)
+    │                                  # staged proposals (600, never rebuilt). Since
+    │                                  # 2026-10-16 also, keyed by scope: the GitLab
+    │                                  # work tables (8t), transcript_parts and
+    │                                  # transcript_part_asks (33g), and the
+    │                                  # meeting summary state rows (7b)
     ├── event_index.db                 # Tier 3: search index over rules/, event_log/,
     │                                  # meetings/ - disposable, rebuilt by pm-ai reindex
     ├── commitment_index.db            # Tier 3: index over commitments_log.md - disposable
@@ -153,6 +161,9 @@ The application scope holds none, because it owns no meetings. **All three are e
 │   │   ├── meetings/                  # Meeting SUMMARIES - citation root for every
 │   │   │                              # extracted fact (man-hour cost, attendees, duration).
 │   │   │                              # A record may only cite a meeting in its own scope.
+│   │   ├── member_updates.md          # Tier 1, append-only: meeting updates naming a
+│   │   │                              # GitLab issue (7e, 2026-10-16). Declared in the
+│   │   │                              # project tree only - no personal or people copy
 │   │   └── event_log/                 # Project-specific audit trail & decision log
 │   ├── skills/                        # PROJECT-SPECIFIC SKILLS (committed)
 │   │   ├── parse_standup.py
@@ -179,7 +190,9 @@ The application scope holds none, because it owns no meetings. **All three are e
 
 - Personal-scope files are never indexed into or committed to project repositories; pre-commit hooks verify the private enclaves are gitignored.
 - A capture write asks **git itself** whether the directory would be carried into a commit, and the question is keyed on whether the path lies inside a git working tree — never on which scope owns it. All three capture locations are covered on the same terms, so a private personal repository is protected exactly as the employer's is. Tracked, or unanswerable, refuses the write; outside a working tree there is nothing to be excluded from and the write proceeds.
-- Anti-burnout indicators and personal workload analytics are excluded from every project-scope file.
+- Anti-burnout indicators and personal workload analytics are excluded from every project-scope file. **Amended 2026-10-16 (Andrei):** a project dashboard may show per-member activity — each member's recent activity against that member's own tasks and priorities, what moved and what did not (Team Activity), read from the project's own records only — but never rankings, per-person totals, comparisons between people, or any personal-scope or team-member-scope data.
+- **Private by location** (2026-10-16, story 1s). Everything under `~/.pm-ai` (the team-member scope included) and `~/.manager-ai`, and a project's `memory/` and `transcripts/`, is `0600` in `0700` folders — decided by where a file lives, not by its `gitignored` declaration, which keeps its own job of making a write ask git first. A project's shared parts — `.project-ai/` itself, `rules/`, `skills/`, the repository's `.gitignore` — stay at the umask, because they travel to teammates through the repository. Each daemon start tightens what already exists in those places (see `storage-contract.md`).
+- A Teams channel may file into the personal scope as well as an enrolled project (2026-10-15, story 33i); its messages then go to the personal event log, as a personal chat's do.
 - **Encryption is narrow as of 2026-08-23**, and covers two files: API credentials (`~/.pm-ai/private/config.json`) and the PM's own voice notes and dialogue state (`~/.manager-ai/private/telegram_cache/`). Everything else — both operational stores, raw captures, team-member records, connector configuration and code — is 600-permissioned, gitignored where it matters, and unencrypted, with full-disk encryption as the backstop. A report's record being unreadable by that report's peers rests on file permissions and the directory boundary rather than on a cipher.
 - Custom metrics and dossiers about a report live in the team-member scope only — never the sovereign scope, never a committed project scope, because a report's performance record must not be readable by that report's peers.
 - Only team-member-scope material is ever an HR sync payload, and no payload may draw on personal-scope material, directly or by way of a model that read both.

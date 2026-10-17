@@ -358,7 +358,7 @@ Known debt this wave takes on, recorded so it is not discovered later:
   evidence: The story is still `ready-for-dev` with nothing depending on it yet — the derived tier it rebuilds is written by later stories. The decomposition table above lists 1h inside story 1; this entry records the explicit decision (review gate, 2026-08-28) to merge story 1 without it rather than hold a 70-file branch for an independent slice. It remains the next `ready-for-dev` story in the queue.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/SPEC.md` (constraint: "Everything else … is 600-permissioned and unencrypted")
-  summary: Implement 600 permissions for the whole plaintext set — every file `_publish` writes plaintext, `operational.db` at creation, captures, and team-member records — as a follow-up story; today only the two encrypted files and their enclave directories are tightened (0600/0700).
+  summary: **Planned in wave 3 as `1s` (pull request #74).** Implement 600 permissions for the whole plaintext set — every file `_publish` writes plaintext, `operational.db` at creation, captures, and team-member records — as a follow-up story; today only the two encrypted files and their enclave directories are tightened (0600/0700).
   evidence: `storage-contract.md` makes 600 the load-bearing substitute for the encryption dropped on 2026-08-23, and nothing implements it for the plaintext set (story-1 code review, 2026-08-28). Deferred by decision at the review gate: the change concentrates in the single writer but touches every write path and deserves its own matrix (umask interaction, git-committed project files, sqlite sidecar files) rather than riding a review patch.
 
 ## Deferred at the story-4a review gate (2026-09-02)
@@ -940,7 +940,7 @@ transcript.
 Found by the spec writers while reading the code each slice touches. Each names the slice that owns it, or says it has none.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/1q-ledger-segment-file-mode.md`
-  summary: A ledger segment created before `1q` keeps whatever mode the umask gave it; nothing reports it and no migration changes it.
+  summary: **Planned in wave 3 as `1s` (pull request #74).** A ledger segment created before `1q` keeps whatever mode the umask gave it; nothing reports it and no migration changes it.
   evidence: `1q` applies the declared mode only when it creates a file, by decision, so a segment already on disk at `0644` stays there. `doctor` would need to walk every project's and person's ledger directory to say so, which is a probe of its own. No owner.
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/4n-doctor-and-setup-name-the-connectors.md`
@@ -1301,7 +1301,7 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
   summary: At GitLab's page cap (50,000 events) persisting a harvest's events is one claimed step of about 1.7 s on the writer thread, longer than the 1 s a client request waits for the writer, so a request arriving then is answered 503; the batch is also far past AD-47's measured 1 MiB single write.
   evidence: Measured 2026-10-14 on an M3 Pro (Rosetta), median 1.71 s over three runs; recorded in 9a's Design Notes. Splitting the persist into several claimed steps needs its own design, since each must leave storage complete.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/9a-scheduled-harvest.md`
-  summary: `operational.db` and its WAL side files are created 0644, though the spine's private tier says 0600; 9a fixed only the directories (0700).
+  summary: **Planned in wave 3 as `1s` (pull request #74).** `operational.db` and its WAL side files are created 0644, though the spine's private tier says 0600; 9a fixed only the directories (0700).
   evidence: Pre-existing; found while fixing the lock's parent directories.
 
 ## Surfaced by the story-9b review (2026-10-15)
@@ -1318,51 +1318,51 @@ Same basis as the wave-1 table above: `tiktoken` `cl100k_base`, spec body exclud
 From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which holds the measurements; numbers below are its finding numbers.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: R1 (Andrei, 2026-10-15): every part of a meeting's transcript is kept — when transcription is stopped and started again, all non-overlapping parts are stored and ingested in time order; overlapping ones stay refused as duplicates.
+  summary: **Planned in wave 3 as `33g` (pull request #74).** Decided by Andrei, 2026-10-15: every part of a meeting's transcript is kept — when transcription is stopped and started again, all non-overlapping parts are stored and ingested in time order; overlapping ones stay refused as duplicates.
   evidence: Finding 11: a real meeting's two sequential parts were both discarded by `33e`'s 'a recording restarted, so none is stored' rule. Amends `33e`'s frozen block through `bmad-spec`.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: R2 (Andrei, 2026-10-15): a listed Teams channel may file into the personal scope, not only into an enrolled project.
-  evidence: Finding 18: four of five channels the PM wanted to follow belong to no project and could not be listed (`connectors/graph/channels.py:132`). Amends `33d`'s frozen block.
+  summary: **Planned in wave 3 as `33i` (pull request #74).** Decided by Andrei, 2026-10-15: a listed Teams channel may file into the personal scope, not only into an enrolled project.
+  evidence: Finding 18: most channels the PM wanted to follow belong to no project and could not be listed (`connectors/graph/channels.py:132`). Amends `33d`'s frozen block.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: The Graph clock-skew warning is false for every Microsoft sign-in: it is computed from the ID token's `iat`, which Microsoft backdates by five minutes, so `connector check` exits 4 on a healthy machine.
+  summary: **Planned in wave 3 as `8r` (pull request #74).** The Graph clock-skew warning is false for every Microsoft sign-in: it is computed from the ID token's `iat`, which Microsoft backdates by five minutes, so `connector check` exits 4 on a healthy machine.
   evidence: Finding 1: measured 5:00.5 'ahead' with the clock within 0.15 s (`connectors/graph/auth.py:1620`). Measure against the token endpoint's `Date` header, or allow for the backdating.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: Both connector-enrolment endings are stale: Graph's says nothing harvests until scheduled harvesting exists, GitLab's that it becomes active at the next start.
+  summary: **Planned in wave 3 as `4s` (pull request #74).** Both connector-enrolment endings are stale: Graph's says nothing harvests until scheduled harvesting exists, GitLab's that it becomes active at the next start.
   evidence: Findings 2 and 6 (`surfaces/cli/dispatch.py:1224`, `:1330`; docstrings at `core/connector_enrolment.py:51`, `app/wiring.py:868`). Rows are read fresh per job since `4r` and picked up at the timer's next read since `9a`.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: File modes leak the day's meeting list and logs to other local users: the personal dashboard and `~/.manager-ai` 0644/0755, `connectors/`, `logs/`, `transcripts/` 0755, `daemon.log`, `config.toml`, `projects.toml` 0644, and an existing `~/.pm-ai` is never tightened.
+  summary: **Planned in wave 3 as `1s` (pull request #74).** File modes leak the day's meeting list and logs to other local users: the personal dashboard and `~/.manager-ai` 0644/0755, `connectors/`, `logs/`, `transcripts/` 0755, `daemon.log`, `config.toml`, `projects.toml` 0644, and an existing `~/.pm-ai` is never tightened.
   evidence: Findings 3, 8 and 14; the project copy and transcript files are already 0600, so the rule exists and is applied unevenly. `operational.db` is the 9a entry above.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: A Proactive Enablement signal is labelled with its harvest time, not the time it was posted.
+  summary: **Planned in wave 3 as `23f` (pull request #74).** A Proactive Enablement signal is labelled with its harvest time, not the time it was posted.
   evidence: Finding 15: every signal read the harvest minute for messages posted hours earlier (`core/rendering.py:708`, `_signal_line`). Keep filtering on `ingested_at`; label with `occurred_at`.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: Signal senders render as raw `graph:<user id>` handles.
+  summary: **Planned in wave 3 as `23f` (pull request #74).** Signal senders render as raw `graph:<user id>` handles.
   evidence: Finding 16: unreadable without looking ids up; nothing resolves a handle for display (`core/rendering.py:900`). Needs a display-name source that respects `33d`'s ids-not-names decision.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: A multi-line message's excerpt shows a literal `\n`.
+  summary: **Planned in wave 3 as `23f` (pull request #74).** A multi-line message's excerpt shows a literal `\n`.
   evidence: Finding 17: the one-line escape writes the two characters `\` `n` (`core/rendering.py:1124`); a space or a separator reads better.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: GitLab's first run reaches back 7 days while every later run asks from 30 days before the cursor, so the second run back-fills three more weeks.
-  evidence: Finding 19 (`connectors/gitlab/__init__.py:106`, `:124`): 38 then 189 commits on a real project; a 30-day first run would be consistent.
+  summary: **Planned in wave 3 as `8s` (pull request #74).** GitLab's first run reaches back 7 days while every later run asks from 30 days before the cursor, so the second run back-fills three more weeks.
+  evidence: Finding 19 (`connectors/gitlab/__init__.py:106`, `:124`): a real project's commits; a 30-day first run would be consistent.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
   summary: An accepted meeting's join-link lookup answers 404, so its transcript is recorded as not the PM's to read.
   evidence: Finding 12: reproduced through pm-ai's own client; another attendee-only meeting resolves, so the cause is not organiser-only access. Investigate cross-tenant organisers and group invitations.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: Small surface gaps from the field test: no `goal list`/show command, no quoting hint for an unquoted path with spaces, no `https://` assumed for a GitLab host, nothing printed when the daemon stops, and a cancelled-but-ended meeting recorded while the dashboard leaves it out.
+  summary: **Planned in wave 3 as `4t`, `11d`, `8s`, `4s` (pull request #74).** Finding 7: **Planned in wave 3 as `23e` (pull request #74 plus this sync)** — Andrei, 2026-10-16: an ended cancelled meeting is shown, marked as cancelled. Small surface gaps from the field test: no `goal list`/show command, no quoting hint for an unquoted path with spaces, no `https://` assumed for a GitLab host, nothing printed when the daemon stops, and a cancelled-but-ended meeting recorded while the dashboard leaves it out.
   evidence: Findings 23, 21, the host prompt, 13 and 7 in the field-test report.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: Whether `transcript drop` should read transcripts exported from Teams as `.docx` (or converted from it).
+  summary: **Planned in wave 3 as `11d` (pull request #74).** Whether `transcript drop` should read transcripts exported from Teams as `.docx` (or converted from it).
   evidence: Finding 22: a real export was refused; depends on how transcripts arrive outside Graph — Andrei to say.
 
 ## Surfaced by the recorded Graph fixtures (2026-10-16)

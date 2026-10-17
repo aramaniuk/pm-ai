@@ -34,8 +34,27 @@ The 50–150 ms and 60-second figures describe **different operations**, not a c
 
 *(There is no NFR-13 in this group — it is the cost target below, numbered as in the source.)*
 
+### Local model use, as wave 3 builds it (2026-10-16, stories 7a and 7b)
+
+How NFR-12 is held when the local model first runs. Every figure below is a bound the specs set; none is a measurement — 7a and 7b record measured figures, with the machine, when built.
+
+- **Loopback only, by construction.** Ollama is reached at `http://127.0.0.1:11434`, a constant: no host setting, no proxy, no redirect, no authorization header. A model whose tag contains `cloud`, or that the server reports as running elsewhere, is refused. pm-ai names the model in `config.toml` (`local_model`) and never pulls one.
+- **One heavy model job at a time**, on a model pool of one worker, never on the loop, the writer thread or an I/O worker; every request sends `keep_alive: 0`, temperature 0 and a fixed seed, so the model is unloaded between calls.
+- **The window and the model are chosen by measurement.** `num_ctx` is 8,192 until 7a's benchmark sets it; the model is picked between `llama3.1:8b` and `qwen3:8b` at `Q4_K_M` by validation, then recall on an authored transcript, then peak memory, then wall time. An answer that reaches the window or is cut short is refused, never used.
+- **Per summary:** each model call has 300 seconds; a long transcript is split at speaker turns and merged, never refused for length; one retry per call; at most 3 meetings offered per harvest, most recent first, none whose start is more than 30 days old (its transcript is purged at 30 days, NFR-09).
+- **Not claimed in wave 3:** NFR-03's 600 seconds from meeting end — pm-ai observes no meeting end yet and reads transcripts at the harvest. 7b measures ingestion-to-written and request-to-written instead, and asks before building on a figure over 600 seconds.
+- **Still open:** whether whisper.cpp and the parsing model fit together at 16GB (SPEC Open Questions). Whisper is not in wave 3, so 7a's benchmark measures the parsing model alone, with a GitLab-sized harvest persisting beside it.
+
 ## Cost & token efficiency
 
 **NFR-13** — Total monthly operational LLM API spend plus electrical runtime power for local model execution is held to a **monitored target of $20/month per user**, achieved by maximizing deterministic scripts and local execution and reserving frontier calls for high-level synthesis. Every frontier call records token counts and a cost estimate to the application-scoped disclosure ledger, and the running monthly total surfaces in briefings and the CLI.
 
+**A meeting summary the PM explicitly asks for** is a frontier use too (kernel amendment 2026-10-16; story 7c): one meeting's transcript, from its own scope back to that scope, never automatic and never a fallback for a local failure. A `sent` disclosure line precedes the request and a `completed` line records the tokens the answer reported and the cost computed from a dated price table (Sonnet 5 $2/$10, Opus 5 $5/$25 per million tokens, the spine's figures, checked when 7c is built); a model with no row refuses the call. No token-counting request is made, since it would send the transcript. The job's reply carries the call's cost and the month's total, warning past $20, and the personal dashboard's Leadership Notes shows the month's total (story 7d).
+
 **Breaching the target produces a warning only.** The system shall not silently degrade output quality, downgrade models, or disable features on breach. The figure is an instrument for understanding real operating economics; converting it into an enforced cap is a later decision to be taken against actual spend data.
+
+## Harvest request bounds stated by wave 3 (2026-10-16)
+
+- **Graph transcripts (story 8s):** the first-run reach-back defaults to five days and transcript acquisition keeps the whole span, so every harvest asks again about each ended meeting of the last five days that has no transcript and no closing answer. How many requests that is per harvest is counted by 8s's test on the recorded Graph transport and recorded in its spec — not yet stated. There is no per-harvest ceiling on them (Andrei, 2026-10-16): the ten-minute fetch budget bounds the run, and a meeting not reached waits for the next harvest.
+- **Graph channels (story 33h):** one request shape (`$top=50&$expand=replies`), the 200-page cap and the shared time budget unchanged; the walk stops after the first page whose oldest first post is more than 90 days before the channel's position. Replies in threads started before that horizon are an admitted limit.
+- **GitLab work (story 8t):** one 10-minute budget per harvest shared by commits, members, issues, merge requests and links; each walk capped at 500 pages of 100; at most 500 related-issue requests per run, the rest read next run.

@@ -49,6 +49,36 @@ Companion to `SPEC.md`. The bridge between this spec's capability ids and the id
 | CAP-39 | FR-39 | — | AD-42, AD-38 | unphased |
 | CAP-40 | FR-40 | — | AD-42, AD-22, AD-3 | unphased |
 
+## Wave 3 slices → capabilities (2026-10-16)
+
+Mapped from each slice spec's Intent. **Cited** means the spec names the CAP itself; otherwise the CAP is the one whose intent the slice serves, or its parent story's in `stories.yaml`. A dash means the slice delivers a kernel Constraint or storage rule rather than a capability, as story 1 does.
+
+| Slice | Parent | Capabilities | Basis |
+| --- | --- | --- | --- |
+| 23e the dashboard reads the whole local day | 23 | CAP-9 | parent 23; the morning briefing's day |
+| 33h fresh replies in older threads | 33 | CAP-2 | harvest completeness |
+| 8r an honest clock check | 8 | CAP-35 | connector health probe |
+| 1s private files stay private | 1b | — | storage contract (`scope-model.md`, `storage-contract.md`) |
+| 8s first runs reach back far enough | 8 | CAP-2, CAP-35 | first harvest; connector add |
+| 23f readable message signals | 23 | CAP-9 | parent 23; Proactive Enablement |
+| 8t GitLab issues harvest | 8 | CAP-2 | harvest of members, issues, merge requests |
+| 23g Team Activity | 23 | CAP-32 | no spec names a CAP; the PRD files Team Activity under FR-32 |
+| 33g every part of a transcript | 33 | CAP-3 | transcript fetched whole |
+| 33i a channel may file personally | 33 | CAP-2 | harvest into the owning scope |
+| 4t goals listed, shown, updated, deleted | 4 | CAP-11, CAP-10 | cited |
+| 4u the prompt completes and hints | 4 | CAP-18 | parent 4 |
+| 4v jobs report themselves | 4 | CAP-18 | parent 4 |
+| 4w `pm-ai logs` | 4 | CAP-18 | parent 4 |
+| 11d transcript drop formats and paths | 11 | CAP-8 | the manual transcript path |
+| 4s small surface fixes | 4 | CAP-18, CAP-35 | parent 4; connector enrolment and categories |
+| 7a the local model behind the port | 7 | CAP-3 | cited |
+| 7b summary, decisions and actions | 7 | CAP-3, CAP-27 | cited |
+| 7e transcripts update member priorities | 7 | CAP-3, CAP-32 | transcript output; rendered in Team Activity (FR-32 in the PRD) |
+| 7c a frontier summary on request | 7 | CAP-27, CAP-3 | CAP-27 cited (disclosure ledger) |
+| 7d summaries and actions on the dashboard | 7 | CAP-9 | cited |
+
+Story 7's own entry in `stories.yaml` names CAP-1 and CAP-21 because story 7 builds the NFR-01/NFR-12 local-model substrate those two build on; no wave-3 slice delivers either. CAP-32 is served only by Team Activity: its pre-meeting timing, inquiries and pushed cards are not delivered by any wave-3 slice. CAP-6's staging of implicit extractions is respected by 7b — action items stage and never execute — but 7b does not cite it and builds no approval card, so it is not counted here.
+
 ## Metrics and budgets
 
 - Success metrics `SM-1..SM-9` and counter-metrics `SM-C1..SM-C3` keep their source ids in `success-metrics.md`, where each row names the capabilities it validates.

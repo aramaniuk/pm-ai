@@ -105,12 +105,14 @@ A job never enqueues its successor. It declares what it produced; the task manag
 | job | inputs | outputs | trigger |
 | --- | --- | --- | --- |
 | **Harvest** | connector instance + cursor | normalized events → `event_log/` | schedule (240m ±15, per AD-9) |
-| **Transcript processing** | a capture in `transcripts/` | meeting summary → `meetings/`, decisions → `event_log/`, commitments → `commitments_log.md`, staged proposals | filesystem event in `transcripts/` |
+| **Transcript processing** | a capture in `transcripts/` | meeting summary → `meetings/`, decisions → `event_log/`, commitments → `commitments_log.md`, staged proposals, meeting updates → a project's `member_updates.md` | filesystem event in `transcripts/` |
 | **Commitment indexing** | `commitments_log.md` | `commitment_index.db` | filesystem event on that file |
 | **Search indexing** | `rules/`, `event_log/`, `meetings/` | `event_index.db` | filesystem event under any of them |
 | **Embedding** | `event_log/`, `meetings/`, `coaching_1on1_history.md` | `vector_index/` | filesystem event under any of them |
 | **Commitment lifecycle** | harvested telemetry + the clock (**not** the index, which it only reads) | commitment state transitions in `commitments_log.md` | schedule |
 | **Compaction** | ageing sealed `event_log/` segments | milestone summary segments, **a `COMPACTION` record in the open segment**, index bounded | schedule (7d / 500MB) |
+
+**Wave 3 runs transcript processing before the task manager exists** (2026-10-16, stories 7b and 7e). Until story 10a, the daemon offers a meeting for summary from its harvest — at most 3 per harvest, one job per scope and meeting, the summary state row in `operational.db` saying what is waiting — and a hand-dropped transcript waits for the next harvest. The outputs are the ones in the row above; `member_updates.md` exists only in a project scope and is append-only, and the alias table (`aliases.md`) is written by the PM's `pm-ai member name`, never by a job.
 
 The chain the design must support, end to end: a meeting ends → the Graph adapter fetches and validates the transcript → the capture lands in `transcripts/` → transcript processing runs → `commitments_log.md` gains entries → commitment indexing runs → the index is current. Each step is one job with one responsibility, and no step names the next.
 

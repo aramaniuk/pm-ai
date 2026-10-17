@@ -34,6 +34,12 @@ Multi-HR tool MCP skill, career dossier pipeline, cohort and individual metric m
 
 ## Phase 1 checks the source flags
 
-- Benchmark concurrent Whisper transcription and local model parsing at the 16GB baseline before the hardware floor is trusted.
-- Select the specific 8B-class local model; the spec names a class, not a pin.
+- Benchmark concurrent Whisper transcription and local model parsing at the 16GB baseline before the hardware floor is trusted. *Wave 3 (story 7a) benchmarks the parsing model alone, beside a heavy harvest; Whisper is not in wave 3, so the concurrent question stays open.*
+- Select the specific 8B-class local model; the spec names a class, not a pin. *Wave 3 (story 7a): chosen by measurement between `llama3.1:8b` and `qwen3:8b` at `Q4_K_M`, recorded with its numbers.*
 - Pin the embedding model and dimension before the first index is written — a change is a reindex event.
+
+## Delivery waves
+
+Phases group capabilities; waves are the order stories are built in (`stories.yaml`), and a wave may take part of a capability from any phase.
+
+**Wave 3** (decided 2026-10-16 from the wave-2 field test and Andrei's first-use feedback): 21 slices, built in this order — 23e, 33h, 8r, 1s, 8s, 23f, 8t, 23g, 33g, 33i, 4t, 4u, 4v, 4w, 11d, 4s, 7a, 7b, 7e, 7c, 7d — every one with a spec checkpoint and a done checkpoint. **Story 7 comes forward into wave 3**, local model first: 7a puts Ollama behind the model port and benchmarks it (no Whisper), 7b makes a summary, decisions and action items from a transcript, 7e links them to GitLab issues, 7c adds a Claude summary on explicit request, 7d shows them on the dashboard. Which capabilities each slice serves is in `traceability.md`.

@@ -57,6 +57,8 @@ The user throughout is **Andrei**, an engineering PM.
 **Climax:** Work Items and the local ledger reflect real discussion state without a ticket editor being opened or an alarm set.
 **Resolution:** Over the next 3 days pm-ai watches commits and PR reviews, verifying progress or surfacing a Socratic alert if a dependency risks slipping.
 
+*As built in wave 3 (2026-10-16):* the transcript is read at the next harvest, not at meeting end, and every stored part of a restarted transcription is read as one meeting. The local model writes a summary, the decisions (each a decision event) and the action items (each a staged proposal, never executed) in the language most of the meeting was held in. If Andrei wants a better summary he asks for one: `pm-ai transcript summarize --scope <scope> --meeting <id> --by claude` sends that one meeting to Claude, discloses the call before it leaves, and replies with its cost and the month's total against $20. For a project meeting, items naming a GitLab issue appear under that issue in the project page's Team Activity.
+
 ### UJ-4 — Preparing for and completing a team-member 1:1
 
 **Entry:** Calendar event trigger, 15 minutes before a 1:1 with Alex.
@@ -92,6 +94,8 @@ The user throughout is **Andrei**, an engineering PM.
 **Climax:** The team skips generic status updates and works validated blockers and agenda resolutions.
 **Resolution:** Today's spoken commitments and target dates become the baseline for tomorrow's validation.
 
+*As built in wave 3 (2026-10-16):* the project page's Team Activity lists each project member with their open GitLab issues in milestone order, marks the issues worked on lately (commits referencing them, a linked merge request updated or merged), and under each issue the latest meeting updates — model-matched ones marked until confirmed. Members are listed alphabetically; nothing ranks, totals or compares them. A spoken name is attributed to a member only through a name Andrei has confirmed (`pm-ai member name`) or an exact match to exactly one active member's display name or username; otherwise the update shows as unassigned.
+
 ### UJ-7 — Explicit verbal commands vs. implicit discussion extraction
 
 **Entry:** An architecture meeting, transcript ingestion active post-meeting.
@@ -108,7 +112,7 @@ The user throughout is **Andrei**, an engineering PM.
 
 **Entry:** Double-booked, missed an optional technical sync that was recorded.
 
-1. *"Fetch the transcript for today's Payment Gateway Sync and run post-meeting analysis."*
+1. *"Fetch the transcript for today's Payment Gateway Sync and run post-meeting analysis."* — or, where the provider holds no transcript, `pm-ai transcript drop <file> --scope <scope>` with a Teams export: `.vtt`, `.txt`, `.md` or `.docx` (2026-10-16). A relative path is read from the folder pm-ai was started in, `~` is expanded, and a refusal names the absolute path it looked at and the four formats.
 2. pm-ai locates the recording via calendar integration, downloads and sanitizes it, and runs the full extraction pipeline within 600 seconds.
 3. It outputs a summary card: explicit requests executed, implicit updates with parsed Work Item numbers, owners and priorities, key architectural decisions, and approval prompts.
 
@@ -128,15 +132,26 @@ The user throughout is **Andrei**, an engineering PM.
 **Climax:** The dashboard updates, focus blocks are written to the calendar via MCP, and alignment metrics update — before the week's noise begins.
 **Resolution:** The week starts with explicit boundaries, goal alignment across all three horizons, and burnout guardrails in place.
 
+*As built in wave 3 (2026-10-16):* the morning page lists the whole local day's meetings (local midnight to midnight), not only the next harvest window; meeting summaries recorded since the last render — and those still waiting or failed, said so — appear under Time-Critical Activities with up to five open action items each; message signals show when each message was posted and who sent it by name; and Leadership Notes carries the month's frontier spend against the $20 target. Goals are kept from the terminal: `pm-ai goal list`, `goal show <id>`, `goal set`, `goal update <id>` and `goal delete <id>` (confirmed, or `--yes`), each change recorded in the personal event log.
+
 ### UJ-10 — Configuring and expanding telemetry connectors
 
 **Entry:** `pm-ai connector` in the terminal, or `/connectors` on Telegram.
 
-1. Andrei runs `pm-ai connector add jira jira:alpha` (or the Telegram equivalent); for Microsoft Graph the command asks the app id, tenant and harvest widths and runs Microsoft's sign-in instead of asking for a token.
+1. Andrei runs `pm-ai connector add jira jira:alpha` (or the Telegram equivalent); for Microsoft Graph the command asks the app id, tenant and harvest widths, then — per enrolled project — which Outlook category marks that project's meetings (2026-10-16; `pm-ai connector categories <instance>` asks again at any time), and then runs Microsoft's sign-in instead of asking for a token.
 2. pm-ai prompts step by step for domain URL, API token or OAuth key, and sync parameters.
 3. It runs an immediate endpoint health probe verifying connectivity, permissions, and polling reachability.
 4. On success it seals the credential into the encrypted credential store first, writes the connector's settings to `~/.pm-ai/connectors/<instance>.json` at 600 permissions, and registers the harvester into the running radar with no daemon restart.
-5. It triggers a 7-day historical backfill and confirms active status, health, and entity mappings (e.g. Jira Issues → Work Items).
+5. It triggers a 7-day historical backfill and confirms active status, health, and entity mappings (e.g. Jira Issues → Work Items). For the two connectors built so far (2026-10-16): Graph's first-run reach-back question offers five days as what Enter keeps (or the window, when that is wider); GitLab's first run reaches back as far as its later runs do, 30 days of commits, plus every open issue and merge request; a GitLab host typed without a scheme is taken as `https://`, and Andrei is told so.
 
 **Climax:** The new source flows into morning dashboards, dossiers, and deep inquiries alongside the existing ones.
 **Resolution:** The multi-tool ecosystem expands in under 2 minutes with zero plaintext secret exposure.
+
+## At the terminal (wave 3, 2026-10-16)
+
+Not a numbered journey: the spine binds `UJ-1..UJ-10`, and this is how Andrei works the prompt day to day after the field test.
+
+1. At `pm-ai>`, Tab completes commands, subcommands, options, scopes, connector instances, goal ids and paths, and the line at the bottom shows the usage of the command being typed.
+2. A job the daemon acknowledges (`dashboard`, a summary) prints its result above the line he is typing as soon as it arrives, his half-typed line redrawn intact; the prompt reads `pm-ai [2 running]>` while jobs run, with a spinner and elapsed time per job.
+3. `pm-ai logs` shows the daemon's log readably in local time — the last lines, `--level`, `--follow` — naming the file it reads, with no daemon needed.
+4. When the daemon stops it prints one line saying it stopped cleanly or why not.
