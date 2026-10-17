@@ -64,12 +64,16 @@ scope at acquisition rather than leaving it to be misdiagnosed later.
 from __future__ import annotations
 
 import json
+import math
 import re
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, ClassVar, NoReturn, Protocol, TypeVar, runtime_checkable
+from urllib.parse import urlsplit
 
 from pm_ai.domain.health import Health, Probe
 
@@ -78,6 +82,7 @@ __all__ = [
     "AuthDeclined",
     "AuthTimedOut",
     "CLOCK_SKEW_TOLERANCE",
+    "ClockReading",
     "CredentialEntryMissing",
     "CredentialStale",
     "CredentialStoreBusy",
@@ -91,12 +96,15 @@ __all__ = [
     "InteractionRequired",
     "InMemoryRefreshTokenStore",
     "OFFLINE_ACCESS",
+    "RecordingHttpClient",
     "RefreshTokenStore",
     "SealedCredential",
     "SignInRefused",
     "StoreBusy",
     "StoreEntryMissing",
     "StoreUnavailable",
+    "TOKEN_ENDPOINT_PATH",
+    "TokenEndpointClock",
     "require_msal",
     "tenant_refusal",
 ]
@@ -171,6 +179,159 @@ and telling the PM to redo the sign-in would send them in a circle. Measured onl
 when the provider actually hands over a timestamp to compare against — an
 unmeasured skew is reported as nothing at all rather than as zero.
 """
+
+TOKEN_ENDPOINT_PATH = "/oauth2/v2.0/token"
+"""The one answer whose `Date` header is read for skew (story 8r).
+
+A `POST` whose URL path ends here: the request that redeems a refresh token or
+polls a device code. The device-code request, instance discovery and the OpenID
+configuration are other paths, or `GET`s, and are never read.
+"""
+
+DATE_RESOLUTION = timedelta(seconds=1)
+"""An HTTP `Date` carries whole seconds, so the provider's clock sat somewhere
+in the second after it. Its midpoint is the honest estimate: compared with the
+`Date` itself, a synchronised machine would read as up to a second ahead."""
+
+
+# ── The provider's clock, read off the token endpoint's answer ───────────────
+
+
+@dataclass(frozen=True)
+class ClockReading:
+    """The token endpoint's `Date`, and this machine's clock when that answer arrived.
+
+    Not the id token's `iat`. That claim is when the authentication occurred,
+    and Microsoft backdates it — measured at 5:00.5 on a synchronised clock — so
+    every sign-in read as five minutes ahead (story 8r).
+    """
+
+    provider: datetime
+    """The `Date` header: Microsoft's clock when it answered, to the second."""
+
+    arrived: datetime
+    """The adapter's injected clock, stamped as the answer arrived."""
+
+    @property
+    def skew(self) -> timedelta:
+        """Arrival minus the `Date`'s midpoint — positive when this machine is ahead."""
+        return self.arrived - (self.provider + DATE_RESOLUTION / 2)
+
+
+def _provider_date(headers: Any) -> datetime | None:
+    """The `Date` header as an aware instant, or `None` when there is none to trust.
+
+    Absent, unparseable and timezone-less are one fact — the provider's clock
+    was not read — so each is `None`, never zero and never an exception.
+    """
+    try:
+        raw = headers.get("Date") if headers is not None else None
+        if raw is None and hasattr(headers, "items"):
+            # MSAL's contract is a case-insensitive mapping; a plain one may not be.
+            raw = next((v for k, v in headers.items() if str(k).lower() == "date"), None)
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        stamped = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, AttributeError, IndexError, OverflowError):
+        return None
+    if stamped.tzinfo is None or stamped.utcoffset() is None:
+        return None
+    return stamped
+
+
+class TokenEndpointClock:
+    """The last token-endpoint reading, held per thread.
+
+    Per thread because one auth object serves the health probe and a harvest at
+    once on the I/O pool, and MSAL makes its HTTP call on the calling thread: a
+    slot per thread is what keeps each acquisition's reading its own. An
+    acquisition clears its slot before calling MSAL and takes the reading after,
+    so a token MSAL answered from its cache — or a throttled answer it replayed
+    from memory — carries no reading rather than the previous one.
+    """
+
+    def __init__(self, now: Callable[[], datetime]) -> None:
+        self._now = now
+        self._slot = threading.local()
+
+    def clear(self) -> None:
+        """Forget this thread's reading, before an acquisition calls MSAL."""
+        self._slot.reading = None
+
+    def record(self, headers: Any) -> None:
+        """Replace this thread's reading with one answer's `Date` and its arrival.
+
+        Arrival is stamped first, so parsing is not counted as flight time. An
+        answer without a usable `Date` replaces the reading with none.
+        """
+        arrived = self._now()
+        provider = _provider_date(headers)
+        self._slot.reading = (
+            None if provider is None else ClockReading(provider=provider, arrived=arrived)
+        )
+
+    def reading(self) -> ClockReading | None:
+        """This thread's reading since its last `clear`, or `None`."""
+        reading = getattr(self._slot, "reading", None)
+        return reading if isinstance(reading, ClockReading) else None
+
+
+class RecordingHttpClient:
+    """The HTTP client handed to MSAL: its default transport, recording token answers.
+
+    MSAL's documented hook (`http_client=`, msal 1.38.0) takes anything with
+    `post` and `get`; MSAL still wraps it in its throttle handling. Each `POST`
+    to the token endpoint has its `Date` recorded into `clock` as it arrives.
+    Nothing else is read, and nothing about the request or the response is
+    changed.
+    """
+
+    def __init__(self, session: Any, clock: TokenEndpointClock) -> None:
+        self.session = session
+        self.clock = clock
+
+    def post(self, url: str, params: Any = None, data: Any = None,
+             headers: Any = None, **kwargs: Any) -> Any:
+        response = self.session.post(url, params=params, data=data, headers=headers, **kwargs)
+        if urlsplit(url).path.endswith(TOKEN_ENDPOINT_PATH):
+            self.clock.record(getattr(response, "headers", None))
+        return response
+
+    def get(self, url: str, params: Any = None, headers: Any = None, **kwargs: Any) -> Any:
+        return self.session.get(url, params=params, headers=headers, **kwargs)
+
+    def close(self) -> None:
+        self.session.close()
+
+
+def _msal_session() -> Any:
+    """MSAL's default `requests` session, built here so its answers can be read.
+
+    msal 1.38.0 builds one with certificate verification on, no timeout, and one
+    retry on a connection error through a mounted adapter; all of that is kept.
+    So is `requests`' own environment handling (`trust_env` left True): proxies,
+    `REQUESTS_CA_BUNDLE` and `.netrc` come from the environment, as they did
+    under MSAL's session. That matches the Graph and GitLab data clients, whose
+    `urllib` openers take proxies from the environment too, so on a proxy-only
+    network sign-in and harvests go the same way (Andrei, 2026-10-17).
+
+    `requests` is imported here, at call time, like `msal`.
+    """
+    try:
+        import requests
+        import requests.adapters
+    except ImportError as missing:
+        raise GraphAuthError(
+            f"the `requests` package could not be imported, so pm-ai cannot "
+            f"obtain a Microsoft Graph token ({missing}). It is declared in the "
+            f"`runtime` extra: install it with `uv sync --extra runtime`."
+        ) from missing
+    session = requests.Session()
+    session.verify = True
+    retry_once = requests.adapters.HTTPAdapter(max_retries=1)
+    session.mount("http://", retry_once)
+    session.mount("https://", retry_once)
+    return session
 
 
 # ── Refusals ─────────────────────────────────────────────────────────────────
@@ -690,14 +851,29 @@ def require_msal() -> Any:
     return msal
 
 
-def _msal_public_client(client_id: str, authority: str) -> Any:
+def _msal_public_client(client_id: str, authority: str, *, clock: TokenEndpointClock) -> Any:
     """A real `msal.PublicClientApplication`, imported at call time.
 
     Public rather than confidential on purpose: a confidential client needs a
     secret, and a secret on a PM's laptop is the thing device code exists to
     avoid.
+
+    Its HTTP client records the token endpoint's `Date` into `clock`, which is
+    the adapter's own (story 8r).
     """
-    return require_msal().PublicClientApplication(client_id, authority=authority)
+    msal = require_msal()
+    session = _msal_session()
+    try:
+        return msal.PublicClientApplication(
+            client_id,
+            authority=authority,
+            http_client=RecordingHttpClient(session, clock),
+        )
+    except BaseException:
+        # MSAL validates the authority over HTTP while it is built; a refusal
+        # there must not leave the session's connection pool open.
+        session.close()
+        raise
 
 
 _TENANT_WORDS = frozenset({"organizations", "common", "consumers"})
@@ -774,7 +950,16 @@ class GraphDeviceCodeAuth:
     """
 
     instance: str = "graph"
-    client_factory: Callable[[str, str], Any] = _msal_public_client
+    client_factory: Callable[[str, str], Any] | None = None
+    """MSAL's client from `(client_id, authority)`; `None` is the real one.
+
+    Left `None`, `_build_application` uses the real client recording into this
+    adapter's `clock` — so production, where wiring passes no factory, always
+    measures. Resolved there rather than stored here, so a copy of the adapter
+    records into its own clock and the field holds no bound method. An injected factory keeps its two arguments; a test simulates an
+    answer by recording into `clock` itself.
+    """
+
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     scopes: ClassVar[frozenset[str]] = GRAPH_SCOPES
@@ -802,6 +987,20 @@ class GraphDeviceCodeAuth:
     another run rotated it — the cache is not asked: it would refresh the old
     lineage, which the new sign-in exists to leave behind.
     """
+
+    clock: TokenEndpointClock = field(init=False, repr=False)
+    """The token endpoint's readings, per thread (story 8r).
+
+    Stamps arrival with `now` — read at each answer, so a clock replaced after
+    build is the one used, as `_adopt` uses it.
+    """
+
+    def __post_init__(self) -> None:
+        self.clock = TokenEndpointClock(lambda: self.now())
+
+    def _recording_client(self, client_id: str, authority: str) -> Any:
+        """The default factory, bound to this adapter's `clock`."""
+        return _msal_public_client(client_id, authority, clock=self.clock)
 
     # ── The port ─────────────────────────────────────────────────────────────
 
@@ -1163,7 +1362,10 @@ class GraphDeviceCodeAuth:
             # of the provider gives a negative `timedelta`, which renders as
             # "-1 day, 21:55:00" — a sentence an operator has to decode before
             # they can read their own clock error.
-            drift = abs(self._skew)
+            # Whole seconds, rounded up: "2:04:59.500000" is noise to an
+            # operator, and rounding to nearest would print a skew of 5:00.3 —
+            # one that warns — as "0:05:00", equal to the tolerance.
+            drift = timedelta(seconds=math.ceil(abs(self._skew).total_seconds()))
             direction = "behind" if self._skew < timedelta(0) else "ahead of"
             return Probe(
                 self.instance,
@@ -1197,8 +1399,9 @@ class GraphDeviceCodeAuth:
 
     def _build_application(self) -> Any:
         """MSAL's client, with an authority it refuses reported as the tenant."""
+        factory = self.client_factory or self._recording_client
         try:
-            return self.client_factory(self.client_id, self.authority)
+            return factory(self.client_id, self.authority)
         except Exception as raised:  # noqa: BLE001 — sorted below, never swallowed
             if not _refused_by_value(raised):
                 raise
@@ -1290,7 +1493,13 @@ class GraphDeviceCodeAuth:
             ) from unreachable
 
     def _call(self, method: Callable[..., Any], *args: Any) -> dict[str, Any]:
-        """One MSAL call that answers with a response dict, or an unreachable."""
+        """One MSAL call that answers with a response dict, or an unreachable.
+
+        This thread's clock reading is cleared first, so what `_adopt` takes
+        afterwards belongs to this call — the last token-endpoint answer it
+        received — and to nothing earlier (story 8r).
+        """
+        self.clock.clear()
         answered = self._guarded(lambda: method(*args))
         return answered if isinstance(answered, dict) else {}
 
@@ -1368,7 +1577,12 @@ class GraphDeviceCodeAuth:
     def _call_silent(
         self, app: Any, account: Mapping[str, Any], *, force_refresh: bool
     ) -> dict[str, Any]:
-        """`acquire_token_silent`, whose `None` means "nothing cached", not a failure."""
+        """`acquire_token_silent`, whose `None` means "nothing cached", not a failure.
+
+        Clears this thread's clock reading first, as `_call` does: a token
+        served from MSAL's cache made no request and carries no reading.
+        """
+        self.clock.clear()
         answered = self._guarded(
             lambda: app.acquire_token_silent(
                 self._resource_scopes(), account=account, force_refresh=force_refresh
@@ -1587,15 +1801,15 @@ class GraphDeviceCodeAuth:
         """Take the access token, its expiry, and whatever the clock says.
 
         Expiry from the provider's relative `expires_in`, less `EXPIRY_MARGIN`.
-        Skew from the id token's `iat` when there is one — a claim about the
-        provider's clock at the moment it minted the token, which is the only
-        comparison available without a second request.
+        Skew from this thread's clock reading: the token endpoint's `Date`
+        against this machine's clock when that answer arrived, taken from the
+        acquisition whose token this is (story 8r). The id token's `iat` is not
+        read — it is when the authentication occurred, not a reading of the
+        provider's clock, and Microsoft backdates it by about five minutes.
 
-        Skew is **replaced** on every adoption, including with `None`. It used to
-        be assigned only when an `iat` was present, so a `WARNING` measured once
-        outlived the clock being fixed: every later response without an `iat` left
-        the old reading in place and the probe kept reporting a drift nothing had
-        re-measured.
+        Skew is **replaced** on every adoption, including with `None`. A token
+        MSAL served from its cache carries no reading, and a `WARNING` measured
+        once must not outlive the clock being fixed.
         """
         token = result.get("access_token")
         if not isinstance(token, str) or not token:
@@ -1614,31 +1828,18 @@ class GraphDeviceCodeAuth:
             # Caching a token of unknown age is how a request goes out with a
             # dead one and the 401 is blamed on the credential.
             self._expires_at = None
-        self._skew = self._measured_skew(result, moment)
+        self._skew = self._measured_skew()
         return token
 
-    def _measured_skew(self, result: Mapping[str, Any], moment: datetime) -> timedelta | None:
-        """This machine's clock against the provider's, or `None` when unmeasurable.
+    def _measured_skew(self) -> timedelta | None:
+        """This machine's clock against the provider's, or `None` when unmeasured.
 
-        `None` covers three cases that are one fact: no id-token claims, no
-        `iat`, and an `iat` no calendar can hold. The last one used to raise
-        `OverflowError`/`OSError` — a value like `1e30`, or a negative one on
-        some platforms — straight out of `access_token` as something that is not
-        a `GraphAuthError` at all, past every caller's `except GraphAuthError`
-        and into `check_health`'s catch-all as "a bug in pm-ai". An unusable
-        timestamp is a skew nobody measured, which is exactly what `None` says.
+        `None` when the acquisition made no token-endpoint request (MSAL's cache,
+        or its throttle replaying an answer), or the answer carried no usable
+        `Date`. Unmeasured is never reported as zero.
         """
-        claims = result.get("id_token_claims")
-        if not isinstance(claims, Mapping):
-            return None
-        issued = claims.get("iat")
-        if isinstance(issued, bool) or not isinstance(issued, (int, float)):
-            return None
-        try:
-            minted = datetime.fromtimestamp(float(issued), tz=timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            return None
-        return moment - minted
+        reading = self.clock.reading()
+        return None if reading is None else reading.skew
 
     def _cached_token_is_live(self) -> bool:
         """Whether the token in hand is still safely usable."""
