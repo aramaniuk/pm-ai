@@ -1,42 +1,63 @@
-"""Teams channel messages, walked newest first and cut by thread activity (story 33d).
+"""Teams channel messages, walked newest first and cut by first-post creation (33d, 33h).
 
 `GET /teams/{team}/channels/{channel}/messages?$top=50&$expand=replies` is the
 only request. pm-ai never lists teams or channels: which channels are read is
 written by hand in the connector's settings file, one entry per channel.
 
-## Two timestamps, two jobs
+## The order Microsoft lists threads in
 
 Microsoft's reference says a channel's threads come newest first, fifty per
-page, ordered by each thread's **latest activity** — the root message or its
-newest reply — and this walk is built on that reading. **A real tenant's page
-(recorded 2026-10-15) contradicts it:** the threads were in order of each
-root's own `createdDateTime`, and a thread created months earlier with replies
-from that morning sat 33rd of 49. Under that order the stop rule below can end
-the walk before an older-rooted thread with fresh replies on a later page; see
-`tests/connectors/test_graph_channel_messages_recorded.py::
-test_a_fresh_reply_listed_behind_a_wholly_older_page_is_still_emitted` (a strict
-xfail) and the deferred-work entry on channel thread order. The two times do
-different work here:
+page, ordered by "the last modified date of the entire reply chain". **A real
+tenant's page (recorded 2026-10-15) contradicts it:** the threads were in order
+of each thread's first post's `createdDateTime`, and a thread started two
+months earlier with replies from that morning sat 33rd of 49
+(`tests/connectors/test_graph_channel_messages_recorded.py::
+test_threads_are_in_order_of_root_creation_not_of_their_latest_reply`). Neither
+reading is trusted blindly, so the walk checks the order as it goes (`33h`).
 
-- **Thread activity decides where the walk stops.** The walk ends after the
-  first page on which *every* thread is older than the channel's position. A
-  page with no threads at all decides nothing, so an empty page that still
-  carries a next-page link is followed.
+## Two timestamps, two jobs
+
+- **First-post creation times decide where the walk stops.** Every first post
+  whose `createdDateTime` can be read is tracked across pages; they are *in
+  order* while each is at or before the one before it (ties allowed). The walk
+  stops after the first page whose readable first posts are in order and the
+  oldest of them was created strictly before the **horizon**,
+  `THREAD_HORIZON` (90 days) before the channel's position: every later page
+  holds only threads started earlier still. Once any first post is out of
+  order the walk stops only on a page whose every readable first post is
+  older than the horizon. A first post with no readable time is left out of
+  both tests; a page of threads none of whose times can be read stops the
+  walk, so it cannot hold every walk open to the page cap. A page with no
+  threads at all decides nothing, so an empty page that still carries a
+  next-page link is followed.
 - **A message's own creation time decides whether it is emitted**: created at
   or after the position. A message seen twice — on the previous run, or twice
   in this one — is dropped by the natural key at persist (AD-34), and inside
   one walk by its id.
 
 The position is the channel's stored one, or the first-run reach-back the row
-already holds for the calendar.
+already holds for the calendar; the horizon is measured back from it.
+
+**The admitted limit.** A fresh reply in a thread started before the horizon,
+listed on a page after the one that stopped the walk, is never read, and
+nothing says so. A recurring channel meeting keeps one thread for the life of
+its series, so a series older than the horizon loses its fresh replies; paging
+known long-lived threads is the recorded follow-up (deferred work).
 
 ## Where the position goes
 
 - After a complete walk: the newest creation time seen, never earlier than the
   position the walk started from.
 - After a walk the page cap or the time budget cut short: still the newest
-  creation time seen. Messages older than the oldest walked were not read, and
-  the failure says so by name — a stated loss, never a silent one.
+  creation time seen, and the failure says which loss it is. Cut before any
+  first post older than the position was read: messages and replies created
+  after the position in threads the walk did not reach are skipped, and the
+  failure is retryable. Cut after such first posts but before the horizon:
+  only replies in threads started between the horizon and the oldest first
+  post walked are skipped, the failure names the horizon, and it is not
+  retryable — an immediate retry would hit the same cut, so the next
+  scheduled harvest walks again. Once the first posts went out of order that
+  second loss cannot be bounded, so the cut states the first one.
 - After any other failure, or a page that answered with nothing to read:
   unchanged, so the next run walks the same history again and the natural key
   drops what it already holds.
@@ -92,6 +113,7 @@ __all__ = [
     "MESSAGE_TYPE",
     "MessageRow",
     "MessageRowRefused",
+    "THREAD_HORIZON",
     "instant",
     "label_problem",
     "plain_text",
@@ -111,6 +133,16 @@ cleaned (AD-29).
 
 MESSAGE_TYPE = "message"
 """The one `messageType` that is a message. Every other value is skipped."""
+
+THREAD_HORIZON = timedelta(days=90)
+"""How far before the channel's position the walk reads threads (`33h`).
+
+Andrei's decision of 2026-10-16. Microsoft lists threads by their first post's
+creation time, so the walk stops after the first page whose oldest first post
+was created before `position - THREAD_HORIZON`. A fresh reply in a thread
+started earlier than that is not read: the admitted limit. A constant, not a
+setting.
+"""
 
 
 # ── What the settings file lists ─────────────────────────────────────────────
@@ -280,13 +312,31 @@ class _Walk:
     refusals: list[RowRefusal] = field(default_factory=list)
     seen: set[str] = field(default_factory=set)
     newest: datetime | None = None
-    oldest: datetime | None = None
     unread_pages: int = 0
     unread_replies: int = 0
+    previous_start: datetime | None = None
+    """The last readable first-post creation time, for the order check."""
+    oldest_start: datetime | None = None
+    """The oldest readable first-post creation time walked."""
+    out_of_order: bool = False
+    """Some readable first post was newer than the one before it."""
+
+    @property
+    def horizon(self) -> datetime:
+        """Threads started before this are not walked (`THREAD_HORIZON`)."""
+        return self.position - THREAD_HORIZON
 
     def saw(self, created: datetime) -> None:
         self.newest = created if self.newest is None else max(self.newest, created)
-        self.oldest = created if self.oldest is None else min(self.oldest, created)
+
+    def started(self, created: datetime) -> None:
+        """One readable first post, checked against the one before it."""
+        if self.previous_start is not None and created > self.previous_start:
+            self.out_of_order = True
+        self.previous_start = created
+        self.oldest_start = (
+            created if self.oldest_start is None else min(self.oldest_start, created)
+        )
 
     def refuse(self, identifier: str | None, reason: str) -> None:
         self.refusals.append(
@@ -322,7 +372,7 @@ class GraphChannelFetch:
         since: datetime | None,
         deadline: datetime,
     ) -> ChannelFetch:
-        """Walk until a page is wholly older than the position, or the walk stops."""
+        """Walk until a page reaches threads started before the horizon, or the walk stops."""
         position = since if since is not None else self.now() - self.reach_back
         state = _Walk(listing=listing, position=position)
         answered_at: datetime | None = None
@@ -445,12 +495,16 @@ class GraphChannelFetch:
     # ── One page, one thread, one message ────────────────────────────────────
 
     def _read(self, body: Mapping[str, Any], state: _Walk) -> bool:
-        """Take one page's messages. True when every thread on it is older.
+        """Take one page's messages. True when the walk stops after this page.
 
-        A page with no threads is never "every thread older": an empty page that
-        still carries a next-page link does not stop the walk. A thread with no
-        readable activity time counts as older, so an undatable thread cannot
-        force every walk to the page cap.
+        It stops when the readable first posts walked so far are in order and
+        the oldest on this page was created strictly before the horizon; once
+        the order has broken, only when every readable first post on this page
+        is. A first post with no readable creation time is left out of both
+        tests, and a page of threads none of which has one stops the walk, so
+        an undatable page cannot force every walk to the page cap. A page with
+        no threads never stops it: an empty page that still carries a
+        next-page link is followed.
         """
         values = body.get("value")
         if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
@@ -463,22 +517,21 @@ class GraphChannelFetch:
             )
             return False
         threads = 0
-        older = 0
+        starts: list[datetime] = []
         for raw in values:
             threads += 1
             if not isinstance(raw, Mapping):
-                # Undatable, so it counts as older: a thread with no time on it
-                # must not hold every walk open until the page cap.
-                older += 1
+                # No readable first post: left out of the stop test.
                 state.refuse(
                     None,
                     f"a messages page carried a {type(raw).__name__} where a "
                     f"message object belongs.",
                 )
                 continue
-            activity = _activity(raw)
-            if activity is None or activity < state.position:
-                older += 1
+            start = instant(raw.get("createdDateTime"))
+            if start is not None:
+                starts.append(start)
+                state.started(start)
             root = self._take(raw, state, reply_to=None)
             replies = raw.get("replies")
             if isinstance(replies, Sequence) and not isinstance(replies, (str, bytes)):
@@ -494,7 +547,15 @@ class GraphChannelFetch:
                     f"were read; the rest were not, and this walk does not page "
                     f"replies.",
                 )
-        return threads > 0 and older == threads
+        if threads == 0:
+            return False
+        if not starts:
+            # Nothing on the page can be dated: it counts as older, as an
+            # undatable page always has, so it cannot hold the walk open.
+            return True
+        if not state.out_of_order:
+            return min(starts) < state.horizon
+        return all(start < state.horizon for start in starts)
 
     def _take(self, raw: Any, state: _Walk, *, reply_to: str | None) -> str | None:
         """Keep one message row, skip it, or refuse it by name. Returns its id."""
@@ -526,9 +587,17 @@ class GraphChannelFetch:
     ) -> HarvestFailure:
         """The page cap or the budget stopped the walk: a stated loss, or none.
 
-        The loss named never reaches below the stored position: messages older
-        than it were read by an earlier run. When the position does not move,
-        nothing is lost — the next run walks the same history again.
+        Two losses, told apart by whether a first post older than the position
+        was read. Before one was, messages and replies created after the
+        position in threads the walk did not reach are skipped, and a retry may
+        reach them. After, only replies in threads started between the horizon
+        and the oldest first post walked are skipped, and the failure is not
+        retryable: an immediate retry would hit the same cut, so the next
+        scheduled harvest walks again. Once the first posts went out of order
+        the second loss cannot be bounded — a later page may hold threads
+        started after the position — so the walk states the first one. The loss
+        named never reaches below the stored position. When the position does
+        not move, nothing is lost — the next run walks the same history again.
         """
         why = (
             f"the {self.client.page_cap}-page cap"
@@ -544,32 +613,50 @@ class GraphChannelFetch:
                 "position did not move and the next run walks the same history "
                 "again"
             )
-        else:
-            floor = (
-                state.position
-                if state.oldest is None
-                else max(state.oldest, state.position)
+            return HarvestFailure(
+                reason=(
+                    f"{self.instance} stopped walking channel "
+                    f"{state.listing.name!r} at {why} before reaching its "
+                    f"position {state.position.isoformat()}: {outcome}."
+                ),
+                retryable=True,
+                retry_after=stopped.retry_after,
             )
-            skipped = (
-                f"messages created at or after {state.position.isoformat()} in "
-                f"threads the walk did not reach"
-                if floor == state.position
-                else f"messages created from {state.position.isoformat()} up to "
-                f"{floor.isoformat()}, the oldest walked, in threads the walk "
-                f"did not reach"
+        oldest = state.oldest_start
+        if oldest is None or oldest >= state.position or state.out_of_order:
+            where = (
+                "after its threads' first posts went out of order"
+                if state.out_of_order
+                else f"before reaching its position {state.position.isoformat()}"
             )
-            outcome = (
-                f"the position advanced to {moved.isoformat()}, the newest "
-                f"message seen, so {skipped} were skipped and are not read again"
+            return HarvestFailure(
+                reason=(
+                    f"{self.instance} stopped walking channel "
+                    f"{state.listing.name!r} at {why} {where}: the position "
+                    f"advanced to {moved.isoformat()}, the newest message seen, "
+                    f"so messages and replies created at or after "
+                    f"{state.position.isoformat()} in threads the walk did not "
+                    f"reach were skipped and are not read again."
+                ),
+                retryable=True,
+                retry_after=stopped.retry_after,
             )
+        horizon = state.horizon
         return HarvestFailure(
             reason=(
                 f"{self.instance} stopped walking channel {state.listing.name!r} "
-                f"at {why} before reaching its position "
-                f"{state.position.isoformat()}: {outcome}."
+                f"at {why} after reaching its position "
+                f"{state.position.isoformat()} but before its horizon "
+                f"{horizon.isoformat()}, {THREAD_HORIZON.days} days earlier: the "
+                f"position advanced to {moved.isoformat()}, the newest message "
+                f"seen, so replies created at or after "
+                f"{state.position.isoformat()} in threads started from "
+                f"{horizon.isoformat()} up to {oldest.isoformat()}, the oldest "
+                f"first post walked, were skipped and are not read again. A "
+                f"retry now would stop at the same cut; the next scheduled "
+                f"harvest walks the channel again."
             ),
-            retryable=True,
-            retry_after=stopped.retry_after,
+            retryable=False,
         )
 
 
@@ -798,33 +885,3 @@ def _mentions(raw: Mapping[str, Any]) -> tuple[str, ...] | None:
         if user is not None:
             ids.append(user)
     return tuple(ids)
-
-
-def _activity(raw: Mapping[str, Any]) -> datetime | None:
-    """A thread's latest activity: the newest time on the root or any reply.
-
-    The cut reads it because Microsoft's reference says the list is ordered
-    by "the last modified date of the entire reply chain". A recorded real
-    page is ordered by the root's creation time instead (see the module
-    docstring and the strict xfail it names), so a page wholly older by this
-    reading does not prove the later pages are. Creation and modification
-    times both count, and an unreadable one is left out rather than guessed. `None` when nothing on the thread can be read, and such a thread
-    never counts as older.
-    """
-    times = [
-        stamp
-        for stamp in (
-            instant(raw.get("createdDateTime")),
-            instant(raw.get("lastModifiedDateTime")),
-        )
-        if stamp is not None
-    ]
-    replies = raw.get("replies")
-    if isinstance(replies, Sequence) and not isinstance(replies, (str, bytes)):
-        for reply in replies:
-            if isinstance(reply, Mapping):
-                for key in ("createdDateTime", "lastModifiedDateTime"):
-                    stamp = instant(reply.get(key))
-                    if stamp is not None:
-                        times.append(stamp)
-    return max(times) if times else None
