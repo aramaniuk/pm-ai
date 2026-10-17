@@ -305,13 +305,15 @@ class RecordingHttpClient:
 
 
 def _msal_session() -> Any:
-    """MSAL's default `requests` session, with the environment ignored.
+    """MSAL's default `requests` session, built here so its answers can be read.
 
     msal 1.38.0 builds one with certificate verification on, no timeout, and one
-    retry on a connection error through a mounted adapter; that is kept. What
-    differs is `trust_env=False` — no proxies, `REQUESTS_CA_BUNDLE` or `.netrc`
-    taken from the environment, as the frontier and local-model clients do
-    (AD-1). The known cost: a sign-in behind a corporate proxy does not work.
+    retry on a connection error through a mounted adapter; all of that is kept.
+    So is `requests`' own environment handling (`trust_env` left True): proxies,
+    `REQUESTS_CA_BUNDLE` and `.netrc` come from the environment, as they did
+    under MSAL's session. That matches the Graph and GitLab data clients, whose
+    `urllib` openers take proxies from the environment too, so on a proxy-only
+    network sign-in and harvests go the same way (Andrei, 2026-10-17).
 
     `requests` is imported here, at call time, like `msal`.
     """
@@ -325,7 +327,6 @@ def _msal_session() -> Any:
             f"`runtime` extra: install it with `uv sync --extra runtime`."
         ) from missing
     session = requests.Session()
-    session.trust_env = False
     session.verify = True
     retry_once = requests.adapters.HTTPAdapter(max_retries=1)
     session.mount("http://", retry_once)

@@ -1145,13 +1145,17 @@ def test_the_recording_client_records_an_answer_without_a_date_as_none():
     assert clock.reading() is None, "an answer without a Date kept the previous reading"
 
 
-def test_the_session_handed_to_msal_ignores_the_environment_and_retries_once():
-    """MSAL's default transport, with `trust_env=False` (AD-1)."""
+def test_the_session_handed_to_msal_keeps_the_environment_and_retries_once():
+    """MSAL's default transport, environment handling included.
+
+    `trust_env` stays True so sign-in takes proxies from the environment as the
+    Graph and GitLab data clients do; asserted so it cannot flip silently.
+    """
     session = _msal_session()
 
-    assert session.trust_env is False
+    assert session.trust_env is True
     assert session.verify is True
-    assert not session.proxies
+    assert not session.proxies, "no proxy is hard-coded; they come from the environment"
     for scheme in ("https://", "http://"):
         adapter = session.get_adapter(f"{scheme}login.microsoftonline.com")
         assert adapter.max_retries.total == 1, "MSAL's one retry was not mounted"
@@ -1187,7 +1191,7 @@ def test_the_default_factory_hands_msal_the_recording_client(monkeypatch):
     client = built["http_client"]
     assert isinstance(client, RecordingHttpClient)
     assert client.clock is auth.clock
-    assert client.session.trust_env is False
+    assert client.session.trust_env is True
 
 
 # ── The MSAL account cache ───────────────────────────────────────────────────

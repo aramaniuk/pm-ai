@@ -1093,7 +1093,7 @@ def test_a_connector_built_with_no_injected_factory_uses_the_recording_client(
     client = made["http_client"]
     assert isinstance(client, RecordingHttpClient)
     assert client.clock is connector.auth.clock
-    assert client.session.trust_env is False
+    assert client.session.trust_env is True
 
 
 def test_a_hand_edited_tenant_that_is_not_one_builds_no_connector(
