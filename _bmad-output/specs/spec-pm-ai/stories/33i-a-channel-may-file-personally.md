@@ -57,12 +57,15 @@ context:
 
 ## Code Map
 
-- `pm_ai/connectors/graph/channels.py` (as of PR #72): `:120-141` `ChannelListing` (`project: str`; `scope` always a project at `:139`); `:365` the 400/404 sentence naming the project
-- `pm_ai/connectors/graph/chats.py:153-188` `ChatListing` -- the model: scope, `__post_init__` refusal, `reference_scope`
-- `pm_ai/connectors/graph/__init__.py:290` `CHANNELS_KEY`; `:461-537` `graph_channel_listings` (missing project raises `UnknownProject` at `:498-503`; duplicate wording at `:524-527`); `:555-621` `graph_chat_listings`; `:624` `_citable_scope`; `:667-711` `_chat_scope` (raises `ChatListRefused`, "A chat's messages go to…"); `:1476-1494` `_message_event`, the reference at `:1489`
-- `pm_ai/app/wiring.py:978-1013` `_files_into` (`:994` reads a channel's `project`); `:951` a Graph row filed personal; `:1405` where the listings are read
-- `ChannelListing(` call sites to update: `pm_ai/connectors/graph/__init__.py` (2), `tests/connectors/test_graph_channel_messages.py` (1), `tests/connectors/test_graph_calendar_mapping.py` (1), `tests/connectors/test_graph_chat_messages.py` (5), and PR #72's `tests/connectors/test_graph_channel_messages_recorded.py`
-- `tests/connectors/test_graph_channel_messages.py:367-402` the list refusals (assert `ChannelListRefused`/`UnknownProject`); `tests/slice/test_line_requests_hardening.py:305-316` `_files_into`
+Re-verified against `5f4f43e` on 2026-10-18.
+
+- `pm_ai/connectors/graph/channels.py`: `:154-175` `ChannelListing` (`project: str` at `:164`; `scope` always a project at `:172-175`); `:424` the 400/404 sentence naming the project (the frozen block's `channels.py:365` is this sentence, moved by `33h` and `23h`)
+- `pm_ai/connectors/graph/chats.py:153-188` `ChatListing` -- the model: scope, `__post_init__` refusal at `:166`, `reference_scope` at `:178-188`
+- `pm_ai/connectors/graph/__init__.py:292` `CHANNELS_KEY`; `:463-539` `graph_channel_listings` (missing project raises `UnknownProject` at `:500-506`; duplicate wording at `:523-529`); `:557-623` `graph_chat_listings`; `:626` `_citable_scope`; `:669-714` `_chat_scope` (raises `ChatListRefused`, "A chat's messages go to…"); `:805-810` `SAMPLE_CHANNEL` (`project="sample"`); `:1489-1509` `_message_event`, the reference at `:1504`; `:1511-1530` `_chat_message_event`, the `reference_scope` model at `:1524`
+- `pm_ai/app/wiring.py:985-1022` `_files_into` (`:1001` pairs channels with `project`, read at `:1011`); `:958` a Graph row filed personal; `:1414` where the channel listings are read
+- `ChannelListing(` call sites to update: `pm_ai/connectors/graph/__init__.py` (2: `:532`, `:805`), `tests/connectors/test_graph_channel_messages.py` (2: `:178`, `:1258`), `tests/connectors/test_graph_calendar_mapping.py` (1: `:1649`), `tests/connectors/test_graph_chat_messages.py` (5: `:608`, `:871`, `:1004`, `:1013`, `:1107`), `tests/connectors/test_graph_channel_messages_recorded.py` (1: `:106`)
+- `tests/connectors/test_graph_channel_messages.py:358-403` the list refusals (assert `ChannelListRefused`/`UnknownProject`); `tests/slice/test_line_requests_hardening.py:304-316` `_files_into`
+- Spine: AD-10's "One row, several scopes" paragraph (`ARCHITECTURE-SPINE.md:267`, `[2026-10-16, gate; 33i]`) already says a listed channel may file into the personal scope since `33i`; no further amendment is owed
 
 ## Tasks & Acceptance
 
@@ -72,7 +75,7 @@ context:
 - [ ] `pm_ai/app/wiring.py` -- `_files_into` reads a channel's `scope` like a chat's, and its `project` as today -- the later-project rule
 - [ ] the `ChannelListing(` call sites above -- construct with a scope
 - [ ] `tests/connectors/test_graph_channel_messages.py` -- one test per matrix row; the refusal tests adjusted to the new types and wording; `tests/slice/test_line_requests_hardening.py` -- `_files_into` over both spellings -- proof
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md` -- when this slice is built: edit the frozen text at `:23`, `:24`, `:32` and add a Change Log line dated that day, "amended by `33i`". 33d is amended in build order `23f`, `33h`, `33i`; re-read its lines first, since the earlier two edit it
+- [ ] `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md` -- when this slice is built: edit the frozen text at `:23`, `:24`, `:32` and add a Change Log line dated that day, "amended by `33i`". 33d is amended in build order `23f`, `33h`, `33i`; re-read its lines first, since the earlier two edit it. As of `5f4f43e` (after `23f` and `33h`) the three sentences are still at `33d:23`, `:24` and `:32`; `23f` added the sender display name to `:32` and left the reference text `graph:<project>:message:<channel id>/<message id>` that this slice replaces
 
 **Acceptance Criteria:**
 - Given `33d`'s channel fixture listed with `"scope": "personal"`, when `run_harvest` runs, then every message is in the personal event log with a `graph:personal:message:` reference, and no project log changed.
@@ -84,6 +87,7 @@ context:
 - **2026-10-16, created.** Carries Andrei's decision of 2026-10-15: a channel entry may carry the chat's `scope` (`personal` or `project:<id>`) with the chat's refusals; the old `project` key unchanged; both or neither refused; personal channel messages in the personal log, cited `graph:personal:…`; `_files_into` reads the new key; dashboard and `9a`'s filed scope unchanged. Supersedes `33d`'s "a channel message belongs to its project … never the personal one".
 - **2026-10-16, review:** "carries a key" defined as present; the shared reader named (`_listed_scope`) with the noun and refusal type parameterised; the personal-name and citable checks applied to the old `project` key; the "neither" refusal type named; the cursor rule for a moved entry stated; scope wording for the 400/404 and duplicate sentences; the `ChannelListing` call sites listed; `33d:23` and `:32` added to the amendments, frozen text edited with a dated line; AC 1 made system-level; anchors re-based on PR #72. Depends on no spine amendment.
 - **2026-10-16, review (consistency):** the 33d amendment follows the one method shared with `33h`: frozen text edited and a dated Change Log line added when this slice is built, in build order `23f`, `33h`, `33i`.
+- **2026-10-18, Code Map re-verified against `5f4f43e`; 33d line references updated after 23f and 33h amended it.**
 
 ## Design Notes
 

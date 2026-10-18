@@ -133,24 +133,32 @@ context:
 
 ## Code Map
 
-Verified against `a1182f8` on 2026-10-16. `8t` (`StoragePort.project_work(scope) -> ProjectWork`, `pm_ai/domain/work.py`) and `7e` (`pm_ai/core/member_updates.py`) are specified, not built. `8t` lands before this slice; `7e` lands after it and fills the slot.
+Re-verified against `5f4f43e` on 2026-10-18 (first verified against `a1182f8` on 2026-10-16). `8t` is built: its reader `StoragePort.project_work(scope) -> ProjectWork` and the values it returns are in `pm_ai/domain/work.py`. `7e` (`pm_ai/core/member_updates.py`) is specified, not built; it lands after this slice and fills the slot. `pm_ai/core/team_activity.py` does not exist yet.
 
-- `_bmad-output/specs/spec-pm-ai/stories/8t-gitlab-issues-harvest.md` -- the record of members, issues and merge requests in the operational store, its one reader, the `bot` flag, each section's unread state and last complete read; the `gitlab:` handle; confidential issues; closed and merged items kept 30 days.
+- `_bmad-output/specs/spec-pm-ai/stories/8t-gitlab-issues-harvest.md` -- the record of members, issues and merge requests in the operational store, its one reader, the `bot` flag, each section's unread state and last complete read; the `gitlab:` handle; confidential issues; closed and merged items kept 30 days; a GitLab run that reads the work is always `HARVESTED`, so every complete section is re-stamped each run.
+- `pm_ai/domain/work.py` -- what this slice reads:
+  - `GitLabPerson` (`handle`, `name`, `username`, `bot`; `handle`, `name` and `username` may each be `None`), `Member` (`person`, `state`, which may be `None`);
+  - `Issue` (`iid`, `title`, `state`, `assignees`, `milestone_title`, `milestone_due`, `labels`, `confidential`); `MergeRequest` (`iid`, `state`, `draft`, `updated_at`, never `None`; `merged_at`, `issue_iids`, `links_read`);
+  - `is_open` (everything but `closed`, `merged` and pm-ai's own `gone`; `locked` counts as open); `CONFIDENTIAL_ISSUE_TITLE`;
+  - `Section`, `SectionStatus` (`complete`, `reason`, `last_complete`), `NEVER_READ`; `ProjectWork` (`instance` is `None` when no GitLab harvest recorded anything for the scope) and its `status(section)`.
+- `pm_ai/ports/__init__.py:770`, `pm_ai/storage/service.py:3888` -- `project_work`. It answers an empty `ProjectWork` for any scope with no rows, and does not refuse a personal or `people` scope (only the writer, `record_project_work` at `:3866`, refuses a non-project scope).
+- `pm_ai/connectors/gitlab/work.py:201-209` -- `_item_key`: a merge request with no usable `updated_at` is never stored, so the reader never hands one over. `:168` `_instant`: an absent or unparseable `merged_at` is stored as `None`.
 - `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md:33` -- `7e` renders its rows in this slot and counts updates on issues not shown.
-- `pm_ai/connectors/gitlab/__init__.py:3`, `:22-27` -- commits are read on the default branch only. `:311` -- `CommitPayload(sha=sha, message=message)`, with no branch.
-- `pm_ai/connectors/gitlab/client.py:118` -- `FETCH_BUDGET`, 10 minutes.
+- `pm_ai/connectors/gitlab/__init__.py:3`, `:22-27` -- commits are read on the default branch only. `:347` -- `CommitPayload(sha=sha, message=message)`, with no branch (`CommitPayload.branch` at `pm_ai/domain/events.py:99` is left `None`); `:345` the commit time as `occurred_at`, from `_commit_date` (`:733`), `None` when absent.
+- `pm_ai/connectors/gitlab/client.py:119` -- `FETCH_BUDGET`, 10 minutes.
 - `pm_ai/core/cadence.py:71`, `:74` -- `CYCLE` and `CYCLE_JITTER`. `:175`, `:178`, `:244` -- the 24-hour fallback, the 7-day cap, `look_back`.
 - `pm_ai/core/rendering.py` --
-  - `:213-234` `PROJECT_HEADINGS` and its docstring, which says two sections;
-  - `:359-412` `render_project_dashboard`;
-  - `:653-780` `_proactive_enablement`, the pattern for the failure branch, the window, the exclusion counts and the cap;
-  - `:866` `_window_words`, `:914` `_window_notes`, `:1007` `_ingested_at`, `:1098` `escape`, `:1144` `code`, `:1223` `_local`.
+  - `:223-244` `PROJECT_HEADINGS` and its docstring, which says two sections;
+  - `:379-433` `render_project_dashboard`;
+  - `:698-853` `_proactive_enablement`, the pattern for the failure branch, the window, the exclusion counts and the cap;
+  - `:313` `HARVESTED_MARKER` and `:1004` `_posted_at` (`23f`), the rule for a time later than the render;
+  - `:930` `_window_words`, `:1034` `_window_notes`, `:1127` `_ingested_at`, `:1218` `escape`, `:1265` `code`, `:1316` `fold_breaks` (`23f`; `escape` and `code` also fold, so the cut to 100 characters follows an explicit fold), `:1375` `_local`.
 - `pm_ai/app/pipelines.py` --
-  - `:1602` `prepare_dashboard`, which reads the records on the worker beside the log read. They are not part of the bounded step, which `9b` keeps for the calendar read alone.
-  - `:1634` `since`;
-  - `:1666` the project renderer call;
-  - `:1724` `_event_log`, the pattern for a failed read becoming a stated value.
-- `tests/core/test_project_rendering.py` -- `:242` the parameter list, which grows by `issue_notes`; `:250` the no-goal annotation test; `:365`, `:380`, `:518`, `:608` the heading tests.
+  - `:1618` `prepare_dashboard`, which reads the records on the worker beside the log read. They are not part of the bounded step, which `9b` keeps for the calendar read alone.
+  - `:1650` `since`;
+  - `:1682` the project renderer call;
+  - `:1740` `_event_log`, the pattern for a failed read becoming a stated value.
+- `tests/core/test_project_rendering.py` -- `:253` the parameter list, which grows by `issue_notes`; `:261` the no-goal annotation test; `:376`, `:391`, `:529`, `:619` the heading assertions.
 - `tests/core/mypy_fixture_project_render_valid.py` -- must still type-check.
 - `tests/architecture/test_domain_invariants.py:227` -- the AD-25 test, which must still pass.
 - `tests/slice/test_dashboard_slice.py:1073` -- the project page's headings, end to end.
@@ -219,6 +227,7 @@ Verified against `a1182f8` on 2026-10-16. `8t` (`StoragePort.project_work(scope)
 - **2026-10-16, review (cross-spec consistency).** `8t`'s reader named as `StoragePort.project_work(scope) -> ProjectWork` (`pm_ai/domain/work.py`) in the operational store, replacing `pm_ai/core/gitlab_work.py`; members `8t` marks as bots excluded, those not stated listed (the earlier "Rejected: bots" entry withdrawn); each section's last complete read used to say when what is shown is older than one harvest cycle plus jitter (the earlier stale-data rejection withdrawn); the non-calendar reads stated as outside the bounded step.
 - **2026-10-16, spine gate:** frozen block edited (recorded here), one sentence: the GitLab record is keyed by scope and connector instance, one GitLab instance per project scope (AD-3, AD-10); nothing this slice reads changes.
 - **2026-10-16, spine gate:** frozen block edited (recorded here): members' handles are `gitlab:<host>:<numeric user id>` (Andrei 2026-10-16, AD-34); nothing this slice shows changes.
+- **2026-10-18, Code Map re-verified against `5f4f43e` after 8t, 23f and 23h merged.** Moved anchors corrected (`FETCH_BUDGET`, the commit payload, the rendering and pipeline functions, the project-rendering tests). Added: `pm_ai/domain/work.py` with the fields this slice reads; the reader's anchors in the port and storage service, noting it refuses no scope; `_item_key` and `_instant` in `pm_ai/connectors/gitlab/work.py`; `23f`'s `HARVESTED_MARKER`, `_posted_at` and `fold_breaks`. `8t` marked built. Frozen block unchanged; three differences from what `8t` built are open for Andrei: the reader does not refuse a personal or `people` scope, although the matrix row "Personal scope" and the slice task expect it to raise; a merge request's `updated_at` is never absent or unparseable once stored, so the footnote's unusable-time count can only come from `merged_at` or a time after the render; a member's handle, display name and state can each be absent.
 
 ## Design Notes
 
