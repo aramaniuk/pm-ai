@@ -34,6 +34,16 @@ running command; inside a local one, the command's own interruption is its exit
 code; while waiting on the daemon, it abandons the wait and the daemon finishes
 the command on its own.
 
+**Line editing** (story 4u). At a terminal the lines are read through
+`prompt_toolkit`, imported when the prompt opens and never at module import:
+Tab completes from the command table and a few readers of local files
+(`completion`), the bottom line shows the usage of the command being typed, and
+a dim suggestion offers the rest of a command typed earlier in this session,
+accepted with the right arrow. History is this session's, in memory, and holds
+only lines whose first word names a command. Without the library — the runtime
+extra not installed, or a session that cannot start — the prompt is `4q`'s loop
+over `input`, said once in one sentence, and the session continues.
+
 Nothing is composed and nothing is sent to open the prompt. The one thread this
 module starts waits on a job the daemon already owns and decides nothing about
 when work runs (AD-7): the prompt schedules nothing.
@@ -41,6 +51,7 @@ when work runs (AD-7): the prompt schedules nothing.
 
 from __future__ import annotations
 
+import os
 import queue
 import shlex
 import sys
@@ -49,6 +60,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from pm_ai.surfaces.cli.completion import Completion
 from pm_ai.surfaces.cli.dispatch import (
     EXIT_OK,
     EXIT_REFUSAL,
@@ -69,7 +81,17 @@ from pm_ai.surfaces.cli.loopback import (
     StreamLost,
 )
 
-__all__ = ["DaemonClient", "ENDINGS", "PROMPT", "run", "runs_here"]
+__all__ = [
+    "DaemonClient",
+    "ENDINGS",
+    "NO_LINE_EDITOR",
+    "NotATerminal",
+    "PROMPT",
+    "is_a_command_line",
+    "line_editor_failed",
+    "run",
+    "runs_here",
+]
 
 PROMPT = "pm-ai> "
 
@@ -113,15 +135,138 @@ def runs_here(words: Sequence[str]) -> bool:
 def _line_editing() -> bool:
     """Load `readline` for line editing and in-session recall, if it imports.
 
-    Importing the module is the whole of it: `input()` uses it once loaded.
-    No history file is read or written. Returns whether it loaded; without it,
-    lines are still read and nothing else changes.
+    `4q`'s loop, kept for a prompt without `prompt_toolkit` (story 4u): no
+    completion of its own is set, so there is one completer, not two that must
+    agree. Importing the module is the whole of it: `input()` uses it once
+    loaded. No history file is read or written. Returns whether it loaded;
+    without it, lines are still read and nothing else changes.
     """
     try:
         import readline  # noqa: F401
     except ImportError:
         return False
     return True
+
+
+NO_LINE_EDITOR = (
+    "pm-ai: completion and hints need the runtime extra (`uv sync --extra "
+    "runtime`); this prompt reads lines without them."
+)
+"""Said once, at open, when `prompt_toolkit` cannot be imported (story 4u)."""
+
+
+def line_editor_failed(error: BaseException, *, started: bool = False) -> str:
+    """The one sentence for a line editor that imported but could not run, by type."""
+    if started:
+        return (
+            f"pm-ai: the line editor stopped on {type(error).__name__}, so this "
+            f"prompt reads lines without completion or hints from here on."
+        )
+    return (
+        f"pm-ai: the line editor could not start ({type(error).__name__}), so "
+        f"this prompt reads lines without completion or hints."
+    )
+
+
+def _is_a_terminal(stream: object) -> bool:
+    """Whether `stream` is backed by a terminal's file descriptor.
+
+    Asked of the descriptor, not of `isatty()` alone: a line editor reads and
+    writes the descriptor itself, so a stream without one cannot carry it.
+    """
+    try:
+        return os.isatty(stream.fileno())  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+class NotATerminal(Exception):
+    """Standard input or output is not a terminal, so no line editor is started."""
+
+
+def is_a_command_line(line: str) -> bool:
+    """Whether `line`'s first word names a command, as `_handle` decides it.
+
+    The in-memory history keeps only these (story 4u, `4f`'s rule that an open
+    line is recorded nowhere), and the completion readers are read again after
+    one runs.
+    """
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        return False
+    if not words or not words[0]:
+        return False
+    first = words[0]
+    return first not in ENDINGS and (first.startswith("-") or names_a_command(first))
+
+
+_EDITOR_PACKAGES = frozenset({"prompt_toolkit", "wcwidth"})
+"""The runtime extra's line editor and its one dependency (story 4u)."""
+
+
+_input: Callable[[str], str] = input
+"""`4q`'s reader, bound when this module loads: a command's own questions call
+`input` by name, and a stand-in for them must not become the prompt's reader."""
+
+
+class _Edited:
+    """`prompt_toolkit`'s `prompt`, falling back to `input` if the library fails.
+
+    Ctrl-C and Ctrl-D reach the loop as they do from `input`. Any other
+    exception from the library is said once, by type, and every later line is
+    read by `input`: the session continues.
+    """
+
+    def __init__(self, prompt: Callable[[str], str]) -> None:
+        self._prompt: Callable[[str], str] | None = prompt
+
+    def __call__(self, text: str) -> str:
+        if self._prompt is None:
+            return _input(text)
+        try:
+            return self._prompt(text)
+        except (KeyboardInterrupt, EOFError):
+            raise
+        except Exception as failed:  # noqa: BLE001 — said by type; the session continues
+            self._prompt = None
+            print(line_editor_failed(failed, started=True), file=sys.stderr, flush=True)
+            _line_editing()
+            return _input(text)
+
+
+def _line_editor(completion: Completion) -> Callable[[str], str]:
+    """The reader the prompt uses: `prompt_toolkit`'s when it imports and starts.
+
+    The import is here, when the prompt opens, so `pm-ai <command>` never
+    loads the library. A failed import is `4q`'s loop and the sentence naming
+    the runtime extra; a session that cannot start is `4q`'s loop and one
+    sentence naming what failed by type.
+    """
+    try:
+        from pm_ai.surfaces.cli import editor
+    except Exception as failed:  # noqa: BLE001 — said; the session continues
+        if (
+            isinstance(failed, ModuleNotFoundError)
+            and (failed.name or "").partition(".")[0] in _EDITOR_PACKAGES
+        ):
+            # The runtime extra is not installed.
+            print(NO_LINE_EDITOR, file=sys.stderr, flush=True)
+        else:
+            # Installed but incompatible (`cannot import name ...`), or a fault
+            # in pm-ai's own module: said by type, never a traceback.
+            print(line_editor_failed(failed), file=sys.stderr, flush=True)
+        _line_editing()
+        return _input
+    try:
+        if not (_is_a_terminal(sys.stdin) and _is_a_terminal(sys.stdout)):
+            raise NotATerminal("standard input or output is not a terminal")
+        prompt = editor.session(completion, keep=is_a_command_line)
+    except Exception as failed:  # noqa: BLE001 — said by type; the session continues
+        print(line_editor_failed(failed), file=sys.stderr, flush=True)
+        _line_editing()
+        return _input
+    return _Edited(prompt)
 
 
 def _status(code: int) -> None:
@@ -345,20 +490,24 @@ def _ending(jobs: _Jobs | None) -> int:
 def run(
     runner: Callable[[Sequence[str]], int],
     *,
-    read: Callable[[str], str] = input,
+    read: Callable[[str], str] | None = None,
     line_editing: bool = False,
     client: DaemonClient | None = None,
+    completion: Completion | None = None,
 ) -> int:
     """Read lines until `exit`, `quit` or Ctrl-D, and return 0.
 
     `runner` takes the words of a command and returns its exit code. `client`
     is the daemon's (story 4q); without one every command runs through
-    `runner`, as before `4q`. `read` is `input`, injectable so the loop is a
-    unit test. `line_editing` loads `readline` first; the composition root
-    asks for it.
+    `runner`, as before `4q`. `read` is injectable so the loop is a unit test;
+    when it is not given, `line_editing` (which the composition root asks for)
+    opens `prompt_toolkit` over `completion` (story 4u), falling back to
+    `input` with `readline`, and without it `read` is `input`. `completion`'s
+    readers are read again after every command line.
     """
-    if line_editing:
-        _line_editing()
+    completion = completion if completion is not None else Completion()
+    if read is None:
+        read = _line_editor(completion) if line_editing else _input
     jobs = None if client is None else _Jobs(client)
     while True:
         try:
@@ -384,3 +533,18 @@ def run(
             # Anywhere outside `read` and the runner — the split, a sentence,
             # the status line: a fresh prompt, never the end of the session.
             print(flush=True)
+        _after(line, completion)
+
+
+def _after(line: str, completion: Completion) -> None:
+    """After a command line, the next Tab reads the files again (story 4u).
+
+    A command may have enrolled a project, added a connector or set a goal. A
+    Ctrl-C landing here forgets too: reading again is never wrong.
+    """
+    try:
+        command = is_a_command_line(line)
+    except KeyboardInterrupt:
+        command = True
+    if command:
+        completion.forget()

@@ -100,6 +100,18 @@ runtime = [
     # currency risk of `sqlite-vec`'s shape over a far smaller surface, and
     # behind a port, so replacing the backend stays local.
     "watchdog==6.0.0",
+    # Story 4u: the `pm-ai>` prompt's line editor — Tab completion, the bottom
+    # hint line, the dim suggestion. PINNED EXACTLY 2026-10-18 at the release
+    # current on PyPI that day (3.0.53, verified against
+    # https://pypi.org/pypi/prompt_toolkit/json: requires Python >=3.10).
+    # `prompt_toolkit` itself is pure Python. Its one dependency, `wcwidth`
+    # (`>=0.1.4`), is pinned by the lock (0.9.2) and is not pure Python: it
+    # ships compiled cp310-abi3 wheels for macOS and Linux, plus an sdist.
+    # The only import site is `pm_ai.surfaces.cli.editor`, loaded by
+    # `pm_ai.surfaces.cli.repl._line_editor` when the prompt opens, never at
+    # module import, so `pm-ai <command>` never loads it; without it the
+    # prompt is `4q`'s loop and says once that completion needs this extra.
+    "prompt_toolkit==3.0.53",
 ]
 
 [dependency-groups]

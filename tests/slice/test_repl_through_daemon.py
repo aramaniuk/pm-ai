@@ -259,9 +259,11 @@ def test_a_typed_line_runs_through_the_daemon_and_is_recalled(home, daemon_proce
     try:
         assert session.read_until(1), session.output
         session.type(b"config show\n")
-        assert session.read_until(2), session.output
-        session.type(b"\x1b[A\n")  # up arrow, then Enter: recalled through readline
-        assert session.read_until(3), session.output
+        # Story 4u: `prompt_toolkit` draws the prompt again when a line is
+        # accepted, so the wait is on the status line, not a count of prompts.
+        assert session.read_until_text(b"exit 0\r\n", 1), session.output
+        session.type(b"\x1b[A\n")  # up arrow, then Enter: recalled through prompt_toolkit
+        assert session.read_until_text(b"exit 0\r\n", 2), session.output
         session.type(b"exit\n")
         assert session.finish() == 0
     finally:
