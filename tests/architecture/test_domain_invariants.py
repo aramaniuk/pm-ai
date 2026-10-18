@@ -953,6 +953,9 @@ def test_adapters_satisfy_the_ports_they_are_declared_against(tmp_path):
         "write_capture",
         "record_transcript_state",
         "transcript_states",
+        # Story 8t: the one write and the one reader of GitLab project work.
+        "record_project_work",
+        "project_work",
     ):
         assert member in declared, (
             f"StoragePort does not declare {member}, so nothing typed against "
@@ -1098,3 +1101,22 @@ def test_ad34_the_reference_set_guard_survives_o():
     finally:
         identity.PM_AI_MINTED = original
     identity._assert_reference_sets_agree()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AD-34 — the `gitlab` handle system (story 8t)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_gitlab_is_a_handle_system_qualified_by_its_server():
+    """`gitlab:<host>:<numeric id>`, parsed at the last `:` (AD-34, 2026-10-16)."""
+    handles = mod("pm_ai.domain.handles")
+
+    assert "gitlab" in handles.HANDLE_SYSTEMS
+    assert "gitlab" not in handles.NEVER_A_PERSON
+    built = handles.gitlab_handle("https://GitLab.Example.com:8443", 17)
+    assert str(built) == "gitlab:gitlab.example.com:8443:17"
+    assert handles.parse_person_handle(str(built)) == built
+    assert str(handles.gitlab_handle("https://gitlab.example.com:443", 17)) == "gitlab:gitlab.example.com:17"
+    for refused in (True, "17", "x17", None, -1, 1.0):
+        assert handles.gitlab_handle("https://gitlab.example.com", refused) is None, refused

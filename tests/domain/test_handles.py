@@ -121,7 +121,7 @@ def test_text_not_in_canonical_form_is_refused_by_the_parser():
 def test_the_handle_systems_are_disjoint_from_the_scopeless_references():
     from pm_ai.domain.identity import SCOPELESS_SYSTEMS
 
-    assert HANDLE_SYSTEMS == {"graph", "graph_app", "email", "none"}
+    assert HANDLE_SYSTEMS == {"graph", "graph_app", "email", "gitlab", "none"}
     assert not HANDLE_SYSTEMS & SCOPELESS_SYSTEMS
 
 

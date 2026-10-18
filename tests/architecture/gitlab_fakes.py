@@ -18,7 +18,7 @@ pytest's import path.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -86,6 +86,7 @@ def install(
     *,
     instance: str = "gitlab:alpha",
     fetch: Any = None,
+    work: Any = None,
 ) -> Pages | Any:
     """Give a composed daemon's GitLab connector a token and a page fetch.
 
@@ -96,6 +97,10 @@ def install(
     connector.credential = TOKEN
     installed = fetch if fetch is not None else Pages(tuple(rows or ()))
     connector.fetch_page = installed
+    # Story 8t: a composed connector also reads the project's work, through
+    # `work` when one is given; a commit seam with no work seam reads commits
+    # alone.
+    connector.fetch_work = work
     return installed
 
 
@@ -145,4 +150,159 @@ def page(*rows: dict, next_page: int | str | None = None, status: int = 200) -> 
     return GitLabResponse(status=status, body=list(rows), headers=headers)
 
 
-__all__ = ["TOKEN", "Pages", "PageUnavailable", "Wire", "WireOverrun", "commit", "install", "page"]
+# ── Story 8t: a GitLab that answers by what is asked ─────────────────────────
+
+
+def stamp(at: datetime) -> str:
+    """An instant as GitLab writes one: milliseconds and `Z`."""
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{at.microsecond // 1000:03d}Z"
+
+
+def person(user_id: Any, name: str = "Dana Smith", username: str = "dana", **extra: Any) -> dict[str, Any]:
+    """A user object as GitLab nests one: `id`, `name`, `username`, and whatever else."""
+    return {"id": user_id, "name": name, "username": username, **extra}
+
+
+def issue(iid: int, updated: datetime, state: str = "opened", **extra: Any) -> dict[str, Any]:
+    """One row in GitLab's issue-list shape, a description included (never kept)."""
+    row: dict[str, Any] = {
+        "id": 10_000 + iid,
+        "iid": iid,
+        "project_id": PROJECT_ID,
+        "title": f"issue {iid}",
+        "description": f"the body of issue {iid}, which pm-ai never keeps",
+        "state": state,
+        "assignees": [],
+        "labels": [],
+        "milestone": None,
+        "updated_at": stamp(updated),
+        "closed_at": None,
+        "web_url": f"https://gitlab.example.com/acme/web/-/issues/{iid}",
+        "confidential": False,
+    }
+    row.update(extra)
+    return row
+
+
+def merge_request(iid: int, updated: datetime, state: str = "opened", **extra: Any) -> dict[str, Any]:
+    """One row in GitLab's merge-request-list shape."""
+    row: dict[str, Any] = {
+        "id": 20_000 + iid,
+        "iid": iid,
+        "project_id": PROJECT_ID,
+        "title": f"merge request {iid}",
+        "description": f"the body of merge request {iid}, which pm-ai never keeps",
+        "state": state,
+        "source_branch": f"{iid}-a-branch",
+        "author": person(17),
+        "draft": False,
+        "updated_at": stamp(updated),
+        "merged_at": None,
+        "closed_at": None,
+        "web_url": f"https://gitlab.example.com/acme/web/-/merge_requests/{iid}",
+    }
+    row.update(extra)
+    return row
+
+
+PROJECT_ID = 7
+"""The numeric id GitLab gives the fake's project."""
+
+
+class GitLab:
+    """A transport answering like one GitLab project, recording every request.
+
+    Lists are filtered and ordered the way the connector asks GitLab to:
+    `state`, `updated_after` (on or after), oldest `updated_at` first, 100 a
+    page, with GitLab's next-page header. `refuse` maps a list — `members`,
+    `issues`, `merge_requests`, `related_issues`, or `related_issues:<iid>` —
+    to the answer given instead. `before(resource, query)` runs before each
+    answer, so a test can change the project mid-walk.
+    """
+
+    PER_PAGE = 100
+
+    def __init__(self) -> None:
+        self.commits: list[dict[str, Any]] = []
+        self.members: list[dict[str, Any]] = []
+        self.issues: list[dict[str, Any]] = []
+        self.merge_requests: list[dict[str, Any]] = []
+        self.related: dict[int, list[dict[str, Any]]] = {}
+        self.refuse: dict[str, GitLabResponse] = {}
+        self.before: Any = None
+        self.sent: list[str] = []
+
+    def asked(self, resource: str) -> list[dict[str, list[str]]]:
+        """The decoded queries of every request sent for one list."""
+        return [
+            parse_qs(urlsplit(url).query)
+            for url in self.sent
+            if self._resource(urlsplit(url).path)[0] == resource
+        ]
+
+    @staticmethod
+    def _resource(path: str) -> tuple[str, int | None]:
+        tail = path.split("/projects/", 1)[1].split("/", 1)[1]
+        if tail == "repository/commits":
+            return "commits", None
+        if tail == "members/all":
+            return "members", None
+        if tail.startswith("merge_requests/") and tail.endswith("/related_issues"):
+            return "related_issues", int(tail.split("/")[1])
+        return tail, None
+
+    def __call__(self, request: GitLabRequest) -> GitLabResponse:
+        self.sent.append(request.url)
+        parts = urlsplit(request.url)
+        resource, iid = self._resource(parts.path)
+        query = {key: values[0] for key, values in parse_qs(parts.query).items()}
+        if self.before is not None:
+            self.before(resource, query)
+        for key in (f"{resource}:{iid}", resource):
+            if key in self.refuse:
+                return self.refuse[key]
+        number = int(query.get("page", "1"))
+        if resource == "commits":
+            return page(*self.commits)
+        if resource == "members":
+            rows = list(self.members)
+        elif resource == "related_issues":
+            rows = list(self.related.get(iid or 0, []))
+        else:
+            rows = list(self.issues if resource == "issues" else self.merge_requests)
+            state = query.get("state", "all")
+            if state != "all":
+                rows = [row for row in rows if row["state"] == state]
+            after = query.get("updated_after")
+            if after is not None:
+                floor = datetime.fromisoformat(after)
+                rows = [row for row in rows if datetime.fromisoformat(row["updated_at"]) >= floor]
+            rows.sort(key=lambda row: (row["updated_at"], row["iid"]))
+        start = (number - 1) * self.PER_PAGE
+        chunk = rows[start : start + self.PER_PAGE]
+        following = number + 1 if start + self.PER_PAGE < len(rows) else None
+        return page(*chunk, next_page=following)
+
+
+def refused(status: int, **headers: str) -> GitLabResponse:
+    """An error answer with GitLab's JSON message body."""
+    return GitLabResponse(status=status, body={"message": f"{status}"}, headers=dict(headers))
+
+
+__all__ = [
+    "PROJECT_ID",
+    "TOKEN",
+    "GitLab",
+    "Pages",
+    "PageUnavailable",
+    "Wire",
+    "WireOverrun",
+    "commit",
+    "install",
+    "issue",
+    "merge_request",
+    "page",
+    "person",
+    "refused",
+    "stamp",
+]

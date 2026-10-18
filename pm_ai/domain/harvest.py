@@ -25,6 +25,7 @@ from pm_ai.domain.events import NormalizedEvent
 from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.transcripts import TranscriptReport
+from pm_ai.domain.work import WorkChange
 
 
 UNCLASSIFIED_FAULT_IS_RETRYABLE = False
@@ -367,6 +368,21 @@ class HarvestResult:
     has not happened has no honest representation as an event (AD-27).
     """
 
+    work: WorkChange | None = None
+    """A GitLab project's members, issues and merge requests read this run (story 8t).
+
+    Beside `records`, which is its precedent: current state the harvest earned,
+    for `app` to hand to the single writer (`record_project_work`) after the
+    events and before the position is saved. It is not an event — an issue's
+    later states would be dropped as duplicates of its first (AD-3, AD-34).
+
+    A change counts as something harvested: `EMPTY` carries none, and
+    `HARVESTED` may carry only a change. It earns no coverage window and never
+    withholds one — coverage is the commit walk's (`8n`, `8i`) — so a run
+    whose commit walk answered with nothing keeps that walk's window beside a
+    change.
+    """
+
     answered_at: datetime | None = None
     """The instant, by this machine's clock, the provider's first page was read.
 
@@ -405,9 +421,11 @@ class HarvestResult:
             and not self.refusals
             and not self.records
             and not self.live
+            and self.work is None
         ):
             raise ValueError(
-                "outcome=harvested with no events, no records, nothing live and "
+                "outcome=harvested with no events, no records, nothing live, no "
+                "project work and "
                 "nothing refused. EMPTY is the value for a provider that "
                 "answered with nothing; collapsing the two loses the only "
                 "distinction AD-35's two silences are built on."
@@ -437,6 +455,11 @@ class HarvestResult:
                 f"fail-closed reading treats as 'the provider answered and there "
                 f"was nothing there'."
             )
+        if self.outcome is HarvestOutcome.EMPTY and self.work is not None:
+            raise ValueError(
+                "outcome=empty with a project-work change. A change counts as "
+                "something harvested (story 8t), so the run did not learn nothing."
+            )
         # `records` and `live` join `events` here rather than being a second
         # rule, because they are the same evidence in a different shape: story
         # 33c's connector maps a window of upcoming meetings to `live` and emits
@@ -457,6 +480,10 @@ class HarvestResult:
             and not self.events
             and not self.records
             and not self.live
+            # Story 8t: a change carried beside a commit walk that answered with
+            # nothing and refused nothing keeps that walk's window — the change
+            # earns none and withholds none. Refused rows still withhold it.
+            and (self.work is None or self.refusals)
         ):
             raise ValueError(
                 f"coverage claimed by an outcome={self.outcome.value} harvest "

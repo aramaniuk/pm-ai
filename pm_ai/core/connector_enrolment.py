@@ -54,7 +54,7 @@ connector becomes active at the next start rather than claiming it is live.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from pm_ai.domain.connector_rows import USER_ID_KEY
 from pm_ai.domain.handles import usable_user_id
@@ -327,7 +327,13 @@ def connector_configurations(storage: StoragePort) -> tuple[str, ...]:
     )
 
 
-def assert_unconfigured(storage: StoragePort, *, system: str, instance: str) -> None:
+def assert_unconfigured(
+    storage: StoragePort,
+    *,
+    system: str,
+    instance: str,
+    files_into: Callable[[str], str | None] | None = None,
+) -> None:
     """Refuse a malformed name, or one a row in `connectors/` already uses (story 8o).
 
     The part of `assert_enrollable` that needs no master key: the names'
@@ -336,6 +342,13 @@ def assert_unconfigured(storage: StoragePort, *, system: str, instance: str) -> 
     terminal check — nothing is asked by it — so a name in use is the first
     thing said; the rest of `assert_enrollable`, where the keychain is first
     reached, runs after the terminal check.
+
+    `files_into` (story 8t, AD-10) names the project an instance name files
+    into, or `None` when it files into none yet. Given it, a GitLab name is
+    refused when another **enrolled** GitLab row already files into the same
+    project, naming that row: one GitLab instance per project scope, for now.
+    The built-in `gitlab:<project id>` each watched project gets is not a row,
+    so enrolling under its name replaces it and is not a second instance.
 
     Raises `MalformedInstanceName` or `DuplicateConnector`.
     """
@@ -349,6 +362,45 @@ def assert_unconfigured(storage: StoragePort, *, system: str, instance: str) -> 
             f"does not replace one. Two connectors under one instance name "
             f"share a cursor and a credential, so one of them silently "
             f"re-harvests from the other's position. Nothing was written."
+        )
+    if system == "gitlab" and files_into is not None:
+        _assert_one_gitlab_per_project(
+            storage, instance=instance, configured=configured, files_into=files_into
+        )
+
+
+def _assert_one_gitlab_per_project(
+    storage: StoragePort,
+    *,
+    instance: str,
+    configured: tuple[str, ...],
+    files_into: Callable[[str], str | None],
+) -> None:
+    """Refuse a second enrolled GitLab row for a project that has one (AD-10, story 8t).
+
+    A reader cannot yet tell which repository a bare `#N` means, and the
+    project's work is kept per `(project, instance)` (AD-3), so a project has
+    at most one GitLab instance. Only enrolled rows count — a row whose
+    `system` is `gitlab`; a row that cannot be read is not counted.
+    """
+    project = files_into(instance)
+    if project is None:
+        return
+    for other in sorted(configured):
+        if other == instance:
+            continue
+        try:
+            row = connector_row(storage, instance=other)
+        except (ConnectorNotConfigured, MalformedSettings, MalformedInstanceName):
+            continue
+        if row.get("system") != "gitlab" or files_into(other) != project:
+            continue
+        raise DuplicateConnector(
+            f"{other!r} is already an enrolled GitLab connector filing into the "
+            f"project {project!r}, and a project has one GitLab instance for now "
+            f"(AD-10): with two, a bare issue number could mean either "
+            f"repository. Nothing was written. Remove {other!r}'s row in "
+            f"{CONNECTORS} first to enrol {instance!r} in its place."
         )
 
 

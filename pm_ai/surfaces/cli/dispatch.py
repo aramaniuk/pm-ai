@@ -588,6 +588,10 @@ class GitLabCheck(Protocol):
         """Refuse a name no start would build, against the projects watched now."""
         ...
 
+    def files_into(self, instance: str) -> str | None:
+        """The project `instance` would file into now, or `None` (story 8t)."""
+        ...
+
     def host_as_read(self, typed: str) -> str:
         """The address a typed host is read as: `https://` added to a bare answer."""
         ...
@@ -1348,7 +1352,11 @@ def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -
             "about this machine; nothing was asked and nothing was saved."
         )
 
-    assert_unconfigured(daemon.storage, system="gitlab", instance=instance)
+    # One enrolled GitLab instance per project scope (AD-10, story 8t): a
+    # second row filing into a project that has one is refused, naming it.
+    assert_unconfigured(
+        daemon.storage, system="gitlab", instance=instance, files_into=gitlab.files_into
+    )
     if not _stdin_is_terminal():
         raise Refusal(
             "adding a GitLab connector asks two questions and takes a token at "

@@ -36,6 +36,7 @@ socket.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -54,6 +55,7 @@ from pm_ai.connectors.gitlab.client import (
     project_refusal,
     render_instant,
 )
+from pm_ai.connectors.gitlab.work import LINK_CAP, WorkQuery, WorkWalker
 from pm_ai.domain.clocks import ImplausibleTimestamp, validate_occurred_at
 from pm_ai.domain.events import CommitPayload, NormalizedEvent, ObservedEventType, Provenance
 from pm_ai.domain.handles import EMAIL, NO_PERSON, usable_handle
@@ -85,6 +87,7 @@ __all__ = [
     "Page",
     "PageUnavailable",
     "RowRefused",
+    "WorkQuery",
     "host_refusal",
     "project_refusal",
 ]
@@ -234,6 +237,17 @@ class GitLabConnectorAdapter:
     # The two bounds on the page loop, injected so a test can reach them.
     page_cap: int = PAGE_CAP
     budget: timedelta = FETCH_BUDGET
+    # Story 8t — whether a harvest also reads the project's members, issues and
+    # merge requests. Composition (`pm_ai.app.wiring`) turns it on for every
+    # GitLab connector it builds; off, the harvest reads commits alone and
+    # writes the commit-date cursor `8n` wrote, which is what a test standing at
+    # the commit seam, and the enrolment check, compose.
+    reads_work: bool = False
+    # The work lists' page seam, as `fetch_page` is the commits'. `None` asks
+    # GitLab through `transport`. Returns a `Page` or raises `PageUnavailable`.
+    fetch_work: Callable[[WorkQuery], Page] | None = None
+    # At most this many `related_issues` requests a run.
+    link_cap: int = LINK_CAP
 
     def __post_init__(self) -> None:
         longest = timedelta(minutes=MAX_REACH_BACK_MINUTES)
@@ -264,6 +278,16 @@ class GitLabConnectorAdapter:
     def has_credential(self) -> bool:
         """Whether a usable token is held — anything but `None`, empty or blank."""
         return bool(self.token)
+
+    @property
+    def _walks_work(self) -> bool:
+        """Whether this run reads the project's work (story 8t).
+
+        `reads_work`, and a way to ask: the work seam, or GitLab itself. A
+        commit seam stood in without a work seam is a stand-in for commits
+        alone, and the work is then not asked of the real transport behind it.
+        """
+        return self.reads_work and (self.fetch_work is not None or self.fetch_page is None)
 
     def emits(self) -> frozenset[ObservedEventType]:
         """Only from the core taxonomy — a connector may not mint a type (AD-27)."""
@@ -394,27 +418,15 @@ class GitLabConnectorAdapter:
 
     # ── Harvest ──────────────────────────────────────────────────────────────
 
-    def _asked_from(self, since: Cursor) -> tuple[datetime | None, datetime]:
-        """The stored cursor read, and the instant this run asks from.
+    def _asked_from_position(self, stored: datetime | None) -> tuple[datetime | None, datetime]:
+        """The stored commit position, and the instant this run asks from.
 
         The first is what a finished walk must not move the cursor behind:
         `None` on a first run, and `None` too for a stored date past this
         machine's now, so the walk that follows replaces it with a real one.
-
-        Raises `_UnreadableCursor` for a token this connector did not write.
         """
-        if not since.token:
+        if stored is None:
             return None, self.now() - self.first_run_reach_back
-        try:
-            text = since.token.decode("ascii")
-            stored = datetime.strptime(text, _CURSOR_FORMAT).replace(tzinfo=timezone.utc)
-        except (UnicodeDecodeError, ValueError):
-            if since.token.isdigit():
-                raise _UnreadableCursor(
-                    "it is a decimal page offset, the form this connector wrote "
-                    "before it read a real GitLab"
-                ) from None
-            raise _UnreadableCursor("it is not a commit date this connector wrote") from None
         # A stored date past this machine's now — the clock was moved back —
         # is read as now: asking from a future instant would ask for nothing.
         now = self.now()
@@ -428,6 +440,35 @@ class GitLabConnectorAdapter:
 
         def fetch(query: CommitQuery) -> Page:
             return client.commits(query.since, query.page, deadline=query.deadline)
+
+        return fetch
+
+    def _work_from_gitlab(self) -> Callable[[WorkQuery], Page]:
+        """The default work fetch: one client for the run, asking GitLab (story 8t)."""
+        client = self._client()
+
+        def fetch(query: WorkQuery) -> Page:
+            if query.resource == "members":
+                url = client.members_url(query.page)
+                what = "GitLab member list"
+            elif query.resource == "related_issues":
+                if query.iid is None:
+                    raise PageUnavailable(
+                        "a merge request's links were asked for with no merge "
+                        "request named; nothing was sent.",
+                        retryable=False,
+                    )
+                url = client.related_issues_url(query.iid, query.page)
+                what = "GitLab issue list"
+            else:
+                url = client.items_url(
+                    query.resource,
+                    state=query.state or "all",
+                    updated_after=query.updated_after,
+                    page=query.page,
+                )
+                what = f"GitLab {query.resource.replace('_', ' ')[:-1]} list"
+            return client.list_page(url, page=query.page, what=what, deadline=query.deadline)
 
         return fetch
 
@@ -445,6 +486,12 @@ class GitLabConnectorAdapter:
         finished — see the module docstring.
 
         The loop is bounded twice, by `page_cap` and by `budget`.
+
+        With `reads_work` (story 8t), a commit walk that finished is followed by
+        the project's members, issues and merge requests under the same budget
+        (`pm_ai.connectors.gitlab.work`), carried on the result as `work`.
+        Coverage stays the commit walk's: the work sections earn no window and
+        never withhold one.
         """
         if not self.has_credential:
             return _failed(
@@ -454,7 +501,8 @@ class GitLabConnectorAdapter:
                 f"gitlab {self.instance}`.",
             )
         try:
-            stored, asked_from = self._asked_from(since)
+            positions = _read_positions(since.token)
+            stored, asked_from = self._asked_from_position(positions.commits)
         except _UnreadableCursor as unreadable:
             # The cursor itself is never quoted: it is opaque provider state.
             return _failed(
@@ -466,6 +514,10 @@ class GitLabConnectorAdapter:
                 f"yet — that is recorded as deferred work — so this connector "
                 f"refuses every run until one exists.",
             )
+        # The run's start, for the work walk (story 8t): a complete read is
+        # stamped with it and prunes are measured back from it. Read only when
+        # the work is read, so a commit-only run reads the clock as `8n` did.
+        started = self.now() if self._walks_work else None
         fetch = self.fetch_page or self._fetch_from_gitlab()
 
         page_number = 1
@@ -584,7 +636,9 @@ class GitLabConnectorAdapter:
                 )
         events = tuple(mapped)
 
-        outcome = HarvestOutcome.of(
+        # The commit walk's own outcome decides its coverage, as `8n` and `8i`
+        # define it; what follows it (story 8t) never withholds the window.
+        commit_outcome = HarvestOutcome.of(
             mapped=bool(events), refused=bool(refusals), failed=failure is not None
         )
 
@@ -594,7 +648,7 @@ class GitLabConnectorAdapter:
         placed = _plausible_dates(events, now=finished_at)
         coverage: CoverageWindow | None = None
         if (
-            (outcome is HarvestOutcome.EMPTY or placed)
+            (commit_outcome is HarvestOutcome.EMPTY or placed)
             and reached_at is not None
             # This machine's clock stepping backwards mid-harvest leaves no
             # honest interval, and `CoverageWindow` refuses a reversed one.
@@ -606,15 +660,68 @@ class GitLabConnectorAdapter:
                 end=finished_at,
             )
 
+        cursor = since
+        work = None
+        if failure is None and not self._walks_work and since.token.startswith(b"{"):
+            # A position written by a run that read the work: only the commit
+            # position moves, and the work's positions are kept as they were.
+            moved = _advanced_position(stored, placed, now=finished_at)
+            if moved is not None:
+                cursor = _Positions(
+                    commits=moved,
+                    issues=positions.issues,
+                    merge_requests=positions.merge_requests,
+                    issues_checked=positions.issues_checked,
+                    merge_requests_checked=positions.merge_requests_checked,
+                ).encode()
+        elif failure is None and not self._walks_work:
+            cursor = _advanced(since, stored, placed, now=finished_at)
+        elif failure is None and started is not None:
+            # The one budget is shared (story 8t): measured from the first
+            # commit page, as the commit walk measured it.
+            budget_from = reached_at if reached_at is not None else started
+            walker = WorkWalker(
+                instance=self.instance,
+                host=self.host,
+                project=self.project,
+                fetch=self.fetch_work or self._work_from_gitlab(),
+                now=self.now,
+                started=started,
+                deadline=budget_from + self.budget,
+                page_cap=self.page_cap,
+                link_cap=self.link_cap,
+            )
+            walked_work = walker.walk(
+                issues=positions.issues,
+                merge_requests=positions.merge_requests,
+                issues_checked=positions.issues_checked,
+                merge_requests_checked=positions.merge_requests_checked,
+            )
+            work = walked_work.change
+            failure = walked_work.failure
+            commits_at = _advanced_position(stored, placed, now=finished_at)
+            cursor = _Positions(
+                commits=commits_at if commits_at is not None else positions.commits,
+                issues=walked_work.issues,
+                merge_requests=walked_work.merge_requests,
+                issues_checked=walked_work.issues_checked,
+                merge_requests_checked=walked_work.merge_requests_checked,
+            ).encode()
+
+        outcome = HarvestOutcome.of(
+            mapped=bool(events) or work is not None,
+            refused=bool(refusals),
+            failed=failure is not None,
+        )
+
         return HarvestResult(
             events=events,
-            cursor=_advanced(since, stored, placed, now=finished_at)
-            if failure is None
-            else since,
+            cursor=cursor,
             outcome=outcome,
             coverage=coverage,
             failure=failure,
             refusals=tuple(refusals),
+            work=work,
             # The reading the window's start was taken from (`8p`).
             answered_at=reached_at,
         )
@@ -674,6 +781,104 @@ def _advanced(
     if stored is not None and newest <= stored:
         return since
     return Cursor(render_instant(newest).encode("ascii"))
+
+
+def _advanced_position(
+    stored: datetime | None, placed: list[datetime], *, now: datetime
+) -> datetime | None:
+    """`_advanced`'s rule as an instant: the new commit position, or `None` for unchanged."""
+    if not placed:
+        return None
+    newest = min(max(placed), now).replace(microsecond=0)
+    if stored is not None and newest <= stored:
+        return None
+    return newest
+
+
+_POSITION_KEYS = (
+    "commits",
+    "issues",
+    "merge_requests",
+    "issues_checked",
+    "merge_requests_checked",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Positions:
+    """Where each walk got to: one position per resource (story 8t).
+
+    `commits` is `8n`'s commit date; `issues` and `merge_requests` are the last
+    `updated_at` read; the two `_checked` are the instants of the last complete
+    listing of the open set. Written as one JSON object. A token in `8n`'s
+    commit-only form still reads — as the commit position, with issues and
+    merge requests then on a first run.
+    """
+
+    commits: datetime | None = None
+    issues: datetime | None = None
+    merge_requests: datetime | None = None
+    issues_checked: datetime | None = None
+    merge_requests_checked: datetime | None = None
+
+    def encode(self) -> Cursor:
+        document = {
+            "commits": render_instant(self.commits) if self.commits is not None else None,
+            **{
+                key: (value.isoformat() if value is not None else None)
+                for key, value in (
+                    ("issues", self.issues),
+                    ("merge_requests", self.merge_requests),
+                    ("issues_checked", self.issues_checked),
+                    ("merge_requests_checked", self.merge_requests_checked),
+                )
+            },
+        }
+        return Cursor(json.dumps(document, sort_keys=True, separators=(",", ":")).encode("ascii"))
+
+
+def _read_positions(token: bytes) -> _Positions:
+    """A stored cursor read, or `_UnreadableCursor` for one this connector did not write."""
+    if not token:
+        return _Positions()
+    if token.startswith(b"{"):
+        try:
+            document = json.loads(token.decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            raise _UnreadableCursor("it is not a position this connector wrote") from None
+        if not isinstance(document, dict) or not set(document) <= set(_POSITION_KEYS):
+            raise _UnreadableCursor("it is not a position this connector wrote")
+        read: dict[str, datetime | None] = {}
+        for key in _POSITION_KEYS:
+            value = document.get(key)
+            if value is None:
+                read[key] = None
+                continue
+            if not isinstance(value, str):
+                raise _UnreadableCursor("it is not a position this connector wrote")
+            try:
+                if key == "commits":
+                    at = datetime.strptime(value, _CURSOR_FORMAT).replace(tzinfo=timezone.utc)
+                else:
+                    at = datetime.fromisoformat(value)
+                    if at.tzinfo is None:
+                        raise ValueError("naive")
+                    at = at.astimezone(timezone.utc)
+            except ValueError:
+                raise _UnreadableCursor("it is not a position this connector wrote") from None
+            read[key] = at
+        return _Positions(**read)
+    try:
+        text = token.decode("ascii")
+        stored = datetime.strptime(text, _CURSOR_FORMAT).replace(tzinfo=timezone.utc)
+    except (UnicodeDecodeError, ValueError):
+        if token.isdigit():
+            raise _UnreadableCursor(
+                "it is a decimal page offset, the form this connector wrote "
+                "before it read a real GitLab"
+            ) from None
+        raise _UnreadableCursor("it is not a commit date this connector wrote") from None
+    return _Positions(commits=stored)
 
 
 def _failed(since: Cursor, reason: str) -> HarvestResult:

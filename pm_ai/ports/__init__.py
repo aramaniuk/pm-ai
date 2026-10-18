@@ -36,6 +36,7 @@ from pm_ai.domain.transcripts import (
     TranscriptStateKind,
 )
 from pm_ai.domain.vcs import TrackingVerdict
+from pm_ai.domain.work import ProjectWork, WorkChange
 
 
 @runtime_checkable
@@ -759,6 +760,18 @@ class StoragePort(Protocol):
         """Remove coverage records ending before `before`; how many went (9a)."""
     def harvest_records(self) -> tuple[HarvestRecord, ...]:
         """Every instance's attempts and current failure, a plain read (9a)."""
+    def record_project_work(self, scope: DataScope, change: WorkChange) -> int:
+        """Merge one GitLab harvest's members, issues and merge requests (story 8t).
+
+        One claimed step, asking git nothing: the current rows of `(scope,
+        change.instance)` are read, merged and written in one transaction.
+        How many members lists, issues and merge requests changed.
+        """
+    def project_work(self, scope: DataScope) -> ProjectWork:
+        """A project's GitLab members, issues and merge requests — the one reader (8t).
+
+        `23g` and `7e` read nothing else of it. A plain read.
+        """
     def record_render(self, scope: DataScope, *, at: datetime) -> None:
         """A successful render of `scope` at `at`, in one statement (9b)."""
     def record_render_failure(

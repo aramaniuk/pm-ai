@@ -643,6 +643,10 @@ def test_an_enrolled_row_harvests_two_pages_under_its_own_name(tmp_path):
     wire = Wire(
         page(commit("p1a", at=NOW - timedelta(hours=3)), next_page=2),
         page(commit("p2a", at=NOW - timedelta(hours=1))),
+        # Story 8t: the members, issues and merge requests, each empty.
+        page(),
+        page(),
+        page(),
     )
     connector.transport = wire
 
@@ -651,7 +655,8 @@ def test_an_enrolled_row_harvests_two_pages_under_its_own_name(tmp_path):
     assert persisted.persisted == 2
     assert [wire.query(i)["page"] for i in (0, 1)] == [["1"], ["2"]]
     assert daemon.storage.coverage_windows("gitlab:alpha") == [(NOW, NOW)]
-    assert daemon.storage.load_cursor("gitlab:alpha") == Cursor(b"2026-08-19T08:00:00Z")
+    stored = json.loads(daemon.storage.load_cursor("gitlab:alpha").token)
+    assert stored["commits"] == "2026-08-19T08:00:00Z"
     log = "".join(
         daemon.storage.read_event_log_segment(scope=daemon.scope, name=name)
         for name in daemon.storage.event_log_segments(scope=daemon.scope)
@@ -673,12 +678,16 @@ def test_a_hand_written_row_with_a_host_path_and_a_reach_back_is_what_goes_out(t
     daemon = build(tmp_path, "alpha", now=lambda: NOW)
     connector = daemon.connectors["gitlab:alpha"]
     connector.credential = TOKEN
-    wire = Wire(page())
+    wire = Wire(page(), page(), page(), page())
     connector.transport = wire
 
     result = connector.harvest(Cursor())
 
-    assert result.outcome is HarvestOutcome.EMPTY
+    # Story 8t: the work read beside the commits is a change, so the run is
+    # HARVESTED while the commit walk's own window stands.
+    assert result.outcome is HarvestOutcome.HARVESTED
+    assert result.coverage is not None and result.work is not None
+    assert urlsplit(wire.sent[1].url).path == "/gitlab/api/v4/projects/acme%2Fweb/members/all"
     sent = urlsplit(wire.sent[0].url)
     assert (sent.scheme, sent.netloc) == ("https", "git.internal")
     assert sent.path == "/gitlab/api/v4/projects/acme%2Fweb/repository/commits"
@@ -691,7 +700,8 @@ def test_a_row_with_no_reach_back_asks_thirty_days_back_on_its_first_run(tmp_pat
     _row(build(tmp_path, "alpha", now=lambda: NOW), "gitlab:alpha", project=PROJECT)
     connector = build(tmp_path, "alpha", now=lambda: NOW).connectors["gitlab:alpha"]
     connector.credential = TOKEN
-    wire = Wire(page())
+    # Story 8t: the members, issues and merge requests follow, each empty.
+    wire = Wire(page(), page(), page(), page())
     connector.transport = wire
 
     connector.harvest(Cursor())

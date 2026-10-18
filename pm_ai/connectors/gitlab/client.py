@@ -1,4 +1,5 @@
-"""The GitLab HTTP client: one project's commits, read-only (story 8n).
+"""The GitLab HTTP client: one project's commits, read-only (story 8n), and
+its members, issues and merge requests (story 8t).
 
 The connector around this already had paging, the cursor, the coverage rules
 and the mapping; what it lacked was the wire. This module is that wire and
@@ -484,13 +485,18 @@ class GitLabClient:
     # ── URLs ─────────────────────────────────────────────────────────────────
 
     @property
-    def _commits_root(self) -> str:
-        """The project's commits, its path URL-encoded as one segment.
+    def _project_root(self) -> str:
+        """The project, its path URL-encoded as one segment.
 
         `group/project` is sent as `group%2Fproject`, GitLab's namespaced-path
         form (https://docs.gitlab.com/api/rest/ "Namespaced paths").
         """
-        return f"{self.host}{API_PATH}/projects/{quote(self.project, safe='')}/repository/commits"
+        return f"{self.host}{API_PATH}/projects/{quote(self.project, safe='')}"
+
+    @property
+    def _commits_root(self) -> str:
+        """The project's commits."""
+        return f"{self._project_root}/repository/commits"
 
     def commits_url(self, since: datetime, page: int) -> str:
         """One page of the default branch's commits made at or after `since`."""
@@ -503,6 +509,40 @@ class GitLabClient:
         """The one commit the health check asks for."""
         return f"{self._commits_root}?per_page=1"
 
+    # Story 8t — the project's members, issues and merge requests, and the
+    # issues each merge request relates to. All `GET`, all offset-paged by
+    # GitLab's next-page header; keyset pagination is never asked for.
+
+    def members_url(self, page: int) -> str:
+        """One page of the project's members, inherited ones included."""
+        return f"{self._project_root}/members/all?per_page={PER_PAGE}&page={page}"
+
+    def items_url(
+        self, kind: str, *, state: str, updated_after: datetime | None, page: int
+    ) -> str:
+        """One page of the project's `issues` or `merge_requests`, oldest change first.
+
+        `updated_after` is GitLab's "on or after", so a walk that asks again
+        from the last instant it read re-reads that instant rather than
+        skipping it. Absent on a first run and on the daily open check.
+        """
+        if kind not in ("issues", "merge_requests"):
+            raise ValueError(f"{kind!r} is not a list this client reads")
+        url = (
+            f"{self._project_root}/{kind}?order_by=updated_at&sort=asc"
+            f"&state={state}&per_page={PER_PAGE}&page={page}"
+        )
+        if updated_after is not None:
+            url += f"&updated_after={quote(render_instant(updated_after), safe=':')}"
+        return url
+
+    def related_issues_url(self, iid: int, page: int) -> str:
+        """One page of the issues one merge request relates to."""
+        return (
+            f"{self._project_root}/merge_requests/{int(iid)}/related_issues"
+            f"?per_page={PER_PAGE}&page={page}"
+        )
+
     # ── Asking ───────────────────────────────────────────────────────────────
 
     def commits(self, since: datetime, page: int, *, deadline: datetime | None = None) -> Page:
@@ -512,12 +552,28 @@ class GitLabClient:
         page number, are refusals rather than guesses: neither says what is on
         the default branch. A missing or blank header is the last page.
         """
-        response = self._answer(self.commits_url(since, page), deadline=deadline)
+        return self.list_page(
+            self.commits_url(since, page),
+            page=page,
+            what="GitLab commit list",
+            deadline=deadline,
+        )
+
+    def list_page(
+        self, url: str, *, page: int, what: str, deadline: datetime | None = None
+    ) -> Page:
+        """One page of any list this client reads, or `PageUnavailable`.
+
+        The rules `commits` has always applied, for every list: a body that is
+        not a list is refused rather than read as empty, and a next-page header
+        that is not a page number ends the walk as not complete.
+        """
+        response = self._answer(url, deadline=deadline)
         body = response.body
         if not isinstance(body, list):
             raise PageUnavailable(
                 f"GitLab answered {response.status} for page {page} of "
-                f"{self.project!r} with a body that is not a GitLab commit list. "
+                f"{self.project!r} with a body that is not a {what}. "
                 f"Refusing rather than reading it as an empty page.",
                 retryable=False,
                 status=response.status,

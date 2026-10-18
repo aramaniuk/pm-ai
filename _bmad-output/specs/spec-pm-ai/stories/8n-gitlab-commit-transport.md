@@ -111,6 +111,7 @@ Two more faults hid behind the stub: the connector names itself after the GitLab
 ## Spec Change Log
 
 - **2026-10-18, amended by 8s:** a first run reaches back 30 days (`MERGE_LAG_DAYS`), not seven, so the second run no longer back-fills about three weeks (field-test finding 19); a hand-written row key still wins. A host typed with no scheme is read as https at enrolment (8o's question); the row reader is unchanged and still refuses a `host` without `https://`. Frozen text and the matrix's first-run row edited to match.
+- **2026-10-18, amended by `8t`** (the GitLab harvest reads the project's members, issues and merge requests). Line 25 ("only commits are read … one event type"): commits stay the only thing read from the default branch and the only event type (`emits()` is still `{commit_pushed}`), but a harvest now also reads the project's members, issues and merge requests into Tier 2, not the event log. Line 30 ("the cursor is the newest plausible commit date"): the commit position keeps that rule, and is now one of several positions in one cursor — commits, issues, merge requests and the two open-check instants — written as one JSON object; a stored commit-only cursor still reads. Line 41 (Never: "No merge requests, events or issues"): merge requests and issues are read by `8t`; still no write to GitLab and no event-log entry for either.
 
 ## Design Notes
 

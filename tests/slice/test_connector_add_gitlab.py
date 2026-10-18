@@ -760,19 +760,27 @@ def test_a_bare_host_enrolled_then_harvested_twice_goes_to_https_and_reaches_bac
 
     first_run_at = datetime(2026, 10, 16, 9, 0, tzinfo=timezone.utc)
     newest = first_run_at - timedelta(days=2, hours=3)
-    first = Wire(page(commit("n1", at=newest), commit("o1", at=newest - timedelta(days=9))))
+    # Story 8t: each run also reads members, issues and merge requests, here empty.
+    first = Wire(
+        page(commit("n1", at=newest), commit("o1", at=newest - timedelta(days=9))),
+        page(),
+        page(),
+        page(),
+    )
     daemon = build(home, "alpha", keychain=keychain, now=lambda: first_run_at)
     daemon.connectors[INSTANCE].transport = first
     assert run_harvest(daemon, INSTANCE).persisted == 2
 
-    second = Wire(page())
+    second = Wire(page(), page(), page(), page())
     later = first_run_at + timedelta(hours=4)
     daemon = build(home, "alpha", keychain=keychain, now=lambda: later)
     daemon.connectors[INSTANCE].transport = second
     run_harvest(daemon, INSTANCE)
 
     sent = [request.url for request in (*enrolment.requests, *first.sent, *second.sent)]
-    assert len(sent) == 3
+    # The enrolment check and each run's commit walk; 8t's work requests aside.
+    commits = [url for url in sent if "/repository/commits" in url]
+    assert len(commits) == 3, sent
     assert all(url.startswith("https://git.internal/api/v4/") for url in sent), sent
     assert first.query()["since"] == ["2026-09-16T09:00:00Z"], "thirty days before the first run"
     assert second.query()["since"] == ["2026-09-14T06:00:00Z"], (
@@ -1275,3 +1283,31 @@ def test_the_token_never_reaches_a_log(machine, monkeypatch, capsys, caplog, ans
     _no_token_on_screen(captured)
     assert TOKEN not in caplog.text
     assert all(TOKEN not in str(record.args) for record in caplog.records)
+
+
+# ── Story 8t: one GitLab instance per project (AD-10) ────────────────────────
+
+
+def test_a_second_gitlab_row_for_the_same_project_is_refused_naming_the_first(
+    machine, monkeypatch, capsys
+):
+    """`gitlab:alpha` is enrolled under the built-in's name (accepted: it replaces
+    the built-in); `gitlab:web` would file into the same project, and is refused."""
+    home, keychain = machine
+    provider = GitLab()
+    _gitlab(monkeypatch, provider)
+    code, _, _ = _add(monkeypatch, VALID)
+    assert code == EXIT_OK, capsys.readouterr().err
+    capsys.readouterr()
+    sealed_before = _sealed(home, keychain)
+    asked = len(provider.requests)
+
+    code, terminal, hidden = _add(monkeypatch, VALID, instance="gitlab:web")
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL
+    assert "'gitlab:alpha'" in captured.err and "one GitLab instance" in captured.err
+    assert terminal.prompts == [] and hidden.prompts == [], "refused before any question"
+    assert len(provider.requests) == asked, "GitLab was not asked"
+    assert not _settings_file(home, "gitlab:web").exists()
+    assert _sealed(home, keychain) == sealed_before, "nothing was sealed"

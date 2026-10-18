@@ -1440,3 +1440,13 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23h-four-fixes-from-the-first-reviews.md`
   summary: An all-day row whose end date is not after its start date now carries a clock flag, as 23h's matrix requires ("flagged; not refused"), and a flagged row cannot prove coverage. A calendar page holding only such rows therefore claims no coverage, where before 23h it did.
   evidence: Raised by 23h's verification-gap review. `_clock_flag` (`pm_ai/connectors/graph/calendar.py`) flags the row and `_any_credible_clock` reads any flag as an incredible clock. Graph is not known to send such rows: every all-day entry it returns ends at least a day after it starts. No test asserts coverage for that page either way. If it shows up, the fix is a flag that marks the row without counting against coverage.
+
+
+## Surfaced by the story-8t review (2026-10-18)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8t-gitlab-issues-harvest.md`
+  summary: **Needs Andrei's decision.** A GitLab harvest that reads the work is now always `HARVESTED`, never `EMPTY`, and its section status rows are written every run, even when no item changed.
+  evidence: Members are read whole each run and each complete section takes this run's instant as its last complete read, so the harvest always carries a change; the frozen rule "`EMPTY` carries none, `HARVESTED` may carry only a change" then makes every run `HARVESTED`. The matrix row "Nothing changed: no write" is honoured for item rows only, because 23g needs the last-complete-read instant each run. As a result GitLab no longer gives AD-35's "answered with nothing" signal. No production code reads `EMPTY` against `HARVESTED` today. The options are to keep it as built, or to count a change only when an item or member row differs (which the connector cannot know without asking storage, so the outcome would be decided after the write).
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/8t-gitlab-issues-harvest.md`
+  summary: The `gitlab_*` rows are never removed when their connector row is removed or renamed, and items that stay open are never pruned; their names, usernames and user ids stay in `operational.db`.
+  evidence: The tables are keyed by `(scope, instance)` and no path deletes by instance; `project_work` serves the instance with the latest complete read, so a leftover instance is hidden but kept. A connector-removal cleanup (and any later erase path) should reach these tables.
