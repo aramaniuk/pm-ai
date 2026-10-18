@@ -700,7 +700,8 @@ def test_a_row_with_no_reach_back_asks_thirty_days_back_on_its_first_run(tmp_pat
     _row(build(tmp_path, "alpha", now=lambda: NOW), "gitlab:alpha", project=PROJECT)
     connector = build(tmp_path, "alpha", now=lambda: NOW).connectors["gitlab:alpha"]
     connector.credential = TOKEN
-    wire = Wire(page())
+    # Story 8t: the members, issues and merge requests follow, each empty.
+    wire = Wire(page(), page(), page(), page())
     connector.transport = wire
 
     connector.harvest(Cursor())

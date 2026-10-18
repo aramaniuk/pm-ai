@@ -760,19 +760,27 @@ def test_a_bare_host_enrolled_then_harvested_twice_goes_to_https_and_reaches_bac
 
     first_run_at = datetime(2026, 10, 16, 9, 0, tzinfo=timezone.utc)
     newest = first_run_at - timedelta(days=2, hours=3)
-    first = Wire(page(commit("n1", at=newest), commit("o1", at=newest - timedelta(days=9))))
+    # Story 8t: each run also reads members, issues and merge requests, here empty.
+    first = Wire(
+        page(commit("n1", at=newest), commit("o1", at=newest - timedelta(days=9))),
+        page(),
+        page(),
+        page(),
+    )
     daemon = build(home, "alpha", keychain=keychain, now=lambda: first_run_at)
     daemon.connectors[INSTANCE].transport = first
     assert run_harvest(daemon, INSTANCE).persisted == 2
 
-    second = Wire(page())
+    second = Wire(page(), page(), page(), page())
     later = first_run_at + timedelta(hours=4)
     daemon = build(home, "alpha", keychain=keychain, now=lambda: later)
     daemon.connectors[INSTANCE].transport = second
     run_harvest(daemon, INSTANCE)
 
     sent = [request.url for request in (*enrolment.requests, *first.sent, *second.sent)]
-    assert len(sent) == 3
+    # The enrolment check and each run's commit walk; 8t's work requests aside.
+    commits = [url for url in sent if "/repository/commits" in url]
+    assert len(commits) == 3, sent
     assert all(url.startswith("https://git.internal/api/v4/") for url in sent), sent
     assert first.query()["since"] == ["2026-09-16T09:00:00Z"], "thirty days before the first run"
     assert second.query()["since"] == ["2026-09-14T06:00:00Z"], (
