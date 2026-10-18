@@ -65,6 +65,7 @@ from enum import Enum
 from pathlib import Path
 
 from pm_ai.app.daemon import serve as serve_daemon
+from pm_ai.app.prompts import DAEMON_LOG_NAME, DAEMON_LOGGER
 from pm_ai.app.pipelines import (
     CONNECTOR_CHECK_BOUND_SECONDS,
     TRANSCRIPT_DROP_BOUND_SECONDS,
@@ -99,7 +100,7 @@ from pm_ai.core.goal_register import GOALS_SCOPE, parse_goals
 from pm_ai.domain.health import GRAPH_SYSTEM, EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry, parse_registry
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.scope_model import ScopeResolutionError
+from pm_ai.domain.scope_model import APPLICATION_DIRNAME, ScopeResolutionError
 from pm_ai.connectors.probe import probe_credential
 from pm_ai.platform.doctor import (
     DAEMON_PROBE,
@@ -120,6 +121,7 @@ from pm_ai.platform.doctor import (
 )
 from pm_ai.domain.storage_tiers import API_TOKEN, OPERATIONAL_DB
 from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS
+from pm_ai.platform.environment import local_zone_name
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.ports import (
@@ -129,8 +131,10 @@ from pm_ai.ports import (
     StoragePort,
 )
 from pm_ai.storage.service import (
+    DIAGNOSTIC_LOGS,
     OperationalStoreUnavailable,
     StorageService,
+    diagnostic_log_files,
     is_collection_member,
     render_records_at,
 )
@@ -144,6 +148,8 @@ from pm_ai.surfaces.cli.dispatch import (
 from pm_ai.surfaces.cli import repl
 from pm_ai.surfaces.cli.completion import Completion, Readers
 from pm_ai.surfaces.cli.loopback import LoopbackClient
+from pm_ai.surfaces.cli.logs import DaemonLog
+from pm_ai.surfaces.api.app import REQUEST_LOGGER
 
 __all__ = [
     "CONFIG_ARTIFACT",
@@ -197,6 +203,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         parsed = parse(arguments)
         if isinstance(parsed, Answered):
             return parsed.deliver()
+        if parsed.reads_daemon_log:
+            # Story 4w: `pm-ai logs` reads the daemon's log by its paths alone,
+            # before the keychain adapter is built or anything is composed, so
+            # no key, store, settings file or daemon is touched and a home with
+            # no `~/.pm-ai` gains nothing.
+            return dispatch(
+                parsed,
+                daemon=None,
+                diagnose=lambda: Report(()),
+                probe_connectors=None,
+                daemon_log=_daemon_log(),
+            )
         keychain = MacOSKeychainAdapter()
         if not parsed.composes:
             # Story 4t: `goal list` and `goal show` read `strategic_goals.md`
@@ -1423,6 +1441,22 @@ def _loopback() -> LoopbackClient:
     return LoopbackClient(
         token_path=lambda: ScopePaths.production().resolve(APPLICATION, API_TOKEN),
         port=_configured_port,
+    )
+
+
+def _daemon_log() -> DaemonLog:
+    """`daemon.log` and its rotated copies, located from paths alone (story 4w).
+
+    The file list is the storage service's one rule (`diagnostic_log_files`),
+    under `~/.pm-ai/logs/` resolved without preparing it, so nothing is
+    created; the logger names are the two that write the file.
+    """
+    directory = ScopePaths.production().resolve(APPLICATION, DIAGNOSTIC_LOGS)
+    return DaemonLog(
+        files=diagnostic_log_files(directory, DAEMON_LOG_NAME),
+        sources={REQUEST_LOGGER: "request", DAEMON_LOGGER: "daemon"},
+        shown=f"~/{APPLICATION_DIRNAME}/{DIAGNOSTIC_LOGS}{DAEMON_LOG_NAME}",
+        zone_name=local_zone_name(),
     )
 
 

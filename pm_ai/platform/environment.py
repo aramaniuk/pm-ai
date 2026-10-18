@@ -24,8 +24,15 @@ AD-26, and a static rule keeps it here.
 from __future__ import annotations
 
 import os
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-__all__ = ["DISABLE_ENCRYPTION_VAR", "TRUTHY", "encryption_disabled", "raw_toggle"]
+__all__ = [
+    "DISABLE_ENCRYPTION_VAR",
+    "TRUTHY",
+    "encryption_disabled",
+    "local_zone_name",
+    "raw_toggle",
+]
 
 DISABLE_ENCRYPTION_VAR = "PM_AI_DISABLE_ENCRYPTION"
 
@@ -57,3 +64,46 @@ def encryption_disabled() -> bool:
     """
     value = raw_toggle()
     return value is not None and value.strip().lower() in TRUTHY
+
+
+def local_zone_name() -> str | None:
+    """This machine's time zone by name (`Europe/Minsk`), or `None` when it has none.
+
+    For `pm-ai logs` (story 4w), which shows times in the zone the C library
+    converts with. `TZ` first, as the C library reads it: empty is UTC; a
+    leading `:` is dropped; a path names the zone after its `zoneinfo/`. Else
+    the zone `/etc/localtime` links to, which is how macOS records the one
+    chosen in its settings. A name the zone database does not know (`Foo/Bar`,
+    a POSIX rule such as `CET-1CEST`) is no name. Read here because the
+    environment is read here alone.
+    """
+    configured = os.environ.get("TZ")
+    if configured is not None:
+        if not configured:
+            return "UTC"
+        return _known_zone(_zone_part(configured.removeprefix(":")))
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        return None
+    _, marker, name = target.partition("zoneinfo/")
+    return _known_zone(name) if marker else None
+
+
+def _zone_part(spelled: str) -> str | None:
+    """A zone name from a `TZ` value: the name itself, or a path's part after `zoneinfo/`."""
+    if spelled.startswith("/"):
+        _, marker, name = spelled.partition("zoneinfo/")
+        return name if marker else None
+    return spelled
+
+
+def _known_zone(name: str | None) -> str | None:
+    """`name` when the zone database knows it, else `None`."""
+    if not name:
+        return None
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return None
+    return name

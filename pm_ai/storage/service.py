@@ -1372,6 +1372,21 @@ _DIAGNOSTIC_LOG_BYTES = 5 * 1024 * 1024
 _DIAGNOSTIC_LOG_BACKUPS = 3
 
 
+def diagnostic_log_files(directory: Path, name: str) -> tuple[Path, ...]:
+    """`<name>` in `directory` and its rotated copies, oldest first, the current last.
+
+    The one rule for which files AD-24's diagnostic log is and in what order:
+    `<name>.3`, `.2`, `.1`, then `<name>` — the copies `diagnostic_log`'s
+    handler keeps. Paths only: nothing is opened, checked or created, so the
+    restart pass and `pm-ai logs` (story 4w) can ask without preparing `logs/`.
+    `name` is validated as a capture's is, since it becomes a path component.
+    """
+    base = directory / _capture_name(name)
+    return tuple(
+        base.with_name(f"{base.name}.{n}") for n in range(_DIAGNOSTIC_LOG_BACKUPS, 0, -1)
+    ) + (base,)
+
+
 # The artifacts this thread holds a claim on, by canonical path, across every
 # writer in the process (AD-5, story 8q). Per thread: it cannot see asyncio
 # tasks that share one thread. Checked before the port is asked, so
@@ -2261,13 +2276,8 @@ class StorageService:
         Absent files contribute nothing.
         """
         directory = self._paths.resolve(APPLICATION, DIAGNOSTIC_LOGS)
-        base = directory / _capture_name(name)
-        files = [
-            base.with_name(f"{base.name}.{n}")
-            for n in range(_DIAGNOSTIC_LOG_BACKUPS, 0, -1)
-        ] + [base]
         lines: list[str] = []
-        for path in files:
+        for path in diagnostic_log_files(directory, name):
             try:
                 lines.extend(path.read_text(encoding="utf-8", errors="replace").splitlines())
             except FileNotFoundError:
