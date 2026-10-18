@@ -1426,10 +1426,10 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 ## Surfaced by the story-23f review (2026-10-18)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23f-readable-message-signals.md`
-  summary: **Needs Andrei's decision.** A signal's posted time is used as its label whenever it is not later than the render, even when it is later than the line's own harvest time, and a posted time a few seconds ahead of the local clock is labelled `(harvested)`.
+  summary: **SETTLED 2026-10-18 (Andrei): accepted limit, kept as built.** The frozen rule stands: a posted time is distrusted only when later than the render. Clock skew of seconds shifts a label by seconds at most, and 8r's clock check warns past five minutes. Was: **Needs Andrei's decision.** A signal's posted time is used as its label whenever it is not later than the render, even when it is later than the line's own harvest time, and a posted time a few seconds ahead of the local clock is labelled `(harvested)`.
   evidence: `23f`'s frozen rule names only "later than the render's instant" (`core/rendering.py`, `_posted_at`). A posted time after its own harvest cannot be right, and provider clock skew of seconds flips a line to the harvest label. The options are to keep the rule as frozen, to compare against the earlier of the render and the harvest time, or to allow a small skew.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23f-readable-message-signals.md`
-  summary: **Needs Andrei's decision.** A person whose display name ends in `(app)` reads like a bot on the dashboard, and two senders with the same display name read as one.
+  summary: **SETTLED 2026-10-18 (Andrei): accepted limit, kept as built.** Display names are for display only; mentions compare handles, so no decision rests on a name. Was: **Needs Andrei's decision.** A person whose display name ends in `(app)` reads like a bot on the dashboard, and two senders with the same display name read as one.
   evidence: `_sender` appends ` (app)` only for `graph_app:` handles and never checks a person's name for the marker; the handle is no longer printed beside a name. `23f`'s Design Notes admit a guest using a colleague's name; these are two more cases of the same display-only limit. Mentions still compare handles, so no decision on the line rests on the name.
 
 ## Surfaced by the story-23h review (2026-10-18)
@@ -1445,7 +1445,7 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 ## Surfaced by the story-8t review (2026-10-18)
 
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8t-gitlab-issues-harvest.md`
-  summary: **Needs Andrei's decision.** A GitLab harvest that reads the work is now always `HARVESTED`, never `EMPTY`, and its section status rows are written every run, even when no item changed.
+  summary: **DECIDED 2026-10-18 (Andrei): kept as built; 8t's frozen outcome rule and "Nothing changed" row amended to say so.** Was: **Needs Andrei's decision.** A GitLab harvest that reads the work is now always `HARVESTED`, never `EMPTY`, and its section status rows are written every run, even when no item changed.
   evidence: Members are read whole each run and each complete section takes this run's instant as its last complete read, so the harvest always carries a change; the frozen rule "`EMPTY` carries none, `HARVESTED` may carry only a change" then makes every run `HARVESTED`. The matrix row "Nothing changed: no write" is honoured for item rows only, because 23g needs the last-complete-read instant each run. As a result GitLab no longer gives AD-35's "answered with nothing" signal. No production code reads `EMPTY` against `HARVESTED` today. The options are to keep it as built, or to count a change only when an item or member row differs (which the connector cannot know without asking storage, so the outcome would be decided after the write).
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8t-gitlab-issues-harvest.md`
   summary: The `gitlab_*` rows are never removed when their connector row is removed or renamed, and items that stay open are never pruned; their names, usernames and user ids stay in `operational.db`.
