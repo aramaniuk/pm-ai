@@ -96,33 +96,33 @@ context:
 
 ## Code Map
 
-Verified against `a1182f8` on 2026-10-16.
+Re-verified against `ba0b747` on 2026-10-17.
 
 - `pm_ai/connectors/graph/channels.py` --
-  - `:141-162` `MessageRow`;
-  - `:580-625` `read_message`, shared by channels and chats, which reads `from` at `:617`;
-  - `:770` `_nested_id`;
-  - `:631` `MAX_LABEL_LENGTH`;
-  - `:97` `EXCERPT_LENGTH`;
-  - `:245` `plain_text`, which returns `a\n\nb` for `<p>a</p>\n<p>b</p>` (run on 2026-10-16) and is unchanged here.
-- `pm_ai/connectors/graph/__init__.py:1476` -- `_message_event`; its docstring says no display name is recorded and must be updated. `:1517-1555` `_posted`: the actor chosen at `:1541-1543`, `MessagePayload` built at `:1547`.
+  - `:179-200` `MessageRow`;
+  - `:675-721` `read_message`, shared by channels and chats, which reads `from` at `:711`;
+  - `:864` `_nested_id`;
+  - `:725` `MAX_LABEL_LENGTH`;
+  - `:126` `EXCERPT_LENGTH`;
+  - `:284` `plain_text`, which returns `a\n\nb` for `<p>a</p>\n<p>b</p>` (run on 2026-10-16) and is unchanged here.
+- `pm_ai/connectors/graph/__init__.py:1488` -- `_message_event`; its docstring says no display name is recorded and must be updated. `:1529-1574` `_posted`: the actor chosen at `:1553-1555`, `MessagePayload(` built at `:1559`.
 - `pm_ai/domain/events.py:116-128` -- `MessagePayload`. `:224` `UNTRUSTED_TEXT`.
 - `pm_ai/domain/payload_fields.py:39-45` -- a missing field takes its default, so old lines decode with no name.
 - `pm_ai/domain/handles.py` -- the person-handle parser, used to refuse a handle-shaped name.
-- `pm_ai/storage/service.py:2765-2772` -- `occurred_at` is written on every line (`unknown` when absent). `pm_ai/domain/event_entries.py:152` -- `OCCURRED_AT_FLAG`.
+- `pm_ai/storage/service.py:3181-3188` -- `occurred_at` is written on every line (`unknown` when absent). `pm_ai/domain/event_entries.py:161` -- `OCCURRED_AT_FLAG`.
 - `pm_ai/core/rendering.py` --
-  - `:708` the window on `_ingested_at` (`:1007`);
-  - `:749` `_Signal` built with the harvest time;
-  - `:763` the sort;
-  - `:892-911` `_signal_line`;
-  - `:1098-1140` `escape`, which writes `\n` as two characters at `:1124-1125`;
-  - `:1144` `code`, whose control characters at `:1163-1164` are spelled the same way;
-  - `:1223` `_local`.
+  - `:733` the window on `_ingested_at` (`:1032`);
+  - `:774` `_Signal` built with the harvest time (the class at `:807`);
+  - `:788` the sort;
+  - `:917-936` `_signal_line`;
+  - `:1123-1165` `escape`, which writes `\n` as two characters at `:1149-1150`; `23e`'s all-day meeting lines also pass through it;
+  - `:1169` `code`, whose control characters at `:1188-1189` are spelled the same way;
+  - `:1248` `_local`.
 - `tests/domain/test_entry_grammar_pins.py:54-57` -- pins `MessagePayload`'s fields; grows by one.
 - `tests/core/test_rendering_sections.py:104`, `tests/core/test_project_rendering.py:119` -- the `message(...)` builders, which write no `occurred_at` today.
 - `tests/core/test_rendering_sections.py:967`, `tests/core/test_project_rendering.py:611` -- assert `"\\n"` in the injected-heading text; flip to asserting it is absent.
 - `tests/core/goldens/dashboard_full_day.md` -- re-pinned if the builder change moves a byte.
-- `tests/connectors/fixtures/graph/channel_messages.json`, `chat_messages.json` -- recorded rows carrying `from.user.displayName`.
+- `tests/connectors/fixtures/graph/channel_messages_recorded.json`, `chat_messages_recorded.json` -- the recorded, redacted field-test rows carrying `from.user.displayName`, tested in `tests/connectors/test_graph_channel_messages_recorded.py` and `test_graph_chat_messages_recorded.py`. The hand-written `channel_messages.json` and `chat_messages.json` carry it too.
 - `_bmad-output/specs/spec-pm-ai/stories/23c-proactive-enablement-from-messages.md:27,28,31`, `33d-graph-channel-messages.md:32` -- the frozen sentences amended.
 
 ## Tasks & Acceptance
@@ -132,12 +132,12 @@ Verified against `a1182f8` on 2026-10-16.
 - [ ] `pm_ai/connectors/graph/channels.py`, `pm_ai/connectors/graph/__init__.py` -- `MessageRow` carries both names; `_posted` stores the one that matches the chosen actor, after the absence rules; `_message_event`'s docstring updated -- R3
 - [ ] `pm_ai/core/rendering.py` -- `_Signal` carries the label time and whether it is the harvest time; sort on it; `_signal_line` shows the name, with `(app)` for a bot, or the handle; `escape` and `code` fold line-break runs into one space -- findings 15, 16, 17
 - [ ] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- builders gain `occurred_at`, defaulting to the harvest time so existing goldens keep their times; one test per matrix row; the two injected-heading assertions flipped -- the matrix is the contract
-- [ ] `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_chat_messages.py` -- the name taken from the recorded fixtures; the bot, unknown-sender and handle-shaped cases -- the connector half
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/23c-proactive-enablement-from-messages.md`, `33d-graph-channel-messages.md` -- when this slice is built, edit the amended frozen sentences (`23c`:27, :28, :31; `33d`:32) to say what is now true, and add a dated Change Log line in each naming this slice and what changed -- the one method every amending spec uses
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark findings 15, 16 and 17 resolved (the entries land with PR #71) -- the debt is on record
+- [ ] `tests/connectors/test_graph_channel_messages_recorded.py`, `tests/connectors/test_graph_chat_messages_recorded.py` -- the name taken from the recorded fixtures `channel_messages_recorded.json` and `chat_messages_recorded.json`; `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_chat_messages.py` -- the bot, unknown-sender and handle-shaped cases -- the connector half
+- [ ] `_bmad-output/specs/spec-pm-ai/stories/23c-proactive-enablement-from-messages.md`, `33d-graph-channel-messages.md` -- when this slice is built, edit the amended frozen sentences (`23c`:27, :28, :31; `33d`:32) to say what is now true, and add a dated Change Log line in each naming this slice and what changed; `33h` has already edited `33d` (lines 26 and 29, two matrix rows, a Change Log entry around line 132) but left `33d`:32 untouched, so this amendment still applies, and `23f`'s `33d` Change Log line goes after `33h`'s -- the one method every amending spec uses
+- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark findings 15, 16 and 17 resolved (the entries at `deferred-work.md:1341`, `:1345` and `:1349`, each now marked planned as `23f`) -- the debt is on record
 
 **Acceptance Criteria:**
-- Given a recorded channel message and a recorded chat message from the field-test fixtures, when a harvest and then `pm-ai dashboard` run, then:
+- Given a recorded channel message and a recorded chat message from the recorded, redacted fixtures (`tests/connectors/fixtures/graph/channel_messages_recorded.json` and `chat_messages_recorded.json`, tested in `test_graph_*_recorded.py`), when a harvest and then `pm-ai dashboard` run, then:
   - both signal lines show the senders' names;
   - the event-log lines still carry `actor=graph:<user id>`;
   - a mention of the PM is still marked.
@@ -164,6 +164,7 @@ Verified against `a1182f8` on 2026-10-16.
   - **Wording:** ACs are system-level checks.
   - **Rejected — handle suffix on names:** keeping a short handle suffix beside every name against guest display-name spoofing. It undoes the readability R3 asked for. Nothing pm-ai decides rests on the name, since mentions compare handles. Marking guests would need a tenant comparison, which the project's standing rule on provider identity forbids.
 - **2026-10-16, review (cross-spec consistency).** The amendment method made explicit: when this slice is built, the frozen sentences it amends in `23c` (:27, :28, :31) and `33d` (:32) are edited to the new rule, and each of those specs gains a dated Change Log line naming this slice.
+- **2026-10-17, Code Map re-verified against `ba0b747`; the acceptance check names the recorded fixtures.**
 
 ## Design Notes
 

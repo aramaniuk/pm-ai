@@ -67,13 +67,15 @@ context:
 
 ## Code Map
 
-- `pm_ai/surfaces/cli/repl.py:341` -- `run`, whose `read` is `input`; `:113` `_line_editing`, the `readline` import this replaces; `:74` `PROMPT`; `:88` `runs_here`, unchanged
-- `pm_ai/surfaces/cli/dispatch.py:890` -- `Command` (`takes`, `optional`, `options`, `requires`; `flags` arrives with `4t`); `:2793` `TABLE`; `:2915` `_spelled`; `:2932` `usage`; `:2906` `names_a_command`; `:1083` `SUPPORTED_SYSTEMS`; `:1484` `_connector_sign_in`, which reads no `enabled`
-- `pm_ai/core/goal_register.py:159`, `:169` -- the domain and horizon spellings; `:314` `parse_goals`
-- `pm_ai/app/entry.py:188` -- the no-arguments branch that opens the prompt; `:1499` `_loopback`, built from paths alone (the pattern for the completion readers)
-- `pm_ai/app/wiring.py:2773` -- `read_connector_rows`, `4n`'s row rule, which takes a whole `StorageService`; `pm_ai/storage/service.py:1081-1091` -- building one creates and connects `operational.db`, so the rule is factored to a pure function over the directory's files
+Verified against: re-verified against `ba0b747` (main) on 2026-10-17. `4t`'s goal set/update/delete/list/show and the `yes` flag are on main, and the command and argument sources below cover them.
+
+- `pm_ai/surfaces/cli/repl.py:345` -- `run`, whose `read` is `input` (`:348`); `:113` `_line_editing`, the `readline` import this replaces; `:74` `PROMPT`; `:88` `runs_here`, unchanged
+- `pm_ai/surfaces/cli/dispatch.py:940` -- `Command` (`takes`, `optional`, `options`, `requires`, and `flags` at `:988` from `4t`); `:3092` `TABLE`; `:3247` `_spelled`; `:3265` `usage`; `:3238` `names_a_command`; `:1148` `SUPPORTED_SYSTEMS`; `:1549` `_connector_sign_in`, which reads no `enabled`; option and argument names: `:2444` `GOAL_OPTIONS`, `:2449` `YES_FLAG`, `:1715` `SCOPE_ARGUMENT`, `:2761` `MEETING_ARGUMENT`
+- `pm_ai/core/goal_register.py:164` `DOMAIN_SPELLINGS`, `:174` `HORIZON_SPELLINGS` -- the domain and horizon spellings; `:337` `parse_goals`
+- `pm_ai/app/entry.py:181-182` -- the no-arguments branch that opens the prompt; `:1406` `_loopback`, built from paths alone (the pattern for the completion readers)
+- `pm_ai/app/wiring.py:2773` -- `read_connector_rows`, `4n`'s row rule, which takes a whole `StorageService`; `pm_ai/storage/service.py:1390` `StorageService`, `:1395` `__init__` -- building one creates the store's folder (around `:1448`) and connects `operational.db` (around `:1456`), so the rule is factored to a pure function over the directory's files
 - `pm_ai/domain/scope_model.py:562` -- `strategic_goals.md` declared not encrypted
-- `pyproject.toml` -- the runtime extra and its pinning comments
+- `pyproject.toml` -- the runtime extra and its pinning comments. The spine's Stack table records `prompt_toolkit` 3.0.53 (as of 2026-10-16); the build pins the release current on PyPI when it is built and records that, as the Boundaries require
 - `tests/slice/test_repl_startup.py:24` -- `BUDGET_SECONDS = 1.0`; `:114` the timing test; `:128-147` the recall test; `:150` the import test; `tests/surfaces/test_cli_repl.py` -- `4q`'s matrix tests, which drive `run` through `read`
 
 ## Tasks & Acceptance
@@ -97,6 +99,7 @@ context:
 - **2026-10-16, created** from Andrei's feedback after first use ("the prompt needs auto-completion and hints"; memlog UX decision, slice 4u). Decisions it carries: `prompt_toolkit` rather than the standard library's `readline`, because readline (here the `editline` backend, measured) completes but cannot hint while typing or redraw a line safely, which `4v` also needs; the library in the runtime extra, pinned exactly, imported only when the prompt opens, with `4q`'s prompt as the fallback; candidates from the one command table, with a test that every name has a source; readers of local files only, re-read after each command, never the daemon; hints as a bottom line plus dim suggestions from this session's in-memory history; meeting ids not completed.
 - **2026-10-16, review:** value sources keyed by command and name (`connector add`'s instance and `goal set`'s id are free text), the free-text list in `completion.py`; Graph rows offered enabled or not; readers by path with `4n`'s row rule as a pure function, `StorageService` forbidden (it opens `operational.db`); `shlex.quote` for any candidate that would not split back, an open quote tolerated and closed, `--scope=` completed; history holds command lines only; separate fallbacks for a failed import and a failed start; the cursor-position request off and the startup tests' handling stated; the library's process-starting features off; rows for recall, Ctrl-C, Ctrl-D, `exit`, no history file, group alone, help, unknown word, open lines; a task for `4f`'s Change Log; finding cited by file. Amends an earlier frozen block: `4f`'s line-editing bullet and Recall row (replaced when the runtime extra is installed). Depends on spine amendment: the Stack table — a `prompt_toolkit` row, pinned exactly, runtime extra, imported lazily by the prompt.
 - **2026-10-16, review (cross-spec):** Change Log moved before Design Notes; the group hint reads the subcommands from the table (so `connector categories` from `4s` appears), not a fixed list; `--lines` dropped from the free-text list (it is `4w`'s); the amendment task now edits `4f`'s frozen text and adds a dated line, when this slice is built.
+- **2026-10-17,** Code Map re-verified against `ba0b747` after 4t merged; command and argument sources match main.
 
 ## Design Notes
 
