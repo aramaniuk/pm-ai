@@ -51,6 +51,7 @@ __all__ = [
     "Answer",
     "Busy",
     "CONNECT_SECONDS",
+    "FINISHED",
     "LOOPBACK",
     "LoopbackClient",
     "MAX_ANSWER_BYTES",
@@ -84,7 +85,8 @@ MAX_ANSWER_BYTES = 16 * 1024 * 1024
 MAX_EVENT_LINE_BYTES = 16 * 1024 * 1024
 """The longest line of a job's stream this client reads."""
 
-_FINISHED = frozenset({"done", "failed"})
+FINISHED = frozenset({"done", "failed"})
+"""The states that end a job's stream: its result is in the event."""
 _EXIT_UNEXPECTED = 1
 
 
@@ -294,15 +296,22 @@ class LoopbackClient:
                 f"so this line was not sent."
             )
 
-    def follow(self, job_id: str) -> Followed:
+    def follow(
+        self, job_id: str, on_state: Callable[[str], None] | None = None
+    ) -> Followed:
         """Read the job's event stream until it is `done` or `failed`; its result.
 
         Waits as long as the job runs — the thread that calls this only waits
         for a job the daemon already owns. Any way the stream ends first is
         `StreamLost`, naming the job. Nothing is raised.
+
+        `on_state` (story 4v) is told the state of each event read, in order,
+        the finished one included, before the result is returned. An error in
+        it is dropped and the stream still read: reporting a state never ends
+        the wait. The stream, its endpoint and its events are `4r`'s, unchanged.
         """
         try:
-            return self._follow(job_id)
+            return self._follow(job_id, on_state)
         except Exception as error:  # noqa: BLE001 — named, never the end of the session
             return StreamLost(job_id, f"reading its stream stopped on an unexpected {type(error).__name__}")
 
@@ -381,7 +390,7 @@ class LoopbackClient:
 
     # ── the job's stream ─────────────────────────────────────────────────────
 
-    def _follow(self, job_id: str) -> Followed:
+    def _follow(self, job_id: str, on_state: Callable[[str], None] | None) -> Followed:
         ready = self._ready()
         if isinstance(ready, _Blocked):
             # The job was accepted; only reading its result is blocked.
@@ -420,7 +429,10 @@ class LoopbackClient:
             if response.status != 200:
                 return StreamLost(job_id, f"the daemon answered HTTP {response.status}")
             for event in _events(response):
-                if event.get("state") in _FINISHED:
+                state = event.get("state")
+                if on_state is not None and isinstance(state, str):
+                    _report(on_state, state)
+                if state in FINISHED:
                     return _result(job_id, event)
         except _Malformed as malformed:
             return StreamLost(job_id, str(malformed))
@@ -460,6 +472,14 @@ class LoopbackClient:
                 f"({unreadable.strerror or unreadable})"
             )
         return port, token, path
+
+
+def _report(on_state: Callable[[str], None], state: str) -> None:
+    """Tell `on_state` a state; an error in it is dropped, never the end of the wait."""
+    try:
+        on_state(state)
+    except Exception:  # noqa: BLE001, S110 — a failed report never ends the wait (story 4v)
+        pass
 
 
 def _read_token(path: Path) -> str:
