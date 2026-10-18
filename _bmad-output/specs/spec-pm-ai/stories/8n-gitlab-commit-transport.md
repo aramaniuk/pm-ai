@@ -108,6 +108,10 @@ Two more faults hid behind the stub: the connector names itself after the GitLab
 - Given a built-in with no credential, when the harvest pipeline runs over it, then no transport call is made and no cursor, window or failure is saved.
 - Given `uv run pytest`, then all pass and the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09); given `uv run lint-imports`, then every contract holds.
 
+## Spec Change Log
+
+- **2026-10-18, amended by `8t`** (the GitLab harvest reads the project's members, issues and merge requests). Line 25 ("only commits are read … one event type"): commits stay the only thing read from the default branch and the only event type (`emits()` is still `{commit_pushed}`), but a harvest now also reads the project's members, issues and merge requests into Tier 2, not the event log. Line 30 ("the cursor is the newest plausible commit date"): the commit position keeps that rule, and is now one of several positions in one cursor — commits, issues, merge requests and the two open-check instants — written as one JSON object; a stored commit-only cursor still reads. Line 41 (Never: "No merge requests, events or issues"): merge requests and issues are read by `8t`; still no write to GitLab and no event-log entry for either.
+
 ## Design Notes
 
 Row keys this slice reads: `host`, `project`, `first_run_reach_back_minutes`; `RESERVED_ROW_KEYS` (`connector_enrolment.py:121`) governs clashes. Header names, kept out of the frozen block: the token goes in `PRIVATE-TOKEN`; the next page is `x-next-page` (the commits call sends no total headers); the throttle hint is `Retry-After`. `since` is rendered `YYYY-MM-DDTHH:MM:SSZ`, never with `+00:00`. Host rules: https scheme, non-empty host, optional path, no query, fragment, user info or trailing slash; base URL `<host>/api/v4`.

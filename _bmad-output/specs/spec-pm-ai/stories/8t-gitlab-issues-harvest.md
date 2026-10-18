@@ -2,7 +2,8 @@
 title: 'The GitLab harvest reads the project''s members, issues and merge requests'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '9e5383fe4c6ec023d243bfd09d9df39e72d6b6d4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -93,18 +94,18 @@ Re-verified against `ba0b747` on 2026-10-17.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/handles.py` -- the `gitlab` handle system `gitlab:<host>:<id>`: host lowercased, default port dropped, parsed at the last `:`, id ASCII digits written `str(int(id))` -- after the AD-34 amendment; the built-in connector instance name `gitlab:<project id>` (`app/wiring.py:1246`) is not a person handle and is not renamed
-- [ ] `pm_ai/domain/work.py` -- new: member, issue and merge-request values, `ProjectWork`, the harvest's change, the I/O-free merge and prune
-- [ ] `pm_ai/domain/harvest.py` -- `HarvestResult.work`; the outcome rule
-- [ ] `pm_ai/storage/service.py`, `pm_ai/ports/__init__.py` -- the tables, keyed by `(scope, instance)`; `record_project_work` and `project_work` on the writer and the port -- after the AD-3 amendment
-- [ ] `pm_ai/core/connector_enrolment.py` (`assert_unconfigured`, `:330`), called from `pm_ai/surfaces/cli/dispatch.py:1336` (`connector add gitlab`) -- a second enrolled GitLab row for a scope that has one is refused, naming the first; enrolling under the built-in's name `gitlab:<project id>` replaces it and is accepted -- one instance per project scope (AD-10, decision A)
-- [ ] `pm_ai/app/wiring.py` -- `record_project_work` in `HANDED_CALLS`, `_asks_none`
-- [ ] `pm_ai/connectors/gitlab/client.py` -- the members, issues, merge-requests and `related_issues` URLs and pages
-- [ ] `pm_ai/connectors/gitlab/__init__.py` -- per-resource cursor reading the old form; filter paging; first run; state, prune, daily open check; links and their cap; confidential rules; the one stop rule; unread sections
-- [ ] `pm_ai/app/pipelines.py` -- `record_project_work` after the events, before `save_cursor`
-- [ ] `tests/connectors/test_gitlab_work.py`, `tests/core/test_gitlab_work.py`, `tests/slice/` (a harvest through `run_harvest`) -- one test per matrix row, recorded-answer transport, no network, request URLs asserted
-- [ ] `tests/architecture/test_domain_invariants.py` -- `gitlab` in the handle systems; `record_project_work` and `project_work` on `StoragePort`
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md` -- dated Change Log line: `8n:25` (only commits, one event type), `8n:30` (the cursor as one commit date) and `8n:41` (Never: no merge requests, events or issues) amended by `8t`
+- [x] `pm_ai/domain/handles.py` -- the `gitlab` handle system `gitlab:<host>:<id>`: host lowercased, default port dropped, parsed at the last `:`, id ASCII digits written `str(int(id))` -- after the AD-34 amendment; the built-in connector instance name `gitlab:<project id>` (`app/wiring.py:1246`) is not a person handle and is not renamed
+- [x] `pm_ai/domain/work.py` -- new: member, issue and merge-request values, `ProjectWork`, the harvest's change, the I/O-free merge and prune
+- [x] `pm_ai/domain/harvest.py` -- `HarvestResult.work`; the outcome rule
+- [x] `pm_ai/storage/service.py`, `pm_ai/ports/__init__.py` -- the tables, keyed by `(scope, instance)`; `record_project_work` and `project_work` on the writer and the port -- after the AD-3 amendment
+- [x] `pm_ai/core/connector_enrolment.py` (`assert_unconfigured`, `:330`), called from `pm_ai/surfaces/cli/dispatch.py:1336` (`connector add gitlab`) -- a second enrolled GitLab row for a scope that has one is refused, naming the first; enrolling under the built-in's name `gitlab:<project id>` replaces it and is accepted -- one instance per project scope (AD-10, decision A)
+- [x] `pm_ai/app/wiring.py` -- `record_project_work` in `HANDED_CALLS`, `_asks_none`
+- [x] `pm_ai/connectors/gitlab/client.py` -- the members, issues, merge-requests and `related_issues` URLs and pages
+- [x] `pm_ai/connectors/gitlab/__init__.py` -- per-resource cursor reading the old form; filter paging; first run; state, prune, daily open check; links and their cap; confidential rules; the one stop rule; unread sections
+- [x] `pm_ai/app/pipelines.py` -- `record_project_work` after the events, before `save_cursor`
+- [x] `tests/connectors/test_gitlab_work.py`, `tests/core/test_gitlab_work.py`, `tests/slice/` (a harvest through `run_harvest`) -- one test per matrix row, recorded-answer transport, no network, request URLs asserted
+- [x] `tests/architecture/test_domain_invariants.py` -- `gitlab` in the handle systems; `record_project_work` and `project_work` on `StoragePort`
+- [x] `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md` -- dated Change Log line: `8n:25` (only commits, one event type), `8n:30` (the cursor as one commit date) and `8n:41` (Never: no merge requests, events or issues) amended by `8t`
 
 **Acceptance Criteria:**
 - Given a project with an open issue assigned to two members and a merge request related to it, when `run_harvest` runs, then `project_work(scope)` returns both members with handles, display names and usernames, the issue with its milestone, due date and labels, the merge request linking it, and each section complete with this run's instant — and no stored row holds a description.
@@ -142,3 +143,72 @@ Re-verified against `ba0b747` on 2026-10-17.
 
 **Manual checks (if no CLI):**
 - On the field-test GitLab: one harvest fills the tables and the members request answers.
+
+## Suggested Review Order
+
+**The walk: order, filter paging, stop rule**
+
+- Entry point: per resource, incremental walk first, then the daily open check, under one stop rule.
+  [`work.py:470`](../../../../pm_ai/connectors/gitlab/work.py#L470)
+
+- The walker's shared budget, page cap and link cap.
+  [`work.py:213`](../../../../pm_ai/connectors/gitlab/work.py#L213)
+
+- A cut walk keeps what it read; a cut open check changes nothing — two wordings.
+  [`work.py:494`](../../../../pm_ai/connectors/gitlab/work.py#L494)
+
+- Links: this project's issues only; no project id or 403/404 leaves them unread.
+  [`work.py:430`](../../../../pm_ai/connectors/gitlab/work.py#L430)
+
+**Cursor and outcome**
+
+- One JSON cursor per resource; an old commit-only cursor still reads.
+  [`__init__.py:796`](../../../../pm_ai/connectors/gitlab/__init__.py#L796)
+
+- Harvest: commit coverage alone; work walk on top; commit-only runs keep the JSON positions.
+  [`__init__.py:463`](../../../../pm_ai/connectors/gitlab/__init__.py#L463)
+
+- `HarvestResult.work` and the outcome rule (see deferred: every work run is HARVESTED).
+  [`harvest.py:349`](../../../../pm_ai/domain/harvest.py#L349)
+
+**State rules (no I/O)**
+
+- Replace, closed/merged, gone, 30-day prune, confidential redaction, section status.
+  [`work.py:292`](../../../../pm_ai/domain/work.py#L292)
+
+- The reader's own 30-day cutoff, by the storage clock.
+  [`work.py:425`](../../../../pm_ai/domain/work.py#L425)
+
+**Storage and the one write**
+
+- One transaction: read, merge, write only differing rows.
+  [`service.py:3860`](../../../../pm_ai/storage/service.py#L3860)
+
+- The six tables, keyed by `(scope, instance)`; no version bump.
+  [`service.py:228`](../../../../pm_ai/storage/service.py#L228)
+
+- Written after the events and before the cursor save; project scopes only.
+  [`pipelines.py:374`](../../../../pm_ai/app/pipelines.py#L374)
+
+- Claimed step asking git nothing.
+  [`wiring.py:3545`](../../../../pm_ai/app/wiring.py#L3545)
+
+**Person handles**
+
+- `gitlab:<host>:<id>`: host lowercased, default port dropped, ports 1–65535, digits-only id.
+  [`handles.py:390`](../../../../pm_ai/domain/handles.py#L390)
+
+**One GitLab instance per project**
+
+- Counts enrolled rows only; the built-in is no row, so replacing it is accepted.
+  [`connector_enrolment.py:366`](../../../../pm_ai/core/connector_enrolment.py#L366)
+
+**Peripherals**
+
+- Client URLs and the shared page reader.
+  [`client.py:562`](../../../../pm_ai/connectors/gitlab/client.py#L562)
+
+- Connector matrix tests; merge and storage tests; slice through `run_harvest`; CLI refusal.
+  [`test_gitlab_work.py:1`](../../../../tests/connectors/test_gitlab_work.py#L1)
+  [`test_gitlab_work_merge.py:1`](../../../../tests/core/test_gitlab_work_merge.py#L1)
+  [`test_gitlab_work_slice.py:1`](../../../../tests/slice/test_gitlab_work_slice.py#L1)
