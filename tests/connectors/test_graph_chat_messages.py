@@ -328,6 +328,66 @@ def test_the_fixture_maps_through_the_channel_mapping_unchanged():
     assert result.refusals == ()
 
 
+def test_the_fixture_senders_name_is_stored_beside_the_handle():
+    """`23f`: the chat walk reads the name through the one `read_message`."""
+    result = _connector(Routes(chats={CHAT_A: [_page(*_rows())]})).harvest(Cursor())
+    event = _by_id(result)["1760000000300"]
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name == "Sam Sender"
+
+
+BOT = "55555555-5555-5555-5555-555555555555"
+
+DISGUISED_HANDLES = {
+    "zero-width-before": "\u200bgraph:1234",
+    "word-joiner-before": "\u2060email:a@b.c",
+    "bom-before": "\ufeffgraph:x",
+    "zero-width-inside": "graph\u200b:x",
+    "fullwidth": "\uff27\uff32\uff21\uff30\uff28\uff1a1234",
+}
+"""As in the channel tests: handle-shaped names behind invisible or
+compatibility characters, each refused (`23f`)."""
+
+
+@pytest.mark.parametrize(
+    ("sender", "actor", "name"),
+    [
+        (
+            {"application": {"id": BOT, "displayName": "Release Bot"}, "user": None},
+            f"graph_app:{BOT}",
+            "Release Bot",
+        ),
+        ({"user": {"id": None, "displayName": "Dana Okafor"}}, "none:", None),
+        ({"user": {"id": SENDER, "displayName": "graph:1234"}}, f"graph:{SENDER}", None),
+        ({"user": {"id": SENDER, "displayName": "email:a@b.c"}}, f"graph:{SENDER}", None),
+        *(
+            ({"user": {"id": SENDER, "displayName": name}}, f"graph:{SENDER}", None)
+            for name in DISGUISED_HANDLES.values()
+        ),
+        (
+            {"user": {"id": SENDER, "displayName": "\u200b" * 100 + "Sam Sender"}},
+            f"graph:{SENDER}",
+            None,
+        ),
+    ],
+    ids=[
+        "bot",
+        "unknown-sender",
+        "graph-shaped-name",
+        "email-shaped-name",
+        *DISGUISED_HANDLES,
+        "invisible-after-the-cut",
+    ],
+)
+def test_a_chat_message_takes_the_name_from_the_actors_own_branch(sender, actor, name):
+    """`23f`: bot, unknown sender and handle-shaped names, as for channels."""
+    row = _message(**{"from": sender})
+    result = _connector(Routes(chats={CHAT_A: [_page(row)]})).harvest(Cursor())
+    event = _by_id(result)["1760000000500"]
+    assert str(event.actor) == actor
+    assert event.payload.sender_name == name
+
+
 # ── References ───────────────────────────────────────────────────────────────
 
 

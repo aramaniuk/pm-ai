@@ -43,6 +43,7 @@ here as plain mappings.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
@@ -69,6 +70,7 @@ __all__ = [
     "person_for",
     "person_handle",
     "pm_identity",
+    "reads_as_handle",
     "register_alias",
     "usable_handle",
     "usable_user_id",
@@ -290,6 +292,38 @@ def parse_person_handle(text: str) -> PersonHandle:
             f"{str(built)!r}."
         )
     return built
+
+
+def reads_as_handle(text: str) -> bool:
+    """Whether `text` would read as a person handle: `<handle system>:…`.
+
+    For display text that must never imitate the identity form (`23f`'s sender
+    names): `graph:1234` is not a valid handle — no GUID follows — yet a reader
+    takes it for one, so the test is the system before the first `:`, never
+    whether what follows is well-formed. It is made on the text a reader sees:
+    NFKC-normalised, so fullwidth `ＧＲＡＰＨ：` counts, with every invisible
+    character (control, format, any separator, whitespace) removed, so a
+    zero-width character before or inside `graph:` cannot slip past it — and
+    case-folded.
+    """
+    seen = "".join(
+        character
+        for character in unicodedata.normalize("NFKC", text)
+        if not _invisible(character)
+    )
+    system, separator, _ = seen.partition(_SEPARATOR)
+    return bool(separator) and system.casefold() in HANDLE_SYSTEMS
+
+
+def _invisible(character: str) -> bool:
+    """Whitespace, a control or format character, or any separator (`Z*`)."""
+    return character.isspace() or unicodedata.category(character) in (
+        "Cc",
+        "Cf",
+        "Zs",
+        "Zl",
+        "Zp",
+    )
 
 
 def usable_handle(system: str, raw: str | None) -> PersonHandle | None:

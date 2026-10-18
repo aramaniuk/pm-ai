@@ -30,14 +30,17 @@ from pm_ai.connectors.graph.channels import (
 from pm_ai.connectors.graph.client import GraphClient
 from pm_ai.domain.events import MessagePayload
 from pm_ai.domain.harvest import Cursor, HarvestOutcome
+from pm_ai.domain.identity import DataScope, ScopeKind
 from tests.connectors.recorded_graph import (
     INSTANCE,
     Auth,
     Recorded,
     graph_time,
+    harvest_then_dashboard,
     mentioned_users,
     message_events,
     recorded,
+    signal_lines,
     tag_names,
     tags_left,
 )
@@ -392,3 +395,65 @@ def test_the_recorded_page_alone_reaches_past_the_horizon_in_one_request():
     transport = Recorded(PAGE)
     _harvest(transport, position=position)
     assert len(transport.resource_requests()) == 1
+
+
+# ── Story 23f: the names reach the dashboard; the handles stay the identity ──
+
+
+def test_the_senders_name_is_taken_from_from_user():
+    """`from.user.displayName` beside the handle, for every message that has one."""
+    events = message_events(_whole_page())
+    sent = [
+        row
+        for row in _rows()
+        if _is_message(row) and ((row["from"] or {}).get("user") or {}).get("displayName")
+    ]
+    named = 0
+    for row in _rows():
+        if not _is_message(row) or not (row["from"] or {}).get("user"):
+            continue
+        payload = events[row["id"]].payload
+        assert isinstance(payload, MessagePayload)
+        assert payload.sender_name == row["from"]["user"]["displayName"]
+        named += payload.sender_name is not None
+    assert sent and named == len(sent)
+
+
+def test_a_harvest_then_the_dashboard_shows_names_keeps_handles_and_marks_the_pm(tmp_path):
+    """Acceptance (`23f`): names on the signal lines, `actor=graph:<user id>` on
+    the log lines, and a mention of the PM still marked."""
+    (first,) = [row for row in _rows() if row["id"] == THREADS[0]["id"]]
+    pm = mentioned_users(first)[0]
+    mentioning = [row for row in _rows() if _is_message(row) and pm in mentioned_users(row)]
+    names = {
+        row["from"]["user"]["displayName"]
+        for row in _rows()
+        if _is_message(row) and (row["from"] or {}).get("user")
+    } - {None}
+
+    dashboard, log = harvest_then_dashboard(
+        tmp_path,
+        message_events(_whole_page()).values(),
+        scope=DataScope(ScopeKind.PROJECT, project_id=PROJECT),
+        pm_user_id=pm,
+        now=NOW,
+    )
+
+    lines = signal_lines(dashboard)
+    assert len(lines) == 20
+    for line in lines:
+        sender = line.split("** ", 1)[1].split(f" in {LABEL}", 1)[0]
+        assert sender in names, line
+    marked = [line for line in lines if line.endswith("— mentions you")]
+    assert mentioning and len(mentioning) <= len(lines)
+    assert lines[: len(marked)] == marked and len(marked) == len(mentioning)
+    sent = graph_time(first["createdDateTime"]).strftime("%Y-%m-%d %H:%M")
+    assert lines[0].startswith(
+        f"- **{sent}** {first['from']['user']['displayName']} in {LABEL} — "
+    )
+    for row in _rows():
+        if _is_message(row) and (row["from"] or {}).get("user"):
+            assert f"actor=graph:{row['from']['user']['id']}" in log
+    assert "actor=Person" not in log
+    # Every line shown is a named sender (checked above), so no handle is shown.
+    assert "graph:" not in "\n".join(lines)

@@ -55,6 +55,8 @@ PAYLOAD_FIELDS: dict[str, tuple[tuple[str, object, object], ...]] = {
         ("channel", str, REQUIRED),
         ("excerpt", str | None, None),
         ("mentions", tuple[str, ...] | None, None),
+        # Added by `23f` (2026-10-16): optional, so every earlier line decodes.
+        ("sender_name", str | None, None),
     ),
     "DecisionPayload": (
         ("statement", str, REQUIRED),
