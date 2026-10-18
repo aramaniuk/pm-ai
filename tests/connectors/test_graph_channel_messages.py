@@ -54,7 +54,7 @@ from pm_ai.connectors.graph.channels import (
 from pm_ai.connectors.graph.client import GRAPH_BASE, GraphClient, GraphRequest, GraphResponse
 from pm_ai.core.ledger import parse_segment
 from pm_ai.domain.events import MessagePayload, ObservedEventType, Provenance
-from pm_ai.domain.harvest import Cursor, HarvestOutcome
+from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestOutcome
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.payload_fields import decode_payload
@@ -1160,6 +1160,7 @@ def test_a_cut_after_the_position_names_the_horizon_and_is_not_retryable():
     assert datetime.fromisoformat(_positions(result.cursor)["channels"][CHANNEL_A]) == newest
     failure = result.failure
     assert failure is not None and failure.retryable is False
+    assert failure.walk_cut_short is True, "the cut after the position is marked (`23h`)"
     assert failure.retry_after is None
     reason = failure.reason
     assert "Build room" in reason
@@ -1191,6 +1192,7 @@ def test_a_cut_by_the_budget_after_the_position_is_not_retryable_either():
     assert datetime.fromisoformat(_positions(result.cursor)["channels"][CHANNEL_A]) == newest
     failure = result.failure
     assert failure is not None and failure.retryable is False
+    assert failure.walk_cut_short is True
     assert failure.retry_after is None
     assert "time budget" in failure.reason
     assert "Build room" in failure.reason
@@ -1213,8 +1215,51 @@ def test_a_cut_whose_oldest_first_post_is_exactly_at_the_position_is_the_retryab
     )
     failure = result.failure
     assert failure is not None and failure.retryable is True
+    assert failure.walk_cut_short is False, "only the non-retryable cut is marked"
     assert "horizon" not in failure.reason
     assert f"messages and replies created at or after {position.isoformat()}" in failure.reason
+
+
+# ── The cut marker through the run's one failure (story 23h) ─────────────────
+
+_CUT = HarvestFailure("cut after the position", retryable=False, walk_cut_short=True)
+_THROTTLED = HarvestFailure("calendar throttled", retryable=True, retry_after=timedelta(minutes=2))
+_EXPIRED = HarvestFailure("sign-in expired", retryable=False)
+
+
+@pytest.mark.parametrize(
+    ("parts", "cut"),
+    [
+        pytest.param((_CUT,), True, id="cut-alone"),
+        pytest.param((_CUT, _THROTTLED), True, id="cut-plus-throttled-calendar"),
+        pytest.param((_THROTTLED, _CUT, _CUT), True, id="two-cuts-and-a-throttle"),
+        pytest.param((_CUT, _EXPIRED), False, id="cut-plus-expired-sign-in"),
+        pytest.param((_EXPIRED,), False, id="expired-alone"),
+        pytest.param((_THROTTLED, _THROTTLED), False, id="retryable-join"),
+    ],
+)
+def test_a_joined_failure_is_a_cut_only_when_every_non_retryable_part_is(parts, cut):
+    from pm_ai.connectors.graph import _one_failure
+
+    joined = _one_failure(parts)
+    assert joined is not None
+    assert joined.walk_cut_short is cut
+    assert joined.retryable is all(part.retryable for part in parts)
+
+
+def test_a_retryable_failure_cannot_carry_the_cut_marker():
+    with pytest.raises(ValueError, match="walk_cut_short"):
+        HarvestFailure("cut", retryable=True, walk_cut_short=True)
+
+
+def test_naming_the_skipped_channels_keeps_the_cut_marker():
+    from pm_ai.connectors.graph import _with_skipped
+
+    skipped = ChannelListing(team="t", channel="c", project="alpha", label="Later room")
+    named = _with_skipped(_CUT, (skipped,))
+    assert named is not None and named is not _CUT
+    assert "Later room" in named.reason
+    assert named.walk_cut_short is True
 
 
 def test_a_cut_after_the_first_posts_went_out_of_order_states_the_unbounded_loss():
@@ -1769,6 +1814,44 @@ def test_an_all_day_entry_east_of_utc_is_listed_only_on_its_own_date(tmp_path):
     schedule = _schedule(text)
     assert "Today's holiday" in schedule
     assert "Yesterday's holiday" not in schedule
+
+
+@pytest.mark.parametrize(("day", "listed"), [(18, True), (19, False)])
+def test_a_multi_day_all_day_entry_east_of_utc_ends_before_its_end_date(tmp_path, day, listed):
+    """Matrix (`23h`): UTC+9, start Oct 17, end Oct 19 — on Oct 19 the range
+    overlaps the entry's midnight-UTC end, so it is returned, and not listed.
+
+    Assumes Graph writes the end as the entry's own midnight under
+    `Prefer: outlook.timezone="UTC"` (unmeasured, `deferred-work.md`).
+    """
+    from datetime import date
+
+    tokyo_evening = datetime(2026, 10, day, 11, 0, tzinfo=timezone.utc)  # 20:00 in Tokyo
+    offsite = _spanning(
+        "AAMk-offsite",
+        "Offsite",
+        datetime(2026, 10, 17, tzinfo=timezone.utc),
+        datetime(2026, 10, 19, tzinfo=timezone.utc),
+        isAllDay=True,
+    )
+    late = _calendar_event("AAMk-late", "Late sync", tokyo_evening + timedelta(hours=3))
+    routes = Routes(calendar=[_page(offsite, late), _page(offsite, late)])
+    connector = _calendar_only(routes, clock=lambda: tokyo_evening)
+
+    asked_range = (
+        datetime(2026, 10, day - 1, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, day, 15, 0, tzinfo=timezone.utc),
+    )
+    returned = connector.read_calendar(*asked_range)
+    (meeting,) = [m for m in (*returned.records, *returned.live) if m.title == "Offsite"]
+    assert (meeting.all_day_date, meeting.all_day_end_date) == (
+        date(2026, 10, 17),
+        date(2026, 10, 19),
+    )
+
+    text = _dashboard(tmp_path, connector, now=tokyo_evening, zone="Asia/Tokyo")
+    assert _range_of(_calendar_asks(routes)[-1]) == asked_range
+    assert ("Offsite" in _schedule(text)) is listed
 
 
 def test_an_all_day_row_carries_its_own_date_and_nothing_else_does():

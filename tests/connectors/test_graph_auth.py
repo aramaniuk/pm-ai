@@ -1969,6 +1969,134 @@ def test_real_msal_through_the_recording_client_measures_the_token_answer(monkey
     assert auth._skew == timedelta(seconds=59, milliseconds=500)
 
 
+# ── The sign-in timeout (story 23h) ──────────────────────────────────────────
+
+
+def test_the_session_handed_to_msal_waits_ten_seconds_to_connect_and_thirty_per_read():
+    """Bound into `request`, so every `get` and `post` MSAL makes carries it."""
+    assert auth_module.SIGN_IN_CONNECT_TIMEOUT_SECONDS == 10.0
+    assert auth_module.SIGN_IN_READ_TIMEOUT_SECONDS == 30.0
+
+    seen: list = []
+
+    class Recording(StubTransport):
+        def send(self, request, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return super().send(request, **kwargs)
+
+    client, _ = _recording(Recording())
+    client.post(f"{AUTHORITY}/oauth2/v2.0/token", data={"grant_type": "x"})
+    client.get(f"{AUTHORITY}/v2.0/.well-known/openid-configuration")
+    assert seen == [(10.0, 30.0), (10.0, 30.0)]
+
+
+class _Stalling(MicrosoftOverHttp):
+    """Microsoft's endpoints, one of which times out the way `requests` reports it."""
+
+    def __init__(self, stalls: str, raised: type[Exception]) -> None:
+        super().__init__()
+        self.stalls = stalls
+        self.raised = raised
+        self.timeouts: list = []
+
+    def send(self, request, **kwargs):
+        self.timeouts.append(kwargs.get("timeout"))
+        if self.stalls in request.url:
+            raise self.raised("stalled")
+        return super().send(request, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("stalls", "raised"),
+    [
+        pytest.param("/oauth2/v2.0/token", "ReadTimeout", id="stalled-POST"),
+        pytest.param("openid-configuration", "ReadTimeout", id="stalled-GET"),
+        pytest.param("openid-configuration", "ConnectTimeout", id="unreachable-endpoint"),
+    ],
+)
+def test_a_stalled_sign_in_is_the_same_did_not_answer_as_a_refused_connection(
+    monkeypatch, stalls, raised
+):
+    """Matrix: stalled POST, stalled GET, unreachable endpoint — real msal 1.38.0,
+    no network; the timeout surfaces as `GraphUnreachable`, handled as today."""
+    import requests
+
+    transport = _Stalling(stalls, getattr(requests.exceptions, raised))
+    built = auth_module._msal_session
+
+    def stubbed():
+        session = built()
+        session.mount("https://", transport)
+        return session
+
+    monkeypatch.setattr(auth_module, "_msal_session", stubbed)
+    auth = GraphDeviceCodeAuth(
+        client_id=CLIENT_ID, store=InMemoryRefreshTokenStore(_enrolled()), now=lambda: NOW
+    )
+
+    with pytest.raises(GraphUnreachable, match="did not answer"):
+        auth.access_token()
+    assert transport.timeouts and set(transport.timeouts) == {(10.0, 30.0)}
+
+
+@contextmanager
+def _silent_server():
+    """A loopback listener that accepts every connection and never answers."""
+    import socket
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    accepted: list = []
+    stop = threading.Event()
+
+    def accept() -> None:
+        listener.settimeout(0.05)
+        while not stop.is_set():
+            try:
+                accepted.append(listener.accept()[0])
+            except OSError:
+                continue
+
+    worker = threading.Thread(target=accept, daemon=True)
+    worker.start()
+    try:
+        yield listener.getsockname()[1], accepted
+    finally:
+        stop.set()
+        worker.join()
+        for connection in accepted:
+            connection.close()
+        listener.close()
+
+
+@pytest.mark.parametrize(
+    ("method", "attempts"),
+    [pytest.param("post", 1, id="POST-not-retried"), pytest.param("get", 2, id="GET-read-retried")],
+)
+def test_a_stalled_read_gives_up_after_the_read_timeout_per_attempt(monkeypatch, method, attempts):
+    """Matrix totals, scaled down: a stalled POST waits one read timeout (about
+    30 s), a stalled GET two (about 60 s), because the adapter retries a read
+    only on an idempotent method."""
+    import time
+
+    import requests
+
+    monkeypatch.setattr(auth_module, "SIGN_IN_READ_TIMEOUT_SECONDS", 0.3)
+    session = auth_module._msal_session()
+    with _silent_server() as (port, accepted):
+        started = time.monotonic()
+        with pytest.raises(requests.exceptions.RequestException):
+            getattr(session, method)(f"http://127.0.0.1:{port}/oauth2/v2.0/token")
+        elapsed = time.monotonic() - started
+        settled = time.monotonic() + 2
+        while len(accepted) < attempts and time.monotonic() < settled:
+            time.sleep(0.02)
+        assert len(accepted) == attempts
+    assert 0.3 * attempts <= elapsed < 0.3 * attempts + 5
+    session.close()
+
+
 def test_the_session_is_closed_when_msal_refuses_to_build(monkeypatch):
     """MSAL validates the authority while it is built; a refusal leaks no pool."""
 

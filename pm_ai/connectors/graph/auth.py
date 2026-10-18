@@ -63,6 +63,7 @@ scope at acquisition rather than leaving it to be misdiagnosed later.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -304,11 +305,34 @@ class RecordingHttpClient:
         self.session.close()
 
 
+SIGN_IN_CONNECT_TIMEOUT_SECONDS = 10.0
+"""How long the session handed to MSAL waits to connect to Microsoft (`23h`)."""
+
+SIGN_IN_READ_TIMEOUT_SECONDS = 30.0
+"""How long that session waits for each read of an answer (`23h`).
+
+The data client waits 30 s too (`client.py`). With the adapter's one retry, a
+stalled read gives up after about 60 s, an unreachable endpoint after about
+20 s, and a stalled token `POST` (which `requests` does not retry) after about
+30 s. An unreachable token `POST` also gives up after about 20 s: connect errors
+are retried whatever the method. The bound applies to each device-code poll of
+`connector add graph`; the flow's overall expiry is unchanged.
+"""
+
+
 def _msal_session() -> Any:
     """MSAL's default `requests` session, built here so its answers can be read.
 
     msal 1.38.0 builds one with certificate verification on, no timeout, and one
-    retry on a connection error through a mounted adapter; all of that is kept.
+    retry on a connection error through a mounted adapter; the verification and
+    the retry are kept. The timeout is not (`23h`): a stalled token endpoint
+    would otherwise hold a health probe, a harvest's refresh or a device-code
+    poll for ever. `requests` has no session-wide timeout and MSAL passes none,
+    so `SIGN_IN_CONNECT_TIMEOUT_SECONDS` and `SIGN_IN_READ_TIMEOUT_SECONDS` are
+    bound into the session's `request` with `functools.partial` — msal 1.38.0's
+    own pattern (`application.py:710-713`). A timeout raises out of MSAL like a
+    refused connection and is reported as the same "did not answer". The
+    device-code flow's overall expiry is unchanged.
     So is `requests`' own environment handling (`trust_env` left True): proxies,
     `REQUESTS_CA_BUNDLE` and `.netrc` come from the environment, as they did
     under MSAL's session. That matches the Graph and GitLab data clients, whose
@@ -331,6 +355,10 @@ def _msal_session() -> Any:
     retry_once = requests.adapters.HTTPAdapter(max_retries=1)
     session.mount("http://", retry_once)
     session.mount("https://", retry_once)
+    session.request = functools.partial(  # type: ignore[method-assign]
+        session.request,
+        timeout=(SIGN_IN_CONNECT_TIMEOUT_SECONDS, SIGN_IN_READ_TIMEOUT_SECONDS),
+    )
     return session
 
 

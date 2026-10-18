@@ -628,3 +628,172 @@ def test_the_paths_argument_decides_the_layout_it_is_given(home, tmp_path):
     assert not (home / ".pm-ai" / "projects.toml").exists(), (
         "the registry went to $HOME instead of the resolver it was handed"
     )
+
+
+# ── pm-ai's own folders are not projects (story 23h) ─────────────────────────
+
+
+def _refused(home: Path, raw_path: str) -> str:
+    """Onboard `raw_path` in-process, expecting the refusal; the registry untouched."""
+    before = digests(home)
+    with pytest.raises(ProjectPathUnusable) as refused:
+        onboard_project(Keychain(), raw_path)
+    message = str(refused.value)
+    assert "Nothing was onboarded" in message
+    assert not (home / ".pm-ai" / "projects.toml").exists()
+    assert digests(home) == before, "nothing was written"
+    return message
+
+
+def _case_insensitive(folder: Path) -> bool:
+    return folder.with_name(folder.name.upper()).exists()
+
+
+@pytest.mark.parametrize("name", [".manager-ai", ".pm-ai"])
+def test_a_home_itself_is_refused_naming_it(home, name):
+    """Matrix: `~/.manager-ai` as a project — refused; registry unchanged."""
+    (home / name).mkdir()
+    message = _refused(home, str(home / name))
+    assert str(home / name) in message
+
+
+def test_a_case_variant_of_a_home_is_refused_on_a_case_insensitive_disk(home):
+    """Matrix: `~/.PM-AI` on APFS — the same folder, compared by `samefile`."""
+    (home / ".pm-ai").mkdir()
+    if not _case_insensitive(home / ".pm-ai"):
+        pytest.skip("this disk is case-sensitive: `~/.PM-AI` is another folder")
+    message = _refused(home, str(home / ".PM-AI"))
+    assert "application folder" in message
+
+
+def test_a_path_inside_a_home_is_refused_and_nothing_is_created(home):
+    """Matrix: `~/.pm-ai/work`, not yet existing — refused; nothing created."""
+    (home / ".pm-ai").mkdir()
+    message = _refused(home, str(home / ".pm-ai" / "work"))
+    assert f"inside {home / '.pm-ai'}" in message
+    assert not (home / ".pm-ai" / "work").exists()
+
+
+def test_a_case_variant_of_a_home_not_yet_created_is_refused(home):
+    """No `~/.pm-ai` yet: `~/.PM-AI/work` would become it on APFS, so it is
+    refused by name under the home's parent, on any disk."""
+    assert not (home / ".pm-ai").exists()
+    message = _refused(home, str(home / ".PM-AI" / "work"))
+    assert "application folder" in message
+    assert not (home / ".PM-AI").exists() and not (home / ".pm-ai").exists()
+
+
+def test_a_path_inside_a_home_not_yet_created_is_refused(home):
+    """A fresh machine: no `~/.manager-ai` yet, compared by its resolved path."""
+    _refused(home, str(home / ".manager-ai" / "work"))
+    assert not (home / ".manager-ai").exists()
+
+
+def test_a_link_into_a_home_is_refused(home):
+    """Matrix: `~/work` linking into `~/.manager-ai` — refused."""
+    (home / ".manager-ai").mkdir()
+    (home / "work").symlink_to(home / ".manager-ai")
+    message = _refused(home, str(home / "work"))
+    assert ".manager-ai" in message
+
+
+@pytest.mark.parametrize(
+    "inside", [Path(".project-ai") / "memory", Path(".Project-AI")], ids=["memory", "case"]
+)
+def test_a_project_ai_folder_or_a_path_inside_one_is_refused(home, tmp_path, inside):
+    """Matrix: `/repo/.project-ai/memory`, `/repo/.Project-AI` — refused."""
+    repository = tmp_path / "repo"
+    (repository / ".project-ai" / "memory").mkdir(parents=True)
+    message = _refused(home, str(repository / inside))
+    assert "project's own pm-ai folder" in message
+
+
+def test_the_normal_layout_is_onboarded(home, tmp_path):
+    """Matrix: `/repo/` holding `/repo/.project-ai` — onboarded, trailing slash too."""
+    repository = tmp_path / "repo"
+    (repository / ".project-ai").mkdir(parents=True)
+    outcome = onboard_project(Keychain(), f"{repository}/")
+    assert outcome.repository == repository.resolve()
+    assert registry_of(home)["repo"].path == repository.resolve()
+
+
+def test_a_similar_name_and_the_home_folder_itself_are_onboarded(home):
+    """Matrix: `~/.manager-ai-old` and `~` — neither is, or is inside, a home."""
+    (home / ".manager-ai").mkdir()
+    (home / ".manager-ai-old").mkdir()
+    onboard_project(Keychain(), str(home / ".manager-ai-old"), alias="old")
+    onboard_project(Keychain(), str(home))
+    registered = registry_of(home)
+    assert registered["old"].path == (home / ".manager-ai-old").resolve()
+    assert registered["home"].path == home.resolve()
+
+
+def test_a_relative_path_is_resolved_then_checked(home, monkeypatch):
+    """Matrix: relative, in-process — resolved against the working directory."""
+    (home / ".pm-ai").mkdir()
+    monkeypatch.chdir(home / ".pm-ai")
+    message = _refused(home, "work/repo")
+    assert str(home / ".pm-ai" / "work" / "repo") in message
+
+
+def _daemon_over(home: Path):
+    from pm_ai.app.wiring import build
+    from pm_ai.core.config import Config
+
+    return build(
+        None,
+        DataScope(ScopeKind.APPLICATION),
+        watched=(),
+        paths=ScopePaths.production(home=home, projects={}),
+        keychain=Keychain(),
+        encryption_disabled=True,
+        config=Config(display_timezone="UTC"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "names"),
+    [
+        pytest.param(".pm-ai/work", "application folder", id="inside-a-home"),
+        pytest.param(".manager-ai", "personal folder", id="a-home"),
+        pytest.param("repo/.project-ai/memory", "project's own pm-ai folder", id="project-folder"),
+        pytest.param("work/repo", "relative path", id="relative"),
+    ],
+)
+def test_the_daemon_refuses_the_same_folders(home, raw, names):
+    """The same check through the daemon, against its resolver's roots."""
+    from pm_ai.app.wiring import onboard_in_daemon
+
+    (home / ".pm-ai").mkdir(exist_ok=True)
+    (home / ".manager-ai").mkdir(exist_ok=True)
+    daemon = _daemon_over(home)
+    try:
+        before = digests(home)
+        path = raw if raw == "work/repo" else str(home / raw)
+        with pytest.raises(ProjectPathUnusable) as refused:
+            onboard_in_daemon(daemon, path, None, hand=lambda work, label: work())
+        assert names in str(refused.value)
+        assert "Nothing was onboarded" in str(refused.value)
+        assert digests(home) == before
+    finally:
+        daemon.storage.close()
+
+
+def test_the_daemon_refuses_a_link_into_a_home(home):
+    """Matrix: `~/work` linking into `~/.manager-ai`, through the daemon — a
+    case only the special-folder check catches."""
+    from pm_ai.app.wiring import onboard_in_daemon
+
+    (home / ".pm-ai").mkdir(exist_ok=True)
+    (home / ".manager-ai").mkdir(exist_ok=True)
+    (home / "work").symlink_to(home / ".manager-ai")
+    daemon = _daemon_over(home)
+    try:
+        before = digests(home)
+        with pytest.raises(ProjectPathUnusable) as refused:
+            onboard_in_daemon(daemon, str(home / "work"), None, hand=lambda work, label: work())
+        assert "personal folder" in str(refused.value)
+        assert "Nothing was onboarded" in str(refused.value)
+        assert digests(home) == before
+    finally:
+        daemon.storage.close()

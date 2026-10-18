@@ -666,6 +666,7 @@ class GraphChannelFetch:
                 f"harvest walks the channel again."
             ),
             retryable=False,
+            walk_cut_short=True,
         )
 
 

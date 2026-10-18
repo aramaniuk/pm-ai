@@ -373,7 +373,18 @@ class HarvestTimers:
         slot.failures_in_a_row = 0
         slot.waiting_for_setup = attempt.outcome is AttemptOutcome.SKIPPED
         slot.due = next_cycle(finished, self.draw())
-        if attempt.outcome is AttemptOutcome.FAILED:
+        if attempt.outcome is AttemptOutcome.FAILED and failure is not None and (
+            failure.walk_cut_short
+        ):
+            _log.warning(
+                "%s's harvest attempt stopped because a channel walk was cut "
+                "short (`pm-ai doctor` names the channel, and lists it as failing "
+                "until a walk completes); it waits for its next regular cycle, "
+                "which walks the channel again",
+                instance,
+                extra={"instance": instance},
+            )
+        elif attempt.outcome is AttemptOutcome.FAILED:
             _log.warning(
                 "%s's harvest attempt failed in a way that needs a person (`pm-ai "
                 "doctor` names the reason and the remedy); it is tried again at "
