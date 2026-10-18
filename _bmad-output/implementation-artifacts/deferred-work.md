@@ -1450,3 +1450,9 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/8t-gitlab-issues-harvest.md`
   summary: The `gitlab_*` rows are never removed when their connector row is removed or renamed, and items that stay open are never pruned; their names, usernames and user ids stay in `operational.db`.
   evidence: The tables are keyed by `(scope, instance)` and no path deletes by instance; `project_work` serves the instance with the latest complete read, so a leftover instance is hidden but kept. A connector-removal cleanup (and any later erase path) should reach these tables.
+
+## Surfaced by the story-4w review (2026-10-18)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/4w-pm-ai-logs.md`
+  summary: **Needs Andrei's decision.** `pm-ai logs` replaces the C0 and C1 control characters and DEL, as the frozen rule names, but prints Unicode's invisible formatting characters as they are: the direction overrides and isolates (U+202A–U+202E, U+2066–U+2069), the direction marks (U+200E, U+200F), zero-width characters, and the line and paragraph separators (U+2028, U+2029).
+  evidence: The request log records the decoded path of requests nobody authenticated (`surfaces/api/app.py:277-281`), so any local process or web page can plant these in a message. They cannot start a terminal command, but a direction override can make a printed line read in a different order on screen, and a zero-width character can hide text. The options are to keep the rule as frozen, or to widen it so every Unicode "format" (Cf) and separator (Zl, Zp) character is also printed as `?`. Widening costs one character class in `pm_ai/surfaces/cli/logs.py` (`_UNPRINTABLE`) and a test, and it changes the frozen "Nothing in the file can act on the terminal" bullet.

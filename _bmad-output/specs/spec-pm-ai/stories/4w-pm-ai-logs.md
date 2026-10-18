@@ -2,7 +2,8 @@
 title: 'pm-ai logs shows the daemon log readably'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '8b79328d36da9e733063f9c84eac425d500956f4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -76,14 +77,14 @@ Re-verified against `5f4f43e` on 2026-10-18.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/storage/service.py` -- the rotated-file list as a module-level function of the logs directory and the name, used by `diagnostic_lines` and handed out for this command; it resolves paths and never calls `_prepared`, which would create `logs/` -- one rule for which files and in what order
-- [ ] `pm_ai/app/entry.py` -- `logs` answered in `main` after `parse` and before the keychain adapter (`:200`, which `4t`'s `composes=False` branch still builds) and `_compose`, with the file list built from `ScopePaths.production()` -- nothing composed, nothing created
-- [ ] `pm_ai/surfaces/cli/logs.py` -- new: records read from the files (invalid ones counted, a partial last line held), the level filter, local time per record, control characters replaced, the skipped count, following with rotation through the open handle, waiting for an absent file, Ctrl-C caught in the follow, a closed output treated as the end -- the reader, testable without a terminal
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `logs` in `TABLE` with `lines`, `level`, flag `follow`, no target; `TERMINAL_BOUND` gains `logs` and its docstring the wider meaning; the usage errors; the header and closing sentences -- the command
-- [ ] `pm_ai/app/prompts.py` -- the refusal sentence at `:376-378` widened from "asks questions or takes a secret" so it is true of `logs` ("holds the terminal until Ctrl-C") -- the matrix's "refused by name as terminal-bound"
-- [ ] `pm_ai/surfaces/cli/completion.py` -- `--level` completes the five levels (a new source in `_BY_COMMAND` and a branch in `_values`); `("logs",), "lines"` in `FREE_TEXT`; `--follow` needs nothing -- `4u`'s check that every declared name has a source
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md` -- when this slice is built: edit the amended frozen text and add a dated Change Log line naming `logs` added to the commands that need this terminal, and the new reason -- an earlier frozen block says it was amended
-- [ ] `tests/surfaces/test_cli_logs.py`, `tests/slice/test_logs_command.py` -- one test per matrix row against a temporary home with written log files (rotation simulated by renaming), the slice ones through `main()` asserting the home is unchanged; a record carrying a planted secret in a field other than `message` never prints it -- the matrix is the contract
+- [x] `pm_ai/storage/service.py` -- the rotated-file list as a module-level function of the logs directory and the name, used by `diagnostic_lines` and handed out for this command; it resolves paths and never calls `_prepared`, which would create `logs/` -- one rule for which files and in what order
+- [x] `pm_ai/app/entry.py` -- `logs` answered in `main` after `parse` and before the keychain adapter (`:200`, which `4t`'s `composes=False` branch still builds) and `_compose`, with the file list built from `ScopePaths.production()` -- nothing composed, nothing created
+- [x] `pm_ai/surfaces/cli/logs.py` -- new: records read from the files (invalid ones counted, a partial last line held), the level filter, local time per record, control characters replaced, the skipped count, following with rotation through the open handle, waiting for an absent file, Ctrl-C caught in the follow, a closed output treated as the end -- the reader, testable without a terminal
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `logs` in `TABLE` with `lines`, `level`, flag `follow`, no target; `TERMINAL_BOUND` gains `logs` and its docstring the wider meaning; the usage errors; the header and closing sentences -- the command
+- [x] `pm_ai/app/prompts.py` -- the refusal sentence at `:376-378` widened from "asks questions or takes a secret" so it is true of `logs` ("holds the terminal until Ctrl-C") -- the matrix's "refused by name as terminal-bound"
+- [x] `pm_ai/surfaces/cli/completion.py` -- `--level` completes the five levels (a new source in `_BY_COMMAND` and a branch in `_values`); `("logs",), "lines"` in `FREE_TEXT`; `--follow` needs nothing -- `4u`'s check that every declared name has a source
+- [x] `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md` -- when this slice is built: edit the amended frozen text and add a dated Change Log line naming `logs` added to the commands that need this terminal, and the new reason -- an earlier frozen block says it was amended
+- [x] `tests/surfaces/test_cli_logs.py`, `tests/slice/test_logs_command.py` -- one test per matrix row against a temporary home with written log files (rotation simulated by renaming), the slice ones through `main()` asserting the home is unchanged; a record carrying a planted secret in a field other than `message` never prints it -- the matrix is the contract
 
 **Acceptance Criteria:**
 - Given a daemon run in a temporary home that answered a few requests and stopped, when `pm-ai logs` runs, then the request lines appear in local time with `request` as their source, the first stderr line names the file, and the exit is 0.
@@ -111,3 +112,73 @@ The machine's local zone rather than `display_timezone`: the log is read beside 
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai daemon run`, a few `pm-ai config show` lines, then `.venv/bin/pm-ai logs --level info` and `--follow` -- expected: readable local-time lines; follow shows new requests as they come
+
+## Suggested Review Order
+
+**Answered before anything is composed**
+
+- Entry point: `logs` answered right after `parse`, before the keychain adapter and composition.
+  [`entry.py:206`](../../../../pm_ai/app/entry.py#L206)
+
+- The file list, logger names and zone built from paths alone; nothing created.
+  [`entry.py:1447`](../../../../pm_ai/app/entry.py#L1447)
+
+- One rule for which files and in what order, shared with the restart pass.
+  [`service.py:1375`](../../../../pm_ai/storage/service.py#L1375)
+
+**What a record may print**
+
+- Only `at`, `level`, the logger and `message` survive parsing; anything else is foreign.
+  [`logs.py:126`](../../../../pm_ai/surfaces/cli/logs.py#L126)
+
+- Control characters (C0, DEL, C1, surrogates) become `?` (see deferred: Unicode format characters).
+  [`logs.py:75`](../../../../pm_ai/surfaces/cli/logs.py#L75)
+
+- Local time per record's own instant; continuation lines indented.
+  [`logs.py:161`](../../../../pm_ai/surfaces/cli/logs.py#L161)
+
+- The header names only the copies actually read, and the zone with its offset now.
+  [`logs.py:190`](../../../../pm_ai/surfaces/cli/logs.py#L190)
+
+**Reading and following**
+
+- Top level: skipped count, Ctrl-C in follow is exit 0, closed pipe is exit 0.
+  [`logs.py:271`](../../../../pm_ai/surfaces/cli/logs.py#L271)
+
+- First read: current file opened first; a copy that is the same file is read once.
+  [`logs.py:398`](../../../../pm_ai/surfaces/cli/logs.py#L398)
+
+- Follow: old file read to its end, new current opened before copies are caught up.
+  [`logs.py:527`](../../../../pm_ai/surfaces/cli/logs.py#L527)
+
+- Copies newer than the old file, stopping at the new current's identity.
+  [`logs.py:578`](../../../../pm_ai/surfaces/cli/logs.py#L578)
+
+- Raw stdout writes, so a closed pipe leaves nothing for the exit-time flush.
+  [`logs.py:321`](../../../../pm_ai/surfaces/cli/logs.py#L321)
+
+**The command and its routing**
+
+- `logs` in the table: `--lines`, `--level`, `--follow`, no target, read before the keychain.
+  [`dispatch.py:3220`](../../../../pm_ai/surfaces/cli/dispatch.py#L3220)
+
+- The handler: usage errors exit 2, an unreadable current file exit 3.
+  [`dispatch.py:3116`](../../../../pm_ai/surfaces/cli/dispatch.py#L3116)
+
+- `logs` joins the commands that need this terminal; the daemon refuses it by name.
+  [`dispatch.py:3188`](../../../../pm_ai/surfaces/cli/dispatch.py#L3188)
+
+- The daemon's refusal sentence widened to "holds the terminal until Ctrl-C".
+  [`prompts.py:377`](../../../../pm_ai/app/prompts.py#L377)
+
+**Peripherals**
+
+- The machine's zone name: `TZ` first, else the `/etc/localtime` link; checked against the zone database.
+  [`environment.py:69`](../../../../pm_ai/platform/environment.py#L69)
+
+- `--level` completes the five levels; `--lines` is free text.
+  [`completion.py:107`](../../../../pm_ai/surfaces/cli/completion.py#L107)
+
+- Reader tests per matrix row; slice tests through `main()` and real processes.
+  [`test_cli_logs.py:1`](../../../../tests/surfaces/test_cli_logs.py#L1)
+  [`test_logs_command.py:1`](../../../../tests/slice/test_logs_command.py#L1)
