@@ -101,6 +101,11 @@ def meeting(
     )
 
 
+AS_HARVESTED = object()
+"""`message`'s default `occurred_at`: the harvest time, so a fixture that does
+not care about the posted time keeps the time its golden was pinned with."""
+
+
 def message(
     *,
     at: datetime | str | None,
@@ -109,6 +114,9 @@ def message(
     excerpt: str | None = None,
     entry_id: str = "evt_1",
     mentions: tuple[str, ...] | None = None,
+    occurred_at: object = AS_HARVESTED,
+    implausible: bool = False,
+    sender_name: str | None = None,
 ) -> EventEntry:
     """A `message_posted` ledger entry, shaped as `_append_batch` writes one —
     its payload fields built by `encode_payload`, the writer's own encoder.
@@ -120,16 +128,32 @@ def message(
     A `str` is written to the field verbatim, which is how a value that is
     *there and unreadable* is expressed — the ledger is text, so the renderer
     reads back whatever was on the line, not a `datetime` somebody validated.
+
+    `occurred_at` (`23f`) defaults to the harvest time; `None` leaves the field
+    off, a `str` is written verbatim (`unknown`, a naive or unreadable value),
+    and `implausible` stamps the flag the writer sets on a clock it disbelieves.
     """
     fields: list[tuple[str, str]] = []
     if at is not None:
         fields.append(("ingested_at", at if isinstance(at, str) else at.isoformat()))
     fields.append(("src", "slack:msg/1"))
+    posted = at if occurred_at is AS_HARVESTED else occurred_at
+    if isinstance(posted, datetime):
+        fields.append(("occurred_at", posted.isoformat()))
+    elif isinstance(posted, str):
+        fields.append(("occurred_at", posted))
+    if implausible:
+        fields.append(("occurred_at_flag", "implausible"))
     # Through the encoder, as the writer does: entries built with hand-spelled
     # names passed here while every real message would have rendered empty.
     fields.extend(
         encode_payload(
-            MessagePayload(channel=channel, excerpt=excerpt, mentions=mentions)
+            MessagePayload(
+                channel=channel,
+                excerpt=excerpt,
+                mentions=mentions,
+                sender_name=sender_name,
+            )
         )
     )
     return EventEntry(
@@ -964,7 +988,9 @@ def test_markdown_unsafe_text_is_escaped_and_the_structure_survives():
         f"## {heading}" for heading in HEADINGS
     ]
     assert "\\|" in text
-    assert "\\n" in text
+    # Folded to one space, never spelled out (`23f`): the excerpt is one line.
+    assert "\\n" not in text
+    assert "ship it ## Time-Critical Activities" in text
     body = sections(text)
     assert "All clear!" in body["Time-Critical Activities"]  # as content, not a claim
     assert "dana \\| *ops*" in body["Proactive Enablement"]
@@ -998,18 +1024,17 @@ def test_a_link_in_a_title_reaches_the_dashboard_as_text_not_as_a_link():
 @pytest.mark.parametrize(
     ("point", "spelled"),
     [
-        (0x2028, "\\u2028"),  # LINE SEPARATOR — a line break to renderers that honour it
-        (0x2029, "\\u2029"),  # PARAGRAPH SEPARATOR
+        # U+2028 and U+2029 were here; `23f` folds them as line breaks, below.
         (0x202E, "\\u202e"),  # RIGHT-TO-LEFT OVERRIDE — reverses the rest of the line
         (0x2066, "\\u2066"),  # LEFT-TO-RIGHT ISOLATE
     ],
-    ids=["line-sep", "para-sep", "rtl-override", "isolate"],
+    ids=["rtl-override", "isolate"],
 )
-def test_invisible_separators_and_bidi_overrides_are_spelled_out(point, spelled):
-    """The same class as the `\\n` already escaped, one plane up.
+def test_bidi_overrides_are_spelled_out(point, spelled):
+    """A control character's damage one plane up, and its visible spelling.
 
-    `char < " "` catches C0 and misses these, so a title carrying U+2028 broke
-    the bullet and one carrying U+202E decided how the rest of the line read.
+    `char < " "` catches C0 and misses these, so a title carrying U+202E decided
+    how the rest of the line read.
     """
     hostile = f"Sync{chr(point)}All clear!"
     assert escape(hostile) == f"Sync{spelled}All clear!"
@@ -1636,3 +1661,323 @@ def test_an_empty_window_since_the_last_render_names_it():
         "No `message_posted` entries in the event log between 2026-09-09 09:30 and "
         "2026-09-09 12:30 — since the last render at 2026-09-09 09:30." in body
     )
+
+
+# ── Story 23f: readable message signals ──────────────────────────────────────
+
+APP_ID = "12345678-9abc-4def-8123-456789abcdef"
+"""A bot's Graph application id."""
+
+MORNING = datetime(2026, 9, 9, 5, 0, tzinfo=timezone.utc)
+"""07:00 in the display zone, the morning after a late harvest."""
+
+
+def test_a_named_person_shows_the_name_in_place_of_the_handle():
+    """Matrix: named person — the stored name, never the handle."""
+    entry = message(
+        at=NOW - timedelta(minutes=30),
+        actor=f"graph:{OTHER_ID}",
+        excerpt="deploy is green",
+        mentions=(),
+        sender_name="Dana Okafor",
+    )
+    (line,) = signal_lines(render(entries=(entry,), pm=PM))
+    assert line == "- **12:00** Dana Okafor in #payments — deploy is green"
+    assert OTHER_ID not in line
+
+
+def test_a_bot_shows_its_name_followed_by_app():
+    """Matrix: bot — `<name> (app)`; the actor stays `graph_app:`."""
+    entry = message(
+        at=NOW - timedelta(minutes=30),
+        actor=f"graph_app:{APP_ID}",
+        excerpt="build passed",
+        sender_name="Dana Okafor",
+    )
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == "- **12:00** Dana Okafor (app) in #payments — build passed"
+
+
+def test_a_bot_with_no_name_shows_its_handle_without_the_marker():
+    entry = message(at=NOW - timedelta(minutes=30), actor=f"graph_app:{APP_ID}")
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == f"- **12:00** graph_app:{APP_ID} in #payments"
+
+
+def test_the_unknown_sender_stays_unknown_even_with_a_name_on_the_line():
+    """Matrix: unknown sender with a name — `none:` never shows one."""
+    entry = message(
+        at=NOW - timedelta(minutes=30), actor="none:", sender_name="Dana Okafor"
+    )
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == f"- **12:00** {UNKNOWN_SENDER} in #payments"
+
+
+def test_an_old_line_with_no_name_shows_its_handle_as_before():
+    """Matrix: old line / no name — the handle, as `23c` rendered it."""
+    entry = message(at=NOW - timedelta(minutes=30), actor=f"graph:{OTHER_ID}")
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == f"- **12:00** graph:{OTHER_ID} in #payments"
+
+
+def test_a_named_mention_of_the_pm_is_marked_and_listed_first():
+    """Matrix: mention of the PM — the name shown, marked, first."""
+    newer = message(
+        at=NOW - timedelta(minutes=1),
+        actor=f"graph:{OTHER_ID}",
+        sender_name="Sam Lee",
+        entry_id="evt_new",
+    )
+    mention = message(
+        at=NOW - timedelta(hours=5),
+        actor=f"graph:{OTHER_ID}",
+        excerpt="can you look?",
+        mentions=mentioning(PM_ID),
+        sender_name="Dana Okafor",
+        entry_id="evt_mention",
+    )
+    lines = signal_lines(render(entries=(newer, mention), pm=PM))
+    assert lines == [
+        f"- **07:30** Dana Okafor in #payments — can you look? — {MENTIONS_YOU}",
+        "- **12:29** Sam Lee in #payments",
+    ]
+
+
+def test_a_name_equal_to_the_pms_is_never_compared():
+    """Matrix: name equals the PM's, no mention — names are never compared."""
+    entry = message(
+        at=NOW - timedelta(minutes=1),
+        actor=f"graph:{PM_ID}",
+        sender_name="The PM",
+        mentions=(),
+    )
+    (line,) = signal_lines(render(entries=(entry,), pm=PM))
+    assert not line.endswith(MENTIONS_YOU)
+
+
+def test_a_late_harvest_is_inside_the_window_and_labelled_with_the_posted_day():
+    """Matrix: posted earlier, harvested now — yesterday's date and 11:20."""
+    entry = message(
+        at=datetime(2026, 9, 8, 20, 51, tzinfo=timezone.utc),  # 22:51 local
+        occurred_at=datetime(2026, 9, 8, 9, 20, tzinfo=timezone.utc),  # 11:20 local
+        actor="u_dana",
+    )
+    (line,) = signal_lines(render(entries=(entry,), now=MORNING))
+    assert line == "- **2026-09-08 11:20** u_dana in #payments"
+
+
+def test_a_window_still_selects_on_the_harvest_time():
+    """Posted long before the window, harvested inside it: listed (correction 24)."""
+    entry = message(
+        at=NOW - timedelta(hours=1),
+        occurred_at=NOW - timedelta(days=5),
+    )
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line.startswith("- **2026-09-04 12:30** ")
+
+
+def test_a_message_posted_today_is_labelled_with_its_posted_time():
+    """Matrix: posted today — posted 06:40, harvested 06:52, render 07:00."""
+    entry = message(
+        at=datetime(2026, 9, 9, 4, 52, tzinfo=timezone.utc),
+        occurred_at=datetime(2026, 9, 9, 4, 40, tzinfo=timezone.utc),
+    )
+    (line,) = signal_lines(render(entries=(entry,), now=MORNING))
+    assert line == "- **06:40** u_dana in #payments"
+
+
+UNUSABLE_POSTED = {
+    "absent": {"occurred_at": None},
+    "unknown": {"occurred_at": "unknown"},
+    "naive": {"occurred_at": "2026-09-09T09:00:00"},
+    "unreadable": {"occurred_at": "yesterday-ish"},
+    "implausible": {"occurred_at": NOW - timedelta(hours=2), "implausible": True},
+    "after the render": {"occurred_at": NOW + timedelta(minutes=3)},
+}
+
+
+@pytest.mark.parametrize("posted", UNUSABLE_POSTED.values(), ids=UNUSABLE_POSTED)
+def test_an_unusable_posted_time_labels_the_line_with_its_harvest_time(posted):
+    """Matrix: unusable posted time and posted after the render — `HH:MM (harvested)`."""
+    entry = message(at=NOW - timedelta(minutes=30), **posted)
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == "- **12:00 (harvested)** u_dana in #payments"
+
+
+def test_a_posted_time_with_no_utc_instant_is_unusable_not_a_crash():
+    """`0001-01-01T00:00+05:00` overflows on conversion: the harvest label."""
+    entry = message(at=NOW - timedelta(minutes=30), occurred_at="0001-01-01T00:00+05:00")
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == "- **12:00 (harvested)** u_dana in #payments"
+
+
+def test_a_harvest_label_from_another_day_is_dated():
+    """Matrix: harvested yesterday, unusable posted time — `YYYY-MM-DD HH:MM (harvested)`."""
+    entry = message(
+        at=datetime(2026, 9, 8, 20, 51, tzinfo=timezone.utc), occurred_at="unknown"
+    )
+    (line,) = signal_lines(render(entries=(entry,), now=MORNING))
+    assert line == "- **2026-09-08 22:51 (harvested)** u_dana in #payments"
+
+
+def test_lines_are_ordered_by_the_time_they_are_labelled_with():
+    """Matrix: ordering — harvested together, 14:30 above 09:10, mentions first."""
+    harvested = datetime(2026, 9, 9, 13, 0, tzinfo=timezone.utc)
+    later_now = datetime(2026, 9, 9, 14, 0, tzinfo=timezone.utc)
+    early = message(
+        at=harvested,
+        occurred_at=datetime(2026, 9, 9, 7, 10, tzinfo=timezone.utc),  # 09:10
+        actor="u_early",
+        entry_id="evt_a",
+    )
+    late = message(
+        at=harvested,
+        occurred_at=datetime(2026, 9, 9, 12, 30, tzinfo=timezone.utc),  # 14:30
+        actor="u_late",
+        entry_id="evt_b",
+    )
+    oldest_mention = message(
+        at=harvested,
+        occurred_at=datetime(2026, 9, 9, 6, 0, tzinfo=timezone.utc),  # 08:00
+        actor="u_mention",
+        mentions=mentioning(PM_ID),
+        entry_id="evt_c",
+    )
+    entries = (early, late, oldest_mention)
+    text = render(entries=entries, now=later_now, pm=PM)
+    assert [line.split("** ")[1].split(" ")[0] for line in signal_lines(text)] == [
+        "u_mention",
+        "u_late",
+        "u_early",
+    ]
+    assert render(entries=entries[::-1], now=later_now, pm=PM) == text
+
+
+def test_the_cap_and_the_closing_count_follow_the_label_order():
+    """The 20 shown are the newest by posted time, not by harvest time."""
+    harvested = NOW - timedelta(minutes=10)
+    entries = tuple(
+        message(
+            at=harvested - timedelta(minutes=n),  # harvest order opposite to posted
+            occurred_at=NOW - timedelta(hours=2) + timedelta(minutes=n),
+            actor=f"u_{n:02d}",
+            entry_id=f"evt_{n:02d}",
+        )
+        for n in range(MAX_SIGNAL_LINES + 1)
+    )
+    text = render(entries=entries)
+    lines = signal_lines(text)
+    assert len(lines) == MAX_SIGNAL_LINES
+    assert " u_20 " in lines[0]
+    assert all(" u_00 " not in line for line in lines)
+    assert "1 more message signal in this window is not shown" in text
+
+
+FOLDED = {
+    "multi-line excerpt": ("Hi all\nCan you review", "Hi all Can you review"),
+    "Teams paragraphs": ("First\n\nSecond", "First Second"),
+    "crlf": ("a\r\nb", "a b"),
+    "vertical tab": ("a\vb", "a b"),
+    "form feed": ("a\fb", "a b"),
+    "next line": ("a\x85b", "a b"),
+    "line separator": ("a\u2028b", "a b"),
+    "paragraph separator": ("a\u2029b", "a b"),
+    "blanks beside": ("a \t\n b", "a b"),
+    "no-break spaces beside": ("a\u00a0\n\u00a0b", "a b"),
+    "ideographic space beside": ("a\u3000\nb", "a b"),
+    "em and medium spaces beside": ("a\u2003\n\u205f\u1680b", "a b"),
+}
+
+
+def test_every_space_separator_and_the_tab_are_absorbed_beside_a_break():
+    """The set is Unicode's `Zs` and the tab, pinned against the tables."""
+    import sys
+    import unicodedata
+
+    from pm_ai.core.rendering import _BESIDE_BREAKS
+
+    spaces = {
+        chr(point)
+        for point in range(sys.maxunicode + 1)
+        if unicodedata.category(chr(point)) == "Zs"
+    }
+    assert set(_BESIDE_BREAKS) == spaces | {"\t"}
+
+
+@pytest.mark.parametrize(("raw", "shown"), FOLDED.values(), ids=FOLDED)
+def test_a_run_of_line_breaks_folds_into_one_space(raw, shown):
+    """Matrix: multi-line excerpt, Teams paragraphs, other breaks."""
+    assert escape(raw) == shown
+    assert code(raw) == shown
+    entry = message(at=NOW - timedelta(minutes=30), excerpt=raw)
+    (line,) = signal_lines(render(entries=(entry,)))
+    assert line == f"- **12:00** u_dana in #payments — {shown}"
+
+
+def test_a_lone_tab_and_other_controls_keep_their_visible_spelling():
+    """Matrix: lone tab or other control — as `23a` spelled them."""
+    assert escape("a\tb") == "a\\tb"
+    assert escape("a\x01b") == "a\\x01b"
+    assert code("a\tb") == "a\\tb"
+    assert escape("a\u202eb") == "a\\u202eb"
+
+
+def test_a_meeting_title_with_a_break_reads_on_one_line():
+    """Matrix: meeting title with a break — `Sync weekly`."""
+    body = sections(
+        render(
+            meetings=(
+                meeting(
+                    "m_sync",
+                    "Sync\nweekly",
+                    start=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc),
+                ),
+            )
+        )
+    )["Time-Critical Activities"]
+    assert "Sync weekly" in body
+    assert "\\n" not in body
+
+
+def test_a_name_with_breaks_and_markdown_is_folded_and_escaped():
+    entry = message(
+        at=NOW - timedelta(minutes=30),
+        actor=f"graph:{OTHER_ID}",
+        sender_name="Dana\n## Leadership Notes | [x](y)",
+    )
+    text = render(entries=(entry,))
+    (line,) = signal_lines(text)
+    assert line == "- **12:00** Dana ## Leadership Notes \\| \\[x\\](y) in #payments"
+    assert [l for l in text.split("\n") if l.startswith("## ")] == [
+        f"## {heading}" for heading in HEADINGS
+    ]
+
+
+def test_no_render_carries_a_spelled_out_line_break():
+    """Acceptance: no backslash followed by `n`, `r`, `v` or `f` in the file."""
+    hostile = "a\nb\r\nc\vd\fe\x85f\u2028g\u2029h"
+    text = render(
+        meetings=(
+            meeting(
+                "m_x", hostile, start=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+            ),
+        ),
+        entries=(
+            message(
+                at=NOW - timedelta(minutes=5),
+                actor=f"graph:{OTHER_ID}",
+                channel=hostile,
+                excerpt=hostile,
+                sender_name=hostile,
+            ),
+        ),
+        register=goals(b"## Project\n\n- [g_a] (short) Cut\vlatency\n"),
+    )
+    # Every spelling the escaper before `23f` gave a line break (`\n`, `\r`,
+    # `\x0b`, `\x0c`, `\u2028`, `\u2029`), and the raw characters themselves:
+    # U+0085 it passed through unescaped.
+    for spelled in ("\\n", "\\r", "\\v", "\\f", "\\x0b", "\\x0c", "\\x85", "\\u2028", "\\u2029"):
+        assert spelled not in text
+    for raw in ("\v", "\f", "\x85", "\u2028", "\u2029"):
+        assert raw not in text
+    assert "a b c d e f g h" in text

@@ -135,3 +135,63 @@ def tag_names(html: str) -> set[str]:
 def tags_left(text: str, names: set[str]) -> list[str]:
     """Any of `names` still written as a tag in `text`."""
     return [name for name in names if re.search(rf"</?\s*{name}\b", text, re.IGNORECASE)]
+
+
+# ── From a harvest to the dashboard (`23f`) ──────────────────────────────────
+
+
+class _NoKey:
+    """A keychain with nothing in it: a dashboard render needs no key."""
+
+    def get(self, name: str) -> bytes:
+        from pm_ai.ports import KeyNotFound
+
+        raise KeyNotFound(f"nothing is stored under {name!r}")
+
+    def set(self, name: str, secret: bytes) -> None:
+        raise AssertionError("a dashboard render must never enrol a key")
+
+    def delete(self, name: str) -> None:
+        raise AssertionError("a dashboard render must never delete a key")
+
+
+def harvest_then_dashboard(
+    root: Path, events: Any, *, scope: Any, pm_user_id: str, now: datetime
+) -> tuple[str, str]:
+    """Persist a harvest's events and run `pm-ai dashboard` over them.
+
+    The real single writer and the real render (`run_dashboard`), on a machine
+    whose one Graph connector row records `pm_user_id` as the PM's, with no
+    calendar. Returns the dashboard's text and the scope's event-log text.
+    """
+    from pm_ai.app.pipelines import run_dashboard
+    from pm_ai.app.wiring import build
+    from pm_ai.core.config import Config
+    from pm_ai.domain.identity import DataScope, ScopeKind
+
+    built = build(
+        root, "alpha", now=lambda: now, keychain=_NoKey(), config=Config(display_timezone="UTC")
+    )
+    built.connectors = {}
+    built.storage.write_artifact(
+        json.dumps(
+            {"instance": INSTANCE, "system": "graph", "enabled": True, "user_id": pm_user_id}
+        ).encode("utf-8"),
+        scope=DataScope(ScopeKind.APPLICATION),
+        artifact="connectors/",
+        name=f"{INSTANCE}.json",
+    )
+    built.storage.persist_events(tuple(events), scope=scope)
+    dashboard = run_dashboard(built, scope=scope, now=now).read_text(encoding="utf-8")
+    log = "".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(root.rglob("event_log/*.md"))
+    )
+    return dashboard, log
+
+
+def signal_lines(dashboard: str) -> list[str]:
+    """The Proactive Enablement section's signal lines, in rendered order."""
+    _, _, after = dashboard.partition("## Proactive Enablement")
+    body = after.split("\n## ", 1)[0]
+    return [line for line in body.split("\n") if line.startswith("- **")]

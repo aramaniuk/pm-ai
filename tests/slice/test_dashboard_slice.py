@@ -1206,14 +1206,17 @@ def _message(
     excerpt: str | None = None,
     mentions: tuple[str, ...] | None = None,
     sender: str = OTHER_ID,
+    occurred_at: datetime = NOW - timedelta(minutes=5),
 ) -> NormalizedEvent:
-    """A message as `33d` writes one: a Graph sender handle, channel, excerpt."""
+    """A message as `33d` writes one: a Graph sender handle, channel, excerpt.
+
+    `occurred_at` is the posted time each line is labelled with (`23f`)."""
     return NormalizedEvent(
         scope=scope,
         type=ObservedEventType.MESSAGE_POSTED,
         source_ref=SourceRef.parse(f"graph:alpha:message:{native}"),
         actor=person_handle("graph", sender),
-        occurred_at=NOW - timedelta(minutes=5),
+        occurred_at=occurred_at,
         payload=MessagePayload(channel="#payments", excerpt=excerpt, mentions=mentions),
     )
 
@@ -1252,7 +1255,11 @@ def test_a_mention_of_the_pm_is_listed_first_marked_and_the_rest_newest_first(tm
         (60, "m_new", None, "newest"),
     ):
         clock[0] = NOW - timedelta(minutes=minutes)
-        _persist(built, _message(native, excerpt=excerpt, mentions=mentions))
+        # Posted when harvested, so the labels are the harvest minutes (`23f`).
+        _persist(
+            built,
+            _message(native, excerpt=excerpt, mentions=mentions, occurred_at=clock[0]),
+        )
     clock[0] = NOW
 
     lines = _signal_lines(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))
@@ -1323,7 +1330,8 @@ def test_the_project_dashboard_marks_a_mention_from_the_same_rows(tmp_path):
     lines = _signal_lines(
         run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8")
     )
-    assert lines == [f"- **12:30** graph:{OTHER_ID} in #payments — alpha ask — mentions you"]
+    # Labelled with the posted time, five minutes before the harvest (`23f`).
+    assert lines == [f"- **12:25** graph:{OTHER_ID} in #payments — alpha ask — mentions you"]
 
 
 def test_each_dashboard_reads_only_its_own_scopes_log(tmp_path):
