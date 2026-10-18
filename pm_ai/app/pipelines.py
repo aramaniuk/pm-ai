@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import errno
 import logging
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
@@ -80,6 +81,7 @@ from pm_ai.core.rendering import (
     render_dashboard,
     render_project_dashboard,
 )
+from pm_ai.core.team_activity import WorkAnswer
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.events import MeetingHeldPayload, NormalizedEvent, ObservedEventType
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
@@ -1679,8 +1681,17 @@ def prepare_dashboard(
         # goals parameter, so this branch cannot hand it the personal register
         # even by mistake (AD-25) — and no personal-scope artifact is opened on
         # this path at all, which is the half a signature cannot enforce.
+        # `8t`'s record is read here, on the worker beside the log read and
+        # outside the bounded step, which `9b` keeps for the calendar alone
+        # (`23g`). No GitLab request: the record is what the harvest stored.
         document = render_project_dashboard(
-            meetings, entries, now, tz=zone, pm=pm, since=since
+            meetings,
+            entries,
+            now,
+            tz=zone,
+            pm=pm,
+            since=since,
+            work=_project_work(daemon, scope=scope),
         )
     return document.encode("utf-8")
 
@@ -1760,6 +1771,37 @@ def _event_log(daemon: Daemon, *, scope: DataScope) -> EventLogAnswer:
         # `retryable` is required by the type and read by nothing on this path:
         # the section states the reason and gives no retry advice. False is not
         # a finding that the read will keep failing — nothing here computed that.
+        return HarvestFailure(reason=str(refused), retryable=False)
+
+
+def _project_work(daemon: Daemon, *, scope: DataScope) -> WorkAnswer:
+    """`scope`'s GitLab record as `8t` stored it, or why it could not be read (`23g`).
+
+    A plain read through the one reader, `StoragePort.project_work`, for a
+    project scope only. A scope that is not a project is refused before the
+    read and the refusal propagates: AD-25's wall is never a stated line. A
+    store that cannot be opened or read — the library's own error included —
+    or a row a hand edit broke becomes a `HarvestFailure` carrying the
+    refusal's own text: the section states it, the other sections render, and
+    the command exits zero, as an unreadable log does.
+    """
+    if scope.kind is not ScopeKind.PROJECT:
+        raise ValueError(
+            f"GitLab project work is read for a project scope only, and {scope} "
+            f"is not one (AD-25)."
+        )
+    try:
+        return daemon.storage.project_work(scope)
+    except (
+        OperationalStoreUnavailable,
+        sqlite3.Error,
+        OSError,
+        ValueError,
+        TypeError,
+    ) as refused:
+        # `ValueError` here is a malformed row (a date, the labels' JSON, a
+        # confidential issue stored with its own title): the scope refusal is
+        # raised above, before the read.
         return HarvestFailure(reason=str(refused), retryable=False)
 
 

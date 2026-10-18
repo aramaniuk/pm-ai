@@ -35,7 +35,9 @@ from pm_ai.core.rendering import (
     MENTIONS_YOU,
     MESSAGE_WINDOW,
     NO_MEETINGS,
+    PROACTIVE_ENABLEMENT,
     PROJECT_HEADINGS,
+    TIME_CRITICAL,
     PmHandles,
     render_dashboard,
     render_project_dashboard,
@@ -250,7 +252,16 @@ def test_the_signature_accepts_no_goal_register():
     cannot be handed the PM's career goals by any caller, correct or not.
     """
     parameters = inspect.signature(render_project_dashboard).parameters
-    assert list(parameters) == ["meetings", "entries", "now", "tz", "pm", "since"]
+    assert list(parameters) == [
+        "meetings",
+        "entries",
+        "now",
+        "tz",
+        "pm",
+        "since",
+        "work",
+        "issue_notes",
+    ]
     assert not [
         name
         for name in parameters
@@ -526,7 +537,8 @@ def test_the_shared_section_renders_byte_identically_in_both_files():
         project = raw_blocks(
             render_project_dashboard(meetings, PROJECT_ENTRIES, now, tz=DISPLAY, pm=NOBODY)
         )
-        for heading in PROJECT_HEADINGS:
+        # The two shared sections; Team Activity is the project's own (`23g`).
+        for heading in (TIME_CRITICAL, PROACTIVE_ENABLEMENT):
             assert project[heading] == personal[heading], label
 
 
