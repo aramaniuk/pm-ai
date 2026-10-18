@@ -360,9 +360,10 @@ def as_stored(meeting: Meeting) -> Meeting:
       meeting arriving from two tenants *in memory*, during a single read of the
       day — a question no record read back off disk is ever asked, since `put`
       writes one meeting per id per scope.
-    - **`cancelled` and `all_day_date`.** Both joined `Meeting` with story `23e`
-      on the same precedent: in memory only, for the dashboard's live read of
-      the day, with no key in `_FIELDS`.
+    - **`cancelled`, `all_day_date` and `all_day_end_date`.** The first two
+      joined `Meeting` with story `23e`, the third with `23h`, on the same
+      precedent: in memory only, for the dashboard's live read of the day, with
+      no key in `_FIELDS`.
 
     Everything else round-trips unchanged, so those are the whole of the loss.
     """
@@ -373,6 +374,7 @@ def as_stored(meeting: Meeting) -> Meeting:
         ical_uid=None,
         cancelled=False,
         all_day_date=None,
+        all_day_end_date=None,
     )
 
 

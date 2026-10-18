@@ -1772,3 +1772,58 @@ def test_a_flagged_row_is_persisted_and_counted_rather_than_raised(tmp_path):
 
     assert result.flagged == 1
     assert result.persisted == 1, "flagged is a count beside the write, not instead of it"
+
+
+# ── Multi-day all-day entries (story 23h) ────────────────────────────────────
+
+
+def _fetched_rows(*events: dict):
+    return GraphCalendarFetch(
+        client=GraphClient(auth=Auth(), transport=Transport(_page(*events)), now=lambda: NOW),
+        instance=INSTANCE,
+        windows=WindowPolicy(width=WIDTH, first_run_reach_back=REACH_BACK),
+        now=lambda: NOW,
+    ).fetch().rows
+
+
+def test_an_all_day_row_carries_its_end_date_in_memory_only():
+    """Matrix: start Sep 3, end Sep 6 — both dates as Graph wrote them, no flag."""
+    from datetime import date
+
+    start = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    row = _event(start, start + timedelta(days=3), isAllDay=True)
+
+    (fetched,) = _fetched_rows(row)
+    assert (fetched.all_day_date, fetched.all_day_end_date) == (
+        date(2026, 9, 3),
+        date(2026, 9, 6),
+    )
+    assert fetched.clock_flag is None
+
+    (record,) = _harvest(row).records
+    assert (record.all_day_date, record.all_day_end_date) == (date(2026, 9, 3), date(2026, 9, 6))
+    assert as_stored(record).all_day_end_date is None, "stored nowhere"
+
+
+def test_a_timed_row_carries_no_end_date():
+    (fetched,) = _fetched_rows(_ended())
+    assert fetched.all_day_date is None and fetched.all_day_end_date is None
+
+
+@pytest.mark.parametrize("days", [0, -1], ids=["end-on-the-start-date", "end-before-it"])
+def test_an_all_day_row_ending_not_after_its_start_is_flagged_not_refused(days):
+    """Matrix: start Sep 3, end Sep 3 or Sep 2 — carried as sent, flagged, kept."""
+    from datetime import date
+
+    start = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    row = _event(start, start + timedelta(days=days), isAllDay=True)
+
+    (fetched,) = _fetched_rows(row)
+    assert fetched.clock_flag is not None
+    assert fetched.all_day_end_date == date(2026, 9, 3) + timedelta(days=days)
+
+    result = _harvest(row)
+    assert result.refusals == ()
+    (meeting,) = (*result.records, *result.live)
+    assert meeting.all_day_date == date(2026, 9, 3)
+    assert meeting.duration_minutes == 0

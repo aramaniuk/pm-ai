@@ -2,7 +2,8 @@
 title: 'The prompt completes and hints'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '9e5383fe4c6ec023d243bfd09d9df39e72d6b6d4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -81,14 +82,14 @@ Verified against: re-verified against `ba0b747` (main) on 2026-10-17. `4t`'s goa
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pyproject.toml`, `uv.lock` -- `prompt_toolkit` pinned exactly in the runtime extra, with the verification comment -- the dependency
-- [ ] `pm_ai/app/wiring.py` -- `4n`'s row rule as a pure function over the rows' names and bytes, used by `read_connector_rows` and by the completion reader -- one rule, no store
-- [ ] `pm_ai/surfaces/cli/completion.py` -- new: the completer over `TABLE` with value sources keyed by command and name, the free-text list, the hint text, `shlex.quote` for candidates, a tokenizer that tolerates an open quote; no I/O of its own beyond listing a folder for a path -- one place reads the table for completion
-- [ ] `pm_ai/surfaces/cli/repl.py` -- `run` reads through a `prompt_toolkit` session (in-memory history of command lines only, Tab completion, bottom hint line, suggestions, cursor-position request off, editor, system prompt and suspend off) when the library imports and the session starts; otherwise `4q`'s loop and the matching sentence; `read` stays injectable -- the prompt
-- [ ] `pm_ai/app/entry.py` -- the completion readers (registry ids, Graph rows, goal ids), built from paths, read lazily, injected into `run` -- `surfaces` may not locate files
-- [ ] `tests/surfaces/test_cli_completion.py` -- one test per matrix row against the completer with stand-in readers, the extra-missing row by simulating the failed import, plus the test that every name a command declares has a value source or is listed as free text, and the test that the process-starting features are off -- the matrix is the contract
-- [ ] `tests/slice/test_repl_startup.py` -- the import test lists `prompt_toolkit`; no cursor-position warning asserted; the recall test waits on status lines if prompts repeat; the docstring records the figure measured with the library -- the budget
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/4f-terminal-repl.md` -- when this slice is built: edit the amended frozen text and add a dated Change Log line naming the line-editing bullet and the Recall row this slice replaces -- an earlier frozen block says it was amended
+- [x] `pyproject.toml`, `uv.lock` -- `prompt_toolkit` pinned exactly in the runtime extra, with the verification comment -- the dependency
+- [x] `pm_ai/app/wiring.py` -- `4n`'s row rule as a pure function over the rows' names and bytes, used by `read_connector_rows` and by the completion reader -- one rule, no store
+- [x] `pm_ai/surfaces/cli/completion.py` -- new: the completer over `TABLE` with value sources keyed by command and name, the free-text list, the hint text, `shlex.quote` for candidates, a tokenizer that tolerates an open quote; no I/O of its own beyond listing a folder for a path -- one place reads the table for completion
+- [x] `pm_ai/surfaces/cli/repl.py` -- `run` reads through a `prompt_toolkit` session (in-memory history of command lines only, Tab completion, bottom hint line, suggestions, cursor-position request off, editor, system prompt and suspend off) when the library imports and the session starts; otherwise `4q`'s loop and the matching sentence; `read` stays injectable -- the prompt
+- [x] `pm_ai/app/entry.py` -- the completion readers (registry ids, Graph rows, goal ids), built from paths, read lazily, injected into `run` -- `surfaces` may not locate files
+- [x] `tests/surfaces/test_cli_completion.py` -- one test per matrix row against the completer with stand-in readers, the extra-missing row by simulating the failed import, plus the test that every name a command declares has a value source or is listed as free text, and the test that the process-starting features are off -- the matrix is the contract
+- [x] `tests/slice/test_repl_startup.py` -- the import test lists `prompt_toolkit`; no cursor-position warning asserted; the recall test waits on status lines if prompts repeat; the docstring records the figure measured with the library -- the budget
+- [x] `_bmad-output/specs/spec-pm-ai/stories/4f-terminal-repl.md` -- when this slice is built: edit the amended frozen text and add a dated Change Log line naming the line-editing bullet and the Recall row this slice replaces -- an earlier frozen block says it was amended
 
 **Acceptance Criteria:**
 - Given the runtime extra installed and two projects enrolled, when `pm-ai` opens on a pseudo-terminal and `dashboard --scope ` and Tab are typed, then both `project:<id>` candidates and `personal` are offered and no request reached the daemon's port.
@@ -100,6 +101,7 @@ Verified against: re-verified against `ba0b747` (main) on 2026-10-17. `4t`'s goa
 - **2026-10-16, review:** value sources keyed by command and name (`connector add`'s instance and `goal set`'s id are free text), the free-text list in `completion.py`; Graph rows offered enabled or not; readers by path with `4n`'s row rule as a pure function, `StorageService` forbidden (it opens `operational.db`); `shlex.quote` for any candidate that would not split back, an open quote tolerated and closed, `--scope=` completed; history holds command lines only; separate fallbacks for a failed import and a failed start; the cursor-position request off and the startup tests' handling stated; the library's process-starting features off; rows for recall, Ctrl-C, Ctrl-D, `exit`, no history file, group alone, help, unknown word, open lines; a task for `4f`'s Change Log; finding cited by file. Amends an earlier frozen block: `4f`'s line-editing bullet and Recall row (replaced when the runtime extra is installed). Depends on spine amendment: the Stack table — a `prompt_toolkit` row, pinned exactly, runtime extra, imported lazily by the prompt.
 - **2026-10-16, review (cross-spec):** Change Log moved before Design Notes; the group hint reads the subcommands from the table (so `connector categories` from `4s` appears), not a fixed list; `--lines` dropped from the free-text list (it is `4w`'s); the amendment task now edits `4f`'s frozen text and adds a dated line, when this slice is built.
 - **2026-10-17,** Code Map re-verified against `ba0b747` after 4t merged; command and argument sources match main.
+- **2026-10-18, built:** `prompt_toolkit` pinned at 3.0.53, the release current on PyPI that day (`wcwidth` 0.9.2 by the lock). Startup with the library loaded at open: median 0.71 s over seven pseudo-terminal runs at build, 0.66 s over nine after review (0.43 s with the import made to fail), so more than a quarter of the 1.0 s budget is left and the Ask First did not apply. The hint line is the library's bottom toolbar, drawn on the line under the input: with the cursor-position request off, the library cannot know the rows below the cursor, so `editor.py` reports one. Review added: Ctrl-Z bound to nothing; `~name` paths not completed; after a bare `--`, words are positionals; the connector reader shares `list_collection`'s membership rule; inside double quotes, only `"` and `\` are escaped, as `shlex` does.
 
 ## Design Notes
 
@@ -115,3 +117,70 @@ A completer keyed by the command and the names the table already declares keeps 
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai` with one project enrolled: Tab through `transcript drop`, a path with a space, `--scope` -- expected: as the matrix says; the bottom line shows the usage
+
+## Suggested Review Order
+
+**Completion over the one table**
+
+- Entry point: completes a line from `TABLE`, keyed by command and declared name.
+  [`completion.py:362`](../../../../pm_ai/surfaces/cli/completion.py#L362)
+
+- Value sources by (command, name); free-text names listed here, never in `TABLE`.
+  [`completion.py:107`](../../../../pm_ai/surfaces/cli/completion.py#L107)
+
+- Reads the words so far: options given, positional count, a bare `--`.
+  [`completion.py:292`](../../../../pm_ai/surfaces/cli/completion.py#L292)
+
+- Tolerates an open quote; marks a trailing backslash broken, as `shlex` refuses it.
+  [`completion.py:173`](../../../../pm_ai/surfaces/cli/completion.py#L173)
+
+- Inserted words split back to themselves (`shlex.quote`, or closing the open quote).
+  [`completion.py:240`](../../../../pm_ai/surfaces/cli/completion.py#L240)
+
+- Hint text: usage and summary, a group's subcommands, help, or nothing.
+  [`completion.py:441`](../../../../pm_ai/surfaces/cli/completion.py#L441)
+
+- Path listing relative to the start folder; only the `~/` form of `~`.
+  [`completion.py:470`](../../../../pm_ai/surfaces/cli/completion.py#L470)
+
+**The prompt and its fallbacks**
+
+- Only importer of `prompt_toolkit`: history of commands only, toolbar, suggestions, features off.
+  [`editor.py:125`](../../../../pm_ai/surfaces/cli/editor.py#L125)
+
+- One row reported below the cursor so the toolbar draws with the cursor-position request off.
+  [`editor.py:68`](../../../../pm_ai/surfaces/cli/editor.py#L68)
+
+- Missing extra, incompatible library or failed start: `4q`'s loop and one sentence.
+  [`repl.py:238`](../../../../pm_ai/surfaces/cli/repl.py#L238)
+
+- Mid-session library failure falls back; Ctrl-C and Ctrl-D pass through.
+  [`repl.py:213`](../../../../pm_ai/surfaces/cli/repl.py#L213)
+
+- Readers forgotten after every command line, so new enrolments are offered.
+  [`repl.py:539`](../../../../pm_ai/surfaces/cli/repl.py#L539)
+
+**Readers built from paths**
+
+- Composition root hands the three lazy readers to the prompt.
+  [`entry.py:1429`](../../../../pm_ai/app/entry.py#L1429)
+
+- Graph rows by path, enabled or not; no store opened.
+  [`entry.py:1460`](../../../../pm_ai/app/entry.py#L1460)
+
+- `4n`'s row rule as a pure function, shared with `read_connector_rows`.
+  [`wiring.py:2865`](../../../../pm_ai/app/wiring.py#L2865)
+
+- Collection membership rule shared by `list_collection` and the reader.
+  [`service.py:1390`](../../../../pm_ai/storage/service.py#L1390)
+
+**Peripherals**
+
+- Exact pin and its verification comment.
+  [`pyproject.toml:106`](../../../../pyproject.toml#L106)
+
+- Matrix tests, the declared-name check, features-off and fallback tests.
+  [`test_cli_completion.py`](../../../../tests/surfaces/test_cli_completion.py)
+
+- Pseudo-terminal acceptance: scope candidates with no daemon request; hint line drawn.
+  [`test_repl_startup.py:184`](../../../../tests/slice/test_repl_startup.py#L184)

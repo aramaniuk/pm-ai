@@ -71,6 +71,7 @@ and ends this morning appear without a date filter here silently dropping it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -86,10 +87,16 @@ from pm_ai.core.cadence import (
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.event_log import LogRead
 from pm_ai.core.goal_register import GoalRegister
-from pm_ai.domain.event_entries import EventEntry, MalformedEntry, SelfActionType
+from pm_ai.domain.event_entries import (
+    IMPLAUSIBLE,
+    OCCURRED_AT_FLAG,
+    EventEntry,
+    MalformedEntry,
+    SelfActionType,
+)
 from pm_ai.domain.events import MessagePayload, ObservedEventType
 from pm_ai.domain.goals import Goal, GoalDomain
-from pm_ai.domain.handles import NO_PERSON, PersonHandle
+from pm_ai.domain.handles import GRAPH_APP, NO_PERSON, PersonHandle
 from pm_ai.domain.harvest import (
     HarvestFailure,
     NoCalendarConnector,
@@ -99,9 +106,11 @@ from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.payload_fields import decode_payload
 
 __all__ = [
+    "APP_MARKER",
     "CalendarAnswer",
     "EventLogAnswer",
     "GOALS_PATH",
+    "HARVESTED_MARKER",
     "HEADINGS",
     "LEADERSHIP_NOTES",
     "MAX_SIGNAL_LINES",
@@ -117,6 +126,7 @@ __all__ = [
     "UNKNOWN_SENDER",
     "code",
     "escape",
+    "fold_breaks",
     "render_dashboard",
     "render_project_dashboard",
 ]
@@ -292,7 +302,17 @@ MENTIONS_YOU = "mentions you"
 """How a signal line whose `mentions` holds one of the PM's handles ends."""
 
 UNKNOWN_SENDER = "an unknown sender"
-"""What the absence actor `none:` renders as; every other actor renders as written."""
+"""What the absence actor `none:` renders as. Every other actor renders as the
+sender's stored display name when the line carries one (`23f`), otherwise as
+the handle written."""
+
+APP_MARKER = "(app)"
+"""What follows an application's display name on a signal line (`23f`), so a
+bot that names itself like a colleague still reads as a bot."""
+
+HARVESTED_MARKER = "(harvested)"
+"""What follows a signal line's time when it is the harvest time (`23f`): the
+posted time was absent, unreadable, flagged implausible, or after the render."""
 
 # The categories Proactive Enablement reads. One member today; a tuple because
 # the section states its own vocabulary, and a widening should change the
@@ -692,7 +712,9 @@ def _proactive_enablement(
 
     A log that could not be read is stated, with its reason bounded, and nothing
     else is said. Otherwise: the signals decoded, marked and ordered — mentions
-    of the PM first, then newest first — at most `MAX_SIGNAL_LINES` of them with
+    of the PM first, then newest first by the time each line is labelled with
+    (the posted time, or the harvest time when that cannot be used, `23f`) — at
+    most `MAX_SIGNAL_LINES` of them with
     a closing line counting the rest, or the empty-window sentence; then a line
     per connector whose sign-in predates the recorded user id and per row that
     could not be checked; then the footnotes counting what the window excluded.
@@ -771,7 +793,17 @@ def _proactive_enablement(
             continue
         # `None` is "mentions not recorded": no claim either way, so unmarked.
         mentioned = bool(mine.intersection(payload.mentions or ()))
-        signals.append(_Signal(at, entry, payload, mentioned))
+        # Selected on the harvest time, labelled with the posted time (`23f`).
+        posted = _posted_at(entry, now=now)
+        signals.append(
+            _Signal(
+                label=at if posted is None else posted,
+                harvested=posted is None,
+                entry=entry,
+                payload=payload,
+                mentioned=mentioned,
+            )
+        )
 
     footnote = _window_notes(
         absent=absent, unreadable=unreadable, ahead=ahead, undecodable=undecodable
@@ -782,11 +814,12 @@ def _proactive_enablement(
     if not signals:
         return f"{_no_signals(window=window, now=now, tz=tz)}{sign_ins}{footnote}"
 
-    # Mentions of the PM first, then newest first, then the entry id — total,
-    # so a re-render is byte-identical. When the mentions alone exceed the cap,
-    # the newest of them fill it, which this order gives for free.
+    # Mentions of the PM first, then newest first by the label's time, then the
+    # entry id — total, so a re-render is byte-identical, and the list reads in
+    # the order of its own labels (`23f`). When the mentions alone exceed the
+    # cap, the newest of them fill it, which this order gives for free.
     signals.sort(
-        key=lambda s: (not s.mentioned, -s.at.timestamp(), s.entry.entry_id or "")
+        key=lambda s: (not s.mentioned, -s.label.timestamp(), s.entry.entry_id or "")
     )
     shown = signals[:MAX_SIGNAL_LINES]
     lines = "\n".join(_signal_line(signal, tz=tz, now=now) for signal in shown)
@@ -805,9 +838,15 @@ def _proactive_enablement(
 
 @dataclass(frozen=True, slots=True)
 class _Signal:
-    """One decoded message inside the window, and whether it mentions the PM."""
+    """One decoded message inside the window, and whether it mentions the PM.
 
-    at: datetime
+    `label` is the instant the line shows and is ordered by: the posted time,
+    or the harvest time when `harvested` (`23f`). The window selected the entry
+    on its harvest time either way.
+    """
+
+    label: datetime
+    harvested: bool
     entry: EventEntry
     payload: MessagePayload
     mentioned: bool
@@ -921,11 +960,7 @@ def _signal_line(signal: _Signal, *, tz: tzinfo, now: datetime) -> str:
     # actor and nothing else.
     channel = signal.payload.channel
     excerpt = signal.payload.excerpt
-    # The actor as the line carries it — a handle, not a name: the alias table
-    # that would resolve it is saved nowhere, so nothing here resolves it.
-    actor = signal.entry.actor
-    sender = UNKNOWN_SENDER if actor == str(NO_PERSON) else escape(actor)
-    parts = [f"- **{_local(signal.at, tz=tz, now=now)}**", sender]
+    parts = [f"- **{_signal_time(signal, tz=tz, now=now)}**", _sender(signal)]
     if channel:
         parts.append(f"in {escape(channel)}")
     line = " ".join(parts)
@@ -934,6 +969,66 @@ def _signal_line(signal: _Signal, *, tz: tzinfo, now: datetime) -> str:
     if signal.mentioned:
         line += f" — {MENTIONS_YOU}"
     return line
+
+
+def _signal_time(signal: _Signal, *, tz: tzinfo, now: datetime) -> str:
+    """The line's label: the posted time, or the harvest time marked as such.
+
+    Both dated by the one rule (`_local`) when not today (`23f`).
+    """
+    when = _local(signal.label, tz=tz, now=now)
+    return f"{when} {HARVESTED_MARKER}" if signal.harvested else when
+
+
+def _sender(signal: _Signal) -> str:
+    """Who posted it, as the line shows it — display text, never identity.
+
+    The stored display name when the line carries one, with `(app)` after an
+    application's (`23f`); otherwise the handle as written, which is what every
+    line ingested before `23f` shows. Nothing here resolves a handle or
+    compares a name: whether the line mentions the PM was decided on handles.
+    `none:` is the unknown sender even if a hand-edited line carries a name.
+    """
+    actor = signal.entry.actor
+    if actor == str(NO_PERSON):
+        return UNKNOWN_SENDER
+    name = signal.payload.sender_name
+    shown = escape(name) if name else ""
+    if not shown:
+        return escape(actor)
+    if actor.startswith(f"{GRAPH_APP}:"):
+        return f"{shown} {APP_MARKER}"
+    return shown
+
+
+def _posted_at(entry: EventEntry, *, now: datetime) -> datetime | None:
+    """The provider's posted time, when a line may be labelled with it (`23f`).
+
+    `None` — so the line takes its harvest time, marked — when `occurred_at` is
+    absent or `unknown`, unreadable, without a timezone, outside the range a
+    UTC instant can hold, flagged implausible
+    when it was stored (AD-35), or later than this render's instant: a posted
+    time in the future cannot be right yet.
+    """
+    fields = dict(entry.fields)
+    if fields.get(OCCURRED_AT_FLAG) == IMPLAUSIBLE:
+        return None
+    raw = fields.get("occurred_at")
+    if raw is None:
+        return None
+    try:
+        at = datetime.fromisoformat(raw)
+    except ValueError:
+        # `unknown` lands here too: it is not an instant.
+        return None
+    if at.tzinfo is None or at.utcoffset() is None:
+        return None
+    try:
+        at = at.astimezone(timezone.utc)
+    except OverflowError:
+        # `0001-01-01T00:00+05:00` has no UTC instant: unusable, not a crash.
+        return None
+    return None if at > now else at
 
 
 def _window_notes(
@@ -1130,33 +1225,34 @@ def escape(text: str) -> str:
     everything after it reads as a new item, and a `|` would break any table a
     later section grows.
 
+    **Line breaks are folded first** (`23f`, Andrei's decision of 2026-10-16):
+    every run of line breaks, with the spaces, tabs and no-break spaces beside
+    it, becomes one space (`fold_breaks`), so a multi-line excerpt or title
+    reads as one line, the way a mail client previews it, and no literal `\n`
+    reaches the page. It runs before escaping and before any cut.
+
     Two classes, escaped differently on purpose. A control character has no
-    Markdown spelling, so it becomes a visible `\n`/`\r`/`\t` — the value stays
+    Markdown spelling, so it becomes a visible `\t` or `\xNN` — the value stays
     on its line and the reader can see what was in it. A structural character
     has one, so it is backslash-escaped and renders as itself.
 
-    `_INVISIBLE` is the first class with a wider net than C0: U+2028 and the
-    bidi overrides sit above the `char < " "` test and do a control character's
+    `_INVISIBLE` is the first class with a wider net than C0: the bidi
+    overrides sit above the `char < " "` test and do a control character's
     damage, so they take a control character's visible spelling.
     """
     out: list[str] = []
-    # Stripped *before* escaping, not after: once a trailing newline has become
-    # the two characters `\` and `n` no strip can find it, and a title padded by
-    # its provider would render with a visible `\n` hanging off the end.
-    for char in text.strip():
+    # Folded and stripped *before* escaping, not after: once a control character
+    # has become its visible spelling no fold or strip can find it.
+    for char in fold_breaks(text).strip():
         if char == "\\":
             out.append("\\\\")
-        elif char == "\n":
-            out.append("\\n")
-        elif char == "\r":
-            out.append("\\r")
         elif char == "\t":
             out.append("\\t")
         elif char in _STRUCTURAL:
             out.append(f"\\{char}")
         elif char < " " or char == "\x7f":
             # Everything else in C0 and DEL: invisible in a text file, and a
-            # `\x0b` in a title is the kind of thing that makes two renders of
+            # `\x01` in a title is the kind of thing that makes two renders of
             # the same data look identical and diff.
             out.append(f"\\x{ord(char):02x}")
         elif char in _INVISIBLE:
@@ -1175,18 +1271,19 @@ def code(text: str) -> str:
     every citation on the page. What a code span cannot survive is a backtick or
     a line break, and those are the two this handles: the backtick is replaced
     rather than escaped, because there is no escape for it in the span grammar,
-    and a control character becomes its visible spelling exactly as in `escape`.
+    a run of line breaks is folded to one space exactly as in `escape` (`23f`),
+    and any other control character becomes its visible spelling as there.
 
     Goal ids are charset-checked by `goal_register.GOAL_ID` and could not
     contain either. The register is a plain `dict` subclass that anything may
     construct, though, so this does not depend on the parser having built it.
     """
     out: list[str] = []
-    for char in text.strip():
+    for char in fold_breaks(text).strip():
         if char == "`":
             out.append("'")
-        elif char in "\n\r\t":
-            out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}[char])
+        elif char == "\t":
+            out.append("\\t")
         elif char < " " or char == "\x7f":
             out.append(f"\\x{ord(char):02x}")
         elif char in _INVISIBLE:
@@ -1196,6 +1293,35 @@ def code(text: str) -> str:
         else:
             out.append(char)
     return "".join(out)
+
+
+_LINE_BREAKS = "\n\r\v\f\x85\u2028\u2029"
+"""Every character the fold treats as a line break (`23f`): `\r\n` is two of them
+in one run. A tab, any other control character and the bidi overrides are not
+here and keep their visible spelling."""
+
+_BESIDE_BREAKS = (
+    "\t\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u202f\u205f\u3000"
+)
+"""What a break run absorbs on either side: a tab and every Unicode space
+separator (category `Zs`) — the ordinary space, the no-break spaces (U+00A0,
+U+2007, U+202F), the en to hair spaces (U+2000–U+200A), the Ogham space mark
+(U+1680), the medium mathematical space (U+205F) and the ideographic space
+(U+3000). A test pins the set against the Unicode tables."""
+
+_BREAK_RUN = re.compile(f"[{_BESIDE_BREAKS}]*(?:[{_LINE_BREAKS}][{_BESIDE_BREAKS}]*)+")
+
+
+def fold_breaks(text: str) -> str:
+    """Every run of line breaks, with the blanks beside it, as one space (`23f`).
+
+    `First\n\nSecond` and `a \t\n b` read `First Second` and `a b`. A tab
+    not beside a break is left for the escaper to spell. Applied by `escape`
+    and `code` to every interpolated value, so lines already in the log fold
+    too; the stored text is never changed.
+    """
+    return _BREAK_RUN.sub(" ", text)
 
 
 _INVISIBLE = frozenset(
@@ -1219,7 +1345,8 @@ mechanism with a different scope.
 Rendered as a visible `\uXXXX` rather than backslash-escaped, following the C0
 branch: there is no Markdown escape for a character with no glyph, and a
 visible spelling keeps the value on its line where the reader can see what was
-in it.
+in it. U+2028 and U+2029 are folded to a space before this set is consulted
+(`fold_breaks`, `23f`); they stay listed so the set still says what it guards.
 
 Declared by code point rather than as a string of literals, because a literal
 here is invisible in the source too — a set nobody can read in a diff is a set
@@ -1240,8 +1367,8 @@ visible backslash in every `u_dana`, every `#payments` and every
 `goal:g_staff_eng` on the page a PM reads at 07:00 — a permanent legibility tax
 on every line, paid to prevent a title rendering in italics. `#` is out for a
 different reason: it is a heading only at the start of a line, and no
-interpolation here can reach one, because a literal newline is escaped to `\\n`
-before anything is placed.
+interpolation here can reach one, because every line break is folded to a space
+before anything is placed (`23f`).
 """
 
 

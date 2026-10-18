@@ -33,6 +33,7 @@ from pm_ai.ports import (
     KeyNotFound,
 )
 from pm_ai.surfaces.cli import dispatch as cli
+from pm_ai.surfaces.cli import repl
 from pm_ai.surfaces.cli.dispatch import (
     EXIT_OK,
     EXIT_REFUSAL,
@@ -242,7 +243,9 @@ def test_opening_the_prompt_composes_nothing_and_starts_no_setup(
     assert entry.main([]) == EXIT_OK
     captured = capsys.readouterr()
     assert captured.out == "pm-ai> "
-    assert captured.err == ""
+    # Story 4u: this stand-in terminal has no descriptor, so the line editor
+    # cannot start and says so in its one sentence; nothing else is said.
+    assert captured.err == repl.line_editor_failed(repl.NotATerminal()) + "\n"
 
 
 def test_a_secret_command_asks_at_this_terminal_and_ctrl_c_there_is_exit_3(

@@ -124,14 +124,25 @@ def message(
     excerpt: str | None = None,
     mentions: tuple[str, ...] | None = None,
     entry_id: str = "evt_1",
+    occurred_at: datetime | None = None,
+    sender_name: str | None = None,
 ) -> EventEntry:
     """A `message_posted` entry off the project's event log, its payload fields
-    built by `encode_payload` as the writer builds them."""
+    built by `encode_payload` as the writer builds them.
+
+    `occurred_at` (`23f`) defaults to the harvest time `at`, so a fixture that
+    does not care about the posted time keeps its golden's times."""
     fields: list[tuple[str, str]] = [
         ("ingested_at", at.isoformat()),
         ("src", "slack:msg/1"),
+        ("occurred_at", (at if occurred_at is None else occurred_at).isoformat()),
         *encode_payload(
-            MessagePayload(channel=channel, excerpt=excerpt, mentions=mentions)
+            MessagePayload(
+                channel=channel,
+                excerpt=excerpt,
+                mentions=mentions,
+                sender_name=sender_name,
+            )
         ),
     ]
     return EventEntry(
@@ -608,7 +619,9 @@ def test_markdown_unsafe_text_is_escaped_and_the_structure_survives():
         f"## {heading}" for heading in PROJECT_HEADINGS
     ]
     assert "\\|" in text
-    assert "\\n" in text
+    # Folded to one space, never spelled out (`23f`): the excerpt is one line.
+    assert "\\n" not in text
+    assert "ship it ## Time-Critical Activities" in text
     body = sections(text)
     assert "All clear!" in body["Time-Critical Activities"]  # content, not a claim
     assert "dana \\| *ops*" in body["Proactive Enablement"]
@@ -680,3 +693,60 @@ def test_the_proactive_section_renders_byte_identically_in_both_files():
     )
     project = raw_blocks(render_project_dashboard((), entries, NOW, tz=DISPLAY, pm=pm))
     assert project["Proactive Enablement"] == personal["Proactive Enablement"]
+
+
+# ── Story 23f: readable message signals on the project dashboard ─────────────
+
+
+def _signal_lines(text: str) -> list[str]:
+    body = sections(text)["Proactive Enablement"]
+    return [line for line in body.split("\n") if line.startswith("- **")]
+
+
+def test_a_project_line_shows_the_name_the_posted_time_and_one_line_of_text():
+    """The same rule as the personal file: name, posted time, folded excerpt."""
+    entry = message(
+        at=NOW - timedelta(minutes=5),
+        occurred_at=NOW - timedelta(hours=1),
+        actor="graph:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        sender_name="Dana Okafor",
+        excerpt="First\n\nSecond",
+    )
+    (line,) = _signal_lines(render(entries=(entry,)))
+    assert line == "- **11:30** Dana Okafor in #alpha-build — First Second"
+
+
+def test_a_project_line_posted_after_the_render_takes_its_harvest_time():
+    entry = message(
+        at=NOW - timedelta(minutes=5), occurred_at=NOW + timedelta(minutes=3)
+    )
+    (line,) = _signal_lines(render(entries=(entry,)))
+    assert line == "- **12:25 (harvested)** u_dana in #alpha-build"
+
+
+def test_no_project_render_carries_a_spelled_out_line_break():
+    """Acceptance: no backslash followed by `n`, `r`, `v` or `f` in the file."""
+    hostile = "a\nb\r\nc\vd\fe\x85f\u2028g\u2029h"
+    text = render(
+        meetings=(
+            meeting(
+                "m_x", hostile, start=datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)
+            ),
+        ),
+        entries=(
+            message(
+                at=NOW - timedelta(minutes=5),
+                channel=hostile,
+                excerpt=hostile,
+                sender_name=hostile,
+            ),
+        ),
+    )
+    # Every spelling the escaper before `23f` gave a line break (`\n`, `\r`,
+    # `\x0b`, `\x0c`, `\u2028`, `\u2029`), and the raw characters themselves:
+    # U+0085 it passed through unescaped.
+    for spelled in ("\\n", "\\r", "\\v", "\\f", "\\x0b", "\\x0c", "\\x85", "\\u2028", "\\u2029"):
+        assert spelled not in text
+    for raw in ("\v", "\f", "\x85", "\u2028", "\u2029"):
+        assert raw not in text
+    assert "a b c d e f g h" in text

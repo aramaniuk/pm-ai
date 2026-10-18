@@ -126,6 +126,13 @@ class MessagePayload:
     # `None` is "the connector never asked", which is a different fact from
     # `()`, "it asked and there were none" (AD-27).
     mentions: tuple[str, ...] | None = None
+    # The display name Microsoft sent with the sender (`23f`): for display only,
+    # never identity. The sender is the envelope actor, a handle (AD-34); this
+    # name is never compared, matched to a person, used as an actor or a
+    # mention, or written in place of a handle. Taken from the same branch of
+    # `from` that produced the actor, so it is absent for `none:`. `None` on
+    # every line written before `23f`, which therefore shows its handle.
+    sender_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +233,7 @@ UNTRUSTED_TEXT: dict[type, tuple[str, ...]] = {
     CommitPayload: ("message", "branch"),
     ReviewPayload: ("target_ref",),
     DocumentPayload: ("title",),
-    MessagePayload: ("channel", "excerpt"),
+    MessagePayload: ("channel", "excerpt", "sender_name"),
     DecisionPayload: ("statement", "rationale"),
     PipelinePayload: (),
     MeetingHeldPayload: (),

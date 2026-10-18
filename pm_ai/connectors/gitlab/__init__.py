@@ -124,9 +124,21 @@ arithmetic from overflowing. The same bound Graph sets on its own minute
 settings, stated here for GitLab rather than borrowed.
 """
 
-FIRST_RUN_REACH_BACK = timedelta(days=7)
-"""How far back a run with no cursor asks. A row may override it with
-`first_run_reach_back_minutes`."""
+FIRST_RUN_REACH_BACK = timedelta(days=MERGE_LAG_DAYS)
+"""How far back a run with no cursor asks: `MERGE_LAG_DAYS`, spelled once.
+
+The same span every later run asks from before its cursor (story 8s). At seven
+days the second run quietly back-filled about three weeks the first had not
+asked for; derived from `MERGE_LAG_DAYS`, the two cannot drift apart again.
+
+The second run still can add something: the cursor is the date D of the
+newest commit the first run's complete walk saw, not the time T of the run, so
+the second asks from D − 30 days. What it can add beyond the first run's range
+is the range from D − 30 days up to T − 30 days, whose length is T − D —
+usually a few days on an active project.
+
+A row may override it with `first_run_reach_back_minutes`, written by hand;
+enrolment never writes one."""
 
 PAGE_CAP = 500
 """How many pages one `harvest` may walk before it refuses.

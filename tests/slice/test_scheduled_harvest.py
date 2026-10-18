@@ -717,6 +717,71 @@ def test_a_permanent_failure_waits_for_the_next_regular_cycle_and_a_success_clea
     assert rig.doctor("graph:a").health is Health.OK
 
 
+# ── A channel walk cut short (story 23h) ─────────────────────────────────────
+
+_CUT = HarvestFailure(
+    "graph:a stopped walking channel 'Build room' at the 20-page cap after "
+    "reaching its position; the next scheduled harvest walks the channel again.",
+    retryable=False,
+    walk_cut_short=True,
+)
+_THROTTLED = HarvestFailure("graph:a's calendar was throttled", retryable=True)
+_EXPIRED = HarvestFailure(
+    "graph:a's sign-in has expired; run `pm-ai connector sign-in graph:a`",
+    retryable=False,
+)
+_WAITS = "a channel walk was cut short"
+_NEEDS = "needs a person"
+
+
+@pytest.mark.parametrize(
+    ("parts", "says", "not_said"),
+    [
+        pytest.param((_CUT,), _WAITS, _NEEDS, id="cut-alone"),
+        pytest.param((_CUT, _THROTTLED), _WAITS, _NEEDS, id="cut-plus-throttled-calendar"),
+        pytest.param((_CUT, _EXPIRED), _NEEDS, _WAITS, id="cut-plus-expired-sign-in"),
+    ],
+)
+def test_a_cut_channel_walk_waits_for_its_next_cycle_and_is_logged_as_such(
+    rig, caplog, parts, says, not_said
+):
+    """Matrix: a cut walk is not retried and is logged as waiting for its next
+    cycle; beside an expired sign-in it still needs a person. The run's one
+    failure is joined by the connector's own `_one_failure`."""
+    from pm_ai.connectors.graph import _one_failure, _with_skipped
+
+    joined = _with_skipped(_one_failure(parts), ())
+    assert joined is not None and joined.retryable is False
+
+    def answer(connector: Any, cursor: Cursor) -> HarvestResult:
+        return HarvestResult(
+            events=(), cursor=cursor, outcome=HarvestOutcome.FAILED, failure=joined
+        )
+
+    caplog.set_level(logging.WARNING, logger=DAEMON_LOGGER)
+    a = Scripted(rig, "graph:a", answer, ok(), takes=timedelta(0))
+    rig.use(a)
+    rig.make_timers()
+    rig.drive(until=timedelta(seconds=30))
+
+    assert rig.timers.due["graph:a"] == T0 + CYCLE, "not retried: the next regular cycle"
+    said = [r.getMessage() for r in caplog.records if "graph:a" in r.getMessage()]
+    assert any(says in line for line in said), said
+    assert not any(not_said in line for line in said), said
+
+    stored = rig.daemon.storage.harvest_failure("graph:a")
+    assert stored is not None
+    assert (stored.reason, stored.retryable, stored.retry_after) == (
+        joined.reason,
+        joined.retryable,
+        joined.retry_after,
+    )
+    assert stored.walk_cut_short is False, "in memory only: no column holds it"
+
+    rig.drive(until=CYCLE + MINUTE)
+    assert a.asked == [T0, T0 + CYCLE]
+
+
 # ── A refused save ───────────────────────────────────────────────────────────
 
 

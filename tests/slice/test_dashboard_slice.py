@@ -1206,14 +1206,17 @@ def _message(
     excerpt: str | None = None,
     mentions: tuple[str, ...] | None = None,
     sender: str = OTHER_ID,
+    occurred_at: datetime = NOW - timedelta(minutes=5),
 ) -> NormalizedEvent:
-    """A message as `33d` writes one: a Graph sender handle, channel, excerpt."""
+    """A message as `33d` writes one: a Graph sender handle, channel, excerpt.
+
+    `occurred_at` is the posted time each line is labelled with (`23f`)."""
     return NormalizedEvent(
         scope=scope,
         type=ObservedEventType.MESSAGE_POSTED,
         source_ref=SourceRef.parse(f"graph:alpha:message:{native}"),
         actor=person_handle("graph", sender),
-        occurred_at=NOW - timedelta(minutes=5),
+        occurred_at=occurred_at,
         payload=MessagePayload(channel="#payments", excerpt=excerpt, mentions=mentions),
     )
 
@@ -1252,7 +1255,11 @@ def test_a_mention_of_the_pm_is_listed_first_marked_and_the_rest_newest_first(tm
         (60, "m_new", None, "newest"),
     ):
         clock[0] = NOW - timedelta(minutes=minutes)
-        _persist(built, _message(native, excerpt=excerpt, mentions=mentions))
+        # Posted when harvested, so the labels are the harvest minutes (`23f`).
+        _persist(
+            built,
+            _message(native, excerpt=excerpt, mentions=mentions, occurred_at=clock[0]),
+        )
     clock[0] = NOW
 
     lines = _signal_lines(run_dashboard(built, now=NOW).read_text(encoding="utf-8"))
@@ -1323,7 +1330,8 @@ def test_the_project_dashboard_marks_a_mention_from_the_same_rows(tmp_path):
     lines = _signal_lines(
         run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8")
     )
-    assert lines == [f"- **12:30** graph:{OTHER_ID} in #payments — alpha ask — mentions you"]
+    # Labelled with the posted time, five minutes before the harvest (`23f`).
+    assert lines == [f"- **12:25** graph:{OTHER_ID} in #payments — alpha ask — mentions you"]
 
 
 def test_each_dashboard_reads_only_its_own_scopes_log(tmp_path):
@@ -1728,3 +1736,85 @@ def test_a_day_of_only_an_all_day_marker_never_says_it_has_ended(tmp_path):
     body = sections(written(built))["Time-Critical Activities"]
     assert body == "- **all day** Public holiday — 2 attendees"
     assert "has ended" not in body and "have ended" not in body
+
+
+# ── Multi-day all-day entries (story 23h) ────────────────────────────────────
+
+
+def _spanning_marker(start_date, end_date, *, title: str = "Offsite") -> Meeting:
+    """An all-day marker from `start_date` up to, not including, `end_date`."""
+    from dataclasses import replace
+
+    midnight = datetime(start_date.year, start_date.month, start_date.day, tzinfo=_UTC)
+    return replace(
+        meeting("m_offsite", title, start=midnight, minutes=0),
+        all_day_date=start_date,
+        all_day_end_date=end_date,
+    )
+
+
+def _listed_on(tmp_path: Path, marker: Meeting, now: datetime, *, zone: str = ZONE) -> bool:
+    built = daemon(tmp_path, _DayCalendar("graph:contoso", live=(marker,)), zone=zone)
+    run_dashboard(built, now=now)
+    body = sections(written(built))["Time-Critical Activities"]
+    lines = [line for line in body.split("\n") if marker.title in line]
+    assert all(line.startswith(f"- **all day** {marker.title} — ") for line in lines)
+    return bool(lines)
+
+
+@pytest.mark.parametrize(
+    ("day", "listed"),
+    [(17, True), (18, True), (19, True), (20, False)],
+    ids=["first-day", "middle-day", "last-day", "end-date"],
+)
+def test_a_multi_day_all_day_entry_is_listed_on_every_date_it_spans(tmp_path, day, listed):
+    """Matrix: start Oct 17, end Oct 20 — `all day` on 17, 18, 19; not 20."""
+    from datetime import date
+
+    marker = _spanning_marker(date(2026, 10, 17), date(2026, 10, 20))
+    noon = datetime(2026, 10, day, 10, 0, tzinfo=_UTC)  # 12:00 in Warsaw
+    assert _listed_on(tmp_path, marker, noon) is listed
+
+
+@pytest.mark.parametrize(
+    ("day", "listed"),
+    [(16, False), (17, True), (18, True), (19, False)],
+    ids=["day-before", "first-day", "last-day", "end-date"],
+)
+def test_a_multi_day_all_day_entry_west_of_utc_keeps_its_own_dates(tmp_path, day, listed):
+    """Matrix: UTC−5, start Oct 17, end Oct 19 — Oct 17 and 18; not Oct 16.
+
+    The midnight-UTC start reads as 19:00 on Oct 16 in Bogotá, and the request
+    range for Oct 16 overlaps it; the dates decide.
+    """
+    from datetime import date
+
+    marker = _spanning_marker(date(2026, 10, 17), date(2026, 10, 19))
+    evening = datetime(2026, 10, day, 23, 30, tzinfo=_UTC)  # 18:30 in Bogotá
+    assert _listed_on(tmp_path, marker, evening, zone="America/Bogota") is listed
+
+
+@pytest.mark.parametrize(
+    "end_day", [17, 16], ids=["end-on-the-start-date", "end-before-the-start-date"]
+)
+@pytest.mark.parametrize(("day", "listed"), [(16, False), (17, True), (18, False)])
+def test_an_all_day_entry_ending_not_after_its_start_is_on_its_start_date_only(
+    tmp_path, end_day, day, listed
+):
+    """Matrix: start Oct 17, end Oct 17 or Oct 16 — Oct 17 only."""
+    from datetime import date
+
+    marker = _spanning_marker(date(2026, 10, 17), date(2026, 10, end_day))
+    noon = datetime(2026, 10, day, 10, 0, tzinfo=_UTC)
+    assert _listed_on(tmp_path, marker, noon) is listed
+
+
+@pytest.mark.parametrize(("day", "listed"), [(16, False), (17, True), (18, False)])
+def test_an_all_day_entry_with_no_end_date_is_on_its_start_date_only(tmp_path, day, listed):
+    """Matrix: a `Meeting` with a start date only, as `23e` built them."""
+    from datetime import date
+
+    marker = _spanning_marker(date(2026, 10, 17), None)
+    assert marker.all_day_end_date is None
+    noon = datetime(2026, 10, day, 10, 0, tzinfo=_UTC)
+    assert _listed_on(tmp_path, marker, noon) is listed

@@ -2049,7 +2049,9 @@ def _on_day(meeting: Meeting, *, start: datetime, end: datetime, day: date) -> b
     is not in it.
 
     An all-day marker that carries its own date is placed by that date (`23e`):
-    it is on the page when the date equals the display date `day`. Converting
+    it is on the page on every date from its start date up to, not including,
+    its end date (`23h`), and on its start date alone when it has no end date
+    or one not after the start. Converting
     its start to the display zone instead would, west of UTC, move a
     midnight-UTC start onto the previous day — and the request range overlaps a
     neighbouring day's all-day entry by up to the zone's offset, which this
@@ -2057,7 +2059,10 @@ def _on_day(meeting: Meeting, *, start: datetime, end: datetime, day: date) -> b
     placed by its start.
     """
     if meeting.all_day_date is not None:
-        return meeting.all_day_date == day
+        ends = meeting.all_day_end_date
+        if ends is None or ends <= meeting.all_day_date:
+            return meeting.all_day_date == day
+        return meeting.all_day_date <= day < ends
     if meeting.start >= end:
         return False
     finishes = meeting.start + timedelta(minutes=meeting.duration_minutes)

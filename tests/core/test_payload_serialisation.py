@@ -175,8 +175,9 @@ def test_a_message_with_mentions_is_persisted_parsed_decoded_and_rendered():
         (), (entry,), NOW + timedelta(hours=1), tz=DISPLAY,
         pm=PmHandles(handles=frozenset(), unrecorded=(), unchecked=()),
     )
+    # Labelled with the posted time, 08:00Z, not the harvest time (`23f`).
     assert (
-        f"- **11:00** graph:{DANA_GUID} in #payments — Cache TTL is still 60s in staging"
+        f"- **10:00** graph:{DANA_GUID} in #payments — Cache TTL is still 60s in staging"
         in rendered
     )
 

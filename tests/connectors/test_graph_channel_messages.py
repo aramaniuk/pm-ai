@@ -46,6 +46,7 @@ from pm_ai.connectors.graph.auth import (
 from pm_ai.connectors.graph.calendar import GraphCalendarFetch, WindowPolicy
 from pm_ai.connectors.graph.channels import (
     EXCERPT_LENGTH,
+    MAX_LABEL_LENGTH,
     THREAD_HORIZON,
     GraphChannelFetch,
     plain_text,
@@ -53,7 +54,7 @@ from pm_ai.connectors.graph.channels import (
 from pm_ai.connectors.graph.client import GRAPH_BASE, GraphClient, GraphRequest, GraphResponse
 from pm_ai.core.ledger import parse_segment
 from pm_ai.domain.events import MessagePayload, ObservedEventType, Provenance
-from pm_ai.domain.harvest import Cursor, HarvestOutcome
+from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestOutcome
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.payload_fields import decode_payload
@@ -461,6 +462,148 @@ def test_a_bot_sender_is_emitted_with_an_application_handle():
     event = _by_id(result)["1700000000100"]
     assert str(event.actor) == f"graph_app:{BOT}"
     assert event.payload.excerpt == "Nightly build passed.\nLogs attached."
+
+
+# ── The sender's name (story 23f) ────────────────────────────────────────────
+
+
+def _sent_by(sender: object) -> object:
+    """The one event a root message from `sender` (its `from`) emits."""
+    result, _ = _harvest(_page(_message(**{"from": sender})))
+    return _by_id(result)["1700000000500"]
+
+
+def _user(user_id: object = SENDER, name: object = "Sam Sender") -> dict:
+    return {"application": None, "device": None, "user": {"id": user_id, "displayName": name}}
+
+
+def _app(app_id: object = BOT, name: object = "Build Bot") -> dict:
+    return {"application": {"id": app_id, "displayName": name}, "device": None, "user": None}
+
+
+def test_a_named_person_has_the_name_beside_the_handle():
+    """Matrix: named person — the name stored, the actor still the handle."""
+    event = _sent_by(_user())
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name == "Sam Sender"
+
+
+def test_a_bot_has_its_application_name_and_its_application_handle():
+    """Matrix: bot."""
+    result, _ = _harvest(_page(*_threads()))
+    event = _by_id(result)["1700000000100"]
+    assert str(event.actor) == f"graph_app:{BOT}"
+    assert event.payload.sender_name == "Build Bot"
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        _user(user_id=None, name="Dana Okafor"),
+        _user(user_id="not-a-guid", name="Dana Okafor"),
+        _app(app_id=None, name="Build Bot"),
+        {"user": {"displayName": "Dana Okafor"}, "application": {"displayName": "Bot"}},
+    ],
+    ids=["no-user-id", "unusable-user-id", "no-app-id", "names-only"],
+)
+def test_an_unknown_sender_stores_no_name_even_when_one_was_sent(sender):
+    """Matrix: unknown sender with a name — `none:`, and no name."""
+    event = _sent_by(sender)
+    assert str(event.actor) == "none:"
+    assert event.payload.sender_name is None
+
+
+def test_a_users_message_never_takes_the_applications_name():
+    """Matrix: user message, app name present — the user's name only."""
+    both = {
+        "user": {"id": SENDER, "displayName": "Sam Sender"},
+        "application": {"id": BOT, "displayName": "Build Bot"},
+    }
+    event = _sent_by(both)
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name == "Sam Sender"
+    no_user_name = {
+        "user": {"id": SENDER},
+        "application": {"id": BOT, "displayName": "Build Bot"},
+    }
+    assert _sent_by(no_user_name).payload.sender_name is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [None, 42, ["Sam"], "", "   ", "\u200b\u200e\u2060", "\t\n\u00a0", "\u2028"],
+    ids=["null", "number", "list", "empty", "spaces", "format-only", "blank-mix", "line-sep"],
+)
+def test_no_usable_name_is_left_off_and_the_handle_stays(name):
+    """Matrix: no name — absent, null, a number, whitespace or only format characters."""
+    event = _sent_by(_user(name=name))
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name is None
+
+
+def test_an_absent_display_name_is_left_off():
+    event = _sent_by({"user": {"id": SENDER}})
+    assert event.payload.sender_name is None
+
+
+DISGUISED_HANDLES = {
+    "zero-width-before": "\u200bgraph:1234",
+    "word-joiner-before": "\u2060email:a@b.c",
+    "bom-before": "\ufeffgraph:x",
+    "zero-width-inside": "graph\u200b:x",
+    "fullwidth": "\uff27\uff32\uff21\uff30\uff28\uff1a1234",
+}
+"""Handle-shaped names behind invisible or compatibility characters (`23f`):
+each reads as a handle on the page, so each is refused like the plain form."""
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "graph:1234",
+        f"graph:{SENDER}",
+        "Email:dana@example.com",
+        " none:",
+        "graph_app:x",
+        *DISGUISED_HANDLES.values(),
+    ],
+    ids=["graph", "graph-guid", "email", "none", "graph-app", *DISGUISED_HANDLES],
+)
+def test_a_name_shaped_like_a_handle_is_left_off(name):
+    """Matrix: name like a handle — it would read as one, so it is not stored."""
+    event = _sent_by(_user(name=name))
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name is None
+
+
+def test_a_name_with_a_colon_that_names_no_handle_system_is_kept():
+    assert _sent_by(_user(name="Ops: Dana")).payload.sender_name == "Ops: Dana"
+
+
+def test_a_long_name_is_stripped_and_cut_to_the_label_bound():
+    """Matrix: long name — 150 characters stored as 100."""
+    event = _sent_by(_user(name="  " + "n" * 150 + "  "))
+    assert MAX_LABEL_LENGTH == 100
+    assert event.payload.sender_name == "n" * 100
+
+
+def test_a_name_left_invisible_by_the_cut_is_left_off():
+    """Zero-width characters that fill the 100 kept: no blank sender."""
+    event = _sent_by(_user(name="\u200b" * MAX_LABEL_LENGTH + "Sam Sender"))
+    assert event.payload.sender_name is None
+
+
+def test_the_name_reaches_the_log_line_and_decodes(tmp_path):
+    """Through the single writer: the name is a `p.` field; the actor the handle."""
+    built = build(tmp_path, "alpha", now=lambda: NOW)
+    event = _sent_by(_user(name="Sam \"S\" Sender"))
+    built.storage.persist_events((event,), scope=ALPHA)
+    (segment,) = sorted(tmp_path.rglob("event_log/*.md"))
+    (entry,) = parse_segment(segment.read_text(encoding="utf-8"))
+    assert entry.actor == f"graph:{SENDER}"
+    payload = decode_payload(entry)
+    assert isinstance(payload, MessagePayload)
+    assert payload.sender_name == 'Sam "S" Sender'
 
 
 def test_html_to_text_decodes_entities_and_breaks_blocks_once():
@@ -1017,6 +1160,7 @@ def test_a_cut_after_the_position_names_the_horizon_and_is_not_retryable():
     assert datetime.fromisoformat(_positions(result.cursor)["channels"][CHANNEL_A]) == newest
     failure = result.failure
     assert failure is not None and failure.retryable is False
+    assert failure.walk_cut_short is True, "the cut after the position is marked (`23h`)"
     assert failure.retry_after is None
     reason = failure.reason
     assert "Build room" in reason
@@ -1048,6 +1192,7 @@ def test_a_cut_by_the_budget_after_the_position_is_not_retryable_either():
     assert datetime.fromisoformat(_positions(result.cursor)["channels"][CHANNEL_A]) == newest
     failure = result.failure
     assert failure is not None and failure.retryable is False
+    assert failure.walk_cut_short is True
     assert failure.retry_after is None
     assert "time budget" in failure.reason
     assert "Build room" in failure.reason
@@ -1070,8 +1215,51 @@ def test_a_cut_whose_oldest_first_post_is_exactly_at_the_position_is_the_retryab
     )
     failure = result.failure
     assert failure is not None and failure.retryable is True
+    assert failure.walk_cut_short is False, "only the non-retryable cut is marked"
     assert "horizon" not in failure.reason
     assert f"messages and replies created at or after {position.isoformat()}" in failure.reason
+
+
+# ── The cut marker through the run's one failure (story 23h) ─────────────────
+
+_CUT = HarvestFailure("cut after the position", retryable=False, walk_cut_short=True)
+_THROTTLED = HarvestFailure("calendar throttled", retryable=True, retry_after=timedelta(minutes=2))
+_EXPIRED = HarvestFailure("sign-in expired", retryable=False)
+
+
+@pytest.mark.parametrize(
+    ("parts", "cut"),
+    [
+        pytest.param((_CUT,), True, id="cut-alone"),
+        pytest.param((_CUT, _THROTTLED), True, id="cut-plus-throttled-calendar"),
+        pytest.param((_THROTTLED, _CUT, _CUT), True, id="two-cuts-and-a-throttle"),
+        pytest.param((_CUT, _EXPIRED), False, id="cut-plus-expired-sign-in"),
+        pytest.param((_EXPIRED,), False, id="expired-alone"),
+        pytest.param((_THROTTLED, _THROTTLED), False, id="retryable-join"),
+    ],
+)
+def test_a_joined_failure_is_a_cut_only_when_every_non_retryable_part_is(parts, cut):
+    from pm_ai.connectors.graph import _one_failure
+
+    joined = _one_failure(parts)
+    assert joined is not None
+    assert joined.walk_cut_short is cut
+    assert joined.retryable is all(part.retryable for part in parts)
+
+
+def test_a_retryable_failure_cannot_carry_the_cut_marker():
+    with pytest.raises(ValueError, match="walk_cut_short"):
+        HarvestFailure("cut", retryable=True, walk_cut_short=True)
+
+
+def test_naming_the_skipped_channels_keeps_the_cut_marker():
+    from pm_ai.connectors.graph import _with_skipped
+
+    skipped = ChannelListing(team="t", channel="c", project="alpha", label="Later room")
+    named = _with_skipped(_CUT, (skipped,))
+    assert named is not None and named is not _CUT
+    assert "Later room" in named.reason
+    assert named.walk_cut_short is True
 
 
 def test_a_cut_after_the_first_posts_went_out_of_order_states_the_unbounded_loss():
@@ -1626,6 +1814,44 @@ def test_an_all_day_entry_east_of_utc_is_listed_only_on_its_own_date(tmp_path):
     schedule = _schedule(text)
     assert "Today's holiday" in schedule
     assert "Yesterday's holiday" not in schedule
+
+
+@pytest.mark.parametrize(("day", "listed"), [(18, True), (19, False)])
+def test_a_multi_day_all_day_entry_east_of_utc_ends_before_its_end_date(tmp_path, day, listed):
+    """Matrix (`23h`): UTC+9, start Oct 17, end Oct 19 — on Oct 19 the range
+    overlaps the entry's midnight-UTC end, so it is returned, and not listed.
+
+    Assumes Graph writes the end as the entry's own midnight under
+    `Prefer: outlook.timezone="UTC"` (unmeasured, `deferred-work.md`).
+    """
+    from datetime import date
+
+    tokyo_evening = datetime(2026, 10, day, 11, 0, tzinfo=timezone.utc)  # 20:00 in Tokyo
+    offsite = _spanning(
+        "AAMk-offsite",
+        "Offsite",
+        datetime(2026, 10, 17, tzinfo=timezone.utc),
+        datetime(2026, 10, 19, tzinfo=timezone.utc),
+        isAllDay=True,
+    )
+    late = _calendar_event("AAMk-late", "Late sync", tokyo_evening + timedelta(hours=3))
+    routes = Routes(calendar=[_page(offsite, late), _page(offsite, late)])
+    connector = _calendar_only(routes, clock=lambda: tokyo_evening)
+
+    asked_range = (
+        datetime(2026, 10, day - 1, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, day, 15, 0, tzinfo=timezone.utc),
+    )
+    returned = connector.read_calendar(*asked_range)
+    (meeting,) = [m for m in (*returned.records, *returned.live) if m.title == "Offsite"]
+    assert (meeting.all_day_date, meeting.all_day_end_date) == (
+        date(2026, 10, 17),
+        date(2026, 10, 19),
+    )
+
+    text = _dashboard(tmp_path, connector, now=tokyo_evening, zone="Asia/Tokyo")
+    assert _range_of(_calendar_asks(routes)[-1]) == asked_range
+    assert ("Offsite" in _schedule(text)) is listed
 
 
 def test_an_all_day_row_carries_its_own_date_and_nothing_else_does():

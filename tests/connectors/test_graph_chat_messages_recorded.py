@@ -31,9 +31,11 @@ from tests.connectors.recorded_graph import (
     Auth,
     Recorded,
     graph_time,
+    harvest_then_dashboard,
     mentioned_users,
     message_events,
     recorded,
+    signal_lines,
     tag_names,
     tags_left,
 )
@@ -184,3 +186,50 @@ def test_the_rows_arrive_newest_modification_first_and_the_position_moves_to_the
     result = _harvest(Recorded(PAGE))
     stored = json.loads(result.cursor.token.decode())["chats"][CHAT.casefold()]
     assert datetime.fromisoformat(stored) == newest
+
+
+# ── Story 23f: the names reach the dashboard; the handles stay the identity ──
+
+
+def test_the_senders_name_is_taken_from_from_user():
+    events = message_events(_harvest(Recorded(PAGE)))
+    for row in _messages():
+        payload = events[row["id"]].payload
+        assert isinstance(payload, MessagePayload)
+        assert payload.sender_name == row["from"]["user"]["displayName"]
+
+
+def test_a_harvest_then_the_dashboard_shows_names_keeps_handles_and_marks_the_pm(tmp_path):
+    """Acceptance (`23f`): names on the signal lines, `actor=graph:<user id>` on
+    the log lines, and a mention of the PM still marked."""
+    (mention,) = [row for row in _messages() if mentioned_users(row)]
+    pm = mentioned_users(mention)[0]
+
+    dashboard, log = harvest_then_dashboard(
+        tmp_path,
+        message_events(_harvest(Recorded(PAGE))).values(),
+        scope=PERSONAL,
+        pm_user_id=pm,
+        now=NOW,
+    )
+
+    lines = signal_lines(dashboard)
+    assert len(lines) == len(_messages()) == 4
+    sent = graph_time(mention["createdDateTime"]).strftime("%Y-%m-%d %H:%M")
+    assert lines[0].startswith(
+        f"- **{sent}** {mention['from']['user']['displayName']} in {LABEL} — "
+    )
+    assert lines[0].endswith("— mentions you")
+    assert not any(line.endswith("— mentions you") for line in lines[1:])
+    rest = sorted(
+        (row for row in _messages() if row is not mention),
+        key=lambda row: graph_time(row["createdDateTime"]),
+        reverse=True,
+    )
+    for line, row in zip(lines[1:], rest, strict=True):
+        when = graph_time(row["createdDateTime"]).strftime("%Y-%m-%d %H:%M")
+        assert line.startswith(f"- **{when}** {row['from']['user']['displayName']} in {LABEL}")
+    for row in _messages():
+        assert f"actor=graph:{row['from']['user']['id']}" in log
+    assert "actor=Person" not in log
+    assert "graph:" not in "\n".join(lines)

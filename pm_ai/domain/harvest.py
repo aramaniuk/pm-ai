@@ -173,6 +173,28 @@ class HarvestFailure:
     cannot tell a connector that just broke from one nobody has looked at since.
     """
 
+    walk_cut_short: bool = False
+    """Whether this non-retryable failure is a channel walk cut short (`23h`).
+
+    Set only on `33h`'s cut after the position: a retry now would stop at the
+    same cut, so the run is not retried, but nothing needs a person either —
+    the next regular cycle walks the channel again. The daemon's log says so
+    instead of "needs a person". A joined failure carries it only when it is
+    not retryable and every non-retryable part carries it.
+
+    In memory only: storage writes no column for it, so a failure read back
+    from Tier 2 has it `False`, and `doctor`'s line is unchanged.
+    """
+
+    def __post_init__(self) -> None:
+        if self.walk_cut_short and self.retryable:
+            raise ValueError(
+                "HarvestFailure with walk_cut_short=True and retryable=True says "
+                "both that a retry now would stop at the same cut and that the "
+                "scheduler should retry. The cut marker belongs only on a "
+                "non-retryable failure."
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class RowRefusal:

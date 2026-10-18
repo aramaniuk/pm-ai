@@ -24,7 +24,7 @@ context:
   - A daylight-saving day is therefore 23 or 25 hours.
   - In a zone whose clocks change at midnight, the day starts at the first local instant that exists.
   - The same two instants select the meetings shown (the existing overlap rule), so the day asked for and the day shown cannot disagree.
-- **An all-day entry is placed by its own date.** An all-day entry is a zero-length marker. It is on the page when the calendar date Graph gives it equals the display date. It is not placed by converting its start to the display zone: in a zone west of UTC, that conversion would move a midnight-UTC start onto the previous day.
+- **An all-day entry is placed by its own dates.** An all-day entry is a zero-length marker. It is on the page on every display date from the date Graph gives its start up to, not including, the date Graph gives its end; with no end date, or one not after the start, on its start date only (amended by `23h`). It is not placed by converting its start to the display zone: in a zone west of UTC, that conversion would move a midnight-UTC start onto the previous day.
 - **`23b`'s rules stand.**
   - Meetings not yet ended are read live and persisted nowhere.
   - Meetings that have ended come back as records, for display only.
@@ -143,6 +143,7 @@ Verified against `a1182f8` on 2026-10-16; re-verified against `ac7de7b` on 2026-
   - The display date is derived from `_day_bounds`' start.
   - Test assertions that could not fail were fixed. Acceptance criterion 1 is now tested with one daemon and one connector, and the partial-day Graph test names the failing tenant.
   - **Deferred** to `deferred-work.md`: multi-day all-day entries (Andrei's decision, since the frozen rule places a marker by its start date), and Graph's wire spelling of an all-day start (to be measured from a recorded row).
+- **2026-10-18, amended by `23h`.** Frozen placement bullet edited to the range rule: an all-day entry is on every date from its start date up to, not including, its end date, both as Graph wrote them; no end date, or one not after the start, means the start date only. The line still reads `all day`; the end date is carried in memory only.
 
 ## Design Notes
 

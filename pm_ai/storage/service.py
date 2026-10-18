@@ -1765,6 +1765,17 @@ def _claimed_here() -> set[Path]:
     return held
 
 
+def is_collection_member(name: str) -> bool:
+    """Whether a name found in a `Collection`'s directory is one of its members.
+
+    Dot-prefixed entries (the `.part` files `_publish` stages) and claim
+    sidecars (`<name>.lock`, story `1r`) are not. The one rule
+    `list_collection` applies, shared with the prompt's completion (story 4u),
+    which lists `connectors/` by path because it may not build a writer.
+    """
+    return not name.startswith(".") and not name.endswith(CLAIM_SIDECAR_SUFFIX)
+
+
 class StorageService:
     """Owns every write. Nothing else opens a file for writing (AD-5)."""
 
@@ -3088,12 +3099,7 @@ class StorageService:
         if not directory.is_dir():
             return ()
         return tuple(
-            sorted(
-                entry.name
-                for entry in directory.iterdir()
-                if not entry.name.startswith(".")
-                and not entry.name.endswith(CLAIM_SIDECAR_SUFFIX)
-            )
+            sorted(entry.name for entry in directory.iterdir() if is_collection_member(entry.name))
         )
 
     def remove_member(self, *, scope: DataScope, artifact: str, name: str) -> bool:

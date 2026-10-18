@@ -85,6 +85,7 @@ __all__ = [
     "HARVEST_CYCLE",
     "MAX_SERVABLE_SPAN",
     "MalformedCalendarRow",
+    "OFFERED_FIRST_RUN_REACH_BACK",
     "RowRefusal",
     "UnresolvableTimezone",
     "WINDOWS_TIMEZONES",
@@ -537,6 +538,25 @@ def _in_minutes(span: timedelta) -> str:
     return str(int(minutes)) if minutes == int(minutes) else f"{minutes:.2f}"
 
 
+OFFERED_FIRST_RUN_REACH_BACK = timedelta(days=5)
+"""What Enter keeps at `connector add graph`'s reach-back question: 7200 minutes.
+
+An offer, not a default `WindowPolicy` applies: the policy still takes both
+widths from the row, and every enrolled row already carries one. Story 8s put
+it at the question because a person taking the smallest window and the
+smallest reach-back it allowed got a first harvest of four hours. Spelled
+here, beside the rule it must satisfy: when the window typed before it is
+wider, the question offers the window instead, since a reach-back may never be
+shorter than the window (`WindowPolicy.__post_init__`).
+
+What bounds a five-day first run is what bounds every run, and nothing is added
+for it: the calendar asks one span, under `MAX_SERVABLE_SPAN`; each channel or
+chat walk stops at the client's page cap or fetch budget as a stated loss; and
+transcript acquisition, which asks again about every ended meeting in the
+reach-back that has no transcript yet, spends the same fetch budget.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class WindowPolicy:
     """How wide a harvest window is, and how far back the first one reaches.
@@ -724,6 +744,15 @@ class CalendarRow:
     all-day entry is a zero-length marker placed by this date, never by its
     start converted to a display zone: west of UTC, that conversion would move
     a midnight-UTC start onto the previous day.
+    """
+    all_day_end_date: date | None = None
+    """An all-day row's end date, as Graph wrote it; `None` otherwise (`23h`).
+
+    The wall-clock date of `end.dateTime`, read exactly as `all_day_date` reads
+    the start. The entry is on every date from `all_day_date` up to, not
+    including, this one; an end not after the start means the start date only.
+    A backwards span is carried as sent and flagged (`_clock_flag`), never
+    reordered.
     """
 
     def __post_init__(self) -> None:
@@ -1130,6 +1159,14 @@ class GraphCalendarFetch:
         start = to_utc(raw.get("start"), field_name="start", event_id=event_id)
         end = to_utc(raw.get("end"), field_name="end", event_id=event_id)
         is_all_day = bool(raw.get("isAllDay"))
+        all_day_dates = (
+            (
+                _stated_date(raw["start"], field_name="start", event_id=event_id),
+                _stated_date(raw["end"], field_name="end", event_id=event_id),
+            )
+            if is_all_day
+            else None
+        )
         return CalendarRow(
             event_id=event_id,
             start=start,
@@ -1150,8 +1187,15 @@ class GraphCalendarFetch:
             categories=_categories(raw.get("categories")),
             response=_response(raw.get("responseStatus")),
             source_timezone=_stated_zone(raw.get("start")),
-            clock_flag=_clock_flag(start, end, window=window, event_id=event_id),
-            all_day_date=_stated_date(raw["start"], event_id=event_id) if is_all_day else None,
+            clock_flag=_clock_flag(
+                start,
+                end,
+                window=window,
+                event_id=event_id,
+                all_day_dates=all_day_dates,
+            ),
+            all_day_date=all_day_dates[0] if all_day_dates else None,
+            all_day_end_date=all_day_dates[1] if all_day_dates else None,
         )
 
     def _failure(
@@ -1219,14 +1263,17 @@ def _text(value: Any) -> str | None:
     return value.strip() or None if isinstance(value, str) else None
 
 
-def _stated_date(stamp: Mapping[str, Any], *, event_id: str) -> date:
+def _stated_date(stamp: Mapping[str, Any], *, field_name: str, event_id: str) -> date:
     """The wall-clock date of a `{dateTime, timeZone}` pair, before conversion.
 
     Called only after `to_utc` accepted the same stamp, which refuses one that
     is not an object or carries no parsable `dateTime` string — so this only
-    reads the date Graph wrote off a string known to parse.
+    reads the date Graph wrote off a string known to parse. Reads an all-day
+    row's `start` (`23e`) and its `end` (`23h`) the same way.
     """
-    return _parsed(str(stamp["dateTime"]).strip(), field_name="start", event_id=event_id).date()
+    return _parsed(
+        str(stamp["dateTime"]).strip(), field_name=field_name, event_id=event_id
+    ).date()
 
 
 def _stated_zone(stamp: Any) -> str | None:
@@ -1276,7 +1323,12 @@ def _response(raw: Any) -> str | None:
 
 
 def _clock_flag(
-    start: datetime, end: datetime, *, window: CalendarWindow, event_id: str
+    start: datetime,
+    end: datetime,
+    *,
+    window: CalendarWindow,
+    event_id: str,
+    all_day_dates: tuple[date, date] | None = None,
 ) -> str | None:
     """Why this row's provider clock is not credible, or `None`.
 
@@ -1300,7 +1352,20 @@ def _clock_flag(
     **Does the span run backwards?** An `end` before its `start` is a clock
     nothing can reconcile, and it would give `duration` a negative value that
     `33c` would carry into a cost.
+
+    **Does an all-day entry end on or before the date it starts?** (`23h`) Its
+    dates are the ones Graph wrote; an end not after the start is carried as
+    sent, placed on the start date alone, and flagged. The check applies only
+    while the instants do not also run backwards (`end >= start`); when they
+    do, the "ends before it starts" reason below is the one given. Like any
+    clock flag, it keeps the row from proving coverage (`_any_credible_clock`).
     """
+    if all_day_dates is not None and all_day_dates[1] <= all_day_dates[0] and end >= start:
+        return (
+            f"all-day event {event_id} ends on {all_day_dates[1].isoformat()}, not "
+            f"after the date it starts, {all_day_dates[0].isoformat()}. It is placed "
+            f"on its start date alone and flagged rather than given an invented end."
+        )
     if end < start:
         return (
             f"event {event_id} ends at {end.isoformat()}, before it starts at "

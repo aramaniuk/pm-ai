@@ -694,6 +694,20 @@ def test_a_hand_written_row_with_a_host_path_and_a_reach_back_is_what_goes_out(t
     assert wire.query()["since"] == ["2026-08-18T09:00:00Z"], "one day of reach-back"
 
 
+def test_a_row_with_no_reach_back_asks_thirty_days_back_on_its_first_run(tmp_path):
+    """Story 8s: enrolment writes no reach-back key, so a first run asks from
+    `MERGE_LAG_DAYS` back — the span every later run asks from before its cursor."""
+    _row(build(tmp_path, "alpha", now=lambda: NOW), "gitlab:alpha", project=PROJECT)
+    connector = build(tmp_path, "alpha", now=lambda: NOW).connectors["gitlab:alpha"]
+    connector.credential = TOKEN
+    wire = Wire(page())
+    connector.transport = wire
+
+    connector.harvest(Cursor())
+
+    assert wire.query()["since"] == ["2026-07-20T09:00:00Z"], "thirty days of reach-back"
+
+
 def test_a_row_without_a_host_asks_gitlab_com_and_the_wait_is_a_real_sleep(tmp_path):
     import time
 

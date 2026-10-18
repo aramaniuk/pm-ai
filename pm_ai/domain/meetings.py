@@ -178,6 +178,14 @@ class Meeting:
     # marker by this date rather than by converting its start to the display
     # zone, which west of UTC would move it onto the previous day.
     all_day_date: date | None = None
+    # Carried in memory and written to no file, as `all_day_date` is (story
+    # 23h). The date the provider gave an all-day entry's end: the entry is on
+    # every date from `all_day_date` up to, not including, this one. `None`, or
+    # a date not after `all_day_date`, means the start date alone. An end date
+    # with no `all_day_date` is ignored: the meeting is placed as a timed one.
+    # Neither date is checked here, so a backwards span passes; the connector
+    # flags it.
+    all_day_end_date: date | None = None
 
     def __post_init__(self) -> None:
         count = len(self.attendees) if self.attendee_count is None else self.attendee_count

@@ -2,7 +2,8 @@
 title: 'Four fixes from the first reviews'
 type: 'bugfix'
 created: '2026-10-17'
-status: 'draft'
+status: 'done'
+baseline_commit: '9e5383fe4c6ec023d243bfd09d9df39e72d6b6d4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -22,7 +23,7 @@ context:
 - **Sign-in timeout (amends `8r`).** The `requests` session handed to MSAL waits at most 10 s to connect and 30 s for each read, bound into the session's `request` method with `functools.partial`, since `requests` has no session-wide timeout and MSAL passes none. A stalled sign-in fails as the same "token endpoint did not answer" error a refused connection gives, handled as today. It covers health probes, harvest refreshes and each device-code poll of `connector add graph`; the device-code flow's overall expiry is unchanged.
 - **`project add` refuses special folders.** A project path that is, or is inside, `~/.pm-ai`, `~/.manager-ai`, or any folder named `.project-ai` (name compared casefolded) is refused with `ProjectPathUnusable`, naming the path, the special folder, and that nothing was onboarded. The path is resolved, then each of its existing folders is compared with each home by `os.path.samefile`, so links and case variants on a case-insensitive disk are caught, and `~/.manager-ai-old` is not. The same check runs in-process and through the daemon.
 
-**Ask First:** Whether `doctor` should also stop saying "needs you" for a stored cut walk. That needs the marker stored (a `harvest_failures` column, defined at `storage/service.py:148`, INSERT at `:3347`). Recommended: not in this slice; recorded in deferred-work.
+**Ask First:** Nothing (answered 2026-10-18: doctor's line is unchanged; storing the cut-walk marker so doctor can say so is recorded in deferred-work).
 
 **Never:** No change to which runs retry or when. No "day N of M" mark. No change to how an all-day start date is read. No refusal of a path that contains a home, such as the home folder itself.
 
@@ -53,7 +54,7 @@ context:
 
 ## Code Map
 
-Verified against `ba0b747` on 2026-10-17.
+Verified against `ba0b747` on 2026-10-17; every line re-checked unchanged against `9e5383f` on 2026-10-18.
 
 - `pm_ai/connectors/graph/calendar.py:720` `all_day_date`; `:1154` set from `start`; `:1222` `_stated_date`; `:1304` backwards span flagged
 - `pm_ai/domain/meetings.py:180`, `:182` -- `all_day_date`; `__post_init__`
@@ -75,13 +76,13 @@ Verified against `ba0b747` on 2026-10-17.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `calendar.py`, `meetings.py`, `graph/__init__.py`, `meeting_records.py`, `pipelines.py` -- carry the end date in memory; `_on_day` places by range -- fix 1
-- [ ] `harvest.py`, `channels.py`, `graph/__init__.py`, `ticks.py` -- the field, set, kept, logged -- fix 2
-- [ ] `auth.py` -- the timeouts as named constants in `_msal_session` -- fix 3
-- [ ] `wiring.py` -- `_assert_usable` refuses special folders, given the resolver's roots; `project_registry.py` -- `ProjectPathUnusable`'s docstring names this refusal too -- fix 4
-- [ ] `tests/slice/test_dashboard_slice.py`, `tests/connectors/test_graph_calendar_mapping.py`, `tests/slice/test_scheduled_harvest.py`, `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_auth.py`, `tests/slice/test_project_onboarding.py` -- one test per matrix row, timeouts on a stub transport. `23e`'s single-day tests pass unchanged. A cut failure compared with its stored read-back differs (the stored copy has the field false): compare the stored fields, or expect that
-- [ ] story specs, when built, each with a dated Change Log line: `23e` frozen placement sentence (`23e:27`) edited to the range rule; `8r` frozen transport bullet (`8r:29`), "MSAL's default timeout (none)" becoming 10 s connect and 30 s read; `33h` the cut's rule stands, its log wording changed; `1s` `project add` refuses the homes and `.project-ai` folders, and its rule skipping registered repositories inside a home (`1s:28`) stays, for hand-written registry rows, now the only way to reach it
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the four `23h` entries (`:1381`, `:1390`, `:1399`, `:1417`) resolved; add the stored cut walk in `doctor`
+- [x] `calendar.py`, `meetings.py`, `graph/__init__.py`, `meeting_records.py`, `pipelines.py` -- carry the end date in memory; `_on_day` places by range -- fix 1
+- [x] `harvest.py`, `channels.py`, `graph/__init__.py`, `ticks.py` -- the field, set, kept, logged -- fix 2
+- [x] `auth.py` -- the timeouts as named constants in `_msal_session` -- fix 3
+- [x] `wiring.py` -- `_assert_usable` refuses special folders, given the resolver's roots; `project_registry.py` -- `ProjectPathUnusable`'s docstring names this refusal too -- fix 4
+- [x] `tests/slice/test_dashboard_slice.py`, `tests/connectors/test_graph_calendar_mapping.py`, `tests/slice/test_scheduled_harvest.py`, `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_auth.py`, `tests/slice/test_project_onboarding.py` -- one test per matrix row, timeouts on a stub transport. `23e`'s single-day tests pass unchanged. A cut failure compared with its stored read-back differs (the stored copy has the field false): compare the stored fields, or expect that
+- [x] story specs, when built, each with a dated Change Log line: `23e` frozen placement sentence (`23e:27`) edited to the range rule; `8r` frozen transport bullet (`8r:29`), "MSAL's default timeout (none)" becoming 10 s connect and 30 s read; `33h` the cut's rule stands, its log wording changed; `1s` `project add` refuses the homes and `.project-ai` folders, and its rule skipping registered repositories inside a home (`1s:28`) stays, for hand-written registry rows, now the only way to reach it
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the four `23h` entries (`:1381`, `:1390`, `:1399`, `:1417`) resolved; add the stored cut walk in `doctor`
 
 **Acceptance Criteria:**
 - Given a daemon whose run ends with only a cut channel walk, when the attempt settles, then `daemon.log` holds the cut wording, not "needs a person", and the next attempt is at the next regular cycle.
@@ -92,6 +93,11 @@ Verified against `ba0b747` on 2026-10-17.
 - **2026-10-17, created.**
   - **Source:** Andrei's decisions of 2026-10-17 on the batch-1 review findings (memlog, "Batch-1 review decisions"). Four fixes in one slice because each is small and they touch different files.
   - **Review (one critical pass):** added the "no end date" rule, so 23e's tests are unchanged; case-insensitive home matching via `samefile`; the normal-layout, trailing-slash, home-folder and relative-path rows; real timeout totals with the retry adapter; the unmeasured all-day wire format; and doctor's unchanged line, with an Ask First on storing the marker. Hand-written registry rows are not refused (routine, Design Notes).
+- **2026-10-18, approved; Ask First answered.**
+  - **Source:** Andrei at the spec checkpoint, 2026-10-18. `doctor` stays unchanged in this slice: its line for a stored cut walk still reads "FAILING, needs you". Storing the cut marker so `doctor` can say otherwise is a deferred-work entry (story-23h review). Kept as one slice despite its length.
+- **2026-10-18, built and reviewed.**
+  - **Built:** the four fixes as specified. Two readings of the text: an all-day row whose end date equals its start date is flagged too, as the matrix's "End not after start" row says (the backwards-span check alone missed it); and `_assert_usable` now runs before the project id is checked, so `.pm-ai` or `.project-ai` as a path is refused as a special folder rather than as a malformed id.
+  - **Review (blind hunter, edge-case hunter, verification gap):** patched — a home not yet created is matched by a case variant of its name (`~/.PM-AI/work` on a fresh machine); `HarvestFailure` refuses the cut marker on a retryable failure; the cut-walk log line no longer implies `doctor` agrees; a flake-prone timing count in the stalled-read test waits instead of sleeping; a link into a home runs through the daemon path too; docstrings for the timeouts, the all-day flag and an end date with no start date. Deferred — a page of only zero-length all-day rows claims no coverage (deferred-work, story-23h review). No intent or spec gaps.
 
 ## Design Notes
 
@@ -103,3 +109,68 @@ Verified against `ba0b747` on 2026-10-17.
 - `uv run pytest -q` -- expected: all pass
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**Multi-day all-day entries**
+
+- The placement rule: a range when the end is after the start, else the start date alone.
+  [`pipelines.py:2026`](../../../../pm_ai/app/pipelines.py#L2026)
+
+- Both dates read off Graph's own `dateTime`, the same way.
+  [`calendar.py:1142`](../../../../pm_ai/connectors/graph/calendar.py#L1142)
+
+- An end not after the start is flagged, not refused; it also withholds coverage.
+  [`calendar.py:1343`](../../../../pm_ai/connectors/graph/calendar.py#L1343)
+
+- Carried onto `Meeting` in memory, cleared on read-back.
+  [`__init__.py:1662`](../../../../pm_ai/connectors/graph/__init__.py#L1662)
+  [`meeting_records.py:377`](../../../../pm_ai/core/meeting_records.py#L377)
+
+**Cut channel walk log wording**
+
+- The join: a cut only when not retryable and every non-retryable part is a cut.
+  [`__init__.py:1913`](../../../../pm_ai/connectors/graph/__init__.py#L1913)
+
+- The new log branch; every other non-retryable failure still "needs a person".
+  [`ticks.py:376`](../../../../pm_ai/app/ticks.py#L376)
+
+- The field, in memory only, and its guard against a retryable cut.
+  [`harvest.py:175`](../../../../pm_ai/domain/harvest.py#L175)
+
+- Set only on 33h's cut after the position.
+  [`channels.py:660`](../../../../pm_ai/connectors/graph/channels.py#L660)
+
+**Sign-in timeout**
+
+- 10 s connect, 30 s read, bound with `functools.partial` as msal does.
+  [`auth.py:358`](../../../../pm_ai/connectors/graph/auth.py#L358)
+
+**`project add` refuses special folders**
+
+- Each existing folder compared with each home by `samefile`; `.project-ai` by casefolded name.
+  [`wiring.py:3729`](../../../../pm_ai/app/wiring.py#L3729)
+
+- A missing home matched by name and parent, so a fresh machine is covered.
+  [`wiring.py:3754`](../../../../pm_ai/app/wiring.py#L3754)
+
+- Called before the id check, in-process and through the daemon.
+  [`wiring.py:3276`](../../../../pm_ai/app/wiring.py#L3276)
+  [`wiring.py:3438`](../../../../pm_ai/app/wiring.py#L3438)
+
+**Tests**
+
+- Dashboard placement rows.
+  [`test_dashboard_slice.py:1762`](../../../../tests/slice/test_dashboard_slice.py#L1762)
+
+- The cut wording and next due time at the daemon level.
+  [`test_scheduled_harvest.py:745`](../../../../tests/slice/test_scheduled_harvest.py#L745)
+
+- Joining rules for the cut marker.
+  [`test_graph_channel_messages.py:1098`](../../../../tests/connectors/test_graph_channel_messages.py#L1098)
+
+- Stalls on real msal over a stub transport.
+  [`test_graph_auth.py:2017`](../../../../tests/connectors/test_graph_auth.py#L2017)
+
+- Every special-folder row.
+  [`test_project_onboarding.py:653`](../../../../tests/slice/test_project_onboarding.py#L653)

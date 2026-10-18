@@ -10,6 +10,7 @@ encryption and the `connectors/` row are the real ones.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import threading
@@ -147,6 +148,23 @@ def test_yes_and_enter_at_the_name_saves_graph_work_as_connector_add_graph_does(
         keychain=keychain,
     )
     assert isinstance(daemon.connectors.get(INSTANCE), GraphConnector)
+
+
+def test_enter_at_the_reach_back_through_setup_keeps_five_days(
+    machine, tmp_path, monkeypatch, capsys
+):
+    """Story 8s: step 4 runs `connector add graph`'s own questions, so Enter at
+    the reach-back keeps the same 7200 minutes, saved by the same path."""
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _setup(monkeypatch, tmp_path / "alpha", "y", "", CLIENT_ID, "", "240", "")
+
+    assert code == EXIT_OK, capsys.readouterr().err
+    (reach,) = [p for p in terminal.prompts if p.startswith("First-run reach-back")]
+    assert "[Enter keeps 7200]" in reach
+    row = json.loads(_row_path(home).read_text())
+    assert (row["window_width_minutes"], row["first_run_reach_back_minutes"]) == (240, 7200)
 
 
 def test_a_typed_name_is_saved_under_that_name(machine, tmp_path, monkeypatch, capsys):

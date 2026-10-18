@@ -486,6 +486,10 @@ class GraphSignIn(Protocol):
         """CAP-2's floor on the harvest window, stated in the question."""
         ...
 
+    def offered_reach_back_minutes(self, width: int) -> int:
+        """What Enter keeps at the reach-back question: five days, or `width` if wider."""
+        ...
+
     @property
     def default_tenant(self) -> str:
         """What Enter keeps at the tenant question."""
@@ -586,6 +590,10 @@ class GitLabCheck(Protocol):
 
     def files_into(self, instance: str) -> str | None:
         """The project `instance` would file into now, or `None` (story 8t)."""
+        ...
+
+    def host_as_read(self, typed: str) -> str:
+        """The address a typed host is read as: `https://` added to a bare answer."""
         ...
 
     def refusal(self, *, host: str | None = None, project: str | None = None) -> str | None:
@@ -1208,7 +1216,9 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
        tenant id (a GUID), a domain, or one of `organizations`, `common` and
        `consumers` in any case, and stored as typed; the harvest window, with its
        minimum stated and no default; the first-run reach-back, at least the
-       window. An answer
+       window, where Enter keeps five days (7200 minutes) or the window when
+       it is wider, the question naming the number either way (story 8s). An
+       answer
        that would not build a connector is refused with its reason and asked
        again, never saved. Outlook categories are not asked: the closing
        message names the file they are added to.
@@ -1255,9 +1265,12 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
         f"Harvest window in minutes (at least {minimum}; no default): ",
         judge=lambda minutes: graph.refusal(width=minutes),
     )
+    offered = graph.offered_reach_back_minutes(width)
     reach_back = _ask_minutes(
-        f"First-run reach-back in minutes (at least {width}, the window): ",
+        f"First-run reach-back in minutes (at least {width}, the window) "
+        f"[Enter keeps {offered}]: ",
         judge=lambda minutes: graph.refusal(width=width, reach_back=minutes),
+        default=offered,
     )
 
     _echo()
@@ -1311,7 +1324,9 @@ def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -
        watching several projects, a name no start would build.
     2. **Two questions**: the host, where Enter keeps the default and a typed
        answer must be an https address with no query, fragment, user info or
-       trailing slash; the project path, required, as `group/project`. An
+       trailing slash — one typed with no scheme is read as `https://` and
+       saved so, one line saying "taken as …" (story 8s), while one naming a
+       scheme is judged as typed; the project path, required, as `group/project`. An
        answer that would not build a connector is asked again with its reason.
     3. **The token**, at a hidden prompt, stripped; blank is refused, and
        Ctrl-C or Ctrl-D ends the command with nothing saved.
@@ -1354,13 +1369,15 @@ def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -
     with _interruptible():
         gitlab.ready(instance)
 
-    host = (
-        _ask_until(
-            f"GitLab host [Enter keeps {gitlab.default_host}]: ",
-            judge=lambda answer: gitlab.refusal(host=answer) if answer else None,
-        )
-        or gitlab.default_host
+    typed_host = _ask_until(
+        f"GitLab host [Enter keeps {gitlab.default_host}]: ",
+        judge=lambda answer: gitlab.refusal(host=answer) if answer else None,
     )
+    host = gitlab.host_as_read(typed_host) if typed_host else gitlab.default_host
+    if typed_host and host != typed_host:
+        # Said straight after the question, so it sits above anything the
+        # check says later (story 8s).
+        _echo(f"  taken as {host}")
     project = _ask_until(
         "GitLab project path, as group/project (required): ",
         judge=lambda answer: gitlab.refusal(project=answer),
@@ -1467,23 +1484,30 @@ def _ask_until(prompt: str, *, judge: Callable[[str], str | None]) -> str:
         _echo(f"  {reason}", file=sys.stderr)
 
 
-def _ask_minutes(prompt: str, *, judge: Callable[[int], str | None]) -> int:
+def _ask_minutes(
+    prompt: str, *, judge: Callable[[int], str | None], default: int | None = None
+) -> int:
     """A whole number of minutes, asked until `judge` accepts it.
 
     Plain digits only, after trimming: `1440.0`, `1_440` and `+480` are all
     numbers to Python and none of them is what the question asked for, so each
-    is asked again rather than read generously. Blank is asked again rather
-    than defaulted: neither width has a default, and Enter taking one would be
-    the answer the spec reserves for the human.
+    is asked again rather than read generously. Blank keeps `default` when the
+    caller offers one — the Graph reach-back does (story 8s), and its prompt
+    names the number — and is asked again otherwise: the harvest window and
+    the drop duration keep no default, and Enter taking one there would be the
+    answer the spec reserves for the human. A default is judged like a typed
+    answer, so an offer the check would refuse is never saved.
     """
     while True:
         typed = _typed(prompt)
         if typed is None:
             _echo(f"  {_NOT_TEXT}", file=sys.stderr)
             continue
-        if not typed:
+        if not typed and default is None:
             _echo("  this has no default; type a whole number of minutes.", file=sys.stderr)
             continue
+        if not typed:
+            typed = str(default)
         if not (typed.isascii() and typed.isdigit()):
             _echo(
                 f"  {typed!r} is not a whole number of minutes; type digits only.",

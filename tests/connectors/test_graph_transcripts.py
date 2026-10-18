@@ -1271,3 +1271,46 @@ def test_an_unreadable_lookup_or_listing_is_refused_by_name(where):
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "could not be read" in outcome.reason
     assert graph.asked("/content") == []
+
+
+# ── Story 8s — what a five-day reach-back costs per harvest ──────────────────
+
+FIVE_DAYS = timedelta(minutes=7200)
+"""The reach-back `connector add graph` offers at Enter (story 8s)."""
+
+UNTRANSCRIBED = 20
+"""Ended meetings in the five days with no transcript yet and no closing answer:
+twenty half-hour Teams meetings spread evenly across the five days, the count
+recorded in 8s."""
+
+
+def test_one_acquisition_over_five_days_asks_three_requests_per_untranscribed_meeting():
+    """Story 8s measures, it does not bound: every harvest asks again about each
+    ended meeting in the reach-back with no transcript yet (`33e`'s rule,
+    unchanged). Measured per acquisition pass, on the recorded fake transport,
+    excluding the harvest's `calendarView` call and any channel or chat walk:
+    for one meeting that has no transcript, that is its event, its online
+    meeting looked up by join link, and its transcript listing — three Graph
+    requests — so twenty such meetings cost sixty requests per pass, spent
+    against the client's fetch budget like every Graph walk."""
+    graph = FakeGraph()
+    held = []
+    for index in range(UNTRANSCRIBED):
+        start = NOW - FIVE_DAYS + timedelta(hours=2) + index * (FIVE_DAYS - timedelta(hours=4)) / UNTRANSCRIBED
+        event_id = f"AAMk-{index:02d}"
+        join = f"{JOIN}-{index:02d}"
+        online = f"{ONLINE}-{index:02d}"
+        graph.events[event_id] = ok(event_body(event_id, start, minutes=30, join=join))
+        graph.lookups[join] = ok(lookup_body(online))
+        graph.listing(online)
+        held.append(meeting(event_id, start, minutes=30))
+    assert all(NOW - FIVE_DAYS <= m.start and m.start + timedelta(minutes=30) < NOW for m in held)
+
+    outcomes = _adapter(graph).acquire(held, since=NOW - FIVE_DAYS)
+
+    assert len(outcomes) == UNTRANSCRIBED
+    assert all(isinstance(outcome, TranscriptAbsent) for outcome in outcomes)
+    assert len(graph.asked("/me/events/")) == UNTRANSCRIBED
+    assert len(graph.asked("/me/onlineMeetings?")) == UNTRANSCRIBED
+    assert len(graph.asked("/transcripts")) == UNTRANSCRIBED
+    assert len(graph.requests) == 3 * UNTRANSCRIBED == 60

@@ -86,13 +86,17 @@ from pm_ai.app.wiring import (
     bootstrap,
     build,
     onboard_project,
+    is_connector_row_file,
     read_connector_rows,
+    sort_connector_rows,
     warn_if_encryption_disabled,
 )
 from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import Config, ConfigRefused, load_config, read_daemon_port
 from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
-from pm_ai.domain.health import EnrolmentReading
+from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
+from pm_ai.core.goal_register import GOALS_SCOPE, parse_goals
+from pm_ai.domain.health import GRAPH_SYSTEM, EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry, parse_registry
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
@@ -127,6 +131,7 @@ from pm_ai.ports import (
 from pm_ai.storage.service import (
     OperationalStoreUnavailable,
     StorageService,
+    is_collection_member,
     render_records_at,
 )
 from pm_ai.surfaces.cli.dispatch import (
@@ -137,6 +142,7 @@ from pm_ai.surfaces.cli.dispatch import (
     parse,
 )
 from pm_ai.surfaces.cli import repl
+from pm_ai.surfaces.cli.completion import Completion, Readers
 from pm_ai.surfaces.cli.loopback import LoopbackClient
 
 __all__ = [
@@ -179,7 +185,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # pipe, cron, no stdin, output to a file — it stays the usage error
         # `parse` answers.
         if not arguments and _at_a_terminal():
-            return repl.run(main, line_editing=True, client=_loopback())
+            # Story 4u: completion's readers, built from paths and read at the
+            # first Tab that needs them, never here.
+            return repl.run(
+                main, line_editing=True, client=_loopback(), completion=_completion()
+            )
         # Parsed first, and once (story 4m, AD-11): the command's target decides
         # where the daemon acts, so it has to be known before anything about
         # projects is decided. Help and usage errors are answered here, with
@@ -1414,6 +1424,72 @@ def _loopback() -> LoopbackClient:
         token_path=lambda: ScopePaths.production().resolve(APPLICATION, API_TOKEN),
         port=_configured_port,
     )
+
+
+def _completion() -> Completion:
+    """The prompt's completion over three local files, read by path (story 4u).
+
+    `surfaces` may not locate files, so the readers are built here, from paths
+    alone, as `_loopback` is. Nothing is read now: each reader runs at the first
+    Tab that needs it. None of them builds a `StorageService` (building one
+    opens `operational.db`), asks for the master key or the keychain, or
+    reaches the daemon; a reader that raises offers nothing.
+    """
+    return Completion(
+        Readers(
+            projects=_enrolled_projects,
+            graph_instances=_graph_instances,
+            goal_ids=_goal_ids,
+        )
+    )
+
+
+def _read_or_none(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _enrolled_projects() -> tuple[str, ...]:
+    """The project ids `projects.toml` enrols, as `parse_registry` reads them."""
+    path = ScopePaths.production().resolve(APPLICATION, REGISTRY_ARTIFACT)
+    return tuple(parse_registry(_read_or_none(path)))
+
+
+def _graph_instances() -> tuple[str, ...]:
+    """Every Graph row in `connectors/`, enabled or not, by `4n`'s row rule.
+
+    The rows are listed and read by path and sorted by `sort_connector_rows`,
+    the rule `read_connector_rows` applies through the single writer. A row is
+    a regular `*.json` file (`is_connector_row_file`), among the members
+    `StorageService.list_collection` would list (`is_collection_member`). A
+    missing `connectors/` offers nothing.
+    """
+    directory = ScopePaths.production().resolve(APPLICATION, "connectors/")
+    if not directory.is_dir():
+        return ()
+    rows: list[tuple[str, bytes | BaseException]] = []
+    for name in sorted(found.name for found in directory.iterdir()):
+        path = directory / name
+        if not is_collection_member(name) or not is_connector_row_file(path):
+            continue
+        try:
+            rows.append((name, path.read_bytes()))
+        except FileNotFoundError:
+            continue
+        except OSError as unreadable:
+            rows.append((name, unreadable))
+    sorted_rows = sort_connector_rows(str(directory), rows)
+    return tuple(
+        instance for instance, system in sorted_rows.named if system == GRAPH_SYSTEM
+    )
+
+
+def _goal_ids() -> tuple[str, ...]:
+    """The goal ids in `strategic_goals.md` (not encrypted), as `parse_goals` reads them."""
+    path = ScopePaths.production().resolve(GOALS_SCOPE, GOALS_ARTIFACT)
+    return tuple(parse_goals(_read_or_none(path), scope=GOALS_SCOPE))
 
 
 def _configured_port() -> int:
