@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -78,6 +79,7 @@ from pm_ai.connectors.graph.auth import (
 )
 from pm_ai.connectors.graph.calendar import (
     HARVEST_CYCLE,
+    OFFERED_FIRST_RUN_REACH_BACK,
     GraphCalendarFetch,
     WindowPolicy,
 )
@@ -193,8 +195,11 @@ __all__ = [
     "bootstrap",
     "build",
     "onboard_project",
+    "connector_rows_unlisted",
+    "is_connector_row_file",
     "read_connector_rows",
     "refreshed",
+    "sort_connector_rows",
     "Onboarded",
     "warn_if_encryption_disabled",
     "PmIdentityReading",
@@ -1582,6 +1587,15 @@ class GraphEnrolment:
         """
         return math.ceil(HARVEST_CYCLE / timedelta(minutes=1))
 
+    def offered_reach_back_minutes(self, width: int) -> int:
+        """What Enter keeps at the reach-back question, given the typed window (8s).
+
+        Five days, read off the constant beside `WindowPolicy`, or the window
+        when it is wider: a reach-back may never be shorter than the window, so
+        an offer below it would be one the next check refuses.
+        """
+        return max(math.ceil(OFFERED_FIRST_RUN_REACH_BACK / timedelta(minutes=1)), width)
+
     @property
     def default_tenant(self) -> str:
         """The adapter's own default, read off its field rather than copied."""
@@ -2108,28 +2122,54 @@ class GitLabEnrolment:
                 f"{names}. Nothing was saved."
             )
 
+    @staticmethod
+    def host_as_read(typed: str) -> str:
+        """The address a typed host answer is read as (story 8s).
+
+        https is the only scheme the token is sent over, so a bare answer —
+        one that neither contains `://` nor begins with a scheme followed by
+        `:/` — is read as `https://` followed by it: `git.internal`,
+        `git.internal/gitlab` and `git.internal:8443` all are, the part
+        before the first `/` lower-cased as `check` saves it. Anything that
+        already looks like a scheme, mistyped or not, is returned as typed, so
+        `http://…` is still refused for its scheme and `http:/git.internal` is
+        shown back rather than silently turned into a different address.
+
+        Typed answers only: the row reader (`_gitlab_connector`) judges a
+        hand-written `host` as written.
+        """
+        if "://" in typed or _SCHEME_THEN_SLASH.match(typed):
+            return typed
+        # The host part lower-cased, as `check` saves it, so the "taken as"
+        # line names what is saved. Split by hand: nothing is validated yet.
+        host, slash, path = typed.partition("/")
+        return f"https://{host.lower()}{slash}{path}"
+
     def refusal(self, *, host: str | None = None, project: str | None = None) -> str | None:
         """Why a typed host or project path would not build a connector, or `None`.
 
-        The host is judged by the transport's `host_refusal`, plus one rule a
-        typed host adds: its path may not end in `/api/v4`, which the API is
-        reached under. The path is judged by the transport's
-        `project_refusal`, plus what a typed `group/project` must also be:
-        at least one `/`, no `://` (a pasted address), no trailing `/` and no
-        empty segment.
+        The host is read through `host_as_read` and judged by the transport's
+        `host_refusal`, plus one rule a typed host adds: its path may not end
+        in `/api/v4`, which the API is reached under. A refusal quotes what
+        was typed, and the address it was read as when the scheme was added.
+        The path is judged by the transport's `project_refusal`, plus what a
+        typed `group/project` must also be: at least one `/`, no `://` (a
+        pasted address), no trailing `/` and no empty segment.
         """
         if host is not None:
-            refused = host_refusal(host)
+            read = self.host_as_read(host)
+            refused = host_refusal(read)
             if refused is None:
-                path = urlsplit(host).path.rstrip("/").casefold()
+                path = urlsplit(read).path.rstrip("/").casefold()
                 if path == API_PATH or path.endswith(API_PATH):
                     refused = (
                         f"it ends in {API_PATH!r}, which pm-ai adds itself; type "
                         f"the address without it"
                     )
             if refused is not None:
+                quoted = repr(host) if read == host else f"{host!r} (read as {read!r})"
                 return (
-                    f"{host!r} cannot be the GitLab host: {refused}. Type an "
+                    f"{quoted} cannot be the GitLab host: {refused}. Type an "
                     f"https address, optionally with a path "
                     f"(https://git.internal/gitlab), or press Enter for "
                     f"{self.default_host}."
@@ -2193,7 +2233,7 @@ class GitLabEnrolment:
                 "request header and is not a GitLab token; nothing was sent or "
                 "saved."
             )
-        host = _lowered_origin(host)
+        host = _lowered_origin(self.host_as_read(host))
         client = GitLabClient(host=host, project=project, token=token, now=self.now)
         heard: list[GitLabResponse | BaseException] = []
         wire = client.transport if self.transport is None else self.transport
@@ -2247,6 +2287,10 @@ class GitLabEnrolment:
             project=project,
             settings={GITLAB_HOST_KEY: host},
         )
+
+
+_SCHEME_THEN_SLASH = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:/")
+"""A scheme followed by `:/` at the start of a typed host: judged as typed (8s)."""
 
 
 def _lowered_origin(host: str) -> str:
@@ -2747,6 +2791,14 @@ class ConnectorRows:
     accepted: tuple[tuple[str, str, Mapping[str, object]], ...]
     refused: tuple[tuple[str, str], ...]
     reading: EnrolmentReading
+    named: tuple[tuple[str, str], ...] = ()
+    """`(instance, system)` for every readable row naming both, enabled or not.
+
+    Story 4u: `connector sign-in` reads no `enabled`, so the prompt offers
+    every Graph row by its name, whether the build would run it or not. In
+    listing order; a name several rows carry is listed once, with the system
+    its first row names.
+    """
 
 
 def _cause(error: BaseException) -> str:
@@ -2816,25 +2868,69 @@ def read_connector_rows(storage: StorageService) -> ConnectorRows:
     try:
         names = storage.list_collection(scope=application, artifact="connectors/")
     except Exception as unlisted:
-        return ConnectorRows(
-            (), (), EnrolmentReading(shown, (), (), (), (), _cause(unlisted))
-        )
-    problems: list[str] = []
-    disabled: list[str] = []
-    # Every enabled row in listing order: `(file, instance or None, row)`.
-    enabled: list[tuple[str, str | None, Mapping[str, object]]] = []
+        return connector_rows_unlisted(shown, unlisted)
+    rows: list[tuple[str, bytes | BaseException]] = []
     for name in names:
-        if not name.endswith(".json") or not (directory / name).is_file():
+        if not is_connector_row_file(directory / name):
             continue
-        where = f"connectors/{name}" if name.isprintable() else f"connectors/{name!r}"
         try:
             raw = storage.read_artifact(
                 scope=application, artifact="connectors/", name=name
             )
         except Exception as unreadable:
-            problems.append(f"{where} could not be read ({_cause(unreadable)})")
+            rows.append((name, unreadable))
             continue
         if raw is None:
+            continue
+        rows.append((name, raw))
+    return sort_connector_rows(shown, rows)
+
+
+def is_connector_row_file(path: Path) -> bool:
+    """Whether a member of `connectors/` is a row: a regular file named `*.json`.
+
+    Shared by `read_connector_rows` and the prompt's completion (story 4u), so
+    the two cannot disagree about which files are rows.
+    """
+    return path.name.endswith(".json") and path.is_file()
+
+
+def connector_rows_unlisted(directory: str, error: BaseException) -> ConnectorRows:
+    """The reading of a `connectors/` that could not be listed: nothing else is said.
+
+    An unlisted directory is not an empty one, so no row is accepted, refused or
+    named (story 4n).
+    """
+    return ConnectorRows((), (), EnrolmentReading(directory, (), (), (), (), _cause(error)))
+
+
+def sort_connector_rows(
+    directory: str, rows: Sequence[tuple[str, bytes | BaseException]]
+) -> ConnectorRows:
+    """`4n`'s row rule as a pure function over the rows' names and bytes (story 4u).
+
+    `rows` is every regular file the caller found in `connectors/`, in listing
+    order, each with its bytes or the exception its read raised; a row removed
+    between the listing and its read is left out by the caller. `directory` is
+    how the directory is named in `doctor`'s line. Nothing here opens a file,
+    so the same rule serves `read_connector_rows`, which reads through the
+    single writer, and the prompt's completion, which reads by path and may not
+    build a `StorageService` (building one opens `operational.db`).
+
+    A name not ending in `.json` is not a row and is ignored.
+    """
+    shown = directory
+    problems: list[str] = []
+    disabled: list[str] = []
+    named: dict[str, str] = {}
+    # Every enabled row in listing order: `(file, instance or None, row)`.
+    enabled: list[tuple[str, str | None, Mapping[str, object]]] = []
+    for name, raw in rows:
+        if not name.endswith(".json"):
+            continue
+        where = f"connectors/{name}" if name.isprintable() else f"connectors/{name!r}"
+        if isinstance(raw, BaseException):
+            problems.append(f"{where} could not be read ({_cause(raw)})")
             continue
         try:
             decoded = json.loads(raw.decode("utf-8"))
@@ -2851,6 +2947,9 @@ def read_connector_rows(storage: StorageService) -> ConnectorRows:
             problems.append(f"{where} holds a {type(decoded).__name__}, not an object")
             continue
         instance = _usable_name(decoded.get("instance"))
+        system = decoded.get("system")
+        if instance is not None and isinstance(system, str) and system:
+            named.setdefault(instance, system)
         if decoded.get("enabled") is not True:
             disabled.append(where if instance is None else instance)
             continue
@@ -2926,6 +3025,7 @@ def read_connector_rows(storage: StorageService) -> ConnectorRows:
             problems=tuple(problems),
             unlisted=None,
         ),
+        named=tuple(named.items()),
     )
 
 

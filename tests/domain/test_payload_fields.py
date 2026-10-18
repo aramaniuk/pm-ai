@@ -419,6 +419,7 @@ EVERY_FIELD_SET: dict[type, object] = {
         channel="#payments",
         excerpt="Cache TTL is still 60s, in staging \\ prod",
         mentions=(U1, U2, str(DANA)),
+        sender_name='Dana "D" Okafor, ops',
     ),
     MeetingHeldPayload: MeetingHeldPayload(
         meeting_id="mtg_01", attendee_count=4, duration_minutes=30

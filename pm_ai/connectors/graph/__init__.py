@@ -80,6 +80,7 @@ from pm_ai.connectors.graph.channels import (
     ChannelListing,
     GraphChannelFetch,
     MessageRow,
+    display_name,
     label_problem,
     unusable_id_character,
 )
@@ -1492,8 +1493,10 @@ class GraphConnector:
         `graph:<user id>`, never resolved through the alias table here (AD-34):
         a person is matched only when read. A bot sender is
         `graph_app:<application id>`; a sender Microsoft names neither way is
-        `none:`. Each mention with a user id is a `graph:` handle; no display
-        name is recorded anywhere but in the text a person typed.
+        `none:`. Each mention with a user id is a `graph:` handle, never a
+        display name. The one display name recorded is the sender's (`23f`),
+        beside the handle and for display only: taken from the same branch of
+        `from` that produced the actor, and never for `none:`.
         """
         return self._posted(
             scope=listing.scope,
@@ -1545,14 +1548,25 @@ class GraphConnector:
                 if handle is not None and str(handle) not in handles:
                     handles.append(str(handle))
             mentions = tuple(handles)
+        # The actor first, then the name from the same branch of `from` (`23f`):
+        # a user's message never shows an application's name, and `none:` shows
+        # no name even when Microsoft sent one.
+        user = usable_handle(GRAPH, row.sender_user)
+        application = (
+            None if user is not None else usable_handle(GRAPH_APP, row.sender_application)
+        )
+        if user is not None:
+            sender_name = display_name(row.sender_user_name)
+        elif application is not None:
+            sender_name = display_name(row.sender_application_name)
+        else:
+            sender_name = None
         return NormalizedEvent(
             # AD-4 — a channel's project, or the scope a chat was listed under.
             scope=scope,
             type=ObservedEventType.MESSAGE_POSTED,
             source_ref=source,
-            actor=usable_handle(GRAPH, row.sender_user)
-            or usable_handle(GRAPH_APP, row.sender_application)
-            or NO_PERSON,
+            actor=user or application or NO_PERSON,
             # The provider clock (AD-35), carried as sent: implausible is
             # flagged at persist, never replaced.
             occurred_at=row.created_at,
@@ -1562,6 +1576,8 @@ class GraphConnector:
                 # (AD-12), not here.
                 excerpt=row.text[:EXCERPT_LENGTH] or None,
                 mentions=mentions,
+                # Display only, never compared or matched (AD-34, `23f`).
+                sender_name=sender_name,
             ),
             # AD-36 — a connector may never assert `external`.
             authored_by=Provenance.UNKNOWN,

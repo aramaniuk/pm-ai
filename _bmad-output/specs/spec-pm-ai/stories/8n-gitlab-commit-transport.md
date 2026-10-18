@@ -28,7 +28,7 @@ Two more faults hid behind the stub: the connector names itself after the GitLab
 - **The connector's name is the enrolled instance name**, handed in by composition; the built-in for a watched project keeps `gitlab:<project id>`. A commit's reference is `gitlab:<pm-ai project id>:commit:<sha>` — the project scope, as the grammar requires, never the provider path.
 - **Pages follow GitLab's own next-page header** (https://docs.gitlab.com/api/rest/ "Pagination"), 100 rows a page, under the existing page cap and ten-minute budget, with a thirty-second socket timeout on each request as the Graph client has. A missing next-page value is the last page; a non-numeric one, a next page that does not advance, or a 200 whose body is not a list is a non-retryable failure that keeps what was walked.
 - **The cursor is the newest plausible commit date seen on a complete walk, never past now.** The next run asks from **thirty days before the cursor** (`MERGE_LAG_DAYS`, a constant): a commit made on a branch reaches the default branch only when merged, and asking from the cursor alone would miss it. What was already recorded is dropped as a duplicate by its natural key; a commit merged more than thirty days after it was made is a stated loss. **A walk that did not finish moves the cursor nothing**: GitLab lists newest first, so the pages not walked are the older ones. What was walked keeps its events and coverage.
-- **A first run reaches back seven days** (`FIRST_RUN_REACH_BACK`, a constant); a row may override it with `first_run_reach_back_minutes`, Graph's key, and it is not asked at enrolment. A stored cursor this connector cannot read — the old decimal form, or anything else — is a non-retryable failure naming it, cursor unchanged, as Graph refuses one.
+- **A first run reaches back 30 days** (`FIRST_RUN_REACH_BACK`, derived from `MERGE_LAG_DAYS` since 8s); a row may override it with `first_run_reach_back_minutes`, Graph's key, and it is not asked at enrolment. A stored cursor this connector cannot read — the old decimal form, or anything else — is a non-retryable failure naming it, cursor unchanged, as Graph refuses one.
 - **GitLab's row shape is mapped**: `id` is the sha; `message`; `author_email`; `committed_date`, parsed to an aware UTC instant, replaces the invented `committed_at`. A row whose date will not parse refuses that row alone; a date in the future is flagged as implausible, as today, and never sets the cursor.
 - **Each answer has one reading.** 401 — token refused. 403 — the token lacks the `read_api` scope. 404 — no project visible at that path (GitLab answers 404 for a project the token cannot see). None of the three is retryable. 429 — the wait hint in seconds (https://docs.gitlab.com/administration/settings/user_and_ip_rate_limits/) is honoured inside the fetch when it fits the remaining budget, through an injected wait that composition sets to a real sleep; no hint, or a date for one, waits a default thirty seconds (`DEFAULT_THROTTLE_BACKOFF`); a hint that does not fit, a third throttle on one page, or a wait nobody injected ends the walk with the hint on the failure, retryable. 5xx and an unreachable host are retryable. Any other status is named, not retryable.
 - **No credential, no socket.** A built-in with no credential is not harvested and records no failure — it is not set up, which is not a fault; asked directly, its harvest returns a non-retryable failure saying so, with no coverage.
@@ -66,7 +66,7 @@ Two more faults hid behind the stub: the connector names itself after the GitLab
 | Built-in, no credential | watched project, nothing enrolled | not harvested; nothing recorded; health "not set up yet" | N/A |
 | Adapter, no credential | `credential=None`, harvest called | no socket | failure, not retryable |
 | Old cursor | decimal offset from the stub | refused, named; cursor unchanged | failure, not retryable |
-| First run | empty cursor | asks from now − 7 days, or the row's override | N/A |
+| First run | empty cursor | asks from now − 30 days, or the row's override | N/A |
 | Bad row setting | `project: "/x"`, reach-back `0` | connector not built; key named on stderr | N/A |
 | Unparseable date | `committed_date: "yesterday"` | that row refused by sha; the rest kept | row refusal |
 | Enrolled name kept | row `gitlab:alpha`, project `acme/web` | `instance` is `gitlab:alpha`; cursor and window save under it | N/A |
@@ -107,6 +107,10 @@ Two more faults hid behind the stub: the connector names itself after the GitLab
 - Given a transport that fails on page two, when the harvest runs twice, then the second run asks from the same instant as the first.
 - Given a built-in with no credential, when the harvest pipeline runs over it, then no transport call is made and no cursor, window or failure is saved.
 - Given `uv run pytest`, then all pass and the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09); given `uv run lint-imports`, then every contract holds.
+
+## Spec Change Log
+
+- **2026-10-18, amended by 8s:** a first run reaches back 30 days (`MERGE_LAG_DAYS`), not seven, so the second run no longer back-fills about three weeks (field-test finding 19); a hand-written row key still wins. A host typed with no scheme is read as https at enrolment (8o's question); the row reader is unchanged and still refuses a `host` without `https://`. Frozen text and the matrix's first-run row edited to match.
 
 ## Design Notes
 

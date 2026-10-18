@@ -2,7 +2,8 @@
 title: 'First runs reach back far enough'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '9e5383fe4c6ec023d243bfd09d9df39e72d6b6d4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -80,18 +81,18 @@ Re-verified against `ba0b747` on 2026-10-17.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/calendar.py` -- one constant for the offered reach-back, 7200 minutes, beside `WindowPolicy` -- spelled once, where the rule it must satisfy lives
-- [ ] `pm_ai/app/wiring.py` -- `GraphEnrolment` exposes the offered reach-back for a given window (the larger of the constant and the window); `GitLabEnrolment` gains the typed-host reading (the rule above) used before `refusal(host=)`, and its refusal quotes the typed text plus the address it was read as -- the composition root reaches `connectors`, the CLI does not
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `_ask_minutes` takes an optional default named in the prompt; the reach-back question passes the offered value; the host question reads the typed answer through the new reading, prints "taken as …" only for an accepted answer whose scheme was added, and saves the full address; docstrings updated -- the questions
-- [ ] `pm_ai/connectors/gitlab/__init__.py` -- `FIRST_RUN_REACH_BACK = timedelta(days=MERGE_LAG_DAYS)`, its docstring saying why they are one span and what the second run can still add -- consistency
-- [ ] `tests/slice/test_connector_add_graph.py`, `tests/slice/test_setup_connector_step.py` -- every Graph row of the matrix -- the Graph rows
-- [ ] `tests/slice/test_connector_add_gitlab.py` -- each host row of the matrix, the saved row asserted on disk -- the host rows
-- [ ] `tests/connectors/test_gitlab_transport.py`, `tests/connectors/test_coverage_honesty.py` -- first run asks from 30 days back (the seven-day assertion at `test_coverage_honesty.py:575-583` changes); a row key still wins; on a fixture whose newest commit date is pinned, the second run asks from that date minus 30 days -- finding 19
-- [ ] `tests/connectors/test_graph_transcripts.py` -- count the requests one acquisition makes, on the recorded Graph transport, for a stated number of ended meetings with no transcript inside a 7200-minute reach-back; record the count and the meeting count in this spec's Design Notes -- the stated cost, measured
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/8l-connector-add-graph.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: the reach-back question now offers 7200 minutes, or the window when wider, as what Enter keeps (Andrei, 2026-10-16); the window keeps no default -- its frozen text and Ask First say "no default"
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: a first run reaches back 30 days (`MERGE_LAG_DAYS`), not seven; a typed host with no scheme is read as https at enrolment, the row reader unchanged -- its frozen text says seven days
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/8o-connector-add-gitlab.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: the first-run constant it names is now 30 days; a host typed without a scheme is taken as https and said so -- its frozen text says "the seven-day constant" and "must be an https address"
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved the field test's GitLab first-run entry (finding 19) and the host part of its small-gaps entry -- what this closes
+- [x] `pm_ai/connectors/graph/calendar.py` -- one constant for the offered reach-back, 7200 minutes, beside `WindowPolicy` -- spelled once, where the rule it must satisfy lives
+- [x] `pm_ai/app/wiring.py` -- `GraphEnrolment` exposes the offered reach-back for a given window (the larger of the constant and the window); `GitLabEnrolment` gains the typed-host reading (the rule above) used before `refusal(host=)`, and its refusal quotes the typed text plus the address it was read as -- the composition root reaches `connectors`, the CLI does not
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `_ask_minutes` takes an optional default named in the prompt; the reach-back question passes the offered value; the host question reads the typed answer through the new reading, prints "taken as …" only for an accepted answer whose scheme was added, and saves the full address; docstrings updated -- the questions
+- [x] `pm_ai/connectors/gitlab/__init__.py` -- `FIRST_RUN_REACH_BACK = timedelta(days=MERGE_LAG_DAYS)`, its docstring saying why they are one span and what the second run can still add -- consistency
+- [x] `tests/slice/test_connector_add_graph.py`, `tests/slice/test_setup_connector_step.py` -- every Graph row of the matrix -- the Graph rows
+- [x] `tests/slice/test_connector_add_gitlab.py` -- each host row of the matrix, the saved row asserted on disk -- the host rows
+- [x] `tests/connectors/test_gitlab_transport.py`, `tests/connectors/test_coverage_honesty.py` -- first run asks from 30 days back (the seven-day assertion at `test_coverage_honesty.py:575-583` changes); a row key still wins; on a fixture whose newest commit date is pinned, the second run asks from that date minus 30 days -- finding 19
+- [x] `tests/connectors/test_graph_transcripts.py` -- count the requests one acquisition makes, on the recorded Graph transport, for a stated number of ended meetings with no transcript inside a 7200-minute reach-back; record the count and the meeting count in this spec's Design Notes -- the stated cost, measured
+- [x] `_bmad-output/specs/spec-pm-ai/stories/8l-connector-add-graph.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: the reach-back question now offers 7200 minutes, or the window when wider, as what Enter keeps (Andrei, 2026-10-16); the window keeps no default -- its frozen text and Ask First say "no default"
+- [x] `_bmad-output/specs/spec-pm-ai/stories/8n-gitlab-commit-transport.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: a first run reaches back 30 days (`MERGE_LAG_DAYS`), not seven; a typed host with no scheme is read as https at enrolment, the row reader unchanged -- its frozen text says seven days
+- [x] `_bmad-output/specs/spec-pm-ai/stories/8o-connector-add-gitlab.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: the first-run constant it names is now 30 days; a host typed without a scheme is taken as https and said so -- its frozen text says "the seven-day constant" and "must be an https address"
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved the field test's GitLab first-run entry (finding 19) and the host part of its small-gaps entry -- what this closes
 
 **Acceptance Criteria:**
 - Given a clean machine, when `connector add graph` is answered with a 240-minute window and Enter at the reach-back, and the daemon then harvests the new connector once, then the first harvest's calendar request, read from its recorded URL, starts five days before the run and ends 240 minutes after it (the window), and the meetings that harvest records include ones from those five days.
@@ -107,6 +108,7 @@ of the first minus 30 days.
 - **2026-10-16, Andrei's decision on the request ceiling.** No per-harvest ceiling on Graph transcript requests; the existing fetch budget bounds the run and meetings not reached wait for the next. One sentence added to the transcripts bullet, since the slice left the point open.
 - **2026-10-17, frozen block amended by Andrei's decision B:** since 23e the dashboard reads only the display day, so the Problem sentence and acceptance criterion 1 now speak of what the first harvest requests and records.
 - **2026-10-17, Code Map re-verified** against `ba0b747`: `dispatch.py` lines moved by slice 4t, `_ask_minutes`'s second caller noted, the channel walk's first-run start and `_cut_short` added, the 33h horizon note added to Design Notes.
+- **2026-10-18, built.** Tasks done as listed; the transcript request count recorded in Design Notes (60 requests for 20 untranscribed meetings). 8l, 8n and 8o carry their dated Change Log lines; deferred-work's finding-19 entry and the host part of the small-gaps entry are marked resolved.
 
 ## Design Notes
 
@@ -114,7 +116,9 @@ Why the default lives in the question and not in the row reader: every enrolled 
 
 Transcripts: `33e` ties the transcript span to the same row value on purpose — every meeting a first run records must be inside it — and its frozen block says absent transcripts are asked again while in the reach-back. Five days of that is more requests per run than four hours; Andrei kept the five days for transcripts (2026-10-16), and how many requests that is per run is what the counting task records.
 
-GitLab's second run (choice, review 2026-10-16): a 30-day first run cannot make the second run add nothing, because the cursor is the newest commit's date, not the run's time. The spec states the true bound — the span from that date to the first run — and the test pins the date on a fixture, rather than claiming no back-fill.
+Measured (2026-10-18, `test_one_acquisition_over_five_days_asks_three_requests_per_untranscribed_meeting`, on `test_graph_transcripts.py`'s `FakeGraph` transport): for 20 ended one-off Teams meetings inside a 7200-minute reach-back, each with no transcript yet, one acquisition pass, called directly on the recorded fake transport, made 60 Graph requests — three per meeting: the event, the online-meeting lookup by join link, and the transcript listing (one page each). A meeting with a transcript adds its download; a series shares one lookup and one listing (`test_acceptance_a_series_is_looked_up_and_listed_once`). The count excludes the harvest's `calendarView` call and any channel or chat walk. Twenty is a stated count, not a measurement of any real calendar.
+
+GitLab's second run (choice, review 2026-10-16): a 30-day first run cannot make the second run add nothing, because the cursor is the newest commit's date, not the run's time. The spec states the true bound — the second run asks from D − 30 days (D the newest commit's date), so what it adds beyond the first run's range is the range from D − 30 days up to T − 30 days (T the first run's time), a span T − D long — and the test pins the date on a fixture, rather than claiming no back-fill.
 
 Host reading (choice, review 2026-10-16): only a bare answer is prefixed; anything that already looks like a scheme, mistyped or not, is judged as typed, so a typo is shown back rather than silently turned into a different address.
 
@@ -131,3 +135,55 @@ Build order: 8s comes before 4s in wave 3. Both change `_connector_add_graph`, `
 - `uv run pytest -q` -- expected: all pass; the skip count unchanged from the slice's baseline
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**Graph: Enter keeps five days at the reach-back question**
+
+- The offer: five days or the window, whichever is wider, named in the prompt.
+  [`dispatch.py:1264`](../../../../pm_ai/surfaces/cli/dispatch.py#L1264)
+
+- Blank keeps the default only when a caller offers one; window and drop duration still refuse.
+  [`dispatch.py:1479`](../../../../pm_ai/surfaces/cli/dispatch.py#L1479)
+
+- The composition root computes the offer from the connector's constant.
+  [`wiring.py:1586`](../../../../pm_ai/app/wiring.py#L1586)
+
+- The constant, spelled once beside the rule it must satisfy.
+  [`calendar.py:541`](../../../../pm_ai/connectors/graph/calendar.py#L541)
+
+**GitLab: a typed host with no scheme is read as https**
+
+- Only a bare answer is prefixed; host part lower-cased to match what is saved.
+  [`wiring.py:2122`](../../../../pm_ai/app/wiring.py#L2122)
+
+- Refusal judges the read address, quotes the typed text and how it was read.
+  [`wiring.py:2156`](../../../../pm_ai/app/wiring.py#L2156)
+
+- The check reads the host the same way before probing and saving.
+  [`wiring.py:2232`](../../../../pm_ai/app/wiring.py#L2232)
+
+- The question prints "taken as …" only when a scheme was added.
+  [`dispatch.py:1364`](../../../../pm_ai/surfaces/cli/dispatch.py#L1364)
+
+**GitLab: first run reaches back 30 days**
+
+- Derived from `MERGE_LAG_DAYS`, so first and later runs cannot drift apart.
+  [`__init__.py:124`](../../../../pm_ai/connectors/gitlab/__init__.py#L124)
+
+**Tests**
+
+- Acceptance 1: enrol with Enter, harvest once, calendar request spans five days back.
+  [`test_connector_add_graph.py:823`](../../../../tests/slice/test_connector_add_graph.py#L823)
+
+- Acceptance 2: bare host enrolled, harvested twice, https and D − 30 days.
+  [`test_connector_add_gitlab.py:743`](../../../../tests/slice/test_connector_add_gitlab.py#L743)
+
+- Host reading pinned directly across bare, port, path, case and scheme shapes.
+  [`test_connector_add_gitlab.py:663`](../../../../tests/slice/test_connector_add_gitlab.py#L663)
+
+- First run 30 days, second from newest commit date, hand-set key still wins.
+  [`test_coverage_honesty.py:577`](../../../../tests/connectors/test_coverage_honesty.py#L577)
+
+- The measured transcript cost: three requests per untranscribed meeting.
+  [`test_graph_transcripts.py:1287`](../../../../tests/connectors/test_graph_transcripts.py#L1287)

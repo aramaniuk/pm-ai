@@ -57,6 +57,8 @@ from pm_ai.app.pipelines import run_harvest
 from pm_ai.app.wiring import build
 from pm_ai.connectors.gitlab import (
     FETCH_BUDGET,
+    FIRST_RUN_REACH_BACK,
+    MERGE_LAG_DAYS,
     CommitQuery,
     GitLabConnectorAdapter,
     Page,
@@ -572,15 +574,53 @@ def test_a_cursor_within_the_skew_tolerance_is_never_past_now():
     assert result.cursor == Cursor(b"2026-08-19T09:00:00Z")
 
 
-def test_a_first_run_reaches_back_seven_days_or_the_rows_override():
-    """Row: *first run* — now − 7 days, or the override the row sets."""
+def test_a_first_run_reaches_back_thirty_days_or_the_rows_override():
+    """Row: *first run* — now − 30 days, the span every later run asks from
+    before its cursor (story 8s), or the override the row sets."""
+    assert FIRST_RUN_REACH_BACK == timedelta(days=MERGE_LAG_DAYS) == timedelta(days=30)
+
     default = paging(())
     connector(fetch_page=default).harvest(Cursor())
-    assert default.since == [NOW - timedelta(days=7)]
+    assert default.since == [NOW - timedelta(days=30)]
 
     overridden = paging(())
     connector(fetch_page=overridden, first_run_reach_back=timedelta(minutes=90)).harvest(Cursor())
     assert overridden.since == [NOW - timedelta(minutes=90)]
+
+
+def test_the_second_run_asks_from_thirty_days_before_the_newest_commit_date():
+    """Story 8s, finding 19: the cursor is the newest commit's date D, not the
+    first run's time T, so the second run asks from D − 30 days — and what it
+    adds beyond the first run's range is D − 30 days up to T − 30 days."""
+    first_run_at = NOW
+    newest = NOW - timedelta(days=3, hours=4)
+    first = paging((commit("d1", "the newest", at=newest),))
+    result = connector(fetch_page=first).harvest(Cursor())
+    assert first.since == [first_run_at - timedelta(days=30)]
+    assert result.cursor == Cursor(b"2026-08-16T05:00:00Z")
+
+    second = paging(())
+    later = first_run_at + timedelta(hours=4)
+    connector(fetch_page=second, now=lambda: later).harvest(result.cursor)
+    assert second.since == [newest - timedelta(days=30)]
+    added = first.since[0] - second.since[0]
+    assert added == first_run_at - newest, "what is new is D − 30 days up to T − 30 days, a span T − D long"
+
+
+def test_a_hand_set_short_reach_back_still_back_fills_at_the_second_run():
+    """Row: *GitLab short key by hand* — one day first, then 30 days before the
+    cursor, so the second run back-fills up to 29 days, as it always did."""
+    first = paging((commit("d1", "today", at=NOW - timedelta(hours=1)),))
+    result = connector(fetch_page=first, first_run_reach_back=timedelta(minutes=1440)).harvest(
+        Cursor()
+    )
+    assert first.since == [NOW - timedelta(days=1)]
+
+    second = paging(())
+    connector(fetch_page=second, first_run_reach_back=timedelta(minutes=1440)).harvest(
+        result.cursor
+    )
+    assert second.since == [NOW - timedelta(hours=1) - timedelta(days=30)]
 
 
 def test_page_two_failing_twice_asks_from_the_same_instant_both_times(tmp_path):

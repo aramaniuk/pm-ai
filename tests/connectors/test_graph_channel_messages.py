@@ -46,6 +46,7 @@ from pm_ai.connectors.graph.auth import (
 from pm_ai.connectors.graph.calendar import GraphCalendarFetch, WindowPolicy
 from pm_ai.connectors.graph.channels import (
     EXCERPT_LENGTH,
+    MAX_LABEL_LENGTH,
     THREAD_HORIZON,
     GraphChannelFetch,
     plain_text,
@@ -461,6 +462,148 @@ def test_a_bot_sender_is_emitted_with_an_application_handle():
     event = _by_id(result)["1700000000100"]
     assert str(event.actor) == f"graph_app:{BOT}"
     assert event.payload.excerpt == "Nightly build passed.\nLogs attached."
+
+
+# ── The sender's name (story 23f) ────────────────────────────────────────────
+
+
+def _sent_by(sender: object) -> object:
+    """The one event a root message from `sender` (its `from`) emits."""
+    result, _ = _harvest(_page(_message(**{"from": sender})))
+    return _by_id(result)["1700000000500"]
+
+
+def _user(user_id: object = SENDER, name: object = "Sam Sender") -> dict:
+    return {"application": None, "device": None, "user": {"id": user_id, "displayName": name}}
+
+
+def _app(app_id: object = BOT, name: object = "Build Bot") -> dict:
+    return {"application": {"id": app_id, "displayName": name}, "device": None, "user": None}
+
+
+def test_a_named_person_has_the_name_beside_the_handle():
+    """Matrix: named person — the name stored, the actor still the handle."""
+    event = _sent_by(_user())
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name == "Sam Sender"
+
+
+def test_a_bot_has_its_application_name_and_its_application_handle():
+    """Matrix: bot."""
+    result, _ = _harvest(_page(*_threads()))
+    event = _by_id(result)["1700000000100"]
+    assert str(event.actor) == f"graph_app:{BOT}"
+    assert event.payload.sender_name == "Build Bot"
+
+
+@pytest.mark.parametrize(
+    "sender",
+    [
+        _user(user_id=None, name="Dana Okafor"),
+        _user(user_id="not-a-guid", name="Dana Okafor"),
+        _app(app_id=None, name="Build Bot"),
+        {"user": {"displayName": "Dana Okafor"}, "application": {"displayName": "Bot"}},
+    ],
+    ids=["no-user-id", "unusable-user-id", "no-app-id", "names-only"],
+)
+def test_an_unknown_sender_stores_no_name_even_when_one_was_sent(sender):
+    """Matrix: unknown sender with a name — `none:`, and no name."""
+    event = _sent_by(sender)
+    assert str(event.actor) == "none:"
+    assert event.payload.sender_name is None
+
+
+def test_a_users_message_never_takes_the_applications_name():
+    """Matrix: user message, app name present — the user's name only."""
+    both = {
+        "user": {"id": SENDER, "displayName": "Sam Sender"},
+        "application": {"id": BOT, "displayName": "Build Bot"},
+    }
+    event = _sent_by(both)
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name == "Sam Sender"
+    no_user_name = {
+        "user": {"id": SENDER},
+        "application": {"id": BOT, "displayName": "Build Bot"},
+    }
+    assert _sent_by(no_user_name).payload.sender_name is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [None, 42, ["Sam"], "", "   ", "\u200b\u200e\u2060", "\t\n\u00a0", "\u2028"],
+    ids=["null", "number", "list", "empty", "spaces", "format-only", "blank-mix", "line-sep"],
+)
+def test_no_usable_name_is_left_off_and_the_handle_stays(name):
+    """Matrix: no name — absent, null, a number, whitespace or only format characters."""
+    event = _sent_by(_user(name=name))
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name is None
+
+
+def test_an_absent_display_name_is_left_off():
+    event = _sent_by({"user": {"id": SENDER}})
+    assert event.payload.sender_name is None
+
+
+DISGUISED_HANDLES = {
+    "zero-width-before": "\u200bgraph:1234",
+    "word-joiner-before": "\u2060email:a@b.c",
+    "bom-before": "\ufeffgraph:x",
+    "zero-width-inside": "graph\u200b:x",
+    "fullwidth": "\uff27\uff32\uff21\uff30\uff28\uff1a1234",
+}
+"""Handle-shaped names behind invisible or compatibility characters (`23f`):
+each reads as a handle on the page, so each is refused like the plain form."""
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "graph:1234",
+        f"graph:{SENDER}",
+        "Email:dana@example.com",
+        " none:",
+        "graph_app:x",
+        *DISGUISED_HANDLES.values(),
+    ],
+    ids=["graph", "graph-guid", "email", "none", "graph-app", *DISGUISED_HANDLES],
+)
+def test_a_name_shaped_like_a_handle_is_left_off(name):
+    """Matrix: name like a handle — it would read as one, so it is not stored."""
+    event = _sent_by(_user(name=name))
+    assert str(event.actor) == f"graph:{SENDER}"
+    assert event.payload.sender_name is None
+
+
+def test_a_name_with_a_colon_that_names_no_handle_system_is_kept():
+    assert _sent_by(_user(name="Ops: Dana")).payload.sender_name == "Ops: Dana"
+
+
+def test_a_long_name_is_stripped_and_cut_to_the_label_bound():
+    """Matrix: long name — 150 characters stored as 100."""
+    event = _sent_by(_user(name="  " + "n" * 150 + "  "))
+    assert MAX_LABEL_LENGTH == 100
+    assert event.payload.sender_name == "n" * 100
+
+
+def test_a_name_left_invisible_by_the_cut_is_left_off():
+    """Zero-width characters that fill the 100 kept: no blank sender."""
+    event = _sent_by(_user(name="\u200b" * MAX_LABEL_LENGTH + "Sam Sender"))
+    assert event.payload.sender_name is None
+
+
+def test_the_name_reaches_the_log_line_and_decodes(tmp_path):
+    """Through the single writer: the name is a `p.` field; the actor the handle."""
+    built = build(tmp_path, "alpha", now=lambda: NOW)
+    event = _sent_by(_user(name="Sam \"S\" Sender"))
+    built.storage.persist_events((event,), scope=ALPHA)
+    (segment,) = sorted(tmp_path.rglob("event_log/*.md"))
+    (entry,) = parse_segment(segment.read_text(encoding="utf-8"))
+    assert entry.actor == f"graph:{SENDER}"
+    payload = decode_payload(entry)
+    assert isinstance(payload, MessagePayload)
+    assert payload.sender_name == 'Sam "S" Sender'
 
 
 def test_html_to_text_decodes_entities_and_breaks_blocks_once():

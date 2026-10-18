@@ -26,7 +26,7 @@ A Graph credential is also not something you type. It comes from Microsoft's sig
 **Always:**
 - **Refuse a name already in use before asking anything**, so nobody completes a sign-in only to be told the name was taken.
 - **It needs a terminal**, as adding a credential does today; without one it is refused before anything is asked.
-- **The questions, in order:** the Microsoft app (client) id, required; the tenant, where Enter keeps `organizations`; the harvest window in minutes, which states its 240-minute minimum and has no default; the first-run reach-back in minutes, which must be at least the window. An answer that would not build a connector is asked again with the reason, never saved.
+- **The questions, in order:** the Microsoft app (client) id, required; the tenant, where Enter keeps `organizations`; the harvest window in minutes, which states its 240-minute minimum and has no default; the first-run reach-back in minutes, which must be at least the window, where Enter keeps 7200 minutes (five days), or the window when it is wider, and the question names the number Enter keeps (8s). An answer that would not build a connector is asked again with the reason, never saved.
 - **Outlook category → project mapping is not asked.** The closing message names the settings file where it is added by hand.
 - **The sign-in shows Microsoft's own address and code**, waits for the person, and reports a declined, partial or expired sign-in by its own reason, saving nothing.
 - **After sign-in, a live health check runs within 10 seconds** (CAP-35); a failure saves nothing.
@@ -34,7 +34,7 @@ A Graph credential is also not something you type. It comes from Microsoft's sig
 - **The sign-in token never appears** on screen, in logs, or in error messages.
 - **The connector becomes active at the next start**, as today.
 
-**Ask First:** Any change to the questions asked or their order. Any default for the harvest window or reach-back.
+**Ask First:** Any change to the questions asked or their order. Any default for the harvest window, or any other default for the reach-back.
 
 **Never:**
 - No re-sign-in for a connector already enrolled, no GitLab probe, no `pm-ai setup` step — each is its own slice (recorded 2026-10-09).
@@ -50,6 +50,7 @@ A Graph credential is also not something you type. It comes from Microsoft's sig
 | No terminal | stdin not a TTY | refused before any question | exit 3 |
 | Window under 240 | `120` | asked again, saying the minimum | N/A |
 | Reach-back under window | window 480, reach-back 60 | asked again, saying it must be at least 480 | N/A |
+| Enter at the reach-back | window 240, Enter | 7200 saved; the question named 7200 (8s) | N/A |
 | Blank client id | Enter | asked again | N/A |
 | Tenant left blank | Enter | `organizations` saved | N/A |
 | Sign-in declined / expired | the person refuses, or the code runs out | that reason; nothing saved | exit 3 |
@@ -84,6 +85,10 @@ A Graph credential is also not something you type. It comes from Microsoft's sig
 **Acceptance Criteria:**
 - Given a machine with a project enrolled and no Graph connector, when `pm-ai connector add graph graph:work` runs with valid answers and an approved sign-in, then a fresh start builds a Graph connector named `graph:work` and `pm-ai connector check` lists it.
 - Given the change, when `uv run pytest` runs, then everything passes with 24 skipped.
+
+## Spec Change Log
+
+- **2026-10-18, amended by 8s** (Andrei, 2026-10-16): the reach-back question now offers 7200 minutes (five days), or the window when it is wider, as what Enter keeps, and names that number; the harvest window keeps no default. Frozen text, Ask First and the matrix edited to match.
 
 ## Verification
 

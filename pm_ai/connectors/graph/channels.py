@@ -102,6 +102,7 @@ from pm_ai.domain.harvest import (
     HarvestFailure,
     RowRefusal,
 )
+from pm_ai.domain.handles import reads_as_handle
 from pm_ai.domain.identity import DataScope, ScopeKind
 
 __all__ = [
@@ -114,6 +115,7 @@ __all__ = [
     "MessageRow",
     "MessageRowRefused",
     "THREAD_HORIZON",
+    "display_name",
     "instant",
     "label_problem",
     "plain_text",
@@ -191,6 +193,13 @@ class MessageRow:
     """`from.user.id` — a Graph user id, exactly as Microsoft sent it."""
     sender_application: str | None = None
     """`from.application.id` — set when a bot posted the message."""
+    sender_user_name: str | None = None
+    """`from.user.displayName`, the text as Microsoft sent it, or `None` when it
+    sent no text there. Display only (`23f`); cleaned by `display_name` when the
+    event is built, and kept only when the actor is the user's handle."""
+    sender_application_name: str | None = None
+    """`from.application.displayName`, as sent, or `None`. Kept only when the
+    actor is the application's handle."""
     mentions: tuple[str, ...] | None = None
     """The user id of each mention that names a user, in the order Microsoft
     sent them. `None` when Microsoft sent no `mentions` list at all, which is a
@@ -716,6 +725,8 @@ def read_message(raw: Mapping[str, Any], *, reply_to: str | None) -> MessageRow 
         text=text,
         sender_user=_nested_id(sender, "user"),
         sender_application=_nested_id(sender, "application"),
+        sender_user_name=_nested_text(sender, "user", "displayName"),
+        sender_application_name=_nested_text(sender, "application", "displayName"),
         mentions=_mentions(raw),
         reply_to=reply_to,
     )
@@ -864,13 +875,53 @@ def _body_text(body: Any) -> str:
 
 def _nested_id(holder: Any, key: str) -> str | None:
     """`holder[key].id` when every step of it is there."""
+    value = _nested_text(holder, key, "id")
+    return value if value else None
+
+
+def _nested_text(holder: Any, key: str, name: str) -> str | None:
+    """`holder[key][name]` when every step is there and the value is text."""
     if not isinstance(holder, Mapping):
         return None
     inner = holder.get(key)
     if not isinstance(inner, Mapping):
         return None
-    value = inner.get("id")
-    return value if isinstance(value, str) and value else None
+    value = inner.get(name)
+    return value if isinstance(value, str) else None
+
+
+def display_name(value: object) -> str | None:
+    """A sender's display name fit to show, or `None` when there is none (`23f`).
+
+    Display only — never identity (AD-34). Stripped and cut to
+    `MAX_LABEL_LENGTH`. `None` for anything but text; for text that would read
+    as a person handle (`graph:…`, `email:…`, judged on what a reader sees,
+    `reads_as_handle`): a name must never imitate the identity form; and for a
+    value in which, once cut, only whitespace, control, format or other
+    invisible characters remain — so a run of zero-width characters cannot
+    push the visible text past the cut and leave a blank sender. Other
+    characters are kept as sent; the dashboard's escape makes them visible.
+    """
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if reads_as_handle(name):
+        return None
+    cut = name[:MAX_LABEL_LENGTH].rstrip()
+    if all(_invisible(character) for character in cut):
+        return None
+    return cut
+
+
+def _invisible(character: str) -> bool:
+    """Whitespace, a control or format character, or any separator (`Z*`)."""
+    return character.isspace() or unicodedata.category(character) in (
+        "Cc",
+        "Cf",
+        "Zs",
+        "Zl",
+        "Zp",
+    )
 
 
 def _mentions(raw: Mapping[str, Any]) -> tuple[str, ...] | None:
