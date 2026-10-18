@@ -1350,7 +1350,7 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   evidence: Finding 17: the one-line escape writes the two characters `\` `n` (`core/rendering.py:1124`); a space or a separator reads better.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `8s` (pull request #74).** GitLab's first run reaches back 7 days while every later run asks from 30 days before the cursor, so the second run back-fills three more weeks.
+  summary: **RESOLVED 2026-10-18 by `8s`** — `FIRST_RUN_REACH_BACK` is derived from `MERGE_LAG_DAYS`, so a first run asks from 30 days back, as every later run asks before its cursor; the second run asks from the newest commit's date D minus 30 days, so what it can still add beyond the first run is the range from D − 30 days up to T − 30 days (T the first run's time), a span T − D long. A hand-written `first_run_reach_back_minutes` still wins. Was: GitLab's first run reaches back 7 days while every later run asks from 30 days before the cursor, so the second run back-fills three more weeks.
   evidence: Finding 19 (`connectors/gitlab/__init__.py:106`, `:124`): a real project's commits; a 30-day first run would be consistent.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
@@ -1358,7 +1358,7 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   evidence: Finding 12: reproduced through pm-ai's own client; another attendee-only meeting resolves, so the cause is not organiser-only access. Investigate cross-tenant organisers and group invitations.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `4t`, `11d`, `8s`, `4s` (pull request #74).** Finding 7: **Planned in wave 3 as `23e` (pull request #74 plus this sync)** — Andrei, 2026-10-16: an ended cancelled meeting is shown, marked as cancelled. Small surface gaps from the field test: no `goal list`/show command, no quoting hint for an unquoted path with spaces, no `https://` assumed for a GitLab host, nothing printed when the daemon stops, and a cancelled-but-ended meeting recorded while the dashboard leaves it out.
+  summary: **Planned in wave 3 as `4t`, `11d`, `8s`, `4s` (pull request #74).** Finding 7: **Planned in wave 3 as `23e` (pull request #74 plus this sync)** — Andrei, 2026-10-16: an ended cancelled meeting is shown, marked as cancelled. Small surface gaps from the field test: no `goal list`/show command, no quoting hint for an unquoted path with spaces, no `https://` assumed for a GitLab host (**RESOLVED 2026-10-18 by `8s`**: a host typed with no scheme is taken as `https://`, saved so and said so; one naming a scheme is judged as typed), nothing printed when the daemon stops, and a cancelled-but-ended meeting recorded while the dashboard leaves it out.
   evidence: Findings 23, 21, the host prompt, 13 and 7 in the field-test report.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`

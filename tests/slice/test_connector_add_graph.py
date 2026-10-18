@@ -21,11 +21,14 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from pm_ai.app import entry, wiring
+from pm_ai.app.pipelines import run_harvest
 from pm_ai.app.wiring import GraphEnrolment, bootstrap, build
 from pm_ai.connectors.graph import MAX_SETTING_MINUTES, GraphConnector
 from pm_ai.connectors.graph import auth as graph_auth
@@ -36,6 +39,7 @@ from pm_ai.connectors.graph.auth import (
     SealedCredential,
 )
 from pm_ai.core.connector_enrolment import MalformedSettings, stored_credentials
+from pm_ai.core.meeting_records import MEETINGS
 from pm_ai.core.project_registry import ProjectEntry, render_registry
 from pm_ai.domain.health import ArtifactState, Health
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -43,6 +47,7 @@ from pm_ai.domain.storage_tiers import RESTRICTED_FILE_MODE
 from pm_ai.ports import KeyAlreadyEnrolled, KeyNotFound
 from pm_ai.surfaces.cli import dispatch as cli
 from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL
+from tests.connectors.recorded_graph import graph_time
 
 INSTANCE = "graph:work"
 CLIENT_ID = "00000000-0000-0000-0000-00000000008l"
@@ -733,6 +738,126 @@ def test_a_reach_back_under_the_window_is_asked_again(machine, monkeypatch, caps
     assert "at least 480" in reaches[1]
     assert "at least 480 minutes" in captured.err
     assert _row(home)["first_run_reach_back_minutes"] == 480
+
+
+# ── Story 8s — Enter at the reach-back keeps five days ───────────────────────
+
+
+def test_enter_at_the_window_is_asked_again_it_keeps_no_default(machine, monkeypatch, capsys):
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "", "240", ""])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    windows = _prompts(terminal, "Harvest window")
+    assert len(windows) == 2, "Enter at the window is asked again"
+    assert "no default" in windows[0] and "Enter keeps" not in windows[0]
+    assert "this has no default" in captured.err
+    assert _row(home)["window_width_minutes"] == 240
+
+
+def test_enter_at_the_reach_back_keeps_five_days_and_the_question_names_it(
+    machine, monkeypatch, capsys
+):
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "240", ""])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert len(terminal.prompts) == 4
+    (reach,) = _prompts(terminal, "First-run reach-back")
+    assert "[Enter keeps 7200]" in reach and "at least 240" in reach
+    row = _row(home)
+    assert (row["window_width_minutes"], row["first_run_reach_back_minutes"]) == (240, 7200)
+
+
+def test_a_typed_reach_back_is_saved_as_typed(machine, monkeypatch, capsys):
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, _ = _add(monkeypatch, [CLIENT_ID, "", "240", "900"])
+
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert _row(home)["first_run_reach_back_minutes"] == 900
+
+
+def test_with_a_window_wider_than_five_days_enter_keeps_the_window(
+    machine, monkeypatch, capsys
+):
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "10080", ""])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    (reach,) = _prompts(terminal, "First-run reach-back")
+    assert "[Enter keeps 10080]" in reach and "7200" not in reach
+    assert _row(home)["first_run_reach_back_minutes"] == 10080
+
+
+def test_a_row_already_on_disk_keeps_its_reach_back(machine, monkeypatch, capsys):
+    """Row: *existing Graph row* — 240 stays 240: nothing rewrites it, and the
+    calendar, the transcript span and a newly listed chat or channel all read
+    it."""
+    home, keychain = machine
+    _microsoft(monkeypatch, Microsoft())
+    assert _add(monkeypatch, [CLIENT_ID, "", "240", "240"])[0] == EXIT_OK
+    before = _settings_file(home).read_bytes()
+
+    daemon = build(home, "alpha", keychain=keychain)
+
+    assert _settings_file(home).read_bytes() == before, "the row was rewritten"
+    connector = daemon.connectors[INSTANCE]
+    assert isinstance(connector, GraphConnector), capsys.readouterr().err
+    four_hours = timedelta(minutes=240)
+    assert connector.calendar.windows.first_run_reach_back == four_hours
+    assert connector._messages().reach_back == four_hours
+    assert connector._chat_messages().reach_back == four_hours
+
+
+def test_acceptance_a_first_harvest_after_enter_reaches_back_five_days(
+    machine, monkeypatch, capsys
+):
+    """Story 8s's first acceptance criterion: a 240-minute window, Enter at the
+    reach-back, then one harvest through the daemon's own `run_harvest`. The
+    calendar request, read from its recorded URL, starts five days before the
+    run and ends the window after it, and a meeting from four days back is
+    recorded."""
+    from tests.connectors.test_graph_transcripts import (
+        Auth,
+        FakeGraph,
+        _calendar_row,
+        _one_off,
+    )
+
+    home, keychain = machine
+    _microsoft(monkeypatch, Microsoft())
+    assert _add(monkeypatch, [CLIENT_ID, "", "240", ""])[0] == EXIT_OK
+
+    now = datetime(2026, 10, 16, 9, 0, tzinfo=timezone.utc)
+    four_days_ago = now - timedelta(days=4)
+    graph = FakeGraph()
+    graph.calendar = [_calendar_row("AAMk-four-days", four_days_ago)]
+    _one_off(graph, "AAMk-four-days", start=four_days_ago)
+    daemon = build(home, "alpha", keychain=keychain, now=lambda: now)
+    client = daemon.connectors[INSTANCE].calendar.client
+    client.transport, client.auth = graph, Auth()
+
+    persisted = run_harvest(daemon, INSTANCE)
+
+    assert daemon.storage.harvest_failure(INSTANCE) is None, persisted
+    (asked,) = graph.asked("/me/calendarView")
+    query = parse_qs(urlsplit(asked).query)
+    assert graph_time(query["startDateTime"][0]) == now - timedelta(days=5)
+    assert graph_time(query["endDateTime"][0]) == now + timedelta(minutes=240)
+    personal = DataScope(ScopeKind.PERSONAL)
+    records = daemon.storage.list_collection(scope=personal, artifact=MEETINGS)
+    assert any("AAMk-four-days" in name for name in records), records
 
 
 @pytest.mark.parametrize("typed", ["", "abc", "1440.0", "1_440", "+480", "١٤٤٠"])

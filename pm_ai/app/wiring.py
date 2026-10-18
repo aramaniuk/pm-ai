@@ -13,6 +13,7 @@ import copy
 import json
 import logging
 import math
+import re
 import sys
 import threading
 import time
@@ -77,6 +78,7 @@ from pm_ai.connectors.graph.auth import (
 )
 from pm_ai.connectors.graph.calendar import (
     HARVEST_CYCLE,
+    OFFERED_FIRST_RUN_REACH_BACK,
     GraphCalendarFetch,
     WindowPolicy,
 )
@@ -1581,6 +1583,15 @@ class GraphEnrolment:
         """
         return math.ceil(HARVEST_CYCLE / timedelta(minutes=1))
 
+    def offered_reach_back_minutes(self, width: int) -> int:
+        """What Enter keeps at the reach-back question, given the typed window (8s).
+
+        Five days, read off the constant beside `WindowPolicy`, or the window
+        when it is wider: a reach-back may never be shorter than the window, so
+        an offer below it would be one the next check refuses.
+        """
+        return max(math.ceil(OFFERED_FIRST_RUN_REACH_BACK / timedelta(minutes=1)), width)
+
     @property
     def default_tenant(self) -> str:
         """The adapter's own default, read off its field rather than copied."""
@@ -2107,28 +2118,54 @@ class GitLabEnrolment:
                 f"{names}. Nothing was saved."
             )
 
+    @staticmethod
+    def host_as_read(typed: str) -> str:
+        """The address a typed host answer is read as (story 8s).
+
+        https is the only scheme the token is sent over, so a bare answer —
+        one that neither contains `://` nor begins with a scheme followed by
+        `:/` — is read as `https://` followed by it: `git.internal`,
+        `git.internal/gitlab` and `git.internal:8443` all are, the part
+        before the first `/` lower-cased as `check` saves it. Anything that
+        already looks like a scheme, mistyped or not, is returned as typed, so
+        `http://…` is still refused for its scheme and `http:/git.internal` is
+        shown back rather than silently turned into a different address.
+
+        Typed answers only: the row reader (`_gitlab_connector`) judges a
+        hand-written `host` as written.
+        """
+        if "://" in typed or _SCHEME_THEN_SLASH.match(typed):
+            return typed
+        # The host part lower-cased, as `check` saves it, so the "taken as"
+        # line names what is saved. Split by hand: nothing is validated yet.
+        host, slash, path = typed.partition("/")
+        return f"https://{host.lower()}{slash}{path}"
+
     def refusal(self, *, host: str | None = None, project: str | None = None) -> str | None:
         """Why a typed host or project path would not build a connector, or `None`.
 
-        The host is judged by the transport's `host_refusal`, plus one rule a
-        typed host adds: its path may not end in `/api/v4`, which the API is
-        reached under. The path is judged by the transport's
-        `project_refusal`, plus what a typed `group/project` must also be:
-        at least one `/`, no `://` (a pasted address), no trailing `/` and no
-        empty segment.
+        The host is read through `host_as_read` and judged by the transport's
+        `host_refusal`, plus one rule a typed host adds: its path may not end
+        in `/api/v4`, which the API is reached under. A refusal quotes what
+        was typed, and the address it was read as when the scheme was added.
+        The path is judged by the transport's `project_refusal`, plus what a
+        typed `group/project` must also be: at least one `/`, no `://` (a
+        pasted address), no trailing `/` and no empty segment.
         """
         if host is not None:
-            refused = host_refusal(host)
+            read = self.host_as_read(host)
+            refused = host_refusal(read)
             if refused is None:
-                path = urlsplit(host).path.rstrip("/").casefold()
+                path = urlsplit(read).path.rstrip("/").casefold()
                 if path == API_PATH or path.endswith(API_PATH):
                     refused = (
                         f"it ends in {API_PATH!r}, which pm-ai adds itself; type "
                         f"the address without it"
                     )
             if refused is not None:
+                quoted = repr(host) if read == host else f"{host!r} (read as {read!r})"
                 return (
-                    f"{host!r} cannot be the GitLab host: {refused}. Type an "
+                    f"{quoted} cannot be the GitLab host: {refused}. Type an "
                     f"https address, optionally with a path "
                     f"(https://git.internal/gitlab), or press Enter for "
                     f"{self.default_host}."
@@ -2192,7 +2229,7 @@ class GitLabEnrolment:
                 "request header and is not a GitLab token; nothing was sent or "
                 "saved."
             )
-        host = _lowered_origin(host)
+        host = _lowered_origin(self.host_as_read(host))
         client = GitLabClient(host=host, project=project, token=token, now=self.now)
         heard: list[GitLabResponse | BaseException] = []
         wire = client.transport if self.transport is None else self.transport
@@ -2246,6 +2283,10 @@ class GitLabEnrolment:
             project=project,
             settings={GITLAB_HOST_KEY: host},
         )
+
+
+_SCHEME_THEN_SLASH = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:/")
+"""A scheme followed by `:/` at the start of a typed host: judged as typed (8s)."""
 
 
 def _lowered_origin(host: str) -> str:

@@ -605,6 +605,182 @@ def test_a_host_that_would_not_build_is_asked_again_with_the_reason(
     assert len(provider.requests) == 1, "nothing was asked of the host refused"
 
 
+# ── Story 8s — a host typed without a scheme is read as https ─────────────
+
+
+@pytest.mark.parametrize(
+    ("typed", "saved"),
+    [
+        ("git.internal", "https://git.internal"),
+        ("git.internal/gitlab", "https://git.internal/gitlab"),
+        ("git.internal:8443", "https://git.internal:8443"),
+    ],
+    ids=["a bare host", "a host with a path", "a host with a port"],
+)
+def test_a_host_without_a_scheme_is_saved_as_https_and_said_so(
+    machine, monkeypatch, capsys, typed, saved
+):
+    home, _ = machine
+    provider = GitLab()
+    _gitlab(monkeypatch, provider)
+
+    code, terminal, _ = _add(monkeypatch, [typed, "acme/web"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert len(_prompts(terminal, "GitLab host")) == 1, "accepted, not asked again"
+    assert f"taken as {saved}\n" in captured.out
+    assert captured.out.index(f"taken as {saved}") < captured.out.index("answered for"), (
+        "the line sits above what the check says"
+    )
+    assert _row(home)["host"] == saved, "the full https address is what the row holds"
+    assert provider.requests[0].url.startswith(f"{saved}/api/v4/projects/acme%2Fweb/")
+
+
+def test_a_bare_host_in_mixed_case_is_said_and_saved_lower_cased(machine, monkeypatch, capsys):
+    home, _ = machine
+    _gitlab(monkeypatch, GitLab())
+
+    code, _, _ = _add(monkeypatch, ["Git.Internal", "acme/web"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert "taken as https://git.internal\n" in captured.out, "the line names what is saved"
+    assert _row(home)["host"] == "https://git.internal"
+
+
+@pytest.mark.parametrize(
+    ("typed", "read"),
+    [
+        ("git.internal:8443/gitlab", "https://git.internal:8443/gitlab"),
+        ("Git.Internal/GitLab", "https://git.internal/GitLab"),
+        ("HTTPS://Git.Internal", "HTTPS://Git.Internal"),
+        ("http:/git.internal", "http:/git.internal"),
+        ("http://x", "http://x"),
+        ("git.internal/", "https://git.internal/"),
+    ],
+)
+def test_host_as_read_prefixes_only_a_bare_answer(typed, read):
+    assert GitLabEnrolment.host_as_read(typed) == read
+
+
+def test_a_bare_host_with_a_trailing_slash_is_refused_quoting_both_forms(tmp_path):
+    enrolment = GitLabEnrolment(storage=build(tmp_path, APPLICATION).storage)
+
+    refused = enrolment.refusal(host="git.internal/")
+
+    assert refused is not None
+    assert "'git.internal/' (read as 'https://git.internal/') cannot be the GitLab host" in refused
+    assert "ends in '/'" in refused
+
+
+def test_a_host_typed_with_https_prints_no_taken_as_line(machine, monkeypatch, capsys):
+    home, _ = machine
+    _gitlab(monkeypatch, GitLab())
+
+    code, _, _ = _add(monkeypatch, ["https://git.internal", "acme/web"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert "taken as" not in captured.out + captured.err
+    assert _row(home)["host"] == "https://git.internal"
+
+
+@pytest.mark.parametrize(
+    "typed", ["http://git.internal", "http:/git.internal"], ids=["http", "a mistyped scheme"]
+)
+def test_a_host_naming_a_scheme_is_judged_as_typed(machine, monkeypatch, capsys, typed):
+    home, _ = machine
+    provider = GitLab()
+    _gitlab(monkeypatch, provider)
+
+    code, terminal, _ = _add(monkeypatch, [typed, "", "acme/web"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert len(_prompts(terminal, "GitLab host")) == 2, "asked again"
+    assert f"{typed!r} cannot be the GitLab host" in captured.err
+    assert "its scheme is 'http'; the token is only sent over https" in captured.err
+    assert "read as" not in captured.err, "no scheme was guessed"
+    assert "taken as" not in captured.out + captured.err
+    assert _row(home)["host"] == DEFAULT_HOST
+    assert len(provider.requests) == 1, "nothing was asked of the host refused"
+
+
+def test_a_bare_host_refused_otherwise_quotes_what_was_typed_and_how_it_was_read(
+    machine, monkeypatch, capsys
+):
+    home, _ = machine
+    _gitlab(monkeypatch, GitLab())
+
+    code, terminal, _ = _add(monkeypatch, ["git.internal/api/v4", "", "acme/web"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert len(_prompts(terminal, "GitLab host")) == 2, "asked again"
+    assert (
+        "'git.internal/api/v4' (read as 'https://git.internal/api/v4') cannot be the "
+        "GitLab host: it ends in '/api/v4'"
+    ) in captured.err
+    assert "taken as" not in captured.out + captured.err
+    assert _row(home)["host"] == DEFAULT_HOST
+
+
+def test_enter_at_the_host_keeps_the_default_and_says_nothing_of_a_scheme(
+    machine, monkeypatch, capsys
+):
+    home, _ = machine
+    _gitlab(monkeypatch, GitLab())
+
+    code, _, _ = _add(monkeypatch, VALID)
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert "taken as" not in captured.out + captured.err
+    assert _row(home)["host"] == DEFAULT_HOST
+
+
+def test_a_bare_host_enrolled_then_harvested_twice_goes_to_https_and_reaches_back_thirty_days(
+    machine, monkeypatch, capsys
+):
+    """Story 8s's second acceptance criterion, end to end: enrolled through
+    `connector add gitlab` with a scheme-less host, then harvested twice by the
+    daemon's own `run_harvest` against a fake GitLab."""
+    from datetime import datetime, timedelta, timezone
+
+    from gitlab_fakes import Wire, commit, page
+
+    from pm_ai.app.pipelines import run_harvest
+
+    home, keychain = machine
+    enrolment = GitLab()
+    _gitlab(monkeypatch, enrolment)
+    code, _, _ = _add(monkeypatch, ["git.internal", "acme/web"])
+    assert code == EXIT_OK, capsys.readouterr().err
+
+    first_run_at = datetime(2026, 10, 16, 9, 0, tzinfo=timezone.utc)
+    newest = first_run_at - timedelta(days=2, hours=3)
+    first = Wire(page(commit("n1", at=newest), commit("o1", at=newest - timedelta(days=9))))
+    daemon = build(home, "alpha", keychain=keychain, now=lambda: first_run_at)
+    daemon.connectors[INSTANCE].transport = first
+    assert run_harvest(daemon, INSTANCE).persisted == 2
+
+    second = Wire(page())
+    later = first_run_at + timedelta(hours=4)
+    daemon = build(home, "alpha", keychain=keychain, now=lambda: later)
+    daemon.connectors[INSTANCE].transport = second
+    run_harvest(daemon, INSTANCE)
+
+    sent = [request.url for request in (*enrolment.requests, *first.sent, *second.sent)]
+    assert len(sent) == 3
+    assert all(url.startswith("https://git.internal/api/v4/") for url in sent), sent
+    assert first.query()["since"] == ["2026-09-16T09:00:00Z"], "thirty days before the first run"
+    assert second.query()["since"] == ["2026-09-14T06:00:00Z"], (
+        "thirty days before the newest commit date the first run saw"
+    )
+    assert newest - timedelta(days=30) == datetime(2026, 9, 14, 6, 0, tzinfo=timezone.utc)
+
+
 @pytest.mark.parametrize("typed", ["web", "/acme/web", "acme/web?x", "acme/web#x", "acme/my web", ""])
 def test_a_project_path_that_would_not_build_is_asked_again_showing_the_form(
     machine, monkeypatch, capsys, typed
