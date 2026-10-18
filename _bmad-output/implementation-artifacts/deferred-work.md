@@ -1423,6 +1423,8 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   summary: Which folders are private is read off folder names (`.pm-ai`, `.manager-ai`, `.project-ai/memory|transcripts`; `private_top`), while file modes follow the scope. A resolver built with homes under other names would get `0600` files in umask folders.
   evidence: The production and test resolvers both use the standard names, as `crypto.is_encrypted` already assumes. Deriving the private top from `ScopePaths`' roots would remove the coupling, but the lock-file code has no resolver at hand.
 
+## Surfaced by the story-23f review (2026-10-18)
+
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/23f-readable-message-signals.md`
   summary: **Needs Andrei's decision.** A signal's posted time is used as its label whenever it is not later than the render, even when it is later than the line's own harvest time, and a posted time a few seconds ahead of the local clock is labelled `(harvested)`.
   evidence: `23f`'s frozen rule names only "later than the render's instant" (`core/rendering.py`, `_posted_at`). A posted time after its own harvest cannot be right, and provider clock skew of seconds flips a line to the harvest label. The options are to keep the rule as frozen, to compare against the earlier of the render and the harvest time, or to allow a small skew.
