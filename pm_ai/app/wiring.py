@@ -497,6 +497,7 @@ def build(
             scope=watched_scope,
             now=clock,
             wait=time.sleep,
+            reads_work=True,
         )
         connectors[builtin.instance] = builtin
         builtin_scopes[builtin.instance] = watched_scope
@@ -1056,6 +1057,7 @@ def refreshed(
             scope=watched_scope,
             now=clock,
             wait=time.sleep,
+            reads_work=True,
         )
         connectors[builtin.instance] = builtin
         builtin_scopes[builtin.instance] = watched_scope
@@ -1157,6 +1159,7 @@ def _gitlab_connector(
             now=clock,
             credential=credential,
             wait=time.sleep,
+            reads_work=True,
             **extra,
         )
     except Exception as unexpected:  # noqa: BLE001 — `build()` composes regardless
@@ -2106,6 +2109,19 @@ class GitLabEnrolment:
                 f"files into. Name it gitlab:<enrolled project id> — one of "
                 f"{names}. Nothing was saved."
             )
+
+    def files_into(self, instance: str) -> str | None:
+        """The project `instance` would file into, against the projects watched now (8t).
+
+        `_placement`'s rule: `None` when it files into none — no project
+        watched, or several and the name names none of them.
+        """
+        scopes = {
+            _builtin_instance(project_id): DataScope(ScopeKind.PROJECT, project_id)
+            for project_id in sorted(set(self.watching()))
+        }
+        placed = _placement(instance, scopes=scopes)
+        return None if isinstance(placed, str) else placed.project_id
 
     def refusal(self, *, host: str | None = None, project: str | None = None) -> str | None:
         """Why a typed host or project path would not build a connector, or `None`.
@@ -3525,6 +3541,8 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "record_harvest_failure": ("record a failed harvest attempt", _asks_none),
     "record_transcript_refusals": ("record the transcript refusals", _asks_none),
     "prune_coverage": ("remove old coverage records", _asks_none),
+    # Story 8t: the GitLab project work, rows in `operational.db`.
+    "record_project_work": ("save the project's GitLab work", _asks_none),
     "record_render": ("record the render", _asks_none),
     "record_render_failure": ("record a failed render", _asks_none),
     "record_render_failures": ("record failed renders", _asks_none),
@@ -3558,6 +3576,7 @@ PLAIN_READS: frozenset[str] = frozenset(
         "api_token_path",
         "daemon_lock_path",
         "harvest_records",  # its own read-only connection
+        "project_work",  # its own read-only connection (story 8t)
         "render_records",  # its own read-only connection
         "last_render",  # its own read-only connection
         "ask_git_exclusion",  # `git`'s answer, uncached: a bounded step

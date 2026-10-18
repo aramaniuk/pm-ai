@@ -42,7 +42,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from pm_ai.domain import clocks
@@ -92,6 +92,20 @@ from pm_ai.domain.storage_tiers import (
     PRIVATE_DIR_MODE,
 )
 from pm_ai.domain.vcs import VcsUnavailable
+from pm_ai.domain.handles import InvalidPersonHandle, parse_person_handle
+from pm_ai.domain.work import (
+    GitLabPerson,
+    Issue,
+    Member,
+    MergeRequest,
+    ProjectWork,
+    Section,
+    SectionStatus,
+    StoredWork,
+    WorkChange,
+    merge_work,
+    visible_work,
+)
 from pm_ai.ports import (
     ArtifactBusy,
     CaptureAlreadyExists,
@@ -211,6 +225,82 @@ CREATE TABLE IF NOT EXISTS requests (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS gitlab_members (
+    scope     TEXT NOT NULL,
+    instance  TEXT NOT NULL,
+    position  INTEGER NOT NULL,
+    handle    TEXT,
+    name      TEXT,
+    username  TEXT,
+    bot       INTEGER,
+    state     TEXT,
+    PRIMARY KEY (scope, instance, position)
+);
+CREATE TABLE IF NOT EXISTS gitlab_issues (
+    scope           TEXT NOT NULL,
+    instance        TEXT NOT NULL,
+    iid             INTEGER NOT NULL,
+    title           TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    milestone_title TEXT,
+    milestone_due   TEXT,
+    labels          TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    closed_at       TEXT,
+    web_url         TEXT,
+    confidential    INTEGER NOT NULL,
+    gone_at         TEXT,
+    PRIMARY KEY (scope, instance, iid)
+);
+CREATE TABLE IF NOT EXISTS gitlab_issue_assignees (
+    scope     TEXT NOT NULL,
+    instance  TEXT NOT NULL,
+    iid       INTEGER NOT NULL,
+    position  INTEGER NOT NULL,
+    handle    TEXT,
+    name      TEXT,
+    username  TEXT,
+    bot       INTEGER,
+    PRIMARY KEY (scope, instance, iid, position)
+);
+CREATE TABLE IF NOT EXISTS gitlab_merge_requests (
+    scope           TEXT NOT NULL,
+    instance        TEXT NOT NULL,
+    iid             INTEGER NOT NULL,
+    title           TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    source_branch   TEXT,
+    author_present  INTEGER NOT NULL,
+    author_handle   TEXT,
+    author_name     TEXT,
+    author_username TEXT,
+    author_bot      INTEGER,
+    draft           INTEGER NOT NULL,
+    updated_at      TEXT NOT NULL,
+    merged_at       TEXT,
+    closed_at       TEXT,
+    web_url         TEXT,
+    links_read      INTEGER NOT NULL,
+    gone_at         TEXT,
+    PRIMARY KEY (scope, instance, iid)
+);
+CREATE TABLE IF NOT EXISTS gitlab_merge_request_issues (
+    scope     TEXT NOT NULL,
+    instance  TEXT NOT NULL,
+    mr_iid    INTEGER NOT NULL,
+    position  INTEGER NOT NULL,
+    issue_iid INTEGER NOT NULL,
+    PRIMARY KEY (scope, instance, mr_iid, position)
+);
+CREATE TABLE IF NOT EXISTS gitlab_work_status (
+    scope         TEXT NOT NULL,
+    instance      TEXT NOT NULL,
+    section       TEXT NOT NULL,
+    complete      INTEGER NOT NULL,
+    reason        TEXT,
+    last_complete TEXT,
+    PRIMARY KEY (scope, instance, section)
+);
 """
 
 # Every table `_SCHEMA` declares, read off it rather than listed beside it, so
@@ -233,7 +323,9 @@ SCHEMA_VERSION = 1
 # the case migration 1 was written for. A version bump with no migration behind
 # it would stamp a store nothing changed. Story `4r`'s `requests` table rode in
 # the same way, and for the same reason the version did not move; so did story
-# `9a`'s `harvest_runs`, and story `9b`'s `renders`.
+# `9a`'s `harvest_runs`, and story `9b`'s `renders`. Story `8t`'s six `gitlab_`
+# tables (AD-3's GitLab project work) are new tables too, so the version does
+# not move for them either (AD-5).
 
 # Version 0 is the *unversioned era* — every store written before this story.
 # It is not a shape: two stores can both be at 0 and differ, because the era had
@@ -1372,6 +1464,292 @@ def render_records_at(store: Path) -> tuple[RenderRecord, ...]:
             )
         )
     return tuple(records)
+
+
+# ── GitLab project work rows (story 8t) ──────────────────────────────────────
+
+
+def _iso(at: datetime | date | None) -> str | None:
+    """An instant written as UTC, so instants compare as text in time order; a day as is."""
+    if isinstance(at, datetime):
+        if at.tzinfo is None or at.utcoffset() is None:
+            raise ValueError(f"{at!r} is not an aware instant")
+        return at.astimezone(timezone.utc).isoformat()
+    return at.isoformat() if at is not None else None
+
+
+def _when(text: object) -> datetime | None:
+    return datetime.fromisoformat(text) if isinstance(text, str) and text else None
+
+
+def _flag(value: object) -> bool | None:
+    return None if value is None else bool(value)
+
+
+def _handle_text(person: GitLabPerson) -> str | None:
+    return str(person.handle) if person.handle is not None else None
+
+
+def _person_from(handle: object, name: object, username: object, bot: object) -> GitLabPerson:
+    """A stored person read back; a handle a hand edit broke reads as none."""
+    parsed = None
+    if isinstance(handle, str) and handle:
+        try:
+            parsed = parse_person_handle(handle)
+        except InvalidPersonHandle:
+            parsed = None
+    return GitLabPerson(
+        handle=parsed,
+        name=name if isinstance(name, str) else None,
+        username=username if isinstance(username, str) else None,
+        bot=_flag(bot),
+    )
+
+
+def _read_work(db: sqlite3.Connection, scope: str, instance: str) -> StoredWork:
+    """Every row one `(scope, instance)` holds, as the domain values."""
+    key = (scope, instance)
+    members = tuple(
+        Member(person=_person_from(handle, name, username, bot), state=state)
+        for handle, name, username, bot, state in db.execute(
+            "SELECT handle, name, username, bot, state FROM gitlab_members "
+            "WHERE scope = ? AND instance = ? ORDER BY position",
+            key,
+        )
+    )
+    assignees: dict[int, list[GitLabPerson]] = {}
+    for iid, handle, name, username, bot in db.execute(
+        "SELECT iid, handle, name, username, bot FROM gitlab_issue_assignees "
+        "WHERE scope = ? AND instance = ? ORDER BY iid, position",
+        key,
+    ):
+        assignees.setdefault(iid, []).append(_person_from(handle, name, username, bot))
+    issues = []
+    for (
+        iid, title, state, milestone_title, milestone_due, labels, updated_at,
+        closed_at, web_url, confidential, gone_at,
+    ) in db.execute(
+        "SELECT iid, title, state, milestone_title, milestone_due, labels, "
+        "updated_at, closed_at, web_url, confidential, gone_at FROM gitlab_issues "
+        "WHERE scope = ? AND instance = ? ORDER BY iid",
+        key,
+    ):
+        decoded = json.loads(labels) if labels else []
+        issues.append(
+            Issue(
+                iid=iid,
+                title=title,
+                state=state,
+                assignees=tuple(assignees.get(iid, ())),
+                milestone_title=milestone_title,
+                milestone_due=date.fromisoformat(milestone_due) if milestone_due else None,
+                labels=tuple(label for label in decoded if isinstance(label, str)),
+                updated_at=datetime.fromisoformat(updated_at),
+                closed_at=_when(closed_at),
+                web_url=web_url,
+                confidential=bool(confidential),
+                gone_at=_when(gone_at),
+            )
+        )
+    links: dict[int, list[int]] = {}
+    for mr_iid, issue_iid in db.execute(
+        "SELECT mr_iid, issue_iid FROM gitlab_merge_request_issues "
+        "WHERE scope = ? AND instance = ? ORDER BY mr_iid, position",
+        key,
+    ):
+        links.setdefault(mr_iid, []).append(issue_iid)
+    merge_requests = []
+    for (
+        iid, title, state, source_branch, author_present, author_handle, author_name,
+        author_username, author_bot, draft, updated_at, merged_at, closed_at, web_url,
+        links_read, gone_at,
+    ) in db.execute(
+        "SELECT iid, title, state, source_branch, author_present, author_handle, "
+        "author_name, author_username, author_bot, draft, updated_at, merged_at, "
+        "closed_at, web_url, links_read, gone_at FROM gitlab_merge_requests "
+        "WHERE scope = ? AND instance = ? ORDER BY iid",
+        key,
+    ):
+        merge_requests.append(
+            MergeRequest(
+                iid=iid,
+                title=title,
+                state=state,
+                source_branch=source_branch,
+                author=(
+                    _person_from(author_handle, author_name, author_username, author_bot)
+                    if author_present
+                    else None
+                ),
+                draft=bool(draft),
+                updated_at=datetime.fromisoformat(updated_at),
+                merged_at=_when(merged_at),
+                closed_at=_when(closed_at),
+                web_url=web_url,
+                issue_iids=tuple(links.get(iid, ())),
+                links_read=bool(links_read),
+                gone_at=_when(gone_at),
+            )
+        )
+    statuses = []
+    for section, complete, reason, last_complete in db.execute(
+        "SELECT section, complete, reason, last_complete FROM gitlab_work_status "
+        "WHERE scope = ? AND instance = ?",
+        key,
+    ):
+        try:
+            named = Section(section)
+        except ValueError:
+            continue
+        statuses.append(
+            SectionStatus(
+                section=named,
+                complete=bool(complete),
+                reason=reason,
+                last_complete=_when(last_complete),
+            )
+        )
+    order = {section: index for index, section in enumerate(Section)}
+    return StoredWork(
+        members=members,
+        issues=tuple(issues),
+        merge_requests=tuple(merge_requests),
+        statuses=tuple(sorted(statuses, key=lambda status: order[status.section])),
+    )
+
+
+def _write_work(
+    db: sqlite3.Connection,
+    scope: str,
+    instance: str,
+    current: StoredWork,
+    merged: StoredWork,
+) -> int:
+    """Write what differs between `current` and `merged`; how many item rows changed.
+
+    Members, issues and merge requests whose values are unchanged are not
+    touched, so a merge that changes nothing writes no item row.
+    """
+    key = (scope, instance)
+    changed = 0
+    if merged.members != current.members:
+        db.execute("DELETE FROM gitlab_members WHERE scope = ? AND instance = ?", key)
+        db.executemany(
+            "INSERT INTO gitlab_members "
+            "(scope, instance, position, handle, name, username, bot, state) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    scope, instance, position, _handle_text(member.person),
+                    member.person.name, member.person.username,
+                    None if member.person.bot is None else int(member.person.bot),
+                    member.state,
+                )
+                for position, member in enumerate(merged.members)
+            ],
+        )
+        changed += 1
+
+    held_issues = {issue.iid: issue for issue in current.issues}
+    kept_issues = {issue.iid: issue for issue in merged.issues}
+    for iid in set(held_issues) | set(kept_issues):
+        before, after = held_issues.get(iid), kept_issues.get(iid)
+        if before == after:
+            continue
+        changed += 1
+        db.execute(
+            "DELETE FROM gitlab_issues WHERE scope = ? AND instance = ? AND iid = ?",
+            (*key, iid),
+        )
+        db.execute(
+            "DELETE FROM gitlab_issue_assignees WHERE scope = ? AND instance = ? AND iid = ?",
+            (*key, iid),
+        )
+        if after is None:
+            continue
+        db.execute(
+            "INSERT INTO gitlab_issues (scope, instance, iid, title, state, "
+            "milestone_title, milestone_due, labels, updated_at, closed_at, web_url, "
+            "confidential, gone_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                *key, iid, after.title, after.state, after.milestone_title,
+                _iso(after.milestone_due), json.dumps(list(after.labels), ensure_ascii=False),
+                _iso(after.updated_at), _iso(after.closed_at), after.web_url,
+                int(after.confidential), _iso(after.gone_at),
+            ),
+        )
+        db.executemany(
+            "INSERT INTO gitlab_issue_assignees "
+            "(scope, instance, iid, position, handle, name, username, bot) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    *key, iid, position, _handle_text(person), person.name,
+                    person.username, None if person.bot is None else int(person.bot),
+                )
+                for position, person in enumerate(after.assignees)
+            ],
+        )
+
+    held_mrs = {mr.iid: mr for mr in current.merge_requests}
+    kept_mrs = {mr.iid: mr for mr in merged.merge_requests}
+    for iid in set(held_mrs) | set(kept_mrs):
+        held, kept = held_mrs.get(iid), kept_mrs.get(iid)
+        if held == kept:
+            continue
+        changed += 1
+        db.execute(
+            "DELETE FROM gitlab_merge_requests WHERE scope = ? AND instance = ? AND iid = ?",
+            (*key, iid),
+        )
+        db.execute(
+            "DELETE FROM gitlab_merge_request_issues "
+            "WHERE scope = ? AND instance = ? AND mr_iid = ?",
+            (*key, iid),
+        )
+        if kept is None:
+            continue
+        author = kept.author
+        db.execute(
+            "INSERT INTO gitlab_merge_requests (scope, instance, iid, title, state, "
+            "source_branch, author_present, author_handle, author_name, "
+            "author_username, author_bot, draft, updated_at, merged_at, closed_at, "
+            "web_url, links_read, gone_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                *key, iid, kept.title, kept.state, kept.source_branch,
+                int(author is not None),
+                _handle_text(author) if author is not None else None,
+                author.name if author is not None else None,
+                author.username if author is not None else None,
+                None if author is None or author.bot is None else int(author.bot),
+                int(kept.draft), _iso(kept.updated_at), _iso(kept.merged_at),
+                _iso(kept.closed_at), kept.web_url, int(kept.links_read),
+                _iso(kept.gone_at),
+            ),
+        )
+        db.executemany(
+            "INSERT INTO gitlab_merge_request_issues "
+            "(scope, instance, mr_iid, position, issue_iid) VALUES (?, ?, ?, ?, ?)",
+            [(*key, iid, position, issue) for position, issue in enumerate(kept.issue_iids)],
+        )
+
+    held_status = {status.section: status for status in current.statuses}
+    for status in merged.statuses:
+        if held_status.get(status.section) == status:
+            continue
+        db.execute(
+            "INSERT INTO gitlab_work_status "
+            "(scope, instance, section, complete, reason, last_complete) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(scope, instance, section) DO UPDATE "
+            "SET complete = excluded.complete, reason = excluded.reason, "
+            "last_complete = excluded.last_complete",
+            (
+                *key, status.section.value, int(status.complete), status.reason,
+                _iso(status.last_complete),
+            ),
+        )
+    return changed
 
 
 def _canonical(target: Path) -> Path:
@@ -3476,6 +3854,55 @@ class StorageService:
                 )
             )
         return tuple(records)
+
+    # ── GitLab project work (story 8t, AD-3) ─────────────────────────────────
+
+    def record_project_work(self, scope: DataScope, change: WorkChange) -> int:
+        """Merge one harvest's `change` into `scope`'s rows, in one transaction.
+
+        A claimed step that asks git nothing: the current rows of `(scope,
+        change.instance)` are read inside the transaction, merged by the one
+        rule (`pm_ai.domain.work.merge_work`) and what differs is written, so
+        a re-run after a crash before the position was saved replaces rows
+        with themselves. Returns how many members lists, issues and merge
+        requests changed — `0` when nothing was updated and nothing pruned,
+        which writes no item row. Refuses a scope that is not a project.
+        """
+        if not isinstance(change, WorkChange):
+            raise TypeError(f"record_project_work takes a WorkChange, not {change!r}")
+        if scope.kind is not ScopeKind.PROJECT:
+            raise ValueError(
+                f"GitLab project work is kept per project scope, and {scope} is "
+                f"not one (AD-3)."
+            )
+        with self._transaction() as db:
+            current = _read_work(db, str(scope), change.instance)
+            return _write_work(db, str(scope), change.instance, current, merge_work(current, change))
+
+    def project_work(self, scope: DataScope) -> ProjectWork:
+        """`scope`'s GitLab members, issues and merge requests, a plain read (story 8t).
+
+        On a read-only connection of its own. One GitLab instance per project
+        scope (AD-10), so this names one: the instance with the most recent
+        complete read, by name when none has one. The open items, and those
+        closed, merged or gone within 30 days of the storage clock.
+        """
+        with self._reader() as reader:
+            instances = [
+                (instance, latest)
+                for instance, latest in reader.execute(
+                    "SELECT instance, MAX(last_complete) FROM gitlab_work_status "
+                    "WHERE scope = ? GROUP BY instance ORDER BY instance",
+                    (str(scope),),
+                )
+            ]
+            if not instances:
+                return ProjectWork(scope=scope, instance=None)
+            # `GROUP BY` answers in instance order, and `max` keeps the first
+            # of equals, so a tie goes to the first name.
+            chosen = max(instances, key=lambda row: (row[1] is not None, row[1] or ""))[0]
+            stored = _read_work(reader, str(scope), chosen)
+        return visible_work(scope, chosen, stored, now=self._at())
 
     # ── `renders`: each dashboard scope's last render (story 9b) ────────────
     # Tier 2. A hand-run `pm-ai dashboard` and the daemon both write a row, so

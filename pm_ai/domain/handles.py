@@ -23,6 +23,11 @@ because only tests filled the alias table — the provider's address was lost.
 - `email` — an address: surrounding whitespace stripped, then exactly one `@`
   with text on both sides; no whitespace, comma, colon, double quote or control
   character; ASCII only, until a slice meets a non-ASCII address;
+- `gitlab` — a GitLab server and a numeric user id on it, `<host>:<id>` (story
+  8t, AD-34): the host lowercased, its port kept only when it is not the
+  scheme's default, then the id in ASCII digits written `str(int(id))`. The
+  handle is split at its **last** `:`, so a host with a port parses. Built from
+  a provider answer by `gitlab_handle`;
 - `none` — the empty handle only, written `none:`. The one absence value, for an
   observed event with no person behind it. Legal only as an envelope actor.
 
@@ -53,6 +58,7 @@ from pm_ai.domain.invariants import InconsistentModel
 __all__ = [
     "ALIASES",
     "EMAIL",
+    "GITLAB",
     "GRAPH",
     "GRAPH_APP",
     "HANDLE_SYSTEMS",
@@ -64,6 +70,8 @@ __all__ = [
     "InconsistentHandleModel",
     "InvalidPersonHandle",
     "PersonHandle",
+    "gitlab_handle",
+    "gitlab_host",
     "own_handle_set",
     "parse_person_handle",
     "person_for",
@@ -77,9 +85,10 @@ __all__ = [
 GRAPH = "graph"
 GRAPH_APP = "graph_app"
 EMAIL = "email"
+GITLAB = "gitlab"
 NONE = "none"
 
-HANDLE_SYSTEMS: frozenset[str] = frozenset({GRAPH, GRAPH_APP, EMAIL, NONE})
+HANDLE_SYSTEMS: frozenset[str] = frozenset({GRAPH, GRAPH_APP, EMAIL, GITLAB, NONE})
 """Every system a person handle may name. Closed: adding one is a deliberate
 change here, with its handle kind and case rule stated (AD-34)."""
 
@@ -145,6 +154,39 @@ def _email(system: str, raw: str) -> str:
     return address.lower()
 
 
+_GITLAB_HOST = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?")
+_ASCII_DIGITS = re.compile(r"[0-9]+")
+
+
+def _port_ok(host: str) -> bool:
+    """A host with no port, or one in 1–65535."""
+    _, colon, port = host.partition(_SEPARATOR)
+    return not colon or 1 <= int(port) <= 65535
+
+
+def _gitlab(system: str, raw: str) -> str:
+    """`<host>:<id>`, split at the last `:` (AD-34, story 8t).
+
+    The host is lowercased, a name of letters, digits, dots and hyphens with an
+    optional port; the id is ASCII digits, written `str(int(id))`, so `017`
+    is `17`. Anything else is refused, naming the value.
+    """
+    host, separator, user_id = raw.rpartition(_SEPARATOR)
+    host = host.lower()
+    if not separator or not raw.isascii() or not _GITLAB_HOST.fullmatch(host) or not _port_ok(host):
+        raise InvalidPersonHandle(
+            f"{f'{system}:{raw}'!r} is not `<host>:<numeric user id>`. A `gitlab` "
+            f"handle names the GitLab server, lowercased, with its port only "
+            f"when it is not the scheme's default, then the user's id (AD-34)."
+        )
+    if not _ASCII_DIGITS.fullmatch(user_id):
+        raise InvalidPersonHandle(
+            f"{f'{system}:{raw}'!r} has the id {user_id!r}, which is not ASCII digits. "
+            f"A GitLab user id is a number, and a username is never identity."
+        )
+    return f"{host}{_SEPARATOR}{int(user_id)}"
+
+
 def _none(system: str, raw: str) -> str:
     if raw != "":
         raise InvalidPersonHandle(
@@ -158,6 +200,7 @@ _SHAPES: dict[str, Callable[[str, str], str]] = {
     GRAPH: _guid,
     GRAPH_APP: _guid,
     EMAIL: _email,
+    GITLAB: _gitlab,
     NONE: _none,
 }
 
@@ -246,7 +289,7 @@ def person_handle(system: str, handle: str) -> PersonHandle:
         )
     if system not in HANDLE_SYSTEMS:
         raise InvalidPersonHandle(_unknown_system(f"{system}:{handle}", system))
-    if _SEPARATOR in handle:
+    if _SEPARATOR in handle and system != GITLAB:
         raise InvalidPersonHandle(
             f"{system}:{handle!r} has a `:` inside the handle. The first `:` "
             f"separates the system, so a second one is a handle nothing can read "
@@ -306,6 +349,58 @@ def usable_handle(system: str, raw: str | None) -> PersonHandle | None:
     except InvalidPersonHandle:
         return None
     return None if handle.is_absent else handle
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def gitlab_host(server: str) -> str | None:
+    """The host part of a `gitlab` handle for a GitLab server's URL, or `None`.
+
+    The URL's host, lowercased, with its port only when it is not the scheme's
+    default — `https://GitLab.example.com:443` is `gitlab.example.com`, and
+    `https://gitlab.example.com:8443` is `gitlab.example.com:8443`. A path
+    beneath the host (`https://git.internal/gitlab`) is not part of it. `None`
+    for a value that names no host this rule can write. Read by hand rather
+    than with `urllib`, which `domain` may not import (AD-30).
+    """
+    if not isinstance(server, str):
+        return None
+    scheme, separator, rest = server.strip().partition("://")
+    if not separator:
+        return None
+    authority = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    authority = authority.rpartition("@")[2].lower()
+    name, colon, port_text = authority.partition(_SEPARATOR)
+    port: int | None = None
+    if colon:
+        if not _ASCII_DIGITS.fullmatch(port_text) or len(port_text) > 5:
+            return None
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+    host = name
+    if port is not None and port != _DEFAULT_PORTS.get(scheme.lower()):
+        host = f"{name}{_SEPARATOR}{port}"
+    if not host.isascii() or not _GITLAB_HOST.fullmatch(host):
+        return None
+    return host
+
+
+def gitlab_handle(server: str, user_id: object) -> PersonHandle | None:
+    """The `gitlab` handle for one person GitLab named, or `None` (story 8t).
+
+    `user_id` must be an integer — never a boolean, never text, never
+    negative — and `server` the GitLab server's URL. Anything else gives no
+    handle: that person is kept by display name and username only, and never
+    matched by id (AD-34).
+    """
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
+        return None
+    host = gitlab_host(server)
+    if host is None:
+        return None
+    return usable_handle(GITLAB, f"{host}{_SEPARATOR}{user_id}")
 
 
 def own_handle_set(handles: Iterable[PersonHandle]) -> frozenset[PersonHandle]:

@@ -1099,3 +1099,31 @@ def test_the_token_never_reaches_a_log(machine, monkeypatch, capsys, caplog, ans
     _no_token_on_screen(captured)
     assert TOKEN not in caplog.text
     assert all(TOKEN not in str(record.args) for record in caplog.records)
+
+
+# ── Story 8t: one GitLab instance per project (AD-10) ────────────────────────
+
+
+def test_a_second_gitlab_row_for_the_same_project_is_refused_naming_the_first(
+    machine, monkeypatch, capsys
+):
+    """`gitlab:alpha` is enrolled under the built-in's name (accepted: it replaces
+    the built-in); `gitlab:web` would file into the same project, and is refused."""
+    home, keychain = machine
+    provider = GitLab()
+    _gitlab(monkeypatch, provider)
+    code, _, _ = _add(monkeypatch, VALID)
+    assert code == EXIT_OK, capsys.readouterr().err
+    capsys.readouterr()
+    sealed_before = _sealed(home, keychain)
+    asked = len(provider.requests)
+
+    code, terminal, hidden = _add(monkeypatch, VALID, instance="gitlab:web")
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL
+    assert "'gitlab:alpha'" in captured.err and "one GitLab instance" in captured.err
+    assert terminal.prompts == [] and hidden.prompts == [], "refused before any question"
+    assert len(provider.requests) == asked, "GitLab was not asked"
+    assert not _settings_file(home, "gitlab:web").exists()
+    assert _sealed(home, keychain) == sealed_before, "nothing was sealed"

@@ -362,6 +362,22 @@ def _harvest(
     persisted = _persist_by_scope(daemon, attributed, scope=scope)
     if refusals:
         persisted = replace(persisted, refusals=(*persisted.refusals, *refusals))
+    # Story 8t — the GitLab project's members, issues and merge requests: one
+    # claimed step asking git nothing, after the events and before the position
+    # is saved, so a crash in between re-reads and the merge replaces rows with
+    # themselves. Into the scope the instance files into (AD-3: keyed by
+    # project scope and connector instance).
+    # A GitLab connector files into a project; were its scope ever another
+    # (the daemon's own, as `instance_scope`'s fallback), the work is not
+    # written rather than crashing a harvest whose events are already saved.
+    if result.work is not None and scope.kind is ScopeKind.PROJECT:
+        daemon.storage.record_project_work(scope, result.work)
+    elif result.work is not None:
+        _log.warning(
+            "%s's GitLab work was not saved: it files into %s, not a project",
+            instance,
+            scope,
+        )
     # AD-35 — `result.coverage` is `CoverageWindow | None` and `None` is passed
     # through as itself. A harvest that asked and got an empty answer *does*
     # record a window (`8i`): the connector's own clock readings either side of
