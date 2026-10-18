@@ -85,6 +85,7 @@ __all__ = [
     "HARVEST_CYCLE",
     "MAX_SERVABLE_SPAN",
     "MalformedCalendarRow",
+    "OFFERED_FIRST_RUN_REACH_BACK",
     "RowRefusal",
     "UnresolvableTimezone",
     "WINDOWS_TIMEZONES",
@@ -535,6 +536,25 @@ def _in_minutes(span: timedelta) -> str:
     """`span` as a count of minutes, whole where it is whole."""
     minutes = span / timedelta(minutes=1)
     return str(int(minutes)) if minutes == int(minutes) else f"{minutes:.2f}"
+
+
+OFFERED_FIRST_RUN_REACH_BACK = timedelta(days=5)
+"""What Enter keeps at `connector add graph`'s reach-back question: 7200 minutes.
+
+An offer, not a default `WindowPolicy` applies: the policy still takes both
+widths from the row, and every enrolled row already carries one. Story 8s put
+it at the question because a person taking the smallest window and the
+smallest reach-back it allowed got a first harvest of four hours. Spelled
+here, beside the rule it must satisfy: when the window typed before it is
+wider, the question offers the window instead, since a reach-back may never be
+shorter than the window (`WindowPolicy.__post_init__`).
+
+What bounds a five-day first run is what bounds every run, and nothing is added
+for it: the calendar asks one span, under `MAX_SERVABLE_SPAN`; each channel or
+chat walk stops at the client's page cap or fetch budget as a stated loss; and
+transcript acquisition, which asks again about every ended meeting in the
+reach-back that has no transcript yet, spends the same fetch budget.
+"""
 
 
 @dataclass(frozen=True, slots=True)
