@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-__all__ = ["ArtifactState", "CONNECTOR_SYSTEMS", "EnrolmentReading", "Health", "Presence",
+__all__ = ["ArtifactState", "CONNECTOR_SYSTEMS", "GRAPH_SYSTEM", "EnrolmentReading", "Health", "Presence",
            "Probe", "Report", "UnbuiltConnector"]
 
 
@@ -106,7 +106,10 @@ class UnbuiltConnector:
         return f"[unbuilt] {self.instance}: enrolled, not built: {self.reason}"
 
 
-CONNECTOR_SYSTEMS = ("gitlab", "graph")
+GRAPH_SYSTEM = "graph"
+"""A Microsoft Graph connector row's `system` (story 4u names it once)."""
+
+CONNECTOR_SYSTEMS = ("gitlab", GRAPH_SYSTEM)
 """The systems pm-ai builds a connector for: `gitlab`, and `graph` since story 33c.
 
 Here rather than in the composition root because two layers state it: the build

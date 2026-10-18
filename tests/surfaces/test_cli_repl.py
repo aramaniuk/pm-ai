@@ -278,8 +278,23 @@ def test_ctrl_c_while_typing_clears_the_line_and_never_ends_the_session():
 # ── Line editing ─────────────────────────────────────────────────────────────
 
 
-def test_lines_are_still_read_when_readline_cannot_be_imported(monkeypatch):
-    """`sys.modules[name] = None` makes the import raise `ImportError`."""
+def _without_prompt_toolkit(monkeypatch) -> None:
+    """The runtime extra's line editor made unimportable (story 4u).
+
+    `sys.modules[name] = None` makes the import raise `ImportError`; the
+    prompt's own module is dropped too, so a copy an earlier test imported
+    cannot answer for it.
+    """
+    import pm_ai.surfaces.cli as cli
+
+    monkeypatch.setitem(sys.modules, "prompt_toolkit", None)
+    monkeypatch.delitem(sys.modules, "pm_ai.surfaces.cli.editor", raising=False)
+    monkeypatch.delattr(cli, "editor", raising=False)
+
+
+def test_lines_are_still_read_when_readline_cannot_be_imported(monkeypatch, capsys):
+    """Neither line editor imports: `input` reads every line, nothing else changes."""
+    _without_prompt_toolkit(monkeypatch)
     monkeypatch.setitem(sys.modules, "readline", None)
     loaded: list[bool] = []
     original = repl._line_editing
@@ -291,9 +306,11 @@ def test_lines_are_still_read_when_readline_cannot_be_imported(monkeypatch):
     monkeypatch.setattr(repl, "_line_editing", recorded)
     runner = _Runner()
     reader = _Reader(["doctor", "exit"])
-    assert repl.run(runner, read=reader, line_editing=True) == EXIT_OK
+    monkeypatch.setattr(repl, "_input", reader)
+    assert repl.run(runner, line_editing=True) == EXIT_OK
     assert loaded == [False]
     assert runner.calls == [["doctor"]]
+    assert capsys.readouterr().err.count("uv sync --extra runtime") == 1
 
 
 def test_line_editing_is_off_unless_asked_for(monkeypatch):
@@ -304,8 +321,9 @@ def test_line_editing_is_off_unless_asked_for(monkeypatch):
 
 
 def test_no_history_file_is_written(tmp_path, monkeypatch):
-    """The real line-editing path, with readline's history writers recorded."""
+    """`4q`'s line-editing path, with readline's history writers recorded."""
     import readline
+    _without_prompt_toolkit(monkeypatch)
     home, working = tmp_path / "home", tmp_path / "work"
     home.mkdir()
     working.mkdir()
@@ -325,8 +343,8 @@ def test_no_history_file_is_written(tmp_path, monkeypatch):
     original = repl._line_editing
     monkeypatch.setattr(repl, "_line_editing", lambda: loaded.append(original()) or True)
 
-    reader = _Reader(["doctor", "what now", "exit"])
-    assert repl.run(_Runner(), read=reader, line_editing=True) == EXIT_OK
+    monkeypatch.setattr(repl, "_input", _Reader(["doctor", "what now", "exit"]))
+    assert repl.run(_Runner(), line_editing=True) == EXIT_OK
     assert loaded == [True]
     assert written == []
     assert list(home.iterdir()) == []

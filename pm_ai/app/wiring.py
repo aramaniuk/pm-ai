@@ -192,8 +192,11 @@ __all__ = [
     "bootstrap",
     "build",
     "onboard_project",
+    "connector_rows_unlisted",
+    "is_connector_row_file",
     "read_connector_rows",
     "refreshed",
+    "sort_connector_rows",
     "Onboarded",
     "warn_if_encryption_disabled",
     "PmIdentityReading",
@@ -2746,6 +2749,14 @@ class ConnectorRows:
     accepted: tuple[tuple[str, str, Mapping[str, object]], ...]
     refused: tuple[tuple[str, str], ...]
     reading: EnrolmentReading
+    named: tuple[tuple[str, str], ...] = ()
+    """`(instance, system)` for every readable row naming both, enabled or not.
+
+    Story 4u: `connector sign-in` reads no `enabled`, so the prompt offers
+    every Graph row by its name, whether the build would run it or not. In
+    listing order; a name several rows carry is listed once, with the system
+    its first row names.
+    """
 
 
 def _cause(error: BaseException) -> str:
@@ -2815,25 +2826,69 @@ def read_connector_rows(storage: StorageService) -> ConnectorRows:
     try:
         names = storage.list_collection(scope=application, artifact="connectors/")
     except Exception as unlisted:
-        return ConnectorRows(
-            (), (), EnrolmentReading(shown, (), (), (), (), _cause(unlisted))
-        )
-    problems: list[str] = []
-    disabled: list[str] = []
-    # Every enabled row in listing order: `(file, instance or None, row)`.
-    enabled: list[tuple[str, str | None, Mapping[str, object]]] = []
+        return connector_rows_unlisted(shown, unlisted)
+    rows: list[tuple[str, bytes | BaseException]] = []
     for name in names:
-        if not name.endswith(".json") or not (directory / name).is_file():
+        if not is_connector_row_file(directory / name):
             continue
-        where = f"connectors/{name}" if name.isprintable() else f"connectors/{name!r}"
         try:
             raw = storage.read_artifact(
                 scope=application, artifact="connectors/", name=name
             )
         except Exception as unreadable:
-            problems.append(f"{where} could not be read ({_cause(unreadable)})")
+            rows.append((name, unreadable))
             continue
         if raw is None:
+            continue
+        rows.append((name, raw))
+    return sort_connector_rows(shown, rows)
+
+
+def is_connector_row_file(path: Path) -> bool:
+    """Whether a member of `connectors/` is a row: a regular file named `*.json`.
+
+    Shared by `read_connector_rows` and the prompt's completion (story 4u), so
+    the two cannot disagree about which files are rows.
+    """
+    return path.name.endswith(".json") and path.is_file()
+
+
+def connector_rows_unlisted(directory: str, error: BaseException) -> ConnectorRows:
+    """The reading of a `connectors/` that could not be listed: nothing else is said.
+
+    An unlisted directory is not an empty one, so no row is accepted, refused or
+    named (story 4n).
+    """
+    return ConnectorRows((), (), EnrolmentReading(directory, (), (), (), (), _cause(error)))
+
+
+def sort_connector_rows(
+    directory: str, rows: Sequence[tuple[str, bytes | BaseException]]
+) -> ConnectorRows:
+    """`4n`'s row rule as a pure function over the rows' names and bytes (story 4u).
+
+    `rows` is every regular file the caller found in `connectors/`, in listing
+    order, each with its bytes or the exception its read raised; a row removed
+    between the listing and its read is left out by the caller. `directory` is
+    how the directory is named in `doctor`'s line. Nothing here opens a file,
+    so the same rule serves `read_connector_rows`, which reads through the
+    single writer, and the prompt's completion, which reads by path and may not
+    build a `StorageService` (building one opens `operational.db`).
+
+    A name not ending in `.json` is not a row and is ignored.
+    """
+    shown = directory
+    problems: list[str] = []
+    disabled: list[str] = []
+    named: dict[str, str] = {}
+    # Every enabled row in listing order: `(file, instance or None, row)`.
+    enabled: list[tuple[str, str | None, Mapping[str, object]]] = []
+    for name, raw in rows:
+        if not name.endswith(".json"):
+            continue
+        where = f"connectors/{name}" if name.isprintable() else f"connectors/{name!r}"
+        if isinstance(raw, BaseException):
+            problems.append(f"{where} could not be read ({_cause(raw)})")
             continue
         try:
             decoded = json.loads(raw.decode("utf-8"))
@@ -2850,6 +2905,9 @@ def read_connector_rows(storage: StorageService) -> ConnectorRows:
             problems.append(f"{where} holds a {type(decoded).__name__}, not an object")
             continue
         instance = _usable_name(decoded.get("instance"))
+        system = decoded.get("system")
+        if instance is not None and isinstance(system, str) and system:
+            named.setdefault(instance, system)
         if decoded.get("enabled") is not True:
             disabled.append(where if instance is None else instance)
             continue
@@ -2925,6 +2983,7 @@ def read_connector_rows(storage: StorageService) -> ConnectorRows:
             problems=tuple(problems),
             unlisted=None,
         ),
+        named=tuple(named.items()),
     )
 
 
