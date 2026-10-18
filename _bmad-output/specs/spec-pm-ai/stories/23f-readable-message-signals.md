@@ -2,7 +2,8 @@
 title: 'Readable message signals on the dashboard'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '9e5383fe4c6ec023d243bfd09d9df39e72d6b6d4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -128,13 +129,13 @@ Re-verified against `ba0b747` on 2026-10-17.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/events.py` -- the optional sender name on `MessagePayload`, declared in `UNTRUSTED_TEXT`; `tests/domain/test_entry_grammar_pins.py` updated -- display text, never a person
-- [ ] `pm_ai/connectors/graph/channels.py`, `pm_ai/connectors/graph/__init__.py` -- `MessageRow` carries both names; `_posted` stores the one that matches the chosen actor, after the absence rules; `_message_event`'s docstring updated -- R3
-- [ ] `pm_ai/core/rendering.py` -- `_Signal` carries the label time and whether it is the harvest time; sort on it; `_signal_line` shows the name, with `(app)` for a bot, or the handle; `escape` and `code` fold line-break runs into one space -- findings 15, 16, 17
-- [ ] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- builders gain `occurred_at`, defaulting to the harvest time so existing goldens keep their times; one test per matrix row; the two injected-heading assertions flipped -- the matrix is the contract
-- [ ] `tests/connectors/test_graph_channel_messages_recorded.py`, `tests/connectors/test_graph_chat_messages_recorded.py` -- the name taken from the recorded fixtures `channel_messages_recorded.json` and `chat_messages_recorded.json`; `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_chat_messages.py` -- the bot, unknown-sender and handle-shaped cases -- the connector half
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/23c-proactive-enablement-from-messages.md`, `33d-graph-channel-messages.md` -- when this slice is built, edit the amended frozen sentences (`23c`:27, :28, :31; `33d`:32) to say what is now true, and add a dated Change Log line in each naming this slice and what changed; `33h` has already edited `33d` (lines 26 and 29, two matrix rows, a Change Log entry around line 132) but left `33d`:32 untouched, so this amendment still applies, and `23f`'s `33d` Change Log line goes after `33h`'s -- the one method every amending spec uses
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark findings 15, 16 and 17 resolved (the entries at `deferred-work.md:1341`, `:1345` and `:1349`, each now marked planned as `23f`) -- the debt is on record
+- [x] `pm_ai/domain/events.py` -- the optional sender name on `MessagePayload`, declared in `UNTRUSTED_TEXT`; `tests/domain/test_entry_grammar_pins.py` updated -- display text, never a person
+- [x] `pm_ai/connectors/graph/channels.py`, `pm_ai/connectors/graph/__init__.py` -- `MessageRow` carries both names; `_posted` stores the one that matches the chosen actor, after the absence rules; `_message_event`'s docstring updated -- R3
+- [x] `pm_ai/core/rendering.py` -- `_Signal` carries the label time and whether it is the harvest time; sort on it; `_signal_line` shows the name, with `(app)` for a bot, or the handle; `escape` and `code` fold line-break runs into one space -- findings 15, 16, 17
+- [x] `tests/core/test_rendering_sections.py`, `tests/core/test_project_rendering.py` -- builders gain `occurred_at`, defaulting to the harvest time so existing goldens keep their times; one test per matrix row; the two injected-heading assertions flipped -- the matrix is the contract
+- [x] `tests/connectors/test_graph_channel_messages_recorded.py`, `tests/connectors/test_graph_chat_messages_recorded.py` -- the name taken from the recorded fixtures `channel_messages_recorded.json` and `chat_messages_recorded.json`; `tests/connectors/test_graph_channel_messages.py`, `tests/connectors/test_graph_chat_messages.py` -- the bot, unknown-sender and handle-shaped cases -- the connector half
+- [x] `_bmad-output/specs/spec-pm-ai/stories/23c-proactive-enablement-from-messages.md`, `33d-graph-channel-messages.md` -- when this slice is built, edit the amended frozen sentences (`23c`:27, :28, :31; `33d`:32) to say what is now true, and add a dated Change Log line in each naming this slice and what changed; `33h` has already edited `33d` (lines 26 and 29, two matrix rows, a Change Log entry around line 132) but left `33d`:32 untouched, so this amendment still applies, and `23f`'s `33d` Change Log line goes after `33h`'s -- the one method every amending spec uses
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark findings 15, 16 and 17 resolved (the entries at `deferred-work.md:1341`, `:1345` and `:1349`, each now marked planned as `23f`) -- the debt is on record
 
 **Acceptance Criteria:**
 - Given a recorded channel message and a recorded chat message from the recorded, redacted fixtures (`tests/connectors/fixtures/graph/channel_messages_recorded.json` and `chat_messages_recorded.json`, tested in `test_graph_*_recorded.py`), when a harvest and then `pm-ai dashboard` run, then:
@@ -165,6 +166,9 @@ Re-verified against `ba0b747` on 2026-10-17.
   - **Rejected — handle suffix on names:** keeping a short handle suffix beside every name against guest display-name spoofing. It undoes the readability R3 asked for. Nothing pm-ai decides rests on the name, since mentions compare handles. Marking guests would need a tenant comparison, which the project's standing rule on provider identity forbids.
 - **2026-10-16, review (cross-spec consistency).** The amendment method made explicit: when this slice is built, the frozen sentences it amends in `23c` (:27, :28, :31) and `33d` (:32) are edited to the new rule, and each of those specs gains a dated Change Log line naming this slice.
 - **2026-10-17, Code Map re-verified against `ba0b747`; the acceptance check names the recorded fixtures.**
+- **2026-10-18, built against `9e5383f`; Code Map spot-checked unchanged.**
+  - **Review patches:** the handle-shape test now judges the name NFKC-normalised with invisible characters removed, so a zero-width, word-joiner, byte-order-mark or fullwidth disguise is refused; the visible-text check runs after the 100-character cut; a posted time too far out to convert to UTC takes the harvest label instead of failing the render; a break run absorbs every Unicode space beside it, not only the no-break ones.
+  - **Deferred, needs Andrei's decision:** a posted time later than its own harvest time, and seconds of provider clock skew; a person's name ending in `(app)`, and two senders sharing a name.
 
 ## Design Notes
 
@@ -181,3 +185,50 @@ Re-verified against `ba0b747` on 2026-10-17.
 - `uv run pytest -q` -- expected: all pass; skip count unchanged from the baseline
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**The sender's name: same branch as the actor, display only**
+
+- The name is chosen from the `from` branch that produced the actor; `none:` gets none.
+  [`__init__.py:1559`](../../../../pm_ai/connectors/graph/__init__.py#L1559)
+
+- Absence rules: not text, handle-shaped, nothing visible left after the 100-character cut.
+  [`channels.py:892`](../../../../pm_ai/connectors/graph/channels.py#L892)
+
+- The handle test judges what a reader sees: NFKC, invisible characters removed.
+  [`handles.py:297`](../../../../pm_ai/domain/handles.py#L297)
+
+- The optional field, declared untrusted; old lines decode with no name.
+  [`events.py:135`](../../../../pm_ai/domain/events.py#L135)
+
+**The label: posted time, window still on harvest time**
+
+- When the posted time may label a line; otherwise the harvest time, marked.
+  [`rendering.py:1004`](../../../../pm_ai/core/rendering.py#L1004)
+
+- Mentions first, then newest by label, then entry id.
+  [`rendering.py:821`](../../../../pm_ai/core/rendering.py#L821)
+
+- Name, `(app)` for a bot, the handle, or an unknown sender.
+  [`rendering.py:983`](../../../../pm_ai/core/rendering.py#L983)
+
+**One line, everywhere the escape runs**
+
+- Each break run, with the blanks beside it, becomes one space before escaping.
+  [`rendering.py:1316`](../../../../pm_ai/core/rendering.py#L1316)
+
+- `escape` and `code` fold first, so stored lines read cleanly too.
+  [`rendering.py:1218`](../../../../pm_ai/core/rendering.py#L1218)
+
+**Tests**
+
+- End to end on the recorded fixtures: names shown, handles in the log, PM marked.
+  [`test_graph_channel_messages_recorded.py:422`](../../../../tests/connectors/test_graph_channel_messages_recorded.py#L422)
+
+- The harvest-then-dashboard helper the two acceptance tests share.
+  [`recorded_graph.py:158`](../../../../tests/connectors/recorded_graph.py#L158)
+
+- No spelled-out line break on either dashboard.
+  [`test_rendering_sections.py:1956`](../../../../tests/core/test_rendering_sections.py#L1956)
+  [`test_project_rendering.py:727`](../../../../tests/core/test_project_rendering.py#L727)

@@ -1338,15 +1338,15 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   evidence: Findings 3, 8 and 14; the project copy and transcript files are already 0600, so the rule exists and is applied unevenly. `operational.db` is the 9a entry above.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `23f` (pull request #74).** A Proactive Enablement signal is labelled with its harvest time, not the time it was posted.
+  summary: **RESOLVED 2026-10-18 by `23f`** — each line is labelled with its posted time (`occurred_at`), dated when not today, and ordered by it; the harvest time, marked `(harvested)`, stands in only when the posted time is absent, unreadable, flagged implausible or after the render. The window still selects on `ingested_at`. Was: A Proactive Enablement signal is labelled with its harvest time, not the time it was posted.
   evidence: Finding 15: every signal read the harvest minute for messages posted hours earlier (`core/rendering.py:708`, `_signal_line`). Keep filtering on `ingested_at`; label with `occurred_at`.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `23f` (pull request #74).** Signal senders render as raw `graph:<user id>` handles.
+  summary: **RESOLVED 2026-10-18 by `23f`** — the sender's display name Graph sends with each message is stored beside the handle (`MessagePayload.sender_name`, untrusted, display only) and shown in its place, with ` (app)` for a bot; lines ingested earlier still show the handle. Was: Signal senders render as raw `graph:<user id>` handles.
   evidence: Finding 16: unreadable without looking ids up; nothing resolves a handle for display (`core/rendering.py:900`). Needs a display-name source that respects `33d`'s ids-not-names decision.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
-  summary: **Planned in wave 3 as `23f` (pull request #74).** A multi-line message's excerpt shows a literal `\n`.
+  summary: **RESOLVED 2026-10-18 by `23f`** — the dashboard's escape folds every run of line breaks, with the blanks beside it, into one space, for every escaped text on both dashboards. Was: A multi-line message's excerpt shows a literal `\n`.
   evidence: Finding 17: the one-line escape writes the two characters `\` `n` (`core/rendering.py:1124`); a space or a separator reads better.
 
 - source_spec: `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`
@@ -1423,3 +1423,9 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   summary: Which folders are private is read off folder names (`.pm-ai`, `.manager-ai`, `.project-ai/memory|transcripts`; `private_top`), while file modes follow the scope. A resolver built with homes under other names would get `0600` files in umask folders.
   evidence: The production and test resolvers both use the standard names, as `crypto.is_encrypted` already assumes. Deriving the private top from `ScopePaths`' roots would remove the coupling, but the lock-file code has no resolver at hand.
 
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/23f-readable-message-signals.md`
+  summary: **Needs Andrei's decision.** A signal's posted time is used as its label whenever it is not later than the render, even when it is later than the line's own harvest time, and a posted time a few seconds ahead of the local clock is labelled `(harvested)`.
+  evidence: `23f`'s frozen rule names only "later than the render's instant" (`core/rendering.py`, `_posted_at`). A posted time after its own harvest cannot be right, and provider clock skew of seconds flips a line to the harvest label. The options are to keep the rule as frozen, to compare against the earlier of the render and the harvest time, or to allow a small skew.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/23f-readable-message-signals.md`
+  summary: **Needs Andrei's decision.** A person whose display name ends in `(app)` reads like a bot on the dashboard, and two senders with the same display name read as one.
+  evidence: `_sender` appends ` (app)` only for `graph_app:` handles and never checks a person's name for the marker; the handle is no longer printed beside a name. `23f`'s Design Notes admit a guest using a colleague's name; these are two more cases of the same display-only limit. Mentions still compare handles, so no decision on the line rests on the name.
