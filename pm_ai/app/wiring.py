@@ -13,6 +13,7 @@ import copy
 import json
 import logging
 import math
+import os
 import sys
 import threading
 import time
@@ -3269,6 +3270,10 @@ def onboard_project(
     repository = _resolved(raw_path)
     project_id = alias if alias is not None else repository.name
     resolver = paths if paths is not None else ScopePaths.production()
+    # Before the id is checked: a special folder's own name (`.pm-ai`,
+    # `.project-ai`) would otherwise be refused as a malformed id, which names
+    # the wrong problem (`23h`).
+    _assert_usable(repository, resolver)
     # `replace` rather than a second `production()` call. Rebuilding the resolver
     # from scratch here discarded everything `paths` said about the *layout* and
     # kept only its project map, so a caller that handed in `ScopePaths.rooted()`
@@ -3287,7 +3292,6 @@ def onboard_project(
     )
     scope = DataScope(ScopeKind.PROJECT, project_id)
     known.scope_root(scope)
-    _assert_usable(repository)
     storage = _writer(
         known,
         now=lambda: datetime.now(timezone.utc),
@@ -3431,12 +3435,12 @@ def onboard_in_daemon(
     resolver = daemon.storage.paths
     if not isinstance(resolver, ScopePaths):
         raise TypeError("the daemon's writer resolves through ScopePaths")
+    _assert_usable(repository, resolver)
     known = replace(
         resolver, project_roots={**resolver.project_roots, project_id: repository}
     )
     scope = DataScope(ScopeKind.PROJECT, project_id)
     known.scope_root(scope)
-    _assert_usable(repository)
     storage = daemon.storage.seeing(known)
     application = DataScope(ScopeKind.APPLICATION)
     # Bounded: the reads the write is computed from, and git's answer for it.
@@ -3696,14 +3700,84 @@ def _resolved(raw_path: str) -> Path:
     return (expanded if expanded.is_absolute() else Path.cwd() / expanded).resolve()
 
 
-def _assert_usable(repository: Path) -> None:
-    """Refuse a path that cannot become a project directory, before anything is made."""
+def _assert_usable(repository: Path, paths: ScopePaths) -> None:
+    """Refuse a path that cannot become a project directory, before anything is made.
+
+    Also refuses a path that is, or is inside, one of pm-ai's own folders
+    (`23h`): the application home, the personal home (`paths`' two roots), or
+    any folder named `.project-ai`. A project there would put one scope inside
+    another, where `1s`'s rules for private folders and for registered
+    repositories collide. A path that merely contains a home, such as the home
+    folder itself, is not refused.
+    """
+    special = _special_folder(repository, paths)
+    if special is not None:
+        folder, what = special
+        raise ProjectPathUnusable(
+            f"{repository} is {'' if folder == repository else 'inside '}{folder}, "
+            f"{what}, which cannot hold a project. Nothing was onboarded — choose "
+            f"a folder outside it."
+        )
     if repository.exists() and not repository.is_dir():
         raise ProjectPathUnusable(
             f"{repository} is not a directory. A project is onboarded at a "
             f"directory — pm-ai creates one when it is missing, and will not "
             f"replace a file that is already there."
         )
+
+
+def _special_folder(repository: Path, paths: ScopePaths) -> tuple[Path, str] | None:
+    """The pm-ai folder `repository` is or is inside, and what it is; `None` if none.
+
+    `repository` is already resolved, so a link into a home has become the
+    home's own path. Each of its existing folders is compared with each home by
+    `os.path.samefile`, so a case variant on a case-insensitive disk is the
+    same folder and `~/.manager-ai-old` is not. A home that does not exist yet
+    is matched by name, casefolded, under the home's parent, so `~/.PM-AI/work`
+    on a fresh machine is refused rather than later becoming `~/.pm-ai`. A
+    `.project-ai` folder is found by name,
+    compared casefolded, whether or not it exists.
+    """
+    homes = (
+        (paths.application_root, "pm-ai's application folder"),
+        (paths.personal_root, "pm-ai's personal folder"),
+    )
+    for folder in (repository, *repository.parents):
+        if folder.name.casefold() == PROJECT_DIRNAME.casefold():
+            return folder, "a project's own pm-ai folder"
+        for home, what in homes:
+            if _same_folder(folder, home):
+                return folder, what
+    return None
+
+
+def _same_folder(folder: Path, home: Path) -> bool:
+    """Whether `folder` is `home`, by the filesystem's answer where it can give one.
+
+    Both existing: `os.path.samefile`. The home missing: `folder` counts as the
+    home when its name equals the home's casefolded and its parent is the
+    home's parent (`samefile` on the parents when both exist, resolved paths
+    otherwise) — a case variant on a case-insensitive disk would become the
+    home once created, and on a case-sensitive disk refusing it costs nothing.
+    """
+    try:
+        if home.exists():
+            return folder.exists() and os.path.samefile(folder, home)
+    except OSError:
+        return folder == home.resolve()
+    if folder.name.casefold() != home.name.casefold():
+        return False
+    return _same_parent(folder.parent, home.parent)
+
+
+def _same_parent(one: Path, other: Path) -> bool:
+    """Whether two folders are one: `samefile` when both exist, resolved paths otherwise."""
+    try:
+        if one.exists() and other.exists():
+            return os.path.samefile(one, other)
+    except OSError:
+        pass
+    return one.resolve() == other.resolve()
 
 
 def _create(repository: Path) -> None:

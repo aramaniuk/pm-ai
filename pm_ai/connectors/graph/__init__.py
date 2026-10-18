@@ -1657,6 +1657,9 @@ class GraphConnector:
             # In memory only (`23e`): the date Graph gave an all-day row, by
             # which the dashboard places the marker.
             all_day_date=row.all_day_date,
+            # In memory only (`23h`): the end date Graph gave it, so a
+            # multi-day entry is on every date it spans.
+            all_day_end_date=row.all_day_end_date,
         )
 
     def _to_event(self, meeting: Meeting, row: CalendarRow) -> NormalizedEvent:
@@ -1883,6 +1886,7 @@ def _with_skipped(
         reason=f"{failure.reason.rstrip('.')}{_not_attempted(skipped, skipped_chats)}.",
         retryable=failure.retryable,
         retry_after=failure.retry_after,
+        walk_cut_short=failure.walk_cut_short,
     )
 
 
@@ -1891,17 +1895,23 @@ def _one_failure(failures: tuple[HarvestFailure, ...]) -> HarvestFailure | None:
 
     One passes through verbatim. Several are joined in the order the resources
     were walked — each reason names its resource — and are retryable only if
-    every one is, carrying the largest retry hint any of them was given.
+    every one is, carrying the largest retry hint any of them was given. The
+    join is a channel walk cut short (`23h`) only when it is not retryable and
+    every non-retryable part is one: a cut beside a throttled calendar waits
+    for the next cycle, a cut beside an expired sign-in needs a person.
     """
     if not failures:
         return None
     if len(failures) == 1:
         return failures[0]
     hints = [failure.retry_after for failure in failures if failure.retry_after is not None]
+    retryable = all(failure.retryable for failure in failures)
     return HarvestFailure(
         reason="; ".join(failure.reason for failure in failures),
-        retryable=all(failure.retryable for failure in failures),
+        retryable=retryable,
         retry_after=max(hints) if hints else None,
+        walk_cut_short=not retryable
+        and all(failure.walk_cut_short for failure in failures if not failure.retryable),
     )
 
 

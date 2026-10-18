@@ -99,7 +99,13 @@ class RegistryMalformed(RegistryRefused):
 
 
 class ProjectPathUnusable(RegistryRefused):
-    """A path parsed but cannot locate a repository — today, a relative one."""
+    """A path parsed but cannot locate a repository.
+
+    In the registry, a relative one. From `project add`, also a path that is
+    not a directory, cannot be created, or is, or is inside, one of pm-ai's own
+    folders — the application home, the personal home, or a `.project-ai`
+    folder (`23h`).
+    """
 
 
 class DuplicateProject(RegistryRefused):
