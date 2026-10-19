@@ -1546,3 +1546,12 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/7a-the-local-model-behind-the-port.md`
   summary: `uv.lock`'s `revision` went from 3 to 5, because the lock was rewritten by the `uv` on PATH, which reports 0.13.1 (the machine notes of 2026-10-19 named 0.12.2). Whether an older `uv` still reads it is not checked.
   evidence: `git diff` on `uv.lock`. The only content changes are `ollama` dropped and `httpx` pinned.
+
+## Surfaced by the story-7b review (2026-10-19)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7b-a-transcript-yields-summary-decisions-and-actions.md`
+  summary: **Needs Andrei's decision.** The measured figures the spec asks for are not recorded: characters per token on the build's own largest valid answer, the prompt tokens, each call's model time, and the times from ingestion and from the command to the record written. So the 600-second Ask First has not been checked either. The build session's sandbox refuses connections to Ollama on `127.0.0.1:11434`, and the session did not bypass it. `benchmarks/meeting_summary.py` (new, run by hand, never by pytest) runs the slice's own path in a throwaway root and prints those figures with no transcript or answer text.
+  evidence: The only figure in the Design Notes is computed, not measured: the largest answer the limits allow is 8,158 characters, about 2,794 tokens at `7a`'s 2.92 characters per token. That ratio comes from the authored meeting's input, not from an answer. Options: run `uv run python benchmarks/meeting_summary.py --model qwen3:8b` from a terminal outside the sandbox before merging and record the figures, or merge and record them later.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7b-a-transcript-yields-summary-decisions-and-actions.md`
+  summary: **Needs Andrei's decision.** The `DAEMON_BOUNDS` entry for `transcript summarize` is 600 seconds, which is the 300-second call plus its one retry. It does not count time queued: the model pool has one slot, and up to three automatic jobs per harvest can be ahead of a request, each allowed a call and a retry. So a request can pass its stated bound before its first call starts.
+  evidence: Blind-hunter review. Options: keep 600 s and say in the help that queued time is not counted; let a request go ahead of queued automatic jobs; or make the bound cover the queue (up to 3 × 600 s more).

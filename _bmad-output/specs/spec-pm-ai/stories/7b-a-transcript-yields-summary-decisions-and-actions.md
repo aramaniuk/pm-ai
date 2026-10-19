@@ -2,7 +2,8 @@
 title: 'A transcript yields a summary, decisions and action items'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: 'cf01128d6881e8eac769ccd56369ddce76b1cb35'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -107,19 +108,19 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/identity.py` -- `decision` in `SCOPELESS_SYSTEMS` and `PM_AI_MINTED`, after the spine amendment -- each decision its own key, never external
-- [ ] `pm_ai/core/meeting_summary.py` -- new, pure: the instruction constants (the summary prompt, the fixed retry sentences, one of them for the output cap), the schema with the trimmed limits, fragments from a transcript, the validator, the decision digest and proposal id, the region's grammar -- one shape, checked where defined
-- [ ] `pm_ai/core/transcripts.py` -- the whole-meeting reader, pure: given the meeting's part rows, its capture names and their texts, the utterances in order — parts in part order when there are rows; otherwise the `-graph.vtt` capture; otherwise the `-manual.vtt` or `-manual.txt` capture, read by the readers `transcript drop` used. In `core` because `core` may not import `storage` (`.importlinter` layering); the reads themselves are the pipeline's -- one meeting, one sequence
-- [ ] `pm_ai/models/local/ollama.py`, `tests/models/test_ollama_adapter.py` -- `NUM_PREDICT` 2,048 → 4,096 and its docstring (raised by `7b` so the trimmed answer shape fits with margin); the tests that read the constant still pass, and one states that the real-length recording plus the cap fits `NUM_CTX` -- the cap the answer limits are sized against
-- [ ] `pm_ai/core/meeting_records.py`, `pm_ai/domain/event_entries.py` -- `MeetingRecord.summary`; `put_summary`; the grammar's render and parse; carried over on `put`; an unparseable region dropped and reported -- the summary survives re-harvests
-- [ ] `pm_ai/storage/service.py`, `pm_ai/ports/__init__.py` -- the summary state table with its version, the lease taken by compare-and-set and checked in every claimed step; offered-meeting query with the bound; superseding staged items -- offered until done, once at a time
-- [ ] `pm_ai/app/pipelines.py`, `pm_ai/app/daemon.py` -- `summarize_meeting`: preparation on the I/O pool (the step ends there) — the part rows and captures read through storage and handed to the whole-meeting reader; the call on `daemon.model_pool` through `require_model` (no router until `7c`), never awaited from an I/O worker; one call per meeting, the retry, sanitize, the writes in order; offered after ingestion, only for a meeting whose row is `ingested`; `drop_transcript` records waiting -- one path in the daemon
-- [ ] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py`, `pm_ai/surfaces/cli/loopback.py` -- `transcript summarize` with `--by local` (default) and `--by claude` refused naming `7c`; typed in a terminal, the line is sent to `/v1/prompt` through the loopback client (`entry._loopback`) and its job followed, as at the prompt; never run in the CLI process; no daemon refused naming `pm-ai daemon run` -- on request
-- [ ] `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- waiting, failed and timing-out meetings named -- no silent backlog
-- [ ] `tests/core/test_meeting_summary.py`, `tests/slice/test_meeting_summary.py` -- one test per matrix row with a fake `ModelPort`; the instructions-are-constant check -- the matrix is the contract
-- [ ] `stories/11b-the-real-transcript-path.md` -- a dated Change Log line: `## Summary` no longer stays empty and its Never "no summary … no model" is narrowed by `7b` -- an earlier frozen block amended on the record
-- [ ] `pm_ai/app/entry.py` -- a `DAEMON_BOUNDS` entry for `transcript summarize` -- routed as AD-21 declares
-- [ ] `pm_ai/surfaces/cli/completion.py` -- `transcript summarize`'s `--scope` completes to enrolled scopes and `--by` to `local` and `claude`; `--meeting` stays free text, as for `transcript drop` -- `4u`'s test covers every option
+- [x] `pm_ai/domain/identity.py` -- `decision` in `SCOPELESS_SYSTEMS` and `PM_AI_MINTED`, after the spine amendment -- each decision its own key, never external
+- [x] `pm_ai/core/meeting_summary.py` -- new, pure: the instruction constants (the summary prompt, the fixed retry sentences, one of them for the output cap), the schema with the trimmed limits, fragments from a transcript, the validator, the decision digest and proposal id, the region's grammar -- one shape, checked where defined
+- [x] `pm_ai/core/transcripts.py` -- the whole-meeting reader, pure: given the meeting's part rows, its capture names and their texts, the utterances in order — parts in part order when there are rows; otherwise the `-graph.vtt` capture; otherwise the `-manual.vtt` or `-manual.txt` capture, read by the readers `transcript drop` used. In `core` because `core` may not import `storage` (`.importlinter` layering); the reads themselves are the pipeline's -- one meeting, one sequence
+- [x] `pm_ai/models/local/ollama.py`, `tests/models/test_ollama_adapter.py` -- `NUM_PREDICT` 2,048 → 4,096 and its docstring (raised by `7b` so the trimmed answer shape fits with margin); the tests that read the constant still pass, and one states that the real-length recording plus the cap fits `NUM_CTX` -- the cap the answer limits are sized against
+- [x] `pm_ai/core/meeting_records.py`, `pm_ai/domain/event_entries.py` -- `MeetingRecord.summary`; `put_summary`; the grammar's render and parse; carried over on `put`; an unparseable region dropped and reported -- the summary survives re-harvests
+- [x] `pm_ai/storage/service.py`, `pm_ai/ports/__init__.py` -- the summary state table with its version, the lease taken by compare-and-set and checked in every claimed step; offered-meeting query with the bound; superseding staged items -- offered until done, once at a time
+- [x] `pm_ai/app/pipelines.py`, `pm_ai/app/daemon.py` -- `summarize_meeting`: preparation on the I/O pool (the step ends there) — the part rows and captures read through storage and handed to the whole-meeting reader; the call on `daemon.model_pool` through `require_model` (no router until `7c`), never awaited from an I/O worker; one call per meeting, the retry, sanitize, the writes in order; offered after ingestion, only for a meeting whose row is `ingested`; `drop_transcript` records waiting -- one path in the daemon
+- [x] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py`, `pm_ai/surfaces/cli/loopback.py` -- `transcript summarize` with `--by local` (default) and `--by claude` refused naming `7c`; typed in a terminal, the line is sent to `/v1/prompt` through the loopback client (`entry._loopback`) and its job followed, as at the prompt; never run in the CLI process; no daemon refused naming `pm-ai daemon run` -- on request
+- [x] `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- waiting, failed and timing-out meetings named -- no silent backlog
+- [x] `tests/core/test_meeting_summary.py`, `tests/slice/test_meeting_summary.py` -- one test per matrix row with a fake `ModelPort`; the instructions-are-constant check -- the matrix is the contract
+- [x] `stories/11b-the-real-transcript-path.md` -- a dated Change Log line: `## Summary` no longer stays empty and its Never "no summary … no model" is narrowed by `7b` -- an earlier frozen block amended on the record
+- [x] `pm_ai/app/entry.py` -- a `DAEMON_BOUNDS` entry for `transcript summarize` -- routed as AD-21 declares
+- [x] `pm_ai/surfaces/cli/completion.py` -- `transcript summarize`'s `--scope` completes to enrolled scopes and `--by` to `local` and `claude`; `--meeting` stays free text, as for `transcript drop` -- `4u`'s test covers every option
 **Acceptance Criteria:**
 - Given a project meeting's ingested transcript and a fake model answering a valid shape with two decisions and three action items, when the harvest's summary job runs, then the record holds the block, the project's log holds two `decision` events attributed to pm-ai with actor `none:`, three `action_item` proposals are staged citing the meeting, and nothing is executed.
 - Given that record, when the calendar harvest `put`s the same meeting again, then the summary block and `## Notes` are byte-identical.
@@ -142,6 +143,16 @@ context:
 - **2026-10-19, readiness decision (Andrei), `transcript summarize` through the daemon:** frozen block edited (recorded here). Typed in a terminal or at the prompt, the command sends its line to `/v1/prompt` and is acknowledged as a job. It never summarises in its own process. `--by local` is the default; `--by claude` is refused by name until `7c`. Two matrix rows were added (from a terminal; `--by claude`). The CLI task now names `entry._loopback` and `loopback.py`, and `api/app.py` is dropped from it, since `/v1/prompt` exists. AD-21 already matches: it lists `transcript summarize` with `--by local|claude`, sent over the loopback API and acknowledged as a job, refused naming `pm-ai daemon run` with no daemon. No spine edit was needed for this.
 - **2026-10-19, smaller readiness decisions (coordinating session):** frozen block edited (recorded here). (1) The model is reached through `require_model` on `daemon.model_pool` until `7c` builds the router. This is stated in "Where each step runs", and the pipeline task's "through the router" is corrected. (2) `--meeting` completion stays free text, as for `transcript drop`; that part of the completion task is dropped, and `--by` completes to `local` and `claude`. (3) AD-49 in ARCHITECTURE-SPINE.md gains `OutputCapReached` beside `PossiblyTruncated`, with the tag `[2026-10-19, 7a, 7b]`. (4) A meeting is summarised only when its transcript row is `ingested`. A meeting with a part that failed ingestion is not offered and, when requested, is refused naming the failed part. The harvest bullet is reworded and a matrix row added.
 - **2026-10-19, readiness (cosmetic):** frozen block edited (recorded here): three cited lines moved by the merged slices are corrected (`ports/__init__.py:991-996` → `:1058-1063`, `events.py:565` → `:572`, `service.py:2733` → `:3567`), as for `33i` and `7a`. No behaviour changes.
+- **2026-10-19, built:** where the build differs from the Tasks' wording. The slice test is `tests/slice/test_meeting_summary_slice.py`, since pytest refuses two test modules with one basename. Doctor's summaries line is in `pm_ai/app/entry.py` beside the `local model` line, and `loopback.py` needed no change. `render_value` quotes a leading `#` or `-` only when asked (`quote_marks=True`), because quoting by default changed pinned ledger lines such as `p.channel=#payments`. "No words left after cleaning" means no letter or digit, because the sanitizer leaves a lone zero-width character in place. `benchmarks/meeting_summary.py` is new: it runs this slice's own path against the local model, by hand.
+- **2026-10-19, review (three layers):** 21 patches applied, 0 intent or spec gaps. The main ones:
+  - a summarize job whose command raised after the job started left its row running;
+  - an answer that passed validation but could not be rendered was asked for again at every harvest;
+  - an automatic job could act on a row a request had already moved;
+  - one meeting's supersession could reach another meeting whose id extends it;
+  - a superseded item that came back was reported as acted on by the PM;
+  - with no local model, every harvest still read captures.
+
+  Tests were added for the daemon's request path, its pool wiring, a lease revoked before each write, and the reset and re-open paths through the harvest itself. Two findings need Andrei's decision and are in `deferred-work.md`: the measured figures are not yet recorded, and the 600-second bound does not count time queued.
 
 ## Design Notes
 
@@ -149,7 +160,9 @@ The retry's sentence differs from the first prompt, or temperature 0 and a fixed
 
 Choices made in review (2026-10-16): 3 meetings per harvest and nothing older than 30 days, so a backlog after a long absence costs bounded model time and never touches purged captures; owners limited to speaker labels, because a free-text owner invites the model to invent a person and `7e` needs a name the transcript actually carries; a hand-edited summary region is dropped and remade rather than kept, because keeping it would present a human's text as pm-ai's; decisions accumulate rather than being withdrawn, because the event log is append-only and a re-summary is a second reading, not a correction.
 
-Measured figures: none yet.
+Measured figures: none yet from a real model. The build session's sandbox refuses connections to Ollama, so the benchmark could not run there (`deferred-work.md`, story-7b section).
+
+Computed, not measured: the largest answer the limits allow, as JSON with each speaker label counted at 40 characters, is 8,158 characters. At `7a`'s 2.92 characters per token (measured on `7a`'s input, not on an answer), that is about 2,794 tokens, within three quarters of the cap (3,072). This is pinned by `test_the_largest_valid_answer_fits_three_quarters_of_the_output_cap_at_7a_s_ratio`. `benchmarks/meeting_summary.py --model qwen3:8b` prints the measured figures: characters per token on the largest valid answer seen, the limits' largest answer at that ratio, prompt tokens, each call's model time, and the times from ingestion and from the command to the record written.
 
 ## Verification
 
@@ -161,3 +174,95 @@ Measured figures: none yet.
 **Manual checks:**
 - With the model pulled and the daemon running in a throwaway home, `pm-ai transcript drop` the authored fixture into the personal scope; after the next harvest the record's `## Summary` holds the block and `pm-ai doctor` shows nothing waiting.
 - `uv run python benchmarks/local_model.py` with this slice's instructions; its scores, prompt tokens, the largest valid answer's characters and tokens, and times are written into the Design Notes.
+
+## Suggested Review Order
+
+**The job and where each stage runs**
+
+- Entry point: the stages, each naming the pool it runs on; no I/O worker waits on the model.
+  [`pipelines.py:2504`](../../../../pm_ai/app/pipelines.py#L2504)
+
+- Preparation: the record, the transcript row, the captures, refused by name before any call.
+  [`pipelines.py:2396`](../../../../pm_ai/app/pipelines.py#L2396)
+
+- One job in flight per meeting; the pool hand-offs and the stopping paths.
+  [`pipelines.py:2805`](../../../../pm_ai/app/pipelines.py#L2805)
+
+- The daemon's wiring of the jobs onto its I/O and model pools.
+  [`daemon.py:711`](../../../../pm_ai/app/daemon.py#L711)
+
+- After a harvest: at most 3, most recent first, none older than 30 days, only ingested meetings.
+  [`pipelines.py:2959`](../../../../pm_ai/app/pipelines.py#L2959)
+
+- Ingestion records waiting; a later part re-opens an automatic summary.
+  [`pipelines.py:3087`](../../../../pm_ai/app/pipelines.py#L3087)
+
+**The answer shape**
+
+- The constant instructions; nothing from a provider or model is interpolated.
+  [`meeting_summary.py:89`](../../../../pm_ai/core/meeting_summary.py#L89)
+
+- The validator: checked, cleaned, checked again, refused by rule.
+  [`meeting_summary.py:380`](../../../../pm_ai/core/meeting_summary.py#L380)
+
+- Fragments and the labels an owner must match.
+  [`meeting_summary.py:238`](../../../../pm_ai/core/meeting_summary.py#L238)
+
+- Keys by digest, never by position: decisions and action items.
+  [`meeting_summary.py:481`](../../../../pm_ai/core/meeting_summary.py#L481)
+
+- The refusal and the limits, declared in `domain` beside the shape.
+  [`meeting_summaries.py:92`](../../../../pm_ai/domain/meeting_summaries.py#L92)
+
+**The lease and the writes**
+
+- The lease taken by compare-and-set; every later write checks it.
+  [`service.py:4661`](../../../../pm_ai/storage/service.py#L4661)
+
+- The fence check inside each claimed step.
+  [`service.py:4492`](../../../../pm_ai/storage/service.py#L4492)
+
+- Staging under the lease, with supersession matched on the exact id form.
+  [`service.py:4784`](../../../../pm_ai/storage/service.py#L4784)
+
+- The state table, with no schema version bump.
+  [`service.py:248`](../../../../pm_ai/storage/service.py#L248)
+
+**The record's region**
+
+- `put_summary`: the region written under the lease check.
+  [`meeting_records.py:766`](../../../../pm_ai/core/meeting_records.py#L766)
+
+- The grammar's render and parse; a hand edit is refused and dropped.
+  [`meeting_summary.py:538`](../../../../pm_ai/core/meeting_summary.py#L538)
+
+**On request**
+
+- From a terminal, the line goes to the daemon and its job is followed.
+  [`entry.py:378`](../../../../pm_ai/app/entry.py#L378)
+
+- The daemon's job, settled by whichever finishes last, the command or the summary.
+  [`prompts.py:854`](../../../../pm_ai/app/prompts.py#L854)
+
+- Checked and refused by name: `--by claude`, no daemon, not ingested, a failed part.
+  [`pipelines.py:3025`](../../../../pm_ai/app/pipelines.py#L3025)
+
+**Peripherals**
+
+- The whole-meeting reader: parts in order, else the Graph capture, else the dropped one.
+  [`transcripts.py:556`](../../../../pm_ai/core/transcripts.py#L556)
+
+- `decision` is scopeless and minted by pm-ai.
+  [`identity.py:167`](../../../../pm_ai/domain/identity.py#L167)
+
+- The output cap is raised to 4,096.
+  [`ollama.py:115`](../../../../pm_ai/models/local/ollama.py#L115)
+
+- Doctor's summaries line.
+  [`entry.py:1536`](../../../../pm_ai/app/entry.py#L1536)
+
+- The benchmark for this slice's own path, run by hand.
+  [`meeting_summary.py`](../../../../benchmarks/meeting_summary.py)
+
+- One test or more per matrix row.
+  [`test_meeting_summary_slice.py`](../../../../tests/slice/test_meeting_summary_slice.py)
