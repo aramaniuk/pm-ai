@@ -1129,7 +1129,7 @@ pm_ai/
 
   **What it does not do:** these declarations have no reader yet. They say which fields are untrusted; nothing yet requires a caller assembling a prompt to sanitize all of them rather than some. That binding arrives with the first real model call.
 
-### AD-49 — A refusal a port's caller must catch is declared with the port `[NEW 2026-09-23, revised 2026-10-16]`
+### AD-49 — A refusal a port's caller must catch is declared with the port `[NEW 2026-09-23, revised 2026-10-16, 2026-10-19]`
 
 - **Binds:** AD-30, AD-5, `pm_ai.ports`, `pm_ai.domain`, `7a`, `7b`
 - **Prevents:** a caller typed against a protocol having no legal way to name what it catches. If the refusal lives with the implementation, the only `except` that compiles is one that imports the adapter — which is the dependency the port existed to remove, so the caller either reaches around the port or catches nothing and lets a routine refusal escape as a crash.
@@ -1137,7 +1137,7 @@ pm_ai/
   - **About a port's contract → declared in `pm_ai.ports`, beside the protocol.** "This artifact is locked", "the key is not enrolled", "decryption failed", "the probe could not reach the service" — every implementation may raise these and every caller must handle them, so they belong to the protocol rather than to any one adapter.
   - **About domain semantics → declared in `pm_ai.domain`.** A scope leak, a malformed entry, an implausible timestamp: these are violations of a rule the domain owns, and they are raised wherever the rule is checked.
 
-  **The model refusals** `[2026-10-16, 7a, 7b; both homes applied at the gate]`. About the port's transport, so declared in `pm_ai.ports` beside `ModelPort`: `LocalModelUnavailable`, `NoLocalModel`, `PossiblyTruncated`, `ModelTimedOut` (`7a`). About rules `domain` owns, so declared in `pm_ai.domain` beside each rule: `ScopeFlowRefused` (the closed flow table, AD-31) and `ModelAnswerRefused` (`7b`'s answer shape, validated in `core`).
+  **The model refusals** `[2026-10-16, 7a, 7b; both homes applied at the gate]`. About the port's transport, so declared in `pm_ai.ports` beside `ModelPort`: `LocalModelUnavailable`, `NoLocalModel`, `PossiblyTruncated`, `OutputCapReached` `[2026-10-19, 7a, 7b]` (an answer stopped at the output cap, which the caller handles as an invalid answer rather than as a prompt too long for the window), `ModelTimedOut` (`7a`). About rules `domain` owns, so declared in `pm_ai.domain` beside each rule: `ScopeFlowRefused` (the closed flow table, AD-31) and `ModelAnswerRefused` (`7b`'s answer shape, validated in `core`).
 
   **`domain` is reachable by every layer, so it is available as a home too** — the discriminator above is what decides between the two, not reachability. A rule keyed on "who raises it" was drafted for this slot and withdrawn the same day: most refusals in `ports` are raised by exactly one adapter and belong there anyway, and a cross-boundary refusal already lives in `domain` and is correct there.
 
