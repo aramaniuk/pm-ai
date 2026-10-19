@@ -2,7 +2,8 @@
 title: 'Team Activity on the project dashboard'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '8b79328d36da9e733063f9c84eac425d500956f4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -167,12 +168,12 @@ Re-verified against `5f4f43e` on 2026-10-18 (first verified against `a1182f8` on
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/team_activity.py` -- new and pure: the bare-reference finder; the grouping of record and commit entries into members and marked issues; the placed-issues function `placed_issue_numbers`; the `IssueNotes` slot type and its empty default -- testable without Markdown
-- [ ] `pm_ai/core/rendering.py` -- `TEAM_ACTIVITY` third in `PROJECT_HEADINGS`, with its docstring updated; the section renderer; the `issue_notes` keyword -- the section's contract
-- [ ] `pm_ai/app/pipelines.py` -- for a project scope only, read `8t`'s record through `StoragePort.project_work` on the worker, outside the bounded step, with a failed read turned into a stated value; pass it in -- no GitLab call, no personal read
-- [ ] `tests/core/` -- one test per matrix row; a table of the finder's matches and non-matches; the parameter-list and heading tests updated; the mypy fixture -- the matrix is the contract
-- [ ] `tests/slice/test_dashboard_slice.py` -- end to end: a written `8t` record and commit lines produce the section; the personal page is unchanged; reading `8t`'s record for the personal or people scope raises; no request reaches the GitLab transport during a render -- what the renderer cannot see
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/23d-project-render-scope-wall.md` -- a dated Change Log line naming `:22` as amended -- the amendment is on record
+- [x] `pm_ai/core/team_activity.py` -- new and pure: the bare-reference finder; the grouping of record and commit entries into members and marked issues; the placed-issues function `placed_issue_numbers`; the `IssueNotes` slot type and its empty default -- testable without Markdown
+- [x] `pm_ai/core/rendering.py` -- `TEAM_ACTIVITY` third in `PROJECT_HEADINGS`, with its docstring updated; the section renderer; the `issue_notes` keyword -- the section's contract
+- [x] `pm_ai/app/pipelines.py` -- for a project scope only, read `8t`'s record through `StoragePort.project_work` on the worker, outside the bounded step, with a failed read turned into a stated value; pass it in -- no GitLab call, no personal read
+- [x] `tests/core/` -- one test per matrix row; a table of the finder's matches and non-matches; the parameter-list and heading tests updated; the mypy fixture -- the matrix is the contract
+- [x] `tests/slice/test_dashboard_slice.py` -- end to end: a written `8t` record and commit lines produce the section; the personal page is unchanged; reading `8t`'s record for the personal or people scope raises; no request reaches the GitLab transport during a render -- what the renderer cannot see
+- [x] `_bmad-output/specs/spec-pm-ai/stories/23d-project-render-scope-wall.md` -- a dated Change Log line naming `:22` as amended -- the amendment is on record
 
 **Acceptance Criteria:**
 - Given a project with an `8t` record and commit lines, when the 07:00 render runs, then:
@@ -228,6 +229,19 @@ Re-verified against `5f4f43e` on 2026-10-18 (first verified against `a1182f8` on
 - **2026-10-16, spine gate:** frozen block edited (recorded here), one sentence: the GitLab record is keyed by scope and connector instance, one GitLab instance per project scope (AD-3, AD-10); nothing this slice reads changes.
 - **2026-10-16, spine gate:** frozen block edited (recorded here): members' handles are `gitlab:<host>:<numeric user id>` (Andrei 2026-10-16, AD-34); nothing this slice shows changes.
 - **2026-10-18, Code Map re-verified against `5f4f43e` after 8t, 23f and 23h merged.** Moved anchors corrected (`FETCH_BUDGET`, the commit payload, the rendering and pipeline functions, the project-rendering tests). Added: `pm_ai/domain/work.py` with the fields this slice reads; the reader's anchors in the port and storage service, noting it refuses no scope; `_item_key` and `_instant` in `pm_ai/connectors/gitlab/work.py`; `23f`'s `HARVESTED_MARKER`, `_posted_at` and `fold_breaks`. `8t` marked built. Frozen block unchanged; three differences from what `8t` built are open for Andrei: the reader does not refuse a personal or `people` scope, although the matrix row "Personal scope" and the slice task expect it to raise; a merge request's `updated_at` is never absent or unparseable once stored, so the footnote's unusable-time count can only come from `merged_at` or a time after the render; a member's handle, display name and state can each be absent.
+- **2026-10-18, spec checkpoint approved; reader decision (Andrei, 2026-10-18):** the reader refuses. `8t`'s `StoragePort.project_work(scope)` (`pm_ai/ports/__init__.py`, `pm_ai/storage/service.py` `project_work`) is changed inside this slice to raise for a personal or `people` scope; the frozen matrix row "Personal scope … raises" stays as written, and `8t`'s spec gains a dated Change Log line. The two smaller gaps above are handled as routine and stated in the pull request: the unusable-time footnote count comes from `merged_at`, or an `updated_at` or `merged_at` more than five minutes after the render; a member's absent handle, display name or state takes a stated default for the sort order and the "not active" rule. Slice `4w` edits `pm_ai/storage/service.py` in parallel, so this slice's edit there stays inside `project_work`.
+
+- **2026-10-18, built and reviewed.** Built as specified, with these choices stated in the pull request:
+  - `render_project_dashboard` gains `work` beside `issue_notes`, since the record needs a way in; it defaults to no record.
+  - Core keeps its own copy of the GitLab client's `FETCH_BUDGET`, and a test fails if the two differ.
+  - A merge-request time up to five minutes after the render is shown as the render's time. A later time, a merged merge request with no `merged_at`, or a time without a timezone counts as unusable in the footnote.
+  - Defaults for absent fields: an absent state counts as active; an absent display name sorts as empty and is shown as `@username`, then the handle, then "an unnamed person"; a person with no handle is never marked as not a project member; nobody is marked as a former member until the member list has been read completely once.
+  - A bot assignee does not count as an assignee.
+  - Rows in `issue_notes` are list-item text without the leading `- `.
+  - The two event-log time helpers moved from `rendering.py` to `event_log.py`. The ingested-time helper gained a guard for times outside UTC's range.
+  - `project_work` refuses a non-project scope with `ValueError`. The pipeline lets that refusal through and turns an unreadable store or a malformed row into a stated value.
+
+  Review: three layers. Twelve findings were patched (among them the five-minute clamp, times without a timezone, unread merge-request links kept out of the unlinked count, the unlinked line without a record, full stops, and eight missing tests). Rejected: the per-member "N more open issues" line (required by the frozen caps), `7e` rows placed verbatim (frozen), both sections unread hiding older rows (the frozen rule), de-duplicating commits by id, grapheme-safe cutting, and making `work` required. Nothing needs Andrei's decision.
 
 ## Design Notes
 
@@ -246,3 +260,52 @@ Re-verified against `5f4f43e` on 2026-10-18 (first verified against `a1182f8` on
 - `uv run pytest -q` -- expected: all pass; skip count unchanged from the baseline
 - `uv run mypy` -- expected: no errors, including the project-render fixture
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**The section's model**
+
+- Entry point: groups the record and commit lines into members, marks and counts.
+  [`team_activity.py:453`](../../../../pm_ai/core/team_activity.py#L453)
+
+- Bare references: ASCII digits, no leading zero, nothing qualifying before the `#`.
+  [`team_activity.py:136`](../../../../pm_ai/core/team_activity.py#L136)
+
+- Merge-request marks: the earlier window, the five-minute clamp, unusable times.
+  [`team_activity.py:638`](../../../../pm_ai/core/team_activity.py#L638)
+
+- What `7e` uses to count the issues it could not place.
+  [`team_activity.py:671`](../../../../pm_ai/core/team_activity.py#L671)
+
+**Rendering**
+
+- Team Activity third in the project headings.
+  [`rendering.py:238`](../../../../pm_ai/core/rendering.py#L238)
+
+- The section: unread and stale statements, the list, the unlinked line, the footnotes.
+  [`rendering.py:1123`](../../../../pm_ai/core/rendering.py#L1123)
+
+- Member and Unassigned lists, with the caps and the slot rows.
+  [`rendering.py:1268`](../../../../pm_ai/core/rendering.py#L1268)
+
+- The unlinked-work line, which names no author.
+  [`rendering.py:1363`](../../../../pm_ai/core/rendering.py#L1363)
+
+**Reading the record**
+
+- Project scope only; a failed read becomes a stated value.
+  [`pipelines.py:1777`](../../../../pm_ai/app/pipelines.py#L1777)
+
+- The reader refuses a personal or `people` scope (Andrei, 2026-10-18).
+  [`service.py:3900`](../../../../pm_ai/storage/service.py#L3900)
+
+- The time helpers both sections share, now guarded against an overflow.
+  [`event_log.py:195`](../../../../pm_ai/core/event_log.py#L195)
+
+**Tests**
+
+- One test per matrix row, and the finder's table.
+  [`test_team_activity.py:274`](../../../../tests/core/test_team_activity.py#L274)
+
+- End to end: no GitLab request, the project scope only, the personal page unchanged.
+  [`test_dashboard_slice.py:1898`](../../../../tests/slice/test_dashboard_slice.py#L1898)

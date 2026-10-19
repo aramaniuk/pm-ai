@@ -122,6 +122,7 @@ Re-verified against `ba0b747` on 2026-10-17.
 - **2026-10-17, Code Map re-verified against `ba0b747`:** moved anchors corrected (`HANDED_CALLS`, `_builtin_instance`, `_SCHEMA`, `HarvestResult` and its outcome rule); the enrolment-check anchors in `dispatch.py` and `connector_enrolment.py` and the 0600 note on `operational.db` added.
 
 - **2026-10-18, frozen block amended by Andrei's decision on the build review:** a GitLab harvest that reads the work is always `HARVESTED`, never `EMPTY`, because each complete section records its last-complete-read instant every run (needed by `23g`). The "Nothing changed" row now says item rows are not written but the section instants are. Counting a change only when an item or member row differs was rejected: the connector would need storage's answer before reporting, for a label nothing reads.
+- **2026-10-18, reader amended by `23g` (Andrei's decision of 2026-10-18):** `StoragePort.project_work(scope)` now refuses a personal or `people` scope, as its writer `record_project_work` already did; the change is made inside slice `23g`, whose matrix row "Personal scope … raises" expects it. Nothing it returns for a project scope changes.
 
 ## Design Notes
 

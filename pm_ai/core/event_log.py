@@ -21,14 +21,15 @@ sees.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 
 from pm_ai.core import ledger
-from pm_ai.domain.event_entries import EventEntry
+from pm_ai.domain.event_entries import IMPLAUSIBLE, OCCURRED_AT_FLAG, EventEntry
 from pm_ai.domain.identity import DataScope
 from pm_ai.ports import StoragePort
 
-__all__ = ["EventLog", "LogRead"]
+__all__ = ["EventLog", "LogRead", "Unplaceable", "ingested_at", "posted_at"]
 
 
 class LogRead(tuple[EventEntry, ...]):
@@ -167,3 +168,82 @@ def _within(entry: EventEntry, since: datetime | None, until: datetime | None) -
     if until is not None and at > until:
         return False
     return True
+
+
+# ── The two instants a dashboard reads off a line ────────────────────────────
+# Moved here from `rendering` (story `23g`), because two sections now read
+# them: Proactive Enablement and Team Activity. `ingested_at` gained one guard
+# (an instant with no UTC equivalent is unreadable, not a crash); `posted_at`
+# is unchanged.
+
+
+class Unplaceable(Enum):
+    """Why an entry got no instant — two facts a section states separately."""
+
+    ABSENT = "absent"
+    """No `ingested_at` field at all: an entry written before story `2e`."""
+
+    UNREADABLE = "unreadable"
+    """A field that is there and yields no instant — malformed, or naive.
+
+    Naive belongs here rather than being converted: there is no zone to assume,
+    and assuming one is the silent wrong answer. It is a value that could not be
+    read *as an instant*, which is precisely what the sentence says.
+    """
+
+
+def ingested_at(entry: EventEntry) -> datetime | Unplaceable:
+    """The write clock a window is measured on, or why there is none.
+
+    An aware value at any offset is a real instant and is converted to UTC —
+    `2026-09-09T10:30:00+02:00` is 08:30Z and belongs in a window that holds
+    08:30Z. Refusing it dropped a placeable signal and then printed a reason
+    that was not the one computed. Only `now` and the meeting starts are held to
+    UTC-on-arrival: those come from this codebase's own callers, while this
+    field is read back off a ledger line.
+    """
+    raw = dict(entry.fields).get("ingested_at")
+    if raw is None:
+        return Unplaceable.ABSENT
+    try:
+        at = datetime.fromisoformat(raw)
+    except ValueError:
+        return Unplaceable.UNREADABLE
+    if at.tzinfo is None or at.utcoffset() is None:
+        return Unplaceable.UNREADABLE
+    try:
+        return at.astimezone(timezone.utc)
+    except OverflowError:
+        # `0001-01-01T00:00+05:00` has no UTC instant: unplaceable, not a crash
+        # (guarded since `23g`, which reads every commit line through here).
+        return Unplaceable.UNREADABLE
+
+
+def posted_at(entry: EventEntry, *, now: datetime) -> datetime | None:
+    """The provider's posted time, when a line may be labelled with it (`23f`).
+
+    `None` — so the line takes its harvest time, marked — when `occurred_at` is
+    absent or `unknown`, unreadable, without a timezone, outside the range a
+    UTC instant can hold, flagged implausible
+    when it was stored (AD-35), or later than this render's instant: a posted
+    time in the future cannot be right yet.
+    """
+    fields = dict(entry.fields)
+    if fields.get(OCCURRED_AT_FLAG) == IMPLAUSIBLE:
+        return None
+    raw = fields.get("occurred_at")
+    if raw is None:
+        return None
+    try:
+        at = datetime.fromisoformat(raw)
+    except ValueError:
+        # `unknown` lands here too: it is not an instant.
+        return None
+    if at.tzinfo is None or at.utcoffset() is None:
+        return None
+    try:
+        at = at.astimezone(timezone.utc)
+    except OverflowError:
+        # `0001-01-01T00:00+05:00` has no UTC instant: unusable, not a crash.
+        return None
+    return None if at > now else at
