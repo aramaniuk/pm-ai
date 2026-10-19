@@ -498,7 +498,10 @@ def test_no_table_must_be_updated_when_a_class_is_added():
     # later reaches it as "not local" and is refused by name, so nothing here
     # must be updated when one is added; the table that names every member is
     # `7c`'s router, and its arrival is when this set is asked again.
+    # Story 7b: the summary pipeline declares its call's class (`extraction`)
+    # at the call site, as AD-15 asks — one member named, no table of them.
     assert referring == {
+        Path("pm_ai/app/pipelines.py"),
         Path("pm_ai/domain/task_classes.py"),
         Path("pm_ai/models/local/ollama.py"),
         Path("pm_ai/ports/__init__.py"),

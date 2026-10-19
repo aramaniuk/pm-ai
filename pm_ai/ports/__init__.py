@@ -1061,6 +1061,8 @@ class ModelPort(Protocol):
     chokepoint makes the honest call easy and the omission loud; it does not
     make the dishonest one impossible. Closing it would take a distinct type for
     internal prose, which is a different design from the one approved here.
+    Story `7b`'s summary prompts are constants (`pm_ai.core.meeting_summary`),
+    and a test holds every call's instructions to them.
 
     **The second bound was this signature's, and story `7a` narrowed it.**
     Until then `complete` returned `-> str`, which could not feed the

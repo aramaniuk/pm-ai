@@ -364,9 +364,17 @@ class EventEntry:
             check_skill_name(next(value for key, value in self.fields if key == SKILL_FIELD))
 
 
-def render_value(value: str, *, where: str) -> str:
-    """Bare when it can be, quoted when it must be, never able to forge a record."""
-    if any(ch in value for ch in _NEEDS_QUOTING):
+def render_value(value: str, *, where: str, quote_marks: bool = False) -> str:
+    """Bare when it can be, quoted when it must be, never able to forge a record.
+
+    `quote_marks` (story 7b, the meeting record's `## Summary` region) quotes a
+    value beginning `#` or `-` too, so none can read as a heading or a list
+    item. Off by default: a ledger line's bytes are pinned (AD-27), and
+    `p.channel=#payments` stays as it was written.
+    """
+    if any(ch in value for ch in _NEEDS_QUOTING) or (
+        quote_marks and value.startswith(("#", "-"))
+    ):
         escaped = "".join(ESCAPES.get(ch, ch) for ch in value)
         return f'"{escaped}"'
     return value

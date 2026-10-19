@@ -57,10 +57,12 @@ caller. What the exception does *not* relax is
 from __future__ import annotations
 
 import functools
+import shlex
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -68,7 +70,9 @@ from pm_ai.app.daemon import serve as serve_daemon
 from pm_ai.app.prompts import DAEMON_LOG_NAME, DAEMON_LOGGER
 from pm_ai.app.pipelines import (
     CONNECTOR_CHECK_BOUND_SECONDS,
+    SUMMARY_MAX_AGE,
     TRANSCRIPT_DROP_BOUND_SECONDS,
+    TRANSCRIPT_SUMMARIZE_BOUND_SECONDS,
     calendar_instances,
     dashboard_bound,
     drop_transcript,
@@ -103,6 +107,7 @@ from pm_ai.core.goal_register import GOALS_SCOPE, parse_goals
 from pm_ai.domain.health import GRAPH_SYSTEM, EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry, parse_registry
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.meeting_summaries import SummaryState, SummaryStateKind
 from pm_ai.domain.model_calls import LOCAL_MODEL_PROBE, LocalModelPresence
 from pm_ai.domain.scope_model import APPLICATION_DIRNAME, ScopeResolutionError
 from pm_ai.connectors.probe import probe_credential
@@ -141,9 +146,11 @@ from pm_ai.storage.service import (
     diagnostic_log_files,
     is_collection_member,
     render_records_at,
+    summary_records_at,
 )
 from pm_ai.surfaces.cli.dispatch import (
     EXIT_REFUSAL,
+    summarize_refusal,
     EXIT_UNEXPECTED,
     Answered,
     dispatch,
@@ -151,7 +158,12 @@ from pm_ai.surfaces.cli.dispatch import (
 )
 from pm_ai.surfaces.cli import repl
 from pm_ai.surfaces.cli.completion import Completion, Readers
-from pm_ai.surfaces.cli.loopback import LoopbackClient
+from pm_ai.surfaces.cli.loopback import (
+    Acknowledged,
+    Answer,
+    LoopbackClient,
+    WaitAbandoned,
+)
 from pm_ai.surfaces.cli.logs import DaemonLog
 from pm_ai.surfaces.api.app import REQUEST_LOGGER
 
@@ -207,6 +219,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         parsed = parse(arguments)
         if isinstance(parsed, Answered):
             return parsed.deliver()
+        if parsed.via_daemon:
+            # Story 7b: `transcript summarize` is only ever run by the daemon.
+            # Its line goes to `/v1/prompt` and its job is followed here;
+            # nothing is composed and no model is reached in this process.
+            return _through_the_daemon(arguments, parsed.options)
         if parsed.reads_daemon_log:
             # Story 4w: `pm-ai logs` reads the daemon's log by its paths alone,
             # before the keychain adapter is built or anything is composed, so
@@ -358,6 +375,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_UNEXPECTED
 
 
+def _through_the_daemon(arguments: Sequence[str], options: Mapping[str, str]) -> int:
+    """Send a daemon-only command's line to the running daemon and show its result (7b).
+
+    Refused before anything is sent for what the command refuses by name
+    (`--by claude`); with no daemon answering, refused naming `pm-ai daemon
+    run`. An acknowledged job is followed until its result arrives.
+    """
+    refused = summarize_refusal(options)
+    if refused is not None:
+        print(f"pm-ai: {refused}", file=sys.stderr)
+        return EXIT_REFUSAL
+    client = _loopback()
+    try:
+        outcome = client.send(shlex.join(arguments))
+    except WaitAbandoned as abandoned:
+        said = (
+            "stopped waiting for the daemon; it finishes the command on its own."
+            if abandoned.sent
+            else "interrupted before the line reached the daemon, so it was not sent."
+        )
+        print(f"\npm-ai: {said}", file=sys.stderr)
+        return EXIT_REFUSAL
+    if isinstance(outcome, Answer):
+        sys.stdout.write(outcome.output)
+        return outcome.code
+    if not isinstance(outcome, Acknowledged):
+        print(f"pm-ai: {outcome.sentence}", file=sys.stderr)
+        return EXIT_REFUSAL
+    print(
+        f"{outcome.job_id}: acknowledged; the daemon runs it, and its result is "
+        f"shown here once it is ready.",
+        flush=True,
+    )
+    try:
+        followed = client.follow(outcome.job_id)
+    except KeyboardInterrupt:
+        print(
+            f"\npm-ai: stopped waiting for {outcome.job_id}; the daemon finishes it on its own.",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSAL
+    if isinstance(followed, Answer):
+        sys.stdout.write(followed.output)
+        return followed.code
+    print(f"pm-ai: {followed.sentence}", file=sys.stderr)
+    return EXIT_REFUSAL
+
+
 def _at_a_terminal() -> bool:
     """Standard input and standard output are both a terminal.
 
@@ -478,6 +543,8 @@ DAEMON_BOUNDS: Mapping[tuple[str, ...], Callable[[Daemon], float]] = {
     ("dashboard",): lambda daemon: dashboard_bound(len(calendar_instances(daemon))),
     ("connector", "check"): lambda daemon: CONNECTOR_CHECK_BOUND_SECONDS,
     ("transcript", "drop"): lambda daemon: TRANSCRIPT_DROP_BOUND_SECONDS,
+    # Story 7b: the call and its one retry, each under the model's deadline.
+    ("transcript", "summarize"): lambda daemon: TRANSCRIPT_SUMMARIZE_BOUND_SECONDS,
     ("project", "add"): lambda daemon: ONBOARD_BOUND_SECONDS,
     ("doctor",): lambda daemon: DOCTOR_BOUND_SECONDS,
     ("config", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
@@ -1340,6 +1407,11 @@ def _diagnose(
     # `7a`: whether the named local model is pulled and runs here — the
     # adapter's own bounded presence check, reached through wiring.
     probes = (*probes, _local_model_probe(composed))
+    # `7b`: under the local model line, the meetings whose summary is waiting,
+    # failed or timing out — no silent backlog.
+    summaries = _summaries_probe(composed)
+    if summaries is not None:
+        probes = (*probes, summaries)
     if composed.failure is None or composed.failure.name in {p.name for p in probes}:
         return Report(probes)
     return Report((*probes, composed.failure))
@@ -1452,6 +1524,84 @@ def _local_model_probe(composed: _Composition) -> Probe:
             "Fix config.toml (its own line above says how), then run `pm-ai doctor` again.",
         )
     return local_model_check(name).probe
+
+
+SUMMARIES_PROBE = "meeting summaries"
+"""The probe naming the meetings whose summary is waiting, failed or timing out (7b)."""
+
+_NAMED_AT_MOST = 5
+"""How many meetings one part of the summaries line names before counting the rest."""
+
+
+def _summaries_probe(composed: _Composition) -> Probe | None:
+    """The meetings waiting for a summary, failed, and timing out, read-only (story 7b).
+
+    Read straight from the operational store, with or without a composed
+    daemon, so the terminal's `doctor` and the daemon's say the same. Absent
+    when there are no summary rows at all. `OK` while nothing failed — waiting
+    is not a failure: no local model, a harvest not yet run, or a call to try
+    again — and `WARNING` naming each failed meeting and its reason otherwise.
+    """
+    daemon = composed.daemon
+    try:
+        paths = daemon.storage.paths if daemon is not None else ScopePaths.production()
+        rows = summary_records_at(Path(paths.resolve(APPLICATION, OPERATIONAL_DB)))
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        return Probe(
+            SUMMARIES_PROBE,
+            Health.WARNING,
+            f"the operational store could not be asked which meeting summaries are "
+            f"waiting or failed: {type(unreadable).__name__}.",
+        )
+    now = daemon.clock() if daemon is not None else datetime.now(timezone.utc)
+    oldest = now - SUMMARY_MAX_AGE
+    waiting_rows = [
+        (row, ingested) for row, ingested in rows if row.state is SummaryStateKind.WAITING
+    ]
+    # A waiting row a harvest will not offer — its meeting past the age limit,
+    # or its transcript not ingested — is named as such, never as waiting.
+    unoffered = [
+        row for row, ingested in waiting_rows if not ingested or row.meeting_start < oldest
+    ]
+    offerable = [
+        row for row, ingested in waiting_rows if ingested and row.meeting_start >= oldest
+    ]
+    waiting = [row for row in offerable if not row.timing_out]
+    timing_out = [row for row in offerable if row.timing_out]
+    failed = [row for row, _ in rows if row.state is SummaryStateKind.FAILED]
+
+    def named(group: Sequence[SummaryState], *, why: bool = False) -> str:
+        shown = [
+            f"meeting {row.meeting_id} in {row.scope}" + (f" ({row.reason})" if why else "")
+            for row in group[:_NAMED_AT_MOST]
+        ]
+        more = len(group) - len(shown)
+        return "; ".join(shown) + (f"; and {more} more" if more > 0 else "")
+
+    if not (waiting or timing_out or failed or unoffered):
+        return None
+    parts = []
+    if waiting:
+        parts.append(f"{len(waiting)} waiting for the local model: {named(waiting)}")
+    if timing_out:
+        parts.append(f"{len(timing_out)} timing out, offered again: {named(timing_out, why=True)}")
+    if unoffered:
+        parts.append(
+            f"{len(unoffered)} not offered — older than {SUMMARY_MAX_AGE.days} days, or "
+            f"the transcript not ingested: {named(unoffered)}"
+        )
+    if failed:
+        parts.append(f"{len(failed)} failed: {named(failed, why=True)}")
+    detail = ". ".join(parts) + "."
+    if failed:
+        return Probe(
+            SUMMARIES_PROBE,
+            Health.WARNING,
+            detail,
+            "a failed summary is not offered again automatically; `pm-ai transcript "
+            "summarize --scope <scope> --meeting <id>` asks for it again.",
+        )
+    return Probe(SUMMARIES_PROBE, Health.OK, detail)
 
 
 INGESTION_PROBE = "transcript ingestion"

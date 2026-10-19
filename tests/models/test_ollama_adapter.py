@@ -451,6 +451,13 @@ def test_the_window_holds_a_whole_meeting_and_the_cap_fits_beside_it():
     assert 8619 + NUM_PREDICT < NUM_CTX
 
 
+def test_the_output_cap_is_7b_s_and_the_real_length_recording_still_fits():
+    """`7b` raised the cap to 4,096; the 8,619-token recording plus the cap fits the window."""
+    assert NUM_PREDICT == 4096
+    assert 8619 + NUM_PREDICT <= NUM_CTX
+    assert NUM_CTX - NUM_PREDICT == 12288
+
+
 # ── Output cap reached ───────────────────────────────────────────────────────
 
 

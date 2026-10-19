@@ -109,7 +109,8 @@ from pm_ai.app.prompts import (
     RequestPath,
 )
 from pm_ai.app.ticks import HarvestTimers, RenderTimers
-from pm_ai.app.wiring import Daemon
+from pm_ai.app.pipelines import SummaryJobs
+from pm_ai.app.wiring import Daemon, handed_daemon
 from pm_ai.domain.api_token import TOKEN_BYTES, ApiTokenRefused
 from pm_ai.domain.health import Report
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -593,6 +594,8 @@ def _serve_locked(
         diagnose=lambda: diagnose(itself()),
         bounds=bounds,
     )
+    # `7b`: the daemon's summary jobs, on its pools.
+    daemon.summaries = summary_jobs(requests, model_pool)
     try:
         pool.start()
         model_pool.start()
@@ -703,6 +706,26 @@ def _serve_locked(
     first = server_holder[0].first_stop if server_holder else None
     stop_line.append(stop_words(first, marked=drained.marked, unmarked=drained.unmarked))
     return 0
+
+
+def summary_jobs(requests: RequestPath, model_pool: ModelPool) -> SummaryJobs:
+    """The daemon's summary jobs, their stages on its pools (story 7b, AD-19).
+
+    Preparation on the I/O pool, the call on the model pool, what follows a
+    call handed back to the I/O pool — no I/O worker waits on the model pool.
+    Each automatic job reads the daemon afresh (`requests.fresh`) and hands
+    its writes to the writer thread as claimed steps; after the model pool's
+    shutdown has begun no answer is handed on.
+    """
+    writer = requests.writer
+    return SummaryJobs(
+        io=requests.pool.submit,
+        model=model_pool.submit,
+        daemon_for=lambda: handed_daemon(
+            requests.fresh(), hand=lambda work, label: writer.call(work, label=label)
+        ),
+        model_stopping=lambda: model_pool.stopping,
+    )
 
 
 class _Drained:

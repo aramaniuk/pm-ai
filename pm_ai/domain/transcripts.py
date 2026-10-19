@@ -46,6 +46,14 @@ class NothingSaid(ValueError):
     """
 
 
+class CaptureMissing(LookupError):
+    """A meeting's transcript is not on disk to read whole (story 7b).
+
+    No capture at all, or a stored part's capture gone — purged at 30 days
+    (NFR-09) or removed by hand. The message names the meeting and the part.
+    """
+
+
 class CaptureNotIngested(RuntimeError):
     """A dropped transcript was stored and its ingestion then failed (story 11c).
 

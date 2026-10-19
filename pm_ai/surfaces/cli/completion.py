@@ -34,6 +34,7 @@ from pm_ai.surfaces.cli.dispatch import (
     GOAL_OPTIONS,
     MEETING_ARGUMENT,
     SCOPE_ARGUMENT,
+    SUMMARY_MAKERS,
     SUPPORTED_SYSTEMS,
     TABLE,
     Command,
@@ -93,6 +94,7 @@ DOMAINS = "domains"
 HORIZONS = "horizons"
 GOAL_IDS = "goal ids"
 LOG_LEVEL_NAMES = "log levels"
+SUMMARY_MAKER_NAMES = "summary makers"
 PATHS = "paths"
 
 _BY_NAME: Mapping[str, str] = {
@@ -112,6 +114,8 @@ _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("goal", "update"), "id"): GOAL_IDS,
     (("goal", "delete"), "id"): GOAL_IDS,
     (("logs",), "level"): LOG_LEVEL_NAMES,
+    # Story 7b: who makes a summary — `local` today, `claude` refused until 7c.
+    (("transcript", "summarize"), "by"): SUMMARY_MAKER_NAMES,
 }
 """Names whose value depends on the command declaring them."""
 
@@ -446,6 +450,8 @@ class Completion:
             return self._goals.get()
         if source == LOG_LEVEL_NAMES:
             return LOG_LEVELS
+        if source == SUMMARY_MAKER_NAMES:
+            return SUMMARY_MAKERS
         if source == PATHS:
             return _paths(partial)
         return ()

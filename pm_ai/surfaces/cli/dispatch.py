@@ -88,6 +88,7 @@ from pm_ai.core.transcripts import (
     drop_utterances,
 )
 from pm_ai.domain.meetings import AmbiguousMeeting
+from pm_ai.domain.meeting_summaries import FRONTIER_SUMMARY_REFUSED, SummaryRefused
 from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
 from pm_ai.domain.transcripts import (
     CaptureNotIngested,
@@ -160,6 +161,9 @@ __all__ = [
     "DROP_ANSWERS",
     "DROP_FORMATS",
     "DROP_WORDS",
+    "SUMMARIZE_WORDS",
+    "SUMMARY_MAKERS",
+    "summarize_refusal",
     "Context",
     "FirstRun",
     "GoalBook",
@@ -941,6 +945,13 @@ class Context:
     daemon, and the command refuses through `require_daemon()` first.
     """
 
+    transcript_summarize: TranscriptSummarize | None = None
+    """`pm-ai transcript summarize`'s request (story 7b), bound only in the daemon.
+
+    `None` everywhere else: a terminal sends the line to the daemon instead,
+    and a process with no daemon to send it to refuses naming `pm-ai daemon run`.
+    """
+
     serve: Callable[[], int] | None = None
     """Runs the daemon in the foreground until it is stopped (story 4e).
 
@@ -1129,6 +1140,14 @@ class Command:
     no default would be honest. Missing one is a usage error (`2`), and the
     usage line spells it without brackets. Enforced for a leaf and for a
     command without leaves alike (`_missing`).
+    """
+
+    via_daemon: bool = False
+    """`True` for a command only the daemon runs, from a terminal too (story 7b).
+
+    `transcript summarize`: typed in a terminal, its line is sent to the
+    daemon's `/v1/prompt` and its job followed; it never runs in the CLI's own
+    process (AD-21).
     """
 
     target: Callable[[Mapping[str, str]], DataScope] | None = None
@@ -3887,6 +3906,103 @@ project it did not load is not built at all. The CLI cannot see which projects
 a running daemon loaded, so the clause is said whenever the row names one.
 """
 
+# ── `pm-ai transcript summarize` (story 7b) ──────────────────────────────────
+
+BY_OPTION = "by"
+"""`transcript summarize`'s `--by local|claude`: who makes the summary."""
+
+SUMMARY_MAKERS = ("local", "claude")
+"""What `--by` takes. `local` is the default; `claude` is story 7c's."""
+
+SUMMARIZE_WORDS = ("transcript", "summarize")
+
+def summarize_refusal(options: Mapping[str, str]) -> str | None:
+    """Why `transcript summarize` is refused before anything is sent, or `None`.
+
+    Asked at a terminal before the line goes to the daemon, and by the daemon
+    again: `--by claude` is refused by name until 7c.
+    """
+    if options.get(BY_OPTION, SUMMARY_MAKERS[0]) == "claude":
+        return FRONTIER_SUMMARY_REFUSED
+    return None
+
+
+def _summarize_target(options: Mapping[str, str]) -> DataScope:
+    """`--scope`'s scope, required; `_Misread` when absent or naming none."""
+    requested = options.get(SCOPE_ARGUMENT)
+    scope = None if requested is None else _scope(requested)
+    if scope is None:
+        raise _Misread(
+            f"`transcript summarize` needs `--{SCOPE_ARGUMENT} personal` or "
+            f"`--{SCOPE_ARGUMENT} project:<id>` naming the meeting's scope"
+            + ("" if requested is None else f"; `{requested}` is not a scope")
+            + "."
+        )
+    by = options.get(BY_OPTION)
+    if by is not None and by not in SUMMARY_MAKERS:
+        raise _Misread(
+            f"`--{BY_OPTION}` takes {' or '.join(SUMMARY_MAKERS)}; `{by}` is neither."
+        )
+    return scope
+
+
+class SummaryRequestedOutcome(Protocol):
+    """What a summary request said — `pm_ai.app.pipelines.SummaryRequested`, by shape."""
+
+    @property
+    def line(self) -> str: ...
+
+
+class TranscriptSummarize(Protocol):
+    """`pm-ai transcript summarize`'s request, bound to the daemon's job (story 7b).
+
+    `pm_ai.app.pipelines.request_summary` is the real one, and only the daemon
+    binds it: typed at a terminal, the line is sent to the daemon instead.
+    """
+
+    def __call__(self, *, scope: DataScope, meeting_id: str, by: str) -> SummaryRequestedOutcome: ...
+
+
+def _transcript_summarize(context: Context) -> int:
+    """`pm-ai transcript summarize --scope <scope> --meeting <id> [--by local|claude]` (7b).
+
+    Only the daemon summarises. In the daemon this asks for the summary and
+    the job's result follows when the model has answered; anywhere else no
+    pipeline is bound and the command is refused, naming `pm-ai daemon run`.
+    """
+    scope = context.target
+    if scope is None:
+        raise RuntimeError(
+            "no target scope reached `transcript summarize`. That is a wiring fault in pm-ai."
+        )
+    refused = summarize_refusal(context.options)
+    if refused is not None:
+        raise Refusal(refused)
+    if scope.kind not in _DROPPABLE_KINDS:
+        raise Refusal(
+            f"a meeting in {scope} cannot be summarised here: summaries are made "
+            f"for meetings in `personal` or `project:<id>`. Nothing was sent."
+        )
+    summarize = context.transcript_summarize
+    if summarize is None:
+        raise Refusal(
+            "only the daemon summarises a transcript, and no daemon took this "
+            "line; start one with `pm-ai daemon run` and ask again. Nothing was "
+            "sent."
+        )
+    try:
+        requested = summarize(
+            scope=scope,
+            meeting_id=context.options[MEETING_ARGUMENT],
+            by=context.options.get(BY_OPTION, SUMMARY_MAKERS[0]),
+        )
+    except (SummaryRefused, MeetingNotFound, MalformedMeeting, ArtifactBusy) as refusal:
+        message = refusal.args[0] if isinstance(refusal, KeyError) and refusal.args else refusal
+        raise Refusal(str(message)) from refusal
+    _echo(requested.line)
+    return EXIT_OK
+
+
 TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
     {
         ("goal", "set"),
@@ -4044,6 +4160,17 @@ TABLE: Mapping[str, Command] = {
                 requires=(SCOPE_ARGUMENT,),
                 target=_drop_target,
             ),
+            # `7b`: a meeting's summary, decisions and action items, made by the
+            # local model in the daemon.
+            "summarize": Command(
+                "ask the daemon's local model for a meeting's summary, decisions "
+                "and action items; the daemon must be running",
+                _transcript_summarize,
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, BY_OPTION),
+                requires=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
+                target=_summarize_target,
+                via_daemon=True,
+            ),
         },
     ),
     "connector": Command(
@@ -4171,6 +4298,9 @@ class Parsed:
 
     reads_daemon_log: bool = False
     """`Command.reads_daemon_log`, carried so `logs` is answered before the keychain."""
+
+    via_daemon: bool = False
+    """`Command.via_daemon`, carried so a terminal sends the line to the daemon (7b)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -4327,6 +4457,7 @@ def _parsed(
         flags=flags,
         composes=command.composes,
         reads_daemon_log=command.reads_daemon_log,
+        via_daemon=command.via_daemon,
     )
 
 
@@ -4346,6 +4477,7 @@ def dispatch(
     goal_reader: GoalReader | None = None,
     daemon_log: DaemonLog | None = None,
     transcript_drop: TranscriptDrop | None = None,
+    transcript_summarize: TranscriptSummarize | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -4378,6 +4510,7 @@ def dispatch(
             goal_reader=goal_reader,
             daemon_log=daemon_log,
             transcript_drop=transcript_drop,
+            transcript_summarize=transcript_summarize,
             serve=serve,
             unavailable=unavailable,
             undecided=undecided,
@@ -4408,6 +4541,7 @@ def _dispatch(
     goal_reader: GoalReader | None,
     daemon_log: DaemonLog | None,
     transcript_drop: TranscriptDrop | None,
+    transcript_summarize: TranscriptSummarize | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
     undecided: str | None,
@@ -4433,6 +4567,7 @@ def _dispatch(
         goal_reader=goal_reader,
         daemon_log=daemon_log,
         transcript_drop=transcript_drop,
+        transcript_summarize=transcript_summarize,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,

@@ -30,12 +30,14 @@ import html
 import math
 import re
 import secrets
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePath
 
 from pm_ai.core.meeting_records import (
     MalformedMeeting,
+    capture_name,
     MeetingNotFound,
     MeetingRecord,
     MeetingRecords,
@@ -45,6 +47,9 @@ from pm_ai.domain.identity import Actor, DataScope
 from pm_ai.domain.meetings import AmbiguousMeeting, Meeting, tolerance_minutes
 from pm_ai.domain.transcripts import (
     CaptureFormat,
+    CaptureMissing,
+    PartState,
+    TranscriptPart,
     NothingSaid,
     Transcript,
     TranscriptSource,
@@ -73,6 +78,7 @@ __all__ = [
     "MIN_DROP_MINUTES",
     "is_webvtt",
     "last_cue_end_minutes",
+    "meeting_utterances",
     "mint_meeting_id",
     "read_transcript",
     "register_adapter",
@@ -541,6 +547,59 @@ def ingest(
         source=source,
         utterances=read_transcript(payload, name=name),
         part=part,
+    )
+
+
+# ── A whole meeting (story 7b) ───────────────────────────────────────────────
+
+
+def meeting_utterances(
+    meeting_id: str,
+    start: datetime,
+    *,
+    parts: Sequence[TranscriptPart],
+    captures: Mapping[str, str],
+) -> tuple[Utterance, ...]:
+    """One meeting's whole transcript, as one sequence of utterances.
+
+    `parts` are the meeting's `transcript_parts` rows and `captures` its
+    capture files' texts, by name; the reads are the caller's. In order:
+
+    - with stored parts, every stored part in part order, each read on its
+      own and appended (`33g` ingests each part alone and built no reader for
+      the whole meeting, so this is it);
+    - otherwise its Graph capture (`-graph.vtt`, captured before parts existed);
+    - otherwise its dropped capture (`-manual.vtt`, then `-manual.txt`), read
+      as `transcript drop` read it.
+
+    `CaptureMissing` when a stored part's capture is not among `captures`
+    (purged, or removed by hand) or when there is no capture at all.
+    """
+    stored = sorted(
+        (part for part in parts if part.state is PartState.STORED), key=lambda part: part.part
+    )
+    if stored:
+        utterances: list[Utterance] = []
+        for part in stored:
+            name = capture_name(meeting_id, start, CaptureFormat.GRAPH, part=part.part)
+            text = captures.get(name)
+            if text is None:
+                raise CaptureMissing(
+                    f"part {part.part} of meeting {meeting_id}'s transcript ({name}) is "
+                    f"not on disk: purged at 30 days, or removed by hand."
+                )
+            utterances.extend(read_transcript(text, name=name))
+        return tuple(utterances)
+    graph = capture_name(meeting_id, start, CaptureFormat.GRAPH)
+    if graph in captures:
+        return read_transcript(captures[graph], name=graph)
+    for form in (CaptureFormat.MANUAL_VTT, CaptureFormat.MANUAL_TXT):
+        name = capture_name(meeting_id, start, form)
+        if name in captures:
+            return drop_utterances(captures[name], name=name)
+    raise CaptureMissing(
+        f"meeting {meeting_id} has no transcript capture on disk: none was "
+        f"captured, or it was purged at 30 days."
     )
 
 

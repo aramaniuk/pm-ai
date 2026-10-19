@@ -1058,6 +1058,25 @@ def test_ad36_a_goal_reference_is_never_admissible_as_evidence():
     assert not verdict.admissible_as_evidence
 
 
+def test_ad36_a_decision_reference_is_never_admissible_as_evidence():
+    """Story 7b, AD-34: a decision is pm-ai's reading of a transcript.
+
+    `decision:<meeting id>_<digest>` is minted by pm-ai, so normalisation never
+    attributes one to an outside source and AD-36 never counts it.
+    """
+    normalize = mod("pm_ai.core.normalize")
+    events = mod("pm_ai.domain.events")
+
+    verdict = normalize.attribute(
+        _scopeless_event("decision:mtg_01HX_0123456789ab"),
+        frozenset(),
+        frozenset(),
+        own_handles=frozenset(),
+    )
+    assert verdict is events.Provenance.PM_AI
+    assert not verdict.admissible_as_evidence
+
+
 def test_ad36_a_meeting_reference_stays_external():
     """The fix must not swallow the case the original reasoning got right.
 
@@ -1084,7 +1103,7 @@ def test_ad34_every_scopeless_system_is_classified():
     """
     identity = mod("pm_ai.domain.identity")
     assert identity.PM_AI_MINTED <= identity.SCOPELESS_SYSTEMS
-    assert identity.SCOPELESS_SYSTEMS == frozenset({"meeting", "goal"}), (
+    assert identity.SCOPELESS_SYSTEMS == frozenset({"meeting", "goal", "decision"}), (
         "a scopeless system was added or removed; classify it in PM_AI_MINTED "
         "and extend the two attribution tests above before updating this literal."
     )
