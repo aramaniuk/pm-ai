@@ -2,7 +2,8 @@
 title: 'Every part of a meeting''s transcript is kept'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '5e466d6b8232169ee89069f82b270913de777fc1'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -84,18 +85,18 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/transcripts.py` -- `TranscriptCaptured` carries the new parts in time order; a stored-part value; the report names every part -- the outcome
-- [ ] `pm_ai/ports/__init__.py`, `graph_transcripts.py` (both adapters), `manual.py`, test fakes -- `acquire` takes the stored parts -- the port
-- [ ] `pm_ai/connectors/transcripts/graph_transcripts.py` -- the five decisions in order; only new transcripts downloaded -- the adapter
-- [ ] `pm_ai/core/meeting_records.py` -- `capture_name(..., part=1)`, part 1 unnumbered -- one naming rule
-- [ ] `pm_ai/storage/service.py` -- `transcript_parts` and `transcript_part_asks` in `_SCHEMA`; part writes and reads on the writer and the port; the attempt reset -- Tier 2
-- [ ] `pm_ai/app/wiring.py` -- the new writes in `HANDED_CALLS` with `_asks_none`; the capture stays `write_capture`
-- [ ] `pm_ai/core/transcript_acquisition.py` -- asked-again rule; pending repair; one claimed step per part; row rules -- the caller
-- [ ] `pm_ai/app/pipelines.py` -- per-part ingestion and proposal ids -- ingestion
-- [ ] `tests/connectors/test_graph_transcripts.py`, `tests/core/test_transcript_acquisition.py`, `tests/connectors/test_graph_transcripts_recorded.py`, `tests/slice/test_transcript_path.py` -- one test per matrix row; the two flipped tests
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md` -- dated Change Log line: `33e:28` (matching), `33e:29` ("One naming rule, owned here" — extended with part numbers), `33e:57` ("two fit one") amended by `33g`
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md` -- dated Change Log line: `11b:28` ("never ingested twice" — now per part) and the row at `11b:64` amended by `33g`
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- a part Graph lists only after a run past the window is not read; `11c`'s drop refuses a meeting with any capture, so the repair is to remove its captures by hand and drop the whole transcript again
+- [x] `pm_ai/domain/transcripts.py` -- `TranscriptCaptured` carries the new parts in time order; a stored-part value; the report names every part -- the outcome
+- [x] `pm_ai/ports/__init__.py`, `graph_transcripts.py` (both adapters), `manual.py`, test fakes -- `acquire` takes the stored parts -- the port
+- [x] `pm_ai/connectors/transcripts/graph_transcripts.py` -- the five decisions in order; only new transcripts downloaded -- the adapter
+- [x] `pm_ai/core/meeting_records.py` -- `capture_name(..., part=1)`, part 1 unnumbered -- one naming rule
+- [x] `pm_ai/storage/service.py` -- `transcript_parts` and `transcript_part_asks` in `_SCHEMA`; part writes and reads on the writer and the port; the attempt reset -- Tier 2
+- [x] `pm_ai/app/wiring.py` -- the new writes in `HANDED_CALLS` with `_asks_none`; the capture stays `write_capture`
+- [x] `pm_ai/core/transcript_acquisition.py` -- asked-again rule; pending repair; one claimed step per part; row rules -- the caller
+- [x] `pm_ai/app/pipelines.py` -- per-part ingestion and proposal ids -- ingestion
+- [x] `tests/connectors/test_graph_transcripts.py`, `tests/core/test_transcript_acquisition.py`, `tests/connectors/test_graph_transcripts_recorded.py`, `tests/slice/test_transcript_path.py` -- one test per matrix row; the two flipped tests
+- [x] `_bmad-output/specs/spec-pm-ai/stories/33e-graph-transcripts.md` -- dated Change Log line: `33e:28` (matching), `33e:29` ("One naming rule, owned here" — extended with part numbers), `33e:57` ("two fit one") amended by `33g`
+- [x] `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md` -- dated Change Log line: `11b:28` ("never ingested twice" — now per part) and the row at `11b:64` amended by `33g`
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- a part Graph lists only after a run past the window is not read; `11c`'s drop refuses a meeting with any capture, so the repair is to remove its captures by hand and drop the whole transcript again
 
 **Acceptance Criteria:**
 - Given the recorded listing and an occurrence on 2026-10-15 at 08:30 UTC for 30 minutes, when acquisition runs, then two captures land, each byte-identical to its download, with part rows 1 and 2 in creation order.
@@ -110,6 +111,7 @@ context:
 - **2026-10-16, review (consistency):** the per-part rationale corrected — `7b` keeps pattern extraction unchanged; per-part ingestion is kept for independence from extraction's determinism and to avoid re-ingesting earlier parts.
 - **2026-10-19:** Code Map re-verified against `3fa6783` after 23g, 33i, 4v and 4w merged. Moved: `domain/transcripts.py` attempt-cap rule `:278-292`→`:276-290`; `ports/__init__.py` `:670`→`:690`; `meeting_records.py` `:405/417/432`→`:411/423/438`; `pipelines.py` `:606/672/981/1190`→`:624/690/999/1208`; `wiring.py` `HANDED_CALLS` `:3506`→`:3631`; `storage/service.py` `:117/179`→`:134/196`. Graph adapter, `transcript_acquisition.py`, test anchors and the `33e`/`11b` line references unchanged; behaviour claims hold; frozen block unchanged.
 - **2026-10-19, decision (Andrei):** the re-open of an automatic summary when a later part arrives belongs to `7b`; AD-37 no longer binds `33g`. This slice takes no version lease. Frozen block unchanged.
+- **2026-10-19, built and reviewed.** Three review layers ran (blind hunter, edge-case hunter, verification gap). Patched: every part write after the claim is guarded so one meeting's store fault never ends the run; a repair failure costs one meeting, not the scope; a repaired part rewrites an `ingested` row to `fetched`; duplicate transcript ids in one answer refused; `is_graph_capture` matches only names `capture_name` writes; ingestion checks the record still exists; `TranscriptPart` validated; the `.capture` shortcut removed; tests added for a failed later-part download, a retryable refusal after the window, and a busy store inside the per-part loop. Built choice: a part whose ingestion fails does not stop later parts (they are still tried in part order), so the matrix row "new part after exhausted ingestion" holds. Two findings need Andrei's decision and three accepted limits are recorded in `deferred-work.md` under "Surfaced by the story-33g review (2026-10-19)". Frozen block unchanged.
 
 ## Design Notes
 
@@ -128,3 +130,69 @@ Part 1 keeps the unnumbered name so the field test's stored capture, `_awaiting_
 - `uv run pytest -q` -- expected: all pass
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**The five decisions (Graph adapter)**
+
+- Entry point: unfinished, two-occurrence, overlap, earlier-than-stored, then store — before any download.
+  [`graph_transcripts.py:351`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L351)
+
+- Only new parts are downloaded, all or nothing (open decision in deferred-work).
+  [`graph_transcripts.py:468`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L468)
+
+**Each part one claimed step**
+
+- Pending row, then capture, then stored; the first failure stops later parts.
+  [`transcript_acquisition.py:449`](../../../../pm_ai/core/transcript_acquisition.py#L449)
+
+- Who a refusal reaches: a meeting holding parts keeps its row.
+  [`transcript_acquisition.py:391`](../../../../pm_ai/core/transcript_acquisition.py#L391)
+
+- Asked-again rule, pending repair, hand-dropped capture stops asking.
+  [`transcript_acquisition.py:167`](../../../../pm_ai/core/transcript_acquisition.py#L167)
+
+- A kill's leftovers: pending part with capture on disk is marked stored.
+  [`transcript_acquisition.py:252`](../../../../pm_ai/core/transcript_acquisition.py#L252)
+
+**Tier 2 and the port**
+
+- Two new tables created on open; schema version unchanged.
+  [`service.py:218`](../../../../pm_ai/storage/service.py#L218)
+
+- Storing a part resets the meeting's ingestion attempts.
+  [`service.py:4237`](../../../../pm_ai/storage/service.py#L4237)
+
+- `acquire` now receives each meeting's stored parts.
+  [`ports/__init__.py:692`](../../../../pm_ai/ports/__init__.py#L692)
+
+- New writes handed to the writer thread.
+  [`wiring.py:3657`](../../../../pm_ai/app/wiring.py#L3657)
+
+**Values and naming**
+
+- Captures carried in time order; duplicates and misorder refused.
+  [`transcripts.py:217`](../../../../pm_ai/domain/transcripts.py#L217)
+
+- Part 1 keeps `-graph.vtt`; part n is `-graph-<n>.vtt`.
+  [`meeting_records.py:424`](../../../../pm_ai/core/meeting_records.py#L424)
+
+**Ingestion per part**
+
+- Each stored, un-ingested part in order; earlier parts never re-extracted.
+  [`pipelines.py:713`](../../../../pm_ai/app/pipelines.py#L713)
+
+- Part-scoped proposal ids for part 2 onward.
+  [`pipelines.py:1090`](../../../../pm_ai/app/pipelines.py#L1090)
+
+**Tests**
+
+- Matrix rows for the adapter's decisions.
+  [`test_graph_transcripts.py:1541`](../../../../tests/connectors/test_graph_transcripts.py#L1541)
+
+- Acquisition: parts, repair, asked-again, guarded writes.
+  [`test_transcript_acquisition.py:1`](../../../../tests/core/test_transcript_acquisition.py#L1)
+
+- Ingestion acceptance: two parts, a later part, mixed attribution, busy store.
+  [`test_transcript_path.py:1`](../../../../tests/slice/test_transcript_path.py#L1)
+

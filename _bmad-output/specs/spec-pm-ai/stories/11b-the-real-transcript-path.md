@@ -122,7 +122,7 @@ context:
 ## Spec Change Log
 
 - **2026-10-11, note from slices `2n` and `2o`** (Andrei, architecture AD-34 and AD-32). Who spoke is now decided by `pm_identity()` against the utterance's person handle, and a speaker label is never a handle. So a Graph transcript stages because its utterances carry no handle, not because of a source switch: this slice's "PM-handle test skipped for `GRAPH`" task becomes "the comparison through the identity is kept; Graph utterances carry no handle", and lands after `2o`. The frozen intent is unchanged: no Graph transcript auto-executes.
-
+- **2026-10-19, amended by `33g`.** Line 28 ("never ingested twice"): now per part — ingestion reads a meeting's parts from `transcript_parts` (falling back to `-graph.vtt` alone for a meeting with no part rows) and ingests each stored part not yet ingested, once, in part order, into the one meeting, with that part's own attribution; earlier parts are never re-extracted. Part 1's proposal ids keep `prp_<meeting>_<source>_<index>`; part *n* ≥ 2's are `prp_<meeting>_<source>_p<n>_<index>`. A part that fails does not stop the parts after it. The row at line 64: a meeting's row is `ingested` when every stored part is, and storing a new part resets its ingestion attempt count, so a meeting whose ingestion failed three times still ingests its new part.
 
 ## Suggested Review Order
 
