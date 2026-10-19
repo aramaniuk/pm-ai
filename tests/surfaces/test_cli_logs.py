@@ -368,6 +368,19 @@ def test_a_planted_escape_is_printed_with_a_question_mark_for_each_control_chara
     assert not any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in line)
 
 
+def test_invisible_formatting_characters_are_printed_as_question_marks(folder):
+    planted = "GET /\u202eexe.txt\u2066a\u2069\u200e\u200f\u200b\u200d\ufeff\u00ad\u2028\u2029b 404"
+    folder.write(record(1, message=planted, logger="pm_ai.api.requests"))
+    (line,) = run(folder).lines
+    assert line == "2026-10-18 07:00:01  info  request  GET /?exe.txt?a?????????b 404"
+
+
+def test_visible_text_beyond_ascii_is_printed_as_it_is(folder):
+    folder.write(record(1, message="Zoë — 東京 ✓ é", logger="pm_ai.api.requests"))
+    (line,) = run(folder).lines
+    assert line.endswith("  Zoë — 東京 ✓ é")
+
+
 def test_a_lone_surrogate_cannot_break_the_output(folder):
     folder.write(b'{"at": "2026-10-18T07:00:01+00:00", "logger": "pm_ai.api.requests", '
                  b'"level": "info", "message": "GET /\\ud800 404"}\n')

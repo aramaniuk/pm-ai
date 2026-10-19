@@ -28,6 +28,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -70,9 +71,12 @@ _DIGITS = re.compile(r"[0-9]+")
 _sleep = time.sleep
 """The wait between looks; a module seam so a test can end a follow."""
 
-# C0, DEL and C1 — the escape character among them — and the surrogates a JSON
-# string can hold but no terminal can be written.
-_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f\ud800-\udfff]")
+# Unicode categories printed as `?`: control (Cc — C0, DEL and C1, the escape
+# character among them); format (Cf — direction overrides, isolates and marks,
+# zero-width characters), which can reorder or hide text on screen; the line
+# and paragraph separators (Zl, Zp); and the surrogates (Cs) a JSON string can
+# hold but no terminal can be written.
+_UNPRINTABLE = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 
 
 class LogUnreadable(Exception):
@@ -154,8 +158,10 @@ def parse_record(raw: bytes) -> Record | None:
 
 
 def readable(text: str) -> str:
-    """`text` with every control character replaced by `?`."""
-    return _UNPRINTABLE.sub("?", text)
+    """`text` with every control, format and separator character replaced by `?`."""
+    return "".join(
+        "?" if unicodedata.category(char) in _UNPRINTABLE else char for char in text
+    )
 
 
 def format_record(
