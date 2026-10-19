@@ -72,13 +72,13 @@ context:
 ## Code Map
 
 - `pm_ai/connectors/transcripts/graph_transcripts.py:14-19` matching account; `:103` `PLACEMENT_SLACK`; `:211` `GraphTranscriptAdapter`, `:250` `UnenrolledGraphTranscripts.acquire`; `:325-389` `_match`, the refusal at `:351-357`; `:508` `_download`; `:635` `_fits` (a transcript with no created instant never fits today)
-- `pm_ai/domain/transcripts.py:121` `CaptureFormat`; `:136` `TranscriptCapture`; `:170` `TranscriptCaptured` (one `capture`); `:278-292` the attempt-cap rule ("a row rewritten to `fetched` cannot reset the cap"); `:293` `closes`; `:316` `TranscriptReportEntry`
-- `pm_ai/ports/__init__.py:670` `TranscriptSourcePort.acquire`; `pm_ai/connectors/transcripts/manual.py:28`
-- `pm_ai/core/meeting_records.py:405` `capture_stem`, `:417` `capture_name`, `:432` `has_capture`
+- `pm_ai/domain/transcripts.py:121` `CaptureFormat`; `:136` `TranscriptCapture`; `:170` `TranscriptCaptured` (one `capture`); `:276-290` the attempt-cap rule ("a row rewritten to `fetched` cannot reset the cap"); `:293` `closes`; `:316` `TranscriptReportEntry`
+- `pm_ai/ports/__init__.py:690` `TranscriptSourcePort.acquire`; `pm_ai/connectors/transcripts/manual.py:28`
+- `pm_ai/core/meeting_records.py:411` `capture_stem`, `:423` `capture_name`, `:438` `has_capture`
 - `pm_ai/core/transcript_acquisition.py:130-175` `_select_in` (prefix check and part-1-only repair at `:150-169`); `:178` `acquire_transcripts`; `:276` `_stored`; `:343` `_awaiting_ingestion` (keys on the `-graph.vtt` tail)
-- `pm_ai/app/pipelines.py:606` `ingest_captures`; `:672` `_ingest_capture`; `:981` proposal ids; `:1190` the drop refused when any capture exists (`11c`)
-- `pm_ai/app/wiring.py:3506` `HANDED_CALLS`
-- `pm_ai/storage/service.py:117` `CAPTURE_NAME_LIMIT`; `:179` `transcript_state`, the model for the new tables
+- `pm_ai/app/pipelines.py:624` `ingest_captures`; `:690` `_ingest_capture`; `:999` proposal ids; `:1208` the drop refused when any capture exists (`11c`)
+- `pm_ai/app/wiring.py:3631` `HANDED_CALLS`
+- `pm_ai/storage/service.py:134` `CAPTURE_NAME_LIMIT`; `:196` `transcript_state`, the model for the new tables
 - `tests/connectors/test_graph_transcripts.py:456` the two-parts refusal, which flips; `tests/connectors/test_graph_transcripts_recorded.py` (PR #72) `test_the_restarted_occurrence_is_refused_naming_both_and_nothing_is_downloaded`, which flips
 
 ## Tasks & Acceptance
@@ -108,6 +108,7 @@ context:
 - **2026-10-16, created.** Carries Andrei's decision of 2026-10-15: non-overlapping transcripts of one occurrence are parts, each stored verbatim and numbered in time order (part 1 keeps `-graph.vtt`, later parts `-graph-<n>.vtt`); overlapping ones refused as duplicates; a later part added; part rows in Tier 2, nothing on the record. Supersedes `33e`'s "a recording restarted — so none is stored".
 - **2026-10-16, review:** decisions ordered (unfinished, including an unplaced transcript, before two-occurrence, overlap and earlier-than-stored); who a refusal reaches stated; the asked-again rule bounded by a recorded ask after the window; each part one claimed step with a `pending` row and repair; retryable write refusals keep the part pending; a stored part missing from the listing handled; ingestion made per part (earlier parts never re-extracted, part-scoped proposal ids, per-part attribution, offsets carry the part number); the attempt reset; every port implementer and `HANDED_CALLS` named; the `11c` drop repair replaced by a recorded limit; `11b` and `33e:29` added to the amendments. Depends on no spine amendment.
 - **2026-10-16, review (consistency):** the per-part rationale corrected — `7b` keeps pattern extraction unchanged; per-part ingestion is kept for independence from extraction's determinism and to avoid re-ingesting earlier parts.
+- **2026-10-19:** Code Map re-verified against `3fa6783` after 23g, 33i, 4v and 4w merged. Moved: `domain/transcripts.py` attempt-cap rule `:278-292`→`:276-290`; `ports/__init__.py` `:670`→`:690`; `meeting_records.py` `:405/417/432`→`:411/423/438`; `pipelines.py` `:606/672/981/1190`→`:624/690/999/1208`; `wiring.py` `HANDED_CALLS` `:3506`→`:3631`; `storage/service.py` `:117/179`→`:134/196`. Graph adapter, `transcript_acquisition.py`, test anchors and the `33e`/`11b` line references unchanged; behaviour claims hold; frozen block unchanged.
 
 ## Design Notes
 
