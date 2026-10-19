@@ -22,12 +22,16 @@ import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, unquote, urlsplit
 
+from pm_ai.app.wiring import build
 from pm_ai.connectors.graph.client import GraphClient, GraphRequest, GraphResponse
 from pm_ai.connectors.transcripts.graph_transcripts import VTT, GraphTranscriptAdapter
+from pm_ai.core.meeting_records import capture_name
+from pm_ai.core.transcript_acquisition import acquire_transcripts
 from pm_ai.core.transcripts import last_cue_end_minutes, read_transcript
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
-from pm_ai.domain.transcripts import TranscriptCaptured, TranscriptRefused
+from pm_ai.domain.storage_tiers import CAPTURES
+from pm_ai.domain.transcripts import CaptureFormat, PartState, TranscriptCaptured
 from tests.connectors.recorded_graph import FIXTURES, INSTANCE, Auth, graph_time, ok, recorded
 
 LISTING = recorded("transcripts_recorded.json")["page"]
@@ -106,7 +110,7 @@ def _acquire(*days: str):
     graph = Routes()
     client = GraphClient(auth=Auth(), transport=graph, now=lambda: NOW)
     adapter = GraphTranscriptAdapter(client=client, instance=INSTANCE)
-    return adapter.acquire([_occurrence(day) for day in days], since=SINCE), graph
+    return adapter.acquire([_occurrence(day) for day in days], since=SINCE, stored={}), graph
 
 
 def _content_url(transcript_id: str) -> str:
@@ -136,17 +140,19 @@ def test_the_2026_10_15_occurrence_holds_two_transcripts_that_do_not_overlap():
     ]
 
 
-def test_the_restarted_occurrence_is_refused_naming_both_and_nothing_is_downloaded():
-    """Today's rule for two transcripts in one occurrence: none is stored."""
+def test_the_restarted_occurrence_is_captured_as_two_parts_in_creation_order():
+    """Story 33g: both transcripts of 2026-10-15 are parts of the one meeting."""
     (outcome,), graph = _acquire("2026-10-15")
 
-    assert isinstance(outcome, TranscriptRefused)
-    assert not outcome.retryable
-    assert "a recording restarted — so none is stored" in outcome.reason
-    on_the_day = {row["id"] for row in _on("2026-10-15")}
-    named = {row["id"] for row in ROWS if row["id"] in outcome.reason}
-    assert named == on_the_day and len(named) == 2
-    assert graph.downloads() == []
+    assert isinstance(outcome, TranscriptCaptured)
+    later, earlier = _on("2026-10-15")
+    assert [c.transcript_id for c in outcome.captures] == [earlier["id"], later["id"]]
+    assert [c.created for c in outcome.captures] == [
+        graph_time(earlier["createdDateTime"]),
+        graph_time(later["createdDateTime"]),
+    ]
+    assert all(c.text == VTT_TEXT for c in outcome.captures)
+    assert graph.downloads() == [_content_url(earlier["id"]), _content_url(later["id"])]
 
 
 def test_occurrences_with_one_transcript_each_are_captured_and_the_listing_is_read_once():
@@ -155,21 +161,53 @@ def test_occurrences_with_one_transcript_each_are_captured_and_the_listing_is_re
     assert [type(outcome) for outcome in outcomes] == [
         TranscriptCaptured,
         TranscriptCaptured,
-        TranscriptRefused,
+        TranscriptCaptured,
     ]
     matched = []
     for outcome, day in zip(outcomes[:2], ("2026-10-08", "2026-10-12"), strict=True):
         (row,) = _on(day)
-        assert outcome.capture.transcript_id == row["id"]
-        assert outcome.capture.created == graph_time(row["createdDateTime"])
-        assert outcome.capture.text == VTT_TEXT
+        (capture,) = outcome.captures
+        assert capture.transcript_id == row["id"]
+        assert capture.created == graph_time(row["createdDateTime"])
+        assert capture.text == VTT_TEXT
         matched.append(row["id"])
+    later, earlier = _on("2026-10-15")
+    matched += [earlier["id"], later["id"]]
     assert graph.downloads() == [_content_url(transcript) for transcript in matched]
     listings = [r.url for r in graph.requests if urlsplit(r.url).path.endswith("/transcripts")]
     assert len(listings) == 1, "listed once, and its next page never asked for"
     assert graph.asked("$skiptoken") == [], (
         "newest first, with a row older than the reach-back on the first page"
     )
+
+
+def test_acceptance_the_recorded_restart_lands_two_byte_identical_captures_with_parts_1_and_2(tmp_path):
+    """Acceptance (33g): an occurrence on 2026-10-15 at 08:30 UTC for 30 minutes."""
+    daemon = build(tmp_path, "alpha", now=lambda: NOW)
+    held = _occurrence("2026-10-15")
+    daemon.meetings.put(held)
+    graph = Routes()
+    adapter = GraphTranscriptAdapter(
+        client=GraphClient(auth=Auth(), transport=graph, now=lambda: NOW), instance=INSTANCE
+    )
+
+    report = acquire_transcripts(adapter, daemon.storage, scopes=(PERSONAL,), since=SINCE, now=NOW)
+
+    first = capture_name(held.meeting_id, held.start, CaptureFormat.GRAPH)
+    second = capture_name(held.meeting_id, held.start, CaptureFormat.GRAPH, part=2)
+    assert second == first.removesuffix(".vtt") + "-2.vtt"
+    for name in (first, second):
+        assert daemon.storage.read_artifact(scope=PERSONAL, artifact=CAPTURES, name=name) == VTT_TEXT.encode("utf-8")
+    later, earlier = _on("2026-10-15")
+    parts = daemon.storage.transcript_parts(PERSONAL)[held.meeting_id]
+    assert [(p.part, p.transcript_id, p.state) for p in parts] == [
+        (1, earlier["id"], PartState.STORED),
+        (2, later["id"], PartState.STORED),
+    ]
+    (entry,) = report.captured
+    assert entry.capture_names == (first, second)
+    assert first in entry.reason and second in entry.reason
+    assert daemon.storage.transcript_states(PERSONAL)[held.meeting_id].state == "fetched"
 
 
 # ── The body ─────────────────────────────────────────────────────────────────

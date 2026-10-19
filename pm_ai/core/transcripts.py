@@ -349,12 +349,14 @@ def ingest(
     *,
     source: TranscriptSource = TranscriptSource.MANUAL,
     name: str = "the transcript",
+    part: int = 1,
 ) -> Transcript:
     """A capture's text read into a transcript bound to `meeting`.
 
     `UnboundTranscript` with no meeting, before the text is read (AD-23): an
     unattributed file must not mint attributed provenance. `source` defaults to
-    `MANUAL`, the one that never executes (AD-32).
+    `MANUAL`, the one that never executes (AD-32). `part` is which part of the
+    meeting's transcript the text is (story 33g); offsets are within it.
     """
     if meeting is None:
         raise UnboundTranscript(
@@ -366,6 +368,7 @@ def ingest(
         meeting_id=meeting.meeting_id,
         source=source,
         utterances=read_transcript(payload, name=name),
+        part=part,
     )
 
 

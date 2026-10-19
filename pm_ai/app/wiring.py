@@ -3853,6 +3853,13 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "record_render_failure": ("record a failed render", _asks_none),
     "record_render_failures": ("record failed renders", _asks_none),
     "record_transcript_state": ("record the transcript's state", _asks_none),
+    # Story 33g: the parts of a meeting's transcript, rows in `operational.db`.
+    # The capture between the pending row and the stored mark stays `write_capture`.
+    "record_pending_part": ("claim a transcript part", _asks_none),
+    "mark_part_stored": ("mark a transcript part stored", _asks_none),
+    "drop_pending_part": ("drop a refused transcript part", _asks_none),
+    "mark_part_ingested": ("mark a transcript part ingested", _asks_none),
+    "record_part_ask": ("record when a meeting's transcript was asked for", _asks_none),
     "stage_unless_acted": ("stage a proposal", _asks_none),
     "stage_proposal": ("stage a proposal", _asks_none),
     "transition_proposal": ("move a proposal", _asks_none),
@@ -3868,6 +3875,8 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "load_proposal": ("read a proposal", _asks_none),
     "transcript_states": ("read the transcript states", _asks_none),
     "fetched_not_ingested": ("read the transcripts awaiting ingestion", _asks_none),
+    "transcript_parts": ("read the transcript parts", _asks_none),
+    "transcript_part_asks": ("read when transcripts were asked for", _asks_none),
     "was_executed": ("read the executed-key ledger", _asks_none),
     "executed_mutations": ("read the executed-key ledger", _asks_none),
     "load_cursor": ("read a connector's position", _asks_none),
