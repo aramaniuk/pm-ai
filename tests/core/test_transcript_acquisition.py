@@ -15,11 +15,13 @@ import pytest
 
 from pm_ai.app.wiring import build
 from pm_ai.core.meeting_records import (
+    MAX_PART,
     MEETINGS,
     MeetingRecords,
     capture_name,
     capture_stem,
     has_capture,
+    is_graph_capture,
     record_name,
 )
 from pm_ai.core.transcript_acquisition import acquire_transcripts, select_meetings
@@ -28,6 +30,7 @@ from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.storage_tiers import CAPTURES
 from pm_ai.domain.transcripts import (
     CaptureFormat,
+    PartState,
     TranscriptAbsent,
     TranscriptCapture,
     TranscriptCaptured,
@@ -37,7 +40,7 @@ from pm_ai.domain.transcripts import (
     TranscriptState,
     TranscriptStateKind,
 )
-from pm_ai.ports import TranscriptSourcePort, TranscriptSourceUnavailable
+from pm_ai.ports import CaptureAlreadyExists, TranscriptSourcePort, TranscriptSourceUnavailable
 from pm_ai.storage.service import CAPTURE_NAME_LIMIT
 
 NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
@@ -82,13 +85,15 @@ class Source:
         self.asked: list[list[str]] = []
         self.stop_after = stop_after
         self.since: datetime | None = None
+        self.stored: dict = {}
 
-    def acquire(self, meetings: Sequence[Meeting], *, since: datetime) -> tuple[TranscriptOutcome, ...]:
+    def acquire(self, meetings: Sequence[Meeting], *, since: datetime, stored=None) -> tuple[TranscriptOutcome, ...]:
         self.asked.append([m.meeting_id for m in meetings])
         self.since = since
+        self.stored = dict(stored or {})
         reached = meetings if self.stop_after is None else meetings[: self.stop_after]
         return tuple(
-            self.answers.get(m.meeting_id) or TranscriptCaptured(m.meeting_id, _capture(m))
+            self.answers.get(m.meeting_id) or TranscriptCaptured(m.meeting_id, (_capture(m),))
             for m in reached
         )
 
@@ -129,6 +134,31 @@ def test_has_capture_is_a_prefix_test_over_every_source():
     assert not has_capture(["temp", f"{other}-graph.vtt"], stem)
     with pytest.raises(ValueError):
         has_capture([], "")
+
+
+def test_part_1_keeps_the_unnumbered_name_and_later_parts_are_numbered():
+    start = NOW - timedelta(days=1)
+    stem = capture_stem("AAMk-one", start)
+    assert capture_name("AAMk-one", start, CaptureFormat.GRAPH, part=1) == f"{stem}-graph.vtt"
+    assert capture_name("AAMk-one", start, CaptureFormat.GRAPH, part=2) == f"{stem}-graph-2.vtt"
+    assert capture_name("AAMk-one", start, CaptureFormat.GRAPH, part=17) == f"{stem}-graph-17.vtt"
+    assert has_capture([f"{stem}-graph-2.vtt"], stem)
+
+
+def test_a_nine_digit_part_number_fits_the_writers_limit():
+    longest = capture_name("x" * 500, NOW, CaptureFormat.GRAPH, part=999_999_999)
+    assert len(longest.encode()) <= CAPTURE_NAME_LIMIT
+
+
+@pytest.mark.parametrize("part", [0, -1, 1_000_000_000, True])
+def test_a_part_number_out_of_range_is_refused(part):
+    with pytest.raises(ValueError):
+        capture_name("AAMk-one", NOW, CaptureFormat.GRAPH, part=part)
+
+
+def test_a_dropped_file_has_no_part_2():
+    with pytest.raises(ValueError):
+        capture_name("AAMk-one", NOW, CaptureFormat.MANUAL_VTT, part=2)
 
 
 def test_capture_name_refuses_a_source_that_is_not_a_capture_format():
@@ -220,7 +250,7 @@ def test_a_capture_is_written_verbatim_and_its_state_recorded(tmp_path):
     assert isinstance(state, TranscriptState)
     assert state.state == "fetched" and state.closes and state.at == NOW
     (entry,) = report.captured
-    assert entry.capture_name == name and entry.attributed is True
+    assert entry.capture_names == (name,) and entry.attributed is True
     assert report.awaiting_ingestion == ((PROJECT, "AAMk-one"),)
     assert daemon.storage.read_artifact(
         scope=PROJECT, artifact=MEETINGS, name=record_name("AAMk-one", held.start)
@@ -230,7 +260,7 @@ def test_a_capture_is_written_verbatim_and_its_state_recorded(tmp_path):
 def test_an_unattributed_capture_is_reported_as_such(tmp_path):
     held = _meeting("AAMk-one", NOW - timedelta(days=1))
     daemon = _daemon(tmp_path, held)
-    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", _capture(held, attributed=False))})
+    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_capture(held, attributed=False),))})
 
     report = _acquire(daemon, source)
 
@@ -282,9 +312,9 @@ def test_a_capture_that_appears_before_the_write_is_refused_as_a_duplicate(tmp_p
     name = capture_name("AAMk-one", held.start, CaptureFormat.GRAPH)
 
     class Racing(Source):
-        def acquire(self, meetings, *, since):
+        def acquire(self, meetings, *, since, stored=None):
             daemon.storage.write_capture("the first\n", scope=PERSONAL, name=name)
-            return super().acquire(meetings, since=since)
+            return super().acquire(meetings, since=since, stored=stored)
 
     report = _acquire(daemon, Racing())
 
@@ -298,7 +328,7 @@ def test_an_unavailable_source_is_a_run_level_refusal_and_records_nothing(tmp_pa
     daemon = _daemon(tmp_path, held)
 
     class Unavailable(Source):
-        def acquire(self, meetings, *, since):
+        def acquire(self, meetings, *, since, stored=None):
             raise TranscriptSourceUnavailable("no Graph connector is enrolled")
 
     report = _acquire(daemon, Unavailable())
@@ -448,3 +478,477 @@ def test_an_outcome_the_port_does_not_declare_is_a_named_retryable_refusal(tmp_p
 
     (refused,) = report.refused
     assert "Odd" in refused.reason and refused.retryable
+
+
+# ── Story 33g: every part of a transcript is kept ────────────────────────────
+#
+# A 30-minute meeting at 08:30 UTC: it ends at 09:00 and its placement window
+# (end plus PLACEMENT_SLACK) at 09:15. Times below are minutes from 08:30.
+
+SLOT = datetime(2026, 9, 7, 8, 30, tzinfo=timezone.utc)
+
+
+def _slot_meeting(meeting_id: str = "AAMk-one") -> Meeting:
+    return _meeting(meeting_id, SLOT, minutes=30)
+
+
+def _part(meeting: Meeting, transcript_id: str, created: int, ended: int, *, attributed: bool = True) -> TranscriptCapture:
+    return TranscriptCapture(
+        meeting_id=meeting.meeting_id,
+        transcript_id=transcript_id,
+        created=meeting.start + timedelta(minutes=created),
+        ended=meeting.start + timedelta(minutes=ended),
+        text=f"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n<v Sam>{transcript_id}</v>\n",
+        attributed=attributed,
+        format=CaptureFormat.GRAPH,
+    )
+
+
+def _at(daemon, source, minutes: int):
+    now = SLOT + timedelta(minutes=minutes)
+    return acquire_transcripts(source, daemon.storage, scopes=(PERSONAL,), since=now - timedelta(days=7), now=now)
+
+
+def _names(meeting: Meeting, *parts: int) -> list[str]:
+    return [capture_name(meeting.meeting_id, meeting.start, CaptureFormat.GRAPH, part=n) for n in parts]
+
+
+def _parts_of(daemon, meeting_id: str = "AAMk-one"):
+    return daemon.storage.transcript_parts(PERSONAL).get(meeting_id, ())
+
+
+def test_a_restarted_transcription_is_stored_as_two_numbered_byte_identical_parts(tmp_path):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    first, second = _part(held, "T-1", 3, 9), _part(held, "T-2", 16, 32)
+    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (first, second))})
+
+    report = _at(daemon, source, 40)
+
+    one, two = _names(held, 1, 2)
+    assert daemon.storage.read_artifact(scope=PERSONAL, artifact=CAPTURES, name=one) == first.text.encode()
+    assert daemon.storage.read_artifact(scope=PERSONAL, artifact=CAPTURES, name=two) == second.text.encode()
+    assert [(p.part, p.transcript_id, p.state, p.ingested) for p in _parts_of(daemon)] == [
+        (1, "T-1", PartState.STORED, False),
+        (2, "T-2", PartState.STORED, False),
+    ]
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert state.state == "fetched" and one in state.reason and two in state.reason
+    (entry,) = report.captured
+    assert entry.capture_names == (one, two)
+    assert report.awaiting_ingestion == ((PERSONAL, "AAMk-one"),)
+
+
+def test_one_part_is_named_as_33e_named_it(tmp_path):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-1", 1, 29),))})
+
+    _at(daemon, source, 40)
+
+    stem = capture_stem("AAMk-one", held.start)
+    stored = [n for n in daemon.storage.list_collection(scope=PERSONAL, artifact=CAPTURES) if n.startswith(stem)]
+    assert stored == [f"{stem}-graph.vtt"]
+    assert [p.part for p in _parts_of(daemon)] == [1]
+
+
+def test_overlapping_transcripts_with_nothing_stored_become_the_meetings_refused_row(tmp_path):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    source = Source({"AAMk-one": TranscriptRefused("AAMk-one", "T-a and T-b overlap: duplicates", retryable=False)})
+
+    _at(daemon, source, 40)
+    again = Source()
+    _at(daemon, again, 300)
+
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert (state.state, state.retryable) == ("refused", False) and "duplicates" in state.reason
+    assert again.asked == [], "non-retryable: not asked again"
+
+
+def _with_part_1(tmp_path, *, at: int = 40):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    _at(daemon, Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-1", 3, 9),))}), at)
+    daemon.storage.record_transcript_state(
+        PERSONAL, "AAMk-one", TranscriptStateKind.INGESTED, "part 1 ingested", retryable=False
+    )
+    return held, daemon
+
+
+def test_a_refusal_about_a_new_transcript_keeps_the_rows_and_is_named_in_the_run(tmp_path):
+    held, daemon = _with_part_1(tmp_path, at=35)
+    source = Source({"AAMk-one": TranscriptRefused("AAMk-one", "T-1 and T-dup overlap: duplicates", retryable=False)})
+
+    report = _at(daemon, source, 40)
+
+    assert source.asked == [["AAMk-one"]]
+    assert [p.transcript_id for p in source.stored["AAMk-one"]] == ["T-1"]
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].state == "ingested", "row kept"
+    assert report.entries == ()
+    assert any("AAMk-one" in r and "T-dup" in r for r in report.refusals)
+    assert [p.part for p in _parts_of(daemon)] == [1]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [TranscriptSkipped("AAMk-one", "T-2 has no end instant yet"), TranscriptAbsent("AAMk-one", "no new part")],
+    ids=["unfinished part", "nothing new"],
+)
+def test_a_skip_or_absence_leaves_a_meeting_holding_parts_as_it_was(tmp_path, answer):
+    held, daemon = _with_part_1(tmp_path, at=35)
+
+    report = _at(daemon, Source({"AAMk-one": answer}), 40)
+
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].state == "ingested"
+    assert report.entries == () and report.refusals == ()
+    assert [p.part for p in _parts_of(daemon)] == [1]
+
+
+def test_an_unfinished_part_is_asked_again_even_after_the_window(tmp_path):
+    held, daemon = _with_part_1(tmp_path, at=35)
+    _at(daemon, Source({"AAMk-one": TranscriptSkipped("AAMk-one", "T-2 still being produced")}), 60)
+
+    again = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-2", 16, 32),))})
+    _at(daemon, again, 120)
+
+    assert again.asked == [["AAMk-one"]], "a skip is not an ask that closes the meeting"
+    assert [p.transcript_id for p in _parts_of(daemon)] == ["T-1", "T-2"]
+
+
+def test_a_later_part_is_stored_as_part_2_on_a_later_run_and_the_row_is_fetched(tmp_path):
+    """Part 1 stored at 09:05 (35), window ends 09:15 (45); part 2 listed next run."""
+    held, daemon = _with_part_1(tmp_path, at=35)
+    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-2", 16, 32),))})
+
+    report = _at(daemon, source, 275)
+
+    assert source.asked == [["AAMk-one"]]
+    one, two = _names(held, 1, 2)
+    assert two in daemon.storage.list_collection(scope=PERSONAL, artifact=CAPTURES)
+    assert [(p.part, p.transcript_id, p.state) for p in _parts_of(daemon)] == [
+        (1, "T-1", PartState.STORED),
+        (2, "T-2", PartState.STORED),
+    ]
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert state.state == "fetched" and one in state.reason and two in state.reason
+    assert report.captured[0].capture_names == (two,)
+    assert report.awaiting_ingestion == ((PERSONAL, "AAMk-one"),)
+
+
+def test_a_meeting_asked_after_its_window_is_not_asked_again(tmp_path):
+    held, daemon = _with_part_1(tmp_path, at=35)
+    _at(daemon, Source({"AAMk-one": TranscriptAbsent("AAMk-one", "no new part")}), 50)
+
+    later = Source()
+    _at(daemon, later, 300)
+
+    assert later.asked == []
+    assert daemon.storage.transcript_part_asks(PERSONAL)["AAMk-one"] == SLOT + timedelta(minutes=50)
+
+
+def test_a_meeting_asked_before_its_window_ended_is_asked_again(tmp_path):
+    held, daemon = _with_part_1(tmp_path, at=35)
+
+    later = Source({"AAMk-one": TranscriptAbsent("AAMk-one", "no new part")})
+    _at(daemon, later, 300)
+
+    assert later.asked == [["AAMk-one"]]
+
+
+def test_a_new_transcript_earlier_than_a_pending_part_is_not_stored(tmp_path):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    daemon.storage.record_pending_part(
+        PERSONAL, "AAMk-one", 1, transcript_id="T-late", created=SLOT + timedelta(minutes=16),
+        ended=SLOT + timedelta(minutes=32), reason="disk full",
+    )
+    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-early", 3, 9),))})
+
+    _at(daemon, source, 40)
+
+    assert [(p.part, p.transcript_id, p.state) for p in _parts_of(daemon)] == [(1, "T-late", PartState.PENDING)]
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert state.state == "refused" and "T-early" in state.reason
+
+
+def test_a_pending_part_whose_capture_is_on_disk_is_marked_stored_at_selection(tmp_path):
+    """Crash after capture: the row says pending, the capture is there."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    daemon.storage.record_pending_part(
+        PERSONAL, "AAMk-one", 1, transcript_id="T-1", created=SLOT + timedelta(minutes=3),
+        ended=SLOT + timedelta(minutes=9),
+    )
+    daemon.storage.write_capture(TEXT, scope=PERSONAL, name=_names(held, 1)[0])
+    source = Source({"AAMk-one": TranscriptAbsent("AAMk-one", "no new part")})
+
+    report = _at(daemon, source, 40)
+
+    ((part,),) = [_parts_of(daemon)]
+    assert (part.part, part.state) == (1, PartState.STORED)
+    assert [p.transcript_id for p in source.stored["AAMk-one"]] == ["T-1"], "told it is stored"
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].state == "fetched"
+    assert report.awaiting_ingestion == ((PERSONAL, "AAMk-one"),)
+
+
+def test_a_pending_part_with_no_capture_is_fetched_again_under_the_same_number(tmp_path):
+    """Crash before capture: the row says pending, nothing on disk."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    _at(daemon, Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-1", 3, 9),))}), 31)
+    daemon.storage.record_pending_part(
+        PERSONAL, "AAMk-one", 2, transcript_id="T-2", created=SLOT + timedelta(minutes=16),
+        ended=SLOT + timedelta(minutes=32),
+    )
+    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-2", 16, 32),))})
+
+    _at(daemon, source, 300)
+
+    assert source.asked == [["AAMk-one"]], "a pending part keeps the meeting asked"
+    assert [p.transcript_id for p in source.stored["AAMk-one"]] == ["T-1"], "the pending one is not stored"
+    assert [(p.part, p.transcript_id, p.state) for p in _parts_of(daemon)] == [
+        (1, "T-1", PartState.STORED),
+        (2, "T-2", PartState.STORED),
+    ]
+    assert _names(held, 2)[0] in daemon.storage.list_collection(scope=PERSONAL, artifact=CAPTURES)
+
+
+def test_a_retryable_write_refusal_on_part_2_keeps_part_1_and_leaves_part_2_pending(tmp_path, monkeypatch):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    real = daemon.storage.write_capture
+    two = _names(held, 2)[0]
+
+    def full_disk(body, *, scope, name):
+        if name == two:
+            raise OSError(28, "No space left on device")
+        return real(body, scope=scope, name=name)
+
+    monkeypatch.setattr(daemon.storage, "write_capture", full_disk)
+    source = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-1", 3, 9), _part(held, "T-2", 16, 32)))})
+
+    report = _at(daemon, source, 300)
+
+    parts = _parts_of(daemon)
+    assert [(p.part, p.state) for p in parts] == [(1, PartState.STORED), (2, PartState.PENDING)]
+    assert parts[1].reason is not None and "OSError" in parts[1].reason
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].state == "fetched"
+    assert any("OSError" in refusal for refusal in report.refusals)
+
+    monkeypatch.setattr(daemon.storage, "write_capture", real)
+    retry = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-2", 16, 32),))})
+    _at(daemon, retry, 600)
+
+    assert retry.asked == [["AAMk-one"]], "asked again while a part is pending, past the window too"
+    assert [(p.part, p.state) for p in _parts_of(daemon)] == [(1, PartState.STORED), (2, PartState.STORED)]
+
+
+def test_a_non_retryable_write_refusal_drops_the_pending_part_and_names_it_lost(tmp_path):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    name = _names(held, 1)[0]
+
+    class Racing(Source):
+        def acquire(self, meetings, *, since, stored=None):
+            daemon.storage.write_capture("the first\n", scope=PERSONAL, name=name)
+            return super().acquire(meetings, since=since, stored=stored)
+
+    report = _at(daemon, Racing({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-1", 3, 9),))}), 40)
+
+    assert _parts_of(daemon) == ()
+    (entry,) = report.refused
+    assert "lost" in entry.reason and "never overwritten" in entry.reason and not entry.retryable
+
+
+def test_a_capture_written_before_parts_existed_is_part_1_of_a_closed_meeting(tmp_path):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    daemon.storage.write_capture(TEXT, scope=PERSONAL, name=_names(held, 1)[0])
+    source = Source()
+
+    report = _at(daemon, source, 40)
+
+    assert source.asked == [], "inside its window, and still not asked"
+    assert _parts_of(daemon) == ()
+    assert report.awaiting_ingestion == ((PERSONAL, "AAMk-one"),)
+
+
+def test_a_hand_dropped_capture_beside_graph_parts_stops_the_asking(tmp_path):
+    held, daemon = _with_part_1(tmp_path, at=35)
+    daemon.storage.write_capture(
+        TEXT, scope=PERSONAL, name=capture_name("AAMk-one", held.start, CaptureFormat.MANUAL_VTT)
+    )
+    source = Source()
+
+    _at(daemon, source, 40)
+
+    assert source.asked == []
+
+
+def test_the_parts_and_asks_survive_closing_and_reopening_the_store(tmp_path):
+    held, daemon = _with_part_1(tmp_path, at=50)
+    daemon.storage._db.close()
+
+    reopened = build(tmp_path, "alpha", now=lambda: NOW)
+
+    assert [p.transcript_id for p in reopened.storage.transcript_parts(PERSONAL)["AAMk-one"]] == ["T-1"]
+    assert reopened.storage.transcript_part_asks(PERSONAL)["AAMk-one"] == SLOT + timedelta(minutes=50)
+
+
+@pytest.mark.parametrize(
+    "tail, graph",
+    [
+        ("-graph.vtt", True),
+        ("-graph-2.vtt", True),
+        (f"-graph-{MAX_PART}.vtt", True),
+        ("-graph-1.vtt", False),
+        ("-graph-0.vtt", False),
+        ("-graph-02.vtt", False),
+        (f"-graph-{MAX_PART + 1}.vtt", False),
+        ("-graph-x.vtt", False),
+        ("-manual.vtt", False),
+    ],
+)
+def test_is_graph_capture_accepts_only_names_capture_name_writes(tail, graph):
+    stem = capture_stem("AAMk-one", NOW)
+    assert is_graph_capture(stem + tail, stem) is graph
+
+
+def test_one_transcript_twice_in_one_answer_is_refused():
+    held = _slot_meeting()
+    with pytest.raises(ValueError, match="twice"):
+        TranscriptCaptured("AAMk-one", (_part(held, "T-1", 3, 9), _part(held, "T-1", 3, 9)))
+
+
+def test_a_part_row_must_be_numbered_and_in_utc():
+    from pm_ai.domain.transcripts import TranscriptPart
+
+    good = dict(meeting_id="m", part=1, transcript_id="T", created=SLOT, ended=SLOT, state=PartState.STORED)
+    TranscriptPart(**good)
+    with pytest.raises(ValueError):
+        TranscriptPart(**{**good, "part": 0})
+    with pytest.raises(ValueError):
+        TranscriptPart(**{**good, "created": SLOT.replace(tzinfo=None)})
+
+
+@pytest.mark.parametrize("row", [TranscriptStateKind.INGESTED, TranscriptStateKind.INGEST_FAILED])
+def test_a_repaired_part_puts_an_ingestion_row_back_to_fetched(tmp_path, row):
+    held, daemon = _with_part_1(tmp_path, at=35)
+    daemon.storage.record_transcript_state(PERSONAL, "AAMk-one", row, "earlier", retryable=True)
+    daemon.storage.record_pending_part(
+        PERSONAL, "AAMk-one", 2, transcript_id="T-2", created=SLOT + timedelta(minutes=16),
+        ended=SLOT + timedelta(minutes=32),
+    )
+    daemon.storage.write_capture(TEXT, scope=PERSONAL, name=_names(held, 2)[0])
+
+    report = _at(daemon, Source({"AAMk-one": TranscriptAbsent("AAMk-one", "no new part")}), 40)
+
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert (state.state, state.attempts) == ("fetched", 0)
+    assert [p.state for p in _parts_of(daemon)] == [PartState.STORED, PartState.STORED]
+    assert report.awaiting_ingestion == ((PERSONAL, "AAMk-one"),)
+
+
+def test_a_retryable_refusal_after_the_window_records_no_ask_and_is_asked_again(tmp_path):
+    held, daemon = _with_part_1(tmp_path, at=35)
+    _at(daemon, Source({"AAMk-one": TranscriptRefused("AAMk-one", "throttled", retryable=True)}), 60)
+
+    assert daemon.storage.transcript_part_asks(PERSONAL)["AAMk-one"] == SLOT + timedelta(minutes=35), (
+        "the ask from before the window stands; the retryable refusal records none"
+    )
+    later = Source({"AAMk-one": TranscriptAbsent("AAMk-one", "no new part")})
+    _at(daemon, later, 300)
+    assert later.asked == [["AAMk-one"]]
+
+
+def test_a_repair_that_raises_names_the_meeting_and_selection_goes_on(tmp_path, monkeypatch):
+    held, other = _slot_meeting("AAMk-one"), _meeting("AAMk-two", SLOT - timedelta(hours=2), minutes=30)
+    daemon = _daemon(tmp_path, held, other)
+    daemon.storage.record_pending_part(
+        PERSONAL, "AAMk-one", 1, transcript_id="T-1", created=SLOT, ended=SLOT + timedelta(minutes=9),
+    )
+    daemon.storage.write_capture(TEXT, scope=PERSONAL, name=_names(held, 1)[0])
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the store answered nonsense")
+
+    monkeypatch.setattr(daemon.storage, "mark_part_stored", broken)
+    source = Source()
+
+    report = _at(daemon, source, 40)
+
+    assert source.asked == [["AAMk-two"]]
+    assert any("AAMk-one" in r and "RuntimeError" in r for r in report.refusals)
+
+
+@pytest.mark.parametrize("call", ["mark_part_stored", "drop_pending_part", "second record_pending_part"])
+def test_a_part_write_that_raises_costs_this_meeting_and_the_run_goes_on(tmp_path, monkeypatch, call):
+    first, second = _slot_meeting("AAMk-one"), _meeting("AAMk-two", SLOT - timedelta(hours=2), minutes=30)
+    daemon = _daemon(tmp_path, first, second)
+    storage = daemon.storage
+    real_pending, real_write = storage.record_pending_part, storage.write_capture
+    one = _names(first, 1)[0]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the store answered nonsense")
+
+    if call == "mark_part_stored":
+        real_mark = storage.mark_part_stored
+        monkeypatch.setattr(
+            storage, "mark_part_stored",
+            lambda scope, mid, part: broken() if mid == "AAMk-one" else real_mark(scope, mid, part),
+        )
+    else:
+        retryable = call != "drop_pending_part"
+
+        def refused_write(body, *, scope, name):
+            if name == one:
+                if retryable:
+                    raise OSError(28, "No space left on device")
+                raise CaptureAlreadyExists(name)
+            return real_write(body, scope=scope, name=name)
+
+        monkeypatch.setattr(storage, "write_capture", refused_write)
+        if call == "drop_pending_part":
+            monkeypatch.setattr(storage, "drop_pending_part", broken)
+        else:
+            def pending(scope, mid, part, **fields):
+                if fields.get("reason"):
+                    broken()
+                return real_pending(scope, mid, part, **fields)
+
+            monkeypatch.setattr(storage, "record_pending_part", pending)
+
+    report = _at(daemon, Source(), 40)
+
+    assert {e.meeting_id: e.state for e in report.entries} == {
+        "AAMk-one": TranscriptStateKind.REFUSED,
+        "AAMk-two": TranscriptStateKind.FETCHED,
+    }
+    (refused,) = report.refused
+    assert refused.retryable and call.split()[-1] in refused.reason
+
+
+def test_an_ask_that_cannot_be_recorded_is_a_run_refusal(tmp_path, monkeypatch):
+    held, daemon = _with_part_1(tmp_path, at=35)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the store answered nonsense")
+
+    monkeypatch.setattr(daemon.storage, "record_part_ask", broken)
+
+    report = _at(daemon, Source({"AAMk-one": TranscriptAbsent("AAMk-one", "no new part")}), 60)
+
+    assert any("AAMk-one" in r and "RuntimeError" in r for r in report.refusals)
+
+
+def test_a_meeting_with_parts_whose_record_is_gone_is_not_offered_for_ingestion(tmp_path):
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    _at(daemon, Source({"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-1", 3, 9),))}), 40)
+    daemon.storage.remove_member(scope=PERSONAL, artifact=MEETINGS, name=record_name("AAMk-one", held.start))
+
+    report = _at(daemon, Source(), 40)
+
+    assert report.awaiting_ingestion == ()

@@ -139,6 +139,7 @@ __all__ = [
     "capture_stem",
     "check_title",
     "has_capture",
+    "is_graph_capture",
     "parse_attendees",
     "parse_record",
     "record_name",
@@ -420,19 +421,59 @@ def capture_stem(meeting_id: str, start: datetime) -> str:
     return name[: -len(_RECORD_SUFFIX)]
 
 
-def capture_name(meeting_id: str, start: datetime, source: CaptureFormat) -> str:
+def capture_name(
+    meeting_id: str, start: datetime, source: CaptureFormat, *, part: int = 1
+) -> str:
     """The filename one capture of this meeting is written under.
 
     The stem, a dash, then the source's tail — `-graph.vtt` for a Graph
-    capture, `-manual.vtt` or `-manual.txt` for a dropped file. The stem is 108
-    characters at most, so the longest name fits `CAPTURE_NAME_LIMIT` (128).
+    capture, `-manual.vtt` or `-manual.txt` for a dropped file. A Graph
+    transcript recorded in several parts (story 33g) keeps the unnumbered name
+    for part 1, so every capture written before parts existed is a part 1, and
+    names part *n* ≥ 2 `-graph-<n>.vtt`. The stem is 108 characters at most and
+    `-graph-<n>.vtt` with a nine-digit `n` is 20, so every name fits
+    `CAPTURE_NAME_LIMIT` (128). A dropped file has one part.
     """
     if not isinstance(source, CaptureFormat):
         raise TypeError(
             f"capture_name was given {source!r}; a capture's source is a "
             f"CaptureFormat, so a misspelled tail cannot name a file nothing finds"
         )
-    return f"{capture_stem(meeting_id, start)}-{source.value}"
+    if isinstance(part, bool) or not isinstance(part, int) or not 1 <= part <= MAX_PART:
+        raise ValueError(
+            f"capture_name was given part {part!r}; a part is numbered from 1 to "
+            f"{MAX_PART} in time order"
+        )
+    stem = capture_stem(meeting_id, start)
+    if part == 1:
+        return f"{stem}-{source.value}"
+    if source is not CaptureFormat.GRAPH:
+        raise ValueError(
+            f"capture_name was given part {part} of a {source.value} capture; "
+            f"only a Graph transcript is stored in parts"
+        )
+    return f"{stem}-{_GRAPH_PART_HEAD}-{part}.{_GRAPH_PART_EXT}"
+
+
+MAX_PART = 999_999_999
+"""The highest part number a capture name holds within `CAPTURE_NAME_LIMIT`."""
+
+_GRAPH_PART_HEAD, _, _GRAPH_PART_EXT = CaptureFormat.GRAPH.value.partition(".")
+
+
+def is_graph_capture(name: str, stem: str) -> bool:
+    """Whether `name` is a Graph part's capture of the meeting with `stem` (33g)."""
+    if name == f"{stem}-{CaptureFormat.GRAPH.value}":
+        return True
+    head = f"{stem}-{_GRAPH_PART_HEAD}-"
+    tail = f".{_GRAPH_PART_EXT}"
+    if not (name.startswith(head) and name.endswith(tail)):
+        return False
+    number = name[len(head) : -len(tail)]
+    if not (number.isascii() and number.isdigit()) or number.startswith("0"):
+        return False
+    # Only names `capture_name` writes: part 1 is never numbered.
+    return 2 <= int(number) <= MAX_PART
 
 
 def has_capture(names: Iterable[str], stem: str) -> bool:

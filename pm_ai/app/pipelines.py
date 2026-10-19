@@ -21,7 +21,7 @@ from __future__ import annotations
 import errno
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
@@ -110,6 +110,7 @@ from pm_ai.domain.transcripts import (
     DropInterrupted,
     DropRefused,
     NothingSaid,
+    PartState,
     Transcript,
     TranscriptReport,
     TranscriptSource,
@@ -639,7 +640,7 @@ def ingest_captures(daemon: Daemon, report: TranscriptReport) -> TranscriptRepor
     refusals: list[str] = []
     for scope, meeting_id in report.awaiting_ingestion:
         try:
-            name, outcome = _ingest_capture(daemon, scope, meeting_id)
+            done, part_failures = _ingest_capture(daemon, scope, meeting_id)
         except (ArtifactBusy, OperationalStoreBusy) as busy:
             refusals.append(
                 f"the transcript of meeting {meeting_id} in {scope} was not "
@@ -657,10 +658,25 @@ def ingest_captures(daemon: Daemon, report: TranscriptReport) -> TranscriptRepor
                 _record_ingestion(daemon, scope, meeting_id, TranscriptStateKind.INGEST_FAILED, reason)
             )
             continue
+        if part_failures:
+            # A part that failed does not stop the parts after it (story 33g):
+            # each is ingested on its own, and the ones that worked stay so.
+            reason = (
+                f"the transcript of meeting {meeting_id} in {scope} could not be "
+                f"ingested: "
+                + "; ".join(f"{name}: {failure_reason(error)}" for name, error in part_failures)
+            )
+            if done:
+                reason += f". {_ingested_parts(done)}"
+            failed.append((scope, meeting_id, reason))
+            refusals.extend(
+                _record_ingestion(daemon, scope, meeting_id, TranscriptStateKind.INGEST_FAILED, reason)
+            )
+            continue
         ingested.append((scope, meeting_id))
         refusals.extend(
             _record_ingestion(
-                daemon, scope, meeting_id, TranscriptStateKind.INGESTED, _ingested(name, outcome)
+                daemon, scope, meeting_id, TranscriptStateKind.INGESTED, _ingested_parts(done)
             )
         )
     return replace(
@@ -687,18 +703,59 @@ def _ingested(name: str, outcome: TranscriptIngestion) -> str:
     return reason
 
 
+def _ingested_parts(done: Sequence[tuple[str, TranscriptIngestion]]) -> str:
+    """The `ingested` row's reason over every part ingested in this run (33g)."""
+    if not done:
+        return "every stored transcript part was already ingested."
+    return " ".join(_ingested(name, outcome) for name, outcome in done)
+
+
 def _ingest_capture(
     daemon: Daemon, scope: DataScope, meeting_id: str
-) -> tuple[str, TranscriptIngestion]:
+) -> tuple[tuple[tuple[str, TranscriptIngestion], ...], tuple[tuple[str, Exception], ...]]:
+    """Ingest each stored part of this meeting not yet ingested, in part order (33g).
+
+    Each part is read on its own, with its own attribution, and bound to the
+    one meeting; once ingested it is marked so and never extracted again.
+    Returns what each part's ingestion did and each part that failed: a part
+    that fails does not stop the parts after it, so an unreadable part 1 never
+    holds back a later part. A busy store or claim is raised, not counted. A
+    meeting with no part rows was captured before parts existed: its
+    `-graph.vtt` alone is ingested, as `11b`, and its failure raised.
+    """
     record = daemon.meetings.get(meeting_id, scope=scope)
-    name = capture_name(meeting_id, record.meeting.start, CaptureFormat.GRAPH)
+    rows = daemon.storage.transcript_parts(scope).get(meeting_id, ())
+    if not rows:
+        name = capture_name(meeting_id, record.meeting.start, CaptureFormat.GRAPH)
+        return ((name, _ingest_part(daemon, scope, record.meeting, name, part=1)),), ()
+    done: list[tuple[str, TranscriptIngestion]] = []
+    failures: list[tuple[str, Exception]] = []
+    for row in rows:
+        if row.state is not PartState.STORED or row.ingested:
+            continue
+        name = capture_name(meeting_id, record.meeting.start, CaptureFormat.GRAPH, part=row.part)
+        try:
+            outcome = _ingest_part(daemon, scope, record.meeting, name, part=row.part)
+            daemon.storage.mark_part_ingested(scope, meeting_id, row.part)
+        except (ArtifactBusy, OperationalStoreBusy):
+            raise
+        except Exception as failure:  # noqa: BLE001 — one part, not the meeting
+            failures.append((name, failure))
+            continue
+        done.append((name, outcome))
+    return tuple(done), tuple(failures)
+
+
+def _ingest_part(
+    daemon: Daemon, scope: DataScope, meeting: Meeting, name: str, *, part: int
+) -> TranscriptIngestion:
     raw = daemon.storage.read_artifact(scope=scope, artifact=CAPTURES, name=name)
     if raw is None:
         raise FileNotFoundError(f"{name} is not in {scope}'s transcripts/")
     transcript = ingest(
-        raw.decode("utf-8"), record.meeting, source=TranscriptSource.GRAPH, name=name
+        raw.decode("utf-8"), meeting, source=TranscriptSource.GRAPH, name=name, part=part
     )
-    return name, run_transcript_ingestion(daemon, transcript, record.meeting)
+    return run_transcript_ingestion(daemon, transcript, meeting)
 
 
 def _record_ingestion(
@@ -996,7 +1053,7 @@ def run_transcript_ingestion(
             if outcome is not None:
                 failures.append(f"extraction {index}: {outcome}")
         proposal = Proposal(
-            proposal_id=f"prp_{meeting.meeting_id}_{transcript.source.value}_{index}",
+            proposal_id=_proposal_id(meeting, transcript, index),
             type=extraction.kind,
             summary=extraction.for_model[:80],
             payload=command.payload(),
@@ -1019,6 +1076,18 @@ def run_transcript_ingestion(
         unrecorded=tuple(unrecorded),
         left=tuple(left),
     )
+
+
+def _proposal_id(meeting: Meeting, transcript: Transcript, index: int) -> str:
+    """`prp_<meeting>_<source>_<index>`; part *n* ≥ 2 adds `p<n>` before the index (33g).
+
+    Part 1 keeps `11b`'s form, so a meeting ingested before parts existed keeps
+    its proposals, and a later part's extractions never overwrite them.
+    """
+    head = f"prp_{meeting.meeting_id}_{transcript.source.value}"
+    if transcript.part == 1:
+        return f"{head}_{index}"
+    return f"{head}_p{transcript.part}_{index}"
 
 
 def _execute(

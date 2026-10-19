@@ -101,25 +101,28 @@ class _Source:
         self.texts: dict[str, str] = {}
 
     def acquire(
-        self, meetings: Sequence[Meeting], *, since: datetime
+        self, meetings: Sequence[Meeting], *, since: datetime, stored=None
     ) -> tuple[TranscriptOutcome, ...]:
         answers: list[TranscriptOutcome] = []
         for meeting in meetings:
             text = self.texts.get(meeting.meeting_id)
-            if text is None:
+            held = {part.transcript_id for part in (stored or {}).get(meeting.meeting_id, ())}
+            if text is None or f"T-{meeting.meeting_id}" in held:
                 answers.append(TranscriptAbsent(meeting.meeting_id, "nothing recorded"))
                 continue
             answers.append(
                 TranscriptCaptured(
                     meeting.meeting_id,
-                    TranscriptCapture(
-                        meeting_id=meeting.meeting_id,
-                        transcript_id=f"T-{meeting.meeting_id}",
-                        created=meeting.start,
-                        ended=meeting.start + timedelta(minutes=meeting.duration_minutes),
-                        text=text,
-                        attributed=True,
-                        format=CaptureFormat.GRAPH,
+                    (
+                        TranscriptCapture(
+                            meeting_id=meeting.meeting_id,
+                            transcript_id=f"T-{meeting.meeting_id}",
+                            created=meeting.start,
+                            ended=meeting.start + timedelta(minutes=meeting.duration_minutes),
+                            text=text,
+                            attributed=True,
+                            format=CaptureFormat.GRAPH,
+                        ),
                     ),
                 )
             )
@@ -1404,7 +1407,7 @@ def test_the_harvest_never_asks_the_manual_source(tmp_path):
     class Spy:
         name, requires_network = "manual", False
 
-        def acquire(self, meetings, *, since):
+        def acquire(self, meetings, *, since, stored=None):
             asked.append(meetings)
             return ()
 
@@ -1415,3 +1418,189 @@ def test_the_harvest_never_asks_the_manual_source(tmp_path):
 
     assert report is not None and report.ingested == ((PERSONAL, "AAMk-weekly"),)
     assert asked == []
+
+
+# ── Story 33g: every part of a transcript is ingested, once, in part order ───
+
+from pm_ai.app import pipelines  # noqa: E402
+from pm_ai.domain.transcripts import PartState  # noqa: E402
+
+PART_1 = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n<v Alex>I'll send the deck by Friday</v>\n"
+PART_2 = "WEBVTT\n\n00:00:02.000 --> 00:00:04.000\n<v Sam>I'll book the room by Monday</v>\n"
+UNATTRIBUTED_PART = "0:0:2.0 --> 0:0:4.0\nI'll write the notes by Monday\n"
+
+
+def _store_part(daemon, meeting: Meeting, part: int, text: str, *, created: int) -> str:
+    """One part through the claimed steps acquisition makes: pending, capture, stored."""
+    name = capture_name(meeting.meeting_id, meeting.start, CaptureFormat.GRAPH, part=part)
+    daemon.storage.record_pending_part(
+        PERSONAL, meeting.meeting_id, part, transcript_id=f"T-{part}",
+        created=meeting.start + timedelta(minutes=created),
+        ended=meeting.start + timedelta(minutes=created + 5),
+    )
+    daemon.storage.write_capture(text, scope=PERSONAL, name=name)
+    daemon.storage.mark_part_stored(PERSONAL, meeting.meeting_id, part)
+    daemon.storage.record_transcript_state(
+        PERSONAL, meeting.meeting_id, TranscriptStateKind.FETCHED, "stored", retryable=False
+    )
+    return name
+
+
+def _ingest(daemon, meeting_id: str = "AAMk-one") -> TranscriptReport:
+    return ingest_captures(daemon, TranscriptReport(awaiting_ingestion=((PERSONAL, meeting_id),)))
+
+
+def _spy(monkeypatch) -> list[Transcript]:
+    seen: list[Transcript] = []
+    real = pipelines.run_transcript_ingestion
+
+    def recording(daemon, transcript, meeting):
+        seen.append(transcript)
+        return real(daemon, transcript, meeting)
+
+    monkeypatch.setattr(pipelines, "run_transcript_ingestion", recording)
+    return seen
+
+
+def test_acceptance_two_parts_are_ingested_into_the_one_meeting_with_part_scoped_ids(tmp_path, monkeypatch):
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, PART_1, created=1)
+    _store_part(daemon, meeting, 2, PART_2, created=20)
+    seen = _spy(monkeypatch)
+
+    report = _ingest(daemon)
+
+    assert report.ingested == ((PERSONAL, "AAMk-one"),)
+    assert [t.part for t in seen] == [1, 2], "in part order"
+    assert all(t.meeting_id == "AAMk-one" for t in seen)
+    assert seen[1].utterances[0].offset_seconds == 2, "the offset within its own part"
+    first = daemon.storage.load_proposal("prp_AAMk-one_graph_0")
+    second = daemon.storage.load_proposal("prp_AAMk-one_graph_p2_0")
+    assert first.payload["when"]["raw"] == "Friday" and second.payload["when"]["raw"] == "Monday"
+    assert str(first.cites) == str(second.cites) == "meeting:AAMk-one"
+    assert all(p.ingested for p in daemon.storage.transcript_parts(PERSONAL)["AAMk-one"])
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].state == "ingested"
+
+
+def test_acceptance_a_later_part_leaves_part_1_and_an_approved_proposal_untouched(tmp_path, monkeypatch):
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, PART_1, created=1)
+    _ingest(daemon)
+    approved = daemon.storage.transition_proposal(
+        "prp_AAMk-one_graph_0", ProposalState.APPROVED, expected_version=1
+    )
+
+    _store_part(daemon, meeting, 2, PART_2, created=20)
+    seen = _spy(monkeypatch)
+    report = _ingest(daemon)
+
+    assert report.ingested == ((PERSONAL, "AAMk-one"),)
+    assert [t.part for t in seen] == [2], "part 1 is not extracted again"
+    assert daemon.storage.load_proposal("prp_AAMk-one_graph_0") == approved
+    assert daemon.storage.load_proposal("prp_AAMk-one_graph_p2_0").state is ProposalState.STAGED
+
+
+def test_a_meeting_whose_parts_are_all_ingested_is_not_offered_again(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, PART_1, created=1)
+    _ingest(daemon)
+
+    again = run_harvest(daemon, INSTANCE).transcripts
+
+    assert again is not None and (PERSONAL, "AAMk-one") not in again.awaiting_ingestion
+
+
+def test_a_new_part_after_exhausted_ingestion_resets_the_attempts_and_is_ingested(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, "no header, no timings, no speakers\n", created=1)
+    for _ in range(MAX_INGEST_ATTEMPTS):
+        _ingest(daemon)
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].ingestion_exhausted
+    assert (PERSONAL, "AAMk-one") not in run_harvest(daemon, INSTANCE).transcripts.awaiting_ingestion
+
+    _store_part(daemon, meeting, 2, PART_2, created=20)
+
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].attempts == 0
+    report = run_harvest(daemon, INSTANCE).transcripts
+    assert report is not None and (PERSONAL, "AAMk-one") in report.awaiting_ingestion
+    assert daemon.storage.load_proposal("prp_AAMk-one_graph_p2_0").payload["when"]["raw"] == "Monday"
+    parts = daemon.storage.transcript_parts(PERSONAL)["AAMk-one"]
+    assert [(p.part, p.ingested) for p in parts] == [(1, False), (2, True)]
+    ((_, _, reason),) = report.ingest_failed
+    assert "UnreadableTranscript" in reason, "part 1 still fails, and is named"
+
+
+def test_mixed_attribution_each_part_is_ingested_by_its_own(tmp_path, monkeypatch):
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, PART_1, created=1)
+    _store_part(daemon, meeting, 2, UNATTRIBUTED_PART, created=20)
+    seen = _spy(monkeypatch)
+
+    report = _ingest(daemon)
+
+    assert report.ingested == ((PERSONAL, "AAMk-one"),)
+    assert [u.speaker_handle for u in seen[0].utterances] == ["Alex"]
+    assert [u.speaker_handle for u in seen[1].utterances] == [""]
+    assert daemon.storage.load_proposal("prp_AAMk-one_graph_p2_0").payload["when"]["raw"] == "Monday"
+
+
+def test_a_part_whose_capture_is_pending_is_not_ingested(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, PART_1, created=1)
+    daemon.storage.record_pending_part(
+        PERSONAL, "AAMk-one", 2, transcript_id="T-2",
+        created=meeting.start + timedelta(minutes=20), ended=meeting.start + timedelta(minutes=25),
+    )
+
+    _ingest(daemon)
+
+    parts = daemon.storage.transcript_parts(PERSONAL)["AAMk-one"]
+    assert [(p.part, p.state, p.ingested) for p in parts] == [
+        (1, PartState.STORED, True),
+        (2, PartState.PENDING, False),
+    ]
+    with pytest.raises(ProposalNotFound):
+        daemon.storage.load_proposal("prp_AAMk-one_graph_p2_0")
+
+
+@pytest.mark.parametrize("busy", ["ArtifactBusy", "OperationalStoreBusy"])
+@pytest.mark.parametrize("where", ["read_artifact", "run_transcript_ingestion", "mark_part_ingested"])
+def test_a_busy_store_inside_the_part_loop_is_not_an_attempt(tmp_path, monkeypatch, where, busy):
+    from pm_ai.storage.service import OperationalStoreBusy
+
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, PART_1, created=1)
+    error = ArtifactBusy("held by another pm-ai process") if busy == "ArtifactBusy" else OperationalStoreBusy(
+        "operational.db is busy"
+    )
+
+    def held(*args, **kwargs):
+        raise error
+
+    if where == "run_transcript_ingestion":
+        monkeypatch.setattr(pipelines, "run_transcript_ingestion", held)
+    elif where == "read_artifact":
+        real = daemon.storage.read_artifact
+
+        def reading(*, scope, artifact, name):
+            if artifact == CAPTURES:
+                raise error
+            return real(scope=scope, artifact=artifact, name=name)
+
+        monkeypatch.setattr(daemon.storage, "read_artifact", reading)
+    else:
+        monkeypatch.setattr(daemon.storage, "mark_part_ingested", held)
+
+    report = _ingest(daemon)
+
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert (state.state, state.attempts) == ("fetched", 0)
+    assert report.ingest_failed == () and report.ingested == ()
+    assert busy in report.refusals[0]

@@ -18,6 +18,21 @@ belongs to the occurrence whose window — start to end, widened by
 it ended after the occurrence started. Meetings sharing a link are resolved and
 listed once.
 
+**A meeting's transcript may come in parts** (story 33g): when transcription
+is stopped and started again, Teams lists one transcript per part. Every
+transcript fitting an occurrence and overlapping no other is a part of it; the
+caller says which parts are already stored, and only new ones are downloaded,
+returned in time order in one `TranscriptCaptured`. Five decisions, in
+order, before any download: (1) a fitting transcript with no end instant, or
+any listed with no created instant, skips the meeting — so every selected
+meeting on that online meeting's listing is skipped; (2) a new one fitting two
+occurrences on the link is refused for both; (3) two that overlap, stored
+parts included (their instants read from the caller), are refused as
+duplicates; (4) a new one created before the newest stored part is refused;
+(5) otherwise every new part is downloaded, in time order, all or nothing.
+`PLACEMENT_SLACK`, the window's widening, is the domain's (acquisition reads
+it too) and is re-exported here.
+
 ## What stops a run, and what does not
 
 A provider fault — a throttle, a server error, no answer, or a credential that
@@ -73,7 +88,9 @@ from pm_ai.connectors.graph.client import (
 from pm_ai.domain.harvest import UNCLASSIFIED_FAULT_IS_RETRYABLE
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.transcripts import (
+    PLACEMENT_SLACK,
     CaptureFormat,
+    StoredPart,
     TranscriptAbsent,
     TranscriptCapture,
     TranscriptCaptured,
@@ -99,15 +116,6 @@ __all__ = [
     "VTT",
 ]
 
-
-PLACEMENT_SLACK = timedelta(minutes=15)
-"""How far a transcript's created instant may fall outside its occurrence's slot.
-
-Widens a placement window, start to end. `11b`'s `MATCH_TOLERANCE` is a start-to-start
-match tolerance for a dropped file — two figures that happen to agree, not one
-rule. A meeting that overran its slot by more than this is refused by name
-rather than guessed (an admitted limit; `11c`'s drop is the repair).
-"""
 
 LISTING_SLACK = timedelta(minutes=15)
 """The listing stops once a transcript was created earlier than the reach-back's
@@ -225,15 +233,27 @@ class GraphTranscriptAdapter:
     requires_network: bool = True
 
     def acquire(
-        self, meetings: Sequence[Meeting], *, since: datetime
+        self,
+        meetings: Sequence[Meeting],
+        *,
+        since: datetime,
+        stored: Mapping[str, Sequence[StoredPart]],
     ) -> tuple[TranscriptOutcome, ...]:
-        """One outcome per meeting reached, in order; a provider fault ends the run."""
+        """One outcome per meeting reached, in order; a provider fault ends the run.
+
+        Only transcripts not among a meeting's `stored` parts are downloaded.
+        """
         if since.tzinfo is None or since.utcoffset() != timedelta(0):
             raise ValueError(
                 f"since={since!r} is not aware UTC; it is compared with the "
                 f"provider's UTC instants"
             )
-        return _Run(client=self.client, meetings=tuple(meetings), since=since).go()
+        return _Run(
+            client=self.client,
+            meetings=tuple(meetings),
+            since=since,
+            stored={key: tuple(parts) for key, parts in stored.items()},
+        ).go()
 
 
 @dataclass
@@ -248,7 +268,11 @@ class UnenrolledGraphTranscripts:
     requires_network: bool = True
 
     def acquire(
-        self, meetings: Sequence[Meeting], *, since: datetime
+        self,
+        meetings: Sequence[Meeting],
+        *,
+        since: datetime,
+        stored: Mapping[str, Sequence[StoredPart]],
     ) -> tuple[TranscriptOutcome, ...]:
         raise TranscriptSourceUnavailable(
             "no Graph connector is enrolled, so there is no Microsoft account to "
@@ -264,6 +288,8 @@ class _Run:
     client: GraphClient
     meetings: tuple[Meeting, ...]
     since: datetime
+    stored: Mapping[str, tuple[StoredPart, ...]] = field(default_factory=dict)
+    """Each meeting's parts already stored, by meeting id (story 33g)."""
     events: dict[str, _Event | _Verdict] = field(default_factory=dict)
     online: dict[str, str | _Verdict] = field(default_factory=dict)
     listings: dict[str, tuple[_Listed, ...] | _Verdict] = field(default_factory=dict)
@@ -329,16 +355,46 @@ class _Run:
         online_id: str,
         listing: tuple[_Listed, ...],
     ) -> TranscriptOutcome:
+        """The five decisions of story 33g, in order, before any download.
+
+        Every transcript that fits this occurrence and overlaps no other is a
+        part of it. 1: one still being produced — a fitting one with no end, or
+        any listed with no created instant — skips the meeting; 2: a new one
+        fitting another occurrence on the same link refuses it; 3: two that
+        overlap, stored parts included, refuse it as duplicates; 4: a new one
+        created before the newest stored part refuses it; 5: otherwise every
+        new part is downloaded, in time order.
+        """
         mid = meeting.meeting_id
         floor = self.since - LISTING_SLACK
         listed = [t for t in listing if t.created is None or t.created >= floor]
         mine = [t for t in listed if _fits(t, meeting)]
         unplaced = [t for t in listed if t.created is None]
+        held = self.stored.get(mid, ())
+        held_ids = {part.transcript_id for part in held}
 
+        new = [t for t in mine if t.transcript_id not in held_ids]
+
+        # 1 — not finished.
+        if unplaced:
+            return TranscriptSkipped(
+                mid,
+                f"transcript(s) {_ids(unplaced)} of online meeting {online_id} "
+                f"have no created instant yet: still being produced, and may be a "
+                f"part of this meeting, so nothing is stored this run.",
+            )
+        unfinished = [t for t in new if t.ended is None]
+        if unfinished:
+            return TranscriptSkipped(
+                mid,
+                f"transcript(s) {_ids(unfinished)} have no end instant yet: Teams "
+                f"is still producing it, so nothing is stored this run.",
+            )
         if event.kind == _ONE_OFF:
-            # A one-off meeting's online meeting holds only its own recordings,
-            # so one that fits nowhere means the time match has failed.
-            stray = [t for t in listed if t.created is not None and t not in mine]
+            # `33e`'s matching, unchanged: a one-off meeting's online meeting
+            # holds only its own recordings, so one that fits nowhere means the
+            # time match has failed.
+            stray = [t for t in listed if t not in mine]
             if stray:
                 return TranscriptRefused(
                     mid,
@@ -348,45 +404,77 @@ class _Run:
                     f"nothing was stored.",
                     retryable=False,
                 )
-        if len(mine) > 1:
-            return TranscriptRefused(
-                mid,
-                f"transcripts {_ids(mine)} of online meeting {online_id} all fit "
-                f"this meeting — a recording restarted — so none is stored.",
-                retryable=False,
-            )
-        if not mine:
-            if unplaced:
-                return TranscriptSkipped(
-                    mid,
-                    f"transcript(s) {_ids(unplaced)} of online meeting "
-                    f"{online_id} have no created instant yet: still being "
-                    f"produced.",
+        if not new:
+            if held:
+                return TranscriptAbsent(
+                    mid, f"no new part beyond the {len(held)} stored was listed."
                 )
             return TranscriptAbsent(mid, "no transcript was recorded for this meeting.")
-        (transcript,) = mine
-        if transcript.ended is None:
-            return TranscriptSkipped(
-                mid,
-                f"transcript {transcript.transcript_id} has no end instant yet: "
-                f"Teams is still producing it.",
-            )
-        shared = [
-            other.meeting_id
-            for other in self.meetings
-            if other.meeting_id != mid
-            and _fits(transcript, other)
-            and self._same_link(other, event.join_url)
-        ]
-        if shared:
-            return TranscriptRefused(
-                mid,
-                f"transcript {transcript.transcript_id} of online meeting "
-                f"{online_id} fits this meeting and {', '.join(shared)}, so it "
-                f"is stored for none of them.",
-                retryable=False,
-            )
-        return self._download(mid, online_id, transcript)
+
+        # 2 — fits two occurrences sharing the join link.
+        for transcript in new:
+            shared = [
+                other.meeting_id
+                for other in self.meetings
+                if other.meeting_id != mid
+                and _fits(transcript, other)
+                and self._same_link(other, event.join_url)
+            ]
+            if shared:
+                return TranscriptRefused(
+                    mid,
+                    f"transcript {transcript.transcript_id} of online meeting "
+                    f"{online_id} fits this meeting and {', '.join(shared)}, so it "
+                    f"is stored for none of them.",
+                    retryable=False,
+                )
+
+        # 3 — overlap among the fitting transcripts, stored parts included.
+        placed: list[tuple[_Listed, datetime, datetime]] = []
+        for transcript in new:
+            if transcript.created is None or transcript.ended is None:
+                # Unreachable: decision 1 skipped any without both instants.
+                # Said rather than asserted, so `python -O` cannot remove it.
+                return TranscriptSkipped(mid, "a transcript is still being produced.")
+            placed.append((transcript, transcript.created, transcript.ended))
+        spans: list[tuple[str, datetime, datetime]] = [
+            (part.transcript_id, part.created, part.ended) for part in held
+        ] + [(t.transcript_id, created, ended) for t, created, ended in placed]
+        for index, (first, first_created, first_ended) in enumerate(spans):
+            for second, second_created, second_ended in spans[index + 1 :]:
+                if first_created < second_ended and second_created < first_ended:
+                    return TranscriptRefused(
+                        mid,
+                        f"transcripts {first} and {second} of online meeting "
+                        f"{online_id} overlap: they are duplicates covering the "
+                        f"same stretch of the meeting, so which to keep cannot be "
+                        f"decided and neither new one is stored.",
+                        retryable=False,
+                    )
+
+        # 4 — earlier than a stored part: numbering is time order.
+        if held:
+            newest = max(held, key=lambda part: part.created)
+            early = [t for t, created, _ in placed if created < newest.created]
+            if early:
+                return TranscriptRefused(
+                    mid,
+                    f"transcript(s) {_ids(early)} of online meeting {online_id} "
+                    f"were created before stored part {newest.transcript_id}; parts "
+                    f"are numbered in time order, so they are not stored.",
+                    retryable=False,
+                )
+
+        # 5 — every new part, in time order.
+        captures: list[TranscriptCapture] = []
+        for transcript, _, _ in sorted(placed, key=lambda item: item[1]):
+            downloaded = self._download(mid, online_id, transcript)
+            if not isinstance(downloaded, TranscriptCapture):
+                # All or nothing: a later part stored without an earlier one
+                # would leave the earlier one "earlier than a stored part".
+                return downloaded
+            captures.append(downloaded)
+        return TranscriptCaptured(mid, tuple(captures))
 
     def _same_link(self, other: Meeting, join_url: str | None) -> bool:
         if not other.calendar_event_ref:
@@ -507,7 +595,7 @@ class _Run:
 
     def _download(
         self, meeting_id: str, online_id: str, transcript: _Listed
-    ) -> TranscriptOutcome:
+    ) -> TranscriptCapture | TranscriptOutcome:
         if transcript.created is None or transcript.ended is None:
             # Unreachable: `_match` placed it by `created` and skipped it without
             # `ended`. Said rather than asserted, so `python -O` cannot remove it.
@@ -580,17 +668,14 @@ class _Run:
                 f"Teams may still be writing it — so it is tried again next run.",
                 retryable=True,
             )
-        return TranscriptCaptured(
-            meeting_id,
-            TranscriptCapture(
-                meeting_id=meeting_id,
-                transcript_id=transcript.transcript_id,
-                created=transcript.created,
-                ended=transcript.ended,
-                text=text,
-                attributed=attributed,
-                format=CaptureFormat.GRAPH,
-            ),
+        return TranscriptCapture(
+            meeting_id=meeting_id,
+            transcript_id=transcript.transcript_id,
+            created=transcript.created,
+            ended=transcript.ended,
+            text=text,
+            attributed=attributed,
+            format=CaptureFormat.GRAPH,
         )
 
     # ── Transport, with the faults that stop a run lifted out ────────────────

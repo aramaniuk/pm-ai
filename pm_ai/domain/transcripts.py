@@ -92,11 +92,20 @@ class Utterance:
 
 @dataclass(frozen=True, slots=True)
 class Transcript:
-    """Always bound to a meeting. There is no constructor path without one."""
+    """Always bound to a meeting. There is no constructor path without one.
+
+    `part` is which part of the meeting's transcript this is (story 33g): a
+    meeting whose transcription was stopped and started again has one Graph
+    capture per part, each ingested on its own. Every utterance's
+    `offset_seconds` is measured from the start of this part, so a tracing
+    offset (AD-33) is read with the part number beside it. A dropped file is
+    always part 1.
+    """
 
     meeting_id: str
     source: TranscriptSource
     utterances: tuple[Utterance, ...]
+    part: int = 1
 
     def __post_init__(self) -> None:
         if not self.meeting_id:
@@ -104,6 +113,10 @@ class Transcript:
                 "a transcript must bind to a meeting — to its calendar event where "
                 "one exists, else to a record minted from supplied title/start/"
                 "attendees (AD-23)"
+            )
+        if isinstance(self.part, bool) or not isinstance(self.part, int) or self.part < 1:
+            raise ValueError(
+                f"Transcript.part={self.part!r}: a part is numbered from 1 in time order"
             )
 
 
@@ -116,6 +129,20 @@ class Transcript:
 # .transcript_acquisition`'s, and the protocol between them is
 # `pm_ai.ports.TranscriptSourcePort`. Reading a capture's text into utterances
 # is `11b`'s and is not here.
+
+
+PLACEMENT_SLACK = timedelta(minutes=15)
+"""How far a transcript's created instant may fall outside its occurrence's slot.
+
+Widens a placement window, start to end (story 33e). Declared here rather than
+in the Graph adapter because acquisition reads it too (story 33g): a meeting
+holding parts stops being asked once a run that started after its widened
+window ended has asked about it — nothing created later can fit. `11b`'s
+`MATCH_TOLERANCE` is a start-to-start match tolerance for a dropped file — two
+figures that happen to agree, not one rule. A meeting that overran its slot by
+more than this is refused by name rather than guessed (an admitted limit;
+`11c`'s drop is the repair).
+"""
 
 
 class CaptureFormat(Enum):
@@ -167,11 +194,56 @@ class TranscriptCapture:
 
 
 @dataclass(frozen=True, slots=True)
+class StoredPart:
+    """A part of a meeting's transcript already stored, as the source is told it (33g).
+
+    The provider's transcript id and its two instants, read from the
+    operational store's `transcript_parts` rows rather than from the listing,
+    so a stored part the provider no longer lists still counts in the overlap
+    and earlier-than-stored tests.
+    """
+
+    transcript_id: str
+    created: datetime
+    ended: datetime
+
+    def __post_init__(self) -> None:
+        for label, moment in (("created", self.created), ("ended", self.ended)):
+            if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+                raise ValueError(f"StoredPart.{label}={moment!r} is not aware UTC.")
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptCaptured:
-    """The source found exactly one transcript for this meeting and read it."""
+    """The source found new parts of this meeting's transcript and read them (33g).
+
+    `captures` holds every new part, in time order (by `created`), each one
+    verbatim; parts the source was told were stored are never among them. A
+    meeting recorded in one stretch has one.
+    """
 
     meeting_id: str
-    capture: TranscriptCapture
+    captures: tuple[TranscriptCapture, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.captures, tuple) or not all(
+            isinstance(capture, TranscriptCapture) for capture in self.captures
+        ):
+            raise TypeError("TranscriptCaptured.captures is a tuple of TranscriptCapture")
+        if not self.captures:
+            raise ValueError("TranscriptCaptured carries at least one capture")
+        created = [capture.created for capture in self.captures]
+        if created != sorted(created):
+            raise ValueError(
+                "TranscriptCaptured.captures are not in time order; parts are "
+                "numbered by when each was created"
+            )
+        ids = [capture.transcript_id for capture in self.captures]
+        if len(set(ids)) != len(ids):
+            raise ValueError(
+                f"TranscriptCaptured.captures name one transcript twice ({', '.join(ids)}); "
+                f"it would be stored as two parts"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +315,54 @@ _AWAITING = frozenset(
     {TranscriptStateKind.FETCHED.value, TranscriptStateKind.INGEST_FAILED.value}
 )
 """The two states whose capture still awaits ingestion, under the cap."""
+
+
+class PartState(Enum):
+    """Where one part of a meeting's transcript got to (story 33g).
+
+    `PENDING` is written before its capture, `STORED` once the capture is on
+    disk: each part is one claimed step that a kill can interrupt, and the next
+    selection repairs a pending row from what is on disk.
+    """
+
+    PENDING = "pending"
+    STORED = "stored"
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptPart:
+    """One row of the operational store's `transcript_parts` table (Tier 2, 33g).
+
+    Never on the meeting record (AD-33). `part` numbers the meeting's parts in
+    time order from 1; part 1's capture is `<stem>-graph.vtt` and part *n* ≥ 2's
+    `<stem>-graph-<n>.vtt`. `reason` is set on a pending part whose write was
+    refused in a way waiting may clear.
+    """
+
+    meeting_id: str
+    part: int
+    transcript_id: str
+    created: datetime
+    ended: datetime
+    state: PartState
+    ingested: bool = False
+    stored_at: datetime | None = None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.part, bool) or not isinstance(self.part, int) or self.part < 1:
+            raise ValueError(f"TranscriptPart.part={self.part!r}: a part is numbered from 1")
+        moments = [("created", self.created), ("ended", self.ended)]
+        if self.stored_at is not None:
+            moments.append(("stored_at", self.stored_at))
+        for label, moment in moments:
+            if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+                raise ValueError(f"TranscriptPart.{label}={moment!r} is not aware UTC.")
+
+    @property
+    def stored(self) -> StoredPart:
+        return StoredPart(self.transcript_id, self.created, self.ended)
+
 
 MAX_INGEST_ATTEMPTS = 3
 """How many failed ingestions a capture gets before it is left for `doctor`.
@@ -322,8 +442,8 @@ class TranscriptReportEntry:
     reason: str
     retryable: bool = False
     retry_after: timedelta | None = None
-    capture_name: str | None = None
-    """The capture's filename, for a meeting fetched in this run."""
+    capture_names: tuple[str, ...] = ()
+    """Every part's capture filename stored in this run, in part order (33g)."""
     attributed: bool | None = None
     """For a fetched capture: `False` when the tenant forbade speaker names, so
     the capture carries words without names and every extraction from it
@@ -334,7 +454,10 @@ class TranscriptReportEntry:
 class TranscriptReport:
     """One acquisition run, as `run_harvest` hands it back on `PersistResult`.
 
-    `entries` holds one entry per meeting the source reached. `deferred` holds
+    `entries` holds one entry per meeting the source reached whose row the
+    answer wrote: a meeting already holding stored parts keeps its row unless a
+    new part is stored, and a refusal about its new transcripts is in
+    `refusals` instead (story 33g). `deferred` holds
     the meetings it was asked about and did not reach, because a provider fault
     stopped the run — they wait for the next run with no state recorded.
     `refusals` are run-level: a source that refused before any meeting (no
