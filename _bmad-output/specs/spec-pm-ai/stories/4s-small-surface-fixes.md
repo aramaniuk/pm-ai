@@ -2,7 +2,8 @@
 title: 'Small surface fixes from the field test'
 type: 'bugfix'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '5e466d6b8232169ee89069f82b270913de777fc1'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -121,17 +122,17 @@ Verified against `a1182f8` on 2026-10-16; re-verified against `3fa6783` on 2026-
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- one constant for the harvested-when sentence and one for the project clause beside `RESTART_SENTENCE`, used by both endings and the categories command; the shared category-question function (current answers offered, `-` to remove only when there is something, answers trimmed and judged together, re-asked until accepted) called by `_connector_add_graph` after the reach-back and by the new `connector categories <instance>` (command-table entry, `TERMINAL_BOUND`, mapping shown, save, refusals); the closing sentences from what was mapped; the stale docstring step 3 and the "asks four questions" refusal reworded -- (a) and (c)
-- [ ] `pm_ai/app/wiring.py`, `pm_ai/core/connector_enrolment.py` -- the two docstrings say what is true since 4r and 9a; `GraphEnrolment` reads the enrolled projects when the questions start, judges a set of answers, and `sign_in` puts a non-empty mapping into the settings under `CATEGORIES_KEY`; `record_categories`, shaped as `record_user_id`, comparing the categories it finds with those shown and re-judging the projects before writing -- (a), (c), behind the composition root
-- [ ] `pm_ai/app/daemon.py` -- the first stop request recorded by `_Server._stop`; `_drain` keeps `shutdown_pass`'s result or its failure; `serve` logs the line before the log is detached and prints it after the store is closed, ignoring a failed write and pointing standard output at nothing on failure; no line on the not-clean stops -- (b)
-- [ ] `tests/slice/test_connector_add_graph.py`, `tests/slice/test_connector_add_gitlab.py`, `tests/slice/test_setup_connector_step.py` -- every existing script re-baselined for the category question (after 8s's re-baseline of the same files); the endings' new sentences and the absence of the old ones; every new-connector category row of the matrix, the saved row asserted on disk; step 4 reaching the question for the project step 2 registered -- (a), (c)
-- [ ] `pm_ai/surfaces/cli/completion.py` -- give `connector categories <instance>` its value source, the enrolled Graph instances (the rows `connector sign-in` completes from), so 4u's test that every command argument has a source passes -- tab completion (4u) covers the new command
-- [ ] `tests/slice/test_connector_categories.py` -- new: every "Categories command" and "changed while answering" row, rows asserted on disk byte for byte where nothing is written -- the command
-- [ ] `tests/slice/test_daemon_slice.py` -- every stop row, including standard output closed with exit 0 and the line in `daemon.log` -- (b)
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/8l-connector-add-graph.md`, `8o-connector-add-gitlab.md` -- frozen text edited and a dated Spec Change Log line added in each, when this slice is built: the ending no longer says "active at the next start" but when a running daemon picks the connector up; 8l also: categories are now asked after the four questions (Andrei, 2026-10-16) -- their frozen text says otherwise
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/4p-setup-offers-a-connector.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: step 4 now asks the category questions through the shared path; its shape, order and already-done reading unchanged -- its Never says no category question
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`, `4q-repl-through-the-daemon.md` -- frozen text edited and a dated Spec Change Log line added in each, when this slice is built: `connector categories` joins the commands that need their own terminal (refused through the daemon, run locally at the prompt) -- the command joins the list
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved the field test's stale-endings entry and the "nothing printed when the daemon stops" part of its small-gaps entry -- what this closes
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- one constant for the harvested-when sentence and one for the project clause beside `RESTART_SENTENCE`, used by both endings and the categories command; the shared category-question function (current answers offered, `-` to remove only when there is something, answers trimmed and judged together, re-asked until accepted) called by `_connector_add_graph` after the reach-back and by the new `connector categories <instance>` (command-table entry, `TERMINAL_BOUND`, mapping shown, save, refusals); the closing sentences from what was mapped; the stale docstring step 3 and the "asks four questions" refusal reworded -- (a) and (c)
+- [x] `pm_ai/app/wiring.py`, `pm_ai/core/connector_enrolment.py` -- the two docstrings say what is true since 4r and 9a; `GraphEnrolment` reads the enrolled projects when the questions start, judges a set of answers, and `sign_in` puts a non-empty mapping into the settings under `CATEGORIES_KEY`; `record_categories`, shaped as `record_user_id`, comparing the categories it finds with those shown and re-judging the projects before writing -- (a), (c), behind the composition root
+- [x] `pm_ai/app/daemon.py` -- the first stop request recorded by `_Server._stop`; `_drain` keeps `shutdown_pass`'s result or its failure; `serve` logs the line before the log is detached and prints it after the store is closed, ignoring a failed write and pointing standard output at nothing on failure; no line on the not-clean stops -- (b)
+- [x] `tests/slice/test_connector_add_graph.py`, `tests/slice/test_connector_add_gitlab.py`, `tests/slice/test_setup_connector_step.py` -- every existing script re-baselined for the category question (after 8s's re-baseline of the same files); the endings' new sentences and the absence of the old ones; every new-connector category row of the matrix, the saved row asserted on disk; step 4 reaching the question for the project step 2 registered -- (a), (c)
+- [x] `pm_ai/surfaces/cli/completion.py` -- give `connector categories <instance>` its value source, the enrolled Graph instances (the rows `connector sign-in` completes from), so 4u's test that every command argument has a source passes -- tab completion (4u) covers the new command
+- [x] `tests/slice/test_connector_categories.py` -- new: every "Categories command" and "changed while answering" row, rows asserted on disk byte for byte where nothing is written -- the command
+- [x] `tests/slice/test_daemon_slice.py` -- every stop row, including standard output closed with exit 0 and the line in `daemon.log` -- (b)
+- [x] `_bmad-output/specs/spec-pm-ai/stories/8l-connector-add-graph.md`, `8o-connector-add-gitlab.md` -- frozen text edited and a dated Spec Change Log line added in each, when this slice is built: the ending no longer says "active at the next start" but when a running daemon picks the connector up; 8l also: categories are now asked after the four questions (Andrei, 2026-10-16) -- their frozen text says otherwise
+- [x] `_bmad-output/specs/spec-pm-ai/stories/4p-setup-offers-a-connector.md` -- frozen text edited and a dated Spec Change Log line added, when this slice is built: step 4 now asks the category questions through the shared path; its shape, order and already-done reading unchanged -- its Never says no category question
+- [x] `_bmad-output/specs/spec-pm-ai/stories/4r-a-line-is-answered-or-acknowledged.md`, `4q-repl-through-the-daemon.md` -- frozen text edited and a dated Spec Change Log line added in each, when this slice is built: `connector categories` joins the commands that need their own terminal (refused through the daemon, run locally at the prompt) -- the command joins the list
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark resolved the field test's stale-endings entry and the "nothing printed when the daemon stops" part of its small-gaps entry -- what this closes
 
 **Acceptance Criteria:**
 - Given a running daemon that loaded project `alpha` and harvests `graph:work`, when `pm-ai connector categories graph:work` maps `Alpha` to `alpha` and a meeting tagged `Alpha` is then harvested, then its record is filed in `alpha` and the next project dashboard lists it — no restart needed.
@@ -146,6 +147,7 @@ Verified against `a1182f8` on 2026-10-16; re-verified against `3fa6783` on 2026-
 - **2026-10-16, review:** a Graph row mapped to a project the running daemon did not load is not built at all, so both endings and the categories command print a project clause and `RESTART_SENTENCE`; "within" times reworded as normal, not guaranteed; the stop line's stream (stdout), its first stop request, what "jobs" counts, standard output closed (exit 0), a failed store close, a writer stop during the marking step, the two second-Ctrl-C outcomes, a signal during the final wait, and Ctrl-C during start each settled with a row; category answers trimmed and judged together (swaps allowed), stale entries out of the check and dropped on save, `-` refused where nothing can be removed, case-only re-typing kept, an unreadable mapping shown and replaced, the save comparing the categories it shows with those it finds and re-judging the projects, a busy lock, an unreadable `projects.toml` and a disabled row covered; re-baseline of the existing test scripts and the stale `dispatch.py` texts added to the tasks; change-log tasks for 8l, 8o, 4p, 4r and 4q; tasks merged per file; findings cited with the report; plain words for the start spacing, the writer stopping on its own and the row lock; repeated acceptance criteria replaced by system-level ones. Depends on spine amendment: AD-21 — `connector categories` joins the "foreground administrative commands parsed from the command line"; one amendment together with 4t's and 4w's additions to that list.
 - **2026-10-16, review (cross-spec):** the Change Log moved before Design Notes; `connector categories` "joins the list" of terminal commands rather than counting it; the AD-21 amendment stated in the spine's own sense and batched with 4t's and 4w's; a `completion.py` task for the command's value source (4u); the Code Map noted as taken before 8s moves its lines; tasks amending done specs say their frozen text is edited, with a dated Change Log line, when this slice is built.
 - **2026-10-19, re-verified.** Code Map re-verified against `3fa6783` after 23g, 33i, 4v and 4w merged (and 8s, which the old note said would move the lines): every `dispatch.py`, `wiring.py`, `daemon.py`, `prompts.py`, `entry.py`, `connector_enrolment.py`, Graph and test anchor moved and was corrected by name; `_files_into` noted as also naming channel and chat `project:` scopes since 33i; `TERMINAL_BOUND` now holds 4w's `logs`, and a `completion.py:101-108` anchor added for the `_BY_COMMAND` entry the completion task adds; every behaviour the spec describes still holds and the AD-21 amendment naming `connector categories` is in the spine; frozen block unchanged.
+- **2026-10-19, built.** Built as specified. Three review layers ran (blind hunter, edge-case hunter, verification gap). Patched from their findings: a save that finds the answers already there says nothing was written; a clash on a kept category tells the person to type another or `-` rather than press Enter; every malformed `categories` shape is shown as written and replaced; a settings file that stops reading in mid-command is a refusal; the stop line's console write loops until the whole line is out and gives up on a console that takes nothing; `HARVESTED_WHEN` pinned word for word; tests added for an unexpected error during serving, a claim that cannot be taken, and a `categories` key deleted while answering. Deferred: the add path does not re-check the mapped projects after the sign-in (`deferred-work.md`, story-4s review).
 
 ## Design Notes
 
@@ -171,3 +173,73 @@ Choices made in review (2026-10-16):
 
 **Manual checks (if no CLI):**
 - `pm-ai daemon run`, then Ctrl-C: one line after the listening line says how it stopped.
+
+## Suggested Review Order
+
+**Outlook categories asked, not hand-edited**
+
+- The one question function both commands use; current answer offered, `-` only when held.
+  [`dispatch.py:1417`](../../../../pm_ai/surfaces/cli/dispatch.py#L1417)
+
+- The questions sit after the four existing ones and before the browser sign-in.
+  [`dispatch.py:1281`](../../../../pm_ai/surfaces/cli/dispatch.py#L1281)
+
+- The new command: mapping shown, questions, save, refusals.
+  [`dispatch.py:1852`](../../../../pm_ai/surfaces/cli/dispatch.py#L1852)
+
+- Answers judged together by the rules the row is read with.
+  [`wiring.py:1855`](../../../../pm_ai/app/wiring.py#L1855)
+
+- The current mapping read, with stale and unreadable entries shown.
+  [`wiring.py:1885`](../../../../pm_ai/app/wiring.py#L1885)
+
+- Saves only `categories` under enrolment's claim; refuses if changed or a project was removed.
+  [`connector_enrolment.py:831`](../../../../pm_ai/core/connector_enrolment.py#L831)
+
+- `CATEGORIES_KEY` moved to the domain so core can name it.
+  [`connector_rows.py:24`](../../../../pm_ai/domain/connector_rows.py#L24)
+
+- The registry read afresh when the questions start.
+  [`entry.py:691`](../../../../pm_ai/app/entry.py#L691)
+
+**What the endings say**
+
+- One sentence for when a new connector is harvested, built from the timer constants.
+  [`dispatch.py:3477`](../../../../pm_ai/surfaces/cli/dispatch.py#L3477)
+
+- The project clause printed before `RESTART_SENTENCE`.
+  [`dispatch.py:3494`](../../../../pm_ai/surfaces/cli/dispatch.py#L3494)
+
+- GitLab's ending uses the same two sentences.
+  [`dispatch.py:1509`](../../../../pm_ai/surfaces/cli/dispatch.py#L1509)
+
+**The daemon says how it stopped**
+
+- The line logged before the log closes and printed after the store closes.
+  [`daemon.py:162`](../../../../pm_ai/app/daemon.py#L162)
+
+- The words: first stop request, jobs marked failed, or why they were not.
+  [`daemon.py:230`](../../../../pm_ai/app/daemon.py#L230)
+
+- A closed console never turns a clean stop into a failure.
+  [`daemon.py:252`](../../../../pm_ai/app/daemon.py#L252)
+
+- `_drain` keeps how many jobs `shutdown_pass` marked, or its error.
+  [`daemon.py:757`](../../../../pm_ai/app/daemon.py#L757)
+
+- The server remembers the first stop signal.
+  [`daemon.py:1151`](../../../../pm_ai/app/daemon.py#L1151)
+
+**Peripherals**
+
+- The command joins the commands that need their own terminal.
+  [`dispatch.py:3506`](../../../../pm_ai/surfaces/cli/dispatch.py#L3506)
+
+- Tab completion offers the enrolled Graph instances.
+  [`completion.py:103`](../../../../pm_ai/surfaces/cli/completion.py#L103)
+
+- The new command's tests, rows checked on disk byte for byte.
+  [`test_connector_categories.py`](../../../../tests/slice/test_connector_categories.py)
+
+- The stop rows, real processes for each signal.
+  [`test_daemon_slice.py`](../../../../tests/slice/test_daemon_slice.py)

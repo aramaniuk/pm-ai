@@ -24,7 +24,7 @@ Setup walks a new machine through three steps — master key, one project, `conf
 **Always:**
 - **The step is offered, never required.** After the config step, setup asks "add a Microsoft Graph connector now? (y/n)". "no" skips it and setup completes; its closing sentence is the connector line's own remedy from `4n`, word for word. **Enter means "no"**: Enter is how a person moves through setup, and "yes" starts a browser sign-in that takes minutes and needs an app id they may not have. Setup already refuses without a terminal before step 1, so the question is only ever asked at one.
 - **"yes" runs the `connector add graph` path, not a copy of it:** the connector name is asked, then the same questions, Microsoft sign-in, health check and save, through the same code. Enter keeps `graph:work` when that name is free; when it is already in use the question offers no default and a name must be typed. Setup checks the name once, before handing it to the shared path, so the shared path's own name check cannot then fail. A malformed or in-use name is named and asked again; three refused names end setup at step 4 with exit `3`, naming steps 1–3 as done.
-- **A refusal inside the step ends setup as any other step's does**: exit `3`, saying steps 1–3 stay done and `pm-ai setup` or `pm-ai connector add graph <name>` can be run again. A declined, expired or partial sign-in, a failed health check and missing runtime packages all say nothing was saved for the connector. An interruption (Ctrl-C or Ctrl-D) anywhere inside the step — at the y/n question, at any of the connector questions, or during the Microsoft sign-in wait — is this same refusal, naming steps 1–3 as done; the step wraps the whole shared path, so the shared command's own "nothing was saved" interrupt sentence is not what the person sees.
+- **A refusal inside the step ends setup as any other step's does**: exit `3`, saying steps 1–3 stay done and `pm-ai setup` or `pm-ai connector add graph <name>` can be run again. A declined, expired or partial sign-in, a failed health check and missing runtime packages all say nothing was saved for the connector. An interruption (Ctrl-C or Ctrl-D) anywhere inside the step — at the y/n question, at any of the connector questions (a category question included, since `4s`), or during the Microsoft sign-in wait — is this same refusal, naming steps 1–3 as done; the step wraps the whole shared path, so the shared command's own "nothing was saved" interrupt sentence is not what the person sees.
 - **A credential sealed but not recorded is said, not hidden.** When the sign-in's token was sealed and the settings row could not be written, the refusal names the sealed entry and says to fix what the write failed on and enrol that name again; it does not say nothing was saved, and the next attempt refuses that name as in use.
 - **A machine with an enabled Graph connector reads the step as done**, as an enrolled key does: the names are printed, nothing asked, nothing written. A machine with only a GitLab connector, or only a disabled Graph row, is asked. A second connector is added with `pm-ai connector add graph`.
 - **The closing report is `4n`'s**, so it names the connector just added, or says none is. The verdict and exit code still come from the probe report (`4h`): exit 0 when it is healthy, on a first run and a second alike.
@@ -34,7 +34,7 @@ Setup walks a new machine through three steps — master key, one project, `conf
 **Ask First:** Any change to the questions `connector add graph` asks or their order.
 
 **Never:**
-- No GitLab step, no re-sign-in for an enrolled connector, no category-mapping question — each is its own slice (recorded 2026-10-09).
+- No GitLab step and no re-sign-in for an enrolled connector — each is its own slice (recorded 2026-10-09). No category question of its own: since `4s` the shared path asks the Outlook category questions, one per enrolled project — the project step 2 registered included — and step 4 asks them through it; nothing is asked at an already-done step 4.
 - No change to what `connector add graph` asks, prints or exits with, nor to the three existing steps, their order or their questions.
 - No second implementation of the Graph questions or sign-in in setup.
 
@@ -89,6 +89,10 @@ Setup walks a new machine through three steps — master key, one project, `conf
 - Given `graph:work` enrolled and enabled, when setup runs again on a healthy machine, then no file's bytes differ afterwards and it exits `0` — asserted on file contents, as `4h`'s second run is.
 - Given a declined sign-in, or Ctrl-C during the sign-in wait, when setup stops, then no `connectors/` row and no sealed credential exist, the exit code is `3`, and the refusal names steps 1–3 as done.
 - Given the change, when `uv run pytest` runs, then everything passes and the skip count is unchanged from the baseline at the slice's start (24 on 2026-10-09).
+
+## Spec Change Log
+
+- **2026-10-19, frozen block amended by `4s`** (Outlook categories are asked; Andrei, 2026-10-16). Step 4 now asks the Outlook category questions through the shared `connector add graph` path, one per enrolled project, after its four questions and before the sign-in; its shape, order, y/n with Enter as no, and already-done reading of an enabled Graph row are unchanged, and an interruption or refusal at a category question ends setup at step 4 as any other does. The Never line naming no category-mapping question is replaced.
 
 ## Verification
 
