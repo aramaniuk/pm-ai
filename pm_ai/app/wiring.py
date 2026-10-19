@@ -998,25 +998,26 @@ def _files_into(instance: str, system: str, entry: Mapping[str, object]) -> froz
     categories = entry.get(CATEGORIES_KEY)
     if isinstance(categories, Mapping):
         named.update(value for value in categories.values() if isinstance(value, str))
-    for key, field_name in ((CHANNELS_KEY, "project"), (CHATS_KEY, "scope")):
+    for key in (CHANNELS_KEY, CHATS_KEY):
         listed = entry.get(key)
         if not isinstance(listed, list):
             continue
         for item in listed:
             if not isinstance(item, Mapping):
                 continue
-            value = item.get(field_name)
+            # A channel may name its project by id under `project` (`33d`),
+            # trimmed as the listing reader trims it.
+            by_id = item.get("project") if key == CHANNELS_KEY else None
+            if isinstance(by_id, str) and by_id.strip():
+                named.add(by_id.strip())
+            # A chat, and since `33i` a channel, names a scope: only
+            # `project:<id>` is a project; `personal` and the rest name none.
+            value = item.get("scope")
             if not isinstance(value, str):
                 continue
-            if field_name == "project":
-                # A channel names its project by id.
-                named.add(value)
-                continue
-            # A chat names a scope: only `project:<id>` is a project; `personal`
-            # and the rest name none.
-            kind, _, project = value.partition(":")
-            if kind == "project" and project:
-                named.add(project)
+            kind, _, subject = value.partition(":")
+            if kind == "project" and subject:
+                named.add(subject)
     return frozenset(named)
 
 

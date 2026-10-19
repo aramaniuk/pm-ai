@@ -13,7 +13,7 @@ Four modules now, in the order they were built and in the order they depend:
   those rows into `Meeting` records and `CALENDAR_EVENT_HELD` events.
 - `channels` (story 33d) — the Teams channels the PM listed by hand, walked
   newest first; this module turns each message and reply into one
-  `MESSAGE_POSTED` event in the channel's project log.
+  `MESSAGE_POSTED` event in the log of the scope the channel's entry names.
 - `chats` (story 33f) — the Teams chats the PM listed by hand, each with the
   scope its messages go to, read from a server-side position; each message
   becomes one `MESSAGE_POSTED` event through the channel mapping, in the
@@ -257,11 +257,14 @@ class ChannelListRefused(ValueError):
     """The row's `channels` list cannot be read, so no connector was built.
 
     A list that is not a list, an entry that is not an object, an entry missing
-    its team or channel id, a label that is not text, and one channel id listed
-    twice under any team or project. Each names the entry, because the operator
-    repairing it is holding `connectors/<instance>.json` open. An entry naming a
-    project no registry knows is `UnknownProject` instead, the refusal the
-    category mapping already uses for the same fact.
+    its team or channel id, an entry carrying both `project` and `scope` or
+    neither, a scope the shared reader refuses (`33i`), a project named
+    `personal` or one the reference grammar cannot carry, a label that is not
+    text, and one channel id listed twice under any team or scope. Each names
+    the entry, because the operator repairing it is holding
+    `connectors/<instance>.json` open. An entry naming a project no registry
+    knows is `UnknownProject` instead, the refusal the category mapping already
+    uses for the same fact.
 
     A `ValueError`, so `_graph_connector`'s handler reports it like every other
     row refusal and `build()` composes regardless.
@@ -465,17 +468,24 @@ def graph_channel_listings(
 ) -> tuple[ChannelListing, ...]:
     """The channels this row lists by hand, or a refusal naming the entry (`33d`).
 
-    Each entry is `{"team": …, "channel": …, "project": …, "label": …}`, the
-    label optional. pm-ai never lists teams or channels: what is read is what
-    the PM wrote here. No list means calendar only, as before this slice.
+    Each entry is `{"team": …, "channel": …, "project": …, "label": …}` or,
+    since `33i`, `{"team": …, "channel": …, "scope": …, "label": …}`, the label
+    optional. `"project": "<id>"` files into that project, as before;
+    `"scope"` is the chat spelling, `personal` or `project:<id>`, read by the
+    chat's reader (`_listed_scope`). pm-ai never lists teams or channels: what
+    is read is what the PM wrote here. No list means calendar only.
 
     Refused, and the connector not built: a value that is not a list; an entry
     that is not an object; a team or channel id missing, not text, padded, or
     holding whitespace or a `/` — the ids become a request path and a
-    reference; a label that is present and not text; a project no registry
-    knows (`UnknownProject`); and a channel id listed twice under any team or
-    project, compared ignoring case, because one channel cannot belong to two
-    projects' logs.
+    reference; an entry carrying both `project` and `scope`, or neither — a key
+    is carried when present, whatever its value; every refusal of the chat's
+    scope reader; on the `project` key, a project named `personal` in any case
+    and an id the reference grammar cannot carry, whose references would read
+    as personal ones or could not be written; a label that is present and not
+    text; a project no registry knows (`UnknownProject`); and a channel id
+    listed twice under any team or scope, compared ignoring case, because one
+    channel's messages go to one scope.
     """
     raw = entry.get(CHANNELS_KEY)
     if raw is None:
@@ -497,21 +507,9 @@ def graph_channel_listings(
             )
         team = _listed_id(item, "team", where=where)
         channel = _listed_id(item, "channel", where=where)
-        project = item.get("project")
-        if not isinstance(project, str) or not project.strip():
-            raise UnknownProject(
-                f"{where} (channel {channel!r}) names no project. A channel's "
-                f"messages belong to one enrolled project's event log, and there "
-                f"is no default."
-            )
-        project = project.strip()
-        if not registered(project):
-            raise UnknownProject(
-                f"{where} (channel {channel!r}) belongs to project {project!r}, "
-                f"which no registry knows. Projects enter the system through "
-                f"`pm-ai project add` (AD-11); this is a removed project or a "
-                f"typo in an id."
-            )
+        scope = _channel_scope(
+            item, where=f"{where} (channel {channel!r})", registered=registered
+        )
         label = item.get("label")
         problem = None if label is None else label_problem(label)
         if problem is not None:
@@ -524,19 +522,68 @@ def graph_channel_listings(
             raise ChannelListRefused(
                 f"the channel id {channel!r} is listed twice in "
                 f"{CHANNELS_KEY!r}, in entries {first[folded]} and {position}. "
-                f"One channel's messages belong to one project's log; delete "
-                f"one entry."
+                f"One channel's messages go to one scope; delete one entry."
             )
         first[folded] = position
         listings.append(
             ChannelListing(
                 team=team,
                 channel=channel,
-                project=project,
+                scope=scope,
                 label=label.strip() if isinstance(label, str) else None,
             )
         )
     return tuple(listings)
+
+
+def _channel_scope(
+    item: Mapping[object, object], *, where: str, registered: Callable[[str], bool]
+) -> DataScope:
+    """A channel entry's scope, from `project` or `scope` but not both (`33i`).
+
+    A key is carried when it is present, whatever its value, so `null` and an
+    empty string count. `scope` is read by the chat's reader; `project` keeps
+    its old reading — trimmed, then an enrolled project — with the project
+    checks the scope spelling applies, so its references cannot collide with
+    personal ones.
+    """
+    has_project = "project" in item
+    has_scope = "scope" in item
+    if has_project and has_scope:
+        raise ChannelListRefused(
+            f"{where} carries both `project` and `scope`. Each says where the "
+            f"channel's messages go; keep one."
+        )
+    if has_scope:
+        return _listed_scope(
+            item.get("scope"),
+            where=where,
+            noun="channel",
+            refused=ChannelListRefused,
+            registered=registered,
+        )
+    if not has_project:
+        raise ChannelListRefused(
+            f"{where} carries neither `project` nor `scope`. A channel's messages "
+            f'go to `"scope": "personal"`, to `"scope": "project:<id>"` or to '
+            f'`"project": "<id>"`, and there is no default.'
+        )
+    project = item.get("project")
+    if not isinstance(project, str) or not project.strip():
+        raise ChannelListRefused(
+            f"{where} names no project ({project!r}). A channel's messages go to "
+            f"one enrolled project's event log or to the personal one, and there "
+            f"is no default."
+        )
+    project = project.strip()
+    return _project_scope(
+        project,
+        where=where,
+        said=f"names project {project!r}",
+        filed="names project",
+        refused=ChannelListRefused,
+        registered=registered,
+    )
 
 
 def _listed_id(item: Mapping[object, object], key: str, *, where: str) -> str:
@@ -595,8 +642,12 @@ def graph_chat_listings(
                 f"id and a scope."
             )
         chat = _listed_chat(item.get("chat"), where=where)
-        scope = _chat_scope(
-            item.get("scope"), where=f"{where} (chat {chat!r})", registered=registered
+        scope = _listed_scope(
+            item.get("scope"),
+            where=f"{where} (chat {chat!r})",
+            noun="chat",
+            refused=ChatListRefused,
+            registered=registered,
         )
         label = item.get("label")
         problem = None if label is None else label_problem(label)
@@ -666,51 +717,88 @@ def _listed_chat(value: object, *, where: str) -> str:
     return value
 
 
-def _chat_scope(
-    value: object, *, where: str, registered: Callable[[str], bool]
+def _listed_scope(
+    value: object,
+    *,
+    where: str,
+    noun: str,
+    refused: type[ValueError],
+    registered: Callable[[str], bool],
 ) -> DataScope:
-    """A chat entry's scope: personal, or an enrolled project. Refused otherwise."""
+    """A listed entry's scope: personal, or an enrolled project. Refused otherwise.
+
+    One reader for chats (`33f`) and channels (`33i`): `noun` names what the
+    entry lists in each sentence, and `refused` is the caller's refusal type
+    (`ChatListRefused` or `ChannelListRefused`). An unenrolled project is
+    `UnknownProject` for both.
+    """
     if not isinstance(value, str) or not value.strip():
-        raise ChatListRefused(
-            f"{where} names no scope ({value!r}). A chat's messages go to "
+        raise refused(
+            f"{where} names no scope ({value!r}). A {noun}'s messages go to "
             f"`personal` or to `project:<id>`, and there is no default."
         )
     if value != value.strip():
-        raise ChatListRefused(
+        raise refused(
             f"{where} has the scope {value!r}, padded with whitespace. Refused "
-            f"rather than trimmed, as a padded chat id is."
+            f"rather than trimmed, as a padded {noun} id is."
         )
     text = value
     kind, _, subject = text.partition(":")
     if kind.casefold() == ScopeKind.PEOPLE.value:
-        raise ChatListRefused(f"{where} is scoped {text!r}: {NO_TEAM_MEMBER_REGISTRY}.")
+        raise refused(f"{where} is scoped {text!r}: {NO_TEAM_MEMBER_REGISTRY}.")
     if text == ScopeKind.PERSONAL.value:
         return PERSONAL
     if kind == ScopeKind.PROJECT.value and subject.strip():
-        project = subject
-        if project.casefold() == ScopeKind.PERSONAL.value:
-            raise ChatListRefused(
-                f"{where} is scoped {text!r}. A project named 'personal' cites "
-                f"its messages exactly as the personal scope does, so the two "
-                f"could not be told apart; enrol the project under another id."
-            )
-        if not _citable_scope(project):
-            raise ChatListRefused(
-                f"{where} is scoped to project {project!r}, an id the message "
-                f"reference grammar `graph:<scope>:message:<id>` cannot carry "
-                f"(AD-34), so no message from it could be cited."
-            )
-        if not registered(project):
-            raise UnknownProject(
-                f"{where} is scoped to project {project!r}, which no registry "
-                f"knows. Projects enter the system through `pm-ai project add` "
-                f"(AD-11); this is a removed project or a typo in an id."
-            )
-        return DataScope(ScopeKind.PROJECT, project_id=project)
-    raise ChatListRefused(
+        return _project_scope(
+            subject,
+            where=where,
+            said=f"is scoped {text!r}",
+            filed="is scoped to project",
+            refused=refused,
+            registered=registered,
+        )
+    raise refused(
         f"{where} is scoped {text!r}, which is neither `personal` nor "
-        f"`project:<id>` naming an enrolled project."
+        f"`project:<id>` naming an enrolled project. A {noun}'s messages go to "
+        f"one of those two."
     )
+
+
+def _project_scope(
+    project: str,
+    *,
+    where: str,
+    said: str,
+    filed: str,
+    refused: type[ValueError],
+    registered: Callable[[str], bool],
+) -> DataScope:
+    """An entry's project as its scope, or the refusal naming the entry.
+
+    The checks both spellings share: a project named `personal` in any case, an
+    id the reference grammar cannot carry, and a project no registry knows.
+    `said` quotes what the entry wrote; `filed` is the phrase before a project
+    id, so each spelling's sentences read as before.
+    """
+    if project.casefold() == ScopeKind.PERSONAL.value:
+        raise refused(
+            f"{where} {said}. A project named 'personal' cites "
+            f"its messages exactly as the personal scope does, so the two "
+            f"could not be told apart; enrol the project under another id."
+        )
+    if not _citable_scope(project):
+        raise refused(
+            f"{where} {filed} {project!r}, an id the message "
+            f"reference grammar `graph:<scope>:message:<id>` cannot carry "
+            f"(AD-34), so no message from it could be cited."
+        )
+    if not registered(project):
+        raise UnknownProject(
+            f"{where} {filed} {project!r}, which no registry "
+            f"knows. Projects enter the system through `pm-ai project add` "
+            f"(AD-11); this is a removed project or a typo in an id."
+        )
+    return DataScope(ScopeKind.PROJECT, project_id=project)
 
 
 MAX_SETTING_MINUTES = 10 * 366 * 24 * 60
@@ -805,7 +893,7 @@ buy.
 SAMPLE_CHANNEL = ChannelListing(
     team="00000000-0000-0000-0000-00000000000a",
     channel="19:sample@thread.tacv2",
-    project="sample",
+    scope=DataScope(ScopeKind.PROJECT, project_id="sample"),
     label="a sample channel",
 )
 SAMPLE_MESSAGE = MessageRow(
@@ -1501,7 +1589,8 @@ class GraphConnector:
         return self._posted(
             scope=listing.scope,
             reference=(
-                f"graph:{listing.project}:message:{listing.channel}/{row.message_id}"
+                f"graph:{listing.reference_scope}:message:"
+                f"{listing.channel}/{row.message_id}"
             ),
             what=f"channel {listing.name!r}",
             name=listing.name,
@@ -1562,7 +1651,7 @@ class GraphConnector:
         else:
             sender_name = None
         return NormalizedEvent(
-            # AD-4 — a channel's project, or the scope a chat was listed under.
+            # AD-4 — the scope a channel or a chat was listed under.
             scope=scope,
             type=ObservedEventType.MESSAGE_POSTED,
             source_ref=source,

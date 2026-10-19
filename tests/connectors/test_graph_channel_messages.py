@@ -175,7 +175,7 @@ class Auth:
 
 
 def _listing(channel: str = CHANNEL_A, *, label: str | None = "Build room") -> ChannelListing:
-    return ChannelListing(team=TEAM, channel=channel, project="alpha", label=label)
+    return ChannelListing(team=TEAM, channel=channel, scope=ALPHA, label=label)
 
 
 def _connector(
@@ -1255,7 +1255,7 @@ def test_a_retryable_failure_cannot_carry_the_cut_marker():
 def test_naming_the_skipped_channels_keeps_the_cut_marker():
     from pm_ai.connectors.graph import _with_skipped
 
-    skipped = ChannelListing(team="t", channel="c", project="alpha", label="Later room")
+    skipped = ChannelListing(team="t", channel="c", scope=ALPHA, label="Later room")
     named = _with_skipped(_CUT, (skipped,))
     assert named is not None and named is not _CUT
     assert "Later room" in named.reason
@@ -1985,3 +1985,308 @@ def test_the_harvest_after_the_fix_asks_for_the_same_range_as_before():
     _connector(resumed).harvest(_cursor(calendar=position))
     (asked,) = _calendar_asks(resumed)
     assert _range_of(asked) == (position, NOW + WIDTH)
+
+
+# ── Story 33i — a listed channel may file into the personal scope ────────────
+
+
+def _listed(*entries: dict, registered=lambda project: project == "alpha"):
+    return graph_channel_listings({CHANNELS_KEY: list(entries)}, registered=registered)
+
+
+def _refs(result) -> list[str]:
+    return sorted(str(event.source_ref) for event in _messages(result))
+
+
+def _entries(daemon, scope: DataScope) -> list:
+    return [
+        entry
+        for entry in parse_segment(_log(daemon, scope))
+        if entry.category is ObservedEventType.MESSAGE_POSTED
+    ]
+
+
+def _text(entry) -> str:
+    """Every field value of one log entry, the reference among them."""
+    return " ".join(value for _, value in entry.fields)
+
+
+def test_a_personal_channel_through_run_harvest_files_every_message_personally(tmp_path):
+    """Acceptance: 33d's fixture listed `"scope": "personal"`; no project log changed."""
+    _enrol(tmp_path, **{CHANNELS_KEY: [{"team": TEAM, "channel": CHANNEL_A, "scope": "personal"}]})
+    daemon = build(tmp_path, "alpha", now=lambda: NOW)
+    built = daemon.connectors[INSTANCE]
+    assert isinstance(built, GraphConnector)
+    (listing,) = built.channels
+    assert listing.scope == PERSONAL
+    alpha_before = _log(daemon, ALPHA)
+    daemon.connectors[INSTANCE] = _connector(
+        Routes(channels={CHANNEL_A: [_page(*_threads())]}), listing
+    )
+
+    assert run_harvest(daemon, INSTANCE).persisted == 4
+
+    personal = _entries(daemon, PERSONAL)
+    assert len(personal) == 4
+    assert all(f"graph:personal:message:{CHANNEL_A}/" in _text(entry) for entry in personal)
+    assert _log(daemon, ALPHA) == alpha_before
+
+
+def test_a_personal_channels_events_are_personal_and_cited_personal():
+    routes = Routes(channels={CHANNEL_A: [_page(*_threads())]})
+    personal = ChannelListing(team=TEAM, channel=CHANNEL_A, scope=PERSONAL)
+    result = _connector(routes, personal).harvest(Cursor())
+    assert _messages(result)
+    for event in _messages(result):
+        assert event.scope == PERSONAL
+        assert str(event.source_ref).startswith(f"graph:personal:message:{CHANNEL_A}/")
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"team": TEAM, "channel": CHANNEL_A, "project": "alpha", "label": "Build room"},
+        {"team": TEAM, "channel": CHANNEL_A, "scope": "project:alpha", "label": "Build room"},
+    ],
+)
+def test_both_project_spellings_build_the_listing_and_references_33d_built(entry):
+    """Acceptance: a row written before this slice keeps its references and cursor."""
+    (listing,) = _listed(entry)
+    assert listing == _listing()
+    result = _connector(Routes(channels={CHANNEL_A: [_page(*_threads())]}), listing).harvest(Cursor())
+    assert _refs(result) == [
+        f"graph:alpha:message:{CHANNEL_A}/{message}"
+        for message in ("1700000000100", "1700000000300", "1700000000301", "1700000000302")
+    ]
+    assert list(_positions(result.cursor)["channels"]) == [CHANNEL_A]
+
+
+def test_a_channel_listing_refuses_a_people_scope_when_built():
+    with pytest.raises(ValueError, match="personally or in a project"):
+        ChannelListing(team=TEAM, channel=CHANNEL_A, scope=DataScope(ScopeKind.PEOPLE, person_id="x"))
+
+
+@pytest.mark.parametrize("project", ["alpha", "", None])
+@pytest.mark.parametrize("scope", ["personal", "", None])
+def test_an_entry_carrying_both_keys_is_refused_naming_it(project, scope):
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, "project": project, "scope": scope})
+    assert "entry 1" in str(refused.value)
+    assert "both" in str(refused.value)
+
+
+def test_an_entry_carrying_neither_key_is_refused_with_no_default():
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A})
+    assert "entry 1" in str(refused.value)
+    assert "there is no default" in str(refused.value)
+
+
+@pytest.mark.parametrize("project", ["", "  ", None, 3])
+def test_a_project_key_with_no_usable_id_is_refused_naming_the_entry(project):
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, "project": project})
+    assert "entry 1" in str(refused.value)
+
+
+@pytest.mark.parametrize("scope", ["people:x", "People:x"])
+def test_a_people_scope_is_refused_with_the_registry_sentence(scope):
+    from pm_ai.connectors.graph import NO_TEAM_MEMBER_REGISTRY
+
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, "scope": scope})
+    assert NO_TEAM_MEMBER_REGISTRY in str(refused.value)
+
+
+@pytest.mark.parametrize("key, value", [("scope", "project:ghost"), ("project", "ghost")])
+def test_an_unenrolled_project_is_refused_under_either_spelling(key, value):
+    with pytest.raises(UnknownProject) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, key: value})
+    assert "'ghost'" in str(refused.value)
+    assert CHANNEL_A in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [("scope", "project:Personal"), ("project", "Personal"), ("project", "personal")],
+)
+def test_a_project_named_personal_is_refused_under_either_spelling(key, value):
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, key: value}, registered=lambda p: True)
+    assert "entry 1" in str(refused.value)
+    assert "'personal'" in str(refused.value)
+
+
+@pytest.mark.parametrize("key, value", [("scope", "project:a:b"), ("project", "a:b")])
+def test_a_project_id_the_reference_cannot_carry_is_refused_under_either_spelling(key, value):
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, key: value}, registered=lambda p: True)
+    assert "cannot carry" in str(refused.value)
+
+
+@pytest.mark.parametrize("scope", ["team", "project:", "Personal", " personal", "application"])
+def test_a_malformed_scope_is_refused_naming_the_entry_and_a_channel(scope):
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, "scope": scope})
+    assert "entry 1" in str(refused.value)
+    if scope.strip() == scope:
+        assert "a channel's messages" in str(refused.value).casefold()
+    else:
+        assert "padded channel id" in str(refused.value)
+
+
+@pytest.mark.parametrize("scope", [None, "", 3])
+def test_a_scope_key_with_no_usable_scope_is_refused_naming_the_entry(scope):
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed({"team": TEAM, "channel": CHANNEL_A, "scope": scope})
+    assert "entry 1" in str(refused.value)
+    assert "names no scope" in str(refused.value)
+    assert "a channel's messages" in str(refused.value).casefold()
+
+
+def test_one_channel_under_two_scopes_is_refused_naming_the_id():
+    with pytest.raises(ChannelListRefused) as refused:
+        _listed(
+            {"team": TEAM, "channel": CHANNEL_A, "scope": "personal"},
+            {"team": TEAM, "channel": CHANNEL_A, "project": "alpha"},
+        )
+    assert CHANNEL_A in str(refused.value)
+    assert "one scope" in str(refused.value)
+
+
+def test_a_chat_refusal_still_says_a_chat():
+    from pm_ai.connectors.graph import CHATS_KEY, ChatListRefused, graph_chat_listings
+
+    with pytest.raises(ChatListRefused) as refused:
+        graph_chat_listings(
+            {CHATS_KEY: [{"chat": "19:c@thread.v2", "scope": "team"}]},
+            registered=lambda p: True,
+        )
+    assert "a chat's messages" in str(refused.value).casefold()
+
+
+def _moved(tmp_path):
+    """One run filing in `alpha`, then the same entry moved to personal."""
+    daemon = build(tmp_path, "alpha", now=lambda: NOW)
+    fresh = _message("1700000000600", at=NOW - timedelta(minutes=30))
+    routes = Routes(
+        channels={CHANNEL_A: [_page(*_threads()), _page(fresh, *_threads())]},
+        calendar=[EMPTY_CALENDAR, EMPTY_CALENDAR],
+    )
+    daemon.connectors[INSTANCE] = _connector(routes, _listing())
+    first = run_harvest(daemon, INSTANCE)
+    stored = _positions(daemon.storage.load_cursor(INSTANCE))["channels"]
+    moved = ChannelListing(team=TEAM, channel=CHANNEL_A, scope=PERSONAL, label="Build room")
+    daemon.connectors[INSTANCE] = _connector(routes, moved)
+    second = run_harvest(daemon, INSTANCE)
+    return daemon, first, second, stored, routes
+
+
+def test_a_channel_moved_to_personal_keeps_its_position_and_files_new_messages_personally(tmp_path):
+    daemon, first, _, stored, routes = _moved(tmp_path)
+    assert first.persisted == 4
+    newest = datetime(2026, 10, 9, 10, 30, 0, 456000, tzinfo=timezone.utc)
+    assert datetime.fromisoformat(stored[CHANNEL_A]) == newest
+    assert len(routes.asked(CHANNEL_A)) == 2
+
+    assert len(_entries(daemon, ALPHA)) == 4, "what alpha filed stays in alpha"
+    personal = " ".join(_text(entry) for entry in _entries(daemon, PERSONAL))
+    assert f"graph:personal:message:{CHANNEL_A}/1700000000600" in personal
+    for older in ("1700000000300", "1700000000301", "1700000000100"):
+        assert f"/{older}" not in personal, "the reach-back is not re-read into personal"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "33i gap: the walk emits a message created at or after the stored "
+        "position (inclusive, `channels.py` `_read`), and the natural key "
+        "includes the scope, so the newest message already filed in the old "
+        "scope is filed again in the new one. Fixing it needs the cursor to "
+        "record the scope it last filed in, or an exclusive position; both "
+        "change how a project channel is cursored."
+    ),
+)
+def test_a_channel_moved_to_personal_files_no_message_twice(tmp_path):
+    daemon, _, second, _, _ = _moved(tmp_path)
+    assert second.persisted == 1
+    (personal,) = _entries(daemon, PERSONAL)
+    assert f"graph:personal:message:{CHANNEL_A}/1700000000600" in _text(personal)
+
+
+def test_a_mixed_run_files_each_channels_events_in_its_own_log(tmp_path):
+    daemon = build(tmp_path, "alpha", now=lambda: NOW)
+    routes = Routes(
+        channels={
+            CHANNEL_A: [_page(_message("1700000000500"))],
+            CHANNEL_B: [_page(_message("1700000000501"))],
+        }
+    )
+    personal = ChannelListing(team=TEAM, channel=CHANNEL_B, scope=PERSONAL)
+    daemon.connectors[INSTANCE] = _connector(routes, _listing(), personal)
+
+    assert run_harvest(daemon, INSTANCE).persisted == 2
+
+    (alpha,) = _entries(daemon, ALPHA)
+    (mine,) = _entries(daemon, PERSONAL)
+    assert f"graph:alpha:message:{CHANNEL_A}/1700000000500" in _text(alpha)
+    assert f"graph:personal:message:{CHANNEL_B}/1700000000501" in _text(mine)
+
+
+def test_a_mistyped_personal_channel_names_its_scope_not_a_project():
+    routes = Routes(channels={CHANNEL_A: [_status(404)]})
+    personal = ChannelListing(team=TEAM, channel=CHANNEL_A, scope=PERSONAL)
+    result = _connector(routes, personal).harvest(Cursor())
+    assert result.failure is not None
+    assert "(scope 'personal')" in result.failure.reason
+
+
+def test_a_mistyped_project_channel_names_its_scope():
+    routes = Routes(channels={CHANNEL_A: [_status(404)]})
+    result = _connector(routes, _listing()).harvest(Cursor())
+    assert result.failure is not None
+    assert "(scope 'project:alpha')" in result.failure.reason
+
+
+def _daemon_rows(tmp_path: Path, entry: dict):
+    from pm_ai.app.wiring import _enrolled_connectors  # noqa: PLC2701
+
+    _enrol(tmp_path, **{CHANNELS_KEY: [entry]})
+    daemon = build(tmp_path, "alpha", now=lambda: NOW)
+    return _enrolled_connectors(
+        daemon.storage,
+        scopes={},
+        clock=lambda: NOW,
+        registered=lambda project: project == "alpha",
+        later=frozenset({"new"}),
+    )
+
+
+@pytest.mark.parametrize("key, value", [("scope", "project:new"), ("project", "new")])
+def test_in_the_daemon_a_channel_filing_into_a_later_project_names_the_row(tmp_path, key, value):
+    built, unbuilt = _daemon_rows(tmp_path, {"team": TEAM, "channel": CHANNEL_A, key: value})
+    assert INSTANCE not in {instance for instance, _, _ in built}
+    (named,) = [row for row in unbuilt if row.instance == INSTANCE]
+    assert "new" in named.reason and "enrolled since" in named.reason
+
+
+@pytest.mark.parametrize("key, value", [("scope", "project:alpha"), ("project", "alpha")])
+def test_in_the_daemon_a_row_whose_channel_files_into_a_project_is_still_filed_personal(
+    tmp_path, key, value
+):
+    """9a: the Graph row's filed scope stays personal; the channel's is alpha."""
+    built, unbuilt = _daemon_rows(tmp_path, {"team": TEAM, "channel": CHANNEL_A, key: value})
+    assert INSTANCE not in {row.instance for row in unbuilt}
+    ((_, connector, filed),) = [row for row in built if row[0] == INSTANCE]
+    assert filed == PERSONAL
+    assert isinstance(connector, GraphConnector)
+    assert connector.channels[0].scope == ALPHA
+
+
+def test_in_the_daemon_a_personal_channel_is_built(tmp_path):
+    built, unbuilt = _daemon_rows(tmp_path, {"team": TEAM, "channel": CHANNEL_A, "scope": "personal"})
+    assert INSTANCE not in {row.instance for row in unbuilt}
+    ((instance, connector, filed),) = [row for row in built if row[0] == INSTANCE]
+    assert filed == PERSONAL
+    assert isinstance(connector, GraphConnector)
+    assert connector.channels[0].scope == PERSONAL
