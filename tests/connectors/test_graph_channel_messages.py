@@ -2196,22 +2196,17 @@ def test_a_channel_moved_to_personal_keeps_its_position_and_files_new_messages_p
         assert f"/{older}" not in personal, "the reach-back is not re-read into personal"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "33i gap: the walk emits a message created at or after the stored "
-        "position (inclusive, `channels.py` `_read`), and the natural key "
-        "includes the scope, so the newest message already filed in the old "
-        "scope is filed again in the new one. Fixing it needs the cursor to "
-        "record the scope it last filed in, or an exclusive position; both "
-        "change how a project channel is cursored."
-    ),
-)
-def test_a_channel_moved_to_personal_files_no_message_twice(tmp_path):
+def test_a_channel_moved_to_another_scope_files_only_its_newest_old_message_again(tmp_path):
+    # An accepted limit (Andrei, 2026-10-19): the walk reads from the stored
+    # position inclusively and the natural key holds the scope, so the newest
+    # message already filed in the old scope is filed once more in the new one.
     daemon, _, second, _, _ = _moved(tmp_path)
-    assert second.persisted == 1
-    (personal,) = _entries(daemon, PERSONAL)
-    assert f"graph:personal:message:{CHANNEL_A}/1700000000600" in _text(personal)
+    assert second.persisted == 2
+    personal = " ".join(_text(entry) for entry in _entries(daemon, PERSONAL))
+    assert f"graph:personal:message:{CHANNEL_A}/1700000000600" in personal, "the new message"
+    assert f"graph:personal:message:{CHANNEL_A}/1700000000302" in personal, "the newest old one"
+    for older in ("1700000000300", "1700000000301", "1700000000100"):
+        assert f"/{older}" not in personal, "no other old message is filed again"
 
 
 def test_a_mixed_run_files_each_channels_events_in_its_own_log(tmp_path):
