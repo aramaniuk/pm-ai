@@ -74,7 +74,12 @@ from pm_ai.core.meeting_records import (
     check_title,
     parse_attendees,
 )
-from pm_ai.core.transcripts import MAX_DROP_MINUTES, MIN_DROP_MINUTES
+from pm_ai.core.transcripts import (
+    MAX_DROP_MINUTES,
+    MIN_DROP_MINUTES,
+    carried_minutes,
+    drop_utterances,
+)
 from pm_ai.domain.meetings import AmbiguousMeeting
 from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
 from pm_ai.domain.transcripts import (
@@ -145,6 +150,9 @@ __all__ = [
     "Command",
     "ConnectorsOnDisk",
     "DEFAULT_GRAPH_INSTANCE",
+    "DROP_ANSWERS",
+    "DROP_FORMATS",
+    "DROP_WORDS",
     "Context",
     "FirstRun",
     "GoalBook",
@@ -164,7 +172,9 @@ __all__ = [
     "TERMINAL_BOUND",
     "TranscriptDrop",
     "TranscriptDropOutcome",
+    "ask_drop_here",
     "dispatch",
+    "drop_would_ask",
     "names_a_command",
     "parse",
     "usage",
@@ -696,6 +706,10 @@ class TranscriptDropOutcome(Protocol):
     @property
     def duration_from_last_cue(self) -> bool: ...
     @property
+    def from_docx(self) -> bool:
+        """The capture is the text taken from a `.docx` (story 11d)."""
+        ...
+    @property
     def notices(self) -> tuple[str, ...]: ...
 
 
@@ -717,6 +731,7 @@ class TranscriptDrop(Protocol):
         meeting_id: str | None,
         identify: Callable[[], tuple[str, datetime]] | None,
         describe: Callable[[bool], tuple[tuple[Actor, ...], int | None]] | None,
+        from_docx: bool = False,
     ) -> TranscriptDropOutcome: ...
 
 
@@ -3110,6 +3125,27 @@ def _read_goals(context: Context) -> GoalRegister:
 MEETING_ARGUMENT = "meeting"
 """`transcript drop`'s optional `--meeting <id>`: the record to bind to."""
 
+TITLE_OPTION = "title"
+START_OPTION = "start"
+ATTENDEES_OPTION = "attendees"
+DURATION_OPTION = "duration"
+DROP_ANSWERS = (TITLE_OPTION, START_OPTION, ATTENDEES_OPTION, DURATION_OPTION)
+"""The answers to `transcript drop`'s questions, given as options (story 11d).
+
+Typed at the prompt, a drop asks its questions in the prompt's own process and
+sends the daemon these options, so the daemon never asks (AD-21). At a terminal
+each one given is not asked; without a terminal, each one binding needs must be
+given. Each is checked as its question checks the answer typed to it."""
+
+DROP_WORDS = ("transcript", "drop")
+
+DROP_FORMATS = "The transcript formats pm-ai reads: .vtt, .txt, .md, .docx."
+"""Said at the end of every refusal about the dropped file (story 11d). Added
+here, where the command turns a refusal into its sentence, never inside the
+readers, whose refusals Graph's transcript path shares."""
+
+RELATIVE_PATHS = "a relative <file> is read from the folder pm-ai was started in"
+
 _DROPPABLE_KINDS = frozenset({ScopeKind.PERSONAL, ScopeKind.PROJECT})
 
 START_FORMS = ("2026-10-10T14:00+03:00", "2026-10-10T11:00Z")
@@ -3129,13 +3165,13 @@ first thing to go wrong.
 """
 
 _NOT_A_TRANSCRIPT_FORMAT = {
-    ".docx": "a Word document",
-    ".doc": "a Word document",
+    ".doc": "a Word document in the old .doc format",
     ".pdf": "a PDF",
     ".rtf": "a rich-text document",
 }
-"""Document formats refused by name. `.docx` is the deferred one (it needs a
-parser dependency); the others get the same way out."""
+"""Document formats refused by name (story 11c). `.docx` is read since `11d`."""
+
+_DOCX = ".docx"
 
 
 def _drop_target(options: Mapping[str, str]) -> DataScope:
@@ -3201,16 +3237,102 @@ def _duration_refusal(minutes: int) -> str | None:
     )
 
 
-def _drop_identify() -> tuple[str, datetime]:
-    """The title and start, asked at the terminal; refused without one."""
+@dataclass(frozen=True, slots=True)
+class _Given:
+    """The answers given as options, each checked; `None` where none was given."""
+
+    title: str | None = None
+    start: datetime | None = None
+    attendees: tuple[Actor, ...] | None = None
+    duration: int | None = None
+
+
+class _BadAnswer(Exception):
+    """An answer given as an option that its question would not accept: a usage error."""
+
+
+def _given(options: Mapping[str, str]) -> _Given:
+    """The answer options, each judged as its question judges a typed answer."""
+    title = options.get(TITLE_OPTION)
+    start = options.get(START_OPTION)
+    attendees = options.get(ATTENDEES_OPTION)
+    duration = options.get(DURATION_OPTION)
+    if title is not None:
+        title = title.strip()
+        reason = _title_refusal(title)
+        if reason is not None:
+            raise _BadAnswer(f"`--{TITLE_OPTION}`: {reason}")
+    if start is not None:
+        start = start.strip()
+        reason = _start_refusal(start)
+        if reason is not None:
+            raise _BadAnswer(f"`--{START_OPTION}`: {reason}")
+    if attendees is not None:
+        attendees = attendees.strip()
+        reason = _attendee_refusal(attendees)
+        if reason is not None:
+            raise _BadAnswer(f"`--{ATTENDEES_OPTION}`: {reason}")
+    minutes: int | None = None
+    if duration is not None:
+        typed = duration.strip()
+        if not (typed.isascii() and typed.isdigit()):
+            raise _BadAnswer(
+                f"`--{DURATION_OPTION}` takes a whole number of minutes, "
+                f"{MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}; {duration!r} is not one."
+            )
+        minutes = int(typed)
+        reason = _duration_refusal(minutes)
+        if reason is not None:
+            raise _BadAnswer(f"`--{DURATION_OPTION}`: {reason}")
+    if MEETING_ARGUMENT in options and any(name in options for name in DROP_ANSWERS):
+        named = _listed_words([f"`--{name}`" for name in DROP_ANSWERS if name in options])
+        raise _BadAnswer(
+            f"`--{MEETING_ARGUMENT}` names the record to bind to, so {named} "
+            f"cannot be given with it: they describe a meeting to match or make."
+        )
+    return _Given(
+        title=title,
+        start=None if start is None else datetime.fromisoformat(start).astimezone(timezone.utc),
+        attendees=None if attendees is None else parse_attendees(attendees),
+        duration=minutes,
+    )
+
+
+def _drop_misused(sentence: str) -> int:
+    """A `transcript drop` answer pm-ai cannot read: the usage error, exit 2."""
+    leaf = TABLE["transcript"].leaves["drop"]
+    _echo(
+        f"pm-ai: {sentence}\n\nusage: pm-ai transcript {_spelled('drop', leaf)}",
+        file=sys.stderr,
+    )
+    return EXIT_USAGE
+
+
+def _drop_identify(given: _Given | None = None) -> tuple[str, datetime]:
+    """The title and start: given as options, else asked at the terminal; refused without one."""
+    given = given if given is not None else _Given()
+    if given.title is not None and given.start is not None:
+        return given.title, given.start
     if not _stdin_is_terminal():
+        missing = [
+            f"`--{name} <{name}>`"
+            for name, value in ((TITLE_OPTION, given.title), (START_OPTION, given.start))
+            if value is None
+        ]
         raise Refusal(
             "binding this transcript needs the meeting's title and start, and "
             "stdin is not a terminal to ask them at — a pipe, a cron job or a "
             "CI step. Nothing was written. Name the meeting with "
-            "`--meeting <id>` to drop without being asked."
+            f"`--{MEETING_ARGUMENT} <id>`, or give {_listed_words(missing)}, to "
+            f"drop without being asked."
         )
-    title = _ask_until("Meeting title (required): ", judge=_title_refusal)
+    title = (
+        given.title
+        if given.title is not None
+        else _ask_until("Meeting title (required): ", judge=_title_refusal)
+    )
+    if given.start is not None:
+        return title, given.start
     start = _ask_until(
         f"Meeting start, as {START_FORMS[0]} or {START_FORMS[1]}: ",
         judge=_start_refusal,
@@ -3218,77 +3340,137 @@ def _drop_identify() -> tuple[str, datetime]:
     return title, datetime.fromisoformat(start).astimezone(timezone.utc)
 
 
-def _drop_describe(ask_duration: bool) -> tuple[tuple[Actor, ...], int | None]:
-    """The attendees, and the duration when the file does not carry one."""
-    attendees = parse_attendees(
-        _ask_until(
-            "No recorded meeting matches, so a new record is made. Attendees, as "
-            "handles separated by commas with no spaces (Enter for none): ",
-            judge=_attendee_refusal,
+_ATTENDEES_QUESTION = (
+    "No recorded meeting matches, so a new record is made. Attendees, as "
+    "handles separated by commas with no spaces (Enter for none): "
+)
+_DURATION_QUESTION = f"Duration in minutes ({MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}): "
+
+
+def _drop_describe(
+    ask_duration: bool, given: _Given | None = None
+) -> tuple[tuple[Actor, ...], int | None]:
+    """The attendees, and the duration when the file does not carry one.
+
+    Each given as an option is not asked; without a terminal, each that is
+    missing is refused by name, before anything is written.
+    """
+    given = given if given is not None else _Given()
+    attendees = given.attendees
+    minutes = given.duration if ask_duration else None
+    missing = [
+        f"`--{name} <{name}>`"
+        for name, needed in (
+            (ATTENDEES_OPTION, attendees is None),
+            (DURATION_OPTION, ask_duration and minutes is None),
         )
-    )
-    if not ask_duration:
-        return attendees, None
-    minutes = _ask_minutes(
-        f"Duration in minutes ({MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}): ",
-        judge=_duration_refusal,
-    )
+        if needed
+    ]
+    if missing and not _stdin_is_terminal():
+        raise Refusal(
+            f"no recorded meeting matches, so a new record is made, and it needs "
+            f"{_listed_words(missing)}; stdin is not a terminal to ask at. "
+            f"Nothing was written."
+        )
+    if attendees is None:
+        attendees = parse_attendees(_ask_until(_ATTENDEES_QUESTION, judge=_attendee_refusal))
+    if ask_duration and minutes is None:
+        minutes = _ask_minutes(_DURATION_QUESTION, judge=_duration_refusal)
     return attendees, minutes
 
 
-def _read_drop(path: Path) -> str:
-    """The dropped file's text, or a refusal naming the path and what is wrong.
+def _drop_path(given: str) -> tuple[Path, str]:
+    """The absolute path a drop reads, and the note its refusals add for a relative one.
 
-    Checked in this order: there is something at the path, it is a document
-    format pm-ai does not read, it is a regular file, it is within
-    `MAX_DROP_BYTES`, it can be read, it is UTF-8.
+    `~` is expanded here, in whichever process runs the command — the prompt
+    sends `~/x.vtt` to the daemon as typed — and a relative path is read from
+    the folder pm-ai was started in (story 11d).
     """
+    try:
+        path = Path(given).expanduser()
+    except RuntimeError as homeless:
+        raise Refusal(
+            f"{given} starts with `~`, and the home folder it names could not be "
+            f"found ({homeless}). Nothing was written. {DROP_FORMATS}"
+        ) from homeless
+    if path.is_absolute():
+        return path, ""
+    try:
+        folder = Path.cwd()
+    except OSError as unreadable:
+        raise Refusal(
+            f"{given} is a relative path, read from the folder pm-ai was started "
+            f"in, and that folder could not be read "
+            f"({unreadable.strerror or type(unreadable).__name__}). Nothing was "
+            f"written. {DROP_FORMATS}"
+        ) from unreadable
+    return folder / path, f" ({given} is relative, and {RELATIVE_PATHS}, {folder})"
+
+
+def _read_drop(path: Path, note: str = "") -> tuple[str, bool]:
+    """The dropped file's text and whether it was taken from a `.docx`, or a refusal.
+
+    Checked in this order: there is something at the path, it is not a
+    document format pm-ai refuses, it is a regular file, it is within
+    `MAX_DROP_BYTES`, it can be read; then a `.docx` is read as bytes by
+    `pm_ai.core.docx_text`, imported here and only here, and anything else is
+    decoded as UTF-8. Every refusal names the absolute path, with `note` for a
+    relative one, and ends with `DROP_FORMATS`.
+    """
+    where = f"{path}{note}"
+    tail = f"Nothing was written. {DROP_FORMATS}"
     if path.is_symlink() and not path.exists():
         raise Refusal(
-            f"{path} is a link to nothing (a dangling link), so there is no "
-            f"transcript to read. Nothing was written."
+            f"{where} is a link to nothing (a dangling link), so there is no "
+            f"transcript to read. {tail}"
         )
     if not path.exists():
-        raise Refusal(f"{path} does not exist. Nothing was written.")
+        raise Refusal(f"{where} does not exist. {tail}")
     described = _NOT_A_TRANSCRIPT_FORMAT.get(path.suffix.lower())
     if described is not None:
-        deferral = (
-            " Reading .docx needs a parser pm-ai does not ship yet, so it is deferred."
-            if path.suffix.lower() == ".docx"
-            else ""
-        )
         raise Refusal(
-            f"{path} is {described}, not a transcript pm-ai reads.{deferral} Save "
-            f"the transcript as .vtt or .txt and drop that. Nothing was written."
+            f"{where} is {described}, not a transcript pm-ai reads; save the "
+            f"transcript in a format pm-ai reads and drop that. {tail}"
         )
     if path.is_dir():
-        raise Refusal(f"{path} is a directory, not a transcript file. Nothing was written.")
+        raise Refusal(f"{where} is a directory, not a transcript file. {tail}")
     try:
         status = path.stat()
     except OSError as unreadable:
         reason = unreadable.strerror or type(unreadable).__name__
-        raise Refusal(f"{path} could not be read ({reason}). Nothing was written.") from unreadable
+        raise Refusal(f"{where} could not be read ({reason}). {tail}") from unreadable
     if not stat.S_ISREG(status.st_mode):
         raise Refusal(
-            f"{path} is not a regular file (a FIFO, a device or a socket), so it "
-            f"is not a transcript pm-ai will read. Nothing was written."
+            f"{where} is not a regular file (a FIFO, a device or a socket), so it "
+            f"is not a transcript pm-ai will read. {tail}"
         )
     if status.st_size > MAX_DROP_BYTES:
         raise Refusal(
-            f"{path} is {status.st_size} bytes, over the {MAX_DROP_BYTES // (1024 * 1024)} "
-            f"MiB a dropped transcript may be. Nothing was written."
+            f"{where} is {status.st_size} bytes, over the {MAX_DROP_BYTES // (1024 * 1024)} "
+            f"MiB a dropped transcript may be. {tail}"
         )
     try:
         raw = path.read_bytes()
     except OSError as unreadable:
         reason = unreadable.strerror or type(unreadable).__name__
-        raise Refusal(f"{path} could not be read ({reason}). Nothing was written.") from unreadable
+        raise Refusal(f"{where} could not be read ({reason}). {tail}") from unreadable
+    if path.suffix.lower() == _DOCX:
+        # Story 11d: imported when a `.docx` is dropped, so the prompt's
+        # startup never loads the reader.
+        from pm_ai.core.docx_text import DocxRefused, docx_text
+
+        try:
+            return docx_text(raw, name=str(path)), True
+        except DocxRefused as refused:
+            # The reader names the absolute path; a relative one's note follows.
+            said = f"{str(refused).rstrip('.')}{note}." if note else str(refused)
+            raise Refusal(f"{said} {tail}") from refused
     try:
-        return raw.decode("utf-8")
+        return raw.decode("utf-8"), False
     except UnicodeDecodeError as undecodable:
         raise Refusal(
-            f"{path} is not UTF-8 text (byte {undecodable.start} does not decode), "
-            f"so pm-ai cannot read it as a transcript. Nothing was written."
+            f"{where} is not UTF-8 text (byte {undecodable.start} does not decode), "
+            f"so pm-ai cannot read it as a transcript. {tail}"
         ) from undecodable
 
 
@@ -3319,26 +3501,13 @@ def _closing_line(dropped: TranscriptDropOutcome) -> str:
             else "as answered"
         )
         line += f" Its duration is {dropped.duration_minutes} minutes, {source}."
+    if dropped.from_docx:
+        line += " The capture is the text taken from the .docx; the .docx itself is not kept."
     return line
 
 
-def _transcript_drop(context: Context) -> int:
-    """`pm-ai transcript drop <file> --scope <scope> [--meeting <id>]` (story 11c).
-
-    The surface of `pm_ai.app.pipelines.drop_transcript`: it refuses the scopes
-    a drop cannot go to and a path that is not a readable UTF-8 transcript
-    file, then hands the text to the pipeline with the two question sets — the
-    title and start, then the attendees and duration — which the pipeline asks
-    only when binding needs them. Every refusal the pipeline meets, a
-    filesystem error included, is passed through verbatim as exit `3`; it
-    writes nothing before the capture, and a failure or Ctrl-C after it says
-    whether the capture was kept.
-    """
-    scope = context.target
-    if scope is None:
-        raise RuntimeError(
-            "no target scope reached `transcript drop`. That is a wiring fault in pm-ai."
-        )
+def _refuse_undroppable(scope: DataScope) -> None:
+    """The scopes a drop cannot go to, refused by name (story 11c)."""
     if scope.kind is ScopeKind.PEOPLE:
         raise Refusal(
             f"a transcript cannot be dropped into {scope}: a 1:1's transcript is "
@@ -3351,9 +3520,140 @@ def _transcript_drop(context: Context) -> int:
             f"meetings. Drop into `personal` or `project:<id>`. Nothing was "
             f"written."
         )
+
+
+def _file_refusal(refused: UnreadableTranscript | NothingSaid) -> Refusal:
+    """A reader's refusal about the file, with the formats the command reads (story 11d)."""
+    return Refusal(f"{refused} {DROP_FORMATS}")
+
+
+def _drop_left_to_ask(words: Sequence[str]) -> tuple[Parsed, _Given] | None:
+    """The parsed drop and its given answers when the prompt may need to ask; else `None`.
+
+    `None` for a usage error or help (the daemon answers it), `--meeting`
+    given, an answer option its question would refuse (the daemon's usage
+    error names it), every answer given, or no terminal to ask at (the daemon
+    refuses by name).
+    """
+    parsed = parse(words)
+    if isinstance(parsed, Answered) or not parsed.arguments:
+        return None
+    if MEETING_ARGUMENT in parsed.options:
+        return None
+    try:
+        given = _given(parsed.options)
+    except _BadAnswer:
+        return None
+    if None not in (given.title, given.start, given.attendees, given.duration):
+        return None
+    if not _stdin_is_terminal():
+        return None
+    return parsed, given
+
+
+def drop_would_ask(words: Sequence[str]) -> bool:
+    """Whether `ask_drop_here` may ask a question for these words (story 11d).
+
+    The prompt asks this first, so it can find out whether a daemon answers
+    before asking anything a line that could not be sent would waste.
+    """
+    return _drop_left_to_ask(words) is not None
+
+
+def ask_drop_here(words: Sequence[str]) -> list[str]:
+    """At the prompt: a drop's questions asked in this process, and the words to send (AD-21).
+
+    Typed at `pm-ai>`, `transcript drop` runs in the daemon, which never asks.
+    So a drop without `--meeting` that would need to ask asks here first —
+    the title and start, then the attendees a new record needs and, when the
+    file carries none, the duration — and the line goes to the daemon with the
+    answers added as options (story 11d). The prompt cannot read the meeting
+    records without composing, so the attendees and duration are asked before
+    the daemon knows whether a record matches; they are used only if it makes
+    one.
+
+    Checked before any question, and refused here (`Refusal`): the scope kind
+    (`people:<id>` and `application` are refused), and the file — the path,
+    its kind and size, its decoding or `.docx` text, and whether a reader
+    accepts it and anything is said in it. Not checked here, so refused by the
+    daemon after the questions: whether the project is one the daemon watches,
+    the binding itself (a named meeting, two candidates), and the capture.
+
+    The words come back unchanged when nothing is left to ask
+    (`_drop_left_to_ask`). Otherwise the answers are added as options before a
+    bare `--`, if the words hold one; each non-empty value is joined to its
+    option with `=`, so a title starting with `--` is never read as an option.
+    Ctrl-C or end of input at a question is `Refusal`, and nothing is sent.
+    """
+    left = _drop_left_to_ask(words)
+    if left is None:
+        return list(words)
+    parsed, given = left
+    if parsed.target is not None:
+        _refuse_undroppable(parsed.target)
+    path, note = _drop_path(parsed.arguments[0])
+    text, from_docx = _read_drop(path, note)
+    try:
+        drop_utterances(text, name=str(path), from_docx=from_docx)
+    except (UnreadableTranscript, NothingSaid) as refused:
+        raise _file_refusal(refused) from refused
+    title, start = _drop_identify(given)
+    answers = {TITLE_OPTION: title}
+    if given.start is None:
+        answers[START_OPTION] = start.isoformat()
+    if given.attendees is None:
+        answers[ATTENDEES_OPTION] = _ask_until(
+            "If no recorded meeting matches, a new record is made. Attendees, as "
+            "handles separated by commas with no spaces (Enter for none): ",
+            judge=_attendee_refusal,
+        )
+    if given.duration is None and carried_minutes(str(path), text, from_docx=from_docx) is None:
+        minutes = _ask_minutes(
+            f"Duration in minutes, if a new record is made ({MIN_DROP_MINUTES} to "
+            f"{MAX_DROP_MINUTES}): ",
+            judge=_duration_refusal,
+        )
+        answers[DURATION_OPTION] = str(minutes)
+    added: list[str] = []
+    for name, value in answers.items():
+        if name in parsed.options:
+            continue
+        # `--attendees=` is refused as an empty value, so no attendees go as
+        # `--attendees ''`; an empty word is never read as an option.
+        added += [f"--{name}={value}"] if value else [f"--{name}", value]
+    words = list(words)
+    at = words.index("--", len(DROP_WORDS)) if "--" in words[len(DROP_WORDS):] else len(words)
+    return [*words[:at], *added, *words[at:]]
+
+
+def _transcript_drop(context: Context) -> int:
+    """`pm-ai transcript drop <file> --scope <scope> [--meeting <id>] [answers]` (11c, 11d).
+
+    The surface of `pm_ai.app.pipelines.drop_transcript`: it refuses the scopes
+    a drop cannot go to and a path that is not a readable transcript file —
+    `~` expanded here, a relative path read from the folder pm-ai was started
+    in, a `.docx` read for its text — then hands the text to the pipeline with
+    the two question sets — the title and start, then the attendees and
+    duration — which the pipeline asks only when binding needs them, and
+    never for an answer given as an option (`DROP_ANSWERS`). Every refusal the
+    pipeline meets, a filesystem error included, is passed through verbatim as
+    exit `3`, and those about the file end with `DROP_FORMATS`; it writes
+    nothing before the capture, and a failure or Ctrl-C after it says whether
+    the capture was kept.
+    """
+    scope = context.target
+    if scope is None:
+        raise RuntimeError(
+            "no target scope reached `transcript drop`. That is a wiring fault in pm-ai."
+        )
+    try:
+        given = _given(context.options)
+    except _BadAnswer as bad:
+        return _drop_misused(str(bad))
+    _refuse_undroppable(scope)
     (file,) = context.arguments
-    path = Path(file)
-    text = _read_drop(path)
+    path, note = _drop_path(file)
+    text, from_docx = _read_drop(path, note)
     context.require_daemon()
     drop = context.transcript_drop
     if drop is None:
@@ -3367,12 +3667,13 @@ def _transcript_drop(context: Context) -> int:
             file_name=str(path),
             scope=scope,
             meeting_id=context.options.get(MEETING_ARGUMENT),
-            identify=_drop_identify,
-            describe=_drop_describe,
+            identify=lambda: _drop_identify(given),
+            describe=lambda ask_duration: _drop_describe(ask_duration, given),
+            from_docx=from_docx,
         )
+    except (UnreadableTranscript, NothingSaid) as refused:
+        raise _file_refusal(refused) from refused
     except (
-        UnreadableTranscript,
-        NothingSaid,
         UnboundTranscript,
         MeetingNotFound,
         AmbiguousMeeting,
@@ -3651,10 +3952,12 @@ TABLE: Mapping[str, Command] = {
         "meeting transcripts pm-ai extracts from",
         leaves={
             "drop": Command(
-                "ingest a .vtt or .txt transcript against a meeting in that scope",
+                "ingest a .vtt, .txt, .md or .docx transcript against a meeting in "
+                "that scope; a relative <file> is read from the folder pm-ai was "
+                "started in",
                 _transcript_drop,
                 takes=("file",),
-                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, *DROP_ANSWERS),
                 requires=(SCOPE_ARGUMENT,),
                 target=_drop_target,
             ),
@@ -3907,7 +4210,12 @@ def parse(argv: Sequence[str]) -> Parsed | Answered:
             if leaf.takes or leaf.optional
             else "no arguments"
         )
-        return _misused(f"`{name} {rest[0]}` takes {expected}", group=name)
+        hint = (
+            "; a path with spaces must be in quotes, as 'My Notes.vtt'"
+            if (name, rest[0]) == DROP_WORDS and len(supplied) > len(leaf.takes)
+            else ""
+        )
+        return _misused(f"`{name} {rest[0]}` takes {expected}{hint}", group=name)
     return _parsed(
         leaf, leaf.run, arguments=supplied, options=leaf_options, flags=leaf_flags, group=name
     )

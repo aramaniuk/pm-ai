@@ -74,8 +74,9 @@ def test_a_group_offers_its_subcommands_as_the_table_declares_them():
 
 
 def test_options_are_offered_and_one_already_given_is_not():
-    assert _offered("transcript drop x.vtt --") == ["--scope", "--meeting"]
-    assert _offered("transcript drop x.vtt --scope personal --") == ["--meeting"]
+    answers = ["--title", "--start", "--attendees", "--duration"]
+    assert _offered("transcript drop x.vtt --") == ["--scope", "--meeting", *answers]
+    assert _offered("transcript drop x.vtt --scope personal --") == ["--meeting", *answers]
 
 
 def test_a_flag_is_offered_like_an_option():

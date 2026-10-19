@@ -78,7 +78,11 @@ from pm_ai.surfaces.cli.dispatch import (
     TABLE,
     TAKES_A_PATH,
     TERMINAL_BOUND,
+    DROP_WORDS,
     Answered,
+    Refusal,
+    ask_drop_here,
+    drop_would_ask,
     names_a_command,
     parse,
 )
@@ -89,6 +93,7 @@ from pm_ai.surfaces.cli.loopback import (
     Followed,
     Outcome,
     StreamLost,
+    Unreached,
 )
 
 __all__ = [
@@ -113,6 +118,10 @@ class DaemonClient(Protocol):
     """What the prompt needs of `pm_ai.surfaces.cli.loopback.LoopbackClient`."""
 
     def send(self, line: str) -> Outcome: ...
+
+    def reachable(self) -> Unreached | None:
+        """`None` when a line could be sent now; else why not (story 11d)."""
+        ...
 
     def follow(
         self, job_id: str, on_state: Callable[[str], None] | None = None
@@ -640,7 +649,22 @@ def _through_daemon(
     """Send a command's words to the daemon and show what comes back.
 
     `typed` is the line as it was typed, shown on the job's line (story 4v).
+    A `transcript drop` asks its questions here first, and goes with the
+    answers as options: the daemon never asks (story 11d, AD-21).
     """
+    if tuple(words[:2]) == DROP_WORDS and drop_would_ask(words):
+        # Asked before the questions: a line that cannot be sent asks nothing.
+        unreached = client.reachable()
+        if unreached is not None:
+            print(f"pm-ai: {unreached.sentence}", file=sys.stderr, flush=True)
+            _status(EXIT_UNEXPECTED)
+            return
+        try:
+            words = ask_drop_here(words)
+        except Refusal as refused:
+            print(f"pm-ai: {refused}", file=sys.stderr, flush=True)
+            _status(EXIT_REFUSAL)
+            return
     try:
         line = shlex.join(_absolute_paths(words))
     except OSError as unreadable:
