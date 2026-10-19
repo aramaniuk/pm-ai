@@ -83,6 +83,16 @@ from pm_ai.domain.transcripts import (
     UnboundTranscript,
     UnreadableTranscript,
 )
+from pm_ai.surfaces.cli.logs import (
+    LEVELS as LOG_LEVELS,
+    MAX_LINES as LOG_MAX_LINES,
+    DaemonLog,
+    LogUnreadable,
+    level_value,
+    lines_value,
+    show as show_log,
+    unbuffered as unbuffered_stream,
+)
 from pm_ai.core.connector_enrolment import (
     ConnectorNotConfigured,
     ConnectorRowChanged,
@@ -835,6 +845,13 @@ class Context:
     flags: frozenset[str] = frozenset()
     """The value-less flags this invocation carried (`--yes`), by name (4t)."""
 
+    daemon_log: DaemonLog | None = None
+    """Where the daemon's log is, for `pm-ai logs` (story 4w).
+
+    Located by the composition root from paths alone, before anything is
+    composed. `None` refuses `logs` as a wiring fault.
+    """
+
     transcript_drop: TranscriptDrop | None = None
     """`pm-ai transcript drop`'s read, bind, capture and ingest (story 11c).
 
@@ -1012,6 +1029,14 @@ class Command:
     `goal list` and `goal show` (story 4t): the composition root hands them a
     reader and composes no daemon, so a broken `config.toml` or no keychain does
     not stop them.
+    """
+
+    reads_daemon_log: bool = False
+    """`True` for `pm-ai logs` (story 4w): answered before the keychain is built.
+
+    It reads the daemon's log files by their paths and needs no keychain,
+    store, settings file or daemon, so the composition root answers it before
+    building any of them, and a home with no `~/.pm-ai` gains nothing.
     """
 
     requires: tuple[str, ...] = ()
@@ -3083,6 +3108,63 @@ def _transcript_drop(context: Context) -> int:
     return EXIT_OK
 
 
+LOG_LINES_OPTION = "lines"
+LOG_LEVEL_OPTION = "level"
+LOG_FOLLOW_FLAG = "follow"
+
+
+def _logs(context: Context) -> int:
+    """`pm-ai logs [--lines <n>] [--level <level>] [--follow]` (story 4w).
+
+    The daemon's log, read from its files in this process: the last `n` lines
+    at that level or above (default 50, every level), in this machine's local
+    zone, then — with `--follow` — every new line until Ctrl-C. The first line,
+    on standard error, names the file and the zone; standard output carries
+    only log lines. Never through the daemon: `logs` is `TERMINAL_BOUND`.
+    """
+    count = lines_value(context.options.get(LOG_LINES_OPTION))
+    if count is None:
+        return _logs_misused(
+            f"`--{LOG_LINES_OPTION}` takes a whole number from 1 to {LOG_MAX_LINES} in "
+            f"the digits 0-9, not {context.options[LOG_LINES_OPTION]!r}"
+        )
+    level = level_value(context.options.get(LOG_LEVEL_OPTION))
+    if level is None:
+        return _logs_misused(
+            f"`--{LOG_LEVEL_OPTION}` takes one of {', '.join(LOG_LEVELS)}, not "
+            f"{context.options[LOG_LEVEL_OPTION]!r}"
+        )
+    if context.daemon_log is None:
+        raise Refusal(
+            "no daemon log location was supplied to the CLI, so nothing was read. "
+            "This is a wiring fault in pm-ai, not this machine's."
+        )
+    # The process's own stdout is written unbuffered, so a pipe closed early
+    # leaves nothing for the interpreter's exit-time flush to fail on.
+    out = _OUT.get() or unbuffered_stream(sys.stdout)
+    err = _ERR.get() or sys.stderr
+    try:
+        return show_log(
+            context.daemon_log,
+            lines=count,
+            level=level,
+            follow=LOG_FOLLOW_FLAG in context.flags,
+            out=out,
+            err=err,
+        )
+    except LogUnreadable as unreadable:
+        raise Refusal(str(unreadable)) from unreadable
+
+
+def _logs_misused(sentence: str) -> int:
+    """A `logs` value pm-ai cannot read: the usage error, exit 2, on this command's error stream."""
+    _echo(
+        f"pm-ai: {sentence}\n\nusage: pm-ai {_spelled('logs', TABLE['logs'])}",
+        file=sys.stderr,
+    )
+    return EXIT_USAGE
+
+
 RESTART_SENTENCE = (
     "A daemon already running sees this after it is restarted (`pm-ai daemon run`)."
 )
@@ -3103,12 +3185,16 @@ TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
         ("connector", "add"),
         ("connector", "sign-in"),
         ("key", "enrol"),
+        ("logs",),
     }
 )
-"""The commands that need a terminal of their own: they ask questions or take a secret.
+"""The commands that need this terminal: they ask questions, read a secret, or
+hold the terminal until Ctrl-C.
 
 A line sent through the daemon naming one of these is refused by name (story
-4r, `4q`'s routing rule) — the daemon's terminal is not the client's.
+4r, `4q`'s routing rule) — the daemon's terminal is not the client's. `logs`
+(story 4w) is here rather than given a bound: `--follow` has no end, and it
+would hold one of the daemon's four workers until the client went away.
 """
 
 TAKES_A_PATH: frozenset[tuple[str, ...]] = frozenset(
@@ -3129,6 +3215,16 @@ TABLE: Mapping[str, Command] = {
         target=_dashboard_target,
     ),
     "doctor": Command("check this machine and report what is wrong with it", _doctor),
+    # `4w`: the daemon's log, read from its files in this process — no daemon,
+    # keychain or settings needed.
+    "logs": Command(
+        "print the daemon log's recent lines in local time; --follow keeps printing",
+        _logs,
+        options=(LOG_LINES_OPTION, LOG_LEVEL_OPTION),
+        flags=(LOG_FOLLOW_FLAG,),
+        composes=False,
+        reads_daemon_log=True,
+    ),
     # `4e`: the long-lived daemon. Foreground only — starting it at login under
     # launchd is a later slice, and the help says so.
     "daemon": Command(
@@ -3352,6 +3448,9 @@ class Parsed:
     composes: bool = True
     """`Command.composes`, carried so the composition root can skip composing."""
 
+    reads_daemon_log: bool = False
+    """`Command.reads_daemon_log`, carried so `logs` is answered before the keychain."""
+
 
 @dataclass(frozen=True, slots=True)
 class Answered:
@@ -3501,6 +3600,7 @@ def _parsed(
         target=target,
         flags=flags,
         composes=command.composes,
+        reads_daemon_log=command.reads_daemon_log,
     )
 
 
@@ -3518,6 +3618,7 @@ def dispatch(
     first_run: FirstRun | None = None,
     goals: GoalBook | None = None,
     goal_reader: GoalReader | None = None,
+    daemon_log: DaemonLog | None = None,
     transcript_drop: TranscriptDrop | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
@@ -3549,6 +3650,7 @@ def dispatch(
             first_run=first_run,
             goals=goals,
             goal_reader=goal_reader,
+            daemon_log=daemon_log,
             transcript_drop=transcript_drop,
             serve=serve,
             unavailable=unavailable,
@@ -3578,6 +3680,7 @@ def _dispatch(
     first_run: FirstRun | None,
     goals: GoalBook | None,
     goal_reader: GoalReader | None,
+    daemon_log: DaemonLog | None,
     transcript_drop: TranscriptDrop | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
@@ -3602,6 +3705,7 @@ def _dispatch(
         first_run=first_run,
         goals=goals,
         goal_reader=goal_reader,
+        daemon_log=daemon_log,
         transcript_drop=transcript_drop,
         serve=serve,
         unavailable=unavailable,

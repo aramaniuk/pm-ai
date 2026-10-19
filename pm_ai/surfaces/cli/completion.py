@@ -29,6 +29,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from pm_ai.core.goal_register import DOMAIN_SPELLINGS, HORIZON_SPELLINGS
+from pm_ai.surfaces.cli.logs import LEVELS as LOG_LEVELS
 from pm_ai.surfaces.cli.dispatch import (
     GOAL_OPTIONS,
     MEETING_ARGUMENT,
@@ -66,6 +67,8 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
         (("connector", "add"), "instance"),
         # A new goal's id, or one on file — `goal set` creates or revises.
         (("goal", "set"), "id"),
+        # How many log lines: a number, nothing on file to offer (story 4w).
+        (("logs",), "lines"),
     }
 )
 """`(command, name)` pairs whose value is free text, offered nothing."""
@@ -83,6 +86,7 @@ SYSTEMS = "systems"
 DOMAINS = "domains"
 HORIZONS = "horizons"
 GOAL_IDS = "goal ids"
+LOG_LEVEL_NAMES = "log levels"
 PATHS = "paths"
 
 _BY_NAME: Mapping[str, str] = {
@@ -100,6 +104,7 @@ _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("goal", "show"), "id"): GOAL_IDS,
     (("goal", "update"), "id"): GOAL_IDS,
     (("goal", "delete"), "id"): GOAL_IDS,
+    (("logs",), "level"): LOG_LEVEL_NAMES,
 }
 """Names whose value depends on the command declaring them."""
 
@@ -432,6 +437,8 @@ class Completion:
             return tuple(HORIZON_SPELLINGS)
         if source == GOAL_IDS:
             return self._goals.get()
+        if source == LOG_LEVEL_NAMES:
+            return LOG_LEVELS
         if source == PATHS:
             return _paths(partial)
         return ()

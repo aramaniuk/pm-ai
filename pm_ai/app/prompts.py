@@ -10,8 +10,9 @@ command's words sent here deliver what the same words deliver at a terminal.
 - `help` — the command list, inline, exit 0.
 - A first word that names no command — one sentence saying so and naming
   `help`, inline, exit 2.
-- A command that needs a terminal of its own — it asks questions or takes a
-  secret (`TERMINAL_BOUND`) — refused by name, inline, exit 3.
+- A command that needs a terminal of its own — it asks questions, takes a
+  secret, or holds the terminal until Ctrl-C (`TERMINAL_BOUND`) — refused by
+  name, inline, exit 3.
 - Anything else is parsed exactly as the command line is, and the pipeline's
   declared bound decides (`pm_ai.core.dispatch.plan`): under five seconds it
   runs now, on the I/O pool, with its own output buffers; at five or over its
@@ -373,8 +374,9 @@ class RequestPath:
         if needs is not None:
             named = " ".join(needs)
             return _inline(
-                f"pm-ai: `pm-ai {named}` asks questions or takes a secret, so it "
-                f"needs a terminal of its own and is not run through the daemon. "
+                f"pm-ai: `pm-ai {named}` asks questions, takes a secret or holds the "
+                f"terminal until Ctrl-C, so it needs a terminal of its own and is not "
+                f"run through the daemon. "
                 f"Run `pm-ai {named}` at a terminal.\n",
                 EXIT_REFUSAL,
             )

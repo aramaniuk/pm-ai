@@ -1134,7 +1134,7 @@ def test_every_daemon_backed_command_declares_its_target():
 
     That is the order this story replaced: the command would be refused outside
     every folder with two projects enrolled, or act in a project its output
-    does not go to. Exactly the three commands that need no daemon declare
+    does not go to. Exactly the commands that need no daemon declare
     none, and any handler that asks for the daemon must declare one.
     """
     import inspect
@@ -1153,7 +1153,8 @@ def test_every_daemon_backed_command_declares_its_target():
     untargeted = {
         name for name, command in _every_runnable_command() if command.target is None
     }
-    assert untargeted == {"doctor", "setup", "project add"}
+    # `logs` (story 4w) reads the daemon's log files and needs no daemon.
+    assert untargeted == {"doctor", "setup", "project add", "logs"}
 
     for name, command in _every_runnable_command():
         assert command.run is not None

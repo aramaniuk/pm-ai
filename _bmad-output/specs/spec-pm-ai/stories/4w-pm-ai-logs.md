@@ -2,7 +2,8 @@
 title: 'pm-ai logs shows the daemon log readably'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '8b79328d36da9e733063f9c84eac425d500956f4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -21,7 +22,7 @@ context:
 **Always:**
 - **What it reads.** `daemon.log` and its rotated copies in `~/.pm-ai/logs/`, oldest first — the names and the count (three copies of 5 MiB) are the storage service's, which already reads them for `4r`'s restart pass; this slice uses that one rule, not a second copy. The command's first line, on standard error, names the file and the zone times are shown in: `pm-ai: reading ~/.pm-ai/logs/daemon.log (and daemon.log.1–.3), times in <zone> (UTC+03:00 now)` — the zone's name where the machine has one, and its offset now. Standard output carries only log lines, so it can be piped.
 - **One line per record, readable.** `<local date and time to the second>  <level>  <source>  <message>`: the time from the record's `at` field converted to this machine's local zone, each record with the offset in force at its own instant, so lines either side of a daylight-saving change read correctly; the level in lower case; the source `request` for the request log, `daemon` for the daemon's own lines (the two loggers that write the file), any other logger by its name; the message as written. A message of several lines (an error's type name and the frames it was raised through, `4r`'s format) prints its continuation lines indented beneath it.
-- **Nothing in the file can act on the terminal.** The request log records the decoded request path even for a request the daemon refused for want of a token (`surfaces/api/app.py:277-281`, `:308-313`), so any local process, or a web page's request to the loopback port, can put arbitrary characters into a message. Before printing, every control character in the message and the source — the C0 and C1 ranges and DEL, which include the escape character that starts a terminal command — is replaced by `?`, except the line breaks of a multi-line message, which are printed as indented lines.
+- **Nothing in the file can act on the terminal.** The request log records the decoded request path even for a request the daemon refused for want of a token (`surfaces/api/app.py:277-281`, `:308-313`), so any local process, or a web page's request to the loopback port, can put arbitrary characters into a message. Before printing, every control character in the message and the source — the C0 and C1 ranges and DEL, which include the escape character that starts a terminal command — and every Unicode format character (direction overrides, isolates and marks, zero-width characters) and line or paragraph separator, which can reorder or hide text on screen, is replaced by `?`, except the line breaks of a multi-line message, which are printed as indented lines.
 - **No exception text is ever printed (`4r`'s rule).** The file holds none — the daemon's writer keeps an exception's type and frames and drops its text — and this command adds none: it prints the fields named above and nothing else of a record. A line that is not valid UTF-8, not a JSON object, or lacks a parseable timezone-aware `at`, a known `level` or a text `message` is never printed; such lines are counted, and one sentence on standard error at the end says how many were skipped. A last line with no line break yet is a line still being written: it is held, never counted as skipped, and printed when it is complete (with `--follow`) or left out. A filesystem error is named by its system reason (`Permission denied`), never a traceback.
 - **`--lines <n>`** — the last `n` lines that pass the level filter, default 50; ASCII digits only, 1 to 10000; anything else is a usage error, exit 2. **`--level <level>`** — that level and every more severe one: `debug`, `info`, `warning`, `error`, `critical`, case ignored; another word is a usage error naming the five, exit 2. **`--follow`** (a value-less flag, `4t`'s `flags` field) — after the last lines, keeps printing new ones as the daemon writes them, checking about twice a second. When the daemon rotates the file it reads the old file to its end through the handle it already has, then carries on from the start of the new `daemon.log`; two rotations between checks are caught up through `daemon.log.1`; a moment with no `daemon.log` is waited out. No line is repeated or lost. Ctrl-C ends it with exit 0 — the follow catches the interruption itself.
 - **Works with no daemon and nothing composed.** `pm-ai logs` is answered in `main` before the keychain adapter is built and before composition, so no master key, keychain, store, settings file or daemon is touched and a home with no `~/.pm-ai` gains nothing; the file paths come from paths alone, as the prompt's loopback client's do. No file yet: one sentence saying the daemon writes it at `~/.pm-ai/logs/daemon.log` when it runs (`pm-ai daemon run`), exit 0; with `--follow`, that sentence and then it waits for the file to appear. The current file unreadable: refused naming it and the reason, exit 3. A rotated copy unreadable: skipped, with one sentence naming it on standard error, and the rest printed. Output closed early (`pm-ai logs | head`): exit 0, nothing more printed. Ctrl-C while reading without `--follow`: `main`'s interruption, exit 3.
@@ -48,6 +49,7 @@ context:
 | Partial last line | the daemon mid-write | held; not counted as skipped | N/A |
 | Error record | a record whose message holds a type name and frames | the first line, then the frames indented; no exception text | N/A |
 | Planted escape | a request path holding an escape sequence | printed with `?` in place of each control character | N/A |
+| Planted invisible text | a request path holding a direction override, zero-width characters or U+2028 | printed with `?` in place of each format or separator character; visible text beyond ASCII printed as it is | N/A |
 | Foreign line | not JSON, not UTF-8, naive `at`, unknown level, non-text message | not printed; "N lines were not in pm-ai's log format and were skipped" on stderr | N/A |
 | No file | `~/.pm-ai/logs/daemon.log` absent | one sentence naming the path and `pm-ai daemon run` | exit 0 |
 | Unreadable | current file mode 000 | refused naming the file and `Permission denied` | exit 3 |
@@ -76,14 +78,14 @@ Re-verified against `5f4f43e` on 2026-10-18.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/storage/service.py` -- the rotated-file list as a module-level function of the logs directory and the name, used by `diagnostic_lines` and handed out for this command; it resolves paths and never calls `_prepared`, which would create `logs/` -- one rule for which files and in what order
-- [ ] `pm_ai/app/entry.py` -- `logs` answered in `main` after `parse` and before the keychain adapter (`:200`, which `4t`'s `composes=False` branch still builds) and `_compose`, with the file list built from `ScopePaths.production()` -- nothing composed, nothing created
-- [ ] `pm_ai/surfaces/cli/logs.py` -- new: records read from the files (invalid ones counted, a partial last line held), the level filter, local time per record, control characters replaced, the skipped count, following with rotation through the open handle, waiting for an absent file, Ctrl-C caught in the follow, a closed output treated as the end -- the reader, testable without a terminal
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `logs` in `TABLE` with `lines`, `level`, flag `follow`, no target; `TERMINAL_BOUND` gains `logs` and its docstring the wider meaning; the usage errors; the header and closing sentences -- the command
-- [ ] `pm_ai/app/prompts.py` -- the refusal sentence at `:376-378` widened from "asks questions or takes a secret" so it is true of `logs` ("holds the terminal until Ctrl-C") -- the matrix's "refused by name as terminal-bound"
-- [ ] `pm_ai/surfaces/cli/completion.py` -- `--level` completes the five levels (a new source in `_BY_COMMAND` and a branch in `_values`); `("logs",), "lines"` in `FREE_TEXT`; `--follow` needs nothing -- `4u`'s check that every declared name has a source
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md` -- when this slice is built: edit the amended frozen text and add a dated Change Log line naming `logs` added to the commands that need this terminal, and the new reason -- an earlier frozen block says it was amended
-- [ ] `tests/surfaces/test_cli_logs.py`, `tests/slice/test_logs_command.py` -- one test per matrix row against a temporary home with written log files (rotation simulated by renaming), the slice ones through `main()` asserting the home is unchanged; a record carrying a planted secret in a field other than `message` never prints it -- the matrix is the contract
+- [x] `pm_ai/storage/service.py` -- the rotated-file list as a module-level function of the logs directory and the name, used by `diagnostic_lines` and handed out for this command; it resolves paths and never calls `_prepared`, which would create `logs/` -- one rule for which files and in what order
+- [x] `pm_ai/app/entry.py` -- `logs` answered in `main` after `parse` and before the keychain adapter (`:200`, which `4t`'s `composes=False` branch still builds) and `_compose`, with the file list built from `ScopePaths.production()` -- nothing composed, nothing created
+- [x] `pm_ai/surfaces/cli/logs.py` -- new: records read from the files (invalid ones counted, a partial last line held), the level filter, local time per record, control characters replaced, the skipped count, following with rotation through the open handle, waiting for an absent file, Ctrl-C caught in the follow, a closed output treated as the end -- the reader, testable without a terminal
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `logs` in `TABLE` with `lines`, `level`, flag `follow`, no target; `TERMINAL_BOUND` gains `logs` and its docstring the wider meaning; the usage errors; the header and closing sentences -- the command
+- [x] `pm_ai/app/prompts.py` -- the refusal sentence at `:376-378` widened from "asks questions or takes a secret" so it is true of `logs` ("holds the terminal until Ctrl-C") -- the matrix's "refused by name as terminal-bound"
+- [x] `pm_ai/surfaces/cli/completion.py` -- `--level` completes the five levels (a new source in `_BY_COMMAND` and a branch in `_values`); `("logs",), "lines"` in `FREE_TEXT`; `--follow` needs nothing -- `4u`'s check that every declared name has a source
+- [x] `_bmad-output/specs/spec-pm-ai/stories/4q-repl-through-the-daemon.md` -- when this slice is built: edit the amended frozen text and add a dated Change Log line naming `logs` added to the commands that need this terminal, and the new reason -- an earlier frozen block says it was amended
+- [x] `tests/surfaces/test_cli_logs.py`, `tests/slice/test_logs_command.py` -- one test per matrix row against a temporary home with written log files (rotation simulated by renaming), the slice ones through `main()` asserting the home is unchanged; a record carrying a planted secret in a field other than `message` never prints it -- the matrix is the contract
 
 **Acceptance Criteria:**
 - Given a daemon run in a temporary home that answered a few requests and stopped, when `pm-ai logs` runs, then the request lines appear in local time with `request` as their source, the first stderr line names the file, and the exit is 0.
@@ -96,6 +98,7 @@ Re-verified against `5f4f43e` on 2026-10-18.
 - **2026-10-16, review:** answered in `main` before the keychain and composition, the home untouched; never through the daemon — `logs` joins `TERMINAL_BOUND` (meaning widened to "holds the terminal until Ctrl-C") instead of declaring a bound; control characters replaced before printing, because the request log carries decoded paths from unauthenticated requests; a partial last line held; follow reads a rotated file to its end through its open handle, catches up through `.1`, waits out an absent file and waits for one that does not exist yet; malformed and non-UTF-8 lines skipped; per-record daylight-saving offsets; a rotated copy unreadable is skipped with a note; a closed pipe exits 0; `--lines` ASCII digits only, `--level` case ignored; Ctrl-C outside follow is `main`'s exit 3; a `completion.py` task for `--level` and `--lines`; ACs given a When. Amends an earlier frozen block: `4q`'s routing bullet, which names the commands that need this terminal and why — `logs` joins them, and "holds the terminal until Ctrl-C" joins the reasons; a task adds a dated line to `4q`'s Change Log. Depends on spine amendment: AD-21 — `logs` joins the foreground administrative commands parsed from the command line (the list already holds daemon-routed `dashboard` and `config show`).
 - **2026-10-16, review (cross-spec):** Change Log moved before Design Notes; the AD-21 amendment restated as an addition to the foreground administrative commands parsed from the command line; the amendment task now edits `4q`'s frozen text and adds a dated line, when this slice is built.
 - **2026-10-18, Code Map re-verified against `5f4f43e` after 4t, 4u and 1s merged.** Line numbers corrected; the frozen block holds against the merged code (file, rotation by rename to `daemon.log.1`–`.3`, the JSON line format, `0600` files in a `0700` folder this command only reads; AD-21 already lists `logs`). Tasks gained: the daemon's refusal sentence in `prompts.py` widened; `entry.py`'s branch placed before the keychain adapter, which `4t`'s `composes=False` branch still builds; the shared file list must not create `logs/`; `completion.py`'s exact entries.
+- **2026-10-19, decision (Andrei):** frozen block edited (recorded here): the "Nothing in the file can act on the terminal" bullet widened from C0, C1 and DEL to every Unicode control, format and separator character (categories Cc, Cf, Zl, Zp, plus surrogates), raised by the build review; a matrix row "Planted invisible text" added. A joiner inside an emoji sequence is shown as `?` too, an accepted cost.
 
 ## Design Notes
 
@@ -111,3 +114,73 @@ The machine's local zone rather than `display_timezone`: the log is read beside 
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai daemon run`, a few `pm-ai config show` lines, then `.venv/bin/pm-ai logs --level info` and `--follow` -- expected: readable local-time lines; follow shows new requests as they come
+
+## Suggested Review Order
+
+**Answered before anything is composed**
+
+- Entry point: `logs` answered right after `parse`, before the keychain adapter and composition.
+  [`entry.py:206`](../../../../pm_ai/app/entry.py#L206)
+
+- The file list, logger names and zone built from paths alone; nothing created.
+  [`entry.py:1447`](../../../../pm_ai/app/entry.py#L1447)
+
+- One rule for which files and in what order, shared with the restart pass.
+  [`service.py:1375`](../../../../pm_ai/storage/service.py#L1375)
+
+**What a record may print**
+
+- Only `at`, `level`, the logger and `message` survive parsing; anything else is foreign.
+  [`logs.py:126`](../../../../pm_ai/surfaces/cli/logs.py#L126)
+
+- Control, format and separator characters (Unicode Cc, Cf, Zl, Zp, surrogates) become `?`.
+  [`logs.py:75`](../../../../pm_ai/surfaces/cli/logs.py#L75)
+
+- Local time per record's own instant; continuation lines indented.
+  [`logs.py:161`](../../../../pm_ai/surfaces/cli/logs.py#L161)
+
+- The header names only the copies actually read, and the zone with its offset now.
+  [`logs.py:190`](../../../../pm_ai/surfaces/cli/logs.py#L190)
+
+**Reading and following**
+
+- Top level: skipped count, Ctrl-C in follow is exit 0, closed pipe is exit 0.
+  [`logs.py:271`](../../../../pm_ai/surfaces/cli/logs.py#L271)
+
+- First read: current file opened first; a copy that is the same file is read once.
+  [`logs.py:398`](../../../../pm_ai/surfaces/cli/logs.py#L398)
+
+- Follow: old file read to its end, new current opened before copies are caught up.
+  [`logs.py:527`](../../../../pm_ai/surfaces/cli/logs.py#L527)
+
+- Copies newer than the old file, stopping at the new current's identity.
+  [`logs.py:578`](../../../../pm_ai/surfaces/cli/logs.py#L578)
+
+- Raw stdout writes, so a closed pipe leaves nothing for the exit-time flush.
+  [`logs.py:321`](../../../../pm_ai/surfaces/cli/logs.py#L321)
+
+**The command and its routing**
+
+- `logs` in the table: `--lines`, `--level`, `--follow`, no target, read before the keychain.
+  [`dispatch.py:3220`](../../../../pm_ai/surfaces/cli/dispatch.py#L3220)
+
+- The handler: usage errors exit 2, an unreadable current file exit 3.
+  [`dispatch.py:3116`](../../../../pm_ai/surfaces/cli/dispatch.py#L3116)
+
+- `logs` joins the commands that need this terminal; the daemon refuses it by name.
+  [`dispatch.py:3188`](../../../../pm_ai/surfaces/cli/dispatch.py#L3188)
+
+- The daemon's refusal sentence widened to "holds the terminal until Ctrl-C".
+  [`prompts.py:377`](../../../../pm_ai/app/prompts.py#L377)
+
+**Peripherals**
+
+- The machine's zone name: `TZ` first, else the `/etc/localtime` link; checked against the zone database.
+  [`environment.py:69`](../../../../pm_ai/platform/environment.py#L69)
+
+- `--level` completes the five levels; `--lines` is free text.
+  [`completion.py:107`](../../../../pm_ai/surfaces/cli/completion.py#L107)
+
+- Reader tests per matrix row; slice tests through `main()` and real processes.
+  [`test_cli_logs.py:1`](../../../../tests/surfaces/test_cli_logs.py#L1)
+  [`test_logs_command.py:1`](../../../../tests/slice/test_logs_command.py#L1)
