@@ -1106,7 +1106,7 @@ class ModelPort(Protocol):
     frontier adapter are story `7c`'s, behind the same signature. The refusals
     a caller must catch about the port's transport are declared below, beside
     it (AD-49): `LocalModelUnavailable` (and `RemoteModelRefused`, one kind of
-    it), `NoLocalModel`, `PossiblyTruncated`, `ModelTimedOut`. `ScopeFlowRefused`
+    it), `NoLocalModel`, `PossiblyTruncated`, `OutputCapReached`, `ModelTimedOut`. `ScopeFlowRefused`
     is about the flow table, a rule `domain` owns, and lives beside it.
     """
 
@@ -1160,6 +1160,18 @@ class PossiblyTruncated(RuntimeError):
     server stopped for a reason other than `stop`, a token count is missing,
     or the server refused a prompt longer than the window. Names the counts or
     the field.
+    """
+
+
+class OutputCapReached(RuntimeError):
+    """The answer reached the request's output cap, so it was discarded (story 7a).
+
+    Every request caps its output (`num_predict`); an answer that stops there
+    (`done_reason` `length`, below the window) was cut short by the cap, or the
+    model generated without ending. Names the model, the cap and the task
+    class, never the text. Its own refusal rather than `PossiblyTruncated`:
+    the caller handles it as an invalid answer (`7b`: asked once more, then
+    refused), not as a prompt too long for the window (Andrei, 2026-10-19).
     """
 
 

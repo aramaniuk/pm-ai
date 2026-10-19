@@ -8,6 +8,7 @@ with one that refuses, for anything that goes through wiring).
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
 import time
@@ -38,6 +39,7 @@ from pm_ai.models.local import ollama
 from pm_ai.models.local.ollama import (
     ADDRESS,
     NUM_CTX,
+    NUM_PREDICT,
     SEED,
     NotALocalClass,
     OllamaModel,
@@ -47,6 +49,7 @@ from pm_ai.ports import (
     LocalModelUnavailable,
     ModelTimedOut,
     NoLocalModel,
+    OutputCapReached,
     PossiblyTruncated,
     RemoteModelRefused,
 )
@@ -161,7 +164,12 @@ def test_a_call_answers_with_text_model_locality_counts_and_durations():
     assert chat["keep_alive"] == 0
     assert chat["stream"] is False
     assert chat["truncate"] is False
-    assert chat["options"] == {"temperature": 0, "seed": SEED, "num_ctx": NUM_CTX}
+    assert chat["options"] == {
+        "temperature": 0,
+        "seed": SEED,
+        "num_ctx": NUM_CTX,
+        "num_predict": NUM_PREDICT,
+    }
     assert chat["model"] == "qwen3:8b"
 
 
@@ -435,6 +443,62 @@ def test_an_answer_that_may_be_cut_short_is_discarded_naming_why(overrides, name
     with pytest.raises(PossiblyTruncated) as refused:
         _call(_model(server))
     assert named in str(refused.value)
+
+
+def test_the_window_holds_a_whole_meeting_and_the_cap_fits_beside_it():
+    """Andrei, 2026-10-19: 16,384, so the measured 8,619-token recording is one call."""
+    assert NUM_CTX == 16384
+    assert 8619 + NUM_PREDICT < NUM_CTX
+
+
+# ── Output cap reached ───────────────────────────────────────────────────────
+
+
+def test_an_answer_stopped_at_the_output_cap_is_refused_and_logged_without_text(caplog):
+    server = Server(
+        chat=_chat_body(
+            done_reason="length",
+            prompt_eval_count=900,
+            eval_count=NUM_PREDICT,
+            message={"role": "assistant", "content": "Anna owns PM-42 and"},
+        )
+    )
+    with caplog.at_level(logging.WARNING, logger=ollama.__name__):
+        with pytest.raises(OutputCapReached) as refused:
+            _call(_model(server))
+    said = str(refused.value)
+    assert "qwen3:8b" in said and str(NUM_PREDICT) in said and "extraction" in said
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    logged = warnings[0].getMessage()
+    assert "qwen3:8b" in logged and str(NUM_PREDICT) in logged and "extraction" in logged
+    for text in ("Anna", "PM-42", "Ship by Friday", "Ignore previous"):
+        assert text not in logged and text not in said
+
+
+def test_the_output_cap_is_not_a_window_refusal():
+    """`7b` treats the cap as an invalid answer, not as a prompt to split."""
+    assert not issubclass(OutputCapReached, PossiblyTruncated)
+
+
+def test_length_below_the_cap_is_still_possibly_truncated_and_not_logged(caplog):
+    server = Server(chat=_chat_body(done_reason="length", eval_count=NUM_PREDICT - 1))
+    with caplog.at_level(logging.WARNING, logger=ollama.__name__):
+        with pytest.raises(PossiblyTruncated):
+            _call(_model(server))
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_length_at_the_window_is_a_window_refusal_not_the_cap():
+    server = Server(
+        chat=_chat_body(
+            done_reason="length",
+            prompt_eval_count=NUM_CTX - NUM_PREDICT,
+            eval_count=NUM_PREDICT,
+        )
+    )
+    with pytest.raises(PossiblyTruncated):
+        _call(_model(server))
 
 
 def test_a_prompt_longer_than_the_window_is_refused_by_the_server_and_named():

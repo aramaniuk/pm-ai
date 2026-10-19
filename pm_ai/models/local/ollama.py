@@ -30,14 +30,16 @@ and refuses by name a model whose answer names either, or whose tag is a cloud
 tag; the chat answer's own fields are checked again as a backstop.
 
 **Every request asks the same way:** `keep_alive: 0`, temperature 0, the fixed
-`SEED`, the window `NUM_CTX`, `truncate: false` (measured at build on Ollama
+`SEED`, the window `NUM_CTX`, the output cap `NUM_PREDICT`, `truncate: false` (measured at build on Ollama
 0.40.6: without it an over-long prompt is shortened silently to fit and the
 answer's counts stay below the window, so the count check below cannot see
 it; with it the server refuses the prompt with a 400), and `think: false` only
 for a model whose `/api/show` lists thinking among its capabilities. An answer
 is refused (`PossiblyTruncated`) when a token count is missing, when
 `done_reason` is not `stop`, or when its prompt and output tokens together
-reach the window.
+reach the window; one that stops at the output cap is refused as
+`OutputCapReached`, with a warning in the log naming the model, the cap and
+the task class — never the text.
 
 **The presence check** (`local_model_presence`) is the one other kind of
 request: which models are pulled (`/api/tags`) and whether the named one runs
@@ -47,6 +49,7 @@ reach it through the composition root. It never raises.
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -75,6 +78,7 @@ from pm_ai.domain.task_classes import TaskClass
 from pm_ai.ports import (
     LocalModelUnavailable,
     ModelTimedOut,
+    OutputCapReached,
     PossiblyTruncated,
     RemoteModelRefused,
 )
@@ -86,6 +90,7 @@ __all__ = [
     "LOCAL_ONLY_CLASSES",
     "MODEL_CALL_DEADLINE_SECONDS",
     "NUM_CTX",
+    "NUM_PREDICT",
     "PRESENCE_TIMEOUT_SECONDS",
     "SEED",
     "LoopbackBackend",
@@ -98,8 +103,27 @@ ADDRESS = "127.0.0.1:11434"
 BASE_URL = f"http://{ADDRESS}"
 """The only address this adapter can reach. A constant, never a setting."""
 
-NUM_CTX = 8192
-"""The context window every request asks for: conservative until Andrei settles `7a`'s measurement."""
+NUM_CTX = 16384
+"""The context window every request asks for (Andrei, 2026-10-19): a whole meeting in one call.
+
+The real-length recording measured 8,619 prompt tokens on `qwen3:8b`, which
+does not fit 8,192; 16,384 is the smallest power of two holding it and an
+answer. Ollama's runner peaked at 7.1–7.5 GB at this window (M3 Pro, 18 GB).
+"""
+
+NUM_PREDICT = 2048
+"""The output cap every request sends (`num_predict`; Andrei, 2026-10-19).
+
+Sized from the longest valid answer measured — 314 output tokens (`qwen3:8b`,
+the authored meeting) — with about 6.5 times that as headroom. Measured on the
+re-run (2026-10-19): `llama3.1:8b`'s generation on the redacted recording,
+which does not end, now stops at the cap and the whole call takes 121–124
+seconds, inside `MODEL_CALL_DEADLINE_SECONDS`, rather than holding the model
+pool's one slot to the deadline. The 8,619-token recording plus the cap fits
+`NUM_CTX`. Not measured against `7b`'s answer shape at its bounds.
+"""
+
+_log = logging.getLogger(__name__)
 
 SEED = 7
 """The fixed seed every request sends, with temperature 0."""
@@ -429,7 +453,12 @@ class OllamaModel:
             "stream": False,
             "keep_alive": 0,
             "truncate": False,
-            "options": {"temperature": 0, "seed": SEED, "num_ctx": NUM_CTX},
+            "options": {
+                "temperature": 0,
+                "seed": SEED,
+                "num_ctx": NUM_CTX,
+                "num_predict": NUM_PREDICT,
+            },
             "messages": [
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": user},
@@ -440,7 +469,7 @@ class OllamaModel:
         if shape is not None:
             request["format"] = dict(shape)
         body = self._post("/api/chat", request, started=started)
-        return self._answer(body)
+        return self._answer(body, task_class)
 
     def _remaining(self, started: float) -> float:
         left = self._deadline - (self._clock() - started)
@@ -552,7 +581,7 @@ class OllamaModel:
             )
         return body
 
-    def _answer(self, body: Mapping[str, Any]) -> ModelAnswer:
+    def _answer(self, body: Mapping[str, Any], task_class: TaskClass) -> ModelAnswer:
         fields = _remote_fields(body)
         if fields:
             raise RemoteModelRefused(
@@ -570,12 +599,25 @@ class OllamaModel:
                 )
             counts[field] = value
         reason = body.get("done_reason")
+        prompt, output = counts["prompt_eval_count"], counts["eval_count"]
+        if reason == "length" and output >= NUM_PREDICT and prompt + output < NUM_CTX:
+            _log.warning(
+                "the local model %s reached its output cap of %d tokens (task "
+                "class %s); the answer was discarded",
+                self._name,
+                NUM_PREDICT,
+                task_class.value,
+            )
+            raise OutputCapReached(
+                f"{self._name} reached its {NUM_PREDICT}-token output cap (task "
+                f"class {task_class.value}), so the answer may be cut short or never "
+                f"ended; discarded."
+            )
         if reason != "stop":
             raise PossiblyTruncated(
                 f"{self._name} stopped for {reason!r}, not 'stop', so the answer may be "
                 f"cut short; discarded."
             )
-        prompt, output = counts["prompt_eval_count"], counts["eval_count"]
         if prompt + output >= NUM_CTX:
             raise PossiblyTruncated(
                 f"{self._name}'s prompt ({prompt} tokens) and answer ({output} tokens) "
