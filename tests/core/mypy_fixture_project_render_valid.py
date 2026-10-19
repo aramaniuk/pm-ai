@@ -28,6 +28,8 @@ from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.payload_fields import encode_payload
 
 from pm_ai.core.rendering import PmHandles, render_project_dashboard
+from pm_ai.core.team_activity import NO_ISSUE_NOTES, IssueNotes
+from pm_ai.domain.work import ProjectWork
 
 NOW = datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
 DISPLAY = timezone(timedelta(hours=2))
@@ -101,3 +103,20 @@ def an_optional_timezone(tz: timezone | None) -> str:
     therefore be able to pass it.
     """
     return render_project_dashboard((), (), NOW, tz=tz, pm=NOBODY)
+
+
+def a_project_with_its_gitlab_record_and_notes() -> str:
+    """`23g`: `8t`'s record and `7e`'s slot, both keywords."""
+    work = ProjectWork(scope=ALPHA, instance=None)
+    notes = IssueNotes(rows={41: ("a row",)}, closing=("a closing line",))
+    return render_project_dashboard(
+        (MEETING,), (ENTRY,), NOW, tz=DISPLAY, pm=NOBODY, work=work, issue_notes=notes
+    )
+
+
+def an_unreadable_gitlab_record_and_the_default_slot() -> str:
+    """A record that could not be read, and the empty slot spelled out."""
+    failure = HarvestFailure(reason="malformed", retryable=False)
+    return render_project_dashboard(
+        (), (), NOW, tz=DISPLAY, pm=NOBODY, work=failure, issue_notes=NO_ISSUE_NOTES
+    )

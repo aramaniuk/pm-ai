@@ -605,7 +605,7 @@ def test_a_cursor_from_the_channel_slice_reads_and_every_chat_is_a_first_run():
         channels={CHANNEL: [_page(channel_message)]},
         chats={CHAT_A: [_page(_message(at=NOW - timedelta(days=6)))]},
     )
-    listing = ChannelListing(team=TEAM, channel=CHANNEL, project="alpha", label="Build room")
+    listing = ChannelListing(team=TEAM, channel=CHANNEL, scope=ALPHA, label="Build room")
     result = _connector(routes, channels=(listing,)).harvest(since)
 
     (calendar,) = [r for r in routes.requests if "/me/calendarView" in r.url]
@@ -868,7 +868,7 @@ def test_chats_are_walked_after_the_channels_under_the_one_budget():
         return routes(request)
 
     routes = Routes(channels={CHANNEL: [_page()]}, chats={CHAT_A: [_page(_message())]})
-    listing = ChannelListing(team=TEAM, channel=CHANNEL, project="alpha")
+    listing = ChannelListing(team=TEAM, channel=CHANNEL, scope=ALPHA)
     connector = _connector(routes, channels=(listing,), clock=lambda: clock[0])
     connector.calendar.client.transport = _transport
     connector.calendar.client.budget = timedelta(minutes=10)  # the channel spends all of it
@@ -1001,7 +1001,7 @@ def test_a_budget_spent_during_a_chat_cuts_it_and_names_the_rest():
 
 def test_a_channel_throttled_skips_every_chat_and_names_them():
     routes = Routes(channels={CHANNEL: [_status(429, **{"Retry-After": "60"})]}, chats={CHAT_A: [_page()]})
-    listing = ChannelListing(team=TEAM, channel=CHANNEL, project="alpha", label="Build room")
+    listing = ChannelListing(team=TEAM, channel=CHANNEL, scope=ALPHA, label="Build room")
     result = _connector(routes, channels=(listing,)).harvest(Cursor())
     assert routes.asked(CHAT_A) == []
     assert "Not attempted this run: chat(s) 'Sam'" in result.failure.reason
@@ -1010,7 +1010,7 @@ def test_a_channel_throttled_skips_every_chat_and_names_them():
 
 def test_a_channel_sign_in_failure_sends_no_chat_request_and_names_the_chat():
     routes = Routes(channels={CHANNEL: [_status(401), _status(401)]}, chats={CHAT_A: [_page()]})
-    listing = ChannelListing(team=TEAM, channel=CHANNEL, project="alpha", label="Build room")
+    listing = ChannelListing(team=TEAM, channel=CHANNEL, scope=ALPHA, label="Build room")
     result = _connector(routes, channels=(listing,)).harvest(Cursor())
     assert [r for r in routes.requests if "/chats/" in r.url and "/messages" in r.url] == []
     assert "Not attempted this run: chat(s) 'Sam'" in result.failure.reason
@@ -1104,7 +1104,7 @@ def test_a_connector_with_no_chats_writes_no_chats_member():
     connector = _connector(routes)
     connector.chats = ()
     position = NOW - timedelta(hours=1)
-    listing = ChannelListing(team=TEAM, channel=CHANNEL, project="alpha")
+    listing = ChannelListing(team=TEAM, channel=CHANNEL, scope=ALPHA)
     connector.channels = (listing,)
     routes.channels = {CHANNEL: [_page(_message(at=position))]}
     result = connector.harvest(Cursor())

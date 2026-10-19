@@ -1818,3 +1818,256 @@ def test_an_all_day_entry_with_no_end_date_is_on_its_start_date_only(tmp_path, d
     assert marker.all_day_end_date is None
     noon = datetime(2026, 10, day, 10, 0, tzinfo=_UTC)
     assert _listed_on(tmp_path, marker, noon) is listed
+
+
+# ── Story 23g — Team Activity from `8t`'s record and the project's commits ───
+
+GITLAB_HOST = "https://gitlab.example.com"
+PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="dana")
+
+
+def _gitlab_person(user_id: int, name: str, username: str, *, bot: bool | None = False):
+    from pm_ai.domain.handles import gitlab_handle
+    from pm_ai.domain.work import GitLabPerson
+
+    return GitLabPerson(gitlab_handle(GITLAB_HOST, user_id), name, username, bot)
+
+
+def _record_work(built) -> None:
+    """An `8t` record, written through the one writer as a harvest writes it."""
+    from pm_ai.domain.work import Issue, Member, MergeRequest, Section, SectionRead, WorkChange
+
+    dana = _gitlab_person(1, "Dana Smith", "dana")
+    sam = _gitlab_person(2, "Sam Lee", "sam")
+    bot = _gitlab_person(9, "project_bot", "project_bot", bot=True)
+
+    def issue(iid: int, *assignees) -> Issue:
+        return Issue(
+            iid=iid, title=f"Issue {iid}", state="opened", assignees=assignees,
+            milestone_title=None, milestone_due=None, labels=(),
+            updated_at=NOW - timedelta(days=1), closed_at=None, web_url=None,
+            confidential=False,
+        )
+
+    built.storage.record_project_work(
+        ALPHA,
+        WorkChange(
+            instance="gitlab:alpha",
+            started_at=NOW - timedelta(hours=1),
+            members=(Member(dana, "active"), Member(sam, "active"), Member(bot, "active")),
+            issues=(issue(41, dana), issue(52, sam)),
+            merge_requests=(
+                MergeRequest(
+                    iid=9, title="MR 9", state="opened", source_branch=None,
+                    author=None, draft=False, updated_at=NOW - timedelta(hours=3),
+                    merged_at=None, closed_at=None, web_url=None, issue_iids=(52,),
+                ),
+            ),
+            sections=tuple(SectionRead(section, complete=True) for section in Section),
+        ),
+    )
+
+
+def _commit(sha: str, message: str) -> NormalizedEvent:
+    from pm_ai.domain.events import CommitPayload
+
+    return NormalizedEvent(
+        scope=ALPHA,
+        type=ObservedEventType.COMMIT_PUSHED,
+        source_ref=SourceRef.parse(f"gitlab:alpha:commit:{sha}"),
+        actor=person_handle("email", "dev@example.com"),
+        occurred_at=NOW - timedelta(hours=2),
+        payload=CommitPayload(sha=sha, message=message),
+    )
+
+
+def _gitlab_daemon(tmp_path: Path):
+    """A daemon that keeps its built-in GitLab adapter beside a calendar double."""
+    built = build(
+        tmp_path,
+        "alpha",
+        now=lambda: NOW,
+        keychain=_NoKey(),
+        config=Config(display_timezone=ZONE),
+    )
+    built.connectors["graph:contoso"] = _Calendar("graph:contoso")
+    assert "gitlab:alpha" in built.connectors
+    return built
+
+
+def test_a_written_record_and_commit_lines_produce_team_activity(tmp_path, monkeypatch):
+    """Acceptance — Team Activity third, no member-level total, no GitLab
+    request, and nothing read outside the project scope."""
+    from pm_ai.connectors.gitlab.client import GitLabClient
+    from pm_ai.core.rendering import TEAM_ACTIVITY
+
+    built = _gitlab_daemon(tmp_path)
+    _record_work(built)
+    _persist(
+        built,
+        _commit("a" * 40, "Fix #41 token refresh"),
+        _commit("b" * 40, "More on #41"),
+        _commit("c" * 40, "tidy"),
+        scope=ALPHA,
+    )
+
+    def no_request(*args, **kwargs):
+        raise AssertionError("a render must make no GitLab request")
+
+    monkeypatch.setattr(GitLabClient, "_send", no_request)
+    adapter = built.connectors["gitlab:alpha"]
+    monkeypatch.setattr(adapter, "transport", no_request)
+    for name in ("harvest", "check_health"):
+        monkeypatch.setattr(type(adapter), name, no_request)
+
+    asked_work: list[DataScope] = []
+    original_work = type(built.storage).project_work
+
+    def project_work(self, scope):
+        asked_work.append(scope)
+        return original_work(self, scope)
+
+    monkeypatch.setattr(type(built.storage), "project_work", project_work)
+    asked_paths: list[DataScope] = []
+    for method in ("resolve", "scope_root"):
+        original = getattr(ScopePaths, method)
+
+        def record(self, scope, *args, _original=original, **kwargs):
+            asked_paths.append(scope)
+            return _original(self, scope, *args, **kwargs)
+
+        monkeypatch.setattr(ScopePaths, method, record)
+
+    text = run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8")
+
+    body = sections(text)
+    assert list(body) == list(PROJECT_HEADINGS)
+    assert PROJECT_HEADINGS[2] == TEAM_ACTIVITY
+    team = body[TEAM_ACTIVITY]
+    assert "- **Dana Smith** `@dana`" in team
+    assert "- 2 commits; latest" in team
+    assert "merge request `!9` updated" in team
+    assert "project_bot" not in team
+    assert "1 commit references no issue" in team
+    assert "total" not in team.lower()
+    assert asked_work == [ALPHA]
+    assert asked_paths, "the resolver was never consulted, so this proves nothing"
+    assert not [s for s in asked_paths if s.kind in (ScopeKind.PERSONAL, ScopeKind.PEOPLE)]
+
+
+def test_the_personal_page_carries_no_team_activity_and_reads_no_record(tmp_path, monkeypatch):
+    from pm_ai.core.rendering import TEAM_ACTIVITY
+
+    built = _gitlab_daemon(tmp_path)
+    _record_work(built)
+
+    def refuse(self, scope):
+        raise AssertionError("the personal render must not read GitLab work")
+
+    monkeypatch.setattr(type(built.storage), "project_work", refuse)
+    text = run_dashboard(built, now=NOW).read_text(encoding="utf-8")
+    assert list(sections(text)) == list(HEADINGS)
+    assert TEAM_ACTIVITY not in text
+
+
+@pytest.mark.parametrize("scope", [PERSONAL, PEOPLE, APPLICATION])
+def test_reading_gitlab_work_for_a_scope_that_is_not_a_project_raises(tmp_path, scope):
+    """Matrix row "Personal scope" — the reader refuses (Andrei, 2026-10-18)."""
+    built = _gitlab_daemon(tmp_path)
+    _record_work(built)
+    with pytest.raises(ValueError, match="not one"):
+        built.storage.project_work(scope)
+
+
+def test_a_malformed_record_is_stated_and_the_page_is_written(tmp_path):
+    """Matrix row "Record unreadable": a row a hand edit broke."""
+    import sqlite3
+
+    from pm_ai.core.rendering import TEAM_ACTIVITY
+
+    built = _gitlab_daemon(tmp_path)
+    _record_work(built)
+    (store,) = tmp_path.rglob("operational.db")
+    with sqlite3.connect(store) as db:
+        db.execute("UPDATE gitlab_issues SET updated_at = 'not a time' WHERE iid = 41")
+
+    text = run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8")
+    body = sections(text)
+    assert list(body) == list(PROJECT_HEADINGS)
+    assert "The project's GitLab record could not be read" in body[TEAM_ACTIVITY]
+    assert "not a time" in body[TEAM_ACTIVITY]
+
+
+def test_a_store_that_cannot_be_read_is_stated(tmp_path, monkeypatch):
+    from pm_ai.core.rendering import TEAM_ACTIVITY
+    from pm_ai.storage.service import OperationalStoreUnavailable
+
+    built = _gitlab_daemon(tmp_path)
+
+    def unreadable(self, scope):
+        raise OperationalStoreUnavailable("database disk image is malformed")
+
+    monkeypatch.setattr(type(built.storage), "project_work", unreadable)
+    body = sections(run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8"))
+    assert "database disk image is malformed" in body[TEAM_ACTIVITY]
+    assert "Unlinked work in the window" in body[TEAM_ACTIVITY]
+
+
+def test_a_project_with_no_record_says_so(tmp_path):
+    from pm_ai.core.rendering import TEAM_ACTIVITY
+
+    built = _gitlab_daemon(tmp_path)
+    body = sections(run_dashboard(built, scope=ALPHA, now=NOW).read_text(encoding="utf-8"))
+    assert "No GitLab issues are recorded for this project" in body[TEAM_ACTIVITY]
+
+
+
+def test_a_store_the_library_cannot_read_becomes_a_stated_failure(tmp_path):
+    """The library's own error is caught where the render reads the record
+    (`pipelines._project_work`), never inside the reader, and becomes a
+    stated value rather than a crash."""
+    import sqlite3
+
+    from pm_ai.app.pipelines import _project_work
+
+    built = _gitlab_daemon(tmp_path)
+    _record_work(built)
+    (store,) = tmp_path.rglob("operational.db")
+    for sidecar in tmp_path.rglob("operational.db-*"):
+        sidecar.unlink()
+    store.write_bytes(b"not a database" * 100)
+    with pytest.raises(sqlite3.DatabaseError):
+        built.storage.project_work(ALPHA)
+    answer = _project_work(built, scope=ALPHA)
+    assert isinstance(answer, HarvestFailure)
+    assert "not a database" in answer.reason
+
+
+@pytest.mark.parametrize("scope", [PERSONAL, PEOPLE, APPLICATION])
+def test_a_scope_that_is_not_a_project_raises_through_the_pipeline_read(tmp_path, monkeypatch, scope):
+    """AD-25's refusal propagates; it is never turned into a stated line."""
+    from pm_ai.app.pipelines import _project_work
+
+    built = _gitlab_daemon(tmp_path)
+    asked: list[DataScope] = []
+    monkeypatch.setattr(
+        type(built.storage), "project_work", lambda self, s: asked.append(s)
+    )
+    with pytest.raises(ValueError, match="project scope only"):
+        _project_work(built, scope=scope)
+    assert asked == []
+
+
+@pytest.mark.parametrize("error", [OSError("disk gone"), TypeError("bad row type")])
+def test_an_os_or_type_error_from_the_reader_is_stated(tmp_path, monkeypatch, error):
+    from pm_ai.app.pipelines import _project_work
+
+    built = _gitlab_daemon(tmp_path)
+
+    def raises(self, scope):
+        raise error
+
+    monkeypatch.setattr(type(built.storage), "project_work", raises)
+    answer = _project_work(built, scope=ALPHA)
+    assert isinstance(answer, HarvestFailure)
+    assert str(error) == answer.reason

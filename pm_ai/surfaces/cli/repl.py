@@ -19,7 +19,13 @@ an ending, or an open line — and, for a command, where it runs.
     to `4r`'s prompt endpoint and its output and exit code come back. A command
     whose declared bound is five seconds or more is acknowledged with a job id
     instead (AD-21); the prompt returns at once, and the result is printed,
-    prefixed by the id, at the next prompt — never into a line half typed.
+    prefixed by the id, as soon as it arrives (story 4v): above the line being
+    typed, which is drawn again intact. While a local command runs or the
+    prompt waits on an inline answer, a result is held and printed when the
+    prompt returns, before it is drawn — never into a command's own questions.
+    The prompt counts the jobs running (`pm-ai [2 running]> `) and the lines
+    below the hint show each, with its state and the time since it was
+    acknowledged on this process's monotonic clock.
 
   A command added to the table later goes through the daemon unless it is
   named as needing this terminal.
@@ -42,23 +48,26 @@ a dim suggestion offers the rest of a command typed earlier in this session,
 accepted with the right arrow. History is this session's, in memory, and holds
 only lines whose first word names a command. Without the library — the runtime
 extra not installed, or a session that cannot start — the prompt is `4q`'s loop
-over `input`, said once in one sentence, and the session continues.
+over `input`, said once in one sentence, and the session continues; results
+are then printed at the next prompt, as `4q` printed them.
 
 Nothing is composed and nothing is sent to open the prompt. The one thread this
 module starts waits on a job the daemon already owns and decides nothing about
-when work runs (AD-7): the prompt schedules nothing.
+when work runs (AD-7): the prompt schedules nothing. The redraw while a job runs
+is drawing, not work.
 """
 
 from __future__ import annotations
 
 import os
-import queue
 import shlex
 import sys
 import threading
+import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pm_ai.surfaces.cli.completion import Completion
 from pm_ai.surfaces.cli.dispatch import (
@@ -74,6 +83,7 @@ from pm_ai.surfaces.cli.dispatch import (
     parse,
 )
 from pm_ai.surfaces.cli.loopback import (
+    FINISHED,
     Acknowledged,
     Answer,
     Followed,
@@ -104,7 +114,9 @@ class DaemonClient(Protocol):
 
     def send(self, line: str) -> Outcome: ...
 
-    def follow(self, job_id: str) -> Followed: ...
+    def follow(
+        self, job_id: str, on_state: Callable[[str], None] | None = None
+    ) -> Followed: ...
 
 
 def runs_here(words: Sequence[str]) -> bool:
@@ -210,16 +222,38 @@ _input: Callable[[str], str] = input
 `input` by name, and a stand-in for them must not become the prompt's reader."""
 
 
+@runtime_checkable
+class _Screen(Protocol):
+    """What the jobs need of the line editor's session (`editor.Live`, story 4v)."""
+
+    def show(self, board: _Jobs | None) -> None: ...
+
+    def above(self, write: Callable[[], None]) -> None: ...
+
+    def redraw(self) -> None: ...
+
+
 class _Edited:
     """`prompt_toolkit`'s `prompt`, falling back to `input` if the library fails.
 
     Ctrl-C and Ctrl-D reach the loop as they do from `input`. Any other
     exception from the library is said once, by type, and every later line is
-    read by `input`: the session continues.
+    read by `input`: the session continues. From then on the jobs are `4q`'s:
+    results at the next prompt (story 4v).
     """
 
     def __init__(self, prompt: Callable[[str], str]) -> None:
         self._prompt: Callable[[str], str] | None = prompt
+        self._screen: _Screen | None = prompt if isinstance(prompt, _Screen) else None
+        self._jobs: _Jobs | None = None
+
+    def attach(self, jobs: _Jobs) -> None:
+        """Show `jobs` on the session, when the session can show them."""
+        if self._screen is None:
+            return
+        self._jobs = jobs
+        jobs.attach(self._screen)
+        self._screen.show(jobs)
 
     def __call__(self, text: str) -> str:
         if self._prompt is None:
@@ -230,12 +264,29 @@ class _Edited:
             raise
         except Exception as failed:  # noqa: BLE001 — said by type; the session continues
             self._prompt = None
+            jobs = self._jobs
+            self._detach()
             print(line_editor_failed(failed, started=True), file=sys.stderr, flush=True)
             _line_editing()
+            if jobs is not None:
+                # What arrived while the failed read was open, printed once,
+                # before `4q`'s prompt.
+                jobs.deliver()
             return _input(text)
 
+    def _detach(self) -> None:
+        if self._jobs is not None:
+            self._jobs.attach(None)
+        if self._screen is not None:
+            try:
+                self._screen.show(None)
+            except Exception:  # noqa: BLE001, S110 — the session has already failed
+                pass
+        self._screen = None
+        self._jobs = None
 
-def _line_editor(completion: Completion) -> Callable[[str], str]:
+
+def _line_editor(completion: Completion) -> Callable[[str], str] | _Edited:
     """The reader the prompt uses: `prompt_toolkit`'s when it imports and starts.
 
     The import is here, when the prompt opens, so `pm-ai <command>` never
@@ -288,57 +339,274 @@ def _open_line(named: str) -> None:
     )
 
 
+JOB_LINES = 3
+"""The most job lines shown below the hint; the rest are `+N more` (story 4v)."""
+
+REDRAW_SECONDS = 0.25
+"""How often the session draws the prompt and the job lines again while a job
+runs (`editor.Live`); the spinner moves one frame each time (story 4v)."""
+
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+STATE_CELLS = 16
+"""The most cells a job's state takes on its line; a longer one is cut with `…`."""
+
+_ACKNOWLEDGED = "acknowledged"
+"""A job's state before its stream's first event: all the prompt knows of it."""
+
+
+def elapsed(seconds: float) -> str:
+    """`m:ss` under an hour, `h:mm:ss` from an hour (story 4v)."""
+    whole = max(0, int(seconds))
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def printable(text: str) -> str:
+    """`text` without control or other non-printable characters (story 4v).
+
+    A state or a line drawn in the bottom toolbar must not carry a newline or
+    an escape that would move the cursor or break the drawn area.
+    """
+    return "".join(character for character in text if character.isprintable())
+
+
+def cut(text: str, room: int, cells: Callable[[str], int] = len) -> str:
+    """`text`, cut with `…` so it takes at most `room` cells; empty with no room."""
+    if cells(text) <= room:
+        return text
+    if room <= 0:
+        return ""
+    kept: list[str] = []
+    used = 0
+    for character in text:
+        width = max(cells(character), 0)
+        if used + width > room - 1:
+            break
+        kept.append(character)
+        used += width
+    return "".join(kept) + "…"
+
+
+def job_line(
+    frame: str,
+    words: str,
+    state: str,
+    since: str,
+    columns: int,
+    cells: Callable[[str], int] = len,
+) -> str:
+    """One running job's line, at most `columns - 1` cells wide.
+
+    `cells` measures text in terminal cells (the line editor passes the
+    library's `get_cwidth`, so wide characters count as two). The state is cut
+    to `STATE_CELLS`, then the words to what is left; on a terminal narrower
+    than the rest of the line, the whole line is cut. The last column is left
+    free: a line that fills the width wraps on some terminals.
+    """
+    width = columns - 1
+    state = cut(printable(state), STATE_CELLS, cells)
+    words = printable(words)
+    room = width - cells(frame) - cells(state) - cells(since) - 3
+    if room >= 1:
+        return f"{frame} {cut(words, room, cells)} {state} {since}"
+    return cut(f"{frame} {words} {state} {since}", width, cells)
+
+
+@dataclass(slots=True)
+class _Job:
+    words: str
+    since: float
+    state: str = _ACKNOWLEDGED
+    arrived: bool = False
+
+
 class _Jobs:
     """The jobs this session was acknowledged, and the results that have arrived.
 
-    One thread per job waits on the daemon's stream for it and hands the result
-    to `_arrived`; only the loop prints, and only between lines.
+    One thread per job waits on the daemon's stream for it, reports each state
+    it reads, and hands the result over; it only waits, and never prints
+    itself. What a job is — its words, the acknowledgement's monotonic time,
+    its last state — and whether a line is being read are kept under one lock,
+    so the choice between printing an arrival above the prompt and holding it
+    is made under the lock that records whether a read is in progress
+    (story 4v). Without a screen — no line editor, or one that failed — every
+    result is held for the next prompt, as `4q` printed them.
     """
 
-    def __init__(self, client: DaemonClient) -> None:
+    def __init__(self, client: DaemonClient, clock: Callable[[], float] = time.monotonic) -> None:
         self._client = client
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._jobs: dict[str, _Job] = {}
         self._waiting: dict[str, threading.Thread] = {}
-        self._arrived: queue.SimpleQueue[tuple[str, Followed]] = queue.SimpleQueue()
+        self._arrived: list[tuple[str, Followed]] = []
+        self._screen: _Screen | None = None
+        self._reading = False
 
-    def follow(self, job_id: str) -> None:
-        if job_id in self._waiting:
-            # The daemon answered with a job already in flight (one job per
-            # kind and scope): its result is already on its way here.
-            return
-        waiter = threading.Thread(
-            target=self._wait, args=(job_id,), name=f"pm-ai-follow-{job_id}", daemon=True
-        )
-        self._waiting[job_id] = waiter
+    def attach(self, screen: _Screen | None) -> None:
+        with self._lock:
+            self._screen = screen
+            if screen is None:
+                self._reading = False
+
+    def follow(self, job_id: str, words: str = "") -> None:
+        with self._lock:
+            if job_id in self._waiting:
+                # The daemon answered with a job already in flight (one job per
+                # kind and scope): its result is already on its way here.
+                return
+            waiter = threading.Thread(
+                target=self._wait, args=(job_id,), name=f"pm-ai-follow-{job_id}", daemon=True
+            )
+            self._waiting[job_id] = waiter
+            self._jobs[job_id] = _Job(words or job_id, self._clock())
         waiter.start()
 
     def waiting(self, job_id: str) -> bool:
         """Whether the job's result has not been printed yet."""
-        return job_id in self._waiting
+        with self._lock:
+            return job_id in self._waiting
 
     def in_flight(self) -> list[str]:
-        return [job for job, waiter in self._waiting.items() if waiter.is_alive()]
+        """The jobs whose result has not arrived, in the order they were acknowledged."""
+        with self._lock:
+            return [job_id for job_id, job in self._jobs.items() if not job.arrived]
+
+    def running(self) -> int:
+        with self._lock:
+            return sum(1 for job in self._jobs.values() if not job.arrived)
 
     def deliver(self) -> None:
-        """Print every result that has arrived, each line prefixed by its job id."""
-        while True:
+        """Print every result that has arrived, each line prefixed by its job id.
+
+        A result is forgotten only once it is printed: if printing fails
+        partway, that result and the ones after it are held again, for the
+        next prompt.
+        """
+        with self._lock:
+            arrived, self._arrived = self._arrived, []
+        for done, (job_id, followed) in enumerate(arrived):
             try:
-                job_id, followed = self._arrived.get_nowait()
-            except queue.Empty:
+                _print_result(job_id, followed)
+            except BaseException:
+                with self._lock:
+                    self._arrived[:0] = arrived[done:]
+                raise
+            with self._lock:
+                self._waiting.pop(job_id, None)
+                self._jobs.pop(job_id, None)
+
+    # ── what the session draws (`editor.Board`) ──────────────────────────────
+
+    def prompt(self, text: str) -> str:
+        """`pm-ai> ` with none running; `pm-ai [2 running]> ` while two are."""
+        count = self.running()
+        if count == 0:
+            return text
+        return f"{text.removesuffix('> ')} [{count} running]> "
+
+    def lines(self, columns: int, cells: Callable[[str], int] = len) -> list[str]:
+        """A line per running job, at most `JOB_LINES`, then `+N more`.
+
+        Each at most `columns - 1` cells, measured by `cells`.
+        """
+        now = self._clock()
+        with self._lock:
+            running = [
+                (job.words, job.state, job.since) for job in self._jobs.values() if not job.arrived
+            ]
+        shown = []
+        for words, state, since in running[:JOB_LINES]:
+            seconds = max(0.0, now - since)
+            frame = _SPINNER[int(seconds / REDRAW_SECONDS) % len(_SPINNER)]
+            shown.append(job_line(frame, words, state, elapsed(seconds), columns, cells))
+        if len(running) > JOB_LINES:
+            shown.append(cut(f"+{len(running) - JOB_LINES} more", columns - 1, cells))
+        return shown
+
+    def opened(self) -> None:
+        """A read has started: print what arrived since the last, then print on arrival."""
+        with self._lock:
+            if self._screen is None:
                 return
-            self._waiting.pop(job_id, None)
-            if isinstance(followed, Answer):
-                for line in followed.output.splitlines():
-                    print(f"{job_id}: {line}")
-                print(f"{job_id}: exit {followed.code}", flush=True)
-            else:
-                print(f"pm-ai: {followed.sentence}", file=sys.stderr, flush=True)
+            self._reading = True
+            if self._arrived:
+                self._above()
+
+    def closed(self) -> None:
+        with self._lock:
+            self._reading = False
+
+    # ── the waiting threads ──────────────────────────────────────────────────
 
     def _wait(self, job_id: str) -> None:
+        followed: Followed
         try:
-            followed = self._client.follow(job_id)
-        except Exception as error:  # noqa: BLE001 — a lost stream, said by name
+            followed = self._client.follow(job_id, on_state=lambda state: self._state(job_id, state))
+        except BaseException as error:  # noqa: BLE001 — a lost stream, said by name
+            # Any way the wait ends, the job arrives: or the count and the
+            # redraw would never stop.
             followed = StreamLost(job_id, type(error).__name__)
-        self._arrived.put((job_id, followed))
+        with self._lock:
+            self._arrived.append((job_id, followed))
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job.arrived = True
+            if self._reading:
+                self._above()
+        self._redraw()
+
+    def _state(self, job_id: str, state: str) -> None:
+        """The stream read a state; an error here never ends the wait."""
+        try:
+            if state in FINISHED:
+                # The result follows at once; `done` is never drawn as running.
+                return
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is not None:
+                    job.state = printable(str(state))
+            self._redraw()
+        except Exception:  # noqa: BLE001, S110 — a failed report never ends the wait
+            pass
+
+    def _above(self) -> None:
+        """Ask the screen to print the arrivals above the prompt; held if it cannot.
+
+        Called under the lock. Scheduling only: the printing runs on the
+        session's own loop, and takes the arrivals then, so a request that
+        never runs leaves them for the next prompt.
+        """
+        screen = self._screen
+        if screen is None:
+            return
+        try:
+            screen.above(self.deliver)
+        except Exception:  # noqa: BLE001, S110 — held; printed before the next prompt
+            pass
+
+    def _redraw(self) -> None:
+        with self._lock:
+            screen = self._screen
+        if screen is None:
+            return
+        try:
+            screen.redraw()
+        except Exception:  # noqa: BLE001, S110 — drawing never ends the wait
+            pass
+
+
+def _print_result(job_id: str, followed: Followed) -> None:
+    if isinstance(followed, Answer):
+        for line in followed.output.splitlines():
+            print(f"{job_id}: {line}")
+        print(f"{job_id}: exit {followed.code}", flush=True)
+    else:
+        print(f"pm-ai: {followed.sentence}", file=sys.stderr, flush=True)
 
 
 def _absolute_paths(words: Sequence[str]) -> list[str]:
@@ -366,8 +634,13 @@ def _absolute_paths(words: Sequence[str]) -> list[str]:
     return [*words[:2], str(Path.cwd() / path), *rest, *options, *flags]
 
 
-def _through_daemon(words: Sequence[str], client: DaemonClient, jobs: _Jobs) -> None:
-    """Send a command's words to the daemon and show what comes back."""
+def _through_daemon(
+    words: Sequence[str], client: DaemonClient, jobs: _Jobs, typed: str
+) -> None:
+    """Send a command's words to the daemon and show what comes back.
+
+    `typed` is the line as it was typed, shown on the job's line (story 4v).
+    """
     try:
         line = shlex.join(_absolute_paths(words))
     except OSError as unreadable:
@@ -408,7 +681,7 @@ def _through_daemon(words: Sequence[str], client: DaemonClient, jobs: _Jobs) -> 
         _status(outcome.code)
         return
     if isinstance(outcome, Acknowledged):
-        jobs.follow(outcome.job_id)
+        jobs.follow(outcome.job_id, typed)
         print(
             f"{outcome.job_id}: acknowledged; the daemon runs it, and its result "
             f"is shown here, prefixed by this id, at a prompt once it is ready.",
@@ -453,7 +726,7 @@ def _handle(
         _open_line(first)
         return False
     if client is not None and jobs is not None and not runs_here(words):
-        _through_daemon(words, client, jobs)
+        _through_daemon(words, client, jobs, line.strip())
         return False
     try:
         code = runner(words)
@@ -494,6 +767,7 @@ def run(
     line_editing: bool = False,
     client: DaemonClient | None = None,
     completion: Completion | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """Read lines until `exit`, `quit` or Ctrl-D, and return 0.
 
@@ -503,16 +777,22 @@ def run(
     when it is not given, `line_editing` (which the composition root asks for)
     opens `prompt_toolkit` over `completion` (story 4u), falling back to
     `input` with `readline`, and without it `read` is `input`. `completion`'s
-    readers are read again after every command line.
+    readers are read again after every command line. A `read` that is the line
+    editor's (`_Edited`) shows the jobs (story 4v); `clock` is the monotonic
+    clock their elapsed time is read from.
     """
     completion = completion if completion is not None else Completion()
     if read is None:
         read = _line_editor(completion) if line_editing else _input
-    jobs = None if client is None else _Jobs(client)
+    jobs = None if client is None else _Jobs(client, clock)
+    if jobs is not None and isinstance(read, _Edited):
+        read.attach(jobs)
     while True:
         try:
             if jobs is not None:
-                # Between lines only: a result never lands in a line half typed.
+                # What arrived while a command ran is printed before the
+                # prompt is drawn; while a line is read, results are printed
+                # above it by the line editor, and never into it.
                 jobs.deliver()
             line = read(PROMPT)
         except EOFError:

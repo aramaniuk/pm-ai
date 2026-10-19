@@ -3902,7 +3902,16 @@ class StorageService:
         scope (AD-10), so this names one: the instance with the most recent
         complete read, by name when none has one. The open items, and those
         closed, merged or gone within 30 days of the storage clock.
+
+        Refuses a scope that is not a project, as the writer does (`23g`,
+        Andrei's decision of 2026-10-18): the personal and `people` scopes hold
+        no GitLab work, and a read of them is a caller's mistake (AD-25).
         """
+        if scope.kind is not ScopeKind.PROJECT:
+            raise ValueError(
+                f"GitLab project work is kept per project scope, and {scope} is "
+                f"not one (AD-3); it is never read for another scope (AD-25)."
+            )
         with self._reader() as reader:
             instances = [
                 (instance, latest)

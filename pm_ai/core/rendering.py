@@ -5,7 +5,8 @@ what CAP-9 asks for: `~/.manager-ai/memory/daily_dashboard.md` by 07:00 with
 exactly four headed sections — Time-Critical Activities, Proactive Enablement,
 3-Tier Strategic Milestones, Leadership Notes — and no empty section.
 `render_project_dashboard` writes a project's, which CAP-9 does not govern and
-which carries the two sections its own sources support. Nothing turned meetings,
+which carries the three sections its own sources support — the third, Team
+Activity, from the project's GitLab record (`23g`). Nothing turned meetings,
 log entries and goals into either text; this module is those two functions and
 the section renderers they share.
 
@@ -74,8 +75,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone, tzinfo
-from enum import Enum
+from datetime import datetime, timedelta, tzinfo
 
 from pm_ai.core.cadence import (
     FIRST_LOOK_BACK,
@@ -86,10 +86,22 @@ from pm_ai.core.cadence import (
 )
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.event_log import LogRead
+from pm_ai.core.event_log import Unplaceable as _Unplaceable
+from pm_ai.core.event_log import ingested_at as _ingested_at
+from pm_ai.core.event_log import posted_at as _posted_at
 from pm_ai.core.goal_register import GoalRegister
+from pm_ai.core.team_activity import (
+    NO_ISSUE_NOTES,
+    STALE_AFTER,
+    TEXT_LIMIT,
+    Assignee,
+    IssueNotes,
+    IssueRow,
+    TeamActivity,
+    WorkAnswer,
+    build_team_activity,
+)
 from pm_ai.domain.event_entries import (
-    IMPLAUSIBLE,
-    OCCURRED_AT_FLAG,
     EventEntry,
     MalformedEntry,
     SelfActionType,
@@ -104,6 +116,7 @@ from pm_ai.domain.harvest import (
 )
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.payload_fields import decode_payload
+from pm_ai.domain.work import Section, SectionStatus
 
 __all__ = [
     "APP_MARKER",
@@ -122,6 +135,7 @@ __all__ = [
     "PROJECT_HEADINGS",
     "PmHandles",
     "STRATEGIC_MILESTONES",
+    "TEAM_ACTIVITY",
     "TIME_CRITICAL",
     "UNKNOWN_SENDER",
     "code",
@@ -202,6 +216,7 @@ TIME_CRITICAL = "Time-Critical Activities"
 PROACTIVE_ENABLEMENT = "Proactive Enablement"
 STRATEGIC_MILESTONES = "3-Tier Strategic Milestones"
 LEADERSHIP_NOTES = "Leadership Notes"
+TEAM_ACTIVITY = "Team Activity"
 
 HEADINGS: tuple[str, ...] = (
     TIME_CRITICAL,
@@ -223,15 +238,18 @@ headed sections, and the tiers below are a nested list for that reason.
 PROJECT_HEADINGS: tuple[str, ...] = (
     TIME_CRITICAL,
     PROACTIVE_ENABLEMENT,
+    TEAM_ACTIVITY,
 )
-"""The project dashboard's two, which are what its sources support.
+"""The project dashboard's three, which are what its sources support.
 
 Not a subset of CAP-9's four by omission — CAP-9 does not bind this file. Its
 success criterion names `~/.manager-ai/memory/daily_dashboard.md` *by path*
 ("exactly the four headed sections … and no empty section"), which is the
-personal artifact. The project render's inputs are project-scope meetings and a
-project-scope event log, and those two sources support exactly these two
-sections.
+personal artifact. The project render's inputs are project-scope meetings, a
+project-scope event log and the project's GitLab record (`8t`), and those
+sources support exactly these three sections. Team Activity (`23g`, Andrei's
+decision of 2026-10-16) is third: each member's open assigned issues and what
+moved on them, never a ranking or a comparison between people (AD-25).
 
 The other two are absent for reasons worth separating. **3-Tier Strategic
 Milestones cannot exist here**: every goal domain lives in the personal
@@ -384,6 +402,8 @@ def render_project_dashboard(
     tz: tzinfo | None,
     pm: PmHandles,
     since: LookBack | None = None,
+    work: WorkAnswer = None,
+    issue_notes: IssueNotes = NO_ISSUE_NOTES,
 ) -> str:
     """A project's day, as Markdown — and nothing of the PM's.
 
@@ -416,18 +436,29 @@ def render_project_dashboard(
     `entries`, `pm` and `since` mean what they mean there: the PM's handles come
     from pm-ai's own connector settings, which the wall does not forbid (`23c`),
     and `since` is this scope's own last render (story 9b).
+
+    `work` is `8t`'s record of the project's GitLab members, issues and merge
+    requests as `StoragePort.project_work(scope)` answered it, or the reason it
+    could not be read; `None` is no record. `issue_notes` is `7e`'s slot: rows
+    placed under each issue Team Activity shows, and closing lines; its default
+    prints nothing, so a render without it is byte-identical to one with it.
+
     Rendering the same inputs twice returns byte-identical output, and so does
-    rendering them through the other function: the two sections below are the
+    rendering them through the other function: the first two sections are the
     same two functions.
     """
     tz = _require_tz(tz)
     _assert_utc(now, name="now")
 
+    activity = build_team_activity(
+        work, entries, now=now, since=since, issue_notes=issue_notes
+    )
     return _document(
         PROJECT_HEADINGS,
         (
             _time_critical(meetings, now=now, tz=tz),
             _proactive_enablement(entries, pm=pm, now=now, tz=tz, since=since),
+            _team_activity(activity, notes=issue_notes, now=now, tz=tz),
         ),
     )
 
@@ -1001,36 +1032,6 @@ def _sender(signal: _Signal) -> str:
     return shown
 
 
-def _posted_at(entry: EventEntry, *, now: datetime) -> datetime | None:
-    """The provider's posted time, when a line may be labelled with it (`23f`).
-
-    `None` — so the line takes its harvest time, marked — when `occurred_at` is
-    absent or `unknown`, unreadable, without a timezone, outside the range a
-    UTC instant can hold, flagged implausible
-    when it was stored (AD-35), or later than this render's instant: a posted
-    time in the future cannot be right yet.
-    """
-    fields = dict(entry.fields)
-    if fields.get(OCCURRED_AT_FLAG) == IMPLAUSIBLE:
-        return None
-    raw = fields.get("occurred_at")
-    if raw is None:
-        return None
-    try:
-        at = datetime.fromisoformat(raw)
-    except ValueError:
-        # `unknown` lands here too: it is not an instant.
-        return None
-    if at.tzinfo is None or at.utcoffset() is None:
-        return None
-    try:
-        at = at.astimezone(timezone.utc)
-    except OverflowError:
-        # `0001-01-01T00:00+05:00` has no UTC instant: unusable, not a crash.
-        return None
-    return None if at > now else at
-
-
 def _window_notes(
     *,
     absent: int,
@@ -1109,41 +1110,334 @@ def _them(count: int) -> str:
     return "it" if count == 1 else "them"
 
 
-class _Unplaceable(Enum):
-    """Why an entry got no instant — two facts the section states separately."""
+# ── Team Activity (project only, `23g`) ──────────────────────────────────────
 
-    ABSENT = "absent"
-    """No `ingested_at` field at all: an entry written before story `2e`."""
 
-    UNREADABLE = "unreadable"
-    """A field that is there and yields no instant — malformed, or naive.
+_SECTION_LABELS = {
+    Section.MEMBERS: "project members",
+    Section.ISSUES: "issues",
+    Section.MERGE_REQUESTS: "merge requests",
+}
 
-    Naive belongs here rather than being converted: there is no zone to assume,
-    and assuming one is the silent wrong answer. It is a value that could not be
-    read *as an instant*, which is precisely what the sentence says.
+
+def _team_activity(
+    activity: TeamActivity, *, notes: IssueNotes, now: datetime, tz: tzinfo
+) -> str:
+    """Each member's open assigned issues and what moved on them, or why not.
+
+    First line: the two windows. Then what could not be read or is old; the
+    members in name order, each with their issues in milestone order and every
+    mark that holds; Unassigned last; the members with no open issue; the
+    unlinked-work line; `7e`'s closing lines; the footnotes. Nothing totals,
+    rates or compares members (AD-25).
     """
+    blocks: list[str] = [
+        f"Open GitLab issues by assignee, in milestone order. Commits are "
+        f"counted {_window_words(activity.window, now=now, tz=tz)}; merge "
+        f"requests from {_local(activity.merge_request_since, tz=tz, now=now, dated=True)} "
+        f"to {_local(now, tz=tz, now=now, dated=True)}."
+    ]
+    if activity.log_failure is not None:
+        reason = _bounded(escape(activity.log_failure.reason)) or "the read gave no reason"
+        blocks.append(
+            _sentence(f"The event log could not be read, so no commit marks an issue: {reason}")
+        )
+
+    work = activity.work
+    record = activity.record
+    if isinstance(work, HarvestFailure):
+        reason = _bounded(escape(work.reason)) or "the read gave no reason"
+        blocks.append(
+            _sentence(
+                f"The project's GitLab record could not be read, so its members "
+                f"and open issues are unknown: {reason}"
+            )
+        )
+    elif record is None:
+        blocks.append(
+            "No GitLab issues are recorded for this project: no GitLab harvest "
+            "has recorded its members, issues or merge requests."
+        )
+    else:
+        members = record.status(Section.MEMBERS)
+        issues = record.status(Section.ISSUES)
+        sections_said: tuple[Section, ...] = tuple(Section)
+        if not activity.listed:
+            blocks.append(
+                f"Neither the project members nor the issues could be read, so "
+                f"no member list is shown — members: {_clause(_reason(members))}; "
+                f"issues: {_clause(_reason(issues))}."
+            )
+            sections_said = (Section.MERGE_REQUESTS,)
+        blocks.extend(
+            line
+            for section in sections_said
+            for line in _section_state(record.status(section), now=now, tz=tz)
+        )
+        if activity.listed:
+            listing = _member_list(activity, notes=notes, now=now, tz=tz)
+            if listing:
+                blocks.append(listing)
+            elif issues.complete:
+                blocks.append("No open issue is recorded for this project.")
+            if activity.hidden_groups:
+                more = activity.hidden_groups
+                blocks.append(
+                    f"{more} more {'member' if more == 1 else 'members'} with open "
+                    f"issues {'is' if more == 1 else 'are'} not shown; "
+                    f"their issues are in GitLab."
+                )
+            if activity.without_issues:
+                names = ", ".join(_who(a) for a in activity.without_issues)
+                more = activity.hidden_without_issues
+                tail = f", and {more} more" if more else ""
+                blocks.append(
+                    _sentence(f"Project members with no open assigned issue: {names}{tail}")
+                )
+
+    blocks.append(_unlinked_line(activity))
+    blocks.extend(notes.closing)
+    blocks.extend(_activity_notes(activity))
+    return "\n\n".join(blocks)
 
 
-def _ingested_at(entry: EventEntry) -> datetime | _Unplaceable:
-    """The write clock the window is measured on, or why there is none.
+def _shown(text: str) -> str:
+    """Folded, cut to `TEXT_LIMIT` characters, then escaped (`23g`)."""
+    folded = fold_breaks(text).strip()
+    if len(folded) > TEXT_LIMIT:
+        folded = folded[: TEXT_LIMIT - 1] + "…"
+    return escape(folded)
 
-    An aware value at any offset is a real instant and is converted to UTC —
-    `2026-09-09T10:30:00+02:00` is 08:30Z and belongs in a window that holds
-    08:30Z. Refusing it dropped a placeable signal and then printed a reason
-    that was not the one computed. Only `now` and the meeting starts are held to
-    UTC-on-arrival: those come from this codebase's own callers, while this
-    field is read back off a ledger line.
-    """
-    raw = dict(entry.fields).get("ingested_at")
-    if raw is None:
-        return _Unplaceable.ABSENT
-    try:
-        at = datetime.fromisoformat(raw)
-    except ValueError:
-        return _Unplaceable.UNREADABLE
-    if at.tzinfo is None or at.utcoffset() is None:
-        return _Unplaceable.UNREADABLE
-    return at.astimezone(timezone.utc)
+
+def _sentence(text: str) -> str:
+    """`text` ending in exactly one full stop, whatever a reason ended with."""
+    return _clause(text) + "."
+
+
+def _clause(text: str) -> str:
+    """`text` without the full stops a reason may end with, for mid-sentence use."""
+    return text.rstrip().rstrip(".").rstrip()
+
+
+def _reason(status: SectionStatus) -> str:
+    return _bounded(escape(status.reason or "")) or "no reason was recorded"
+
+
+def _section_state(status: SectionStatus, *, now: datetime, tz: tzinfo) -> list[str]:
+    """What is unread or old about one section: at most two sentences."""
+    label = _SECTION_LABELS[status.section]
+    last = status.last_complete
+    if last is not None and (last.tzinfo is None or last.utcoffset() is None):
+        # A hand-edited instant with no timezone cannot be compared with the
+        # render: read as never read completely, never a crash.
+        last = None
+    if last is None:
+        return [_sentence(f"The {label} have never been read completely: {_reason(status)}")]
+    lines: list[str] = []
+    if not status.complete:
+        lines.append(
+            _sentence(
+                f"The {label} could not be read completely in the last harvest: "
+                f"{_reason(status)}"
+            )
+        )
+    if now - last > STALE_AFTER:
+        lines.append(
+            f"The {label} are shown as last read completely at "
+            f"{_local(last, tz=tz, now=now, dated=True)}."
+        )
+    return lines
+
+
+def _who(assignee: Assignee) -> str:
+    """A person as the page names them: display name, else username, else id."""
+    person = assignee.person
+    if _has_name(person.name):
+        return _shown(person.name or "")
+    if person.username:
+        return f"`@{code(person.username)}`"
+    if person.handle is not None:
+        return f"`{code(str(person.handle))}`"
+    return "an unnamed person"
+
+
+def _has_name(name: str | None) -> bool:
+    return bool(name and fold_breaks(name).strip())
+
+
+def _member_list(
+    activity: TeamActivity, *, notes: IssueNotes, now: datetime, tz: tzinfo
+) -> str:
+    lines: list[str] = []
+    for group in activity.groups:
+        who = group.assignee
+        head = f"- **{_who(who)}**"
+        if _has_name(who.person.name) and who.person.username:
+            head += f" `@{code(who.person.username)}`"
+        if not who.active and who.state is not None:
+            head += f" ({_shown(who.state)})"
+        if who.member is False:
+            head += " (not a project member)"
+        lines.append(head)
+        for issue_row in group.issues:
+            lines.extend(_issue_lines(issue_row, notes=notes, now=now, tz=tz))
+        if group.hidden:
+            more = group.hidden
+            lines.append(
+                f"  - {more} more open {'issue' if more == 1 else 'issues'} "
+                f"assigned here {'is' if more == 1 else 'are'} not shown; "
+                f"{'it is' if more == 1 else 'they are'} in GitLab."
+            )
+    hidden_marked = activity.hidden_unassigned_marked
+    hidden_noted = activity.hidden_unassigned_noted
+    quiet = activity.quiet_unassigned
+    if activity.unassigned or hidden_marked or hidden_noted or quiet:
+        lines.append("- **Unassigned**")
+        for issue_row in activity.unassigned:
+            lines.extend(_issue_lines(issue_row, notes=notes, now=now, tz=tz))
+        if hidden_marked:
+            lines.append(
+                f"  - {hidden_marked} more marked unassigned "
+                f"{'issue is' if hidden_marked == 1 else 'issues are'} not shown; "
+                f"{'it is' if hidden_marked == 1 else 'they are'} in GitLab."
+            )
+        if hidden_noted:
+            lines.append(
+                f"  - {hidden_noted} more unassigned "
+                f"{'issue' if hidden_noted == 1 else 'issues'} with notes "
+                f"{'is' if hidden_noted == 1 else 'are'} not shown; "
+                f"{'it is' if hidden_noted == 1 else 'they are'} in GitLab."
+            )
+    if quiet:
+        extra = " more" if activity.unassigned else ""
+        lines.append(
+            f"  - {quiet}{extra} open unassigned "
+            f"{'issue has' if quiet == 1 else 'issues have'} no mark and "
+            f"{'is' if quiet == 1 else 'are'} not shown."
+        )
+    return "\n".join(lines)
+
+
+def _issue_lines(
+    issue_row: IssueRow, *, notes: IssueNotes, now: datetime, tz: tzinfo
+) -> list[str]:
+    """One issue, its marks, and `7e`'s rows for it — unescaped, as handed in."""
+    issue = issue_row.issue
+    line = f"  - `#{issue.iid}` {_shown(issue.title)}"
+    if issue.milestone_title is not None:
+        line += f" — milestone {_shown(issue.milestone_title)}"
+        if issue.milestone_due is not None:
+            line += f", due {issue.milestone_due.isoformat()}"
+    elif issue.milestone_due is not None:
+        line += f" — due {issue.milestone_due.isoformat()}"
+    if issue.labels:
+        line += " — labels: " + ", ".join(_shown(label) for label in issue.labels)
+    lines = [line]
+    mark = issue_row.commits
+    if mark is not None:
+        latest = mark.latest
+        if latest.committed_at is not None:
+            when = _local(latest.committed_at, tz=tz, now=now)
+        else:
+            when = f"{_local(latest.recorded_at, tz=tz, now=now)} {HARVESTED_MARKER}"
+        sha = code(latest.sha[:8])
+        named = f"`{sha}`" if sha else "(no commit id recorded)"
+        text = (
+            f"    - {mark.count} {'commit' if mark.count == 1 else 'commits'}; "
+            f"latest {named} at {when}"
+        )
+        first = _shown(latest.first_line)
+        if first:
+            text += f": {first}"
+        lines.append(text)
+    for mr in issue_row.merge_requests:
+        verb = "merged" if mr.merged else "updated"
+        text = f"    - merge request `!{mr.iid}` {verb} {_local(mr.at, tz=tz, now=now)}"
+        if mr.draft and not mr.merged:
+            text += " (draft)"
+        lines.append(text)
+    lines.extend(f"    - {row}" for row in notes.rows.get(issue.iid, ()))
+    return lines
+
+
+def _unlinked_line(activity: TeamActivity) -> str:
+    """One closing line counting work linked to no open issue, naming no author."""
+    u = activity.unlinked
+    mrs = u.merge_requests
+    if mrs is not None:
+        mr_words = (
+            f"{mrs} marked merge {'request links' if mrs == 1 else 'requests link'} "
+            f"no open issue"
+        )
+    elif isinstance(activity.work, HarvestFailure):
+        mr_words = "merge requests unknown, the GitLab record could not be read"
+    else:
+        mr_words = "no merge requests are recorded"
+    if u.unreferenced is None or u.closed_only is None:
+        line = (
+            f"Unlinked work in the window: commits unknown, the event log could "
+            f"not be read; {mr_words}"
+        )
+    else:
+        line = (
+            f"Unlinked work in the window: {u.unreferenced} "
+            f"{'commit references' if u.unreferenced == 1 else 'commits reference'} "
+            f"no issue, {u.closed_only} "
+            f"{'commit references' if u.closed_only == 1 else 'commits reference'} "
+            f"only closed or unknown issues, and {mr_words}"
+        )
+    record = activity.record
+    if record is not None and not record.status(Section.ISSUES).complete:
+        line += " — checked against the issues as last read"
+    return line + "."
+
+
+def _activity_notes(activity: TeamActivity) -> list[str]:
+    """What the section could not use, counted rather than dropped in silence."""
+    out: list[str] = []
+    commits = activity.commits
+    if commits is not None:
+        if commits.unplaceable:
+            n = commits.unplaceable
+            out.append(
+                f"{n} commit log {_carry(n)} no readable `ingested_at`, so the "
+                f"window could not place {_them(n)}."
+            )
+        if commits.ahead:
+            n = commits.ahead
+            out.append(
+                f"{n} commit log {_carry(n)} an `ingested_at` later than this "
+                f"render's instant, so the window excluded {_them(n)}."
+            )
+        if commits.undecodable:
+            n = commits.undecodable
+            out.append(
+                f"{n} commit log {_carry(n)} fields that could not be decoded, so "
+                f"{'it marks' if n == 1 else 'they mark'} nothing."
+            )
+        if commits.backfilled:
+            n = commits.backfilled
+            out.append(
+                f"{n} {'commit' if n == 1 else 'commits'} recorded in the window "
+                f"{'was' if n == 1 else 'were'} committed more than "
+                f"{_days(LOOK_BACK_CAP)} earlier, so {'it marks' if n == 1 else 'they mark'} "
+                f"nothing."
+            )
+    if activity.unknown_links:
+        n = activity.unknown_links
+        out.append(
+            f"{n} marked merge {'request' if n == 1 else 'requests'} whose links "
+            f"could not be read {'is' if n == 1 else 'are'} counted neither as "
+            f"linked nor as unlinked."
+        )
+    if activity.unusable_merge_request_times:
+        n = activity.unusable_merge_request_times
+        out.append(
+            f"{n} merge {'request carries' if n == 1 else 'requests carry'} a time "
+            f"that cannot be used — absent, without a timezone, or more than five "
+            f"minutes after this render — so {'it marks' if n == 1 else 'they mark'} nothing."
+        )
+    return out
 
 
 # ── 3-Tier Strategic Milestones ──────────────────────────────────────────────

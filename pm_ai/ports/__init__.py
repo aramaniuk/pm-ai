@@ -770,7 +770,8 @@ class StoragePort(Protocol):
     def project_work(self, scope: DataScope) -> ProjectWork:
         """A project's GitLab members, issues and merge requests — the one reader (8t).
 
-        `23g` and `7e` read nothing else of it. A plain read.
+        `23g` and `7e` read nothing else of it. A plain read. Refuses a scope
+        that is not a project (`ValueError`), as `record_project_work` does.
         """
     def record_render(self, scope: DataScope, *, at: datetime) -> None:
         """A successful render of `scope` at `at`, in one statement (9b)."""

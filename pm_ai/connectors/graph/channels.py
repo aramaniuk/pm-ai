@@ -152,17 +152,25 @@ setting.
 
 @dataclass(frozen=True, slots=True)
 class ChannelListing:
-    """One channel the PM listed by hand: where it is, and whose project it is.
+    """One channel the PM listed by hand: where it is, and the scope it files into.
 
     Built by `pm_ai.connectors.graph.graph_channel_listings`, which refuses a
-    malformed entry, an unenrolled project and a channel listed twice before any
-    connector exists.
+    malformed entry, a people scope, an unenrolled project and a channel listed
+    twice before any connector exists. The scope is personal or a project
+    (AD-4), and comes only from the channel's own entry (`33i`).
     """
 
     team: str
     channel: str
-    project: str
+    scope: DataScope
     label: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.scope.kind not in (ScopeKind.PERSONAL, ScopeKind.PROJECT):
+            raise ValueError(
+                f"a listed channel is filed personally or in a project, not in "
+                f"{self.scope}"
+            )
 
     @property
     def name(self) -> str:
@@ -170,9 +178,18 @@ class ChannelListing:
         return self.label if self.label is not None else self.channel
 
     @property
-    def scope(self) -> DataScope:
-        """The project this channel belongs to (AD-4) — never the personal scope."""
-        return DataScope(ScopeKind.PROJECT, project_id=self.project)
+    def reference_scope(self) -> str:
+        """The scope segment of each message's reference (AD-34).
+
+        `personal`, or the project's id — spelled as a chat's is, so a project
+        channel's references are the ones it had before `33i`. This class checks
+        only the scope's kind; the two spellings do not collide because
+        `graph_channel_listings` refuses an entry naming a project called
+        `personal`, in any case.
+        """
+        if self.scope.project_id is not None:
+            return self.scope.project_id
+        return self.scope.kind.value
 
 
 # ── What one walk returns ────────────────────────────────────────────────────
@@ -421,7 +438,7 @@ class GraphChannelFetch:
                     f"{self.instance} could not read channel {listing.name!r}: "
                     f"Graph answered {refused.status if refused.status else 'a 4xx'} "
                     f"for team {listing.team!r}, channel {listing.channel!r} "
-                    f"(project {listing.project!r}) — a mistyped team or channel "
+                    f"(scope {str(listing.scope)!r}) — a mistyped team or channel "
                     f"id in the channels list. Correct the entry in this "
                     f"connector's settings file; re-sending it unchanged will be "
                     f"refused the same way."

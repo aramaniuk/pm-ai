@@ -73,9 +73,9 @@ class _Recorded:
     def send(self, line: str):
         return self._client.send(line)
 
-    def follow(self, job_id: str):
+    def follow(self, job_id: str, on_state=None):
         try:
-            followed = self._client.follow(job_id)
+            followed = self._client.follow(job_id, on_state)
             if isinstance(followed, Answer):
                 self.answers[job_id] = followed
             return followed

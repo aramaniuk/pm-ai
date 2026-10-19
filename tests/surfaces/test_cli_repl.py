@@ -381,7 +381,7 @@ class _Daemon:
             raise answer
         return answer
 
-    def follow(self, job_id):
+    def follow(self, job_id, on_state=None):
         self.followed.append(job_id)
         gate = self.release.get(job_id)
         if gate is not None:
@@ -689,8 +689,9 @@ def test_ctrl_c_while_waiting_abandons_the_wait_and_the_session_continues(raised
 # ── Jobs ─────────────────────────────────────────────────────────────────────
 
 
-def test_a_result_arriving_while_a_line_is_typed_waits_for_the_next_prompt(capsys):
-    """The result arrives while `read` is showing the prompt; it is printed after Enter."""
+def test_without_the_line_editor_a_result_arriving_while_a_line_is_typed_waits_for_the_next_prompt(capsys):
+    """`4q`'s loop, kept without `prompt_toolkit` (story 4v): the result arrives
+    while `read` is showing the prompt; it is printed after Enter."""
     job = "job_bbbbbbbbbbbbbbbb"
     daemon = _Daemon(
         {"dashboard": loopback.Acknowledged(job)},
@@ -803,7 +804,7 @@ def test_a_failed_follow_is_a_lost_stream_not_a_crash(capsys):
     job = "job_eeeeeeeeeeeeeeee"
 
     class _Broken(_Daemon):
-        def follow(self, job_id):
+        def follow(self, job_id, on_state=None):
             try:
                 raise RuntimeError("boom")
             finally:
