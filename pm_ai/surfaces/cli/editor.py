@@ -22,13 +22,27 @@ What the session is, and what it is not:
 - **What starts other processes or stops this one is off**, explicitly:
   opening the line in an editor, the system-command prompt, and suspending
   with Ctrl-Z, which is bound to do nothing rather than insert itself as text.
+
+**Jobs at the prompt** (story 4v). `Live` is the session a board of running
+jobs (`repl._Jobs`) is shown on: the prompt's message and the job lines below
+the hint are read from the board each time the library draws, a waiting thread
+prints above the prompt through `above` (the library's `run_in_terminal`,
+scheduled on the session's own event loop) and asks for a redraw through
+`redraw` (the library's thread-safe `invalidate`). While a job runs, a task on
+the session's loop redraws about four times a second, started when a read
+opens and ending when none runs; with none running nothing redraws. A redraw
+is drawing, not work: nothing here schedules anything (AD-7).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import asyncio
+from collections.abc import Callable, Iterable, Sequence
+from typing import Protocol
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import run_in_terminal
+from prompt_toolkit.application.current import set_app
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer
 from prompt_toolkit.completion import Completion as Offered
@@ -40,11 +54,15 @@ from prompt_toolkit.output import Output
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.output.vt100 import Vt100_Output
 from prompt_toolkit.styles import Style
-from prompt_toolkit.utils import get_bell_environment_variable, get_term_environment_variable
+from prompt_toolkit.utils import (
+    get_bell_environment_variable,
+    get_cwidth,
+    get_term_environment_variable,
+)
 
 from pm_ai.surfaces.cli.completion import Completion
 
-__all__ = ["build", "session", "terminal_output"]
+__all__ = ["Board", "Live", "build", "session", "terminal_output"]
 
 _PROMPT_CLASS = "class:prompt"
 
@@ -128,15 +146,19 @@ def build(
     keep: Callable[[str], bool],
     input: Input | None = None,
     output: Output | None = None,
+    toolbar: Callable[[], str] | None = None,
 ) -> PromptSession[str]:
-    """The session over this terminal; `input` and `output` are a test's when given."""
+    """The session over this terminal; `input` and `output` are a test's when given.
+
+    `toolbar` draws the bottom of the terminal (story 4v); without it, the hint.
+    """
     prompt_session: PromptSession[str] = PromptSession(
         completer=_Completer(completion),
         complete_while_typing=False,
         auto_suggest=AutoSuggestFromHistory(),
         history=_Commands(keep),
         enable_history_search=False,
-        bottom_toolbar=lambda: _hint(completion, prompt_session),
+        bottom_toolbar=toolbar or (lambda: _hint(completion, prompt_session)),
         style=_STYLE,
         # Nothing that starts another process or stops this one (story 4u).
         enable_open_in_editor=False,
@@ -150,27 +172,158 @@ def build(
     return prompt_session
 
 
+class Board(Protocol):
+    """What `Live` shows of the jobs running (story 4v); `repl._Jobs` is one."""
+
+    def prompt(self, text: str) -> str:
+        """The prompt's text, with the count of running jobs when there are any."""
+        ...
+
+    def lines(self, columns: int, cells: Callable[[str], int]) -> Sequence[str]:
+        """One line per running job, under `columns` cells measured by `cells`."""
+        ...
+
+    def running(self) -> int:
+        """How many acknowledged jobs have no result yet."""
+        ...
+
+    def opened(self) -> None:
+        """A read of a line has started: arrivals may be printed above it now."""
+        ...
+
+    def closed(self) -> None:
+        """The read has ended: arrivals are held until the next one opens."""
+        ...
+
+
+class Live:
+    """A prompt over this terminal: call it with the prompt text, get one line.
+
+    Raises `KeyboardInterrupt` for Ctrl-C and `EOFError` for Ctrl-D at an
+    empty line, as `input` does. `show` puts a board of running jobs on it
+    (story 4v); with none shown, or none running, it draws what `4u` drew.
+    """
+
+    def __init__(
+        self,
+        completion: Completion,
+        *,
+        keep: Callable[[str], bool],
+        input: Input | None = None,
+        output: Output | None = None,
+    ) -> None:
+        self._completion = completion
+        self._board: Board | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self.refreshing = False
+        """Whether the redraw task is running (story 4v)."""
+        self.session = build(
+            completion, keep=keep, input=input, output=output, toolbar=self.shown_toolbar
+        )
+
+    def show(self, board: Board | None) -> None:
+        """Show `board` from the next read on; `None` stops showing one."""
+        self._board = board
+
+    def __call__(self, text: str) -> str:
+        try:
+            # Styled with the terminal's own foreground, which the renderer
+            # counts as a style, so it writes the trailing space rather than
+            # skipping it as blank: `pm-ai> ` reaches the terminal as those
+            # bytes. A callable, so the count is read each time it is drawn.
+            return self.session.prompt(
+                lambda: [(_PROMPT_CLASS, self.shown_prompt(text))], pre_run=self._opened
+            )
+        finally:
+            board = self._board
+            if board is not None:
+                board.closed()
+            self._loop = None
+
+    # ── what is drawn ────────────────────────────────────────────────────────
+
+    def shown_prompt(self, text: str) -> str:
+        """The prompt as it is drawn now."""
+        board = self._board
+        if board is None:
+            return text
+        try:
+            return board.prompt(text)
+        except Exception:  # noqa: BLE001 — drawing never prints an error
+            return text
+
+    def shown_toolbar(self) -> str:
+        """The bottom of the terminal as it is drawn now: the hint, then the jobs."""
+        hint = _hint(self._completion, self.session)
+        board = self._board
+        if board is None:
+            return hint
+        try:
+            jobs = list(board.lines(self.session.output.get_size().columns, get_cwidth))
+        except Exception:  # noqa: BLE001 — drawing never prints an error
+            jobs = []
+        return "\n".join([hint, *jobs] if hint else jobs)
+
+    # ── called from the threads that wait on jobs ────────────────────────────
+
+    def above(self, write: Callable[[], None]) -> None:
+        """Run `write` above the prompt being read, on the session's own loop.
+
+        Thread-safe. Raises `RuntimeError` when no read is running, or its loop
+        has closed; then the caller holds what it would have printed.
+        """
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("no line is being read")
+        loop.call_soon_threadsafe(self._above, write)
+
+    def redraw(self) -> None:
+        """Ask the session to draw again; thread-safe, nothing when no read runs."""
+        self.session.app.invalidate()
+
+    # ── on the session's loop ────────────────────────────────────────────────
+
+    def _opened(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        board = self._board
+        if board is None:
+            return
+        board.opened()
+        if board.running() > 0:
+            self.session.app.create_background_task(self._refresh(board))
+
+    def _above(self, write: Callable[[], None]) -> None:
+        app = self.session.app
+        if not app.is_running or app.is_done:
+            # The line was accepted meanwhile: what `write` would print is
+            # still held, and printed before the next prompt.
+            return
+        with set_app(app):
+            run_in_terminal(write)
+
+    async def _refresh(self, board: Board) -> None:
+        """Redraw while a job runs; return once none does (story 4v)."""
+        # Read when it runs, so the interval is the one `repl` names.
+        from pm_ai.surfaces.cli import repl
+
+        self.refreshing = True
+        try:
+            while board.running() > 0:
+                await asyncio.sleep(repl.REDRAW_SECONDS)
+                self.redraw()
+        finally:
+            self.refreshing = False
+
+
 def session(
     completion: Completion,
     *,
     keep: Callable[[str], bool],
     input: Input | None = None,
     output: Output | None = None,
-) -> Callable[[str], str]:
-    """A prompt over this terminal: call it with the prompt text, get one line.
-
-    Raises `KeyboardInterrupt` for Ctrl-C and `EOFError` for Ctrl-D at an
-    empty line, as `input` does.
-    """
-    prompt_session = build(completion, keep=keep, input=input, output=output)
-
-    def read(text: str) -> str:
-        # Styled with the terminal's own foreground, which the renderer counts
-        # as a style, so it writes the trailing space rather than skipping it
-        # as blank: `pm-ai> ` reaches the terminal as those bytes.
-        return prompt_session.prompt([(_PROMPT_CLASS, text)])
-
-    return read
+) -> Live:
+    """A prompt over this terminal: call it with the prompt text, get one line."""
+    return Live(completion, keep=keep, input=input, output=output)
 
 
 def _hint(completion: Completion, prompt_session: PromptSession[str]) -> str:
