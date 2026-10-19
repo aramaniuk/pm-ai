@@ -36,7 +36,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from pm_ai.domain.health import Probe
+from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import DataScope, ScopeKind
 
 __all__ = [
@@ -54,6 +54,7 @@ __all__ = [
     "assert_flow_legal",
     "is_cloud_tag",
     "normalize_model_name",
+    "unset_local_model",
 ]
 
 
@@ -215,11 +216,13 @@ class ModelAnswer:
 # ── Model names ──────────────────────────────────────────────────────────────
 
 SUGGESTED_LOCAL_MODEL = "qwen3:8b"
-"""The model `setup` offers: what `7a`'s selection rule answered on the measurement.
+"""The local model, chosen by Andrei on 2026-10-19 from `7a`'s measurement; `setup` offers it.
 
-Offered pending Andrei's decision on the Ask First items that measurement
-triggered (a call past 300 seconds, swap growth on a run alone) — see the
-story's Design Notes. Not a settled choice until he has made it.
+The selection rule's answer on the re-run after a reboot (window 16,384,
+output cap 2,048): the only candidate that validated on every run, with
+recall 9 of 11 on the authored meeting and the Ollama runner peaking at
+8,077 MB on an 18 GB Mac. Whether 16 GB is enough stays open. Figures are in
+the story's Design Notes.
 """
 
 LOCAL_MODEL_PROBE = "local model"
@@ -281,3 +284,24 @@ class LocalModelPresence:
     probe: Probe
     runs_elsewhere: bool = False
     not_pulled: bool = False
+
+
+def unset_local_model() -> LocalModelPresence:
+    """The `local model` line when `config.toml` names none: `OK`, saying how to set one up.
+
+    An optional model left unset is not a failure (Andrei, 2026-10-19): only a
+    named model that is broken, refused or unreachable affects `doctor`'s exit
+    code. Declared here, not in the adapter, so the line is the same with or
+    without the runtime extra; nothing is asked of Ollama.
+    """
+    return LocalModelPresence(
+        Probe(
+            LOCAL_MODEL_PROBE,
+            Health.OK,
+            "none named (`local_model` is unset in config.toml), so transcripts are "
+            "read by pattern matching only; not a failure.",
+            f"To use one: run `pm-ai setup`, or set `local_model` in config.toml to "
+            f"a model pulled with `ollama pull` ({SUGGESTED_LOCAL_MODEL} is the one "
+            f"7a measured).",
+        )
+    )

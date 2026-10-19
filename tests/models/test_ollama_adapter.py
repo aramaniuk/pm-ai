@@ -761,13 +761,17 @@ def test_presence_warns_when_the_answer_is_late():
     assert "within 0.5 seconds" in presence.probe.detail
 
 
-def test_presence_absent_when_no_model_is_named_and_nothing_is_asked():
+def test_presence_ok_when_no_model_is_named_says_how_to_set_one_up_and_asks_nothing():
+    """Andrei, 2026-10-19: an optional model left unset is not a failure."""
+
     def never(request: httpx.Request) -> httpx.Response:
         raise AssertionError("an unset local_model asks nothing")
 
     presence = local_model_presence("", transport=httpx.MockTransport(never))
-    assert presence.probe.health is Health.ABSENT
+    assert presence.probe.health is Health.OK
+    assert "pattern matching only" in presence.probe.detail
     assert "pm-ai setup" in presence.probe.remediation
+    assert "ollama pull" in presence.probe.remediation
 
 
 def test_the_probe_never_raises(monkeypatch):

@@ -140,23 +140,6 @@ def operator(monkeypatch: pytest.MonkeyPatch) -> Operator:
 
 
 @pytest.fixture
-def local_model_pulled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`doctor`'s `local model` line answered `OK`, contacting nothing (story 7a).
-
-    A machine with no local model named is `ABSENT` there, which is not
-    healthy; a test about a healthy machine stands the line in as a pulled one.
-    """
-    from pm_ai.domain.health import Health, Probe
-    from pm_ai.domain.model_calls import LocalModelPresence
-
-    monkeypatch.setattr(
-        entry,
-        "local_model_check",
-        lambda name: LocalModelPresence(Probe("local model", Health.OK, "stood in")),
-    )
-
-
-@pytest.fixture
 def installed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runtime extra stood in, as `test_doctor.py` stands it in."""
     monkeypatch.setattr(doctor, "missing_distributions", lambda _names: ())
@@ -472,7 +455,7 @@ def test_a_new_project_id_on_a_second_run_joins_the_registry_additively(
 
 
 def test_setup_and_doctor_agree_on_a_machine_with_two_projects(
-    home, tmp_path, keychain, operator, installed, local_model_pulled, capsys
+    home, tmp_path, keychain, operator, installed, capsys
 ):
     """Story 4l — the disagreement that revealed the bug, asserted from both sides.
 

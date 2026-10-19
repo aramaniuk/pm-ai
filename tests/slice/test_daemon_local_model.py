@@ -134,6 +134,9 @@ assert wiring.local_model(Config(local_model="qwen3:8b")) is None
 probe = wiring.local_model_check("qwen3:8b").probe
 assert probe.health is Health.WARNING, probe
 assert "is not installed" in probe.detail and "runtime extra" in probe.detail, probe.detail
+unset = wiring.local_model_check("").probe
+assert unset.health is Health.OK and "none named" in unset.detail, unset
+assert "pm_ai.models.local.ollama" not in sys.modules
 print("composes without the runtime extra")
 """
 

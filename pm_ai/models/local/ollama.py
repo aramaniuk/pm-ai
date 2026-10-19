@@ -72,6 +72,7 @@ from pm_ai.domain.model_calls import (
     assert_flow_legal,
     is_cloud_tag,
     normalize_model_name,
+    unset_local_model,
 )
 from pm_ai.domain.sanitize import Sanitized
 from pm_ai.domain.task_classes import TaskClass
@@ -675,7 +676,9 @@ def local_model_presence(
 ) -> LocalModelPresence:
     """Whether `model` is pulled on the local server and runs there, as a probe.
 
-    `ABSENT` when no model is named; `OK` when the named model is listed and
+    `OK` when no model is named — an optional model left unset is not a failure
+    (Andrei, 2026-10-19), and the line says how to set one up; `OK` when the
+    named model is listed and
     `/api/show` names no remote host or model and lists completion among its
     capabilities; `WARNING` otherwise — Ollama not answering, answering an
     error, late or malformed (naming what came back), the model not pulled, a
@@ -696,16 +699,7 @@ def _presence(
 ) -> LocalModelPresence:
     name = normalize_model_name(model)
     if not name:
-        return LocalModelPresence(
-            Probe(
-                LOCAL_MODEL_PROBE,
-                Health.ABSENT,
-                "no local model is named (`local_model` is unset in config.toml), so "
-                "transcripts are read by pattern matching only.",
-                "Run `pm-ai setup`, or set `local_model` in config.toml to a model "
-                "pulled with `ollama pull`.",
-            )
-        )
+        return unset_local_model()
     if is_cloud_tag(name):
         return _warning(_cloud_sentence(name), SERVER_LIMITS, elsewhere=True)
     backend = LoopbackBackend()

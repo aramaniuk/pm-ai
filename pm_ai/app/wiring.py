@@ -147,7 +147,12 @@ from pm_ai.domain.health import (
     UnbuiltConnector,
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.domain.model_calls import LOCAL_MODEL_PROBE, LocalModelPresence
+from pm_ai.domain.model_calls import (
+    LOCAL_MODEL_PROBE,
+    LocalModelPresence,
+    normalize_model_name,
+    unset_local_model,
+)
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.domain.storage_tiers import API_TOKEN, CAPTURES, EVENT_LOG, GITIGNORE_FILENAME
 from pm_ai.platform.claims import FlockClaims
@@ -637,7 +642,11 @@ def local_model_check(model: str) -> LocalModelPresence:
 
     The adapter is imported here, not at module level, so a machine without the
     runtime extra still composes; there the check says the extra is missing.
+    An unset model is answered before that, the same with or without the extra:
+    it is not a failure (Andrei, 2026-10-19).
     """
+    if not normalize_model_name(model):
+        return unset_local_model()
     try:
         from pm_ai.models.local.ollama import local_model_presence
     except ImportError as missing:

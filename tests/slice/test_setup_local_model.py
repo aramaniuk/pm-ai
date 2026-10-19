@@ -17,6 +17,8 @@ from pm_ai.app import entry
 from pm_ai.core.config import load_config
 from pm_ai.models.local import ollama
 from tests.slice.test_first_run import (  # noqa: F401 — fixtures
+    EXIT_OK,
+    EXIT_UNHEALTHY,
     config_path,
     home,
     installed,
@@ -158,10 +160,11 @@ def _configured(home: Path, text: str) -> None:
     config_path(home).write_text(text)
 
 
-def test_doctor_is_absent_when_no_model_is_named_and_names_setup(home, keychain, installed, capsys):
+def test_doctor_is_ok_when_no_model_is_named_and_names_setup(home, keychain, installed, capsys):
+    """Andrei, 2026-10-19: an unset local model is not a failure; the line says how."""
     entry.main(["doctor"])
     printed = capsys.readouterr().out
-    assert "[ absent] local model:" in _doctor_line(printed)
+    assert "[     ok] local model: none named" in _doctor_line(printed)
     assert "pm-ai setup" in printed
 
 
@@ -195,3 +198,46 @@ def test_a_host_key_in_config_is_refused_as_unknown_through_doctor(home, keychai
     assert "ollama_host" in printed
     assert "[warning] local model: config.toml could not be read" in _doctor_line(printed)
 
+
+# ── doctor: a missing local model is not a failure (Andrei, 2026-10-19) ──────
+
+
+def test_doctor_with_no_local_model_says_how_to_set_one_up_and_exits_healthy(
+    home, tmp_path, keychain, operator, installed, monkeypatch, capsys
+):
+    asked = _ollama(monkeypatch, pulled=["qwen3:8b"])
+    assert _first_run(operator, tmp_path, "none") == EXIT_OK
+    capsys.readouterr()
+
+    code = entry.main(["doctor"])
+    said = capsys.readouterr().out
+    assert code == EXIT_OK
+    line = said.split("local model:")[1].split("\n")
+    assert line[0].startswith(" none named") and "not a failure" in line[0]
+    assert "pm-ai setup" in line[1] and "ollama pull" in line[1]
+    assert "NOT healthy" not in said
+    assert asked == [], "nothing is asked of Ollama for no model"
+
+
+def test_doctor_with_a_named_model_ollama_cannot_answer_for_is_not_healthy(
+    home, tmp_path, keychain, operator, installed, capsys
+):
+    # `tests/conftest.py`'s transport: nothing is listening.
+    _first_run(operator, tmp_path, "qwen3:8b")
+    capsys.readouterr()
+
+    code = entry.main(["doctor"])
+    said = capsys.readouterr().out
+    assert code == EXIT_UNHEALTHY
+    assert "[warning] local model: nothing is listening on 127.0.0.1:11434" in said
+
+
+def test_doctor_with_a_named_model_not_pulled_is_not_healthy(
+    home, tmp_path, keychain, operator, installed, monkeypatch, capsys
+):
+    _ollama(monkeypatch, pulled=[])
+    _first_run(operator, tmp_path, "qwen3:8b")
+    capsys.readouterr()
+
+    assert entry.main(["doctor"]) == EXIT_UNHEALTHY
+    assert "ollama pull qwen3:8b" in capsys.readouterr().out
