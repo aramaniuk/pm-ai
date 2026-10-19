@@ -89,6 +89,8 @@ from pm_ai.app.wiring import (
     enrolled_project_ids,
     onboard_project,
     is_connector_row_file,
+    local_model,
+    local_model_check,
     read_connector_rows,
     sort_connector_rows,
     warn_if_encryption_disabled,
@@ -101,6 +103,7 @@ from pm_ai.core.goal_register import GOALS_SCOPE, parse_goals
 from pm_ai.domain.health import GRAPH_SYSTEM, EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry, parse_registry
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.model_calls import LOCAL_MODEL_PROBE, LocalModelPresence
 from pm_ai.domain.scope_model import APPLICATION_DIRNAME, ScopeResolutionError
 from pm_ai.connectors.probe import probe_credential
 from pm_ai.platform.doctor import (
@@ -639,6 +642,10 @@ class _FirstRun:
                 "the file as it is now."
             )
         return storage.write_artifact(payload, scope=APPLICATION, artifact=CONFIG_ARTIFACT)
+
+    def local_model(self, name: str) -> LocalModelPresence:
+        """Step 3's presence check of a named local model, through wiring (7a)."""
+        return local_model_check(name)
 
     def diagnose(self) -> Report:
         """`1g`'s probes over a fresh read of both artifacts.
@@ -1253,6 +1260,9 @@ def _compose(keychain: KeychainPort, target: DataScope | None = None) -> _Compos
         # phrased differently from the other is how `doctor` and a refusal end
         # up disagreeing about the same file.
         return _Composition(None, config_readable(config), config, registry, connectors)
+    # Story 7a: the local model named in the config just read, wired here
+    # because `build()` was handed none. Read at start only (`Daemon.model`).
+    daemon.model = local_model(daemon.config)
     return _Composition(daemon, None, config, registry, connectors, selection=selected)
 
 
@@ -1327,6 +1337,9 @@ def _diagnose(
     ingestion = _ingestion_probe(composed)
     if ingestion is not None:
         probes = (*probes, ingestion)
+    # `7a`: whether the named local model is pulled and runs here — the
+    # adapter's own bounded presence check, reached through wiring.
+    probes = (*probes, _local_model_probe(composed))
     if composed.failure is None or composed.failure.name in {p.name for p in probes}:
         return Report(probes)
     return Report((*probes, composed.failure))
@@ -1409,6 +1422,36 @@ def _enrolled_ids(registry: ArtifactState) -> tuple[str, ...]:
         return tuple(parse_registry(registry.raw))
     except Exception:  # noqa: BLE001 — the registry line reports it
         return ()
+
+
+def _local_model_probe(composed: _Composition) -> Probe:
+    """The `local model` line: `config.toml`'s `local_model`, asked of Ollama (7a).
+
+    Read now, as the renders line reads `display_timezone` — through the
+    composed daemon's store when there is one. A config that cannot be read is
+    reported by its own line above; this one then says it could not tell.
+    Never raises.
+    """
+    daemon = composed.daemon
+    try:
+        if daemon is not None:
+            raw = daemon.storage.read_artifact(scope=APPLICATION, artifact=CONFIG_ARTIFACT)
+            name = load_config(raw).local_model
+        elif composed.config.presence is Presence.READ:
+            name = load_config(composed.config.raw).local_model
+        elif composed.config.presence is Presence.ABSENT:
+            name = ""
+        else:
+            raise ConfigRefused(composed.config.detail or "it could not be read")
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        return Probe(
+            LOCAL_MODEL_PROBE,
+            Health.WARNING,
+            f"config.toml could not be read, so which local model is named is "
+            f"unknown: {unreadable}",
+            "Fix config.toml (its own line above says how), then run `pm-ai doctor` again.",
+        )
+    return local_model_check(name).probe
 
 
 INGESTION_PROBE = "transcript ingestion"

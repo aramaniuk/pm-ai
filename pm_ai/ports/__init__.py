@@ -27,6 +27,7 @@ from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.sanitize import Sanitized
 from pm_ai.domain.task_classes import TaskClass
@@ -1061,17 +1062,34 @@ class ModelPort(Protocol):
     make the dishonest one impossible. Closing it would take a distinct type for
     internal prose, which is a different design from the one approved here.
 
-    **The second bound: this signature cannot feed the disclosure ledger.**
-    AD-31 requires a frontier call to record its scope provenance — contributing
-    scopes, task class, model, token counts, destination — and AD-38 governs
-    where that record may be written. `-> str` carries none of it: no model, no
-    usage, no destination, and no per-fragment scope, because `Sanitized` holds
-    two strings and not the `DataScope` each fragment came from. So a conforming
-    frontier call cannot be *made* through this port as it stands. That is not
-    an oversight to be found later — it is the part story 7 has to add when it
-    brings the router and the adapters, and widening `complete` is expected work
-    rather than a regression against this slice. Recorded here so the port's
-    shape is read as unfinished in a known place rather than as complete.
+    **The second bound was this signature's, and story `7a` narrowed it.**
+    Until then `complete` returned `-> str`, which could not feed the
+    disclosure ledger: AD-31 requires a frontier call to record its
+    contributing scopes, task class, model, token counts and destination, and
+    a bare string carries none of them. The port is widened once, here, for
+    both adapters:
+
+    - `flow` (required) names the scopes the fragments came from and the
+      destination the answer is bound for — a scope or `EXTERNAL`. Every
+      adapter checks it against `domain`'s closed table
+      (`pm_ai.domain.model_calls.assert_flow_legal`) before anything is sent,
+      local calls included (AD-31 obligation 3);
+    - `shape` (optional) is a JSON schema the answer must follow — sent to the
+      model; validating the answer against it stays the caller's;
+    - `ModelAnswer` carries the text, the model's name, whether it ran
+      locally, and the token counts and durations the server reported — what a
+      ledger line needs *from the model*.
+
+    What is still open. Nothing writes a ledger line yet: the `sent` and
+    `completed` lines are `7c`'s, around the frontier adapter. And the scopes
+    a line would record are the flow **the caller declares**: `Sanitized`
+    holds two strings and no `DataScope`, so nothing checks that each fragment
+    really came from a scope the flow names. The flow table refuses a declared
+    flow that may not happen; it cannot catch a caller that declares the wrong
+    one.
+
+    `external` stays `Sequence[Sanitized]`: what a fragment is and where it
+    came from are separate facts, and the flow carries the second.
 
     **`task_class` is required, and typed.** AD-15's invariant row makes "a call
     without a declared task class" a defect, and its Rule routes by "task class
@@ -1083,13 +1101,13 @@ class ModelPort(Protocol):
     caught here rather than by whichever router first fails to match it. The
     vocabulary is open — see `pm_ai.domain.task_classes`.
 
-    **No adapter, no router, no egress split.** AD-15's other clauses — which
-    classes may leave the machine, which model tier serves each, and the router
-    that reads both — are story 7's, wired "behind the model port". This
-    declares the port and the vocabulary and stops: the shape story 1d used for
-    `KeychainPort`, custody first and cipher later, with a stronger reason — the
-    port exists to refuse a call that does not exist yet, which is the cheapest
-    moment to declare it. Nothing can already be bypassing it.
+    **Adapters.** The local adapter (`pm_ai.models.local.ollama`, story `7a`)
+    implements this port for the local-only classes; the router and the
+    frontier adapter are story `7c`'s, behind the same signature. The refusals
+    a caller must catch about the port's transport are declared below, beside
+    it (AD-49): `LocalModelUnavailable` (and `RemoteModelRefused`, one kind of
+    it), `NoLocalModel`, `PossiblyTruncated`, `ModelTimedOut`. `ScopeFlowRefused`
+    is about the flow table, a rule `domain` owns, and lives beside it.
     """
 
     def complete(
@@ -1098,18 +1116,55 @@ class ModelPort(Protocol):
         task_class: TaskClass,
         instructions: str,
         external: Sequence[Sanitized],
-    ) -> str:
+        flow: ScopeFlow,
+        shape: Mapping[str, object] | None = None,
+    ) -> ModelAnswer:
         """Run `instructions` over `external` as `task_class`, and return the answer.
 
         Implementations put `fragment.for_model` in the prompt and never
         `fragment.raw` — the raw travels so a citation the answer carries can be
         resolved against the evidence (AD-29), not so it can be sent.
 
-        What an implementation does with `task_class` is not settled here. It is
-        carried because AD-15 requires the caller to declare it; reading it to
-        choose a model, or to decide whether the call may leave the machine, is
-        story 7's router.
+        `flow` is checked against the closed table before anything is sent
+        (`ScopeFlowRefused`). An adapter serves the task classes its side
+        declares (AD-15) and refuses any other by name, before any request.
         """
+
+
+class LocalModelUnavailable(RuntimeError):
+    """The local model server could not answer this call, and it was not retried.
+
+    Nothing on 127.0.0.1:11434, the named model not pulled, an overloaded
+    server (503), a redirect (never followed), an error or a malformed answer —
+    each named in the sentence with its remedy (AD-1 class LM, story 7a).
+    """
+
+
+class RemoteModelRefused(LocalModelUnavailable):
+    """The named model runs off this machine, so no prompt was sent to it (AD-1 class LM).
+
+    A `:cloud` or `-cloud` tag, or the server's own `/api/show` answer naming
+    `remote_host` or `remote_model`. A kind of `LocalModelUnavailable`, so a
+    caller that catches the one catches this.
+    """
+
+
+class NoLocalModel(LookupError):
+    """`config.toml` names no `local_model`, so no local adapter is wired (story 7a)."""
+
+
+class PossiblyTruncated(RuntimeError):
+    """The answer may be cut short, so it was discarded (story 7a).
+
+    The prompt and output tokens together reached the context window, the
+    server stopped for a reason other than `stop`, a token count is missing,
+    or the server refused a prompt longer than the window. Names the counts or
+    the field.
+    """
+
+
+class ModelTimedOut(TimeoutError):
+    """The call outlasted its deadline; the connection was closed and nothing written."""
 
 
 @runtime_checkable
@@ -1144,6 +1199,9 @@ class ConfigPort(Protocol):
 
     @property
     def daemon_port(self) -> int: ...
+
+    @property
+    def local_model(self) -> str: ...
 
 
 class DaemonRefused(RuntimeError):

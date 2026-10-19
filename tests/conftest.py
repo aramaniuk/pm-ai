@@ -69,6 +69,31 @@ def _never_the_real_pm_ai_home(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ScopePaths, "production", classmethod(guarded))
 
+
+@pytest.fixture(autouse=True)
+def _never_a_real_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reaches the Ollama server on this machine (story 7a).
+
+    The local adapter's real transport is replaced by one that answers every
+    request as "nothing is listening", so a test that goes through wiring —
+    `doctor`, `setup` — meets a stopped Ollama rather than the developer's own.
+    A test that wants a server injects an `httpx.MockTransport` itself.
+    """
+    import httpx
+
+    from pm_ai.models.local import ollama
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(
+            "tests never reach a real Ollama: inject an httpx.MockTransport",
+            request=request,
+        )
+
+    monkeypatch.setattr(
+        ollama, "_default_transport", lambda _backend=None: httpx.MockTransport(refuse)
+    )
+
+
 RUNTIME_EXTRA = "uv sync --extra runtime"
 RUNTIME_MODULES = ("starlette", "fastapi", "uvicorn")
 

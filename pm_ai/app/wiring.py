@@ -23,10 +23,10 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
 
-from pm_ai.app.concurrency import IOPool, WriterThread
+from pm_ai.app.concurrency import IOPool, ModelPool, WriterThread
 from pm_ai.connectors.gitlab import (
     DEFAULT_HOST as GITLAB_DEFAULT_HOST,
     HOST_KEY as GITLAB_HOST_KEY,
@@ -143,9 +143,11 @@ from pm_ai.domain.health import (
     EnrolmentReading,
     Health,
     Presence,
+    Probe,
     UnbuiltConnector,
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.model_calls import LOCAL_MODEL_PROBE, LocalModelPresence
 from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.domain.storage_tiers import API_TOKEN, CAPTURES, EVENT_LOG, GITIGNORE_FILENAME
 from pm_ai.platform.claims import FlockClaims
@@ -160,6 +162,8 @@ from pm_ai.ports import (
     CryptoPort,
     DecryptionFailed,
     KeychainPort,
+    ModelPort,
+    NoLocalModel,
     ProbeFailed,
     ProbeUnreachable,
     TranscriptSourcePort,
@@ -173,6 +177,7 @@ from pm_ai.surfaces.cli.dispatch import RESTART_SENTENCE
 
 __all__ = [
     "Bootstrap",
+    "LocalModel",
     "CONFIG_ARTIFACT",
     "ConnectorRows",
     "Daemon",
@@ -213,6 +218,21 @@ __all__ = [
 
 REGISTRY_ARTIFACT = "projects.toml"
 CONFIG_ARTIFACT = "config.toml"
+
+
+class LocalModel(ModelPort, Protocol):
+    """The local adapter as the daemon holds it: the port, and the close a shutdown calls (7a).
+
+    A protocol rather than `OllamaModel`, which is imported only where it is
+    built: the adapter imports `httpx`, which is in the runtime extra, and
+    without the extra every command — `doctor` included — must still compose
+    far enough to say so. The annotation must also resolve at run time, since
+    `Daemon`'s field types are read (`get_type_hints`).
+    """
+
+    def close(self) -> None:
+        """End any request in flight and refuse every later one."""
+        ...
 
 
 @dataclass
@@ -312,6 +332,21 @@ class Daemon:
     """
     pool: IOPool | None = None
     """The daemon's I/O pool of four, once started (AD-19, story 4r); `None` elsewhere."""
+    model: LocalModel | None = None
+    """The local model behind `ModelPort`, when `config.toml` names one (story 7a).
+
+    `None` when `local_model` is unset: no local adapter is wired, and a caller
+    that needs one is refused (`NoLocalModel`, from `require_model`). The port
+    plus `close` (`LocalModel`), because the model pool's shutdown closes its
+    connection; `7c`'s router takes this slot's place.
+
+    Set from the `config.toml` read at composition (`entry._compose`), and
+    **read at daemon start only**: `refreshed` reads the settings again for
+    every line and job but keeps this adapter, so a changed `local_model`
+    takes effect at the next daemon start.
+    """
+    model_pool: ModelPool | None = None
+    """The daemon's model pool of one, once started (AD-19, story 7a); `None` elsewhere."""
     instance_scopes: Mapping[str, DataScope] = field(default_factory=dict)
     """The scope each connector instance was filed under when it was built (9a).
 
@@ -562,9 +597,60 @@ def build(
         # has to build a second one.
         clock=clock,
         config=config if config is not None else Config(),
+        model=local_model(config),
         instance_scopes=filed,
         unbuilt=unbuilt,
     )
+
+
+def local_model(config: Config | None) -> LocalModel | None:
+    """The local adapter for `config.toml`'s `local_model`, or `None` when unset (7a).
+
+    Constructing it contacts nothing and opens nothing: its client is built on
+    its first request. No transport is passed — the adapter's own, loopback
+    only — so a test reaches a real Ollama only if it builds one itself.
+    `None` too when the runtime extra is missing (the adapter needs `httpx`):
+    `doctor`'s `runtime packages` and `local model` lines say so.
+    """
+    if config is None or not config.local_model:
+        return None
+    try:
+        from pm_ai.models.local.ollama import OllamaModel
+    except ImportError:
+        return None
+    return OllamaModel(config.local_model)
+
+
+def require_model(daemon: Daemon) -> LocalModel:
+    """`daemon.model`, or `NoLocalModel` naming the setting (story 7a)."""
+    if daemon.model is None:
+        raise NoLocalModel(
+            "no local model is named: `local_model` is unset in config.toml, so no "
+            "local adapter is wired. Run `pm-ai setup`, or set `local_model` to a "
+            "model pulled with `ollama pull`."
+        )
+    return daemon.model
+
+
+def local_model_check(model: str) -> LocalModelPresence:
+    """The presence check `setup` and `doctor` make, through the composition root (7a).
+
+    The adapter is imported here, not at module level, so a machine without the
+    runtime extra still composes; there the check says the extra is missing.
+    """
+    try:
+        from pm_ai.models.local.ollama import local_model_presence
+    except ImportError as missing:
+        return LocalModelPresence(
+            Probe(
+                LOCAL_MODEL_PROBE,
+                Health.WARNING,
+                f"the local model cannot be asked: {missing.name or 'httpx'} is not "
+                f"installed (it is in the runtime extra).",
+                "Run `uv sync --extra runtime`; the runtime packages line says what is missing.",
+            )
+        )
+    return local_model_presence(model)
 
 
 def _transcript_sources(
@@ -1046,6 +1132,10 @@ def refreshed(
     one that hands its read and its compare-and-save to the writer thread.
     Nothing here writes. A `config.toml` the loader refuses raises
     `ConfigRefused`, which the line reports as the terminal would.
+
+    The local model (`Daemon.model`) is kept, not rebuilt: a changed
+    `local_model` takes effect at the next daemon start (story 7a), like the
+    enrolled projects.
     """
     storage = daemon.storage
     config = load_config(

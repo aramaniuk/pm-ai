@@ -100,7 +100,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from pm_ai.app.concurrency import IOPool, WriterThread
+from pm_ai.app.concurrency import IOPool, ModelPool, WriterThread
 from pm_ai.app.prompts import (
     DAEMON_LOG_NAME,
     DAEMON_LOGGER,
@@ -581,8 +581,11 @@ def _serve_locked(
         )
 
     pool = IOPool()
-    # `9a` and `9b` take both from the daemon (AD-5, AD-19).
-    daemon.writer, daemon.pool = writer, pool
+    # `7a`: one thread for the local model, started and stopped with the I/O
+    # pool; its shutdown closes the connection of a generation still running.
+    model_pool = ModelPool(abort=daemon.model.close if daemon.model is not None else None)
+    # `9a` and `9b` take both from the daemon (AD-5, AD-19); `7b` the model pool.
+    daemon.writer, daemon.pool, daemon.model_pool = writer, pool, model_pool
     requests = RequestPath(
         daemon=daemon,
         writer=writer,
@@ -592,6 +595,7 @@ def _serve_locked(
     )
     try:
         pool.start()
+        model_pool.start()
         # Before serving, after the port: a second `daemon run` loses the port
         # first, so it can never mark the running daemon's jobs failed.
         try:
@@ -684,9 +688,14 @@ def _serve_locked(
             listener.close()
         finally:
             try:
-                drained = _stop_writer(requests)
+                # `7a`: a model job queued never starts, and one running loses
+                # its connection and its answer, before the writer drains.
+                model_pool.shutdown()
             finally:
-                pool.shutdown()
+                try:
+                    drained = _stop_writer(requests)
+                finally:
+                    pool.shutdown()
     # A halt — before or during the stop's own marking step — is not a clean
     # stop, and says only what it says today.
     if writer.halted is not None:

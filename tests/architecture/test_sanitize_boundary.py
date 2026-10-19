@@ -319,11 +319,15 @@ def test_the_port_takes_fragments_rather_than_an_assembled_prompt():
     are written: interpolating `for_model` into a template yields a plain `str`
     the port would have to accept."""
     params = inspect.signature(ports.ModelPort.complete).parameters
-    assert set(params) == {"self", "task_class", "instructions", "external"}
+    # Widened once by story 7a, for both adapters: `flow` (required) and
+    # `shape` (optional). Still fragments, never an assembled prompt.
+    assert set(params) == {"self", "task_class", "instructions", "external", "flow", "shape"}
     assert all(
         params[name].kind is inspect.Parameter.KEYWORD_ONLY
-        for name in ("task_class", "instructions", "external")
-    ), "keyword-only, so the three arguments cannot be swapped at a call site"
+        for name in ("task_class", "instructions", "external", "flow", "shape")
+    ), "keyword-only, so the arguments cannot be swapped at a call site"
+    assert params["flow"].default is inspect.Parameter.empty, "flow is required"
+    assert params["shape"].default is None
 
 
 def _expected_refusals() -> dict[int, str]:
@@ -489,8 +493,14 @@ def test_no_table_must_be_updated_when_a_class_is_added():
         if "TaskClass" in names:
             referring.add(path.relative_to(REPO_ROOT))
 
+    # Story 7a: the local adapter names AD-15's five local-only classes and
+    # refuses every other — a subset, not a map of every member. A class added
+    # later reaches it as "not local" and is refused by name, so nothing here
+    # must be updated when one is added; the table that names every member is
+    # `7c`'s router, and its arrival is when this set is asked again.
     assert referring == {
         Path("pm_ai/domain/task_classes.py"),
+        Path("pm_ai/models/local/ollama.py"),
         Path("pm_ai/ports/__init__.py"),
     }, (
         f"TaskClass has gained a consumer: {sorted(map(str, referring))}.\n"

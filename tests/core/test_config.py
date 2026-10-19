@@ -168,6 +168,7 @@ def test_the_accepted_set_is_the_dataclass():
         "verbose_logging",
         "display_timezone",
         "daemon_port",
+        "local_model",
     }
 
 
@@ -416,6 +417,7 @@ ROUND_TRIP = {
     "verbose_logging": (b"verbose_logging = true\n", True),
     "display_timezone": (b'display_timezone = "Europe/Warsaw"\n', "Europe/Warsaw"),
     "daemon_port": (b"daemon_port = 9000\n", 9000),
+    "local_model": (b'local_model = "qwen3:8b"\n', "qwen3:8b"),
 }
 
 

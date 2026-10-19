@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from pm_ai.domain.model_calls import LocalModelPresence
+
 from pm_ai.core.project_registry import ProjectEntry, render_registry
 from pm_ai.platform.doctor import ArtifactState, Presence
 from pm_ai.app.wiring import bootstrap
@@ -119,6 +121,13 @@ def probes(monkeypatch):
         )
 
     install(*HEALTHY)
+    # Story 7a: the `local model` line asks the local Ollama server, which is
+    # this machine's too; stood in as a pulled model, contacting nothing.
+    monkeypatch.setattr(
+        entry,
+        "local_model_check",
+        lambda name: LocalModelPresence(Probe("local model", Health.OK, "stood in")),
+    )
     return install
 
 

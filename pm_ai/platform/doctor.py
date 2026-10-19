@@ -161,7 +161,7 @@ def missing_distributions(names: Iterable[str]) -> tuple[str, ...]:
     """Which of `names` are not installed, without importing any of them.
 
     Importing to find out would be the obvious implementation and the wrong one:
-    `fastapi`, `uvicorn` and `ollama` all cost real time to import and some have
+    `fastapi`, `uvicorn` and `anthropic` all cost real time to import and some have
     side effects, and a diagnostic must not pay a startup cost to report that a
     startup cost exists. Distribution metadata answers without loading code.
     """

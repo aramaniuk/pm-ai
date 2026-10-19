@@ -83,17 +83,29 @@ class Keychain:
 
 
 class Operator:
-    """Scripted answers. Running out is Ctrl-D, which is what a closed stdin is."""
+    """Scripted answers. Running out is Ctrl-D, which is what a closed stdin is.
+
+    Step 3's `local_model` question (story 7a) is answered `model_answer`
+    without consuming a scripted answer — `none`, leaving it unset — so the
+    scripts written before the question existed keep their positions. A test
+    about the question sets `model_answer = None` and scripts it.
+    """
 
     def __init__(self) -> None:
         self.answers: list[str] = []
         self.asked: list[str] = []
+        self.model_answer: str | None = "none"
+        self.model_asked: list[str] = []
 
     def script(self, *answers: str) -> None:
         self.answers = list(answers)
         self.asked = []
 
     def __call__(self, prompt: str = "") -> str:
+        if self.model_answer is not None and prompt.startswith("local_model"):
+            # Recorded apart, so `asked` stays the questions the script answers.
+            self.model_asked.append(prompt)
+            return self.model_answer
         self.asked.append(prompt)
         if not self.answers:
             raise EOFError
@@ -125,6 +137,23 @@ def operator(monkeypatch: pytest.MonkeyPatch) -> Operator:
     monkeypatch.setattr("builtins.input", scripted)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     return scripted
+
+
+@pytest.fixture
+def local_model_pulled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`doctor`'s `local model` line answered `OK`, contacting nothing (story 7a).
+
+    A machine with no local model named is `ABSENT` there, which is not
+    healthy; a test about a healthy machine stands the line in as a pulled one.
+    """
+    from pm_ai.domain.health import Health, Probe
+    from pm_ai.domain.model_calls import LocalModelPresence
+
+    monkeypatch.setattr(
+        entry,
+        "local_model_check",
+        lambda name: LocalModelPresence(Probe("local model", Health.OK, "stood in")),
+    )
 
 
 @pytest.fixture
@@ -443,7 +472,7 @@ def test_a_new_project_id_on_a_second_run_joins_the_registry_additively(
 
 
 def test_setup_and_doctor_agree_on_a_machine_with_two_projects(
-    home, tmp_path, keychain, operator, installed, capsys
+    home, tmp_path, keychain, operator, installed, local_model_pulled, capsys
 ):
     """Story 4l — the disagreement that revealed the bug, asserted from both sides.
 

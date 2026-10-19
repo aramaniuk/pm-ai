@@ -34,7 +34,17 @@ runtime = [
     # `httpx2>=2`, the second web stack the Stack table budgets for.
     "anthropic[mcp]==1.2.0",
     "python-telegram-bot==22.8",   # NOT [job-queue] — it embeds a second scheduler
-    "ollama",
+    # Story 7a: no `ollama` package. 0.6.2 reads `OLLAMA_HOST` and
+    # `OLLAMA_API_KEY` from the environment, adds the key as a bearer header
+    # and follows redirects by default (`ollama/_client.py:85,108-113`), which
+    # AD-1 class LM forbids. The local adapter builds its own client instead,
+    # so `httpx` is imported directly and declared at the lock's version.
+    "httpx==0.28.1",
+    # Imported directly too: the local adapter runs httpx's transport on its
+    # own httpcore network backend, so an abort or the call's deadline can shut
+    # the connection's socket down. Declared at the lock's version, which
+    # `httpx` 0.28.1 already pulled in; the lock gains no package.
+    "httpcore==1.0.9",
     "sqlite-vec==0.1.9",           # pre-1.0; a minor bump is a reindex event (AD-3)
     "fastapi==0.141.1",
     # Pinned beside fastapi (story 4e review): fastapi declares only a floor
