@@ -7,7 +7,7 @@ say what it returns. Adapters implement these; core depends on them.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,7 +31,9 @@ from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.sanitize import Sanitized
 from pm_ai.domain.task_classes import TaskClass
 from pm_ai.domain.transcripts import (
+    StoredPart,
     TranscriptOutcome,
+    TranscriptPart,
     TranscriptState,
     TranscriptStateKind,
 )
@@ -688,13 +690,23 @@ class TranscriptSourcePort(Protocol):
     requires_network: bool
 
     def acquire(
-        self, meetings: Sequence[Meeting], *, since: datetime
+        self,
+        meetings: Sequence[Meeting],
+        *,
+        since: datetime,
+        stored: Mapping[str, Sequence[StoredPart]],
     ) -> tuple[TranscriptOutcome, ...]:
         """One outcome per meeting reached, in the order asked; never raises per meeting.
 
         `since` is the start of the harvest's reach-back: no meeting asked about
         starts before it, and a source that lists transcripts may stop listing
         once it reaches ones created well before it.
+
+        `stored` holds, by meeting id, the parts of each meeting's transcript
+        already stored (story 33g); a meeting absent from it holds none. A
+        source returns only new parts, in time order, in one
+        `TranscriptCaptured`, and reads the stored parts' instants from here,
+        not from its listing, when it tests a new part against them.
 
         A meeting missing from the answer was not reached: a provider fault
         (a throttle, a server error, no answer) stops the run at the meeting it
@@ -944,6 +956,40 @@ class StoragePort(Protocol):
 
     def transcript_states(self, scope: DataScope) -> dict[str, TranscriptState]:
         """Every recorded acquisition and ingestion state in `scope`, by meeting id."""
+
+    def record_pending_part(
+        self,
+        scope: DataScope,
+        meeting_id: str,
+        part: int,
+        *,
+        transcript_id: str,
+        created: datetime,
+        ended: datetime,
+        reason: str | None = None,
+    ) -> None:
+        """Claim a part of a meeting's transcript before its capture is written (33g).
+
+        A pending row under the same number is replaced; a stored one refuses.
+        """
+
+    def mark_part_stored(self, scope: DataScope, meeting_id: str, part: int) -> None:
+        """A pending part's capture is on disk; resets the meeting's ingestion attempts."""
+
+    def drop_pending_part(self, scope: DataScope, meeting_id: str, part: int) -> bool:
+        """Remove a pending part whose write was refused for good."""
+
+    def mark_part_ingested(self, scope: DataScope, meeting_id: str, part: int) -> None:
+        """A stored part was ingested and is never extracted again."""
+
+    def transcript_parts(self, scope: DataScope) -> dict[str, tuple[TranscriptPart, ...]]:
+        """Every part row in `scope`, by meeting id, in part order (Tier 2, 33g)."""
+
+    def record_part_ask(self, scope: DataScope, meeting_id: str, *, asked_at: datetime) -> None:
+        """When a run that asked the source about this meeting started (33g)."""
+
+    def transcript_part_asks(self, scope: DataScope) -> dict[str, datetime]:
+        """When each meeting in `scope` was last asked about, by meeting id (33g)."""
 
     def fetched_not_ingested(self, scope: DataScope) -> tuple[str, ...]:
         """The meetings in `scope` whose capture still awaits ingestion (story 11b).

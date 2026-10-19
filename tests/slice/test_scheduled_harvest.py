@@ -906,24 +906,27 @@ class _Source:
     def __init__(self, texts: dict[str, str]) -> None:
         self.texts = texts
 
-    def acquire(self, meetings: Sequence[Meeting], *, since: datetime) -> tuple[TranscriptOutcome, ...]:
+    def acquire(self, meetings: Sequence[Meeting], *, since: datetime, stored=None) -> tuple[TranscriptOutcome, ...]:
         answers: list[TranscriptOutcome] = []
         for meeting in meetings:
             text = self.texts.get(meeting.meeting_id)
-            if text is None:
+            held = {part.transcript_id for part in (stored or {}).get(meeting.meeting_id, ())}
+            if text is None or f"T-{meeting.meeting_id}" in held:
                 answers.append(TranscriptAbsent(meeting.meeting_id, "nothing recorded"))
                 continue
             answers.append(
                 TranscriptCaptured(
                     meeting.meeting_id,
-                    TranscriptCapture(
-                        meeting_id=meeting.meeting_id,
-                        transcript_id=f"T-{meeting.meeting_id}",
-                        created=meeting.start,
-                        ended=meeting.start + timedelta(minutes=meeting.duration_minutes),
-                        text=text,
-                        attributed=True,
-                        format=CaptureFormat.GRAPH,
+                    (
+                        TranscriptCapture(
+                            meeting_id=meeting.meeting_id,
+                            transcript_id=f"T-{meeting.meeting_id}",
+                            created=meeting.start,
+                            ended=meeting.start + timedelta(minutes=meeting.duration_minutes),
+                            text=text,
+                            attributed=True,
+                            format=CaptureFormat.GRAPH,
+                        ),
                     ),
                 )
             )
@@ -1687,9 +1690,9 @@ def test_the_transcript_fetch_gets_only_what_the_calendar_fetch_left_of_the_budg
             return super().__call__(request)
 
     class SlowSource(_Source):
-        def acquire(self, meetings, *, since):
+        def acquire(self, meetings, *, since, stored=None):
             time.sleep(0.6)
-            return super().acquire(meetings, since=since)
+            return super().acquire(meetings, since=since, stored=stored)
 
     connector = _graph(rig)
     connector.calendar.client.transport = SlowCalendar()

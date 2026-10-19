@@ -46,6 +46,7 @@ from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.storage_tiers import CAPTURES
 from pm_ai.domain.transcripts import (
     CaptureFormat,
+    StoredPart,
     TranscriptAbsent,
     TranscriptCaptured,
     TranscriptRefused,
@@ -286,13 +287,13 @@ def test_a_recorded_one_off_meeting_is_captured_verbatim():
     held = _one_off(graph)
     _recorded(graph)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptCaptured)
-    assert outcome.capture.text.encode("utf-8") == VTT_BYTES
-    assert outcome.capture.attributed is True
-    assert outcome.capture.format is CaptureFormat.GRAPH
-    assert outcome.capture.transcript_id == "T-1"
+    assert outcome.captures[0].text.encode("utf-8") == VTT_BYTES
+    assert outcome.captures[0].attributed is True
+    assert outcome.captures[0].format is CaptureFormat.GRAPH
+    assert outcome.captures[0].transcript_id == "T-1"
     (event_url,) = graph.asked("/me/events/")
     assert "$select=isOnlineMeeting,onlineMeeting,onlineMeetingProvider,start,end" in unquote(event_url)
     (download,) = [r for r in graph.requests if r.url.endswith("/content")]
@@ -309,7 +310,7 @@ def test_a_meeting_with_no_transcript_listed_is_absent():
     graph = FakeGraph()
     held = _one_off(graph)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptAbsent)
     assert "no transcript" in outcome.reason
@@ -324,7 +325,7 @@ def test_a_meeting_that_is_not_an_online_teams_meeting_is_absent_and_never_looke
     graph = FakeGraph()
     held = _one_off(graph, **event)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptAbsent)
     assert "not an online Teams meeting" in outcome.reason
@@ -338,7 +339,7 @@ def test_a_record_with_no_calendar_reference_makes_no_request():
         attendees=(), scope=PERSONAL,
     )
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptAbsent)
     assert graph.requests == []
@@ -354,7 +355,7 @@ def test_a_meeting_that_is_not_the_pms_to_read_is_absent(lookup):
     held = _one_off(graph)
     graph.lookups[JOIN] = lookup
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptAbsent)
     assert "not the PM's to read" in outcome.reason
@@ -364,13 +365,13 @@ def test_a_listing_or_download_saying_expired_is_absent():
     graph = FakeGraph()
     held = _one_off(graph)
     graph.listings[ONLINE] = [error(400, "BadRequest", "MeetingHasExpired")]
-    (listed,) = _adapter(graph).acquire([held], since=SINCE)
+    (listed,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     graph = FakeGraph()
     held = _one_off(graph)
     _recorded(graph)
     graph.contents[("T-1", VTT)] = error(400, "BadRequest", "MeetingHasExpired")
-    (downloaded,) = _adapter(graph).acquire([held], since=SINCE)
+    (downloaded,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(listed, TranscriptAbsent)
     assert isinstance(downloaded, TranscriptAbsent)
@@ -382,7 +383,7 @@ def test_a_lookup_answering_two_online_meetings_is_refused_naming_both():
     held = _one_off(graph)
     graph.lookups[JOIN] = ok(lookup_body("MS-first", "MS-second"))
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused)
     assert outcome.retryable is False
@@ -414,11 +415,11 @@ def test_a_series_resolves_and_lists_once_and_matches_by_time():
     graph.contents[("T-first", VTT)] = content(b"WEBVTT\n\nfirst\n")
     graph.contents[("T-second", VTT)] = content(b"WEBVTT\n\nsecond\n")
 
-    outcomes = _adapter(graph).acquire([first, second, third], since=SINCE)
+    outcomes = _adapter(graph).acquire([first, second, third], since=SINCE, stored={})
 
     assert [type(o) for o in outcomes] == [TranscriptCaptured, TranscriptCaptured, TranscriptAbsent]
-    assert outcomes[0].capture.text == "WEBVTT\n\nfirst\n"
-    assert outcomes[1].capture.text == "WEBVTT\n\nsecond\n"
+    assert outcomes[0].captures[0].text == "WEBVTT\n\nfirst\n"
+    assert outcomes[1].captures[0].text == "WEBVTT\n\nsecond\n"
     assert len(graph.asked("/me/onlineMeetings?")) == 1, "resolved once"
     assert len([u for u in graph.asked("/transcripts") if u.endswith("/transcripts")]) == 1, "listed once"
 
@@ -428,7 +429,7 @@ def test_a_transcript_fitting_none_of_a_series_occurrences_is_left_alone():
     first, second, third = _series(graph)
     graph.listing(ONLINE, transcript_row("T-elsewhere", NOW - timedelta(days=4), NOW - timedelta(days=4) + timedelta(minutes=30)))
 
-    outcomes = _adapter(graph).acquire([first, second, third], since=SINCE)
+    outcomes = _adapter(graph).acquire([first, second, third], since=SINCE, stored={})
 
     assert all(isinstance(o, TranscriptAbsent) for o in outcomes)
 
@@ -444,7 +445,7 @@ def test_one_transcript_fitting_two_occurrences_is_refused_for_both():
     graph.listing(ONLINE, transcript_row("T-both", start + timedelta(minutes=25), back_to_back + timedelta(minutes=19)))
 
     outcomes = _adapter(graph).acquire(
-        [meeting("AAMk-a", start, minutes=20), meeting("AAMk-b", back_to_back, minutes=20)], since=SINCE
+        [meeting("AAMk-a", start, minutes=20), meeting("AAMk-b", back_to_back, minutes=20)], since=SINCE, stored={}
     )
 
     assert [type(o) for o in outcomes] == [TranscriptRefused, TranscriptRefused]
@@ -453,7 +454,8 @@ def test_one_transcript_fitting_two_occurrences_is_refused_for_both():
     assert graph.asked("/content") == [], "nothing stored"
 
 
-def test_two_transcripts_fitting_one_meeting_are_refused_naming_both():
+def test_two_transcripts_fitting_one_meeting_are_its_parts_in_time_order():
+    """Story 33g, restarted transcription: both are downloaded, earliest first."""
     graph = FakeGraph()
     held = _one_off(graph)
     graph.listing(
@@ -461,12 +463,231 @@ def test_two_transcripts_fitting_one_meeting_are_refused_naming_both():
         transcript_row("T-restart", START + timedelta(minutes=20), START + timedelta(minutes=58)),
         transcript_row("T-early", START + timedelta(minutes=1), START + timedelta(minutes=19)),
     )
+    graph.contents[("T-early", VTT)] = content(b"WEBVTT\n\nearly\n")
+    graph.contents[("T-restart", VTT)] = content(b"WEBVTT\n\nrestart\n")
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-early", "T-restart"]
+    assert [c.text for c in outcome.captures] == ["WEBVTT\n\nearly\n", "WEBVTT\n\nrestart\n"]
+    assert len(graph.asked("/content")) == 2
+
+
+# ── Story 33g: the parts of a transcript ─────────────────────────────────────
+
+
+def _parts(graph: FakeGraph, *spans: tuple[str, int, int | None]) -> None:
+    """`(id, created, ended)` in minutes from START, listed newest first, each downloadable."""
+    rows = []
+    for transcript_id, created, ended in sorted(spans, key=lambda span: -span[1]):
+        rows.append(
+            transcript_row(
+                transcript_id,
+                START + timedelta(minutes=created),
+                None if ended is None else START + timedelta(minutes=ended),
+            )
+        )
+        graph.contents[(transcript_id, VTT)] = content(f"WEBVTT\n\n{transcript_id}\n".encode())
+    graph.listing(ONLINE, *rows)
+
+
+def _stored(transcript_id: str, created: int, ended: int) -> StoredPart:
+    return StoredPart(transcript_id, START + timedelta(minutes=created), START + timedelta(minutes=ended))
+
+
+def test_overlapping_transcripts_with_nothing_stored_are_refused_as_duplicates():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-a", 0, 20), ("T-b", 10, 30))
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
-    assert "T-restart" in outcome.reason and "T-early" in outcome.reason
+    assert "T-a" in outcome.reason and "T-b" in outcome.reason
+    assert "duplicates" in outcome.reason
     assert graph.asked("/content") == []
+
+
+def test_one_ending_exactly_as_the_next_is_created_does_not_overlap():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-a", 0, 20), ("T-b", 20, 40))
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-a", "T-b"]
+
+
+def test_a_new_transcript_overlapping_a_stored_part_is_refused_and_not_downloaded():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-dup", 15, 40))
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-1", 1, 20),)}
+    )
+
+    assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
+    assert "T-1" in outcome.reason and "T-dup" in outcome.reason and "duplicates" in outcome.reason
+    assert graph.asked("/content") == []
+
+
+def test_an_unfinished_part_skips_the_meeting_and_nothing_is_downloaded():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, None))
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptSkipped)
+    assert "T-2" in outcome.reason
+    assert graph.asked("/content") == [], "part 1 is not stored either"
+
+
+def test_an_unplaced_transcript_skips_every_meeting_of_its_online_meeting():
+    graph = FakeGraph()
+    first, second, third = _series(graph)
+    graph.listing(
+        ONLINE,
+        transcript_row("T-unplaced", None, None),
+        transcript_row("T-first", first.start + timedelta(minutes=1), first.start + timedelta(minutes=50)),
+    )
+    graph.contents[("T-first", VTT)] = content(b"WEBVTT\n\nfirst\n")
+
+    outcomes = _adapter(graph).acquire([first, second, third], since=SINCE, stored={})
+
+    assert all(isinstance(o, TranscriptSkipped) for o in outcomes)
+    assert all("T-unplaced" in o.reason for o in outcomes)
+    assert graph.asked("/content") == []
+
+
+def test_overlap_and_unfinished_together_is_a_skip_not_a_refusal():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-a", 0, 30), ("T-b", 10, None))
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptSkipped)
+
+
+def test_a_later_part_is_the_only_one_downloaded():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-1", 1, 20),)}
+    )
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-2"]
+    (download,) = graph.asked("/content")
+    assert "T-2" in download
+
+
+def test_no_new_part_beyond_the_stored_ones_is_absent():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20))
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-1", 1, 20),)}
+    )
+
+    assert isinstance(outcome, TranscriptAbsent)
+    assert graph.asked("/content") == []
+
+
+def test_a_new_transcript_created_before_the_newest_stored_part_is_refused_naming_it():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-late", 25, 50), ("T-early", 1, 20))
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-late", 25, 50),)}
+    )
+
+    assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
+    assert "T-early" in outcome.reason and "T-late" in outcome.reason
+    assert graph.asked("/content") == []
+
+
+def test_a_stored_part_missing_from_the_listing_still_counts_and_the_new_one_is_stored():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-2", 25, 50))
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-1", 1, 20),)}
+    )
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-2"]
+
+
+def test_a_stored_part_missing_from_the_listing_still_refuses_an_overlap():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-2", 10, 50))
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-1", 1, 20),)}
+    )
+
+    assert isinstance(outcome, TranscriptRefused) and "duplicates" in outcome.reason
+
+
+def test_a_part_fitting_two_occurrences_refuses_both_and_stores_nothing():
+    graph = FakeGraph()
+    start = NOW - timedelta(days=1, hours=3)
+    back_to_back = start + timedelta(minutes=30)
+    for event_id, at in (("AAMk-a", start), ("AAMk-b", back_to_back)):
+        graph.events[event_id] = ok(event_body(event_id, at, minutes=20, kind="occurrence"))
+    graph.lookups[JOIN] = ok(lookup_body(ONLINE))
+    graph.listing(
+        ONLINE,
+        transcript_row("T-both", start + timedelta(minutes=25), start + timedelta(minutes=40)),
+        transcript_row("T-a1", start + timedelta(minutes=1), start + timedelta(minutes=10)),
+    )
+    graph.contents[("T-a1", VTT)] = content(b"WEBVTT\n\na1\n")
+
+    outcomes = _adapter(graph).acquire(
+        [meeting("AAMk-a", start, minutes=20), meeting("AAMk-b", back_to_back, minutes=20)],
+        since=SINCE,
+        stored={},
+    )
+
+    assert [type(o) for o in outcomes] == [TranscriptRefused, TranscriptRefused]
+    assert all("T-both" in o.reason and not o.retryable for o in outcomes)
+    assert graph.asked("/content") == [], "nothing stored, part 1 of a included"
+
+
+def test_a_series_with_one_restarted_occurrence_lists_once_and_captures_each_part():
+    graph = FakeGraph()
+    first, second, third = _series(graph)
+    graph.listing(
+        ONLINE,
+        transcript_row("T-third", third.start + timedelta(minutes=1), third.start + timedelta(minutes=50)),
+        transcript_row("T-second-b", second.start + timedelta(minutes=30), second.start + timedelta(minutes=55)),
+        transcript_row("T-second-a", second.start + timedelta(minutes=1), second.start + timedelta(minutes=20)),
+        transcript_row("T-first", first.start + timedelta(minutes=1), first.start + timedelta(minutes=50)),
+    )
+    for transcript_id in ("T-first", "T-second-a", "T-second-b", "T-third"):
+        graph.contents[(transcript_id, VTT)] = content(f"WEBVTT\n\n{transcript_id}\n".encode())
+
+    outcomes = _adapter(graph).acquire([first, second, third], since=SINCE, stored={})
+
+    assert all(isinstance(o, TranscriptCaptured) for o in outcomes)
+    assert [[c.transcript_id for c in o.captures] for o in outcomes] == [
+        ["T-first"],
+        ["T-second-a", "T-second-b"],
+        ["T-third"],
+    ]
+    assert len(graph.asked("/me/onlineMeetings?")) == 1, "resolved once"
+    assert len([u for u in graph.asked("/transcripts") if u.endswith("/transcripts")]) == 1, "listed once"
 
 
 def test_a_transcript_fitting_no_window_of_a_one_off_meeting_is_refused():
@@ -475,7 +696,7 @@ def test_a_transcript_fitting_no_window_of_a_one_off_meeting_is_refused():
     # Created 80 minutes after a 60-minute meeting began: past the 15-minute widening.
     graph.listing(ONLINE, transcript_row("T-overran", START + timedelta(minutes=80), START + timedelta(minutes=90)))
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "T-overran" in outcome.reason
@@ -487,7 +708,7 @@ def test_a_transcript_that_ended_before_the_occurrence_started_does_not_fit():
     held = _one_off(graph, kind="occurrence")
     graph.listing(ONLINE, transcript_row("T-before", START - timedelta(minutes=14), START - timedelta(minutes=1)))
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptAbsent)
 
@@ -509,7 +730,7 @@ def test_the_listing_stops_at_a_transcript_older_than_the_reach_back():
     )
     graph.contents[("T-1", VTT)] = content(VTT_BYTES)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptCaptured)
     assert graph.asked("$skiptoken") == [], "no further page was fetched"
@@ -521,7 +742,7 @@ def test_a_listing_that_hits_the_page_cap_first_is_refused_by_name():
     recent = [transcript_row(f"T-{n}", START + timedelta(minutes=1), START + timedelta(minutes=50)) for n in range(3)]
     graph.paged(ONLINE, [recent[0]], [recent[1]], [recent[2]])
 
-    (outcome,) = _adapter(graph, page_cap=2).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph, page_cap=2).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "page cap" in outcome.reason
@@ -539,7 +760,7 @@ def test_a_transcript_without_both_instants_is_skipped(missing):
     ended = None if missing == "ended" else START + timedelta(minutes=58)
     graph.listing(ONLINE, transcript_row("T-live", created, ended))
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptSkipped)
     assert graph.asked("/content") == []
@@ -557,7 +778,7 @@ def test_a_tenant_that_switched_transcripts_off_is_refused_and_the_others_contin
     graph.listing("MS-two", transcript_row("T-2", START - timedelta(hours=3) + timedelta(minutes=1), START - timedelta(hours=2, minutes=5)))
     graph.contents[("T-2", VTT)] = content(VTT_BYTES)
 
-    switched, other = _adapter(graph).acquire([first, meeting("AAMk-two", START - timedelta(hours=3))], since=SINCE)
+    switched, other = _adapter(graph).acquire([first, meeting("AAMk-two", START - timedelta(hours=3))], since=SINCE, stored={})
 
     assert isinstance(switched, TranscriptRefused)
     assert switched.retryable is False
@@ -573,11 +794,11 @@ def test_speaker_attribution_off_asks_once_more_for_the_unattributed_format():
     graph.contents[("T-1", VTT)] = error(403, "Forbidden", "SpeakerAttributionNotAllowed")
     graph.contents[("T-1", UNATTRIBUTED)] = content(UNATTRIBUTED_BYTES, kind=UNATTRIBUTED)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptCaptured)
-    assert outcome.capture.attributed is False
-    assert outcome.capture.text.encode() == UNATTRIBUTED_BYTES
+    assert outcome.captures[0].attributed is False
+    assert outcome.captures[0].text.encode() == UNATTRIBUTED_BYTES
     assert [r.headers["Accept"] for r in graph.requests if r.url.endswith("/content")] == [VTT, UNATTRIBUTED]
 
 
@@ -597,7 +818,7 @@ def test_a_plain_403_is_refused_naming_the_permission(where, permission):
     else:
         graph.contents[("T-1", VTT)] = forbidden
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert permission in outcome.reason
@@ -612,7 +833,7 @@ def test_a_calendar_event_that_is_gone_is_refused_and_not_retried():
     held = _one_off(graph)
     graph.events["AAMk-one"] = error(404, "ErrorItemNotFound")
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "404" in outcome.reason
@@ -624,7 +845,7 @@ def test_a_download_answering_404_after_the_listing_named_it_is_refused():
     _recorded(graph)
     graph.contents[("T-1", VTT)] = error(404, "NotFound")
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "T-1" in outcome.reason and "gone" in outcome.reason
@@ -637,7 +858,7 @@ def test_an_empty_download_is_refused_and_tried_again(raw):
     _recorded(graph)
     graph.contents[("T-1", VTT)] = content(raw)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused)
     assert outcome.retryable is True
@@ -650,7 +871,7 @@ def test_content_that_is_not_utf8_is_refused_by_name():
     _recorded(graph)
     graph.contents[("T-1", VTT)] = content(b"WEBVTT\n\n\xff\xfe broken")
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "UTF-8" in outcome.reason
@@ -677,7 +898,7 @@ def test_a_throttle_on_the_second_meeting_keeps_the_first_and_leaves_the_rest():
     held = _three(graph)
     graph.contents[("T-1", VTT)] = throttled(90)
 
-    outcomes = _adapter(graph).acquire(held, since=SINCE)
+    outcomes = _adapter(graph).acquire(held, since=SINCE, stored={})
 
     assert [type(o) for o in outcomes] == [TranscriptCaptured, TranscriptRefused]
     assert outcomes[1].retryable is True
@@ -693,7 +914,7 @@ def test_a_server_error_stops_the_run_retryably(fault):
     held = _three(graph)
     graph.lookups[f"{JOIN}&n=0"] = fault
 
-    outcomes = _adapter(graph).acquire(held, since=SINCE)
+    outcomes = _adapter(graph).acquire(held, since=SINCE, stored={})
 
     assert len(outcomes) == 1
     assert isinstance(outcomes[0], TranscriptRefused) and outcomes[0].retryable
@@ -703,7 +924,7 @@ def test_a_credential_that_no_longer_signs_in_stops_the_run_and_stays_retryable(
     graph = FakeGraph()
     held = _three(graph)
 
-    outcomes = _adapter(graph, auth=Auth(raises=CredentialStale("expired"))).acquire(held, since=SINCE)
+    outcomes = _adapter(graph, auth=Auth(raises=CredentialStale("expired"))).acquire(held, since=SINCE, stored={})
 
     (only,) = outcomes
     assert isinstance(only, TranscriptRefused) and only.retryable
@@ -723,7 +944,7 @@ def test_an_unclassified_fault_refuses_that_meeting_naming_its_type(monkeypatch)
         return original(body)
 
     monkeypatch.setattr(graph_transcripts, "_event_of", broken)
-    outcomes = _adapter(graph).acquire(held, since=SINCE)
+    outcomes = _adapter(graph).acquire(held, since=SINCE, stored={})
 
     assert isinstance(outcomes[0], TranscriptRefused)
     assert "KeyError" in outcomes[0].reason and "a bug" not in outcomes[0].reason
@@ -734,7 +955,7 @@ def test_with_no_graph_connector_enrolled_the_stand_in_refuses_by_name(tmp_path)
     daemon = build(tmp_path, "alpha", now=lambda: NOW)
     assert isinstance(daemon.transcripts["graph"], UnenrolledGraphTranscripts)
     with pytest.raises(TranscriptSourceUnavailable, match="no Graph connector is enrolled"):
-        daemon.transcripts["graph"].acquire([meeting("AAMk-one", START)], since=SINCE)
+        daemon.transcripts["graph"].acquire([meeting("AAMk-one", START)], since=SINCE, stored={})
 
 
 # ── Acceptance, through `run_harvest` ────────────────────────────────────────
@@ -818,7 +1039,7 @@ def test_acceptance_a_recorded_project_meeting_is_captured_beside_its_record(tmp
     assert before and _record_bytes(daemon, PROJECT) == before, "the record is byte-identical"
     report = persisted.transcripts
     assert report is not None
-    assert [entry.capture_name for entry in report.captured] == [name]
+    assert [entry.capture_names for entry in report.captured] == [(name,)]
     assert report.captured[0].state is TranscriptStateKind.FETCHED
     assert report.awaiting_ingestion == ((PROJECT, "AAMk-one"),)
     assert report.ingested == ((PROJECT, "AAMk-one"),) and not report.ingest_failed
@@ -1169,7 +1390,7 @@ def test_graphs_year_one_sentinel_means_still_being_produced():
     row["endDateTime"] = "0001-01-01T00:00:00Z"
     graph.listing(ONLINE, row)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptSkipped)
     assert graph.asked("/content") == []
@@ -1189,10 +1410,10 @@ def test_a_listing_not_newest_first_is_paged_past_an_old_row():
     )
     graph.contents[("T-1", VTT)] = content(VTT_BYTES)
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert graph.asked("$skiptoken") != [], "an older row followed by a newer one switches the stop off"
-    assert isinstance(outcome, TranscriptCaptured) and outcome.capture.transcript_id == "T-1"
+    assert isinstance(outcome, TranscriptCaptured) and outcome.captures[0].transcript_id == "T-1"
 
 
 def test_the_unattributed_retry_refused_again_names_the_attribution_ban():
@@ -1202,7 +1423,7 @@ def test_the_unattributed_retry_refused_again_names_the_attribution_ban():
     graph.contents[("T-1", VTT)] = error(403, "Forbidden", "SpeakerAttributionNotAllowed")
     graph.contents[("T-1", UNATTRIBUTED)] = error(403, "Forbidden", "SpeakerAttributionNotAllowed")
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "SpeakerAttributionNotAllowed" in outcome.reason
@@ -1266,7 +1487,7 @@ def test_an_unreadable_lookup_or_listing_is_refused_by_name(where):
     else:
         graph.listings[ONLINE] = [ok({"no": "value"})]
 
-    (outcome,) = _adapter(graph).acquire([held], since=SINCE)
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
     assert "could not be read" in outcome.reason
@@ -1306,7 +1527,7 @@ def test_one_acquisition_over_five_days_asks_three_requests_per_untranscribed_me
         held.append(meeting(event_id, start, minutes=30))
     assert all(NOW - FIVE_DAYS <= m.start and m.start + timedelta(minutes=30) < NOW for m in held)
 
-    outcomes = _adapter(graph).acquire(held, since=NOW - FIVE_DAYS)
+    outcomes = _adapter(graph).acquire(held, since=NOW - FIVE_DAYS, stored={})
 
     assert len(outcomes) == UNTRANSCRIBED
     assert all(isinstance(outcome, TranscriptAbsent) for outcome in outcomes)
@@ -1314,3 +1535,18 @@ def test_one_acquisition_over_five_days_asks_three_requests_per_untranscribed_me
     assert len(graph.asked("/me/onlineMeetings?")) == UNTRANSCRIBED
     assert len(graph.asked("/transcripts")) == UNTRANSCRIBED
     assert len(graph.requests) == 3 * UNTRANSCRIBED == 60
+
+
+@pytest.mark.parametrize("failing, other", [("T-2", "T-1"), ("T-1", "T-2")], ids=["part 2 fails", "part 1 fails"])
+def test_a_part_whose_download_fails_returns_the_refusal_and_no_other_part(failing, other):
+    """All or nothing: a capture is never returned without the part beside it."""
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
+    graph.contents[(failing, VTT)] = error(404, "NotFound")
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
+    assert failing in outcome.reason and "404" in outcome.reason
+    assert other not in outcome.reason

@@ -12,12 +12,12 @@ so `acquire` has nothing to fetch and answers every meeting as absent.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
 from pm_ai.domain.meetings import Meeting
-from pm_ai.domain.transcripts import TranscriptAbsent, TranscriptOutcome
+from pm_ai.domain.transcripts import StoredPart, TranscriptAbsent, TranscriptOutcome
 
 
 @dataclass
@@ -26,9 +26,16 @@ class ManualTranscriptAdapter:
     requires_network: bool = False
 
     def acquire(
-        self, meetings: Sequence[Meeting], *, since: datetime
+        self,
+        meetings: Sequence[Meeting],
+        *,
+        since: datetime,
+        stored: Mapping[str, Sequence[StoredPart]],
     ) -> tuple[TranscriptOutcome, ...]:
-        """Absent for every meeting: a dropped file is handed in, never fetched."""
+        """Absent for every meeting: a dropped file is handed in, never fetched.
+
+        `stored` is read by nothing here: there is no new part to find.
+        """
         return tuple(
             TranscriptAbsent(
                 meeting.meeting_id,

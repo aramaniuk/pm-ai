@@ -71,7 +71,13 @@ from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.scope_model import ADDRESS, CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
-from pm_ai.domain.transcripts import MAX_INGEST_ATTEMPTS, TranscriptState, TranscriptStateKind
+from pm_ai.domain.transcripts import (
+    MAX_INGEST_ATTEMPTS,
+    PartState,
+    TranscriptPart,
+    TranscriptState,
+    TranscriptStateKind,
+)
 from pm_ai.domain.storage_tiers import (
     API_TOKEN,
     CAPTURES,
@@ -207,6 +213,25 @@ CREATE TABLE IF NOT EXISTS transcript_ingest_attempts (
     scope       TEXT NOT NULL,
     meeting_id  TEXT NOT NULL,
     attempts    INTEGER NOT NULL,
+    PRIMARY KEY (scope, meeting_id)
+);
+CREATE TABLE IF NOT EXISTS transcript_parts (
+    scope         TEXT NOT NULL,
+    meeting_id    TEXT NOT NULL,
+    part          INTEGER NOT NULL,
+    transcript_id TEXT NOT NULL,
+    created       TEXT NOT NULL,
+    ended         TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    reason        TEXT,
+    ingested      INTEGER NOT NULL DEFAULT 0,
+    stored_at     TEXT,
+    PRIMARY KEY (scope, meeting_id, part)
+);
+CREATE TABLE IF NOT EXISTS transcript_part_asks (
+    scope      TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    asked_at   TEXT NOT NULL,
     PRIMARY KEY (scope, meeting_id)
 );
 CREATE TABLE IF NOT EXISTS renders (
@@ -4151,6 +4176,170 @@ class StorageService:
                 "LEFT JOIN transcript_ingest_attempts a "
                 "ON a.scope = t.scope AND a.meeting_id = t.meeting_id "
                 "WHERE t.scope = ? ORDER BY t.meeting_id",
+                (str(scope),),
+            )
+        }
+
+    # ── The parts of a meeting's transcript (story 33g): Tier 2, never the record ──
+    # One row per part. Each part is one claimed step, safe to kill: the row is
+    # written `pending`, then the capture, then the row is marked `stored`; the
+    # next selection repairs a pending row from what is on disk. Created by
+    # `_SCHEMA` on open, so `SCHEMA_VERSION` does not move.
+
+    def record_pending_part(
+        self,
+        scope: DataScope,
+        meeting_id: str,
+        part: int,
+        *,
+        transcript_id: str,
+        created: datetime,
+        ended: datetime,
+        reason: str | None = None,
+    ) -> None:
+        """Claim part `part` of this meeting for `transcript_id`, before its capture.
+
+        Replaces a pending row under the same number (a part fetched again, or
+        its refused write's reason); refused for a number already stored, which
+        would rename a capture already on disk.
+        """
+        for label, moment in (("created", created), ("ended", ended)):
+            if moment.tzinfo is None or moment.utcoffset() != timedelta(0):
+                raise ValueError(f"record_pending_part: {label}={moment!r} is not aware UTC")
+        written = self._db.execute(
+            "INSERT INTO transcript_parts "
+            "(scope, meeting_id, part, transcript_id, created, ended, state, reason, "
+            "ingested, stored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL) "
+            "ON CONFLICT(scope, meeting_id, part) DO UPDATE SET "
+            "transcript_id = excluded.transcript_id, created = excluded.created, "
+            "ended = excluded.ended, reason = excluded.reason "
+            "WHERE transcript_parts.state = ?",
+            (
+                str(scope),
+                meeting_id,
+                part,
+                transcript_id,
+                created.isoformat(),
+                ended.isoformat(),
+                PartState.PENDING.value,
+                reason,
+                PartState.PENDING.value,
+            ),
+        )
+        if written.rowcount != 1:
+            self._db.rollback()
+            raise ValueError(
+                f"part {part} of meeting {meeting_id} in {scope} is already stored; "
+                f"a stored part is never claimed again"
+            )
+        self._db.commit()
+
+    def mark_part_stored(self, scope: DataScope, meeting_id: str, part: int) -> None:
+        """A pending part's capture is on disk: it is `stored`, stamped now.
+
+        Storing a part resets the meeting's ingestion attempt count, so a
+        meeting whose earlier ingestion failed `MAX_INGEST_ATTEMPTS` times
+        still ingests its new part. One transaction.
+        """
+        marked = self._db.execute(
+            "UPDATE transcript_parts SET state = ?, reason = NULL, stored_at = ? "
+            "WHERE scope = ? AND meeting_id = ? AND part = ? AND state = ?",
+            (
+                PartState.STORED.value,
+                self._at().isoformat(),
+                str(scope),
+                meeting_id,
+                part,
+                PartState.PENDING.value,
+            ),
+        )
+        if marked.rowcount != 1:
+            self._db.rollback()
+            raise ValueError(
+                f"part {part} of meeting {meeting_id} in {scope} has no pending row to mark stored"
+            )
+        self._db.execute(
+            "DELETE FROM transcript_ingest_attempts WHERE scope = ? AND meeting_id = ?",
+            (str(scope), meeting_id),
+        )
+        self._db.commit()
+
+    def drop_pending_part(self, scope: DataScope, meeting_id: str, part: int) -> bool:
+        """Remove a pending part whose write was refused for good; `True` if it was there."""
+        dropped = self._db.execute(
+            "DELETE FROM transcript_parts WHERE scope = ? AND meeting_id = ? AND part = ? "
+            "AND state = ?",
+            (str(scope), meeting_id, part, PartState.PENDING.value),
+        )
+        self._db.commit()
+        return dropped.rowcount == 1
+
+    def mark_part_ingested(self, scope: DataScope, meeting_id: str, part: int) -> None:
+        """A stored part was ingested: it is never extracted again."""
+        marked = self._db.execute(
+            "UPDATE transcript_parts SET ingested = 1 "
+            "WHERE scope = ? AND meeting_id = ? AND part = ? AND state = ?",
+            (str(scope), meeting_id, part, PartState.STORED.value),
+        )
+        if marked.rowcount != 1:
+            self._db.rollback()
+            raise ValueError(
+                f"part {part} of meeting {meeting_id} in {scope} is not a stored part"
+            )
+        self._db.commit()
+
+    def transcript_parts(self, scope: DataScope) -> dict[str, tuple[TranscriptPart, ...]]:
+        """Every part row in `scope`, by meeting id, each meeting's in part order."""
+        parts: dict[str, list[TranscriptPart]] = {}
+        rows = self._db.execute(
+            "SELECT meeting_id, part, transcript_id, created, ended, state, reason, "
+            "ingested, stored_at FROM transcript_parts WHERE scope = ? "
+            "ORDER BY meeting_id, part",
+            (str(scope),),
+        )
+        for (
+            meeting_id,
+            part,
+            transcript_id,
+            created,
+            ended,
+            state,
+            reason,
+            ingested,
+            stored_at,
+        ) in rows:
+            parts.setdefault(meeting_id, []).append(
+                TranscriptPart(
+                    meeting_id=meeting_id,
+                    part=part,
+                    transcript_id=transcript_id,
+                    created=datetime.fromisoformat(created),
+                    ended=datetime.fromisoformat(ended),
+                    state=PartState(state),
+                    ingested=bool(ingested),
+                    stored_at=datetime.fromisoformat(stored_at) if stored_at else None,
+                    reason=reason,
+                )
+            )
+        return {meeting_id: tuple(rows) for meeting_id, rows in parts.items()}
+
+    def record_part_ask(self, scope: DataScope, meeting_id: str, *, asked_at: datetime) -> None:
+        """When a run that asked the source about this meeting started (story 33g)."""
+        if asked_at.tzinfo is None or asked_at.utcoffset() != timedelta(0):
+            raise ValueError(f"record_part_ask: asked_at={asked_at!r} is not aware UTC")
+        self._db.execute(
+            "INSERT INTO transcript_part_asks (scope, meeting_id, asked_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(scope, meeting_id) DO UPDATE SET asked_at = excluded.asked_at",
+            (str(scope), meeting_id, asked_at.isoformat()),
+        )
+        self._db.commit()
+
+    def transcript_part_asks(self, scope: DataScope) -> dict[str, datetime]:
+        """When each meeting in `scope` holding parts was last asked about."""
+        return {
+            meeting_id: datetime.fromisoformat(asked_at)
+            for meeting_id, asked_at in self._db.execute(
+                "SELECT meeting_id, asked_at FROM transcript_part_asks WHERE scope = ?",
                 (str(scope),),
             )
         }
