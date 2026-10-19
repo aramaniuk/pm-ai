@@ -103,7 +103,7 @@ def _harvest(transport: Recorded, *, position: datetime = BEFORE_ALL):
         ),
         categories=CategoryScopes(projects={}, registered=lambda project: True),
         now=lambda: NOW,
-        channels=(ChannelListing(team=TEAM, channel=CHANNEL, project=PROJECT, label=LABEL),),
+        channels=(ChannelListing(team=TEAM, channel=CHANNEL, scope=DataScope(ScopeKind.PROJECT, project_id=PROJECT), label=LABEL),),
         messages=GraphChannelFetch(
             client=client, instance=INSTANCE, reach_back=timedelta(days=7), now=lambda: NOW
         ),

@@ -2,8 +2,9 @@
 title: 'A listed channel may file into the personal scope'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
 review_loop_iteration: 0
+baseline_commit: '8b79328d36da9e733063f9c84eac425d500956f4'
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
 ---
@@ -25,7 +26,7 @@ context:
 - **AD-4 holds:** a personal channel's messages go to the personal event log, never a project's; a project channel's go to that project's, never the personal one. A channel's scope comes only from its entry.
 - **`ChannelListing` carries a scope**, not a project id, and refuses anything but personal or a project when built, as `ChatListing` does; the reference is `graph:<personal | project id>:message:<channel id>/<message id>`, the scope segment spelled by `reference_scope` as a chat's — so a project channel's references are byte-identical to today's.
 - **The cursor stays keyed on the channel id.** An entry moved from one scope to another keeps its position: the new scope's log receives messages created after it; messages already filed stay in the old scope's log, and none is filed twice.
-- **Wording that named a project names the scope:** the 400/404 failure sentence (`channels.py:365`) and the duplicate-channel refusal ("one channel's messages go to one scope").
+- **Wording that named a project names the scope:** the 400/404 failure sentence (`channels.py:424`) and the duplicate-channel refusal ("one channel's messages go to one scope").
 - **Every place that reads a channel's project is changed or checked:** `_files_into` reads a channel's `scope` the way it reads a chat's (only `project:<id>` names a project) and its `project` as today, so `connector check` in the daemon names a row whose channel files into a project enrolled since the start, and not a personal one; the Graph row's filed scope for `9a` (`instance_scopes`) stays personal; the personal dashboard's Proactive Enablement already lists personal message entries (eight from chats on the field test), so it needs no change.
 - **No new permission:** the request is `33d`'s.
 - **`33d`'s frozen block is edited when this slice is built** (frozen text edited, dated Change Log line), after `23f` and `33h` have amended it, by its task: the channel-list rule (`33d:23`, "the enrolled project the channel belongs to"), "A channel message belongs to its project" (`33d:24`) and the reference (`33d:32`, `graph:<project>:message:…` → `graph:<personal | project id>:message:…`), with a dated Change Log line.
@@ -70,12 +71,12 @@ Re-verified against `5f4f43e` on 2026-10-18.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/connectors/graph/channels.py` -- `ChannelListing.scope: DataScope` with the chat's refusal and `reference_scope`; sentences name the scope -- the listing
-- [ ] `pm_ai/connectors/graph/__init__.py` -- `_listed_scope` shared and parameterised; `graph_channel_listings` takes `project` or `scope` (present-key rule), applies the project checks to both; duplicate wording; `_message_event` cites by `reference_scope` -- parsing and citing
-- [ ] `pm_ai/app/wiring.py` -- `_files_into` reads a channel's `scope` like a chat's, and its `project` as today -- the later-project rule
-- [ ] the `ChannelListing(` call sites above -- construct with a scope
-- [ ] `tests/connectors/test_graph_channel_messages.py` -- one test per matrix row; the refusal tests adjusted to the new types and wording; `tests/slice/test_line_requests_hardening.py` -- `_files_into` over both spellings -- proof
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md` -- when this slice is built: edit the frozen text at `:23`, `:24`, `:32` and add a Change Log line dated that day, "amended by `33i`". 33d is amended in build order `23f`, `33h`, `33i`; re-read its lines first, since the earlier two edit it. As of `5f4f43e` (after `23f` and `33h`) the three sentences are still at `33d:23`, `:24` and `:32`; `23f` added the sender display name to `:32` and left the reference text `graph:<project>:message:<channel id>/<message id>` that this slice replaces
+- [x] `pm_ai/connectors/graph/channels.py` -- `ChannelListing.scope: DataScope` with the chat's refusal and `reference_scope`; sentences name the scope -- the listing
+- [x] `pm_ai/connectors/graph/__init__.py` -- `_listed_scope` shared and parameterised; `graph_channel_listings` takes `project` or `scope` (present-key rule), applies the project checks to both; duplicate wording; `_message_event` cites by `reference_scope` -- parsing and citing
+- [x] `pm_ai/app/wiring.py` -- `_files_into` reads a channel's `scope` like a chat's, and its `project` as today -- the later-project rule
+- [x] the `ChannelListing(` call sites above -- construct with a scope
+- [x] `tests/connectors/test_graph_channel_messages.py` -- one test per matrix row; the refusal tests adjusted to the new types and wording; `tests/slice/test_line_requests_hardening.py` -- `_files_into` over both spellings -- proof
+- [x] `_bmad-output/specs/spec-pm-ai/stories/33d-graph-channel-messages.md` -- when this slice is built: edit the frozen text at `:23`, `:24`, `:32` and add a Change Log line dated that day, "amended by `33i`". 33d is amended in build order `23f`, `33h`, `33i`; re-read its lines first, since the earlier two edit it. As of `5f4f43e` (after `23f` and `33h`) the three sentences are still at `33d:23`, `:24` and `:32`; `23f` added the sender display name to `:32` and left the reference text `graph:<project>:message:<channel id>/<message id>` that this slice replaces
 
 **Acceptance Criteria:**
 - Given `33d`'s channel fixture listed with `"scope": "personal"`, when `run_harvest` runs, then every message is in the personal event log with a `graph:personal:message:` reference, and no project log changed.
@@ -88,6 +89,8 @@ Re-verified against `5f4f43e` on 2026-10-18.
 - **2026-10-16, review:** "carries a key" defined as present; the shared reader named (`_listed_scope`) with the noun and refusal type parameterised; the personal-name and citable checks applied to the old `project` key; the "neither" refusal type named; the cursor rule for a moved entry stated; scope wording for the 400/404 and duplicate sentences; the `ChannelListing` call sites listed; `33d:23` and `:32` added to the amendments, frozen text edited with a dated line; AC 1 made system-level; anchors re-based on PR #72. Depends on no spine amendment.
 - **2026-10-16, review (consistency):** the 33d amendment follows the one method shared with `33h`: frozen text edited and a dated Change Log line added when this slice is built, in build order `23f`, `33h`, `33i`.
 - **2026-10-18, Code Map re-verified against `5f4f43e`; 33d line references updated after 23f and 33h amended it.**
+- **2026-10-18, decision (Andrei):** the frozen block's reference to the 400/404 failure sentence corrected from `channels.py:365` to `channels.py:424`, where `33h` and `23h` moved it. Cosmetic; no behaviour change.
+- **2026-10-18, built and reviewed.** Three review layers ran. Patched: `_files_into` trims a channel's `project`; tests for the project channel's 400/404 wording, a lone null, empty or non-text `scope`, the padded-scope sentence, and the filed scope of a project-channel row; 33d's channel-list rule names the new refusals. Deferred, needs Andrei's decision: a channel moved to another scope files the message at its stored position a second time in the new scope (strict xfail `test_a_channel_moved_to_personal_files_no_message_twice`), against the frozen "none is filed twice". The 400/404 sentence now sits at `channels.py:441`, since this slice added lines above it.
 
 ## Design Notes
 
@@ -102,3 +105,46 @@ The cursor stays keyed on the channel id rather than on (scope, channel): keying
 - `uv run pytest -q` -- expected: all pass
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**Where a channel's messages go**
+
+- Entry point: the present-key rule, `project` or `scope`, never both or neither.
+  [`__init__.py:539`](../../../../pm_ai/connectors/graph/__init__.py#L539)
+
+- One scope reader for chats and channels; noun and refusal type are parameters.
+  [`__init__.py:720`](../../../../pm_ai/connectors/graph/__init__.py#L720)
+
+- Project checks shared by both spellings, so old `project` rows cannot collide with personal.
+  [`__init__.py:767`](../../../../pm_ai/connectors/graph/__init__.py#L767)
+
+- The listing carries a scope; refuses anything but personal or a project.
+  [`channels.py:168`](../../../../pm_ai/connectors/graph/channels.py#L168)
+
+**Citing**
+
+- Reference segment spelled like a chat's; project references stay byte-identical.
+  [`channels.py:181`](../../../../pm_ai/connectors/graph/channels.py#L181)
+
+- The message reference built from `reference_scope`.
+  [`__init__.py:1592`](../../../../pm_ai/connectors/graph/__init__.py#L1592)
+
+**Wording and the daemon**
+
+- The 400/404 sentence names the scope.
+  [`channels.py:441`](../../../../pm_ai/connectors/graph/channels.py#L441)
+
+- Later-enrolled project check reads a channel's `scope` like a chat's, trims `project`.
+  [`wiring.py:985`](../../../../pm_ai/app/wiring.py#L985)
+
+**Tests**
+
+- Acceptance 1: a personal channel through `run_harvest`.
+  [`test_graph_channel_messages.py:2014`](../../../../tests/connectors/test_graph_channel_messages.py#L2014)
+
+- Moved scope: what holds, and the strict xfail for the deferred double filing.
+  [`test_graph_channel_messages.py:2185`](../../../../tests/connectors/test_graph_channel_messages.py#L2185)
+
+- `_files_into` over both spellings.
+  [`test_line_requests_hardening.py:305`](../../../../tests/slice/test_line_requests_hardening.py#L305)

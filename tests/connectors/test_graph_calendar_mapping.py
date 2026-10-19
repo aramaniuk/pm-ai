@@ -1649,7 +1649,7 @@ def test_a_failed_harvest_still_writes_the_rows_the_walk_did_reach(tmp_path):
                     ChannelListing(
                         team="00000000-0000-0000-0000-0000000000aa",
                         channel="19:ok@thread.tacv2",
-                        project="alpha",
+                        scope=PROJECT,
                     ),
                 )
                 if with_channel

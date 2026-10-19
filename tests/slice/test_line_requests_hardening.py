@@ -316,6 +316,23 @@ def test_a_chat_filed_personally_names_no_project():
     assert _files_into("graph:work", "graph", entry) == {"alpha", "beta", "gamma"}
 
 
+def test_a_channel_names_a_project_under_either_spelling_and_personal_names_none():
+    """`33i`: a channel's `scope` is read as a chat's, its `project` as before."""
+    from pm_ai.app.wiring import _files_into  # noqa: PLC2701
+
+    entry = {
+        "channels": [
+            {"team": "t", "channel": "c1", "project": "beta"},
+            {"team": "t", "channel": "c2", "scope": "project:delta"},
+            {"team": "t", "channel": "c3", "scope": "personal"},
+            {"team": "t", "channel": "c4", "scope": "people:x"},
+            {"team": "t", "channel": "c5", "project": " new "},
+            {"team": "t", "channel": "c6", "project": "   "},
+        ],
+    }
+    assert _files_into("graph:work", "graph", entry) == {"beta", "delta", "new"}
+
+
 # ── 17. Per-line refreshes say nothing on the daemon's console ───────────────
 
 
