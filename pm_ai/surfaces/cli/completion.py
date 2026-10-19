@@ -100,6 +100,7 @@ _BY_NAME: Mapping[str, str] = {
 
 _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("connector", "sign-in"), "instance"): GRAPH_INSTANCES,
+    (("connector", "categories"), "instance"): GRAPH_INSTANCES,
     (("connector", "add"), "system"): SYSTEMS,
     (("goal", "show"), "id"): GOAL_IDS,
     (("goal", "update"), "id"): GOAL_IDS,

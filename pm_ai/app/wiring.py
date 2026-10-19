@@ -97,6 +97,7 @@ from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core import transcripts as transcript_catalogue
 from pm_ai.core.config import Config, load_config
 from pm_ai.core.connector_enrolment import (
+    CATEGORIES_ABSENT,
     CONNECTORS,
     CREDENTIAL_STORE,
     ConnectorNotConfigured,
@@ -111,6 +112,7 @@ from pm_ai.core.connector_enrolment import (
     assert_replaceable,
     connector_row,
     credential_for,
+    record_categories,
     record_user_id,
     redacted,
     replace_credential,
@@ -176,6 +178,7 @@ __all__ = [
     "Daemon",
     "GitLabChecked",
     "GitLabEnrolment",
+    "GraphCategories",
     "GraphEnrolment",
     "GraphSignInReplaced",
     "GraphSignedIn",
@@ -194,6 +197,7 @@ __all__ = [
     "artifact_state",
     "bootstrap",
     "build",
+    "enrolled_project_ids",
     "onboard_project",
     "connector_rows_unlisted",
     "is_connector_row_file",
@@ -851,11 +855,13 @@ def _enrolled_connectors(
 ) -> tuple[tuple[tuple[str, ConnectorPort, DataScope], ...], tuple[UnbuiltConnector, ...]]:
     """What `pm-ai connector add` wrote, as adapters, so enrolment survives a restart.
 
-    Story 8b's success message tells the operator the connector becomes active
-    at the next start. Nothing read `connectors/` until this function existed,
-    so that sentence was false: an enrolment wrote two files and no later run
-    looked at either. Registration stays construction-time per AD-9 and story
-    8d — this is the start that "the next start" refers to.
+    Nothing read `connectors/` until this function existed, so an enrolment
+    wrote two files and no later run looked at either. Every command, and since
+    story 4r every daemon job, calls it afresh, so a row enrolled after the
+    daemon started is built by the next job that reads the rows; since 9a a
+    running daemon's harvest timer starts harvesting it the next time it reads
+    the connector list (`ticks.HarvestTimers`), which is what enrolment's
+    closing message says (story 4s).
 
     Returned rather than registered, so the caller puts these in
     `Daemon.connectors` — the one inventory a harvest and `pm-ai connector
@@ -871,7 +877,7 @@ def _enrolled_connectors(
     says it was meant to run.
 
     Credentials **are** read, since story 33a. They were not until then, and the
-    consequence was live rather than theoretical: `8b`'s success message tells
+    consequence was live rather than theoretical: `8b`'s success message told
     the operator the connector becomes active at the next start, and the next
     start built every adapter with `credential=None`, so `pm-ai connector check`
     reported a connector enrolled ten seconds ago as `ABSENT` — a fresh install
@@ -1500,7 +1506,7 @@ class GraphSignedIn:
     """What a completed Graph sign-in hands to enrolment (story 8l).
 
     The credential to seal, the health check's sentence for the operator, and
-    the row settings `_graph_connector` reads back at the next start — spelled
+    the row settings `_graph_connector` reads back when the row is built — spelled
     with the connector's own key names, so the CLI never learns them. The
     settings carry the signed-in user's Graph user id under `USER_ID_KEY`
     (story 8q), which the row records and nothing at the start reads.
@@ -1531,6 +1537,22 @@ class GraphSignInReplaced:
 
 
 @dataclass(frozen=True)
+class GraphCategories:
+    """A Graph row's Outlook categories, as `pm-ai connector categories` shows them (4s).
+
+    `shown` is the row's `categories` value exactly as read — or
+    `CATEGORIES_ABSENT` — which the save compares against what it finds then.
+    `entries` is the mapping as (category, project) pairs in the row's order,
+    or `None` when the row reader refuses the value (`unreadable` says why):
+    such a value is shown as written and replaced by the answers.
+    """
+
+    shown: object
+    entries: tuple[tuple[str, str], ...] | None
+    unreadable: str | None = None
+
+
+@dataclass(frozen=True)
 class GraphEnrolment:
     """`pm-ai connector add graph`'s sign-in, behind the composition root (story 8l).
 
@@ -1557,9 +1579,24 @@ class GraphEnrolment:
     already enrolled: `enrolled` judges its row before anything is asked, and
     `replace` signs in with the row's app id and tenant, checks the result, and
     replaces that connector's stored sign-in and nothing else.
+
+    Outlook categories (story 4s): `enrolled_projects` reads the registry when
+    the category questions start, `category_refusal` judges a set of answers by
+    the rules the row is read with, and `sign_in` saves a non-empty mapping in
+    the row it hands to enrolment. `pm-ai connector categories` reads a row's
+    mapping with `categories` and saves new answers with `save_categories`,
+    which writes the `categories` key and nothing else. Neither talks to
+    Microsoft.
     """
 
     storage: StorageService
+    projects: Callable[[], Sequence[str]]
+    """The enrolled project ids, in the registry's order, read again at each call.
+
+    The composition root passes the bootstrap's read, the one every command
+    composes from (`entry._projects_now`). An unreadable or malformed registry
+    is refused (`RegistryRefused`), never read as empty.
+    """
     client_factory: Callable[[str, str], Any] | None = None
     """MSAL's client, or `None` for the adapter's own (a real `msal` import)."""
 
@@ -1682,17 +1719,24 @@ class GraphEnrolment:
         width: int,
         reach_back: int,
         present: Callable[[str], None],
+        categories: Mapping[str, str] | None = None,
     ) -> GraphSignedIn:
         """Sign in through `present`, check the result, and say what to save.
 
         Asking Microsoft for a code is bounded at `timeout`, because nothing is
         on screen yet. The wait after the code is shown is not — a human is in
         a browser, for minutes. The health check after it is bounded again.
+
+        `categories` (story 4s) is the Outlook category mapping the questions
+        produced; a non-empty one is saved under `categories` in the same row,
+        and an empty one saves no key.
         """
         tenant = tenant.strip() or self.default_tenant
         refused = self.refusal(
             client_id=client_id, tenant=tenant, width=width, reach_back=reach_back
         )
+        if refused is None and categories:
+            refused = self.category_refusal(tuple(categories.items()))
         if refused is not None:
             raise ProbeFailed(f"{refused} Nothing was saved.")
         store = InMemoryRefreshTokenStore()
@@ -1792,9 +1836,139 @@ class GraphEnrolment:
                 WIDTH_KEY: width,
                 REACH_BACK_KEY: reach_back,
                 USER_ID_KEY: user_id,
+                **({CATEGORIES_KEY: dict(categories)} if categories else {}),
             },
             secrets=frozenset(secrets),
         )
+
+    # ── Outlook categories (story 4s) ────────────────────────────────────────
+
+    def enrolled_projects(self) -> tuple[str, ...]:
+        """Every enrolled project id, in the registry's order, read now.
+
+        Refused with `RegistryRefused` when `projects.toml` exists and cannot
+        be read or parsed: an empty answer there would ask no question and
+        save a mapping judged against no projects.
+        """
+        return tuple(self.projects())
+
+    def category_refusal(self, answers: Sequence[tuple[str, str]]) -> str | None:
+        """Why these (category, project) answers would not be read, or `None`.
+
+        The rules the row is read with (`CategoryScopes`): a blank category,
+        and one category — compared ignoring case — given to two projects.
+        Judged over the answers together, so two projects may swap categories.
+        Two answers spelling one category the same way are caught here, before
+        a mapping keyed by category would fold them into one.
+        """
+        seen: dict[str, tuple[str, str]] = {}
+        for category, project in answers:
+            key = category.strip().casefold()
+            first = seen.get(key)
+            if first is not None and first[1] != project:
+                # No remedy here: what the person can do next depends on the
+                # question (Enter may keep this very category), so the asker
+                # adds it.
+                return (
+                    f"{category!r} for {project} is the same Outlook category as "
+                    f"{first[0]!r} for {first[1]} — categories are matched "
+                    f"ignoring case — and one category files its meetings into "
+                    f"one project."
+                )
+            seen.setdefault(key, (category, project))
+        try:
+            CategoryScopes(projects=dict(answers), registered=lambda _project: True)
+        except UnknownProject as refused:
+            return str(refused)
+        return None
+
+    def categories(self, instance: str) -> GraphCategories:
+        """`instance`'s Outlook category mapping as its row holds it now.
+
+        Refused, before anything is asked: no row (`ConnectorNotConfigured`),
+        a row file that is not JSON or not an object (`MalformedSettings`
+        naming it), a row that is not Graph's (`NotAGraphRow`). A disabled row
+        is read as any other. A `categories` value the row reader refuses is
+        returned as unreadable, not refused: the answers replace it.
+        """
+        try:
+            row = connector_row(
+                self.storage, instance=instance, purpose="its categories changed"
+            )
+        except ConnectorNotConfigured:
+            raise ConnectorNotConfigured(
+                f"no connector named {instance!r} is configured — {CONNECTORS} has "
+                f"no row for it — so it has no Outlook categories to map. Nothing "
+                f"was asked and nothing was saved."
+            ) from None
+        except MalformedSettings as malformed:
+            raise MalformedSettings(
+                f"{_sentence(str(malformed))} Nothing was asked either."
+            ) from None
+        system = row.get("system")
+        if system != "graph":
+            raise NotAGraphRow(
+                f"the row for {instance!r} in {CONNECTORS} is configured as a "
+                f"{system!r} connector, not a Graph one, so it has no Outlook "
+                f"categories to map. Nothing was asked and nothing was saved."
+            )
+        shown = row.get(CATEGORIES_KEY, CATEGORIES_ABSENT)
+        if shown is CATEGORIES_ABSENT:
+            return GraphCategories(shown=shown, entries=())
+        try:
+            graph_category_scopes(row, registered=lambda _project: True)
+        except (UnknownProject, ValueError, TypeError, AttributeError) as refused:
+            # Whatever the reader refuses a malformed shape with — a project
+            # that is a number, `null`, a nested object — is shown as written
+            # and replaced by the answers, never an unexpected error.
+            return GraphCategories(shown=shown, entries=None, unreadable=str(refused))
+        # The reader accepted it, so it is an object of text to text.
+        entries = shown.items() if isinstance(shown, Mapping) else ()
+        return GraphCategories(
+            shown=shown,
+            entries=tuple((str(category), str(project)) for category, project in entries),
+        )
+
+    def save_categories(
+        self, instance: str, *, shown: object, categories: Mapping[str, str]
+    ) -> bool:
+        """Save `categories` as `instance`'s mapping, if the row still holds `shown`.
+
+        Under the claim enrolment takes before writing a row, with the wait a
+        row write gets (`SealedRefreshTokenStore`'s): the row is read again, and
+        refused, writing nothing, when its `categories` differ from `shown`
+        (`CategoriesChanged`), when it is gone (`ConnectorNotConfigured`), or
+        when a project `categories` names was removed from the registry
+        meanwhile (`CategoryProjectUnenrolled`). A claim still held past the
+        wait is `ArtifactBusy`; one that cannot be taken at all is
+        `CredentialStoreUnclaimable`. Every other key is written back as read.
+        Returns whether the row was written.
+        """
+        store = SealedRefreshTokenStore(
+            storage=self.storage, instance=instance, system="graph", sleep=self.claim_sleep
+        )
+        try:
+            with store.exclusive():
+                enrolled = frozenset(self.enrolled_projects())
+                return record_categories(
+                    self.storage,
+                    instance=instance,
+                    shown=shown,
+                    categories=categories,
+                    registered=lambda project: project in enrolled,
+                    claimed=True,
+                )
+        except StoreBusy as busy:
+            raise ArtifactBusy(
+                f"the credentials file {CREDENTIAL_STORE}, whose claim every row "
+                f"write takes, was busy past the wait: {busy} Nothing was saved."
+            ) from None
+        except StoreUnavailable as unavailable:
+            raise CredentialStoreUnclaimable(
+                f"the claim on the credentials file {CREDENTIAL_STORE}, which every "
+                f"row write takes, could not be taken — this is not another "
+                f"command holding it: {unavailable} Nothing was saved."
+            ) from None
 
 
     # ── `pm-ai connector sign-in` (story 8m) ─────────────────────────────────
@@ -3441,6 +3615,33 @@ def onboard_project(
                 ),
             )
     return Onboarded(project_id, repository, gitignore, already)
+
+
+def _registry_for_categories(state: ArtifactState) -> dict[str, ProjectEntry]:
+    """The registry the category questions offer, or `RegistryRefused` (story 4s)."""
+    if state.presence is Presence.UNREADABLE:
+        raise RegistryRefused(
+            f"{REGISTRY_ARTIFACT} exists and could not be read ({state.detail}), "
+            f"so which projects a category could file into is unknown. Nothing "
+            f"was saved."
+        )
+    try:
+        return dict(parse_registry(state.raw))
+    except RegistryRefused as malformed:
+        raise RegistryRefused(
+            f"{REGISTRY_ARTIFACT} could not be read: {_sentence(str(malformed))} "
+            f"Which projects a category could file into is unknown. Nothing was "
+            f"saved."
+        ) from None
+
+
+def enrolled_project_ids(boot: Bootstrap) -> tuple[str, ...]:
+    """The bootstrap's enrolled project ids, or `RegistryRefused` (story 4s).
+
+    `bootstrap` carries a registry it could not read or parse as no projects,
+    so `doctor` survives it; the category questions refuse it instead.
+    """
+    return tuple(_registry_for_categories(boot.registry))
 
 
 def _readable_registry(state: ArtifactState, known: ScopePaths) -> dict[str, ProjectEntry]:

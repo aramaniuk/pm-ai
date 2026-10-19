@@ -574,7 +574,7 @@ def test_a_different_user_is_accepted_and_recorded(enrolled, monkeypatch, capsys
 
 def test_a_different_tenant_is_accepted_and_its_user_recorded(machine, monkeypatch, capsys):
     home, keychain = machine
-    _add(monkeypatch, answers=[CLIENT_ID, ROW_TENANT, "1440", "10080"])
+    _add(monkeypatch, answers=[CLIENT_ID, ROW_TENANT, "1440", "10080", ""])
     capsys.readouterr()
 
     code, _ = _sign_in(monkeypatch, _provider(oid="6f1c2b3a-0000-4000-8000-000000000003", tid=OTHER_TENANT))
@@ -588,7 +588,7 @@ def test_a_different_tenant_is_accepted_and_its_user_recorded(machine, monkeypat
 
 def test_the_row_s_own_tenant_id_is_signed_in_through(machine, monkeypatch, capsys):
     home, keychain = machine
-    _add(monkeypatch, answers=[CLIENT_ID, ROW_TENANT, "1440", "10080"])
+    _add(monkeypatch, answers=[CLIENT_ID, ROW_TENANT, "1440", "10080", ""])
     capsys.readouterr()
     provider = _provider(tid=ROW_TENANT.upper())
 

@@ -39,6 +39,7 @@ from pm_ai.domain.health import ArtifactState, Health
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.storage_tiers import RESTRICTED_FILE_MODE
 from pm_ai.ports import KeyAlreadyEnrolled, KeychainUnavailable, KeyNotFound
+from pm_ai.surfaces.cli import dispatch as cli
 from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL
 
 INSTANCE = "gitlab:alpha"
@@ -257,7 +258,17 @@ def test_a_valid_add_saves_the_settings_and_the_sealed_token_together(
         "the token prompt names the scope it needs"
     )
     assert "enrolled and healthy" in captured.out
-    assert "next start" in captured.out
+    # Story 4s: the shared sentence for when a new connector is harvested,
+    # then — the row files into `alpha` — the project clause and the restart
+    # sentence. The old ending, which stopped being true at 4r and 9a, is gone.
+    assert cli.HARVESTED_WHEN in captured.out
+    assert (
+        cli.PROJECT_CLAUSE.format(instance=INSTANCE, projects="alpha", which="alpha")
+        + " "
+        + cli.RESTART_SENTENCE
+    ) in captured.out
+    assert "next start" not in captured.out
+    assert "nothing is harvesting" not in captured.out
     assert str(_settings_file(home)) in captured.out, "the closing message names the file"
     _no_token_on_screen(captured)
 

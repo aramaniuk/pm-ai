@@ -38,16 +38,18 @@ from __future__ import annotations
 import builtins
 import contextvars
 import getpass
+import json
 import re
 import stat
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, TextIO, runtime_checkable
 
+from pm_ai.core.cadence import CYCLE, FIRST_RETRY, START_SPREAD
 from pm_ai.core.config import Config, ConfigRefused, load_config, render_config
 from pm_ai.core.enrolment import KeyAlreadyEnrolled, enrol
 from pm_ai.core.goal_register import (
@@ -94,6 +96,8 @@ from pm_ai.surfaces.cli.logs import (
     unbuffered as unbuffered_stream,
 )
 from pm_ai.core.connector_enrolment import (
+    CategoriesChanged,
+    CategoryProjectUnenrolled,
     ConnectorNotConfigured,
     ConnectorRowChanged,
     CredentialNotHeld,
@@ -136,6 +140,8 @@ __all__ = [
     "EXIT_UNEXPECTED",
     "EXIT_UNHEALTHY",
     "EXIT_USAGE",
+    "HARVESTED_WHEN",
+    "PROJECT_CLAUSE",
     "Command",
     "ConnectorsOnDisk",
     "DEFAULT_GRAPH_INSTANCE",
@@ -145,6 +151,7 @@ __all__ = [
     "GoalOutcome",
     "GitLabCheck",
     "GitLabCheckOutcome",
+    "GraphCategoryRow",
     "GraphSignIn",
     "GraphSignInOutcome",
     "GraphSignInReplacement",
@@ -474,6 +481,26 @@ class GraphSignInReplacement(Protocol):
 
 
 @runtime_checkable
+class GraphCategoryRow(Protocol):
+    """A Graph row's Outlook categories as read — `pm_ai.app.wiring.GraphCategories` (4s)."""
+
+    @property
+    def shown(self) -> object:
+        """The row's `categories` value exactly as read, handed back at the save."""
+        ...
+
+    @property
+    def entries(self) -> tuple[tuple[str, str], ...] | None:
+        """(category, project) pairs in the row's order; `None` when unreadable."""
+        ...
+
+    @property
+    def unreadable(self) -> str | None:
+        """Why the row reader refuses the value, when it does."""
+        ...
+
+
+@runtime_checkable
 class GraphSignIn(Protocol):
     """`pm-ai connector add graph`'s sign-in and answer checks (story 8l).
 
@@ -506,7 +533,7 @@ class GraphSignIn(Protocol):
         ...
 
     def settings_file(self, instance: str) -> Path:
-        """The row the closing message sends the operator to for categories."""
+        """The row the closing message names."""
         ...
 
     def ready(self) -> None:
@@ -533,8 +560,33 @@ class GraphSignIn(Protocol):
         width: int,
         reach_back: int,
         present: Callable[[str], None],
+        categories: Mapping[str, str] | None = None,
     ) -> GraphSignInOutcome:
-        """Run Microsoft's sign-in through `present`, then the bounded check."""
+        """Run Microsoft's sign-in through `present`, then the bounded check.
+
+        A non-empty `categories` is saved in the row beside the other settings.
+        """
+        ...
+
+    def enrolled_projects(self) -> tuple[str, ...]:
+        """The enrolled project ids, in the registry's order, read now (story 4s).
+
+        `RegistryRefused` when `projects.toml` cannot be read or parsed.
+        """
+        ...
+
+    def category_refusal(self, answers: Sequence[tuple[str, str]]) -> str | None:
+        """Why these (category, project) answers would not be read, or `None`."""
+        ...
+
+    def categories(self, instance: str) -> GraphCategoryRow:
+        """`instance`'s Outlook category mapping as its row holds it (story 4s)."""
+        ...
+
+    def save_categories(
+        self, instance: str, *, shown: object, categories: Mapping[str, str]
+    ) -> bool:
+        """Save `categories` as `instance`'s mapping if the row still holds `shown`."""
         ...
 
     def enrolled(self, instance: str) -> None:
@@ -1085,7 +1137,8 @@ def _daemon_run(context: Context) -> int:
     keychain, while composing; a taken port or one it cannot listen on; an
     unusable or unreadable token file; a request log that cannot be opened; and
     a server that bound the port but failed to start serving.
-    A clean stop (Ctrl-C, a stop signal, the terminal closing) is exit 0.
+    A clean stop (Ctrl-C, a stop signal, the terminal closing) is exit 0, and
+    the daemon prints one line saying how it stopped (story 4s).
     """
     if context.serve is None:
         context.require_daemon()
@@ -1194,7 +1247,8 @@ def _connector_add(context: Context) -> int:
     are two places a token outlives the command that used it.
 
     Two systems, each with its own path. `graph` is not typed at all (story
-    8l): it is four questions and Microsoft's sign-in, in
+    8l): it is four questions, one Outlook category question per enrolled
+    project (story 4s) and Microsoft's sign-in, in
     `_connector_add_graph`. `gitlab` is two questions, a hidden prompt and a
     live check, in `_connector_add_gitlab` (story 8o). Any other word —
     `GitLab` included, since the system is a key spelled exactly — is refused
@@ -1243,16 +1297,22 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
        minimum stated and no default; the first-run reach-back, at least the
        window, where Enter keeps five days (7200 minutes) or the window when
        it is wider, the question naming the number either way (story 8s). An
-       answer
-       that would not build a connector is refused with its reason and asked
-       again, never saved. Outlook categories are not asked: the closing
-       message names the file they are added to.
-    4. **Microsoft's sign-in, then the bounded health check**, behind
+       answer that would not build a connector is refused with its reason and
+       asked again, never saved.
+    4. **One Outlook category question per enrolled project** (story 4s), in
+       the registry's order, read when these questions start: which category
+       marks that project's meetings, Enter for none. Answers are trimmed and
+       judged together by the rules the row is read with; one category given
+       to two projects is refused naming both and the later question asked
+       again. Before the sign-in, because a refused category costs a re-typed
+       line and an interruption after the sign-in would throw a sign-in away.
+    5. **Microsoft's sign-in, then the bounded health check**, behind
        `context.graph_sign_in`. Either refusing saves nothing.
-    5. **Enrolment**, which seals the sign-in and writes the settings
-       together, as for every other connector. Another add of the same name
-       that finishes during this one's sign-in is caught by enrolment's own
-       re-check, at the cost of this sign-in.
+    6. **Enrolment**, which seals the sign-in and writes the settings —
+       the category mapping among them — together, as for every other
+       connector. Another add of the same name that finishes during this
+       one's sign-in is caught by enrolment's own re-check, at the cost of
+       this sign-in.
 
     The sign-in token never reaches this function's output: it is handed to
     enrolment as the credential, and enrolment's own redaction applies to the
@@ -1267,7 +1327,7 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
 
     if not _stdin_is_terminal():
         raise Refusal(
-            "adding a Graph connector asks four questions and waits for a "
+            "adding a Graph connector asks its questions and waits for a "
             "Microsoft sign-in in a browser, so it needs a terminal. stdin is "
             "not a TTY here — this is a pipe, a cron job or a CI step. Nothing "
             "was asked and nothing was saved. Run `pm-ai connector add graph` "
@@ -1297,6 +1357,7 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
         judge=lambda minutes: graph.refusal(width=width, reach_back=minutes),
         default=offered,
     )
+    mapping = dict(_ask_categories(graph, _projects(graph)))
 
     _echo()
     signed = graph.sign_in(
@@ -1306,6 +1367,7 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
         width=width,
         reach_back=reach_back,
         present=_echo,
+        categories=mapping,
     )
     # The sign-in and the check have both answered; enrolment re-runs the
     # name check under its own reading of the stores and seals. Its "probe" is
@@ -1325,18 +1387,123 @@ def _connector_add_graph(storage: StoragePort, graph: GraphSignIn, instance: str
         if signed.healthy
         else "enrolled; its health check warned (above)"
     )
-    _echo(
-        f"{instance} is {state}. Its row is read afresh by every command and "
-        f"every daemon job, so the next one uses it and a running daemon needs "
-        f"no restart; nothing harvests from it until scheduled harvesting "
-        f"exists."
-    )
-    _echo(
-        f"Outlook categories are not mapped to projects yet, so every meeting "
-        f"is filed as personal. To map them, add a \"categories\" object — "
-        f"Outlook category to project id — to {graph.settings_file(instance)}."
-    )
+    _echo(f"{instance} is {state}. {HARVESTED_WHEN}")
+    _echo(_mapped(instance, mapping))
+    if mapping:
+        _echo(_project_clause(instance, mapping.values()))
+    _echo(f"Its settings are in {graph.settings_file(instance)}.")
     return EXIT_OK
+
+
+def _projects(graph: GraphSignIn) -> tuple[str, ...]:
+    """The enrolled projects the category questions offer, read now (story 4s)."""
+    try:
+        return graph.enrolled_projects()
+    except RegistryRefused as unreadable:
+        raise Refusal(str(unreadable)) from unreadable
+    except (OSError, ValueError) as unread:
+        # Anything else reading the application's settings raised meanwhile
+        # (a `config.toml` that stopped parsing, a file that stopped opening).
+        raise Refusal(
+            f"the enrolled projects could not be read ({type(unread).__name__}: "
+            f"{unread}), so which projects a category could file into is "
+            f"unknown. Nothing was saved."
+        ) from unread
+
+
+_NOTHING_TO_REMOVE = "there is nothing to remove; press Enter for none."
+
+
+def _ask_categories(
+    graph: GraphSignIn,
+    projects: Sequence[str],
+    current: Mapping[str, tuple[str, ...]] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """One Outlook category question per project, in order; the accepted answers (4s).
+
+    The one function `connector add graph`, setup's step 4 and `connector
+    categories` ask through. `current` is each project's categories now:
+    Enter keeps them (or none), a typed category replaces them — the current
+    one re-typed in another case is kept in its stored spelling — and `-`
+    removes them. `-` is offered only where there is something to remove, and
+    refused elsewhere, so no category is ever `-`. Every answer is trimmed and
+    judged with the answers before it by `graph.category_refusal`; a refused
+    one is said and that question asked again. Ctrl-C or Ctrl-D at a question
+    is `_typed`'s refusal: nothing was saved.
+
+    Returns (category, project) pairs, a project kept with several categories
+    giving one pair each.
+    """
+    held_now = current or {}
+    answers: list[tuple[str, str]] = []
+    for project in projects:
+        held = held_now.get(project, ())
+        if held:
+            spelled = ", ".join(repr(category) for category in held)
+            offer = f"Enter keeps {spelled}; - removes {'it' if len(held) == 1 else 'them'}"
+        else:
+            offer = "Enter for none"
+        prompt = f"Outlook category that marks {project}'s meetings [{offer}]: "
+        while True:
+            typed = _typed(prompt)
+            if typed is None:
+                _echo(f"  {_NOT_TEXT}", file=sys.stderr)
+                continue
+            if typed == "-":
+                if not held:
+                    _echo(f"  {_NOTHING_TO_REMOVE}", file=sys.stderr)
+                    continue
+                chosen: tuple[str, ...] = ()
+            elif not typed:
+                chosen = held
+            else:
+                same = [c for c in held if c.strip().casefold() == typed.casefold()]
+                chosen = (same[0] if same else typed,)
+            proposal = [*answers, *((category, project) for category in chosen)]
+            reason = graph.category_refusal(tuple(proposal))
+            if reason is None:
+                answers = proposal
+                break
+            # Enter keeps what is held, so where something is held Enter would
+            # meet the same refusal again: the way out is another or `-`.
+            remedy = (
+                f"Type another for {project}, or - to remove it."
+                if held
+                else f"Type another for {project}, or press Enter for none."
+            )
+            _echo(f"  {reason} {remedy}", file=sys.stderr)
+    return tuple(answers)
+
+
+def _listed(names: Sequence[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _mapped(instance: str, mapping: Mapping[str, str]) -> str:
+    """What the category mapping now files where, and the command that changes it."""
+    command = f"`pm-ai connector categories {instance}`"
+    if not mapping:
+        return (
+            f"No Outlook category is mapped to a project, so every meeting is "
+            f"filed as personal; {command} maps them."
+        )
+    filed = _listed([f"{category!r} into {project}" for category, project in mapping.items()])
+    return (
+        f"Meetings tagged in Outlook are filed by category: {filed}. Every other "
+        f"meeting is filed as personal; {command} changes this."
+    )
+
+
+def _project_clause(instance: str, projects: Iterable[str]) -> str:
+    """`PROJECT_CLAUSE` for the projects a row files into, then `RESTART_SENTENCE`."""
+    named = sorted(set(projects))
+    which = named[0] if len(named) == 1 else "one of them"
+    return (
+        PROJECT_CLAUSE.format(instance=instance, projects=_listed(named), which=which)
+        + " "
+        + RESTART_SENTENCE
+    )
 
 
 def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -> int:
@@ -1441,12 +1608,11 @@ def _connector_add_gitlab(context: Context, daemon: DaemonPort, instance: str) -
     )
 
     _echo(answer)
-    _echo(
-        f"{instance} is enrolled and healthy. It becomes active at the next "
-        f"start — connectors are registered when the daemon is composed, so "
-        f"nothing is harvesting from it yet. Its settings are in "
-        f"{gitlab.settings_file(instance)}."
-    )
+    _echo(f"{instance} is enrolled and healthy. {HARVESTED_WHEN}")
+    files_into = gitlab.files_into(instance)
+    if files_into is not None:
+        _echo(_project_clause(instance, (files_into,)))
+    _echo(f"Its settings are in {gitlab.settings_file(instance)}.")
     return EXIT_OK
 
 
@@ -1679,6 +1845,132 @@ def _sign_in_refusals() -> Iterator[None]:
         CredentialNotHeld,
         CredentialStoreUnclaimable,
         NotAGraphRow,
+    ) as refused:
+        raise Refusal(str(refused)) from refused
+
+
+def _connector_categories(context: Context) -> int:
+    """`pm-ai connector categories <instance>`: which Outlook category files where (4s).
+
+    For any enrolled Graph row, enabled or not, at any time after enrolment.
+
+    1. **What can be known without asking**: the row exists, is a JSON object
+       and is Graph's; the registry can be read. Then a terminal.
+    2. **The mapping as the row holds it**: each category and its project, or
+       none. An entry naming a project no longer enrolled is shown as dropped
+       on save (a row holding it is not built) and not asked about; a value
+       the row reader refuses is shown as written and replaced by the answers.
+       With no project enrolled there is nothing to map: exit 0.
+    3. **One question per enrolled project**, through `_ask_categories`, the
+       function `connector add graph` asks through, each offering its current
+       answer.
+    4. **The save**: only the `categories` key, under enrolment's claim, after
+       the row is read again — refused, writing nothing, if its categories
+       changed meanwhile, the row is gone, or a project was removed from the
+       registry. A mapping equal to the one shown is not written.
+
+    Talks to no Microsoft service, composes no harvest and needs no project.
+    A meeting already filed stays where it was; the next harvest files by the
+    new mapping, since every job reads the row afresh.
+    """
+    (instance,) = context.arguments
+    graph = context.graph_sign_in
+    if graph is None:
+        raise Refusal(
+            "no Graph enrolment was supplied to the CLI, so a Graph connector's "
+            "categories cannot be mapped. That is a wiring fault in pm-ai, not "
+            "anything about this machine; nothing was asked and nothing was saved."
+        )
+    with _categories_refusals():
+        row = graph.categories(instance)
+        projects = _projects(graph)
+        if not _stdin_is_terminal():
+            raise Refusal(
+                "mapping Outlook categories asks one question per enrolled "
+                "project, so it needs a terminal. stdin is not a TTY here — this "
+                "is a pipe, a cron job or a CI step. Nothing was asked and "
+                f"nothing was saved. Run `pm-ai connector categories {instance}` "
+                f"from an interactive shell."
+            )
+        enrolled = set(projects)
+        stale = _show_categories(instance, row, enrolled)
+        if not projects:
+            _echo(
+                "No project is enrolled, so there is nothing to map; nothing was "
+                "asked or written."
+            )
+            return EXIT_OK
+        entries = row.entries or ()
+        current = {
+            project: tuple(category for category, named in entries if named == project)
+            for project in projects
+        }
+        mapping = dict(_ask_categories(graph, projects, current))
+        if row.entries is not None and not stale and mapping == dict(row.entries):
+            _echo(f"Nothing changed, so nothing was written: {instance}'s mapping is as shown.")
+            return EXIT_OK
+        written = graph.save_categories(instance, shown=row.shown, categories=mapping)
+    if not written:
+        # The row already held these answers when it was read again under the
+        # claim, so nothing changed and no daemon has anything new to see.
+        _echo(f"Nothing changed, so nothing was written: {instance}'s mapping is already this.")
+        return EXIT_OK
+
+    _echo(f"Saved. {_mapped(instance, mapping)}")
+    _echo(
+        "A meeting already filed stays where it was; the next harvest files by "
+        "this mapping, and a running daemon reads it there without a restart."
+    )
+    if mapping:
+        _echo(_project_clause(instance, mapping.values()))
+    return EXIT_OK
+
+
+def _show_categories(
+    instance: str, row: GraphCategoryRow, enrolled: set[str]
+) -> tuple[str, ...]:
+    """Print the mapping as the row holds it; return the projects of stale entries."""
+    _echo(f"{instance}'s Outlook categories now:")
+    if row.entries is None:
+        written = json.dumps(row.shown, ensure_ascii=False)
+        _echo(
+            f"  written as {written}, which pm-ai cannot read: "
+            f"{_sentence(row.unreadable or 'the row reader refuses it')} The "
+            f"answers below replace it."
+        )
+        return ()
+    if not row.entries:
+        _echo("  none — every meeting is filed as personal")
+        return ()
+    stale: list[str] = []
+    for category, project in row.entries:
+        if project in enrolled:
+            _echo(f"  {category!r} → {project}")
+        else:
+            stale.append(project)
+            _echo(
+                f"  {category!r} → {project}: {project} is no longer enrolled, so "
+                f"this entry is dropped when the answers are saved — a row "
+                f"naming it is not built"
+            )
+    return tuple(stale)
+
+
+@contextmanager
+def _categories_refusals() -> Iterator[None]:
+    """`connector categories`' refusals, each the sentence `Refusal` carries."""
+    try:
+        with _enrolment_refusals(
+            command="connector categories", then="then run this command again"
+        ):
+            yield
+    except (
+        CategoriesChanged,
+        CategoryProjectUnenrolled,
+        ConnectorNotConfigured,
+        CredentialStoreUnclaimable,
+        NotAGraphRow,
+        RegistryRefused,
     ) as refused:
         raise Refusal(str(refused)) from refused
 
@@ -3176,6 +3468,41 @@ row filing into a project enrolled since it started with it. Later slices print
 this constant, never a sentence of their own.
 """
 
+def _within(span: timedelta) -> str:
+    """A span of whole minutes as the sentences say it: `a minute`, `240 minutes`."""
+    minutes = int(span.total_seconds() // 60)
+    return "a minute" if minutes == 1 else f"{minutes} minutes"
+
+
+HARVESTED_WHEN = (
+    f"A running daemon needs no restart: it starts harvesting a new connector "
+    f"the next time it reads the connector list — normally within "
+    f"{_within(FIRST_RETRY)} when no other connector is set up, otherwise at "
+    f"the next scheduled harvest of any connector, normally within "
+    f"{_within(CYCLE)}. A daemon started afterwards normally harvests it within "
+    f"its first {_within(START_SPREAD)}."
+)
+"""When a newly enrolled connector is first harvested (story 4s), said by both enrolments.
+
+Read off the harvest timers' own constants (`pm_ai.core.cadence`): the list is
+read every `FIRST_RETRY` while no listed connector is set up and at least once
+per `CYCLE` otherwise, and the first harvests after a start are spread over
+`START_SPREAD`. "Normally": a harvest already running when the list is due
+delays the read until it ends.
+"""
+
+PROJECT_CLAUSE = (
+    "{instance} files into {projects}, so a running daemon that started before "
+    "{which} was enrolled does not build it — and so does not harvest it — until "
+    "it is restarted."
+)
+"""Said, then `RESTART_SENTENCE`, whenever a new or saved row files into a project (4s).
+
+A daemon composes projects at start only (AD-5), and a Graph row mapped to a
+project it did not load is not built at all. The CLI cannot see which projects
+a running daemon loaded, so the clause is said whenever the row names one.
+"""
+
 TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
     {
         ("goal", "set"),
@@ -3184,6 +3511,7 @@ TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
         ("setup",),
         ("connector", "add"),
         ("connector", "sign-in"),
+        ("connector", "categories"),
         ("key", "enrol"),
         ("logs",),
     }
@@ -3349,6 +3677,13 @@ TABLE: Mapping[str, Command] = {
             "sign-in": Command(
                 "redo the Microsoft sign-in for an enrolled Graph connector",
                 _connector_sign_in,
+                takes=("instance",),
+                target=_application,
+            ),
+            # `4s`: which Outlook category files a meeting into which project.
+            "categories": Command(
+                "map Outlook categories to projects for an enrolled Graph connector",
+                _connector_categories,
                 takes=("instance",),
                 target=_application,
             ),

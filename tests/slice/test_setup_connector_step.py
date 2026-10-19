@@ -158,7 +158,7 @@ def test_enter_at_the_reach_back_through_setup_keeps_five_days(
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, terminal = _setup(monkeypatch, tmp_path / "alpha", "y", "", CLIENT_ID, "", "240", "")
+    code, terminal = _setup(monkeypatch, tmp_path / "alpha", "y", "", CLIENT_ID, "", "240", "", "")
 
     assert code == EXIT_OK, capsys.readouterr().err
     (reach,) = [p for p in terminal.prompts if p.startswith("First-run reach-back")]
@@ -549,3 +549,49 @@ def test_step_four_output_runs_to_the_closing_report():
     printed = "[4/4] heading\n\nsign in here\n\n[     ok] keychain: fine\n"
     assert step_four(printed) == "[4/4] heading\n\nsign in here"
     assert re.search("sign in here", step_four(printed))
+
+
+# ── Story 4s — step 4 asks the Outlook category questions ────────────────────
+
+
+def test_step_4_asks_the_category_of_the_project_step_2_just_registered(
+    tmp_path, monkeypatch, capsys
+):
+    """A fresh home: the registry is read when the questions start, so the
+    project step 2 wrote is offered, and its answer is saved in the same row."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: Keychain())
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    _microsoft(monkeypatch, Microsoft())
+    (tmp_path / "alpha").mkdir()
+
+    code, terminal = _setup(monkeypatch, tmp_path / "alpha", "y", "", *VALID[:-1], "Alpha")
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    asked = [p for p in terminal.prompts if p.startswith("Outlook category")]
+    assert asked == ["Outlook category that marks alpha's meetings [Enter for none]: "]
+    row = json.loads(_row_path(home).read_text())
+    assert row["categories"] == {"Alpha": "alpha"}
+    assert "user_id" in row, "one row, written once with everything"
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt(), EOFError()], ids=["ctrl-c", "ctrl-d"])
+def test_an_interruption_at_a_category_question_is_the_step_4_refusal(
+    machine, tmp_path, monkeypatch, capsys, interruption
+):
+    home, keychain = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _setup(monkeypatch, tmp_path / "alpha", "y", "", *VALID[:-1], interruption)
+
+    assert code == EXIT_REFUSAL
+    assert terminal.prompts[-1].startswith("Outlook category"), terminal.prompts
+    err = capsys.readouterr().err
+    assert "interrupted at step 4" in err and DONE in err and NOTHING in err
+    for sentence in SHARED_INTERRUPT_SENTENCES:
+        assert sentence not in err
+    _nothing_saved(home)
+    _steps_one_to_three_done(home, keychain)

@@ -62,8 +62,9 @@ FLOW_MESSAGE = (
     "and enter the code ABCD-EFGH to authenticate."
 )
 
-VALID = [CLIENT_ID, "", "1440", "10080"]
-"""App id, Enter for the tenant, a day's window, a week's reach-back."""
+VALID = [CLIENT_ID, "", "1440", "10080", ""]
+"""App id, Enter for the tenant, a day's window, a week's reach-back, and Enter
+at `alpha`'s Outlook category question (story 4s): no category."""
 
 
 def _token(refresh_token: str, **claims: Any) -> dict:
@@ -293,14 +294,20 @@ def test_a_valid_add_saves_the_settings_and_the_sealed_sign_in_together(
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
-    assert len(terminal.prompts) == 4
+    # Four questions, then one Outlook category question for `alpha` (4s).
+    assert len(terminal.prompts) == 5
+    assert terminal.prompts[4] == "Outlook category that marks alpha's meetings [Enter for none]: "
     assert FLOW_MESSAGE in captured.out, "Microsoft's own address and code"
     assert "enrolled and healthy" in captured.out
-    # Story 4r: rows are read afresh by every command and daemon job, so the
-    # closing message says the next one uses it rather than "the next start".
-    assert "a running daemon needs no restart" in captured.out
+    # Story 4s: the shared sentence for when it is first harvested; nothing
+    # mapped, so every meeting is personal and the categories command named.
+    assert cli.HARVESTED_WHEN in captured.out
+    assert "every meeting is filed as personal" in captured.out
+    assert f"`pm-ai connector categories {INSTANCE}`" in captured.out
+    assert "nothing harvests from it" not in captured.out
+    assert "until scheduled harvesting exists" not in captured.out
+    assert cli.RESTART_SENTENCE not in captured.out, "nothing files into a project"
     assert str(_settings_file(home)) in captured.out, "the closing message names the file"
-    assert "categories" in captured.out
 
     row = _row(home)
     assert row["instance"] == INSTANCE and row["system"] == "graph"
@@ -309,7 +316,7 @@ def test_a_valid_add_saves_the_settings_and_the_sealed_sign_in_together(
     assert row["window_width_minutes"] == 1440
     assert row["first_run_reach_back_minutes"] == 10080
     assert row["user_id"] == ACCOUNT_CLAIMS["oid"], "the signed-in user is recorded (8q)"
-    assert "categories" not in row, "category mapping is not asked"
+    assert "categories" not in row, "Enter at every category saves no key"
 
     assert provider.refreshed_with == [SIGNED_IN], (
         "the health check refreshed from something other than the sign-in's token"
@@ -357,7 +364,7 @@ def test_a_sign_in_without_oid_takes_the_one_cached_account_id(
     )
     _microsoft(monkeypatch, provider)
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080", ""])
 
     assert code == EXIT_OK, capsys.readouterr().err
     assert _row(home)["user_id"] == "the-cached-user"
@@ -384,7 +391,7 @@ def test_a_sign_in_naming_no_account_is_refused_and_seals_nothing(
     home, _ = machine
     _microsoft(monkeypatch, Microsoft(device=_no_oid(), accounts=accounts))
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_REFUSAL, captured.err
@@ -409,7 +416,7 @@ def test_the_fallback_account_id_from_another_tenant_is_accepted(
     )
     _microsoft(monkeypatch, provider)
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080", ""])
 
     assert code == EXIT_OK, capsys.readouterr().err
     assert _row(home)["user_id"] == "6f1c2b3a-0000-4000-8000-000000000003"
@@ -427,7 +434,7 @@ def test_a_fallback_against_a_tenant_that_is_not_an_id_takes_the_one_account(
     )
     _microsoft(monkeypatch, provider)
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, tenant, "1440", "10080"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, tenant, "1440", "10080", ""])
 
     assert code == EXIT_OK, capsys.readouterr().err
     assert _row(home)["user_id"] == "the-cached-user"
@@ -441,7 +448,7 @@ def test_a_tenant_word_in_any_case_is_accepted_and_stored_as_typed(
     provider = Microsoft()
     _microsoft(monkeypatch, provider)
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, typed, "1440", "10080"])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, typed, "1440", "10080", ""])
 
     assert code == EXIT_OK, capsys.readouterr().err
     assert len(_prompts(terminal, "Tenant")) == 1, "asked again"
@@ -475,7 +482,7 @@ def test_an_unusable_oid_falls_back_to_the_one_cached_account(
         Microsoft(device=_with_claims(claims), accounts=[{"home_account_id": cached}]),
     )
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080", ""])
 
     assert code == EXIT_OK, capsys.readouterr().err
     assert _row(home)["user_id"] == "the-cached-user"
@@ -489,7 +496,7 @@ def test_an_unusable_oid_with_no_cached_account_is_refused_as_unusable(
     home, _ = machine
     _microsoft(monkeypatch, Microsoft(device=_with_claims(claims), accounts=[]))
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, ROW_TENANT, "1440", "10080", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_REFUSAL, captured.err
@@ -714,7 +721,7 @@ def test_a_window_under_240_is_asked_again_naming_the_minimum(
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "120", "480", "480"])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "120", "480", "480", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
@@ -729,7 +736,7 @@ def test_a_reach_back_under_the_window_is_asked_again(machine, monkeypatch, caps
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "480", "60", "480"])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "480", "60", "480", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
@@ -747,7 +754,7 @@ def test_enter_at_the_window_is_asked_again_it_keeps_no_default(machine, monkeyp
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "", "240", ""])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "", "240", "", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
@@ -764,11 +771,11 @@ def test_enter_at_the_reach_back_keeps_five_days_and_the_question_names_it(
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "240", ""])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "240", "", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
-    assert len(terminal.prompts) == 4
+    assert len(terminal.prompts) == 5, "four questions and alpha's category (4s)"
     (reach,) = _prompts(terminal, "First-run reach-back")
     assert "[Enter keeps 7200]" in reach and "at least 240" in reach
     row = _row(home)
@@ -779,7 +786,7 @@ def test_a_typed_reach_back_is_saved_as_typed(machine, monkeypatch, capsys):
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, "", "240", "900"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, "", "240", "900", ""])
 
     assert code == EXIT_OK, capsys.readouterr().err
     assert _row(home)["first_run_reach_back_minutes"] == 900
@@ -791,7 +798,7 @@ def test_with_a_window_wider_than_five_days_enter_keeps_the_window(
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "10080", ""])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", "10080", "", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
@@ -806,7 +813,7 @@ def test_a_row_already_on_disk_keeps_its_reach_back(machine, monkeypatch, capsys
     it."""
     home, keychain = machine
     _microsoft(monkeypatch, Microsoft())
-    assert _add(monkeypatch, [CLIENT_ID, "", "240", "240"])[0] == EXIT_OK
+    assert _add(monkeypatch, [CLIENT_ID, "", "240", "240", ""])[0] == EXIT_OK
     before = _settings_file(home).read_bytes()
 
     daemon = build(home, "alpha", keychain=keychain)
@@ -837,7 +844,7 @@ def test_acceptance_a_first_harvest_after_enter_reaches_back_five_days(
 
     home, keychain = machine
     _microsoft(monkeypatch, Microsoft())
-    assert _add(monkeypatch, [CLIENT_ID, "", "240", ""])[0] == EXIT_OK
+    assert _add(monkeypatch, [CLIENT_ID, "", "240", "", ""])[0] == EXIT_OK
 
     now = datetime(2026, 10, 16, 9, 0, tzinfo=timezone.utc)
     four_days_ago = now - timedelta(days=4)
@@ -865,7 +872,7 @@ def test_minutes_are_plain_digits_or_asked_again(machine, monkeypatch, capsys, t
     home, _ = machine
     _microsoft(monkeypatch, Microsoft())
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, "", typed, "1440", "10080"])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", typed, "1440", "10080", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
@@ -879,7 +886,7 @@ def test_a_window_past_the_cap_is_refused_in_words_for_a_typed_answer(
     _microsoft(monkeypatch, Microsoft())
     too_wide = str(MAX_SETTING_MINUTES + 1)
 
-    code, terminal = _add(monkeypatch, [CLIENT_ID, "", too_wide, "1440", too_wide, "10080"])
+    code, terminal = _add(monkeypatch, [CLIENT_ID, "", too_wide, "1440", too_wide, "10080", ""])
 
     captured = capsys.readouterr()
     assert code == EXIT_OK, captured.err
@@ -919,7 +926,7 @@ def test_a_typed_tenant_reaches_the_sign_in_and_the_row(machine, monkeypatch, ca
     provider = Microsoft()
     _microsoft(monkeypatch, provider)
 
-    code, _ = _add(monkeypatch, [CLIENT_ID, "contoso.onmicrosoft.com", "1440", "10080"])
+    code, _ = _add(monkeypatch, [CLIENT_ID, "contoso.onmicrosoft.com", "1440", "10080", ""])
 
     assert code == EXIT_OK, capsys.readouterr().err
     assert provider.authorities == ["https://login.microsoftonline.com/contoso.onmicrosoft.com"]
@@ -936,7 +943,8 @@ def test_a_tenant_that_is_not_one_is_asked_again(machine, monkeypatch, capsys, t
     _microsoft(monkeypatch, provider)
 
     code, terminal = _add(
-        monkeypatch, [CLIENT_ID, typed, "11111111-2222-3333-4444-555555555555", "1440", "10080"]
+        monkeypatch,
+        [CLIENT_ID, typed, "11111111-2222-3333-4444-555555555555", "1440", "10080", ""],
     )
 
     captured = capsys.readouterr()
@@ -1237,3 +1245,199 @@ def test_a_hand_edited_tenant_that_is_not_one_builds_no_connector(
 
     assert INSTANCE not in daemon.connectors
     assert "not a tenant Microsoft can sign in through" in capsys.readouterr().err
+
+
+# ── Story 4s — Outlook categories are asked, not hand-edited ─────────────────
+
+FOUR = [CLIENT_ID, "", "1440", "10080"]
+"""The four questions' answers, without any category answer."""
+
+
+def _enrolled(
+    monkeypatch,
+    tmp_path: Path,
+    projects: tuple[str, ...],
+    *,
+    later: ArtifactState | None = None,
+    once: Callable[[], bool] = lambda: False,
+) -> None:
+    """The machine's registry: these project ids, in this order in the file.
+
+    Written by hand rather than by `render_registry`, which sorts, so the
+    order is the file's. `later` is what the registry reads as once `once()`
+    is true — composition has read it whole by then.
+    """
+    entries = {}
+    lines = []
+    for project in projects:
+        repository = tmp_path / f"repo-{project}"
+        repository.mkdir(exist_ok=True)
+        entries[project] = ProjectEntry(path=repository)
+        lines.append(f'[projects.{project}]\npath = "{repository}"\n')
+    state = ArtifactState.read("\n".join(lines).encode()) if entries else ArtifactState.absent()
+
+    def read(chain):
+        now = later if later is not None and once() else state
+        return dataclasses.replace(bootstrap(chain), projects=entries, registry=now)
+
+    monkeypatch.setattr(entry, "_bootstrap", read)
+
+
+def _category_prompts(terminal: Terminal) -> list[str]:
+    return _prompts(terminal, "Outlook category")
+
+
+def test_a_mapped_project_is_saved_in_the_same_row_and_said_with_the_restart(
+    machine, monkeypatch, capsys
+):
+    """Rows *a project mapped* and *one project, a category*: ` Alpha ` trimmed."""
+    home, keychain = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, [*FOUR, " Alpha "])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert _category_prompts(terminal) == [
+        "Outlook category that marks alpha's meetings [Enter for none]: "
+    ]
+    row = _row(home)
+    assert row["categories"] == {"Alpha": "alpha"}
+    assert row["user_id"] == ACCOUNT_CLAIMS["oid"], "saved in the same write as the rest"
+    assert cli.HARVESTED_WHEN in captured.out
+    assert "'Alpha' into alpha" in captured.out
+    assert "Every other meeting is filed as personal" in captured.out
+    assert f"`pm-ai connector categories {INSTANCE}`" in captured.out
+    clause = cli.PROJECT_CLAUSE.format(instance=INSTANCE, projects="alpha", which="alpha")
+    assert f"{clause} {cli.RESTART_SENTENCE}" in captured.out
+    # The connector the next start builds files an `Alpha` meeting into alpha.
+    daemon = build(home, "alpha", keychain=keychain)
+    assert isinstance(daemon.connectors.get(INSTANCE), GraphConnector)
+
+
+def test_the_questions_come_after_the_four_and_before_the_sign_in(
+    machine, monkeypatch, capsys
+):
+    _microsoft(monkeypatch, Microsoft())
+    asked_at_sign_in: list[int] = []
+    real = GraphEnrolment.sign_in
+
+    def sign_in(self, **kwargs):
+        asked_at_sign_in.append(len(terminal.prompts))
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(GraphEnrolment, "sign_in", sign_in)
+    terminal = Terminal(VALID)
+    monkeypatch.setattr("builtins.input", terminal)
+
+    assert entry.main(["connector", "add", "graph", INSTANCE]) == EXIT_OK, capsys.readouterr().err
+    assert terminal.prompts[4].startswith("Outlook category that marks alpha's")
+    assert asked_at_sign_in == [5], "every question was asked before the sign-in"
+
+
+def test_projects_are_asked_in_the_registrys_order(machine, tmp_path, monkeypatch, capsys):
+    home, _ = machine
+    _enrolled(monkeypatch, tmp_path, ("beta", "alpha", "gamma"))
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, [*FOUR, "B", "", "G"])
+
+    assert code == EXIT_OK, capsys.readouterr().err
+    assert [p.split("marks ")[1].split("'")[0] for p in _category_prompts(terminal)] == [
+        "beta",
+        "alpha",
+        "gamma",
+    ]
+    assert _row(home)["categories"] == {"B": "beta", "G": "gamma"}
+
+
+def test_one_category_for_two_projects_is_refused_naming_both_and_the_later_asked_again(
+    machine, tmp_path, monkeypatch, capsys
+):
+    home, _ = machine
+    _enrolled(monkeypatch, tmp_path, ("alpha", "beta"))
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, [*FOUR, "Alpha", "alpha", "Beta"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    prompts = _category_prompts(terminal)
+    assert len(prompts) == 3
+    assert "alpha's" in prompts[0] and "beta's" in prompts[1] and "beta's" in prompts[2]
+    assert "'alpha' for beta is the same Outlook category as 'Alpha' for alpha" in captured.err
+    assert _row(home)["categories"] == {"Alpha": "alpha", "Beta": "beta"}
+
+
+def test_a_dash_where_nothing_can_be_removed_is_refused_and_asked_again(
+    machine, monkeypatch, capsys
+):
+    home, _ = machine
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, [*FOUR, "-", ""])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert len(_category_prompts(terminal)) == 2
+    assert "there is nothing to remove; press Enter for none" in captured.err
+    assert "- removes" not in _category_prompts(terminal)[0], "`-` is not offered"
+    assert "categories" not in _row(home), "no category is ever saved as `-`"
+
+
+def test_with_no_project_enrolled_no_category_is_asked(machine, tmp_path, monkeypatch, capsys):
+    home, _ = machine
+    _enrolled(monkeypatch, tmp_path, ())
+    _microsoft(monkeypatch, Microsoft())
+
+    code, terminal = _add(monkeypatch, FOUR)
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert len(terminal.prompts) == 4 and not _category_prompts(terminal)
+    assert "categories" not in _row(home)
+    assert "every meeting is filed as personal" in captured.out
+
+
+@pytest.mark.parametrize("interruption", [EOFError(), KeyboardInterrupt()], ids=["ctrl-d", "ctrl-c"])
+def test_an_interruption_at_a_category_question_saves_nothing(
+    machine, monkeypatch, capsys, interruption
+):
+    home, _ = machine
+    provider = Microsoft()
+    _microsoft(monkeypatch, provider)
+
+    code, _ = _add(monkeypatch, [*FOUR, interruption])
+
+    assert code == EXIT_REFUSAL
+    assert "nothing was saved" in capsys.readouterr().err
+    assert provider.authorities == [], "no sign-in was started"
+    _nothing_saved(home)
+
+
+@pytest.mark.parametrize(
+    "registry",
+    [ArtifactState.unreadable("Permission denied"), ArtifactState.read(b"[projects\n")],
+    ids=["unreadable", "malformed"],
+)
+def test_a_registry_that_cannot_be_read_is_a_refusal_that_saves_nothing(
+    machine, tmp_path, monkeypatch, capsys, registry
+):
+    """Readable when the command composed; unreadable when the questions start."""
+    home, _ = machine
+    terminal = Terminal([*FOUR, ""])
+    _enrolled(
+        monkeypatch, tmp_path, ("alpha",), later=registry, once=lambda: len(terminal.prompts) >= 4
+    )
+    provider = Microsoft()
+    _microsoft(monkeypatch, provider)
+    monkeypatch.setattr("builtins.input", terminal)
+
+    code = entry.main(["connector", "add", "graph", INSTANCE])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL
+    assert "projects.toml" in captured.err and "Nothing was saved" in captured.err
+    assert not _category_prompts(terminal)
+    assert provider.authorities == []
+    _nothing_saved(home)

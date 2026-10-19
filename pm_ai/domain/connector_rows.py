@@ -7,7 +7,7 @@ may import (the same arrangement as `pm_ai.domain.event_entries`).
 
 from __future__ import annotations
 
-__all__ = ["USER_ID_KEY"]
+__all__ = ["CATEGORIES_KEY", "USER_ID_KEY"]
 
 USER_ID_KEY = "user_id"
 """The row key naming which provider user a connector signed in as (story 8q).
@@ -19,4 +19,12 @@ reserved: `connector add graph` hands it in with its other settings, and
 it afterwards. A row without a usable value has no recorded user; such a row
 still builds. What counts as usable is one rule, `pm_ai.domain.handles.usable_user_id`
 (story 2o), which `recorded_user_id` and `pm_identity` both apply.
+"""
+
+CATEGORIES_KEY = "categories"
+"""The Graph row key mapping an Outlook category to a project id (story 4s).
+
+Read by the Graph connector (`CategoryScopes`) and written by
+`pm_ai.core.connector_enrolment.record_categories`, which `pm-ai connector
+categories` saves through; spelled here for `USER_ID_KEY`'s reason.
 """

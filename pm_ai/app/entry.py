@@ -86,6 +86,7 @@ from pm_ai.app.wiring import (
     artifact_state,
     bootstrap,
     build,
+    enrolled_project_ids,
     onboard_project,
     is_connector_row_file,
     read_connector_rows,
@@ -245,12 +246,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             # artifact a sign-in touches: `pm-ai connector sign-in` needs no
             # project (story 8m), and `connector add` still refuses through
             # `require_daemon()`.
+            # The enrolled projects its category questions offer (story 4s)
+            # are the registry as it is when they start, read the way every
+            # command composes from it.
             graph_sign_in=(
-                GraphEnrolment(storage=daemon.storage)
+                GraphEnrolment(storage=daemon.storage, projects=_projects_now(keychain))
                 if daemon is not None
                 else GraphEnrolment(
                     storage=application_storage(keychain),
                     announce=warn_if_encryption_disabled,
+                    projects=_projects_now(keychain),
                 )
             ),
             # `pm-ai connector add gitlab`'s answers are judged, its name placed
@@ -588,7 +593,11 @@ class _FirstRun:
         """
         if self._graph is None:
             warn_if_encryption_disabled()
-            self._graph = GraphEnrolment(storage=self.storage)
+            # Its category questions offer the registry as it is when they
+            # start, so the project step 2 just registered is asked about.
+            self._graph = GraphEnrolment(
+                storage=self.storage, projects=_projects_now(self._keychain)
+            )
         return self._graph
 
     def connectors(self) -> _ConnectorsOnDisk:
@@ -677,6 +686,15 @@ def read_optional(
         return storage.read_artifact(scope=scope, artifact=artifact)
     except FileNotFoundError:
         return None
+
+
+def _projects_now(keychain: KeychainPort) -> Callable[[], tuple[str, ...]]:
+    """The enrolled project ids, read afresh at each call (story 4s).
+
+    For the Outlook category questions: `_bootstrap`'s read, refused
+    (`RegistryRefused`) when `projects.toml` cannot be read or parsed.
+    """
+    return lambda: enrolled_project_ids(_bootstrap(keychain))
 
 
 def _bootstrap(keychain: KeychainPort) -> Bootstrap:

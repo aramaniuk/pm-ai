@@ -20,7 +20,10 @@ binds, takes its token, serves and stops. What it serves is built in
 4. **Serve**, until Ctrl-C, a stop signal, or the terminal closing (`SIGINT`,
    `SIGTERM`, `SIGHUP` — all three are a stop, none is re-raised afterwards).
 5. **Stop**: stop listening, cancel the timers, mark unfinished jobs, close
-   the writer, return 0.
+   the writer, return 0. A clean stop says so in one line (story 4s): in
+   `daemon.log` before the log is closed, and on standard output — where the
+   listening line went — after the store is closed, naming the first stop
+   request and how many unfinished jobs were marked failed.
 
 Story 4r put two steps before the port and two before serving: the writer
 thread starts and reopens `operational.db` as the daemon's own connection, and
@@ -78,6 +81,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import io
 import json
 import logging
 import logging.handlers
@@ -187,17 +191,117 @@ def serve(
     except BaseException:
         daemon.storage.close()
         raise
+    # Filled only by a clean stop (story 4s): the halt, a refused start and an
+    # unexpected error leave it empty and print what they print today.
+    stop_line: list[str] = []
     try:
-        return _serve(
+        code = _serve(
             daemon, uvicorn, port,
             probes=probes, announce=announce, diagnose=diagnose,
-            bounds=bounds or {},
+            bounds=bounds or {}, stop_line=stop_line,
         )
+    except DaemonRefused:
+        raise
+    except Exception as unexpected:
+        _log.error("the daemon stopped on an unexpected %s", type(unexpected).__name__)
+        raise
     finally:
         try:
+            if stop_line:
+                # Before the log is closed, without the store's part.
+                _log.info("%s.", stop_line[0])
             request_log.detach()
         finally:
             daemon.storage.close()
+    # After the store is closed: a close that raised skipped this line.
+    if stop_line:
+        say_stopped(f"pm-ai: {stop_line[0]}; the store is closed.")
+    return code
+
+
+STOP_NAMES: Mapping[int, str] = {
+    signal.SIGINT: "Ctrl-C",
+    signal.SIGTERM: "a stop signal (SIGTERM)",
+    signal.SIGHUP: "the terminal closing (SIGHUP)",
+}
+"""How the stop line names the first stop request it got (story 4s)."""
+
+
+def stop_words(first: int | None, *, marked: int | None, unmarked: str | None) -> str:
+    """The clean stop's words, without the store's part (story 4s).
+
+    `first` is the first stop request the server saw; `marked` how many jobs —
+    commands sent to the daemon — the stop marked failed; `unmarked` the type
+    of the error the marking failed with, which leaves them to the next start.
+    Renders and harvests marked by the same step are in `daemon.log` already
+    and are not counted.
+    """
+    cause = STOP_NAMES.get(first, "") if first is not None else ""
+    said = f"the daemon stopped cleanly on {cause}" if cause else "the daemon stopped cleanly"
+    if unmarked is not None:
+        return (
+            f"{said}; unfinished jobs were not marked failed ({unmarked}), so the "
+            f"next start marks them"
+        )
+    if not marked:
+        return f"{said}; no job was left unfinished"
+    noun = "job" if marked == 1 else "jobs"
+    return f"{said}; {marked} unfinished {noun} marked failed"
+
+
+def say_stopped(line: str) -> None:
+    """The stop line on standard output, never a failure of the stop itself (4s).
+
+    A console that can no longer be written to — the terminal closed, the
+    pipe's reader gone — does not turn a clean stop into a non-zero exit. The
+    line goes to the console unbuffered, so a write that fails leaves nothing
+    behind for the interpreter's own flush at exit to fail on again; the error
+    is ignored and standard output is pointed at nothing. The line is in
+    `daemon.log` either way.
+    """
+    stream: Any = sys.stdout
+    try:
+        stream.flush()
+    except (OSError, ValueError):
+        # Bytes still buffered would fail again at the interpreter's flush.
+        sys.stdout = _Nothing()
+        return
+    try:
+        raw = stream.buffer.raw  # the console itself, beneath both buffers
+        encoding = stream.encoding or "utf-8"
+    except AttributeError:
+        raw = None
+        encoding = "utf-8"
+    try:
+        if raw is None:
+            # A stream with no console beneath it (a test's capture).
+            print(line, flush=True)
+            return
+        data = memoryview(f"{line}\n".encode(encoding, "replace"))
+        idle = 0
+        while data and idle < _IDLE_WRITES:
+            # A raw write may take part of the line, or none of it (`None`, a
+            # console that would block); a console that keeps taking nothing
+            # is given up on rather than waited on for ever.
+            taken = raw.write(data) or 0
+            idle = 0 if taken else idle + 1
+            data = data[taken:]
+    except (OSError, ValueError):
+        sys.stdout = _Nothing()
+
+
+_IDLE_WRITES = 100
+"""How many writes in a row may take nothing before the stop line is given up on."""
+
+
+class _Nothing(io.TextIOBase):
+    """Standard output once the console has gone: every write is accepted and dropped."""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        return len(text)
 
 
 def _serve(
@@ -209,6 +313,7 @@ def _serve(
     announce: Callable[[str], None] | None,
     diagnose: Callable[[str], HealthReport],
     bounds: Mapping[tuple[str, ...], Callable[[Daemon], float]],
+    stop_line: list[str],
 ) -> int:
     server_holder: list[Any] = []
 
@@ -231,7 +336,7 @@ def _serve(
         return _serve_locked(
             daemon, uvicorn, port, listener,
             probes=probes, announce=announce, diagnose=diagnose, bounds=bounds,
-            server_holder=server_holder,
+            server_holder=server_holder, stop_line=stop_line,
         )
     finally:
         # Released when the daemon is done, which is when the process ends.
@@ -423,6 +528,7 @@ def _serve_locked(
     diagnose: Callable[[str], HealthReport],
     bounds: Mapping[tuple[str, ...], Callable[[Daemon], float]],
     server_holder: list[Any],
+    stop_line: list[str],
 ) -> int:
     def halted(error: BaseException, job: str | None) -> None:
         # On the writer thread, once: the store moved past this daemon's
@@ -573,16 +679,29 @@ def _serve_locked(
         # application's lifespan. A second Ctrl-C during that wait ends the
         # process at once — every claimed step is safe to kill partway (AD-5)
         # — and the parts after it still run where they can.
+        drained = _Drained()
         try:
             listener.close()
         finally:
             try:
-                _stop_writer(requests)
+                drained = _stop_writer(requests)
             finally:
                 pool.shutdown()
+    # A halt — before or during the stop's own marking step — is not a clean
+    # stop, and says only what it says today.
     if writer.halted is not None:
         raise DaemonRefused(f"the daemon stopped: {writer.halted}")
+    first = server_holder[0].first_stop if server_holder else None
+    stop_line.append(stop_words(first, marked=drained.marked, unmarked=drained.unmarked))
     return 0
+
+
+class _Drained:
+    """What the shutdown's own step did: jobs marked failed, or why it could not (4s)."""
+
+    def __init__(self, marked: int | None = None, unmarked: str | None = None) -> None:
+        self.marked = marked
+        self.unmarked = unmarked
 
 
 def record_writer_halt(
@@ -612,11 +731,11 @@ def record_writer_halt(
     )
 
 
-def _stop_writer(requests: RequestPath) -> None:
+def _stop_writer(requests: RequestPath) -> _Drained:
     writer = requests.writer
     writer.stop_accepting()
     try:
-        _drain(requests)
+        return _drain(requests)
     except KeyboardInterrupt:
         # A second interrupt while the writer finishes its queue ends the
         # process at once, as a kill would (AD-5): every claimed step is safe
@@ -624,6 +743,7 @@ def _stop_writer(requests: RequestPath) -> None:
         # all — may run under a writer that is still mid-step.
         print("\npm-ai: interrupted again; stopping at once.", file=sys.stderr, flush=True)
         _exit_now(EXIT_INTERRUPTED)
+        return _Drained()  # not reached outside a test that stands in for the exit
 
 
 EXIT_INTERRUPTED = 3
@@ -634,23 +754,27 @@ def _exit_now(code: int) -> None:
     os._exit(code)
 
 
-def _drain(requests: RequestPath) -> None:
+def _drain(requests: RequestPath) -> _Drained:
     """The shutdown's own step, then the writer's close — each waited for, no time limit.
 
     No `finally`: an interrupt during either wait goes straight to the caller,
-    which ends the process rather than wait again.
+    which ends the process rather than wait again. Returns how many jobs the
+    step marked failed, or the type of the error it failed with (story 4s).
     """
     writer = requests.writer
+    drained = _Drained()
     if writer.halted is None:
         try:
-            requests.shutdown_pass()
+            drained = _Drained(marked=len(requests.shutdown_pass()))
         except Exception as unmarked:  # noqa: BLE001 — the next start's pass marks them
             _log.warning(
                 "the shutdown could not mark unfinished jobs failed (%s); the "
                 "next start's restart pass will",
                 type(unmarked).__name__,
             )
+            drained = _Drained(unmarked=type(unmarked).__name__)
     writer.close()
+    return drained
 
 
 def _master_key(daemon: Daemon, writer: WriterThread) -> bool:
@@ -995,6 +1119,8 @@ def _server_class(uvicorn: Any) -> Any:
     class _Server(uvicorn.Server):  # type: ignore[misc, name-defined]
         announce: Callable[[], None] | None = None
         on_stop: Callable[[], None] | None = None
+        first_stop: int | None = None
+        """The first stop request this server saw, named by the stop line (4s)."""
 
         async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
             server: Any = self
@@ -1022,6 +1148,8 @@ def _server_class(uvicorn: Any) -> Any:
 
         def _stop(self, sig: int, frame: FrameType | None) -> None:
             server: Any = self
+            if server.first_stop is None:
+                server.first_stop = sig
             if server.should_exit and sig == signal.SIGINT:
                 server.force_exit = True
             else:
