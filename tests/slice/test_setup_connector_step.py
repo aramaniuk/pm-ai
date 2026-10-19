@@ -49,8 +49,11 @@ from tests.slice.test_first_run import GRAPH_QUESTION, digests, step_four, write
 
 APPLICATION = DataScope(ScopeKind.APPLICATION)
 
-FIRST_STEPS = ["85", "Europe/Warsaw", "n"]
-"""Rate, zone and verbose: step 3 on a first run."""
+FIRST_STEPS = ["85", "Europe/Warsaw", "n", "none"]
+"""Rate, zone, verbose and `local_model` (left unset, story 7a): step 3 on a first run."""
+
+AGAIN_STEPS = ["none"]
+"""Step 3 on a second run: only `local_model`, still unset, is asked (story 7a)."""
 
 SHARED_INTERRUPT_SENTENCES = (
     "interrupted before every question was answered",
@@ -74,8 +77,8 @@ def installed(monkeypatch: pytest.MonkeyPatch) -> None:
 def _setup(
     monkeypatch, repository: Path, *step_four: str | BaseException, again: bool = False
 ) -> tuple[int, Terminal]:
-    """Run setup; `again` is a second run, whose step 3 asks nothing."""
-    terminal = Terminal([str(repository), "", *([] if again else FIRST_STEPS), *step_four])
+    """Run setup; `again` is a second run, whose step 3 asks only `local_model`."""
+    terminal = Terminal([str(repository), "", *(AGAIN_STEPS if again else FIRST_STEPS), *step_four])
     monkeypatch.setattr("builtins.input", terminal)
     return entry.main(["setup"]), terminal
 
@@ -189,7 +192,8 @@ def test_yes_on_a_second_run_whose_first_three_steps_ask_nothing(
     code, terminal = _setup(monkeypatch, tmp_path / "alpha", "y", "", *VALID, again=True)
 
     assert code == EXIT_OK, capsys.readouterr().err
-    assert len(terminal.prompts) == 2 + 1 + 1 + len(VALID), terminal.prompts
+    # Steps 1–3 ask nothing but `local_model`, still unset (story 7a).
+    assert len(terminal.prompts) == 2 + len(AGAIN_STEPS) + 1 + 1 + len(VALID), terminal.prompts
     assert _row_path(home).exists()
 
 

@@ -50,6 +50,7 @@ SET_VALUES: dict[str, object] = {
     "verbose_logging": True,
     "display_timezone": "Europe/Warsaw",
     "daemon_port": 9000,
+    "local_model": "qwen3:8b",
 }
 
 KEYS = tuple(field.name for field in fields(Config))

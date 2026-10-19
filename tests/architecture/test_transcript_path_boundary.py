@@ -6,8 +6,10 @@ model call:
 
 - the transcript path's source — the pipeline, extraction, and the readers —
   imports no model client and no HTTP client, read from the source itself;
-- `ModelPort.complete` is the only callable anywhere in `pm_ai` declared to
-  accept cleaned text (`Sanitized`), so cleaned text has one door out.
+- `ModelPort.complete`, and its implementations named one by one (the local
+  adapter's since story `7a`), are the only callables anywhere in `pm_ai`
+  declared to accept cleaned text (`Sanitized`), so cleaned text has one door
+  out.
 """
 
 from __future__ import annotations
@@ -149,9 +151,11 @@ def test_model_port_complete_is_the_only_callable_that_accepts_cleaned_text():
     """AD-12 — cleaned text has one door out of pm-ai, and it is the model port.
 
     Every function or method in `pm_ai` with a parameter annotated with
-    `Sanitized` is listed; the list must be exactly `ModelPort.complete`. A
-    second acceptor — a skill payload, a surface renderer — would be a second
-    route for text a model may read, and is the place to stop and ask.
+    `Sanitized` is listed; the list must be exactly `ModelPort.complete` and
+    the implementations of it, named one by one — since story `7a`, the local
+    adapter's `complete`. A further acceptor — a skill payload, a surface
+    renderer, a helper inside an adapter — would be another route for text a
+    model may read, and is the place to stop and ask.
     """
     acceptors = sorted(
         f"{file.path.relative_to(PACKAGE_ROOT)}::{name}"
@@ -159,7 +163,10 @@ def test_model_port_complete_is_the_only_callable_that_accepts_cleaned_text():
         for name, function in _qualified(file.tree)
         if _accepts_sanitized(function)
     )
-    assert acceptors == ["ports/__init__.py::ModelPort.complete"], acceptors
+    assert acceptors == [
+        "models/local/ollama.py::OllamaModel.complete",
+        "ports/__init__.py::ModelPort.complete",
+    ], acceptors
 
 
 def test_the_acceptor_scan_sees_an_annotated_parameter():

@@ -33,7 +33,10 @@ which is how `verbose_loging = true` reads as configured forever. A closed set
 costs nothing here.
 
 The accepted keys are `blended_hourly_rate`, `verbose_logging`,
-`display_timezone` and `daemon_port`. `daemon_port` was added by story 4e.
+`display_timezone`, `daemon_port` and `local_model`. `daemon_port` was added by
+story 4e, `local_model` by story 7a. There is no key naming the local model
+server's host: the address is a constant of the adapter, and a host key is
+refused like any other unknown key (AD-1 class LM).
 `pm_handle` was a key until story 2o removed it. Who the PM is now comes from
 the Graph connector rows (`pm_identity`). A file that still sets `pm_handle` is
 refused like any other unknown key.
@@ -267,6 +270,13 @@ class Config:
     # `DAEMON_PORT_MIN` to `DAEMON_PORT_MAX`: below 1024 needs privileges the
     # daemon never asks for, and a float is not a port.
     daemon_port: int = DEFAULT_DAEMON_PORT
+    # Story 7a: the local model's name as the Ollama server knows it, e.g.
+    # `qwen3:8b`. `""` is the unset state, as `display_timezone`: no local
+    # adapter is wired. Kept as written — a name without a tag means
+    # `:latest`, and `pm_ai.domain.model_calls.normalize_model_name` is where
+    # names are put in that form for comparison, so the round trip holds on
+    # what the person typed. pm-ai never pulls it.
+    local_model: str = ""
 
     def __post_init__(self) -> None:
         """Refuse a value no `Config` may hold, however it was constructed.
@@ -330,6 +340,7 @@ class Config:
                 f"config.toml could not be written with it at all. Re-enter it."
             )
         _refuse_port(self.daemon_port)
+        _refuse_model_name(self.local_model)
         if self.display_timezone:
             # Validated against the zone database rather than by shape. A
             # typo'd zone is not a syntax error — it is a silent shift in which
@@ -347,6 +358,31 @@ class Config:
                 ZoneInfo(self.display_timezone)
             except (ZoneInfoNotFoundError, ValueError, TypeError, OSError) as unknown:
                 raise _refuse_zone(self.display_timezone, unknown) from unknown
+
+
+def _refuse_model_name(name: object) -> None:
+    """Refuse a `local_model` no server could be asked about (story 7a).
+
+    A string, with no whitespace inside it and no unpaired surrogate (the file
+    could not be written with one). Whether the name is pulled, or runs off
+    the machine, is the adapter's question, asked of the server — never this
+    module's, which opens nothing.
+    """
+    if not isinstance(name, str):
+        raise ConfigRefused(
+            f"local_model must be a string naming an Ollama model, such as "
+            f"`local_model = \"qwen3:8b\"`, but it is {_type_name(name)}."
+        )
+    if _has_surrogates(name):
+        raise ConfigRefused(
+            f"local_model is {name!r}, which contains an unpaired surrogate and "
+            f"therefore has no UTF-8 encoding. Re-enter it."
+        )
+    if name and (name != name.strip() or any(c.isspace() for c in name)):
+        raise ConfigRefused(
+            f"local_model is {name!r}, and a model name holds no spaces. Write it "
+            f"as `ollama list` prints it, such as `qwen3:8b`."
+        )
 
 
 ACCEPTED_KEYS = frozenset(field.name for field in fields(Config))
@@ -377,6 +413,7 @@ def load_config(raw: bytes | None) -> Config:
     verbose = supplied.get("verbose_logging")
     zone = supplied.get("display_timezone")
     port = supplied.get("daemon_port")
+    model = supplied.get("local_model")
     return Config(
         blended_hourly_rate=(
             defaults.blended_hourly_rate
@@ -400,6 +437,9 @@ def load_config(raw: bytes | None) -> Config:
             # Passed through as written: `Config.__post_init__` holds the one
             # validator, so the file and a direct construction get one wording.
             defaults.daemon_port if port is None else port  # type: ignore[arg-type]
+        ),
+        local_model=(
+            defaults.local_model if model is None else _text("local_model", model)
         ),
     )
 
@@ -743,7 +783,7 @@ def _number(key: str, value: object) -> float:
 
 
 def _text(key: str, value: object) -> str:
-    """A non-blank string, kept exactly as written — today only `display_timezone`.
+    """A non-blank string, kept exactly as written — `display_timezone`, `local_model`.
 
     Not stripped: a zone written with stray whitespace reaches
     `Config.__post_init__` as written, where the zone database refuses it by

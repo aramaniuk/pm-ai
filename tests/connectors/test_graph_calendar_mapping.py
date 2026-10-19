@@ -1378,11 +1378,18 @@ def test_the_config_vocabulary_stays_closed_and_holds_no_connector_setting():
     `Config` fails here instead of passing a `not in` check that only ever knew
     the two spellings this file happened to think of. Story 4g added the fourth
     member, story 2o removed `pm_handle`, and story 4e added `daemon_port` — a
-    daemon setting, not a connector's; the vocabulary is stated in
+    daemon setting, not a connector's — and story 7a `local_model`, the local
+    model's name, not a connector's either; the vocabulary is stated in
     `pm_ai.core.config`.
     """
     assert ACCEPTED_KEYS == frozenset(
-        {"blended_hourly_rate", "verbose_logging", "display_timezone", "daemon_port"}
+        {
+            "blended_hourly_rate",
+            "verbose_logging",
+            "display_timezone",
+            "daemon_port",
+            "local_model",
+        }
     )
 
 

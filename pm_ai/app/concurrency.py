@@ -1,7 +1,7 @@
-"""The daemon's one writer thread and its I/O pool of four (AD-5, AD-19, story 4r).
+"""The daemon's one writer thread, its I/O pool of four and its model pool of one (AD-5, AD-19).
 
 One event loop waits and schedules; nothing on it blocks. Everything that does
-block goes to one of two places, and only these two:
+block goes to one of three places, and only these three:
 
 - **The writer thread** makes every write and enters every claim. Work reaches
   it as a *claimed step*: a function handed over whole, run to completion on
@@ -14,12 +14,17 @@ block goes to one of two places, and only these two:
   provider call, a `git` question, a keychain probe — and every command a
   client sends. They never call the writer directly: they hand a claimed step
   to it and wait for the answer, exactly as the loop does.
+- **The model pool** (story 7a): one thread for heavy local-model jobs, so
+  only one generation runs at a time. A model job hands its write to the
+  writer only through `ModelPool.hand_off`, which refuses once the shutdown
+  has begun; the shutdown closes the model's connections, a call in flight
+  included.
 
-Neither is `asyncio.to_thread` or the default executor, and neither keeps the
-process alive at exit: `concurrent.futures.ThreadPoolExecutor` joins its
-threads when the interpreter stops, so a calendar read abandoned at a deadline
-would hold the process open. The daemon waits for the writer explicitly, at the
-end of its own stop sequence, and abandons the pool.
+None of the three is `asyncio.to_thread` or the default executor, and none
+keeps the process alive at exit: `concurrent.futures.ThreadPoolExecutor` joins
+its threads when the interpreter stops, so a calendar read abandoned at a
+deadline would hold the process open. The daemon waits for the writer
+explicitly, at the end of its own stop sequence, and abandons the pools.
 
 ## Withdrawal, and why a busy answer leaves nothing behind
 
@@ -56,6 +61,9 @@ __all__ = [
     "IO_POOL_SIZE",
     "WRITER_START_WAIT_SECONDS",
     "IOPool",
+    "MODEL_POOL_SIZE",
+    "ModelJobAbandoned",
+    "ModelPool",
     "StepKind",
     "WriterBusy",
     "WriterStopped",
@@ -417,3 +425,140 @@ class IOPool:
                 future.set_exception(raised)
             else:
                 future.set_result(result)
+
+
+MODEL_POOL_SIZE = 1
+"""The model pool's threads (AD-19): one heavy local-model job at a time. Not a setting."""
+
+
+class ModelJobAbandoned(Exception):
+    """The daemon stopped while this model job was queued or running; its answer is dropped."""
+
+
+class ModelPool:
+    """One daemon thread for heavy local-model jobs (AD-19, story 7a).
+
+    Shaped like `IOPool`, with one thread and two differences.
+
+    **The shutdown abandons the running job.** `abort` — the local adapter's
+    `close` — is called whether or not a job is running, so the model's
+    client is closed when the daemon stops and a request in flight loses its
+    connection. Whatever the running job returns afterwards is replaced by
+    `ModelJobAbandoned`, and work still queued is cancelled and never starts.
+
+    **A model job's write goes through `hand_off`.** A job calls the model,
+    then hands what it would write to the writer thread from inside
+    `hand_off(step)`. The hand-off and the shutdown take one lock: a hand-off
+    that began before the shutdown finishes (the shutdown waits for it — a
+    claimed step is short), and once the shutdown has begun every hand-off is
+    refused with `ModelJobAbandoned` before its step runs. So nothing a call
+    abandoned by the shutdown would have written is written, whichever side
+    of the call's end the shutdown lands on.
+
+    A job's deadline is the request's own, so the slot is held until the
+    request has actually ended and a second job never overlaps a generation
+    still running. A model call never runs on the loop, the writer thread or
+    an I/O worker.
+    """
+
+    def __init__(
+        self, *, abort: Callable[[], None] | None = None, name: str = "pm-ai-model"
+    ) -> None:
+        self._work: collections.deque[tuple[Callable[[], Any], Future[Any]]] = (
+            collections.deque()
+        )
+        self._condition = threading.Condition()
+        self._gate = threading.Lock()
+        self._closed = False
+        self._stopping = False
+        self._running: Future[Any] | None = None
+        self._abort = abort
+        self._thread = threading.Thread(target=self._run, name=f"{name}-1", daemon=True)
+        self._started = False
+
+    @property
+    def size(self) -> int:
+        return MODEL_POOL_SIZE
+
+    @property
+    def stopping(self) -> bool:
+        """Whether the shutdown has begun: every hand-off from now on is refused."""
+        return self._stopping
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._thread.start()
+
+    def submit(self, work: Callable[[], _T]) -> Future[_T]:
+        future: Future[_T] = Future()
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("the daemon's model pool has stopped taking work")
+            self._work.append((work, future))
+            self._condition.notify()
+        return future
+
+    async def run(self, work: Callable[[], _T]) -> _T:
+        """`work` on the model thread, awaited from the loop."""
+        return await asyncio.wrap_future(self.submit(work))
+
+    def hand_off(self, step: Callable[[], _T]) -> _T:
+        """Run `step` — a model job's hand-off to the writer — unless the shutdown has begun."""
+        with self._gate:
+            if self._stopping:
+                raise ModelJobAbandoned(
+                    "the daemon began stopping before this model call's answer was "
+                    "handed to the writer, so nothing was written."
+                )
+            return step()
+
+    def shutdown(self) -> None:
+        """Refuse every later hand-off, cancel what is queued, close the model's connections."""
+        with self._gate:
+            # Waits for a hand-off already running; none starts after this.
+            self._stopping = True
+        with self._condition:
+            self._closed = True
+            for _, future in self._work:
+                future.cancel()
+            self._work.clear()
+            self._condition.notify_all()
+        if self._abort is not None:
+            try:
+                self._abort()
+            except Exception:  # noqa: BLE001 — the stop sequence goes on
+                logging.getLogger(__name__).exception("closing the model connection failed")
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._work and not self._closed:
+                    self._condition.wait()
+                if not self._work:
+                    return
+                work, future = self._work.popleft()
+                if not future.set_running_or_notify_cancel():
+                    continue
+                self._running = future
+            try:
+                result = work()
+            except BaseException as raised:  # noqa: BLE001 — relayed to the waiter
+                outcome: tuple[bool, Any] = (False, raised)
+            else:
+                outcome = (True, result)
+            with self._condition:
+                self._running = None
+                abandoned = self._closed
+            if abandoned:
+                future.set_exception(
+                    ModelJobAbandoned(
+                        "the daemon stopped while this model call ran; its connection "
+                        "was closed and its answer dropped, so nothing was written."
+                    )
+                )
+            elif outcome[0]:
+                future.set_result(outcome[1])
+            else:
+                future.set_exception(outcome[1])

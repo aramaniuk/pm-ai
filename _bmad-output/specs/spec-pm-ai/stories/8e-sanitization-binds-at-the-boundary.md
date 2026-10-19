@@ -118,6 +118,7 @@ Found 2026-09-01 while verifying the prototype-path spec's own claims. Split fro
   KEEP: the `PAYLOAD_FOR` enumeration instinct — the original defect was that seven of eight payload types went unsanitized, so any caller-side test must enumerate the registry rather than spot-check.
 - **2026-09-02, split at the sizing gate** from the original `8c` (2,193 tokens). `8c` keeps the domain declarations and their import-time guard; this slice is the boundary that makes them binding.
 - **Inherited from the 2026-09-02 multi-lens review**, which found "carry the result forward" had no declared carrier against frozen dataclasses and an unchanged `persist_events` signature; that the versioning question was blocking rather than deferrable; and that the transcript path is a second boundary. The carrier and versioning findings are superseded by the renegotiation above; the review's investigation of the transcript path stands and is what shows the chokepoint covers it.
+- **2026-10-19, amended by `7a`.** The port is widened once for both adapters: `ModelPort.complete(*, task_class, instructions, external, flow, shape=None) -> ModelAnswer`. `external` stays `Sequence[Sanitized]`. The misuse fixture follows the port: its correct calls name `flow` and return `ModelAnswer`; a call without `flow` is a refused case (`call-arg`), and reading the answer as `str` is one too (`return-value`). The fragments-not-prompt test's parameter set becomes `{self, task_class, instructions, external, flow, shape}`, every one keyword-only.
 
 ## Design Notes
 

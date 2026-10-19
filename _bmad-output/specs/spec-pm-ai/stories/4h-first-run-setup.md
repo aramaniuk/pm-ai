@@ -94,6 +94,7 @@ context: []
   KEEP: asserting on the probe report rather than on setup's own exit code. The two can disagree, and that is the whole reason the closing report exists.
 
 - **2026-09-03, split at the sizing gate.** Drafted together with the config serializer and probe as one slice measuring 1981 body tokens, over wave 1's 1600 ceiling. `4g` holds the serializer and the probe — independently shippable, and able to land while `4b` and `4d` are still in flight. This half holds the sequence, which cannot start until all three exist.
+- **2026-10-19, amended by `7a`.** Step 3 (`config.toml`) gains the `local_model` question, after the existing keys and whenever `local_model` is unset: Enter takes the offered model, `none` leaves it unset, a cloud tag or a model the server says runs elsewhere is refused and asked again; the local adapter's presence check is printed, with `ollama pull <name>` when the model is not there. A file with the rate and zone set but no `local_model` is no longer a completed step 3.
 
 ## Design Notes
 

@@ -24,9 +24,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow
 from pm_ai.domain.sanitize import Sanitized, sanitize
 from pm_ai.domain.task_classes import TaskClass
 from pm_ai.ports import ModelPort
+
+# Story 7a widened the port: every call names its flow and gets a `ModelAnswer`.
+FLOW = ScopeFlow.of([DataScope(ScopeKind.PERSONAL)], DataScope(ScopeKind.PERSONAL))
 
 # ── The type cannot be specialised out of its guard ──────────────────────────
 
@@ -48,27 +53,27 @@ class ForgedBySubclassing(Sanitized):  # refused: misc
 # ── AD-12: externally-sourced text is `Sanitized`, never `str` ───────────────
 
 
-def omits_sanitization(model: ModelPort, provider_text: str) -> str:
+def omits_sanitization(model: ModelPort, provider_text: str) -> ModelAnswer:
     """The omission AD-12's consumer clause exists to catch."""
-    return model.complete(task_class=TaskClass.CLASSIFICATION, instructions="Do.", external=provider_text)  # refused: arg-type
+    return model.complete(task_class=TaskClass.CLASSIFICATION, instructions="Do.", external=provider_text, flow=FLOW)  # refused: arg-type
 
 
-def assembles_the_prompt_itself(model: ModelPort, clean: Sanitized) -> str:
+def assembles_the_prompt_itself(model: ModelPort, clean: Sanitized) -> ModelAnswer:
     """Interpolating into a template flattens the type back to `str`."""
-    return model.complete(task_class=TaskClass.COACHING, instructions="Do.", external=f"T: {clean.for_model}")  # refused: arg-type
+    return model.complete(task_class=TaskClass.COACHING, instructions="Do.", external=f"T: {clean.for_model}", flow=FLOW)  # refused: arg-type
 
 
-def one_unsanitized_fragment(model: ModelPort, provider_text: str) -> str:
+def one_unsanitized_fragment(model: ModelPort, provider_text: str) -> ModelAnswer:
     """A fragment list is checked per element, so one raw string is enough."""
-    return model.complete(task_class=TaskClass.RESEARCH, instructions="Do.", external=[provider_text])  # refused: list-item
+    return model.complete(task_class=TaskClass.RESEARCH, instructions="Do.", external=[provider_text], flow=FLOW)  # refused: list-item
 
 
-def reads_the_raw_back_out(model: ModelPort, clean: Sanitized) -> str:
+def reads_the_raw_back_out(model: ModelPort, clean: Sanitized) -> ModelAnswer:
     """AD-29 keeps `raw` for citation resolution; it is not a prompt fragment."""
-    return model.complete(task_class=TaskClass.RESEARCH, instructions="Do.", external=[clean.raw])  # refused: list-item
+    return model.complete(task_class=TaskClass.RESEARCH, instructions="Do.", external=[clean.raw], flow=FLOW)  # refused: list-item
 
 
-def unwraps_the_clean_half(model: ModelPort, clean: Sanitized) -> str:
+def unwraps_the_clean_half(model: ModelPort, clean: Sanitized) -> ModelAnswer:
     """The near-miss most likely to be written by hand, and it must still fail.
 
     `for_model` is the right string, so this call would work — which is why a
@@ -76,47 +81,75 @@ def unwraps_the_clean_half(model: ModelPort, clean: Sanitized) -> str:
     `raw` to the citation resolver, and unwrapping it one line early is how the
     port stops being able to tell a derived string from any other.
     """
-    return model.complete(task_class=TaskClass.RESEARCH, instructions="Do.", external=[clean.for_model])  # refused: list-item
+    return model.complete(task_class=TaskClass.RESEARCH, instructions="Do.", external=[clean.for_model], flow=FLOW)  # refused: list-item
 
 
 # ── AD-15: the call site declares its task class ─────────────────────────────
 
 
-def omits_the_task_class(model: ModelPort, clean: Sanitized) -> str:
+def omits_the_task_class(model: ModelPort, clean: Sanitized) -> ModelAnswer:
     """"A call without a declared task class is a defect" — AD-15's invariant row."""
-    return model.complete(instructions="Do.", external=[clean])  # refused: call-arg
+    return model.complete(instructions="Do.", external=[clean], flow=FLOW)  # refused: call-arg
 
 
-def spells_the_task_class_as_a_string(model: ModelPort, clean: Sanitized) -> str:
+def spells_the_task_class_as_a_string(model: ModelPort, clean: Sanitized) -> ModelAnswer:
     """Typed rather than `str`, so a misspelling is caught here and not by a router."""
-    return model.complete(task_class="coaching", instructions="Do.", external=[clean])  # refused: arg-type
+    return model.complete(task_class="coaching", instructions="Do.", external=[clean], flow=FLOW)  # refused: arg-type
 
 
-def passes_the_task_class_positionally(model: ModelPort, clean: Sanitized) -> str:
+def passes_the_task_class_positionally(model: ModelPort, clean: Sanitized) -> ModelAnswer:
     """Keyword-only, so the declaration cannot drift into another slot."""
-    return model.complete(TaskClass.COACHING, instructions="Do.", external=[clean])  # refused: call-arg
+    return model.complete(TaskClass.COACHING, instructions="Do.", external=[clean], flow=FLOW)  # refused: call-arg
+
+
+# ── AD-31: every call names its flow (story 7a) ──────────────────────────────
+
+
+def omits_the_flow(model: ModelPort, clean: Sanitized) -> ModelAnswer:
+    """The flow table is checked on every call, so a call cannot leave it out."""
+    return model.complete(task_class=TaskClass.EXTRACTION, instructions="Do.", external=[clean])  # refused: call-arg
+
+
+def reads_the_answer_as_a_string(model: ModelPort, clean: Sanitized) -> str:
+    """The port returns `ModelAnswer`, so the old `-> str` reading no longer type-checks."""
+    return model.complete(task_class=TaskClass.EXTRACTION, instructions="Do.", external=[clean], flow=FLOW)  # refused: return-value
 
 
 # ── The shapes that must type-check ──────────────────────────────────────────
 
 
-def sanitized_fragments(model: ModelPort, provider_text: str) -> str:
+def sanitized_fragments(model: ModelPort, provider_text: str) -> ModelAnswer:
     """The accepted shape — no marker, so mypy must report nothing here."""
     return model.complete(
         task_class=TaskClass.EXTRACTION,
         instructions="Do.",
         external=[sanitize(provider_text)],
+        flow=FLOW,
     )
 
 
-def internal_text_may_be_a_plain_str(model: ModelPort) -> str:
+def internal_text_may_be_a_plain_str(model: ModelPort) -> ModelAnswer:
     """`instructions` is prose pm-ai wrote about itself: no outside author."""
     return model.complete(
-        task_class=TaskClass.BRIEFING_SYNTHESIS, instructions="Summarise the week.", external=()
+        task_class=TaskClass.BRIEFING_SYNTHESIS,
+        instructions="Summarise the week.",
+        external=(),
+        flow=FLOW,
     )
 
 
-def a_class_added_later_is_an_ordinary_call(model: ModelPort, clean: Sanitized) -> str:
+def a_shaped_call(model: ModelPort, clean: Sanitized) -> str:
+    """`shape` is optional, a JSON schema; the answer's text is read off `ModelAnswer`."""
+    return model.complete(
+        task_class=TaskClass.EXTRACTION,
+        instructions="Do.",
+        external=[clean],
+        flow=FLOW,
+        shape={"type": "object"},
+    ).text
+
+
+def a_class_added_later_is_an_ordinary_call(model: ModelPort, clean: Sanitized) -> ModelAnswer:
     """The vocabulary is open, and the port makes no claim about which members exist.
 
     Nothing in this signature enumerates `TaskClass`, so a member a later story
@@ -125,5 +158,5 @@ def a_class_added_later_is_an_ordinary_call(model: ModelPort, clean: Sanitized) 
     port constrains the *type*, never the membership.
     """
     return model.complete(
-        task_class=TaskClass.FUZZY_MATCH, instructions="Do.", external=[clean]
+        task_class=TaskClass.FUZZY_MATCH, instructions="Do.", external=[clean], flow=FLOW
     )

@@ -65,6 +65,13 @@ from pm_ai.domain.renders import RenderUnrecorded
 from pm_ai.domain.goals import Goal, GoalDomain, GoalHorizon
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
 from pm_ai.domain.health import Report, UnbuiltConnector
+from pm_ai.domain.model_calls import (
+    SERVER_LIMITS,
+    SUGGESTED_LOCAL_MODEL,
+    LocalModelPresence,
+    is_cloud_tag,
+    normalize_model_name,
+)
 from pm_ai.core.project_registry import RegistryRefused
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.scope_model import ScopeResolutionError
@@ -328,6 +335,14 @@ class FirstRun(Protocol):
 
     def diagnose(self) -> HealthReport:
         """`1g`'s probes, run against the machine as it is now."""
+        ...
+
+    def local_model(self, name: str) -> LocalModelPresence:
+        """Whether `name` is pulled on the local Ollama and runs here (story 7a).
+
+        The local adapter's presence check, bound by the composition root:
+        `surfaces` may reach no adapter. Carries no prompt; never raises.
+        """
         ...
 
     @property
@@ -2448,6 +2463,42 @@ def _verbose(current: Config) -> Callable[[str], Config]:
     return interpret
 
 
+_NO_MODEL = frozenset({"none", "-"})
+"""The answers that leave `local_model` unset at step 3 (story 7a)."""
+
+
+def _model(
+    current: Config, first_run: FirstRun, seen: list[LocalModelPresence]
+) -> Callable[[str], Config]:
+    """Step 3's `local_model` answer: Enter takes the offered model, `none` leaves it unset.
+
+    A cloud tag is refused at the prompt and asked again, and so is a name the
+    server's `/api/show` says runs elsewhere — no prompt is ever sent to
+    either (AD-1 class LM). The presence check's answer is kept in `seen` so
+    the step can print it once the file is written.
+    """
+
+    def interpret(raw: str) -> Config:
+        text = raw.strip() or SUGGESTED_LOCAL_MODEL
+        if text.lower() in _NO_MODEL:
+            return current
+        settled = replace(current, local_model=text)
+        if is_cloud_tag(text):
+            raise _Inadmissible(
+                f"{text} has a cloud tag: the Ollama server forwards it to Ollama's "
+                f"hosted service, so a prompt would leave this machine. Name a model "
+                f"that runs locally; OLLAMA_NO_CLOUD=1 turns cloud models off on the "
+                f"server."
+            )
+        presence = first_run.local_model(text)
+        if presence.runs_elsewhere:
+            raise _Inadmissible(presence.probe.detail)
+        seen.append(presence)
+        return settled
+
+    return interpret
+
+
 def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) -> None:
     """Step 3: `config.toml` — asked for, rendered by `4g`, written once.
 
@@ -2464,6 +2515,12 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
     - **complete** — neither is unset: a completed step, as an enrolled key
       is, and nothing is asked or written.
 
+    `local_model` (story 7a) is asked after the existing keys whenever it is
+    unset, offering `SUGGESTED_LOCAL_MODEL`; `none` leaves it unset. The name
+    is checked with the local adapter's presence check, a model running
+    elsewhere refused at the prompt, and the result printed — with
+    `ollama pull <name>` when the model is not there. pm-ai never pulls it.
+
     Each answer is a `Config` before it is accepted, so `__post_init__` refuses
     it at the prompt that asked. Who the PM is is not asked: it comes from the
     Graph connector rows (story 2o).
@@ -2472,7 +2529,8 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
     first_run_file = current == Config()
     ask_rate = not current.blended_hourly_rate
     ask_zone = not current.display_timezone
-    if not first_run_file and not ask_rate and not ask_zone:
+    ask_model = not current.local_model
+    if not first_run_file and not ask_rate and not ask_zone and not ask_model:
         _echo("      already configured; nothing was written.")
         return
     step = "step 3 (config.toml)"
@@ -2496,6 +2554,21 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
             step=step,
             default="y" if settled.verbose_logging else "n",
         )
+    checked: list[LocalModelPresence] = []
+    if ask_model:
+        # Story 7a: after the existing keys. pm-ai never pulls a model.
+        settled = _answer(
+            "local_model, the Ollama model pm-ai reads transcripts with "
+            "(Enter for the offered one, `none` to leave unset)",
+            _model(settled, first_run, checked),
+            step=step,
+            default=SUGGESTED_LOCAL_MODEL,
+        )
+    if not first_run_file and settled == current:
+        # Only `local_model` was asked and it was left unset: the file says
+        # what it said, so it is not rewritten (a rewrite drops comments).
+        _echo("      already configured (local_model left unset); nothing was written.")
+        return
     try:
         written = first_run.write_config(render_config(settled), expected=existing)
     except ConfigRefused as refused:
@@ -2508,6 +2581,16 @@ def _setup_config(first_run: FirstRun, existing: bytes | None, current: Config) 
             f"could not be written: {unwritable}"
         ) from unwritable
     _echo(f"      written to {written}")
+    if checked and settled.local_model:
+        presence = checked[-1]
+        # The line without its remedy, then the one remedy that fits: the pull
+        # command only when the server answered and does not list the model.
+        _echo(f"      {replace(presence.probe, remediation='')}")
+        if presence.not_pulled:
+            _echo(f"      pull it with: ollama pull {normalize_model_name(settled.local_model)}")
+            _echo(f"      {SERVER_LIMITS}")
+        elif presence.probe.remediation:
+            _echo(f"      {presence.probe.remediation}")
 
 
 DEFAULT_GRAPH_INSTANCE = "graph:work"

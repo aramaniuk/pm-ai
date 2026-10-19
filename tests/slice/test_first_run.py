@@ -83,17 +83,29 @@ class Keychain:
 
 
 class Operator:
-    """Scripted answers. Running out is Ctrl-D, which is what a closed stdin is."""
+    """Scripted answers. Running out is Ctrl-D, which is what a closed stdin is.
+
+    Step 3's `local_model` question (story 7a) is answered `model_answer`
+    without consuming a scripted answer — `none`, leaving it unset — so the
+    scripts written before the question existed keep their positions. A test
+    about the question sets `model_answer = None` and scripts it.
+    """
 
     def __init__(self) -> None:
         self.answers: list[str] = []
         self.asked: list[str] = []
+        self.model_answer: str | None = "none"
+        self.model_asked: list[str] = []
 
     def script(self, *answers: str) -> None:
         self.answers = list(answers)
         self.asked = []
 
     def __call__(self, prompt: str = "") -> str:
+        if self.model_answer is not None and prompt.startswith("local_model"):
+            # Recorded apart, so `asked` stays the questions the script answers.
+            self.model_asked.append(prompt)
+            return self.model_answer
         self.asked.append(prompt)
         if not self.answers:
             raise EOFError
