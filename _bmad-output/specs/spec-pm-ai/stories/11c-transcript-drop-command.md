@@ -31,7 +31,7 @@ context:
 
 **Ask First:** Nothing. The syntax, the scopes and the binding were decided on 2026-10-09 and 2026-10-10.
 
-**Never:** No `.docx` — needs a parser dependency; refused by name and recorded. No watched folder (story 10a). No `people:<id>` drops — a 1:1's transcript is a later slice. No re-ingest of a stored capture (deferred). No change to `11b`'s path, readers or binding rule, nor to `33e`'s naming rule. No Graph code.
+**Never:** ~~No `.docx`~~ (withdrawn by `11d`, 2026-10-19: a `.docx` is read for its text with the standard library). No watched folder (story 10a). No `people:<id>` drops — a 1:1's transcript is a later slice. No re-ingest of a stored capture (deferred). No change to `11b`'s path, readers or binding rule, nor to `33e`'s naming rule (`11d` adds a reader, 2026-10-19). No Graph code.
 
 ## I/O & Edge-Case Matrix
 
@@ -47,10 +47,10 @@ context:
 | Personal meeting while started in a project | `--scope personal`, pm-ai run inside alpha | record and capture in the personal tree; exit 0 | N/A |
 | Meeting already has a capture | `<stem>-graph.vtt` or `<stem>-manual.txt` present | refused naming that capture; nothing re-ingested | exit 3 |
 | Git cannot confirm exclusion | project `transcripts/` tracked, or git unreachable | refused with git's reason; nothing written, no record | exit 3 |
-| Path unusable | missing, a directory, unreadable, a dangling link, or not UTF-8 | refused, naming the path and which; no traceback | exit 3 |
+| Path unusable | missing, a directory, unreadable, a dangling link, or not UTF-8 | refused, naming the path (since `11d`, the absolute path after `~` is expanded, and how a relative path is read) and which; no traceback | exit 3 |
 | Zero utterances | header-only VTT, cues with empty payloads, or whitespace only | refused by name before the capture; no record | exit 3 |
-| `.docx` | any Word file | refused, naming the deferral | exit 3 |
-| Neither reader accepts | no `WEBVTT` header, no cue timing, no `Speaker:` lines | refused, naming the file | exit 3 |
+| `.docx` | any Word file | ~~refused, naming the deferral~~ read for its text since `11d` (2026-10-19); `.doc`, `.pdf`, `.rtf` still refused by name | exit 3 for those |
+| No reader accepts | no `WEBVTT` header, no cue timing, no speaker-and-time turns (`11d`), and most lines not `Speaker: words` | refused, naming the file (since `11d`, and the four formats) | exit 3 |
 | `.txt` that is WebVTT | `WEBVTT` header under a `.txt` name | read as VTT; capture named `-manual.txt` | N/A |
 | PM speaks a reversible command | voice tag equals the handle | staged, never executed (AD-32) | N/A |
 | Ingestion fails after the capture | the record write refuses | capture kept and named; nothing staged; no ingested row | exit 3 |
@@ -95,6 +95,10 @@ context:
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai transcript drop sample.vtt --scope personal` on a fresh home (no project needed): asks title, start, attendees; prints the capture path, the minted id and the count staged; exit 0. Run again: exit 3 naming the capture.
+
+## Spec Change Log
+
+- **2026-10-19, amended by `11d`.** The Never line "No `.docx`" and the `.docx` matrix row are withdrawn: a `.docx` is read for its paragraph text with the standard library and stored as `-manual.txt`; `.doc`, `.pdf` and `.rtf` are still refused by name. The Never line "No change to `11b`'s path, readers…" is amended: `11d` adds a third reader (speaker-and-time turns). Also from `11d`: the usage and every refusal about the file name `.vtt, .txt, .md, .docx`; `~` is expanded by the command; path refusals name the absolute path; the title, start, attendees and duration may be given as options, and at the prompt they are asked in the prompt's process and sent to the daemon, which never asks.
 
 ## Suggested Review Order
 
