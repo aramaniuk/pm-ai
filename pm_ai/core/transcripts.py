@@ -7,19 +7,20 @@ Three things, all I/O-free:
   — `core` imports no adapter (AD-30). It holds the adapter *kinds* by name
   (`"graph"`, `"manual"`), each a class satisfying `TranscriptSourcePort`; the
   instances a daemon acquires through are `Daemon.transcripts`.
-- **The readers.** A capture's text becomes utterances through one of two
+- **The readers.** A capture's text becomes utterances through one of three
   readers, chosen by content and never by extension: WebVTT — Graph's format
-  and Microsoft's unattributed one, which has no header — and today's plain
-  `Speaker: words` text. A file neither accepts is `UnreadableTranscript`,
-  naming it. This is this slice's own contract; the acquisition port is
-  `33e`'s and yields captures, not utterances.
+  and Microsoft's unattributed one, which has no header — then speaker-and-time
+  turns, the layout of a Teams transcript downloaded as `.docx` (story 11d),
+  then plain `Speaker: words` text. A file none accepts is
+  `UnreadableTranscript`, naming it. This is this slice's own contract; the
+  acquisition port is `33e`'s and yields captures, not utterances.
 - **The bind step.** A transcript is never ingested without a meeting (AD-23).
   `bind_meeting` follows the one-record-per-meeting rule (D3, AD-33): a named
   id wins and must exist in the scope; otherwise a title and a start match at
   most one record within `MATCH_TOLERANCE`, and none mints a manual-only record.
 
-Neither reader gives an utterance a person handle. A WebVTT voice tag and a
-`Speaker:` label are display names the speakers chose, never accounts (AD-34),
+No reader gives an utterance a person handle. A WebVTT voice tag, a turn's
+name and a `Speaker:` label are display names, never accounts (AD-34),
 so `Utterance.speaker` stays `None` and every spoken command read here stages.
 """
 
@@ -31,6 +32,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePath
 
 from pm_ai.core.meeting_records import (
     MalformedMeeting,
@@ -42,6 +44,8 @@ from pm_ai.core.sanitize import sanitize
 from pm_ai.domain.identity import Actor, DataScope
 from pm_ai.domain.meetings import AmbiguousMeeting, Meeting, tolerance_minutes
 from pm_ai.domain.transcripts import (
+    CaptureFormat,
+    NothingSaid,
     Transcript,
     TranscriptSource,
     UnboundTranscript,
@@ -58,8 +62,12 @@ __all__ = [
     "UnreadableTranscript",
     "bind_candidates",
     "bind_meeting",
+    "carried_minutes",
+    "drop_capture_format",
+    "drop_utterances",
     "failure_reason",
     "get_adapter",
+    "has_turn_line",
     "ingest",
     "MAX_DROP_MINUTES",
     "MIN_DROP_MINUTES",
@@ -136,10 +144,13 @@ _SKIPPED_BLOCKS = ("NOTE", "STYLE", "REGION")
 def read_transcript(text: str, *, name: str) -> tuple[Utterance, ...]:
     """A transcript's utterances, by whichever reader its content selects.
 
-    WebVTT when the first non-blank line is `WEBVTT` or a cue timing line;
-    otherwise `Speaker: words` text. `UnreadableTranscript`, naming `name`,
-    for a WebVTT file with no cue in it, and for text whose lines are not
-    mostly speaker-labelled.
+    In order: WebVTT when the first non-blank line is `WEBVTT` or a cue timing
+    line; otherwise speaker-and-time turns when at least two lines are
+    speaker-and-time lines and they are at least a quarter of the non-blank
+    lines from the first of them on (story 11d); otherwise `Speaker: words`
+    text. `UnreadableTranscript`, naming `name`, for a WebVTT file with no cue
+    in it, and for text no reader accepts. An empty tuple is a file a reader
+    accepted that says nothing: cues or turns that are all empty.
     """
     lines = text.removeprefix("\ufeff").splitlines()
     first = next((line.strip() for line in lines if line.strip()), "")
@@ -151,11 +162,15 @@ def read_transcript(text: str, *, name: str) -> tuple[Utterance, ...]:
                 f"said to read."
             )
         return cues
+    turns = _read_turns(lines)
+    if turns is not None:
+        return turns
     utterances = _read_text(lines)
     if utterances is None:
         raise UnreadableTranscript(
             f"{name} is not a transcript pm-ai can read: it has no WEBVTT header, "
-            f"no cue timing line, and most of its lines are not `Speaker: words`."
+            f"no cue timing line, no lines of a speaker's name and a time, and "
+            f"most of its lines are not `Speaker: words`."
         )
     return utterances
 
@@ -341,6 +356,163 @@ def _read_text(lines: list[str]) -> tuple[Utterance, ...] | None:
         else:
             utterances.append(Utterance("", line.strip(), index * 30))
     return tuple(utterances) if labelled * 2 > len(utterances) else None
+
+
+# ── Speaker-and-time turns (story 11d) ──────────────────────────────────────
+
+_TURN_NAME = re.compile(r"[^\W\d_](?:[^\W\d_]|[ .'’-])*")
+"""A turn's name: starts with a letter; letters, spaces, apostrophes, hyphens
+and full stops after it — no digit, colon or comma."""
+
+_TURN_NAME_LIMIT = 80
+
+_TURN_TIME = r"\d+:[0-5]\d(?::[0-5]\d)?"
+_TURN_TOKEN = re.compile(
+    rf"[*_]*(?:\[[*_]*(?P<linked>{_TURN_TIME})[*_]*\]\([^)\s]*\)|(?P<plain>{_TURN_TIME}))[*_]*"
+)
+"""The time, the line's last word — emphasised, or written as a link (`[3:07](…)`
+reads as `3:07`). Matched against that word alone, after the line is split at
+its last run of whitespace, so no pattern ever scans the name: a line of any
+length is judged in time proportional to it."""
+
+_QUOTED = re.compile(r"^(?:>[ \t]?)+")
+_HEADING = re.compile(r"^#{1,6}[ \t]+")
+_LISTED = re.compile(r"^(?:[-*+]|\d{1,9}[.)])[ \t]+")
+
+
+def _unmarked(line: str) -> str:
+    """`line` with Markdown's marks set aside, as a speaker-and-time line is judged.
+
+    A quotation's `>`s, a heading's `#`s, a list marker, and a trailing
+    backslash or two spaces (Markdown's hard line break). Emphasis around the
+    name or the time is set aside by `_turn`.
+    """
+    line = _QUOTED.sub("", line.strip()).strip()
+    line = _HEADING.sub("", line)
+    line = _LISTED.sub("", line)
+    return line.rstrip().removesuffix("\\").rstrip()
+
+
+def _turn(line: str) -> tuple[str, int] | None:
+    """`(name, offset in seconds)` when `line` is a speaker-and-time line, else `None`.
+
+    A time of two fields is minutes and seconds (`3:07` is 187), of three
+    hours, minutes and seconds (`1:03:07` is 3787).
+    """
+    words = _unmarked(line).rsplit(None, 1)
+    if len(words) != 2:
+        return None
+    head, last = words
+    name = head.strip().strip("*_").strip()
+    if len(name) > _TURN_NAME_LIMIT or not _TURN_NAME.fullmatch(name):
+        return None
+    found = _TURN_TOKEN.fullmatch(last)
+    if found is None:
+        return None
+    fields = [int(part) for part in (found["linked"] or found["plain"]).split(":")]
+    hours, minutes, seconds = ([0] * (3 - len(fields)) + fields)
+    return name, hours * 3600 + minutes * 60 + seconds
+
+
+def has_turn_line(text: str) -> bool:
+    """Whether any line of `text` is a speaker-and-time line (story 11d)."""
+    return any(_turn(line) is not None for line in text.splitlines() if line.strip())
+
+
+def _read_turns(lines: list[str]) -> tuple[Utterance, ...] | None:
+    """Speaker-and-time turns as utterances, or `None` when the text is not in turns.
+
+    Chosen when at least two non-blank lines are speaker-and-time lines and
+    they are at least a quarter of the non-blank lines from the first of them
+    on. Lines before the first turn are the header and are not utterances. A
+    turn is its speaker-and-time line and the non-blank lines after it, up to
+    the next one; each of those lines is an utterance, spoken by the turn's
+    name at the turn's time, with its words as written. A turn with no words
+    adds nothing; times out of order are kept as read.
+    """
+    present = [line for line in lines if line.strip()]
+    judged = [_turn(line) for line in present]
+    first = next((index for index, turn in enumerate(judged) if turn is not None), None)
+    if first is None:
+        return None
+    count = sum(turn is not None for turn in judged)
+    if count < 2 or count * 4 < len(present) - first:
+        return None
+    utterances: list[Utterance] = []
+    speaker, offset = "", 0
+    for line, turn in zip(present[first:], judged[first:], strict=True):
+        if turn is not None:
+            speaker, offset = turn
+            continue
+        utterances.append(Utterance(speaker, line.strip(), offset))
+    return tuple(utterances)
+
+
+# ── A dropped file (stories 11c, 11d) ────────────────────────────────────────
+
+
+def drop_utterances(text: str, *, name: str, from_docx: bool = False) -> tuple[Utterance, ...]:
+    """A dropped file's utterances, or the refusal saying why there are none.
+
+    `NothingSaid` for whitespace only, for a file a reader accepted that says
+    nothing (cues or turns all empty), and for a `.docx` whose text holds no
+    speaker-and-time line and that `Speaker: words` does not accept — a
+    document holding only its header. `UnreadableTranscript` for any other
+    text no reader accepts. Nothing is written by either.
+    """
+    if not text.strip():
+        raise NothingSaid(
+            f"{name} is empty or holds only whitespace, so there is nothing said "
+            f"in it to read. Nothing was written."
+        )
+    try:
+        utterances = read_transcript(text, name=name)
+    except UnreadableTranscript:
+        if from_docx and not has_turn_line(text):
+            raise NothingSaid(
+                f"{name} is a Word document whose text holds no turn — no line "
+                f"with a speaker's name and a time — so there is nothing said in "
+                f"it to read. Nothing was written."
+            ) from None
+        raise
+    if not utterances:
+        what = "cue timings but none of its cues" if is_webvtt(text) else "turns but none of them"
+        raise NothingSaid(
+            f"{name} has {what} says anything, so there is nothing to extract "
+            f"from it. Nothing was written."
+        )
+    return utterances
+
+
+def drop_capture_format(file_name: str, text: str, *, from_docx: bool = False) -> CaptureFormat:
+    """`-manual.vtt` or `-manual.txt`: the extension's word, else the content's.
+
+    `.vtt` and `.txt` by their extension; a `.docx`'s text is always stored as
+    text (story 11d); anything else, `.md` included, by whether its content is
+    WebVTT.
+    """
+    suffix = PurePath(file_name).suffix.lower()
+    if suffix == ".vtt":
+        return CaptureFormat.MANUAL_VTT
+    if suffix == ".txt" or from_docx:
+        return CaptureFormat.MANUAL_TXT
+    return CaptureFormat.MANUAL_VTT if is_webvtt(text) else CaptureFormat.MANUAL_TXT
+
+
+def carried_minutes(file_name: str, text: str, *, from_docx: bool = False) -> int | None:
+    """How long a dropped file says its meeting ran, or `None` when it must be asked.
+
+    The last cue's end, for a file stored as WebVTT whose last cue ends within
+    `MIN_DROP_MINUTES` to `MAX_DROP_MINUTES` (story 11c). Asked of the same
+    rule at the prompt and in the daemon, so the prompt asks for the duration
+    exactly when the drop would.
+    """
+    if drop_capture_format(file_name, text, from_docx=from_docx) is not CaptureFormat.MANUAL_VTT:
+        return None
+    minutes = last_cue_end_minutes(text)
+    if minutes is None or not MIN_DROP_MINUTES <= minutes <= MAX_DROP_MINUTES:
+        return None
+    return minutes
 
 
 def ingest(

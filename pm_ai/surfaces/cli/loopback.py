@@ -296,6 +296,37 @@ class LoopbackClient:
                 f"so this line was not sent."
             )
 
+    def reachable(self) -> NoDaemon | NotSent | None:
+        """`None` when a daemon listens and a request could be made; else why not.
+
+        Asked by the prompt before it asks a `transcript drop`'s questions
+        (story 11d), so a line that cannot be sent asks nothing first. The
+        token and port are read, and a connection is opened and closed at
+        once; nothing is sent. A daemon that stops after this answer is met by
+        `send` as usual.
+        """
+        try:
+            ready = self._ready()
+            if isinstance(ready, _Blocked):
+                return ready.for_line()
+            port = ready[0]
+            try:
+                connection = socket.create_connection((LOOPBACK, port), timeout=CONNECT_SECONDS)
+            except ConnectionRefusedError:
+                return NoDaemon.refused(port)
+            except OSError as unreachable:
+                return NotSent(
+                    f"{LOOPBACK}:{port} could not be reached ({_named(unreachable)}), "
+                    f"so this line was not sent."
+                )
+            connection.close()
+        except Exception as error:  # noqa: BLE001 — named, never the end of the session
+            return NotSent(
+                f"whether the daemon answers could not be told ({type(error).__name__}), "
+                f"so this line was not sent."
+            )
+        return None
+
     def follow(
         self, job_id: str, on_state: Callable[[str], None] | None = None
     ) -> Followed:

@@ -12,6 +12,7 @@ import asyncio
 import functools
 import io
 import json
+import shlex
 import logging
 import sqlite3
 import subprocess
@@ -353,3 +354,238 @@ def test_connector_check_s_credential_saves_are_noted_as_the_job_s_steps(rig):
         store.read()
         store.write("token-two")
     assert rig.path.notes.last("job_noted0000000000") == "save gitlab:beta's refreshed credential"
+
+
+# ── Story 11d: a drop typed at the prompt asks there; the daemon never asks ──
+
+
+def test_a_tilde_drop_at_the_prompt_asks_there_and_the_daemon_reads_the_home_file(
+    rig, tmp_path, monkeypatch, capsys
+):
+    from pm_ai.surfaces.cli import repl
+    from pm_ai.surfaces.cli.loopback import Answer
+
+    home = tmp_path / "person"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (home / "x.vtt").write_text(SAID)
+    answers = ["Standup", "2026-10-14T12:00+03:00", "email:alex@example.com"]
+    asked: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        asked.append(prompt)
+        return answers.pop(0)
+
+    monkeypatch.setattr("builtins.input", typed)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    sent: list[str] = []
+
+    class Client:
+        def send(self, line: str):
+            sent.append(line)
+            return Answer("", EXIT_OK)
+
+        def follow(self, job_id, on_state=None):  # pragma: no cover — never acknowledged
+            raise AssertionError("not acknowledged")
+
+        def reachable(self):
+            return None
+
+    words = ["transcript", "drop", "~/x.vtt", "--scope", "personal"]
+    repl._through_daemon(words, Client(), None, " ".join(words))  # noqa: SLF001
+
+    # Every question was asked in the prompt's process; the file carries its
+    # duration (its last cue), so none was asked for it.
+    assert len(asked) == 3 and answers == []
+    assert not any(prompt.startswith("Duration") for prompt in asked)
+    (line,) = sent
+    assert "~/x.vtt" in line
+    assert "--title=Standup" in line and "--attendees=email:alex@example.com" in line
+    assert "--start" in line and "--duration" not in line
+
+    def no_questions(prompt: str = "") -> str:
+        raise AssertionError(f"the daemon asked {prompt!r}")
+
+    monkeypatch.setattr("builtins.input", no_questions)
+    result = _job_result(rig, line)
+    assert result["exit"] == EXIT_OK, result
+    output = str(result["output"])
+    assert "a new manual-only record" in output
+    captures = list((rig.root / ".manager-ai" / "transcripts").glob("*-manual.vtt"))
+    assert len(captures) == 1 and captures[0].read_text() == SAID
+    assert str(captures[0]) in output
+
+
+def test_a_drop_at_the_prompt_with_a_file_it_refuses_asks_nothing_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from pm_ai.surfaces.cli import repl
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"asked {prompt!r}"))
+    sent: list[str] = []
+
+    class Client:
+        def send(self, line: str):  # pragma: no cover — must not be reached
+            sent.append(line)
+
+        def reachable(self):
+            return None
+
+    monkeypatch.chdir(tmp_path)
+    words = ["transcript", "drop", "absent.vtt", "--scope", "personal"]
+    repl._through_daemon(words, Client(), None, " ".join(words))  # noqa: SLF001
+    err = capsys.readouterr().err
+    assert sent == []
+    assert str(tmp_path / "absent.vtt") in err or str(Path.cwd() / "absent.vtt") in err
+    assert ".vtt, .txt, .md, .docx" in err
+
+
+class _Recording:
+    """A prompt's client that records what it would send, and answers 0."""
+
+    def __init__(self, unreached=None) -> None:
+        self.sent: list[str] = []
+        self.unreached = unreached
+
+    def send(self, line: str):
+        from pm_ai.surfaces.cli.loopback import Answer
+
+        self.sent.append(line)
+        return Answer("", EXIT_OK)
+
+    def follow(self, job_id, on_state=None):  # pragma: no cover — never acknowledged
+        raise AssertionError("not acknowledged")
+
+    def reachable(self):
+        return self.unreached
+
+
+def _typing(monkeypatch, answers: list[str]) -> list[str]:
+    asked: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        asked.append(prompt)
+        if not answers:
+            raise AssertionError(f"asked {prompt!r} with no answer left")
+        return answers.pop(0)
+
+    monkeypatch.setattr("builtins.input", typed)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    return asked
+
+
+def _at_the_prompt(words: list[str], client: _Recording) -> None:
+    from pm_ai.surfaces.cli import repl
+
+    repl._through_daemon(words, client, None, " ".join(words))  # noqa: SLF001
+
+
+FIXTURE_DOCX = (
+    Path(__file__).parents[1] / "core" / "fixtures" / "transcripts" / "teams_export_recorded.docx"
+)
+
+
+def test_a_docx_at_the_prompt_asks_the_duration_there_and_the_daemon_mints_without_asking(
+    rig, tmp_path, monkeypatch
+):
+    dropped = tmp_path / "export.docx"
+    dropped.write_bytes(FIXTURE_DOCX.read_bytes())
+    answers = ["Weekly Sync", "2026-10-14T12:00+03:00", "", "29"]
+    asked = _typing(monkeypatch, answers)
+    client = _Recording()
+
+    _at_the_prompt(["transcript", "drop", str(dropped), "--scope", "personal"], client)
+
+    assert answers == [] and any(prompt.startswith("Duration") for prompt in asked)
+    (line,) = client.sent
+    assert "--duration=29" in shlex.split(line) and "--title=Weekly Sync" in shlex.split(line)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"the daemon asked {prompt!r}"))
+    result = _job_result(rig, line)
+    assert result["exit"] == EXIT_OK, result
+    output = str(result["output"])
+    assert "a new manual-only record" in output and "29 minutes, as answered" in output
+    captures = list((rig.root / ".manager-ai" / "transcripts").glob("*-manual.txt"))
+    assert len(captures) == 1 and str(captures[0]) in output
+    assert captures[0].read_text(encoding="utf-8").startswith("Example Weekly Sync")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--meeting", MEETING],
+        ["--title", "Standup", "--start", "2026-10-14T09:00Z", "--attendees", "",
+         "--duration", "15"],
+    ],
+    ids=["meeting", "every-answer"],
+)
+def test_a_drop_with_nothing_left_to_ask_asks_nothing_and_is_sent_as_typed(
+    options, tmp_path, monkeypatch
+):
+    from pm_ai.surfaces.cli.dispatch import ask_drop_here
+
+    dropped = tmp_path / "notes.txt"
+    dropped.write_text("Ana: hello\nBo: hi\n")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"asked {prompt!r}"))
+    words = ["transcript", "drop", str(dropped), "--scope", "personal", *options]
+    assert ask_drop_here(words) == words
+
+
+def test_the_answers_go_before_a_bare_double_dash_and_a_dashed_title_stays_a_value(
+    tmp_path, monkeypatch
+):
+    from pm_ai.surfaces.cli.dispatch import ask_drop_here, parse
+
+    dropped = tmp_path / "--odd.vtt"
+    dropped.write_text(SAID)
+    _typing(monkeypatch, ["--scope odd", "2026-10-14T12:00+03:00", ""])
+    monkeypatch.chdir(tmp_path)
+    words = ask_drop_here(["transcript", "drop", "--scope", "personal", "--", "--odd.vtt"])
+    assert words[-2:] == ["--", "--odd.vtt"]
+    parsed = parse(words)
+    assert parsed.arguments == ("--odd.vtt",)  # type: ignore[union-attr]
+    assert parsed.options["title"] == "--scope odd"  # type: ignore[union-attr]
+    assert parsed.options["scope"] == "personal"  # type: ignore[union-attr]
+    assert parsed.options["attendees"] == ""  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, EOFError], ids=["ctrl-c", "eof"])
+def test_an_interrupted_question_at_the_prompt_sends_nothing(stop, tmp_path, monkeypatch, capsys):
+    dropped = tmp_path / "standup.vtt"
+    dropped.write_text(SAID)
+    answers = ["Standup"]
+
+    def typed(prompt: str = "") -> str:
+        if answers:
+            return answers.pop(0)
+        raise stop
+
+    monkeypatch.setattr("builtins.input", typed)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    client = _Recording()
+    _at_the_prompt(["transcript", "drop", str(dropped), "--scope", "personal"], client)
+    assert client.sent == []
+    assert "interrupted before every question was answered, so nothing was saved" in (
+        capsys.readouterr().err
+    )
+
+
+def test_with_no_daemon_the_prompt_asks_nothing_and_says_so(tmp_path, monkeypatch, capsys):
+    from pm_ai.surfaces.cli.loopback import NoDaemon
+
+    dropped = tmp_path / "standup.vtt"
+    dropped.write_text(SAID)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"asked {prompt!r}"))
+    client = _Recording(unreached=NoDaemon.refused(1))
+    _at_the_prompt(["transcript", "drop", str(dropped), "--scope", "personal"], client)
+    assert client.sent == []
+    assert "pm-ai daemon run" in capsys.readouterr().err
+
+
+def test_the_loopback_client_says_no_daemon_without_a_token_file(tmp_path):
+    from pm_ai.surfaces.cli.loopback import LoopbackClient, NoDaemon
+
+    client = LoopbackClient(token_path=lambda: tmp_path / "absent", port=lambda: 1)
+    assert isinstance(client.reachable(), NoDaemon)

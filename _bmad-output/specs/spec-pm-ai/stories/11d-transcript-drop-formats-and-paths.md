@@ -2,7 +2,8 @@
 title: 'transcript drop reads .vtt, .txt, .md and .docx, and says how a path is read'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: '0e01a0e9d45c0813a89987ad7c115cf79cd6eecb'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -78,20 +79,21 @@ context:
 - `pm_ai/app/pipelines.py:1135` -- `drop_transcript` (read, bind, capture, ingest); `:1280` `_drop_format`, `.vtt`/`.txt` by extension, anything else by content
 - `pm_ai/domain/transcripts.py:121` -- `CaptureFormat`, unchanged; `pm_ai/storage/service.py:3431` `write_capture(body: str, ...)`, unchanged
 - `.importlinter:38` -- `core-is-io-free`, which names network, process and database modules; `zipfile` and the XML parser over bytes in memory are not among them
+- `tests/core/fixtures/transcripts/` -- recorded 2026-10-19: `teams_export_recorded.docx`, its `.md` conversion and `README.md` with the measured layout (180 turns, `<name>   <m:ss>` after a leading line break, spoken lines one per line break, a closing `<name> stopped transcription` line with no time, ratio 0.365). The layout matches the frozen one, so the Ask First did not trigger. Tests write under a temporary home, never the real `~/.pm-ai`
 - `tests/surfaces/test_cli_subcommands.py:1293-1307` and `tests/slice/test_transcript_drop.py:476-481` -- `11c`'s tests that `.docx` is refused as deferred, rewritten here; `tests/connectors/fixtures/graph/transcript.vtt` -- fixtures live beside their tests
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tests/core/fixtures/transcripts/` -- precondition: Andrei's refused Teams export, from his machine. Recorded as a `.docx` rebuilt from only the content types, the package relationships and a scrubbed `word/document.xml`, plus its `.md` conversion; a note beside them saying where they came from, what was replaced, and that a search for every real name found none -- the layout is measured, not assumed (first task; Ask First if it differs or is unavailable)
-- [ ] `pm_ai/core/docx_text.py` -- new: text from a `.docx`'s bytes as defined above, parsed as a stream, every refusal typed, every library error mapped to one -- I/O-free, standard library only
-- [ ] `pm_ai/core/transcripts.py` -- the speaker-and-time reader with its line rule and Markdown marks set aside, chosen between WebVTT and `Speaker: words` over non-blank lines; empty turns skipped; nothing said told apart from no reader -- the third reader
-- [ ] `pm_ai/surfaces/cli/repl.py`, `pm_ai/surfaces/cli/dispatch.py` -- at the prompt, a drop that needs answers asks them in the prompt's process and sends them as options (title, start, attendees, duration); the daemon's handler accepts them and never asks -- the daemon never asks (AD-21)
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- the check order; `.docx` read through `docx_text`, imported there; `~` expanded in the handler; the full absolute path in path refusals; the four formats added in the command's `except` branch and in its own file refusals; the quoting hint for `transcript drop` only; the summary naming the four formats and how a relative path is read -- the surface
-- [ ] `pm_ai/app/pipelines.py` -- the closing outcome says when the capture is text taken from a `.docx`; `_drop_format` gives `-manual.txt` for it; a header-only `.docx` is nothing said -- the capture
-- [ ] `tests/surfaces/test_cli_subcommands.py:1293-1307`, `tests/slice/test_transcript_drop.py:476-481` -- rewritten: `.docx` read; `.doc`, `.pdf`, `.rtf` refused naming the four formats -- the old deferral is gone
-- [ ] `tests/core/test_docx_text.py`, `tests/core/test_transcript_readers.py`, `tests/slice/test_transcript_drop.py` -- one test per matrix row, the `.docx` refusals built in the test from small archives; the `~` row through the daemon; every "nothing written" row lists `meetings/` and `transcripts/` before and after -- the matrix is the contract
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`, `11c-transcript-drop-command.md` -- when this slice is built: edit the amended frozen text in each and add a dated Change Log line naming what this slice amends -- earlier frozen blocks say they were amended
+- [x] `tests/core/fixtures/transcripts/` -- precondition: Andrei's refused Teams export, from his machine. Recorded as a `.docx` rebuilt from only the content types, the package relationships and a scrubbed `word/document.xml`, plus its `.md` conversion; a note beside them saying where they came from, what was replaced, and that a search for every real name found none -- the layout is measured, not assumed (first task; Ask First if it differs or is unavailable)
+- [x] `pm_ai/core/docx_text.py` -- new: text from a `.docx`'s bytes as defined above, parsed as a stream, every refusal typed, every library error mapped to one -- I/O-free, standard library only
+- [x] `pm_ai/core/transcripts.py` -- the speaker-and-time reader with its line rule and Markdown marks set aside, chosen between WebVTT and `Speaker: words` over non-blank lines; empty turns skipped; nothing said told apart from no reader -- the third reader
+- [x] `pm_ai/surfaces/cli/repl.py`, `pm_ai/surfaces/cli/dispatch.py` -- at the prompt, a drop that needs answers asks them in the prompt's process and sends them as options (title, start, attendees, duration); the daemon's handler accepts them and never asks -- the daemon never asks (AD-21)
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- the check order; `.docx` read through `docx_text`, imported there; `~` expanded in the handler; the full absolute path in path refusals; the four formats added in the command's `except` branch and in its own file refusals; the quoting hint for `transcript drop` only; the summary naming the four formats and how a relative path is read -- the surface
+- [x] `pm_ai/app/pipelines.py` -- the closing outcome says when the capture is text taken from a `.docx`; `_drop_format` gives `-manual.txt` for it; a header-only `.docx` is nothing said -- the capture
+- [x] `tests/surfaces/test_cli_subcommands.py:1293-1307`, `tests/slice/test_transcript_drop.py:476-481` -- rewritten: `.docx` read; `.doc`, `.pdf`, `.rtf` refused naming the four formats -- the old deferral is gone
+- [x] `tests/core/test_docx_text.py`, `tests/core/test_transcript_readers.py`, `tests/slice/test_transcript_drop.py` -- one test per matrix row, the `.docx` refusals built in the test from small archives; the `~` row through the daemon; every "nothing written" row lists `meetings/` and `transcripts/` before and after -- the matrix is the contract
+- [x] `_bmad-output/specs/spec-pm-ai/stories/11b-the-real-transcript-path.md`, `11c-transcript-drop-command.md` -- when this slice is built: edit the amended frozen text in each and add a dated Change Log line naming what this slice amends -- earlier frozen blocks say they were amended
 
 **Acceptance Criteria:**
 - Given the recorded `.docx` fixture and a project enrolled, when `pm-ai transcript drop fixture.docx --scope project:alpha` runs and the questions are answered, then a `mtg_` record exists in alpha's `meetings/`, `<stem>-manual.txt` in alpha's `transcripts/` holds the fixture's text, the utterances carry the fixture's speakers and offsets, and the exit is 0.
@@ -106,6 +108,7 @@ context:
 - **2026-10-16, spine gate:** frozen block edited (recorded here): a drop typed at the prompt asks its questions in the prompt's process and sends the daemon a fully specified request; the daemon never asks (AD-21), so the `~` row passes without `--meeting`; a task for the prompt-side questions.
 - **2026-10-19, re-verified:** Code Map re-verified against `3fa6783` after 23g, 33i, 4v and 4w merged. Line numbers moved in `dispatch.py` (`_NOT_A_TRANSCRIPT_FORMAT` 2839, `_read_drop` 2947, `_transcript_drop` 3033, `Path(file)` 3063, summary 3326, arity error 3575), `repl.py` (`_absolute_paths` 612, its `~` check 627-629), `prompts.py` (388), `pipelines.py` (`drop_transcript` 1135, `_drop_format` 1280) and `storage/service.py` (`write_capture` 3431); every behaviour the Code Map describes still holds; frozen block unchanged.
 - **2026-10-19, decision (Andrei):** frozen block edited (recorded here): the prompt also asks for attendees, as the drop already does when a new record is made (`_drop_describe`), and sends them as an option. AD-21 amended to say title, start, attendees and duration. Raised by the re-verification.
+- **2026-10-19, built and reviewed.** The real export was measured and recorded first: its layout matches the frozen one (180 turns of `<name>   <m:ss>`, spoken lines one per line break, a closing `<name> stopped transcription` line with no time), so the Ask First did not trigger. Fixture and note in `tests/core/fixtures/transcripts/`; the original was deleted afterwards. Built choices: each spoken line of a turn is one utterance with the turn's speaker and time, as `Speaker: words` reads one per line; the prompt's answers reach the daemon as the options `--title`, `--start`, `--attendees` and `--duration` (sent as `--name=value`), which a person may also type, and an answer given is never asked; at the prompt the attendees (and a duration the file does not carry) are asked before it is known whether a record matches, and are used only if one is made; the prompt checks that the daemon can be reached before asking anything. Three review layers ran (blind hunter, edge-case hunter, verification gap). Patched: the speaker-and-time check made linear (a long run of spaces took 25 s); a `.docx` with no turn worded as nothing said rather than "only its header"; `.docx` refusals carry the relative-path note; the refused-format wording; `w:noBreakHyphen` read as a hyphen and line-boundary characters inside text read as spaces; the prompt's added options go before a `--`, a title starting with `--` stays a value, Ctrl-C or end of input during its questions saves nothing, and no daemon means no questions; tests added for a `.docx` dropped at the prompt that needs a duration and for a drop with nothing left to ask. Five findings need Andrei's decision and two limits are recorded in `deferred-work.md` under "Surfaced by the story-11d review (2026-10-19)". Frozen block unchanged.
 
 ## Design Notes
 
@@ -121,3 +124,75 @@ The standard library over `python-docx`: the drop needs paragraph text only, `py
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai transcript drop <the real export>.docx --scope personal` on Andrei's machine (never committed) -- expected: read, bound, stored as `-manual.txt`, exit 0; the same with its `.md` conversion against a second meeting
+
+## Suggested Review Order
+
+**The drop's surface**
+
+- Entry point: check order, `.docx` imported only here, refusals get the four formats
+  [`dispatch.py:3410`](../../../../pm_ai/surfaces/cli/dispatch.py#L3410)
+
+- `~` expanded in the handler; relative paths named absolute with how they are read
+  [`dispatch.py:3382`](../../../../pm_ai/surfaces/cli/dispatch.py#L3382)
+
+- The command's `except` branch turns reader refusals into sentences naming the formats
+  [`dispatch.py:3629`](../../../../pm_ai/surfaces/cli/dispatch.py#L3629)
+
+- Quoting hint for `transcript drop` alone
+  [`dispatch.py:4214`](../../../../pm_ai/surfaces/cli/dispatch.py#L4214)
+
+**Questions asked where the person is (AD-21)**
+
+- Prompt asks in its own process, sends answers as `--name=value` options
+  [`dispatch.py:3563`](../../../../pm_ai/surfaces/cli/dispatch.py#L3563)
+
+- What is checked before any question is asked
+  [`dispatch.py:3530`](../../../../pm_ai/surfaces/cli/dispatch.py#L3530)
+
+- The prompt calls it only when the drop would ask
+  [`repl.py:655`](../../../../pm_ai/surfaces/cli/repl.py#L655)
+
+- Daemon reachability checked before asking
+  [`loopback.py:299`](../../../../pm_ai/surfaces/cli/loopback.py#L299)
+
+- Answers given are used, never asked again
+  [`dispatch.py:3350`](../../../../pm_ai/surfaces/cli/dispatch.py#L3350)
+
+**Reading the text**
+
+- `.docx` text by stream with standard library; every refusal typed
+  [`docx_text.py:169`](../../../../pm_ai/core/docx_text.py#L169)
+
+- Element-by-element extraction: insertions read, deletions and fallbacks not
+  [`docx_text.py:285`](../../../../pm_ai/core/docx_text.py#L285)
+
+- Speaker-and-time line: split at last whitespace, linear time
+  [`transcripts.py:396`](../../../../pm_ai/core/transcripts.py#L396)
+
+- Third reader, chosen by the quarter rule
+  [`transcripts.py:422`](../../../../pm_ai/core/transcripts.py#L422)
+
+- Nothing said told apart from no reader
+  [`transcripts.py:454`](../../../../pm_ai/core/transcripts.py#L454)
+
+**The capture**
+
+- `from_docx`: stored as `-manual.txt`, closing line says so
+  [`pipelines.py:1137`](../../../../pm_ai/app/pipelines.py#L1137)
+
+**Tests and fixtures**
+
+- The recorded export and how it was scrubbed
+  [`README.md`](../../../../tests/core/fixtures/transcripts/README.md)
+
+- `.docx` refusals from small built archives
+  [`test_docx_text.py`](../../../../tests/core/test_docx_text.py)
+
+- Reader rows of the matrix
+  [`test_transcript_readers.py`](../../../../tests/core/test_transcript_readers.py)
+
+- Drop rows end to end, nothing-written rows list both folders
+  [`test_transcript_drop.py`](../../../../tests/slice/test_transcript_drop.py)
+
+- `~` and `.docx` at the prompt through the daemon
+  [`test_project_add_and_drop_through_daemon.py`](../../../../tests/slice/test_project_add_and_drop_through_daemon.py)

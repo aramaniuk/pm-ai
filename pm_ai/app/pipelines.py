@@ -63,11 +63,11 @@ from pm_ai.core.transcripts import (
     MeetingDetails,
     bind_candidates,
     bind_meeting,
+    carried_minutes,
+    drop_capture_format,
+    drop_utterances,
     failure_reason,
     ingest,
-    is_webvtt,
-    last_cue_end_minutes,
-    read_transcript,
 )
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import MalformedGoals, parse_goals
@@ -109,7 +109,6 @@ from pm_ai.domain.transcripts import (
     CaptureNotIngested,
     DropInterrupted,
     DropRefused,
-    NothingSaid,
     PartState,
     Transcript,
     TranscriptReport,
@@ -1135,6 +1134,7 @@ class TranscriptDropped:
     `start` are the bound meeting's own, so a match can be confirmed.
     `duration_minutes` is a minted record's duration and
     `duration_from_last_cue` says it came from the file rather than an answer.
+    `from_docx` says the capture is the text taken from a `.docx` (story 11d).
     `staged` counts the proposals staged and `left` those already approved,
     rejected or expired and so left as they were; a dropped transcript never
     executes anything (AD-32). `notices` are what went wrong after the
@@ -1151,6 +1151,7 @@ class TranscriptDropped:
     left: int = 0
     duration_minutes: int | None = None
     duration_from_last_cue: bool = False
+    from_docx: bool = False
     notices: tuple[str, ...] = ()
 
     @property
@@ -1210,15 +1211,17 @@ def drop_transcript(
     meeting_id: str | None = None,
     identify: Identify | None = None,
     describe: Describe | None = None,
+    from_docx: bool = False,
 ) -> TranscriptDropped:
     """Read, bind, capture and ingest a hand-supplied transcript (story 11c, AD-23).
 
     In that order, and a refusal at any step leaves nothing from the later
     ones:
 
-    1. **Read** `text` to utterances by `11b`'s readers. `NothingSaid` for a
-       file with nothing in it, or cues that say nothing; the readers' own
-       `UnreadableTranscript` for a file neither accepts.
+    1. **Read** `text` to utterances by the readers (`11b`, `11d`):
+       `drop_utterances` — `NothingSaid` for a file with nothing in it, cues
+       or turns that say nothing, or a `.docx` holding only its header; the
+       readers' own `UnreadableTranscript` for text no reader accepts.
     2. **Bind** in `scope` by `11b`'s rule, reading the records once and
        writing nothing: a named `meeting_id` must exist there
        (`MeetingNotFound`); otherwise `identify` gives a title and start, two
@@ -1241,24 +1244,14 @@ def drop_transcript(
 
     The capture format is the file's extension for `.vtt` and `.txt` — a
     `.txt` holding WebVTT is still read as WebVTT and stored as `-manual.txt` —
-    and otherwise what the content is.
+    text taken from a `.docx` (`from_docx`) is `-manual.txt`, and otherwise
+    it is what the content is. A `.docx` itself is never kept (story 11d).
     """
-    if not text.strip():
-        raise NothingSaid(
-            f"{file_name} is empty or holds only whitespace, so there is nothing "
-            f"said in it to read. Nothing was written."
-        )
-    utterances = read_transcript(text, name=file_name)
-    if not utterances:
-        raise NothingSaid(
-            f"{file_name} has cue timings but none of its cues says anything, so "
-            f"there is nothing to extract from it. Nothing was written."
-        )
-    form = _drop_format(file_name, text)
-    from_cues = last_cue_end_minutes(text) if form is CaptureFormat.MANUAL_VTT else None
-    if from_cues is not None and not MIN_DROP_MINUTES <= from_cues <= MAX_DROP_MINUTES:
-        # A last cue at 0:00:00, or past a day, is no meeting's length: asked.
-        from_cues = None
+    utterances = drop_utterances(text, name=file_name, from_docx=from_docx)
+    form = drop_capture_format(file_name, text, from_docx=from_docx)
+    # `None` unless the file is stored as WebVTT and its last cue ends within
+    # a meeting's length (`carried_minutes`); otherwise binding asks for the duration.
+    from_cues = carried_minutes(file_name, text, from_docx=from_docx)
 
     try:
         meeting, bound_by, duration = _bind_drop(
@@ -1342,18 +1335,9 @@ def drop_transcript(
         left=len(outcome.left),
         duration_minutes=duration if bound_by == DROP_MINTED else None,
         duration_from_last_cue=bound_by == DROP_MINTED and from_cues is not None,
+        from_docx=from_docx,
         notices=notices,
     )
-
-
-def _drop_format(file_name: str, text: str) -> CaptureFormat:
-    """`-manual.vtt` or `-manual.txt`: the extension's word, else the content's."""
-    suffix = Path(file_name).suffix.lower()
-    if suffix == ".vtt":
-        return CaptureFormat.MANUAL_VTT
-    if suffix == ".txt":
-        return CaptureFormat.MANUAL_TXT
-    return CaptureFormat.MANUAL_VTT if is_webvtt(text) else CaptureFormat.MANUAL_TXT
 
 
 def _bind_drop(

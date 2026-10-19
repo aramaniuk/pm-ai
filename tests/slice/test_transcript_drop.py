@@ -15,17 +15,21 @@ re-asking) are also in `tests/surfaces/test_cli_subcommands.py`.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import subprocess
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from pm_ai.app import entry
+from pm_ai.app import entry, pipelines
 from pm_ai.app.wiring import onboard_project
+from pm_ai.core.docx_text import docx_text
 from pm_ai.core.meeting_records import MalformedMeeting, MeetingRecords, capture_name
+from pm_ai.core.transcripts import read_transcript
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meetings import Meeting
@@ -51,6 +55,8 @@ SPOKEN_VTT = (
 """Two cues; the last ends at 30:04.5, so the duration is 31 minutes."""
 
 SAID_TXT = "Andrei: we ship on Friday\nAlex: agreed\n"
+FOUR_FORMATS = ".vtt, .txt, .md, .docx"
+FIXTURES = Path(__file__).parents[1] / "core" / "fixtures" / "transcripts"
 START_TYPED = "2026-10-10T14:00+03:00"
 START = datetime(2026, 10, 10, 11, 0, tzinfo=timezone.utc)
 
@@ -473,12 +479,23 @@ def test_a_file_neither_reader_accepts_is_refused_naming_it(machine, tmp_path, m
     assert _held(machine) == before
 
 
-def test_a_word_document_is_refused_naming_the_deferral(machine, tmp_path, monkeypatch, capsys):
-    path = tmp_path / "minutes.docx"
+@pytest.mark.parametrize(
+    ("name", "said"),
+    [("minutes.doc", "old .doc format"), ("minutes.pdf", "a PDF"), ("minutes.rtf", "rich-text")],
+)
+def test_an_old_word_or_pdf_document_is_refused_naming_the_four_formats(
+    name, said, machine, tmp_path, monkeypatch, capsys
+):
+    """Story 11d: `.docx` is read now; `.doc`, `.pdf` and `.rtf` are still refused by name."""
+    before = _held(machine)
+    path = tmp_path / name
     path.write_bytes(b"PK\x03\x04")
-    code, _ = _drop(monkeypatch, path, "--scope", "project:alpha")
+    code, terminal = _drop(monkeypatch, path, "--scope", "project:alpha")
     assert code == EXIT_REFUSAL
-    assert "deferred" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert said in err and str(path) in err and FOUR_FORMATS in err
+    assert terminal.prompts == []
+    assert _held(machine) == before
 
 
 def test_a_txt_holding_webvtt_is_read_as_webvtt_and_stored_as_txt(
@@ -584,9 +601,10 @@ def test_a_command_line_pm_ai_cannot_read_is_the_syntax_reminder(
         ("sync", SPOKEN_VTT, CaptureFormat.MANUAL_VTT, False),
         ("SYNC.VTT", SPOKEN_VTT, CaptureFormat.MANUAL_VTT, False),
         ("sync.log", SAID_TXT, CaptureFormat.MANUAL_TXT, True),
+        ("notes", SAID_TXT, CaptureFormat.MANUAL_TXT, True),
         ("sync.TXT", SPOKEN_VTT, CaptureFormat.MANUAL_TXT, True),
     ],
-    ids=["vtt-as-srt", "vtt-no-extension", "upper-VTT", "speaker-as-log", "vtt-as-upper-TXT"],
+    ids=["vtt-as-srt", "vtt-no-extension", "upper-VTT", "speaker-as-log", "speaker-no-extension", "vtt-as-upper-TXT"],
 )
 def test_the_capture_name_and_duration_source_follow_the_rule(
     name, text, form, asks_duration, machine, tmp_path, monkeypatch, capsys
@@ -815,3 +833,334 @@ def test_ctrl_c_during_ingestion_says_the_capture_was_kept(machine, tmp_path, mo
     err = capsys.readouterr().err
     stored = list((repository / ".project-ai" / "transcripts").glob("*-manual.vtt"))
     assert len(stored) == 1 and f"{stored[0]} was written and stays" in err
+
+
+# ── Story 11d: `.md` and `.docx`, and how a path is read ─────────────────────
+
+
+@pytest.fixture
+def ingested(monkeypatch):
+    """Every transcript the drop hands to ingestion, as it was read."""
+    seen = []
+    real = pipelines.run_transcript_ingestion
+
+    def spy(daemon, transcript, meeting):
+        seen.append(transcript)
+        return real(daemon, transcript, meeting)
+
+    monkeypatch.setattr(pipelines, "run_transcript_ingestion", spy)
+    return seen
+
+
+def _copy(tmp_path: Path, fixture: str, name: str | None = None) -> Path:
+    path = tmp_path / "drops" / (name or fixture)
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes((FIXTURES / fixture).read_bytes())
+    return path
+
+
+def test_the_recorded_teams_docx_is_read_bound_and_stored_as_text(
+    machine, tmp_path, monkeypatch, capsys, ingested
+):
+    """Acceptance: the `.docx` fixture into `project:alpha`, the questions answered."""
+    _, repository, _ = machine
+    path = _copy(tmp_path, "teams_export_recorded.docx")
+
+    code, terminal = _drop(
+        monkeypatch, path, "--scope", "project:alpha",
+        answers=["Weekly Sync", START_TYPED, "email:alex@example.com", "30"],
+    )
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
+    meeting_id = _minted(out)
+    assert any(p.startswith("Duration") for p in terminal.prompts)
+    assert _daemon(machine).meetings.get(meeting_id, scope=ALPHA).meeting.manual_only
+    assert len(_held(machine)["alpha:meetings"]) == 1
+    stored = repository / ".project-ai" / "transcripts" / capture_name(
+        meeting_id, START, CaptureFormat.MANUAL_TXT
+    )
+    text = docx_text(path.read_bytes(), name=str(path))
+    assert stored.read_text(encoding="utf-8") == text
+    assert not list((repository / ".project-ai" / "transcripts").glob("*.docx"))
+    (transcript,) = ingested
+    assert transcript.utterances == read_transcript(text, name="fixture")
+    assert transcript.utterances[0].speaker_handle == "Alex Morgan"
+    assert transcript.utterances[0].offset_seconds == 32
+    assert {u.speaker_handle for u in transcript.utterances} == {"Alex Morgan", "Sam Rivera"}
+    assert "text taken from the .docx" in out and "not kept" in out
+
+
+def test_the_markdown_export_is_read_by_the_turn_reader_and_reads_again_the_same(
+    machine, tmp_path, monkeypatch, capsys, ingested
+):
+    home, _, _ = machine
+    path = _copy(tmp_path, "teams_export_recorded.md")
+
+    code, _ = _drop(
+        monkeypatch, path, "--scope", "personal",
+        answers=["Weekly Sync", START_TYPED, "", "30"],
+    )
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
+    meeting_id = _minted(out)
+    stored = home / ".manager-ai" / "transcripts" / capture_name(
+        meeting_id, START, CaptureFormat.MANUAL_TXT
+    )
+    assert stored.read_bytes() == path.read_bytes()
+    (transcript,) = ingested
+    assert len(transcript.utterances) > 300
+    assert transcript.utterances[0].speaker_handle == "Alex Morgan"
+    # The stored text, read again, gives the same utterances.
+    assert read_transcript(stored.read_text(encoding="utf-8"), name="again") == transcript.utterances
+    assert ".docx" not in out
+
+
+def test_speaker_words_in_md_is_read_as_today(machine, tmp_path, monkeypatch, capsys, ingested):
+    path = _file(tmp_path, "notes.md", SAID_TXT)
+    code, _ = _drop(
+        monkeypatch, path, "--scope", "project:alpha", answers=["Planning", START_TYPED, "", "20"]
+    )
+    assert code == EXIT_OK, capsys.readouterr().err
+    (transcript,) = ingested
+    assert [u.speaker_handle for u in transcript.utterances] == ["Andrei", "Alex"]
+
+
+def test_a_spoken_command_in_a_turn_by_the_pms_name_is_staged_never_executed(
+    machine, tmp_path, monkeypatch, capsys
+):
+    _record(machine, _meeting("mtg_named"))
+    text = f"Weekly Sync\nAndrei Ramaniuk   0:01\n{COMMAND}\nAlex Morgan   0:09\nthanks\n"
+    path = _file(tmp_path, "sync.md", text)
+
+    code, _ = _drop(monkeypatch, path, "--scope", "project:alpha", "--meeting", "mtg_named")
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
+    proposal = _proposal(machine, "mtg_named")
+    assert proposal.state is ProposalState.STAGED
+    assert "1 staged" in out and "executed" not in out
+
+
+def _archive(*entries: tuple[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries:
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _document(body: str, *, namespace: str = W, prolog: str = "") -> bytes:
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?>{prolog}<w:document xmlns:w="{namespace}">'
+        f"<w:body>{body}</w:body></w:document>"
+    ).encode()
+
+
+def _bad_crc() -> bytes:
+    stored = io.BytesIO()
+    with zipfile.ZipFile(stored, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("word/document.xml", _document("<w:p><w:r><w:t>x</w:t></w:r></w:p>"))
+    data = bytearray(stored.getvalue())
+    at = data.find(b"<w:t>")
+    data[at + 1] = ord("W")
+    return bytes(data)
+
+
+HEADER_ONLY = "".join(
+    f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>"
+    for line in ("Weekly sync", "14 September 2026, 09:30am", "Transcript")
+)
+
+
+@pytest.mark.parametrize(
+    ("payload", "said"),
+    [
+        (b"just a text file renamed\n", "ZIP archive"),
+        (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64, "password-protected, or an old .doc"),
+        (_archive(("other.xml", b"<x/>")), "no word/document.xml"),
+        (_archive(("word/document.xml", _document("")), ("Word/Document.xml", _document(""))),
+         "2 times"),
+        (_archive(*[(f"e/{i}", b"") for i in range(10_001)]), "10001 entries"),
+        (_bad_crc(), "damaged"),
+        (_archive(("word/document.xml", _document(
+            "", prolog='<!DOCTYPE w:document [<!ENTITY a "x">]>'))), "document type declaration"),
+        (_archive(("word/document.xml", '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE d>'
+                   f'<w:document xmlns:w="{W}"/>'.encode("utf-16"))), "document type declaration"),
+        (_archive(("word/document.xml", _document(
+            "<w:p/>", namespace="http://purl.oclc.org/ooxml/wordprocessingml/main"))),
+         "Strict Open XML"),
+        (_archive(("word/document.xml", _document(HEADER_ONLY))), "holds no turn"),
+    ],
+    ids=["not-a-zip", "password", "no-document", "two-documents", "too-many", "bad-crc",
+         "doctype-utf8", "doctype-utf16", "strict", "header-only"],
+)
+def test_a_docx_pm_ai_cannot_take_text_from_is_refused_writing_nothing(
+    payload, said, machine, tmp_path, monkeypatch, capsys
+):
+    before = _held(machine)
+    path = tmp_path / "drops" / "minutes.docx"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(payload)
+
+    code, terminal = _drop(monkeypatch, path, "--scope", "project:alpha")
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert said in err and str(path) in err and FOUR_FORMATS in err
+    assert terminal.prompts == []
+    assert _held(machine) == before
+
+
+def test_a_docx_whose_document_is_over_64_mib_is_refused(machine, tmp_path, monkeypatch, capsys):
+    before = _held(machine)
+    big = _archive(("word/document.xml", b"<w:document>" + b" " * (64 * 1024 * 1024) + b"</w:document>"))
+    path = tmp_path / "drops" / "big.docx"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(big)
+    code, _ = _drop(monkeypatch, path, "--scope", "project:alpha")
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "64 MiB" in err and FOUR_FORMATS in err
+    assert _held(machine) == before
+
+
+def test_prose_no_reader_accepts_is_refused_naming_the_file_and_the_four(
+    machine, tmp_path, monkeypatch, capsys
+):
+    before = _held(machine)
+    path = _file(tmp_path, "notes.md", "just some notes\nno speakers here\nnor any times\n")
+    code, _ = _drop(monkeypatch, path, "--scope", "project:alpha")
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert str(path) in err and FOUR_FORMATS in err
+    assert _held(machine) == before
+
+
+def test_a_missing_relative_path_names_the_absolute_path_and_how_it_is_read(
+    machine, tmp_path, monkeypatch, capsys
+):
+    before = _held(machine)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+
+    code, _ = _drop(monkeypatch, Path("notes.vtt"), "--scope", "personal")
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert str(Path.cwd() / "notes.vtt") in err and "does not exist" in err
+    assert "read from the folder pm-ai was started in" in err and FOUR_FORMATS in err
+    assert _held(machine) == before
+
+
+def test_a_quoted_tilde_path_is_read_from_the_home_folder(machine, tmp_path, monkeypatch, capsys):
+    home, _, _ = machine
+    (home / "x.vtt").write_text(SPOKEN_VTT, encoding="utf-8")
+    _record(machine, _meeting("mtg_named", scope=PERSONAL))
+    monkeypatch.setattr("builtins.input", Terminal([]))
+
+    code = entry.main(["transcript", "drop", "~/x.vtt", "--scope", "personal", "--meeting", "mtg_named"])
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
+    stored = home / ".manager-ai" / "transcripts" / capture_name(
+        "mtg_named", START, CaptureFormat.MANUAL_VTT
+    )
+    assert stored.read_text() == SPOKEN_VTT
+
+
+def test_a_missing_tilde_path_names_the_expanded_path(machine, tmp_path, monkeypatch, capsys):
+    home, _, _ = machine
+    code, _ = _drop(monkeypatch, Path("~/absent.vtt"), "--scope", "personal")
+    assert code == EXIT_REFUSAL
+    assert str(home / "absent.vtt") in capsys.readouterr().err
+
+
+def test_an_unquoted_path_with_a_space_says_to_quote_it(machine, capsys):
+    code = entry.main(["transcript", "drop", "My", "Notes.vtt", "--scope", "personal"])
+    assert code == EXIT_USAGE
+    assert "a path with spaces must be in quotes" in capsys.readouterr().err
+
+
+def test_only_transcript_drop_gets_the_quoting_hint(machine, capsys):
+    code = entry.main(["goal", "show", "a", "b"])
+    assert code == EXIT_USAGE
+    assert "quotes" not in capsys.readouterr().err
+
+
+def test_the_usage_names_the_four_formats_and_how_a_relative_path_is_read(capsys):
+    assert entry.main(["transcript", "drop", "--help"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "ingest a .vtt, .txt, .md or .docx transcript" in out
+    assert "a relative <file> is read from the folder pm-ai was started in" in out
+
+
+def test_answers_given_as_options_are_not_asked(machine, tmp_path, monkeypatch, capsys):
+    """The daemon's half of AD-21: a fully specified drop asks nothing, terminal or not."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    path = _file(tmp_path, "sync.txt", SAID_TXT)
+
+    code, terminal = _drop(
+        monkeypatch, path, "--scope", "project:alpha", "--title", "Planning",
+        "--start", START_TYPED, "--attendees", "email:alex@example.com", "--duration", "25",
+    )
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
+    assert terminal.prompts == []
+    record = _daemon(machine).meetings.get(_minted(out), scope=ALPHA).meeting
+    assert record.title == "Planning" and record.start == START
+    assert record.duration_minutes == 25 and record.attendees == (Actor("email:alex@example.com"),)
+
+
+def test_a_missing_answer_without_a_terminal_is_refused_naming_its_option(
+    machine, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    before = _held(machine)
+    path = _file(tmp_path, "sync.txt", SAID_TXT)
+    code, _ = _drop(
+        monkeypatch, path, "--scope", "project:alpha", "--title", "Planning", "--start", START_TYPED
+    )
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert "--attendees" in err and "--duration" in err
+    assert _held(machine) == before
+
+
+@pytest.mark.parametrize(
+    "options",
+    [["--start", "tomorrow"], ["--duration", "0"], ["--attendees", "Smith, Bob"],
+     ["--meeting", "mtg_x", "--title", "Planning"]],
+    ids=["start", "duration", "attendees", "with-meeting"],
+)
+def test_an_answer_option_its_question_would_refuse_is_a_usage_error(
+    options, machine, tmp_path, monkeypatch, capsys
+):
+    path = _file(tmp_path, "sync.txt", SAID_TXT)
+    code, _ = _drop(monkeypatch, path, "--scope", "project:alpha", *options)
+    assert code == EXIT_USAGE
+    assert options[0] in capsys.readouterr().err
+
+
+def test_a_relative_broken_docx_names_the_absolute_path_and_how_it_is_read(
+    machine, tmp_path, monkeypatch, capsys
+):
+    before = _held(machine)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "minutes.docx").write_bytes(b"not a zip\n")
+    monkeypatch.chdir(work)
+
+    code, _ = _drop(monkeypatch, Path("minutes.docx"), "--scope", "personal")
+
+    assert code == EXIT_REFUSAL
+    err = capsys.readouterr().err
+    assert str(Path.cwd() / "minutes.docx") in err and "ZIP archive" in err
+    assert "read from the folder pm-ai was started in" in err and FOUR_FORMATS in err
+    assert _held(machine) == before

@@ -1149,6 +1149,7 @@ class _Dropped:
     left: int = 0
     duration_minutes: int | None = None
     duration_from_last_cue: bool = False
+    from_docx: bool = False
     notices: tuple[str, ...] = ()
 
 
@@ -1164,9 +1165,11 @@ class _Drop:
         self.answer = answer
         self.answers: tuple = ()
 
-    def __call__(self, *, text, file_name, scope, meeting_id, identify, describe):
+    def __call__(self, *, text, file_name, scope, meeting_id, identify, describe,
+                 from_docx=False):
         self.calls.append(
-            {"text": text, "file_name": file_name, "scope": scope, "meeting_id": meeting_id}
+            {"text": text, "file_name": file_name, "scope": scope, "meeting_id": meeting_id,
+             "from_docx": from_docx}
         )
         if self.raises is not None:
             raise self.raises
@@ -1239,7 +1242,8 @@ def test_a_bare_double_dash_ends_the_options(tmp_path, monkeypatch):
     drop = _Drop()
     monkeypatch.chdir(tmp_path)
     assert _drop(["--scope", "personal", "--", "--odd.vtt"], drop) == EXIT_OK
-    assert drop.calls[0]["file_name"] == "--odd.vtt"
+    # Story 11d: the drop names the absolute path it read.
+    assert drop.calls[0]["file_name"] == str(Path.cwd() / "--odd.vtt")
 
 
 def test_a_required_option_is_required_on_a_command_without_leaves(monkeypatch, capsys):
@@ -1292,21 +1296,40 @@ def test_a_scope_a_drop_cannot_go_to_is_refused_by_name(scope, dropped_file, cap
     assert drop.calls == []
 
 
+FOUR_FORMATS = ".vtt, .txt, .md, .docx"
+
+
 @pytest.mark.parametrize(
     ("name", "said"),
     [
-        ("minutes.docx", "deferred"),
         ("minutes.pdf", "a PDF"),
-        ("minutes.doc", "a Word document"),
+        ("minutes.doc", "a Word document in the old .doc format"),
         ("minutes.RTF", "a rich-text document"),
     ],
 )
 def test_a_document_format_is_refused_with_the_way_out(name, said, tmp_path, capsys):
+    """Story 11d: `.doc`, `.pdf` and `.rtf` are still refused by name, naming the four."""
     path = tmp_path / name
     path.write_bytes(b"PK\x03\x04")
-    assert _drop([str(path), "--scope", "personal"]) == EXIT_REFUSAL
+    drop = _Drop()
+    assert _drop([str(path), "--scope", "personal"], drop) == EXIT_REFUSAL
     err = capsys.readouterr().err
-    assert name in err and said in err and "Save the transcript as .vtt or .txt" in err
+    assert str(path) in err and said in err and FOUR_FORMATS in err
+    assert drop.calls == []
+
+
+def test_a_docx_is_read_for_its_text_and_handed_on_as_text(tmp_path):
+    """Story 11d: the deferral is gone; the pipeline gets the text, marked as from a `.docx`."""
+    path = tmp_path / "minutes.docx"
+    path.write_bytes(
+        (Path(__file__).parents[1] / "core" / "fixtures" / "transcripts"
+         / "teams_export_recorded.docx").read_bytes()
+    )
+    drop = _Drop()
+    assert _drop([str(path), "--scope", "personal", "--meeting", "mtg_x"], drop) == EXIT_OK
+    (call,) = drop.calls
+    assert call["from_docx"] is True
+    assert "Alex Morgan   0:32\nPlaceholder line 1 of turn 1.\n" in call["text"]
 
 
 def test_a_missing_docx_is_refused_as_missing(tmp_path, capsys):
