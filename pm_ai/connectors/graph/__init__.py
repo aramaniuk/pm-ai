@@ -90,7 +90,7 @@ from pm_ai.connectors.graph.chats import (
     ChatListing,
     GraphChatFetch,
 )
-from pm_ai.domain.connector_rows import USER_ID_KEY
+from pm_ai.domain.connector_rows import CATEGORIES_KEY, USER_ID_KEY
 from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, render_value
 from pm_ai.domain.events import (
     MeetingHeldPayload,
@@ -291,7 +291,6 @@ WIDTH_KEY = "window_width_minutes"
 REACH_BACK_KEY = "first_run_reach_back_minutes"
 CLIENT_ID_KEY = "client_id"
 TENANT_KEY = "tenant"
-CATEGORIES_KEY = "categories"
 CHANNELS_KEY = "channels"
 CHATS_KEY = "chats"
 """The keys a Graph enrolment row carries, spelled once.

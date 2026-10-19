@@ -30,7 +30,7 @@ context:
 - **The first-run reach-back is not asked.** The transport slice's first-run constant applies, 30 days since 8s; the settings file may override it by hand with `first_run_reach_back_minutes`.
 - **The settings and the token are saved together**, as every enrolment is: encrypted token under the shared credentials lock, settings file at the restricted mode holding `instance`, `system`, `enabled`, the declared `project` path and `host`. Nothing half-saved is left looking healthy.
 - **The token never appears** on screen, in logs or in error messages.
-- **The closing message** says the connector is enrolled and healthy, becomes active at the next start, and names the settings file.
+- **The closing message** says the connector is enrolled and healthy, when a running daemon picks it up — no restart; the next time it reads the connector list — and, since the row files into a project, that a daemon started before that project was enrolled builds it only after a restart (4s), and names the settings file.
 - **The generic add path keeps working for nothing.** With the GitLab check moved behind the composition root, the probe table that `pm-ai connector add <other>` consults is empty, and an unknown system is still refused by name rather than sealed.
 
 **Ask First:** Nothing. A 403 refusing rather than warning, and the reach-back not being asked, were settled on 2026-10-09 and are stated above.
@@ -41,7 +41,7 @@ context:
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Happy path | `gitlab:alpha` on a machine watching `alpha`; Enter, `acme/web`, good token, 200 | settings and encrypted token saved; "enrolled and healthy; active at the next start"; names the file; replaces the built-in at the next start | N/A |
+| Happy path | `gitlab:alpha` on a machine watching `alpha`; Enter, `acme/web`, good token, 200 | settings and encrypted token saved; "enrolled and healthy", when a running daemon harvests it, and the restart case for a project enrolled since it started; names the file; replaces the built-in when the daemon next reads the connector list | N/A |
 | Name in use | settings row exists | refused before any question, naming the row | exit 3 |
 | Half-enrolled | sealed credential, no row | refused before any question, naming the repair | exit 3 |
 | No master key / keychain locked | keychain empty, or unreadable | refused before any question, naming `pm-ai key enrol` or the keychain | exit 3 |
@@ -97,6 +97,7 @@ context:
 
 ## Spec Change Log
 
+- **2026-10-19, amended by 4s:** the ending no longer says the connector becomes active at the next start, but when a running daemon picks it up (the next read of the connector list), with the project clause and the shared restart sentence for a project enrolled after the daemon started. Frozen text and the matrix edited to match.
 - **2026-10-18, amended by 8s:** the first-run constant this slice names is now 30 days (`MERGE_LAG_DAYS`), not seven; a host typed without a scheme is taken as https, saved as the full address and said so in one line, while a host naming a scheme (`http://…`, or a mistyped `http:/…`) is judged as typed. Frozen text edited to match.
 
 ## Design Notes

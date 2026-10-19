@@ -916,7 +916,9 @@ def test_connector_add_never_echoes_the_credential(
     captured = capsys.readouterr()
     assert secret not in captured.out
     assert secret not in captured.err
-    assert "next start" in captured.out, "the activation promise 8d requires"
+    # Since 4s the closing message says when a running daemon picks it up,
+    # not "the next start".
+    assert cli.HARVESTED_WHEN in captured.out, "the activation promise 8d requires"
 
 
 @pytest.mark.parametrize("system", ["jira", "nosuch", "GitLab", "GRAPH"])

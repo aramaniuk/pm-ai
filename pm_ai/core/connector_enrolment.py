@@ -44,11 +44,12 @@ beneath it.
 No connector-specific auth. The Graph device-code flow is story `33a`, and this
 has to work for a plain token typed at a prompt. A Graph enrolment (story 8l)
 signs in and checks the result before it calls this, and hands its settings in
-as data; nothing here knows what they mean. No `pm-ai connector disable`,
-and no hot registration into a running daemon: both need a poller to halt or a
-daemon to register into, and neither exists before `4d`/`9a`. Registration is
-construction-time, per `8d` — which is why the success message says the
-connector becomes active at the next start rather than claiming it is live.
+as data; nothing here knows what they mean. No `pm-ai connector disable`.
+Nothing here registers a connector into a running daemon either: since `4r`
+every daemon job reads the connector rows afresh, and since `9a` a running
+daemon's harvest timer starts harvesting a new row the next time it reads the
+connector list, so the success message says when that normally is (story 4s)
+rather than "the next start".
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 
-from pm_ai.domain.connector_rows import USER_ID_KEY
+from pm_ai.domain.connector_rows import CATEGORIES_KEY, USER_ID_KEY
 from pm_ai.domain.handles import usable_user_id
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import (
@@ -71,7 +72,10 @@ from pm_ai.ports import (
 __all__ = [
     "_default_project",
     "CONNECTORS",
+    "CATEGORIES_ABSENT",
     "CREDENTIAL_STORE",
+    "CategoriesChanged",
+    "CategoryProjectUnenrolled",
     "ConnectorNotConfigured",
     "ConnectorRowChanged",
     "CredentialStoreUnclaimable",
@@ -96,6 +100,7 @@ __all__ = [
     "credential_for",
     "enrol_connector",
     "record_user_id",
+    "record_categories",
     "recorded_user_id",
     "redacted",
     "replace_credential",
@@ -260,6 +265,34 @@ class NotAGraphRow(ValueError):
     it would name a user that system never signed in. Nothing is written, and
     the instance is named.
     """
+
+
+class CategoriesChanged(RuntimeError):
+    """The row's `categories` changed while its questions were answered (story 4s).
+
+    `pm-ai connector categories` shows the mapping, asks, and saves only if the
+    row still holds what it showed: two people's answers about one mapping
+    have no right merge. Nothing is written.
+    """
+
+
+class CategoryProjectUnenrolled(LookupError):
+    """A project the answers map a category to was removed from the registry (4s).
+
+    A Graph row mapping a category to a project no registry knows is not built
+    at all, so it is never saved. Nothing is written, and the project is named.
+    """
+
+
+class _Absent:
+    """The `categories` key was not in the row."""
+
+    def __repr__(self) -> str:
+        return "no categories key"
+
+
+CATEGORIES_ABSENT: object = _Absent()
+"""What `record_categories` is told was shown when the row had no `categories`."""
 
 
 class ClaimNotHeld(RuntimeError):
@@ -791,6 +824,91 @@ def record_user_id(
     row[USER_ID_KEY] = user_id
     storage.write_artifact(
         _encode(row, strict=True), scope=APPLICATION, artifact=CONNECTORS, name=name
+    )
+    return True
+
+
+def record_categories(
+    storage: StoragePort,
+    *,
+    instance: str,
+    shown: object,
+    categories: Mapping[str, str],
+    registered: Callable[[str], bool],
+    claimed: bool = False,
+) -> bool:
+    """Set `instance`'s row `categories` to `categories`, and change nothing else (4s).
+
+    `record_user_id`'s shape: the row is re-read at write time under the claim
+    enrolment writes rows under (the sealed store's), the one key is set, and
+    every other key is written back as it was read — a `user_id` a sign-in
+    recorded meanwhile included. An empty `categories` removes the key.
+
+    `shown` is the `categories` value the caller showed the person before
+    asking — `CATEGORIES_ABSENT` when the row had none. When the row now holds
+    anything else, the answers are about a mapping that is gone and
+    `CategoriesChanged` is raised. Every project `categories` names is judged
+    again with `registered`, read now: one removed meanwhile is
+    `CategoryProjectUnenrolled`, naming it. Also refused, writing nothing:
+    `ConnectorNotConfigured` when the row is gone, `MalformedSettings` when it
+    is not a JSON object, `NotAGraphRow` when its `system` is not `graph`.
+
+    Returns whether the file was written: a mapping equal to the one found is
+    not written again.
+    """
+    _assert_nameable(instance)
+    if not claimed:
+        with storage.exclusive(scope=APPLICATION, artifact=CREDENTIAL_STORE):
+            return record_categories(
+                storage,
+                instance=instance,
+                shown=shown,
+                categories=categories,
+                registered=registered,
+                claimed=True,
+            )
+    if not storage.holds_claim(scope=APPLICATION, artifact=CREDENTIAL_STORE):
+        raise ClaimNotHeld(
+            f"record_categories was told the claim on {CREDENTIAL_STORE} is held "
+            f"for {instance!r}, and this thread does not hold it. That is a bug "
+            f"in pm-ai; nothing was written."
+        )
+    row = connector_row(storage, instance=instance, purpose="its categories saved")
+    if row.get("system") != "graph":
+        raise NotAGraphRow(
+            f"{instance!r} is configured as a {row.get('system')!r} connector, "
+            f"not a Graph one, so it maps no Outlook categories. Nothing was "
+            f"written."
+        )
+    found = row.get(CATEGORIES_KEY, CATEGORIES_ABSENT)
+    if found != shown:
+        raise CategoriesChanged(
+            f"the Outlook categories of {instance!r} changed while the questions "
+            f"were answered — another run or a hand edit saved them first — so "
+            f"these answers were not saved. Nothing was written; run `pm-ai "
+            f"connector categories {instance}` again to see the mapping as it is "
+            f"now."
+        )
+    gone = sorted({project for project in categories.values() if not registered(project)})
+    if gone:
+        raise CategoryProjectUnenrolled(
+            f"{', '.join(gone)} {'is' if len(gone) == 1 else 'are'} no longer "
+            f"enrolled — removed from the project registry while the questions "
+            f"were answered — and a Graph row mapping a category to a project no "
+            f"registry knows is not built at all. Nothing was written."
+        )
+    wanted = dict(categories)
+    if wanted == found or (not wanted and found is CATEGORIES_ABSENT):
+        return False
+    if wanted:
+        row[CATEGORIES_KEY] = wanted
+    else:
+        row.pop(CATEGORIES_KEY, None)
+    storage.write_artifact(
+        _encode(row, strict=True),
+        scope=APPLICATION,
+        artifact=CONNECTORS,
+        name=f"{instance}.json",
     )
     return True
 

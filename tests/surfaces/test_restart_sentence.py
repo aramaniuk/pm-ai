@@ -13,13 +13,31 @@ from pathlib import Path
 from pm_ai.domain.health import Report
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import KeyAlreadyEnrolled, KeyNotFound
-from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL, RESTART_SENTENCE, dispatch
+from pm_ai.surfaces.cli.dispatch import (
+    EXIT_OK,
+    EXIT_REFUSAL,
+    HARVESTED_WHEN,
+    RESTART_SENTENCE,
+    dispatch,
+)
 
 
 def test_the_sentence_is_the_one_the_spine_names():
     assert RESTART_SENTENCE == (
         "A daemon already running sees this after it is restarted (`pm-ai daemon run`)."
     )
+
+
+def test_the_harvested_when_sentence_is_the_one_story_4s_names():
+    """Story 4s: within a minute, within 240 minutes, the first fifteen minutes."""
+    assert HARVESTED_WHEN == (
+        "A running daemon needs no restart: it starts harvesting a new connector "
+        "the next time it reads the connector list — normally within a minute "
+        "when no other connector is set up, otherwise at the next scheduled "
+        "harvest of any connector, normally within 240 minutes. A daemon started "
+        "afterwards normally harvests it within its first 15 minutes."
+    )
+    assert "1 minutes" not in HARVESTED_WHEN
 
 
 @dataclass(frozen=True)

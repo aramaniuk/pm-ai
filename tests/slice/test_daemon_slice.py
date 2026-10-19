@@ -14,6 +14,7 @@ keychain stood in, like every other CLI row in the suite.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import http.client
 import json
@@ -23,6 +24,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -699,3 +701,390 @@ def test_a_locked_keychain_while_composing_the_daemon_refuses_by_name(
     monkeypatch.setattr(entry, "build", locked)
     assert entry.main(["daemon", "run"]) == EXIT_REFUSAL
     assert "the login keychain is locked" in capsys.readouterr().err
+
+
+# ── Story 4s — the daemon says how it stopped ────────────────────────────────
+
+CLEAN = "the daemon stopped cleanly"
+STORE_CLOSED = "; the store is closed."
+
+
+def _stop_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if CLEAN in line]
+
+
+def _logged_stops(home: Home) -> list[str]:
+    return [
+        str(line["message"])
+        for line in home.log_lines()
+        if CLEAN in str(line.get("message", ""))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("sig", "named"),
+    [
+        (signal.SIGINT, "Ctrl-C"),
+        (signal.SIGTERM, "a stop signal (SIGTERM)"),
+        (signal.SIGHUP, "the terminal closing (SIGHUP)"),
+    ],
+    ids=["int", "term", "hup"],
+)
+def test_a_supervisor_reads_exactly_one_stop_line_after_the_listening_line(home, sig, named):
+    """Rows *Ctrl-C, nothing running* and the acceptance criterion: one line on
+    standard output after the listening line, the same words in `daemon.log`."""
+    process = home.start()
+    try:
+        listening = _wait_listening(process)
+        code, out, err = _stop(process, sig)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    assert code == 0, err
+    assert "listening on" in listening
+    expected = f"{CLEAN} on {named}; no job was left unfinished"
+    assert out.splitlines() == [f"pm-ai: {expected}{STORE_CLOSED}"], out
+    assert _logged_stops(home) == [f"{expected}."], "the log line has no store part"
+
+
+def test_with_standard_output_closed_the_stop_is_still_clean(home):
+    """Row *terminal closed*: the write's error is ignored, the exit stays 0,
+    and the line is in `daemon.log`."""
+    process = home.start()
+    try:
+        _wait_listening(process)
+        assert process.stdout is not None
+        process.stdout.close()
+        process.send_signal(signal.SIGHUP)
+        try:
+            code = process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            pytest.fail("the daemon did not stop on SIGHUP")
+        err = process.stderr.read() if process.stderr else ""
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    assert code == 0, err
+    assert "Traceback" not in err and "Exception ignored" not in err, err
+    assert _logged_stops(home) == [
+        f"{CLEAN} on the terminal closing (SIGHUP); no job was left unfinished."
+    ]
+
+
+def test_writing_the_line_to_a_closed_console_raises_nothing(monkeypatch):
+    class Closed:
+        def write(self, text: str) -> int:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self) -> None:
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def fileno(self) -> int:
+            raise ValueError("no descriptor here")
+
+    monkeypatch.setattr(sys, "stdout", Closed())
+    daemon_module.say_stopped("pm-ai: the daemon stopped cleanly; the store is closed.")
+    assert not isinstance(sys.stdout, Closed), "standard output now points at nothing"
+    print("written into nothing")
+
+
+# ── In-process stops: the daemon runs in this process and is signalled ──────
+
+
+def _serve_here(
+    monkeypatch,
+    *,
+    stop: tuple[int, ...] = (signal.SIGTERM,),
+    while_closing: tuple[int, ...] = (),
+) -> int:
+    """`pm-ai daemon run` in this process: `stop` sent once it listens, and
+    `while_closing` sent while the web server is closing."""
+    real = daemon_module._server_class  # noqa: SLF001
+
+    def server_class(uvicorn):
+        base = real(uvicorn)
+
+        class Closing(base):  # type: ignore[misc, valid-type]
+            async def shutdown(self, sockets=None):
+                for sig in while_closing:
+                    os.kill(os.getpid(), sig)
+                    await asyncio.sleep(0.05)  # the handler runs on this loop
+                await super().shutdown(sockets=sockets)
+
+        return Closing
+
+    def announce(line: str) -> None:
+        print(line, flush=True)
+        if "listening on" in line:
+
+            def send() -> None:
+                for sig in stop:
+                    os.kill(os.getpid(), sig)
+
+            threading.Timer(0.2, send).start()
+
+    monkeypatch.setattr(daemon_module, "_server_class", server_class)
+    monkeypatch.setattr(daemon_module, "_announce", announce)
+    return entry.main(["daemon", "run"])
+
+
+def test_unfinished_jobs_are_counted_in_the_line(machine, monkeypatch, capsys):
+    """Row *stop signal with jobs unfinished*: the jobs the shutdown's own step
+    marked failed (two, here) are counted."""
+    from pm_ai.app.prompts import RequestPath
+
+    real = RequestPath.shutdown_pass
+
+    def two(self):
+        real(self)
+        return ("job-one", "job-two")
+
+    monkeypatch.setattr(RequestPath, "shutdown_pass", two)
+    code = _serve_here(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK
+    expected = f"{CLEAN} on a stop signal (SIGTERM); 2 unfinished jobs marked failed"
+    assert _stop_lines(out) == [f"pm-ai: {expected}{STORE_CLOSED}"]
+    assert _logged_stops(machine) == [f"{expected}."]
+
+
+def test_two_stop_requests_name_the_first(machine, monkeypatch, capsys):
+    code = _serve_here(monkeypatch, stop=(signal.SIGTERM,), while_closing=(signal.SIGHUP,))
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK
+    (line,) = _stop_lines(out)
+    assert "a stop signal (SIGTERM)" in line and "SIGHUP" not in line
+
+
+def test_a_second_ctrl_c_while_the_server_closes_is_its_forced_exit_and_still_clean(
+    machine, monkeypatch, capsys
+):
+    code = _serve_here(monkeypatch, stop=(signal.SIGINT,), while_closing=(signal.SIGINT,))
+
+    captured = capsys.readouterr()
+    assert code == EXIT_OK, captured.err
+    assert _stop_lines(captured.out) == [
+        f"pm-ai: {CLEAN} on Ctrl-C; no job was left unfinished{STORE_CLOSED}"
+    ]
+    assert "interrupted again" not in captured.err
+
+
+def test_a_marking_that_fails_is_said_and_left_to_the_next_start(machine, monkeypatch, capsys):
+    from pm_ai.app.prompts import RequestPath
+    from pm_ai.storage.service import OperationalStoreBusy
+
+    def refused(self):
+        raise OperationalStoreBusy("operational.db stayed busy")
+
+    monkeypatch.setattr(RequestPath, "shutdown_pass", refused)
+    code = _serve_here(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert code == EXIT_OK
+    expected = (
+        f"{CLEAN} on a stop signal (SIGTERM); unfinished jobs were not marked failed "
+        f"(OperationalStoreBusy), so the next start marks them"
+    )
+    assert _stop_lines(out) == [f"pm-ai: {expected}{STORE_CLOSED}"]
+    assert _logged_stops(machine) == [f"{expected}."]
+
+
+def _halting_step(self) -> None:
+    from pm_ai.storage.service import SCHEMA_VERSION, schema_moved
+
+    def moved() -> None:
+        raise schema_moved(SCHEMA_VERSION + 1)
+
+    return moved
+
+
+def test_the_writer_stopping_on_its_own_prints_only_todays_line(machine, monkeypatch, capsys):
+    """Row *writer stopped on its own*, before the stop: exit 3, no clean line."""
+    from pm_ai.app.ticks import HarvestTimers
+
+    async def halting(self) -> None:
+        try:
+            await self.requests.writer.call_async(_halting_step(self), label="moved")
+        except Exception:  # noqa: BLE001 — the halt is what is under test
+            pass
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(HarvestTimers, "run", halting)
+    code = entry.main(["daemon", "run"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL
+    assert "the daemon stopped:" in captured.err
+    assert not _stop_lines(captured.out) and not _logged_stops(machine)
+
+
+def test_the_writer_stopping_during_the_stops_marking_is_not_a_clean_stop(
+    machine, monkeypatch, capsys
+):
+    from pm_ai.app.concurrency import StepKind
+    from pm_ai.app.prompts import RequestPath
+
+    def halting(self):
+        self.writer.call(_halting_step(self), label="moved", kind=StepKind.SHUTDOWN)
+
+    monkeypatch.setattr(RequestPath, "shutdown_pass", halting)
+    code = _serve_here(monkeypatch)
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL
+    assert "the daemon stopped:" in captured.err
+    assert not _stop_lines(captured.out) and not _logged_stops(machine)
+
+
+def test_a_second_ctrl_c_while_queued_steps_finish_prints_no_clean_line(
+    machine, monkeypatch, capsys
+):
+    class Exited(BaseException):
+        pass
+
+    def interrupted(requests):
+        raise KeyboardInterrupt
+
+    def exit_now(code: int) -> None:
+        raise Exited(code)
+
+    monkeypatch.setattr(daemon_module, "_drain", interrupted)
+    monkeypatch.setattr(daemon_module, "_exit_now", exit_now)
+    with pytest.raises(Exited) as exited:
+        _serve_here(monkeypatch)
+
+    captured = capsys.readouterr()
+    assert exited.value.args == (daemon_module.EXIT_INTERRUPTED,)
+    assert "interrupted again; stopping at once." in captured.err
+    assert not _stop_lines(captured.out) and not _logged_stops(machine)
+
+
+def test_ctrl_c_during_the_start_prints_no_stop_line(machine, monkeypatch, capsys):
+    def interrupted(daemon):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(daemon_module, "take_token", interrupted)
+    code = entry.main(["daemon", "run"])
+
+    captured = capsys.readouterr()
+    assert code == EXIT_REFUSAL
+    assert "pm-ai: interrupted" in captured.err
+    assert "listening on" not in captured.out
+    assert not _stop_lines(captured.out) and not _logged_stops(machine)
+
+
+def test_a_store_that_fails_to_close_logs_the_line_and_prints_none(machine, monkeypatch, capsys):
+    from pm_ai.storage.service import StorageService
+
+    def fails(self) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(StorageService, "close", fails)
+    code = _serve_here(monkeypatch)
+
+    captured = capsys.readouterr()
+    assert code == 1, "today's report of an unexpected failure"
+    assert "Input/output error" in captured.err
+    assert not _stop_lines(captured.out)
+    assert _logged_stops(machine) == [
+        f"{CLEAN} on a stop signal (SIGTERM); no job was left unfinished."
+    ]
+
+
+def test_the_server_records_the_first_stop_request_and_a_second_ctrl_c_forces_it():
+    import uvicorn
+
+    server = daemon_module._server_class(uvicorn)(uvicorn.Config(app=None))  # noqa: SLF001
+    server._stop(signal.SIGTERM, None)  # noqa: SLF001
+    server._stop(signal.SIGHUP, None)  # noqa: SLF001
+    assert server.first_stop == signal.SIGTERM and not server.force_exit
+    server._stop(signal.SIGINT, None)  # noqa: SLF001
+    assert server.first_stop == signal.SIGTERM and server.force_exit
+
+
+def test_the_words_for_each_ending():
+    words = daemon_module.stop_words
+    assert words(signal.SIGINT, marked=0, unmarked=None) == (
+        "the daemon stopped cleanly on Ctrl-C; no job was left unfinished"
+    )
+    assert words(signal.SIGTERM, marked=1, unmarked=None).endswith("; 1 unfinished job marked failed")
+    assert words(None, marked=0, unmarked=None) == (
+        "the daemon stopped cleanly; no job was left unfinished"
+    )
+    assert "(KeyError), so the next start marks them" in words(
+        signal.SIGHUP, marked=None, unmarked="KeyError"
+    )
+
+
+class _Raw:
+    """A console beneath both buffers: takes `takes` bytes per write in turn."""
+
+    def __init__(self, takes: list[int | None]) -> None:
+        self.takes = list(takes)
+        self.written = b""
+
+    def write(self, data) -> int | None:
+        take = self.takes.pop(0) if self.takes else len(data)
+        if take is None:
+            return None
+        self.written += bytes(data[:take])
+        return take
+
+
+class _Console:
+    encoding = "utf-8"
+
+    def __init__(self, raw: _Raw, flushes: BaseException | None = None) -> None:
+        self.buffer = type("Buffer", (), {"raw": raw})()
+        self.flushes = flushes
+
+    def flush(self) -> None:
+        if self.flushes is not None:
+            raise self.flushes
+
+
+def test_a_line_the_console_takes_in_parts_is_written_whole(monkeypatch):
+    raw = _Raw([3, None, 0, 5])
+    monkeypatch.setattr(sys, "stdout", _Console(raw))
+    daemon_module.say_stopped("pm-ai: the daemon stopped cleanly; the store is closed.")
+    assert raw.written == b"pm-ai: the daemon stopped cleanly; the store is closed.\n"
+
+
+def test_a_console_that_keeps_taking_nothing_is_given_up_on(monkeypatch):
+    raw = _Raw([None] * 1000)
+    monkeypatch.setattr(sys, "stdout", _Console(raw))
+    daemon_module.say_stopped("pm-ai: stopped")
+    assert raw.written == b""
+
+
+def test_a_console_whose_earlier_bytes_will_not_flush_is_pointed_at_nothing(monkeypatch):
+    raw = _Raw([])
+    console = _Console(raw, flushes=BrokenPipeError(32, "Broken pipe"))
+    monkeypatch.setattr(sys, "stdout", console)
+    daemon_module.say_stopped("pm-ai: stopped")
+    assert sys.stdout is not console and raw.written == b""
+    print("written into nothing")
+
+
+def test_an_unexpected_error_that_ends_serving_is_logged_by_type_and_leaves_as_today(
+    machine, monkeypatch, capsys
+):
+    def broken(coroutine):
+        coroutine.close()
+        raise RuntimeError("something nobody planned for")
+
+    monkeypatch.setattr(daemon_module.asyncio, "run", broken)
+    code = entry.main(["daemon", "run"])
+
+    captured = capsys.readouterr()
+    assert code == 1, "today's exit for an unexpected error"
+    assert "RuntimeError" in captured.err
+    messages = [str(line.get("message", "")) for line in machine.log_lines()]
+    assert "the daemon stopped on an unexpected RuntimeError" in messages
+    assert not any("something nobody planned for" in m for m in messages), "type only"
+    assert not _stop_lines(captured.out) and not _logged_stops(machine)

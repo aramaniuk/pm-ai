@@ -27,12 +27,12 @@ A Graph credential is also not something you type. It comes from Microsoft's sig
 - **Refuse a name already in use before asking anything**, so nobody completes a sign-in only to be told the name was taken.
 - **It needs a terminal**, as adding a credential does today; without one it is refused before anything is asked.
 - **The questions, in order:** the Microsoft app (client) id, required; the tenant, where Enter keeps `organizations`; the harvest window in minutes, which states its 240-minute minimum and has no default; the first-run reach-back in minutes, which must be at least the window, where Enter keeps 7200 minutes (five days), or the window when it is wider, and the question names the number Enter keeps (8s). An answer that would not build a connector is asked again with the reason, never saved.
-- **Outlook category → project mapping is not asked.** The closing message names the settings file where it is added by hand.
+- **Outlook categories are asked after the four questions and before the sign-in** (4s; Andrei, 2026-10-16): one question per enrolled project, Enter for none; the mapping is saved in the same row. The closing message says what was mapped and names `pm-ai connector categories <name>`.
 - **The sign-in shows Microsoft's own address and code**, waits for the person, and reports a declined, partial or expired sign-in by its own reason, saving nothing.
 - **After sign-in, a live health check runs within 10 seconds** (CAP-35); a failure saves nothing.
 - **The sign-in and the settings are saved together**, the same way adding a credential is today: encrypted sign-in under the shared credentials lock, settings file at `0600`. Nothing half-saved is left looking healthy.
 - **The sign-in token never appears** on screen, in logs, or in error messages.
-- **The connector becomes active at the next start**, as today.
+- **The closing message says when a running daemon picks the connector up** (4s): no restart is needed; it is harvested the next time the daemon reads the connector list.
 
 **Ask First:** Any change to the questions asked or their order. Any default for the harvest window, or any other default for the reach-back.
 
@@ -45,7 +45,7 @@ A Graph credential is also not something you type. It comes from Microsoft's sig
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Happy path | new name, valid answers, sign-in approved | settings and encrypted sign-in saved; "enrolled and healthy; active at the next start"; names the settings file for categories | N/A |
+| Happy path | new name, valid answers, sign-in approved | settings and encrypted sign-in saved; "enrolled and healthy", when a running daemon harvests it, and what the categories now file where | N/A |
 | Name in use | `graph:work` already enrolled | refused before any question | existing duplicate refusal, exit 3 |
 | No terminal | stdin not a TTY | refused before any question | exit 3 |
 | Window under 240 | `120` | asked again, saying the minimum | N/A |
@@ -88,6 +88,7 @@ A Graph credential is also not something you type. It comes from Microsoft's sig
 
 ## Spec Change Log
 
+- **2026-10-19, amended by 4s** (Andrei, 2026-10-16): the ending no longer says the connector is active at the next start but when a running daemon picks it up (the next read of the connector list); Outlook categories are now asked, one question per enrolled project, after the four questions and before the sign-in, and saved in the same row. Frozen text and the matrix edited to match.
 - **2026-10-18, amended by 8s** (Andrei, 2026-10-16): the reach-back question now offers 7200 minutes (five days), or the window when it is wider, as what Enter keeps, and names that number; the harvest window keeps no default. Frozen text, Ask First and the matrix edited to match.
 
 ## Verification
