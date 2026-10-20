@@ -24,6 +24,7 @@ import math
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 
 from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, render_value
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -37,6 +38,26 @@ DISCLOSURE_LEDGER_ARTIFACT = "disclosure.md"
 _SCOPE_SEPARATOR = ","
 NO_DESTINATION = "none"
 """What an absent destination renders as — spelled once, read by the parser."""
+UNKNOWN = "unknown"
+"""What a count or a cost the ledger cannot state renders as (story 7c).
+
+A `sent` line is written before the request, so its input is unknown; a
+`failed` line is unknown unless the answer reported usage. Never written as
+zero: an unknown cost counted as free would make a month read as cheaper than
+it was."""
+
+
+class DisclosureStatus(Enum):
+    """Where one frontier call got to, as its ledger line says (story 7c, AD-31, AD-38).
+
+    `sent` is written before the request leaves; `completed` (an answer
+    arrived, whether or not it was written) or `failed` after it, under the
+    same call id. A line written before story 7c has no status at all.
+    """
+
+    SENT = "sent"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class MalformedDisclosure(ValueError):
@@ -71,10 +92,45 @@ class DisclosureRecord:
     task_class: str
     model: str
     contributing_scopes: frozenset[DataScope]
-    input_tokens: int
-    output_tokens: int
-    estimated_cost_usd: float
+    input_tokens: int | None
+    output_tokens: int | None
+    estimated_cost_usd: float | None
     destination: DataScope | None = None
+    call_id: str | None = None
+    """The call this line belongs to, random (`uuid4`) and never reused (story 7c).
+
+    `None` only on a line written before 7c, which carries no status either.
+    """
+    status: DisclosureStatus | None = None
+    """`sent`, `completed` or `failed` (story 7c); `None` on a line written before it."""
+
+    def __post_init__(self) -> None:
+        if (self.call_id is None) != (self.status is None):
+            raise MalformedDisclosure(
+                "a disclosure line carries a call id and a status together, or "
+                "neither (a line written before story 7c)."
+            )
+        if self.call_id is not None and not self.call_id.strip():
+            raise MalformedDisclosure("a disclosure line's call id is empty.")
+        if self.status is DisclosureStatus.SENT and (
+            self.input_tokens, self.output_tokens, self.estimated_cost_usd
+        ) != (None, None, None):
+            raise MalformedDisclosure(
+                "a `sent` line is written before the request, so it carries no usage "
+                "and no cost; one that states either is not a `sent` line."
+            )
+        if self.status is None and None in (
+            self.input_tokens, self.output_tokens, self.estimated_cost_usd
+        ):
+            raise MalformedDisclosure(
+                "a line with no call id and no status is a completed call of "
+                "the cost it states; it cannot leave a count or the cost unknown."
+            )
+
+    @property
+    def reports_usage(self) -> bool:
+        """Whether the line states the tokens the answer reported."""
+        return self.input_tokens is not None and self.output_tokens is not None
 
     @property
     def involves_personal(self) -> bool:
@@ -196,7 +252,7 @@ def render_disclosure(record: DisclosureRecord) -> str:
     omitted because it was empty is a field a reader cannot distinguish from one
     that was never written.
     """
-    if not math.isfinite(record.estimated_cost_usd):
+    if record.estimated_cost_usd is not None and not math.isfinite(record.estimated_cost_usd):
         raise MalformedDisclosure(
             f"cost {record.estimated_cost_usd!r} is not a finite number. A month "
             f"containing it totals to nan, and `nan > target` is False — an "
@@ -208,7 +264,7 @@ def render_disclosure(record: DisclosureRecord) -> str:
             ("input_tokens", record.input_tokens),
             ("output_tokens", record.output_tokens),
         )
-        if value < 0
+        if value is not None and value < 0
     }
     if negative:
         raise MalformedDisclosure(
@@ -231,16 +287,25 @@ def render_disclosure(record: DisclosureRecord) -> str:
         )
     scopes = _SCOPE_SEPARATOR.join(named)
     destination = NO_DESTINATION if record.destination is None else str(record.destination)
+    # Story 7c: the call id and the status lead a line that has them; a line
+    # without them is the pre-7c grammar, rendered exactly as before.
+    called: tuple[tuple[str, str], ...] = ()
+    if record.call_id is not None and record.status is not None:
+        called = (("call", record.call_id), ("status", record.status.value))
     fields = (
         ("at", record.at.isoformat()),
+        *called,
         ("task_class", record.task_class),
         ("model", record.model),
-        ("input_tokens", str(record.input_tokens)),
-        ("output_tokens", str(record.output_tokens)),
+        ("input_tokens", _count(record.input_tokens)),
+        ("output_tokens", _count(record.output_tokens)),
         # `repr` of a float round-trips exactly in Python; a fixed number of
         # decimal places would silently round a sub-cent call to zero, and a
         # month of those sums to a figure the ledger cannot justify.
-        ("cost_usd", repr(record.estimated_cost_usd)),
+        (
+            "cost_usd",
+            UNKNOWN if record.estimated_cost_usd is None else repr(record.estimated_cost_usd),
+        ),
         ("scopes", scopes),
         ("destination", destination),
     )
@@ -255,3 +320,7 @@ def render_disclosure(record: DisclosureRecord) -> str:
             f"hand on the same terms as a segment."
         )
     return line
+
+
+def _count(value: int | None) -> str:
+    return UNKNOWN if value is None else str(value)

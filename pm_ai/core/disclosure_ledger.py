@@ -24,12 +24,29 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from pm_ai.domain.disclosure import DisclosureRecord, MalformedDisclosure
+from pm_ai.domain.disclosure import (
+    UNKNOWN,
+    DisclosureRecord,
+    DisclosureStatus,
+    MalformedDisclosure,
+)
 from pm_ai.domain.event_entries import scan_fields
 from pm_ai.domain.identity import DataScope
 from pm_ai.ports import StoragePort
 
-__all__ = ["DisclosureLedger", "MonthlyTotal", "parse_ledger", "parse_disclosure_line"]
+__all__ = [
+    "MONTHLY_TARGET_USD",
+    "DisclosureLedger",
+    "MonthlyTotal",
+    "parse_ledger",
+    "parse_disclosure_line",
+]
+
+MONTHLY_TARGET_USD = 20.0
+"""NFR-13's monthly frontier target (AD-17): a monitored target, not a cap.
+
+A constant, no setting (story 7c). Past it a reply warns; nothing is refused
+or downgraded."""
 
 from pm_ai.domain.disclosure import NO_DESTINATION as _NONE
 
@@ -40,16 +57,25 @@ class MonthlyTotal:
 
     `breached` is `None` when no target was given: "nothing was compared" and
     "nothing was exceeded" are different facts, and collapsing them would let a
-    caller that forgot to pass its target read the result as reassurance.
+    caller that forgot to pass its target read the result as reassurance. It is
+    `None` too when the known total is within the target and some calls are of
+    unknown cost (story 7c): within it cannot be claimed.
     """
 
     year: int
     month: int
     records: int
+    """The calls of known cost counted in `cost_usd` (story 7c: calls, not lines)."""
     input_tokens: int
     output_tokens: int
     cost_usd: float
     breached: bool | None = None
+    unknown: int = 0
+    """Calls of unknown cost (story 7c): a `sent` line with no later line, a
+    `failed` line without usage, or usage with no price. Never counted as zero."""
+    malformed: tuple[str, ...] = ()
+    """The lines that could not be read while totalling, named (only when asked
+    to total past them, `skip_malformed`)."""
 
 
 def parse_ledger(text: str, *, source: str = "disclosure.md") -> tuple[DisclosureRecord, ...]:
@@ -59,13 +85,26 @@ def parse_ledger(text: str, *, source: str = "disclosure.md") -> tuple[Disclosur
     briefing reads, and treating that as corruption would make every concurrent
     read a failure. A *complete* line that will not parse is refused instead.
     """
+    records, malformed = _parse(text, source=source)
+    if malformed:
+        raise malformed[0]
+    return records
+
+
+def _parse(
+    text: str, *, source: str
+) -> tuple[tuple[DisclosureRecord, ...], list[MalformedDisclosure]]:
+    """Every complete record, and every complete line that would not parse, named."""
     records = []
+    malformed: list[MalformedDisclosure] = []
     for number, line in enumerate(text.split("\n")[:-1], start=1):
         try:
             records.append(parse_disclosure_line(line))
         except MalformedDisclosure as refusal:
-            raise MalformedDisclosure(f"{source} line {number}: {refusal}") from refusal
-    return tuple(records)
+            named = MalformedDisclosure(f"{source} line {number}: {refusal}")
+            named.__cause__ = refusal
+            malformed.append(named)
+    return tuple(records), malformed
 
 
 def parse_disclosure_line(line: str) -> DisclosureRecord:
@@ -83,6 +122,31 @@ def parse_disclosure_line(line: str) -> DisclosureRecord:
     } - fields.keys()
     if missing:
         raise MalformedDisclosure(f"{line!r} is missing {sorted(missing)}.")
+    # Story 7c: a call id and a status together, or neither (a pre-7c line).
+    called = "call" in fields or "status" in fields
+    if called and not ("call" in fields and "status" in fields):
+        raise MalformedDisclosure(f"{line!r} carries one of `call` and `status` without the other.")
+    # `unknown` is allowed only on a line with a status: a pre-7c line is a
+    # completed call of the cost it states.
+    unknowable = called
+
+    def count(key: str) -> int | None:
+        raw = fields[key]
+        if unknowable and raw == UNKNOWN:
+            return None
+        value = int(raw)
+        if value < 0:
+            raise ValueError(f"{key} is negative")
+        return value
+
+    def cost() -> float | None:
+        raw = fields["cost_usd"]
+        if unknowable and raw == UNKNOWN:
+            return None
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError("cost_usd is not finite")
+        return value
 
     try:
         return DisclosureRecord(
@@ -92,14 +156,16 @@ def parse_disclosure_line(line: str) -> DisclosureRecord:
             contributing_scopes=frozenset(
                 DataScope.parse(raw) for raw in fields["scopes"].split(",") if raw
             ),
-            input_tokens=int(fields["input_tokens"]),
-            output_tokens=int(fields["output_tokens"]),
-            estimated_cost_usd=float(fields["cost_usd"]),
+            input_tokens=count("input_tokens"),
+            output_tokens=count("output_tokens"),
+            estimated_cost_usd=cost(),
             destination=(
                 None
                 if fields["destination"] == _NONE
                 else DataScope.parse(fields["destination"])
             ),
+            call_id=fields["call"] if called else None,
+            status=DisclosureStatus(fields["status"]) if called else None,
         )
     except (ValueError, KeyError) as refusal:
         raise MalformedDisclosure(f"{line!r}: {refusal}") from refusal
@@ -123,6 +189,17 @@ def _assert_comparable(bound: datetime | None, *, name: str) -> None:
             f"{name}={bound!r} is not aware UTC. Every `at` in the ledger is, so "
             f"this bound cannot be compared against them."
         )
+
+
+def _breached(cost: float, target: float | None, *, unknown: int) -> bool | None:
+    """Past `target`: `True` on the known total alone; `None` when nothing was
+    compared, or when the known total is within it but calls of unknown cost
+    could take it past (story 7c) — never a `False` the ledger cannot back."""
+    if target is None:
+        return None
+    if cost > target:
+        return True
+    return None if unknown else False
 
 
 class DisclosureLedger:
@@ -154,35 +231,80 @@ class DisclosureLedger:
         )
 
     def monthly_total(
-        self, year: int, month: int, *, target_usd: float | None = None
+        self,
+        year: int,
+        month: int,
+        *,
+        target_usd: float | None = None,
+        skip_malformed: bool = False,
     ) -> MonthlyTotal:
         """AD-17's running monthly total. **Warns only** — nothing here blocks.
 
         The target arrives as an argument rather than from configuration: no
         story owns that key yet, and hard-coding a budget figure would put one in
         the domain. A caller that has a configured target supplies it.
+
+        **Calls, not lines** (story 7c, AD-38). Lines are paired by call id,
+        across months; a call belongs to the UTC month of its `sent` line (of
+        its first line, when no `sent` line is there). Its last line decides
+        it: one that reports usage — `completed` or `failed` — is summed, and
+        its cost too when the line states one; a `sent` line with no later
+        line, a `failed` line without usage, and usage with no cost are each a
+        call of unknown cost, never counted as zero. A line written before 7c,
+        with no call id or status, is a completed call of the cost it states.
+
+        A malformed complete line refuses the total, unless `skip_malformed`:
+        then the total is over the lines that read, and `malformed` names the
+        rest.
         """
         if not 1 <= month <= 12:
             raise ValueError(f"{month} is not a month. A total needs one to name.")
-        found = [
-            record
-            for record in parse_ledger(self._storage.read_disclosure())
+        found, broken = _parse(self._storage.read_disclosure(), source="disclosure.md")
+        if broken and not skip_malformed:
+            raise broken[0]
+        calls: dict[str, list[DisclosureRecord]] = {}
+        legacy: list[DisclosureRecord] = []
+        for record in found:
+            if record.call_id is None:
+                legacy.append(record)
+            else:
+                calls.setdefault(record.call_id, []).append(record)
+
+        def in_month(at: datetime) -> bool:
             # Converted before the month is read: `record.at.month` on an
             # offset-carrying value is its *wall-clock* month, which straddles
             # the boundary the caller asked about.
-            if _utc(record.at).year == year and _utc(record.at).month == month
-        ]
+            return _utc(at).year == year and _utc(at).month == month
+
+        counted: list[DisclosureRecord] = [r for r in legacy if in_month(r.at)]
+        tokens_from: list[DisclosureRecord] = list(counted)
+        unknown = 0
+        for lines in calls.values():
+            sent = next((r for r in lines if r.status is DisclosureStatus.SENT), lines[0])
+            if not in_month(sent.at):
+                continue
+            last = lines[-1]
+            if last.status is DisclosureStatus.SENT or not last.reports_usage:
+                unknown += 1
+                continue
+            tokens_from.append(last)
+            if last.estimated_cost_usd is None:
+                unknown += 1
+            else:
+                counted.append(last)
         # `math.fsum` rather than `sum`: correctly rounded, and free. No drifting
         # case was reproducible with realistic sub-cent costs, so this is not a
         # fix for an observed defect — it is the exact option taken because AD-17
         # calls this figure evidence.
-        cost = math.fsum(record.estimated_cost_usd for record in found)
+        cost = math.fsum(record.estimated_cost_usd or 0.0 for record in counted)
         return MonthlyTotal(
             year=year,
             month=month,
-            records=len(found),
-            input_tokens=sum(record.input_tokens for record in found),
-            output_tokens=sum(record.output_tokens for record in found),
+            records=len(counted),
+            input_tokens=sum(record.input_tokens or 0 for record in tokens_from),
+            output_tokens=sum(record.output_tokens or 0 for record in tokens_from),
             cost_usd=cost,
-            breached=None if target_usd is None else cost > target_usd,
+            breached=_breached(cost, target_usd, unknown=unknown),
+            unknown=unknown,
+            malformed=tuple(str(line) for line in broken),
         )

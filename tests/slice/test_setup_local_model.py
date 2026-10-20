@@ -18,6 +18,7 @@ from pm_ai.core.config import load_config
 from pm_ai.models.local import ollama
 from tests.slice.test_first_run import (  # noqa: F401 — fixtures
     EXIT_OK,
+    hold_a_frontier_key,
     EXIT_UNHEALTHY,
     config_path,
     home,
@@ -209,6 +210,7 @@ def test_doctor_with_no_local_model_says_how_to_set_one_up_and_exits_healthy(
     assert _first_run(operator, tmp_path, "none") == EXIT_OK
     capsys.readouterr()
 
+    hold_a_frontier_key(keychain)  # story 7c: an absent key is its own line
     code = entry.main(["doctor"])
     said = capsys.readouterr().out
     assert code == EXIT_OK

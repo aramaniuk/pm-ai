@@ -109,8 +109,8 @@ from pm_ai.app.prompts import (
     RequestPath,
 )
 from pm_ai.app.ticks import HarvestTimers, RenderTimers
-from pm_ai.app.pipelines import SummaryJobs
-from pm_ai.app.wiring import Daemon, handed_daemon
+from pm_ai.app.pipelines import PoolNotWired, SummaryJobs
+from pm_ai.app.wiring import Daemon, frontier_key_check, handed_daemon
 from pm_ai.domain.api_token import TOKEN_BYTES, ApiTokenRefused
 from pm_ai.domain.health import Report
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -585,20 +585,32 @@ def _serve_locked(
     # `7a`: one thread for the local model, started and stopped with the I/O
     # pool; its shutdown closes the connection of a generation still running.
     model_pool = ModelPool(abort=daemon.model.close if daemon.model is not None else None)
+    # `7c`: one thread of its own for calls to Claude — the summaries' and the
+    # key check's — started and stopped beside the model pool, so the wait for
+    # Anthropic holds neither an I/O worker nor the one local slot (AD-19). Its
+    # shutdown closes the frontier adapter's connections.
+    frontier_pool = ModelPool(
+        abort=daemon.router.close if daemon.router is not None else None,
+        name="pm-ai-frontier",
+    )
     # `9a` and `9b` take both from the daemon (AD-5, AD-19); `7b` the model pool.
     daemon.writer, daemon.pool, daemon.model_pool = writer, pool, model_pool
+    daemon.frontier_pool = frontier_pool
     requests = RequestPath(
         daemon=daemon,
         writer=writer,
         pool=pool,
         diagnose=lambda: diagnose(itself()),
         bounds=bounds,
+        key_check=frontier_key_check(daemon),
+        key_pool=frontier_pool,
     )
     # `7b`: the daemon's summary jobs, on its pools.
-    daemon.summaries = summary_jobs(requests, model_pool)
+    daemon.summaries = summary_jobs(requests, model_pool, frontier_pool)
     try:
         pool.start()
         model_pool.start()
+        frontier_pool.start()
         # Before serving, after the port: a second `daemon run` loses the port
         # first, so it can never mark the running daemon's jobs failed.
         try:
@@ -619,6 +631,7 @@ def _serve_locked(
             prompt=requests.prompt,
             job=requests.job,
             job_events=requests.job_events,
+            frontier_key=requests.frontier_key,
         )
         app.state.pm_ai_requests = requests
         # The scheduled harvests (story 9a): attached in `_lifespan`, on this
@@ -693,7 +706,15 @@ def _serve_locked(
             try:
                 # `7a`: a model job queued never starts, and one running loses
                 # its connection and its answer, before the writer drains.
-                model_pool.shutdown()
+                try:
+                    model_pool.shutdown()
+                finally:
+                    # `7c`: a frontier call queued never starts. One running
+                    # loses its client: its `sent` line stays, and a `failed`
+                    # line, input unknown, follows while the writer still takes
+                    # it (an append after the writer closed is refused and
+                    # logged, leaving the `sent` line the call's last word).
+                    frontier_pool.shutdown()
             finally:
                 try:
                     drained = _stop_writer(requests)
@@ -708,7 +729,9 @@ def _serve_locked(
     return 0
 
 
-def summary_jobs(requests: RequestPath, model_pool: ModelPool) -> SummaryJobs:
+def summary_jobs(
+    requests: RequestPath, model_pool: ModelPool, frontier_pool: ModelPool | None = None
+) -> SummaryJobs:
     """The daemon's summary jobs, their stages on its pools (story 7b, AD-19).
 
     Preparation on the I/O pool, the call on the model pool, what follows a
@@ -727,6 +750,27 @@ def summary_jobs(requests: RequestPath, model_pool: ModelPool) -> SummaryJobs:
             requests.fresh(), hand=lambda work, label: writer.call(work, label=label)
         ),
         model_stopping=lambda: model_pool.stopping,
+        # `7c`: a call to Claude on the frontier pool, never the I/O or model pool.
+        frontier=_no_frontier_pool if frontier_pool is None else frontier_pool.submit,
+        frontier_stopping=(
+            (lambda: False) if frontier_pool is None else (lambda: frontier_pool.stopping)
+        ),
+    )
+
+
+class FrontierPoolMissing(PoolNotWired):
+    """A frontier hop with no frontier pool wired: a wiring error, never run here (7c).
+
+    A call to Claude runs on the frontier pool and nowhere else (AD-19); with
+    none given it is refused by name rather than run on the current thread.
+    """
+
+
+def _no_frontier_pool(stage: Callable[[], None]) -> None:
+    raise FrontierPoolMissing(
+        "a frontier call reached summary jobs built with no frontier pool, so it "
+        "was not run: calls to Claude run on the frontier pool only (AD-19). That "
+        "is a wiring fault in pm-ai."
     )
 
 

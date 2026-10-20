@@ -60,6 +60,7 @@ from pm_ai.core.meeting_records import (
     has_capture,
     render_record,
 )
+from pm_ai.core.disclosure_ledger import MONTHLY_TARGET_USD, DisclosureLedger
 from pm_ai.core.meeting_summary import (
     SUMMARY_SHAPE,
     SummaryPrompt,
@@ -137,7 +138,6 @@ from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meeting_summaries import (
     ACTION_ITEM,
-    FRONTIER_SUMMARY_REFUSED,
     ModelAnswerRefused,
     RecordedSummary,
     SummaryActionItem,
@@ -151,7 +151,7 @@ from pm_ai.domain.meeting_summaries import (
     SummaryStateKind,
 )
 from pm_ai.domain.meetings import Meeting
-from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow
+from pm_ai.domain.model_calls import ModelAnswer, ModelSide, ScopeFlow, ScopeFlowRefused
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.renders import RenderUnrecorded
 from pm_ai.connectors.graph.auth import StoreBusy
@@ -194,6 +194,9 @@ from pm_ai.ports import (
     KeychainUnavailable,
     KeyNotFound,
     LedgerChanged,
+    FrontierFailed,
+    FrontierNotSent,
+    FrontierRefused,
     LocalModelUnavailable,
     ModelTimedOut,
     NoLocalModel,
@@ -2420,6 +2423,9 @@ class Hop(Enum):
     title match, which nobody waits for."""
     IO = "io"
     """The I/O pool: reading, judging the answer, and handing each write over."""
+    FRONTIER = "frontier"
+    """The frontier pool of one (story 7c, AD-19): a call to Claude, and nothing
+    else — never the I/O pool, never the model pool's one local slot."""
 
 
 class SummaryResult(Enum):
@@ -2465,6 +2471,9 @@ class SummaryOutcome:
     left: tuple[str, ...] = ()
     calls: tuple[SummaryCall, ...] = ()
     prompt_characters: int = 0
+    spend: str = ""
+    """A frontier call's tokens, cost and the month's total, for the reply (7c);
+    empty for the local model. Never written to the record."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2567,6 +2576,145 @@ def _call(
     return result
 
 
+_FRONTIER_REFUSALS: tuple[type[BaseException], ...] = (FrontierRefused, ScopeFlowRefused)
+
+
+def _frontier_call(
+    daemon: Daemon, scope: DataScope, prepared: _Prepared
+) -> Generator[Hop, None, ModelAnswer | BaseException]:
+    """One call to Claude through the router, on the pool its side names (story 7c).
+
+    The router writes the ledger's lines around it. Nothing is retried, and
+    nothing falls back to the local model (AD-17).
+    """
+    router = daemon.router
+    side = ModelSide.FRONTIER if router is None else router.side_of(TaskClass.MEETING_SUMMARY)
+    yield Hop.FRONTIER if side is ModelSide.FRONTIER else Hop.MODEL
+    try:
+        if router is None:
+            raise FrontierNotSent(
+                "no router is wired in this process, so Claude could not be asked; "
+                "nothing was sent."
+            )
+        result: ModelAnswer | BaseException = router.complete(
+            task_class=TaskClass.MEETING_SUMMARY,
+            instructions=instructions_for(None, language=prepared.prompt.language),
+            external=prepared.prompt.fragments,
+            flow=ScopeFlow.of((scope,), scope),
+            shape=SUMMARY_SHAPE,
+        )
+    except _FRONTIER_REFUSALS as refused:
+        result = refused
+    except Exception as unexpected:  # noqa: BLE001 — settled `failed`, named by type
+        # Never left `waiting`: a request for Claude is not offered again by
+        # any harvest, so a row left there would wait for nothing.
+        result = FrontierFailed(
+            f"the frontier call stopped on {type(unexpected).__name__}, which pm-ai did "
+            f"not expect; it was not retried",
+            sent=True,
+        )
+        result.__cause__ = unexpected
+    yield Hop.IO
+    return result
+
+
+def _frontier_spend(daemon: Daemon, result: ModelAnswer | BaseException) -> str:
+    """This call's tokens and cost and the month's total, for the reply (AD-17, story 7c).
+
+    Warns past `MONTHLY_TARGET_USD`; never refuses. A malformed ledger line is
+    named and left out of the total. Empty when nothing was sent.
+    """
+    if isinstance(result, ModelAnswer):
+        tokens: tuple[int | None, int | None] = (result.prompt_tokens, result.output_tokens)
+        cost = result.estimated_cost_usd
+        sent_at = result.sent_at
+    elif isinstance(result, FrontierRefused) and result.call_id is not None:
+        tokens = (result.input_tokens, result.output_tokens)
+        cost = result.cost_usd
+        sent_at = result.sent_at
+    else:
+        return ""
+    if tokens[0] is None or tokens[1] is None:
+        this = "This call: its tokens and cost are unknown (no usage was reported)."
+    else:
+        priced = "of unknown cost" if cost is None else f"estimated ${cost:.4f}"
+        this = f"This call: {tokens[0]} input and {tokens[1]} output tokens, {priced}."
+    # The call belongs to the UTC month of its `sent` line (AD-38), however
+    # late the reply is written.
+    now = (sent_at or daemon.clock()).astimezone(timezone.utc)
+    try:
+        total = DisclosureLedger(daemon.storage).monthly_total(
+            now.year, now.month, target_usd=MONTHLY_TARGET_USD, skip_malformed=True
+        )
+    except Exception as unreadable:  # noqa: BLE001 — named; the summary stands
+        return (
+            f"{this} The month's total could not be read from the disclosure ledger "
+            f"({type(unreadable).__name__})."
+        )
+    month = (
+        f" This month ({now.year}-{now.month:02d}, UTC): ${total.cost_usd:.2f} across "
+        f"{total.records} call(s), against the ${MONTHLY_TARGET_USD:.2f} target"
+        + (f", and {total.unknown} call(s) of unknown cost" if total.unknown else "")
+        + "."
+    )
+    if total.breached:
+        warned = (
+            f" Warning: the month is past the ${MONTHLY_TARGET_USD:.2f} target. A target "
+            f"to watch, not a cap: nothing is refused or downgraded."
+        )
+    elif total.breached is None:
+        warned = (
+            f" With calls of unknown cost, whether the month is past the "
+            f"${MONTHLY_TARGET_USD:.2f} target cannot be told."
+        )
+    else:
+        warned = ""
+    broken = (
+        " The disclosure ledger has lines that could not be read, left out of the "
+        "total: " + "; ".join(total.malformed)
+        if total.malformed
+        else ""
+    )
+    return this + month + warned + broken
+
+
+def _settle_made(
+    storage: StorageService,
+    fence: SummaryFence,
+    maker: SummaryMaker,
+    *,
+    state: SummaryStateKind,
+    reason: str,
+    model: str | None = None,
+) -> None:
+    """`settle_summary`, with `made_by` for a frontier summary; without it for the
+    local model's, whose row the request or the offer already says (story 7c)."""
+    if maker is SummaryMaker.LOCAL:
+        storage.settle_summary(fence, state=state, reason=reason, model=model)
+    else:
+        storage.settle_summary(fence, state=state, reason=reason, model=model, made_by=maker)
+
+
+def _frontier_refused(
+    scope: DataScope, meeting_id: str, refused: BaseException | SummaryRule
+) -> str:
+    """Why a frontier summary was not written: the row's reason, and the reply's."""
+    if isinstance(refused, SummaryRule):
+        why = (
+            f"Claude's answer was refused for {refused.value}, so nothing of it was "
+            f"written; it was paid for and is not asked again"
+        )
+    elif isinstance(refused, FrontierRefused) and not refused.sent:
+        why = f"Claude was not asked: {refused}"
+    else:
+        why = f"Claude's summary was not written: {refused}"
+    return (
+        f"{why.rstrip('.')}. Meeting {meeting_id} was not summarised; "
+        f"`pm-ai transcript summarize --scope {scope} --meeting {meeting_id} --by claude` "
+        f"asks again."
+    )
+
+
 def _judged(
     result: ModelAnswer | BaseException, labels: frozenset[str]
 ) -> SummaryAnswer | SummaryRule | BaseException:
@@ -2591,6 +2739,7 @@ def summary_steps(
     offered: SummaryFence | None = None,
     prepared: _Prepared | None = None,
     delivered: Callable[[SummaryOutcome], None] | None = None,
+    maker: SummaryMaker = SummaryMaker.LOCAL,
 ) -> Generator[Hop, None, SummaryOutcome]:
     """One summary job, as stages: each `yield` names the pool the next one runs on.
 
@@ -2617,9 +2766,17 @@ def summary_steps(
     naming its type, so the model is not asked again every harvest; a busy
     store or claim, or the writer stopping, leaves the row as it was, to be
     offered again.
+
+    Story 7c: with `maker` `FRONTIER` (a request's `--by claude`) the call is
+    the router's to Claude, on the frontier pool, made once: an invalid or
+    stopped answer settles the row `failed` and is never asked again without
+    the PM, and nothing falls back to the local model. The writes after it
+    are `7b`'s and `7e`'s, unchanged. The outcome carries the call's tokens,
+    cost and the month's total (`spend`).
     """
     storage = daemon.storage
     calls: list[SummaryCall] = []
+    spend = ""
 
     def outcome(result: SummaryResult, reason: str, **found: Any) -> SummaryOutcome:
         return SummaryOutcome(
@@ -2662,6 +2819,31 @@ def summary_steps(
                 return outcome(SummaryResult.FAILED, reason)
         labels = prepared.prompt.labels
 
+        if maker is SummaryMaker.FRONTIER:
+            asked = yield from _frontier_call(daemon, scope, prepared)
+            # Kept for every later end, a lost lease included: a paid call's
+            # tokens and cost are reported however the job ends.
+            spend = _frontier_spend(daemon, asked)
+            if isinstance(asked, ModelAnswer):
+                calls.append(_measured(asked))
+            judged_once = _judged(asked, labels)
+            if isinstance(judged_once, (BaseException, SummaryRule)):
+                reason = _frontier_refused(scope, meeting_id, judged_once)
+                storage.settle_summary(
+                    fence, state=SummaryStateKind.FAILED, reason=reason, made_by=maker
+                )
+                return outcome(SummaryResult.FAILED, reason, spend=spend)
+            written_once = _written(
+                daemon, scope, meeting_id, job, fence, prepared, judged_once,
+                calls[-1].model, requested, outcome, maker=maker, spend=spend,
+            )
+            if isinstance(written_once, SummaryOutcome):
+                return written_once
+            if delivered is not None:
+                delivered(written_once.outcome)
+            yield from _member_updates_after(daemon, written_once, prepared)
+            return _settled(daemon, scope, meeting_id, job, fence, written_once, outcome)
+
         first = yield from _call(daemon, scope, prepared, None)
         if isinstance(first, ModelAnswer):
             calls.append(_measured(first))
@@ -2692,7 +2874,7 @@ def summary_steps(
         yield from _member_updates_after(daemon, written, prepared)
         return _settled(daemon, scope, meeting_id, job, fence, written, outcome)
     except SummaryLeaseLost as lost:
-        return outcome(SummaryResult.STOPPED, str(lost))
+        return outcome(SummaryResult.STOPPED, str(lost), spend=spend)
 
 
 def _written(
@@ -2706,6 +2888,9 @@ def _written(
     model_name: str,
     requested: bool,
     outcome: Callable[..., SummaryOutcome],
+    *,
+    maker: SummaryMaker = SummaryMaker.LOCAL,
+    spend: str = "",
 ) -> _Written | SummaryOutcome:
     """The writes, each its own claimed step under the lease; or the row failed.
 
@@ -2727,6 +2912,7 @@ def _written(
                 requested=requested,
                 made_on=now.astimezone(timezone.utc).date(),
                 answer=answer,
+                made_by=maker,
             ),
             check=lambda: storage.check_summary_lease(lease),
         )
@@ -2773,8 +2959,9 @@ def _written(
             prefix=action_item_prefix(scope, meeting_id),
             fence=lease,
         )
+        made = "Claude" if maker is SummaryMaker.FRONTIER else "the local model"
         reason = (
-            f"summarised by the local model {model_name}"
+            f"summarised by {made} {model_name}"
             f"{' on request' if requested else ''}: {len(decisions)} decision(s), "
             f"{len(items)} action item(s) staged"
             + (f", {len(staged.superseded)} superseded" if staged.superseded else "")
@@ -2791,14 +2978,18 @@ def _written(
                 action_items=items,
                 superseded=staged.superseded,
                 left=staged.left,
+                spend=spend,
             ),
+            maker,
         )
     except SummaryLeaseLost as lost:
-        return outcome(SummaryResult.STOPPED, str(lost))
+        return outcome(SummaryResult.STOPPED, str(lost), spend=spend)
     except _LEFT_AS_IT_WAS:
         raise
     except Exception as broken:  # noqa: BLE001 — settled by its type, never re-offered
-        return _failed_unexpectedly(daemon, scope, meeting_id, job, fence, broken, outcome)
+        return _failed_unexpectedly(
+            daemon, scope, meeting_id, job, fence, broken, outcome, maker=maker, spend=spend
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2808,6 +2999,7 @@ class _Written:
     lease: SummaryFence
     model: str
     outcome: SummaryOutcome
+    maker: SummaryMaker = SummaryMaker.LOCAL
 
 
 def _settled(
@@ -2821,19 +3013,24 @@ def _settled(
 ) -> SummaryOutcome:
     """The row's final state, `summarized`, under the lease; or stopped, or failed."""
     try:
-        daemon.storage.settle_summary(
+        _settle_made(
+            daemon.storage,
             written.lease,
+            written.maker,
             state=SummaryStateKind.SUMMARIZED,
             reason=written.outcome.reason,
             model=written.model,
         )
         return written.outcome
     except SummaryLeaseLost as lost:
-        return outcome(SummaryResult.STOPPED, str(lost))
+        return outcome(SummaryResult.STOPPED, str(lost), spend=written.outcome.spend)
     except _LEFT_AS_IT_WAS:
         raise
     except Exception as broken:  # noqa: BLE001 — settled by its type, never re-offered
-        return _failed_unexpectedly(daemon, scope, meeting_id, job, fence, broken, outcome)
+        return _failed_unexpectedly(
+            daemon, scope, meeting_id, job, fence, broken, outcome,
+            maker=written.maker, spend=written.outcome.spend,
+        )
 
 
 def _failed_unexpectedly(
@@ -2844,11 +3041,20 @@ def _failed_unexpectedly(
     fence: SummaryFence,
     broken: BaseException,
     outcome: Callable[..., SummaryOutcome],
+    *,
+    maker: SummaryMaker = SummaryMaker.LOCAL,
+    spend: str = "",
 ) -> SummaryOutcome:
     storage = daemon.storage
+    paid = (
+        " The call to Claude was paid for (its line is in the disclosure ledger) "
+        "and its answer was not written."
+        if maker is SummaryMaker.FRONTIER
+        else ""
+    )
     reason = (
         f"meeting {meeting_id}'s summary could not be written: "
-        f"{type(broken).__name__}, which pm-ai did not expect. It is not offered "
+        f"{type(broken).__name__}, which pm-ai did not expect.{paid} It is not offered "
         f"again automatically; {_ask_again(scope, meeting_id)}"
     )
     current = storage.summary_state(scope, meeting_id)
@@ -2858,10 +3064,10 @@ def _failed_unexpectedly(
         else fence
     )
     try:
-        storage.settle_summary(held, state=SummaryStateKind.FAILED, reason=reason)
+        _settle_made(storage, held, maker, state=SummaryStateKind.FAILED, reason=reason)
     except SummaryLeaseLost as lost:
-        return outcome(SummaryResult.STOPPED, str(lost))
-    return outcome(SummaryResult.FAILED, reason)
+        return outcome(SummaryResult.STOPPED, str(lost), spend=spend)
+    return outcome(SummaryResult.FAILED, reason, spend=spend)
 
 
 # ── Story 7e: meeting updates on the project's issues ────────────────────────
@@ -3329,12 +3535,16 @@ class SummaryJobs:
         model_first: Callable[[Callable[[], None]], object] | None = None,
         daemon_for: Callable[[], Daemon] | None = None,
         model_stopping: Callable[[], bool] = lambda: False,
+        frontier: Callable[[Callable[[], None]], object] | None = None,
+        frontier_stopping: Callable[[], bool] = lambda: False,
     ) -> None:
         self._io = io or _here
         self._model = model or _here
         self._model_first = model_first or self._model
         self._daemon_for = daemon_for
         self._model_stopping = model_stopping
+        self._frontier = frontier or _here
+        self._frontier_stopping = frontier_stopping
         self._lock = threading.Lock()
         self._in_flight: dict[tuple[DataScope, str], str] = {}
         self._matching: set[tuple[DataScope, str]] = set()
@@ -3354,8 +3564,12 @@ class SummaryJobs:
         offered: SummaryFence | None = None,
         prepared: _Prepared | None = None,
         on_done: Callable[[SummaryOutcome | BaseException], None] | None = None,
+        maker: SummaryMaker = SummaryMaker.LOCAL,
     ) -> bool:
         """Start one job; `False` when an automatic one is already in flight.
+
+        `maker` is a request's (`--by`); an automatic job is always the local
+        model's — nothing calls Claude unasked (story 7c).
 
         A request (`fence` given, from `request_summary`) always starts: it
         has already moved the row to a new version, so a job in flight for
@@ -3414,6 +3628,7 @@ class SummaryJobs:
                 offered=offered,
                 prepared=prepared,
                 delivered=deliver if on_done is not None else None,
+                maker=maker if fence is not None else SummaryMaker.LOCAL,
             )
         except BaseException:
             done(_stopping())
@@ -3479,7 +3694,7 @@ class SummaryJobs:
             except BaseException as raised:  # noqa: BLE001 — named in the log, never lost
                 done(raised)
                 return
-            if hop is Hop.IO and self._model_stopping():
+            if hop is Hop.IO and (self._model_stopping() or self._frontier_stopping()):
                 stop()
                 return
             pool = (
@@ -3487,10 +3702,16 @@ class SummaryJobs:
                 if hop is Hop.MODEL
                 else self._model
                 if hop is Hop.MODEL_IN_TURN
+                else self._frontier
+                if hop is Hop.FRONTIER
                 else self._io
             )
             try:
                 pool(resume)
+            except _WIRING_FAULTS as fault:
+                # Named, never run here: a hop with no pool for it (story 7c).
+                steps.close()
+                done(fault)
             except Exception:  # noqa: BLE001 — a pool that stopped taking work
                 stop()
 
@@ -3498,6 +3719,13 @@ class SummaryJobs:
             self._io(resume)
         except Exception:  # noqa: BLE001 — a pool that stopped taking work
             stop()
+
+
+class PoolNotWired(RuntimeError):
+    """A job stage was handed to a pool that was never wired: a wiring fault (7c)."""
+
+
+_WIRING_FAULTS: tuple[type[BaseException], ...] = (PoolNotWired,)
 
 
 def _here(stage: Callable[[], None]) -> None:
@@ -3590,12 +3818,14 @@ class SummaryRequested:
     scope: DataScope
     meeting_id: str
     title: str
+    maker: SummaryMaker = SummaryMaker.LOCAL
 
     @property
     def line(self) -> str:
+        asked = "Claude" if self.maker is SummaryMaker.FRONTIER else "the local model"
         return (
             f"the summary of meeting {self.meeting_id} ({self.title!r}) in "
-            f"{self.scope} was asked of the local model; any summary running for "
+            f"{self.scope} was asked of {asked}; any summary running for "
             f"it was stopped before its next write."
         )
 
@@ -3611,14 +3841,18 @@ def request_summary(
 ) -> SummaryRequested:
     """`transcript summarize`: checked, then started in the daemon (story 7b).
 
-    Refused by name before any model call: `--by claude` (`7c`), no daemon to
-    run it, a meeting not recorded, a transcript not ingested (a failed part
-    named), a capture missing. Then the row moves to a new version — revoking
-    any job running for it — and the job starts; this returns at once, and
-    `on_done` is told how it ended.
+    Refused by name before any model call: no daemon to run it, a meeting not
+    recorded, a transcript not ingested (a failed part named), a capture
+    missing. Then the row moves to a new version — revoking any job running
+    for it — and the job starts; this returns at once, and `on_done` is told
+    how it ended. `--by claude` (story 7c) asks Claude through the router —
+    the only way a frontier call is ever made — and `--by local` replaces a
+    frontier summary as any explicit request does.
     """
-    if by != SummaryMaker.LOCAL.value:
-        raise SummaryRefused(FRONTIER_SUMMARY_REFUSED)
+    try:
+        maker = SummaryMaker.from_word(by)
+    except ValueError as unknown:
+        raise SummaryRefused(f"{unknown} Nothing was sent.") from unknown
     jobs = daemon.summaries
     if jobs is None:
         raise SummaryRefused(
@@ -3637,10 +3871,24 @@ def request_summary(
         scope,
         meeting_id,
         meeting_start=meeting.start,
-        reason="asked for with `pm-ai transcript summarize`",
+        reason=(
+            "asked of Claude with `pm-ai transcript summarize --by claude`"
+            if maker is SummaryMaker.FRONTIER
+            else "asked for with `pm-ai transcript summarize`"
+        ),
+        made_by=maker,
     )
-    jobs.start(daemon, scope, meeting_id, job=job, fence=fence, prepared=prepared, on_done=on_done)
-    return SummaryRequested(scope, meeting_id, meeting.title)
+    jobs.start(
+        daemon,
+        scope,
+        meeting_id,
+        job=job,
+        fence=fence,
+        prepared=prepared,
+        on_done=on_done,
+        maker=maker,
+    )
+    return SummaryRequested(scope, meeting_id, meeting.title, maker)
 
 
 def summary_closing(outcome: SummaryOutcome | BaseException) -> tuple[str, int]:
@@ -3651,15 +3899,16 @@ def summary_closing(outcome: SummaryOutcome | BaseException) -> tuple[str, int]:
             f"as it was, and a waiting row is offered again at a later harvest.\n",
             EXIT_UNEXPECTED,
         )
+    spend = f"{outcome.spend}\n" if outcome.spend else ""
     if outcome.result is SummaryResult.SUMMARIZED:
         return (
             f"meeting {outcome.meeting_id} in {outcome.scope}: {outcome.reason} The "
-            f"record's ## Summary holds it.\n",
+            f"record's ## Summary holds it.\n{spend}",
             EXIT_OK,
         )
     if outcome.result is SummaryResult.NOTHING_SAID:
         return f"meeting {outcome.meeting_id} in {outcome.scope}: {outcome.reason}\n", EXIT_OK
-    return f"pm-ai: {outcome.reason}\n", EXIT_REFUSAL
+    return f"pm-ai: {outcome.reason}\n{spend}", EXIT_REFUSAL
 
 
 def note_summary_input(

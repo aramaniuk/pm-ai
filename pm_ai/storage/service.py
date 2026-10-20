@@ -4825,16 +4825,32 @@ class StorageService:
     ) -> None:
         """A record's summary region was dropped: the summary is made again (AD-37).
 
-        Whoever made it: `waiting`, automatic, at a new version, so a job
-        running on the old one stops before its next write.
+        `waiting`, automatic, at a new version, so a job running on the old one
+        stops before its next write — unless the row is a summary the PM asked
+        Claude for (story 7c): that is replaced only by another explicit
+        request, so the row is settled `failed`, still Claude's and asked for,
+        naming `--by claude`, and no harvest offers it to the local model.
         """
         at = self._at().isoformat()
+        frontier_reason = (
+            f"{reason}; it was Claude's summary, made on request, so it is not made "
+            f"again automatically. `pm-ai transcript summarize --scope {scope} "
+            f"--meeting {meeting_id} --by claude` asks again."
+        )
         try:
             self._db.execute(
                 "INSERT INTO meeting_summaries "
                 f"({self._SUMMARY_COLUMNS}) VALUES (?, ?, ?, ?, 0, NULL, 0, ?, ?, 1, ?, NULL) "
-                "ON CONFLICT(scope, meeting_id) DO UPDATE SET state = excluded.state, "
-                "requested = 0, attempts = 0, reason = excluded.reason, at = excluded.at, "
+                "ON CONFLICT(scope, meeting_id) DO UPDATE SET "
+                "state = CASE WHEN meeting_summaries.made_by = ? AND meeting_summaries.requested = 1 "
+                "THEN ? ELSE excluded.state END, "
+                "reason = CASE WHEN meeting_summaries.made_by = ? AND meeting_summaries.requested = 1 "
+                "THEN ? ELSE excluded.reason END, "
+                "requested = CASE WHEN meeting_summaries.made_by = ? "
+                "THEN meeting_summaries.requested ELSE 0 END, "
+                "made_by = CASE WHEN meeting_summaries.made_by = ? AND meeting_summaries.requested = 1 "
+                "THEN meeting_summaries.made_by ELSE excluded.made_by END, "
+                "attempts = 0, at = excluded.at, "
                 "version = meeting_summaries.version + 1, job = NULL",
                 (
                     str(scope),
@@ -4844,6 +4860,12 @@ class StorageService:
                     reason,
                     at,
                     meeting_start.isoformat(),
+                    SummaryMaker.FRONTIER.value,
+                    SummaryStateKind.FAILED.value,
+                    SummaryMaker.FRONTIER.value,
+                    frontier_reason,
+                    SummaryMaker.FRONTIER.value,
+                    SummaryMaker.FRONTIER.value,
                 ),
             )
         except BaseException:
@@ -4852,13 +4874,20 @@ class StorageService:
         self._db.commit()
 
     def request_summary(
-        self, scope: DataScope, meeting_id: str, *, meeting_start: datetime, reason: str
+        self,
+        scope: DataScope,
+        meeting_id: str,
+        *,
+        meeting_start: datetime,
+        reason: str,
+        made_by: SummaryMaker = SummaryMaker.LOCAL,
     ) -> SummaryFence:
         """The PM asked: the row moves to a new version first, `waiting`, asked for.
 
         The move revokes any job's lease on the old version, so that job stops
         before its next write. The fence returned is what the requested job
-        reads.
+        reads. `made_by` is who was asked (story 7c): a request for Claude is
+        never offered to the local model while it waits.
         """
         at = self._at().isoformat()
         try:
@@ -4867,12 +4896,13 @@ class StorageService:
                 f"({self._SUMMARY_COLUMNS}) VALUES (?, ?, ?, ?, 1, NULL, 0, ?, ?, 1, ?, NULL) "
                 "ON CONFLICT(scope, meeting_id) DO UPDATE SET state = excluded.state, "
                 "requested = 1, attempts = 0, reason = excluded.reason, at = excluded.at, "
+                "made_by = excluded.made_by, "
                 "version = meeting_summaries.version + 1, job = NULL",
                 (
                     str(scope),
                     meeting_id,
                     SummaryStateKind.WAITING.value,
-                    SummaryMaker.LOCAL.value,
+                    made_by.value,
                     reason,
                     at,
                     meeting_start.isoformat(),
@@ -4910,11 +4940,15 @@ class StorageService:
             + " FROM meeting_summaries s JOIN transcript_state t "
             "ON t.scope = s.scope AND t.meeting_id = s.meeting_id "
             "WHERE s.state = ? AND t.state = ? AND s.meeting_start >= ? "
+            # Story 7c: a request for Claude waits for the PM, never for the
+            # local model — nothing is summarised by another maker unasked.
+            "AND NOT (s.requested = 1 AND s.made_by = ?) "
             "ORDER BY s.meeting_start DESC, s.scope, s.meeting_id",
             (
                 SummaryStateKind.WAITING.value,
                 TranscriptStateKind.INGESTED.value,
                 since.astimezone(timezone.utc).isoformat(),
+                SummaryMaker.FRONTIER.value,
             ),
         ).fetchall()
         return tuple(self._summary_row(row) for row in rows)
@@ -5097,17 +5131,20 @@ class StorageService:
         state: SummaryStateKind,
         reason: str,
         model: str | None = None,
+        made_by: SummaryMaker | None = None,
     ) -> SummaryState:
         """The row's final state for this job, if the row is still at `fence`.
 
         Summarised or nothing said clears the timeout count; waiting and failed
-        keep it. The version moves and the lease is released.
+        keep it. The version moves and the lease is released. `made_by` (story
+        7c) records who made it, kept as it was when not given.
         """
         try:
             self._summary_fenced(fence)
             self._db.execute(
                 "UPDATE meeting_summaries SET state = ?, reason = ?, at = ?, "
-                "model = COALESCE(?, model), version = version + 1, job = NULL, "
+                "model = COALESCE(?, model), made_by = COALESCE(?, made_by), "
+                "version = version + 1, job = NULL, "
                 "attempts = CASE WHEN ? THEN 0 ELSE attempts END "
                 "WHERE scope = ? AND meeting_id = ?",
                 (
@@ -5115,6 +5152,7 @@ class StorageService:
                     reason,
                     self._at().isoformat(),
                     model,
+                    None if made_by is None else made_by.value,
                     int(state in (SummaryStateKind.SUMMARIZED, SummaryStateKind.NOTHING_SAID)),
                     str(fence.scope),
                     fence.meeting_id,

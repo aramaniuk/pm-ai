@@ -1118,8 +1118,9 @@ class ModelPort(Protocol):
       locally, and the token counts and durations the server reported — what a
       ledger line needs *from the model*.
 
-    What is still open. Nothing writes a ledger line yet: the `sent` and
-    `completed` lines are `7c`'s, around the frontier adapter. And the scopes
+    What is still open. Since story `7c` the router writes the ledger's
+    `sent` and `completed` (or `failed`) lines around every frontier adapter
+    call (`pm_ai.models.router`). The scopes
     a line would record are the flow **the caller declares**: `Sanitized`
     holds two strings and no `DataScope`, so nothing checks that each fragment
     really came from a scope the flow names. The flow table refuses a declared
@@ -1140,11 +1141,13 @@ class ModelPort(Protocol):
     vocabulary is open — see `pm_ai.domain.task_classes`.
 
     **Adapters.** The local adapter (`pm_ai.models.local.ollama`, story `7a`)
-    implements this port for the local-only classes; the router and the
-    frontier adapter are story `7c`'s, behind the same signature. The refusals
+    implements this port for the local-only classes; the router
+    (`pm_ai.models.router`, story `7c`) implements it for every class, sending
+    the frontier-eligible ones to the frontier adapter. The refusals
     a caller must catch about the port's transport are declared below, beside
     it (AD-49): `LocalModelUnavailable` (and `RemoteModelRefused`, one kind of
-    it), `NoLocalModel`, `PossiblyTruncated`, `OutputCapReached`, `ModelTimedOut`. `ScopeFlowRefused`
+    it), `NoLocalModel`, `PossiblyTruncated`, `OutputCapReached`, `ModelTimedOut`,
+    and on the frontier side `FrontierRefused` and its kinds. `ScopeFlowRefused`
     is about the flow table, a rule `domain` owns, and lives beside it.
     """
 
@@ -1215,6 +1218,101 @@ class OutputCapReached(RuntimeError):
 
 class ModelTimedOut(TimeoutError):
     """The call outlasted its deadline; the connection was closed and nothing written."""
+
+
+# ── The frontier side's refusals (story 7c, AD-49) ───────────────────────────
+# About the frontier transport, so declared here beside the port. Each carries
+# what the disclosure ledger needs from it: the usage the answer reported, if
+# an answer arrived, and the model that answered. The router writes the ledger
+# lines from these, so a refusal never loses what a paid call reported.
+
+
+class FrontierRefused(RuntimeError):
+    """A frontier call gave no answer pm-ai uses, named by its sentence (story 7c).
+
+    `sent` says whether the request left the machine; `input_tokens` and
+    `output_tokens` are what the answer reported (`None` when no answer
+    arrived, or it reported none); `model` is the model the answer named, or
+    `None`. Never the key, the prompt or the answer's text.
+    """
+
+    def __init__(
+        self,
+        sentence: str,
+        *,
+        sent: bool,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(sentence)
+        self.sent = sent
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.model = model
+        self.call_id: str | None = None
+        """The ledger's call id, set by the router once the `sent` line is written."""
+        self.cost_usd: float | None = None
+        """The cost the router computed from the reported usage, when it could."""
+        self.sent_at: datetime | None = None
+        """When the router wrote the call's `sent` line; its UTC month is the call's."""
+
+    @property
+    def reports_usage(self) -> bool:
+        return self.input_tokens is not None and self.output_tokens is not None
+
+
+class FrontierNotSent(FrontierRefused):
+    """Refused before anything left the machine: no key, an SDK environment variable set,
+    a model with no price row, a prompt estimated past the window, or the ledger's
+    `sent` line unwritable. No request; the PM may ask again once the cause is fixed."""
+
+    def __init__(self, sentence: str) -> None:
+        super().__init__(sentence, sent=False)
+
+
+class FrontierFailed(FrontierRefused):
+    """The request left, and no answer came back to read: the connection dropped,
+    the API answered an error, or the deadline passed. Not retried."""
+
+
+class FrontierStopped(FrontierRefused):
+    """The answer stopped for a reason other than `end_turn`, so its content was
+    not read (`stop_reason` names it). Never `OutputCapReached`, and not asked
+    again: nothing is sent a second time without the PM (AD-16)."""
+
+    def __init__(
+        self,
+        sentence: str,
+        *,
+        stop_reason: str,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        model: str | None = None,
+    ) -> None:
+        super().__init__(
+            sentence,
+            sent=True,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            model=model,
+        )
+        self.stop_reason = stop_reason
+
+
+class FrontierModelMismatch(FrontierRefused):
+    """The answer names a model other than the one asked for, so it was refused (AD-16).
+
+    A re-served answer from a model the PM did not ask for is a second send.
+    """
+
+
+class FrontierKeyRefused(RuntimeError):
+    """The key typed for `pm-ai frontier key` was not accepted, so nothing was sealed.
+
+    Anthropic refused it, or Anthropic could not be asked; the sentence says
+    which, never the key.
+    """
 
 
 @runtime_checkable

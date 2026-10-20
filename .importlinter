@@ -42,6 +42,7 @@ source_modules =
     pm_ai.core
 forbidden_modules =
     httpx
+    httpx2
     requests
     aiohttp
     msal
@@ -64,6 +65,10 @@ forbidden_modules =
 # through the standard library's `http.client`, to 127.0.0.1 only — loopback to
 # the daemon is not egress (AD-8), and no third-party client is needed for it,
 # so this list stands unchanged.
+#
+# Story 7c: `httpx2` joins both lists beside `httpx`. The frontier adapter in
+# `pm_ai.models.frontier` builds its own `httpx2` client (AD-1 class F), and
+# the frontier client's stack is confined there as the local one's is.
 [importlinter:contract:http-confined-to-adapters]
 name = AD-1 — HTTP clients confined to connectors and skills
 type = forbidden
@@ -73,6 +78,7 @@ source_modules =
     pm_ai.platform
 forbidden_modules =
     httpx
+    httpx2
     requests
     aiohttp
     msal

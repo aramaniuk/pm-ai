@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 from pm_ai.domain.health import Health, Probe
@@ -45,6 +46,7 @@ __all__ = [
     "ExternalDestination",
     "LocalModelPresence",
     "ModelAnswer",
+    "ModelSide",
     "ScopeFlow",
     "LOCAL_MODEL_PROBE",
     "SERVER_LIMITS",
@@ -71,6 +73,19 @@ EXTERNAL = ExternalDestination.EXTERNAL
 """The one destination that is not a scope. No row of the table allows it today."""
 
 Destination = DataScope | ExternalDestination
+
+
+class ModelSide(Enum):
+    """Which side a model call runs on (AD-15, story 7c): the vocabulary only.
+
+    Which side each task class takes is the router's table
+    (`pm_ai.models.router.ROUTES`); this names the two answers so a caller
+    that may not import the router — the pipeline — can read one (AD-19:
+    the side picks the pool).
+    """
+
+    LOCAL = "local"
+    FRONTIER = "frontier"
 
 
 class ScopeFlowRefused(Exception):
@@ -211,6 +226,14 @@ class ModelAnswer:
     load_ns: int | None = None
     prompt_ns: int | None = None
     output_ns: int | None = None
+    estimated_cost_usd: float | None = None
+    """A frontier answer's cost, from the router's dated price table (story 7c);
+    `None` for a local answer, which costs nothing pm-ai records."""
+    call_id: str | None = None
+    """The disclosure ledger's call id for a frontier answer (story 7c); `None` locally."""
+    sent_at: datetime | None = None
+    """When the frontier call's `sent` line was written (story 7c): the call's UTC
+    month is that line's, however late the reply. `None` locally."""
 
 
 # ── Model names ──────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ __all__ = [
     "encryption_disabled",
     "local_zone_name",
     "raw_toggle",
+    "set_variables",
 ]
 
 DISABLE_ENCRYPTION_VAR = "PM_AI_DISABLE_ENCRYPTION"
@@ -64,6 +65,16 @@ def encryption_disabled() -> bool:
     """
     value = raw_toggle()
     return value is not None and value.strip().lower() in TRUTHY
+
+
+def set_variables(names: tuple[str, ...]) -> dict[str, str]:
+    """Those of `names` the environment sets, with their values (story 7c).
+
+    The frontier adapter refuses every call while the Anthropic SDK would read
+    one of its pinned variables; the composition root hands it this, so the
+    environment is still read here alone.
+    """
+    return {name: os.environ[name] for name in names if name in os.environ}
 
 
 def local_zone_name() -> str | None:

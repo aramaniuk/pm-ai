@@ -120,7 +120,7 @@ _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("goal", "update"), "id"): GOAL_IDS,
     (("goal", "delete"), "id"): GOAL_IDS,
     (("logs",), "level"): LOG_LEVEL_NAMES,
-    # Story 7b: who makes a summary — `local` today, `claude` refused until 7c.
+    # Story 7b: who makes a summary — `local`, or `claude` (story 7c).
     (("transcript", "summarize"), "by"): SUMMARY_MAKER_NAMES,
     # Story 7e: the members a label may name (usernames and handles), the
     # meetings a generic label may be limited to, the links awaiting a word.

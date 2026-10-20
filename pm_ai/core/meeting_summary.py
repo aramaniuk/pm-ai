@@ -51,6 +51,7 @@ from pm_ai.domain.meeting_summaries import (
     SummaryActionItem,
     SummaryAnswer,
     SummaryDecision,
+    SummaryMaker,
     SummaryRule,
 )
 from pm_ai.domain.sanitize import ForgedSanitization, Sanitized, sanitize
@@ -565,8 +566,10 @@ _DECISIONS = "### Decisions"
 _ITEMS = "### Action items"
 _SUMMARY_KEY = "summary"
 _HOW = {False: "automatically", True: "on request"}
+_MAKER_WORDS = {SummaryMaker.LOCAL: "the local model", SummaryMaker.FRONTIER: "Claude"}
+"""Who the provenance line names (story 7c): the local model, or Claude."""
 _PROVENANCE = re.compile(
-    r'^Made by the local model (?P<model>"(?:[^"\\]|\\.)*"|[^\s"]+), '
+    r'^Made by (?P<maker>the local model|Claude) (?P<model>"(?:[^"\\]|\\.)*"|[^\s"]+), '
     r"(?P<how>automatically|on request), "
     r"on (?P<on>\d{4}-\d{2}-\d{2})\.$"
 )
@@ -600,8 +603,8 @@ def render_summary_region(summary: RecordedSummary) -> list[str]:
     if not model:
         raise MalformedSummary("a model with no name cannot be recorded as the summary's maker.")
     lines = [
-        f"Made by the local model {model}, {_HOW[summary.requested]}, on "
-        f"{summary.made_on.isoformat()}.",
+        f"Made by {_MAKER_WORDS[summary.made_by]} {model}, {_HOW[summary.requested]}, "
+        f"on {summary.made_on.isoformat()}.",
         "",
         f"{_SUMMARY_KEY}={_value(answer.summary, where='the summary')}",
         "",
@@ -717,4 +720,7 @@ def parse_summary_region(lines: Iterable[str], *, source: str) -> RecordedSummar
         requested=provenance["how"] == _HOW[True],
         made_on=made_on,
         answer=SummaryAnswer(summary[_SUMMARY_KEY], tuple(decisions), tuple(items)),
+        made_by=(
+            SummaryMaker.FRONTIER if provenance["maker"] == "Claude" else SummaryMaker.LOCAL
+        ),
     )

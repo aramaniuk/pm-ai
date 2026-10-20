@@ -294,43 +294,154 @@ def test_ad25_project_rendering_cannot_open_the_personal_store():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# Story 7c: these four were written before the port existed — `complete(prompt=…)`,
+# scope strings, an in-memory log, `record_spend_usd` — and are rewritten to the
+# real port: `Sanitized` fragments, a `ScopeFlow`, the ledger file. Each keeps
+# its invariant.
+
+
+class _Local:
+    """A local adapter that records what reached it and answers once."""
+
+    is_local = True
+
+    def __init__(self):
+        self.calls = []
+
+    def complete(self, *, task_class, instructions, external, flow, shape=None):
+        from pm_ai.domain.model_calls import ModelAnswer
+
+        self.calls.append(task_class)
+        return ModelAnswer(text="{}", model="fake:8b", local=True, prompt_tokens=1, output_tokens=1)
+
+
+class _Frontier:
+    """A frontier adapter that writes the `sent` line, then answers with reported usage."""
+
+    def __init__(self, *, input_tokens=1200, output_tokens=300):
+        self.models = []
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+    def refused(self):
+        return None
+
+    def close(self):
+        pass
+
+    def complete(self, *, model, key, instructions, external, shape, before_send):
+        from pm_ai.models.frontier.anthropic import FrontierReply
+
+        before_send()
+        self.models.append(model.model_id)
+        return FrontierReply("{}", model.model_id, self.input_tokens, self.output_tokens)
+
+
+def _router(storage, *, local=None, frontier=None):
+    from datetime import datetime, timezone
+
+    router = mod("pm_ai.models.router")
+    return router.ModelRouter(
+        local=local,
+        frontier=frontier,
+        storage=storage,
+        key=lambda _storage: "test-key-not-real",
+        clock=lambda: datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc),
+    )
+
+
+def _fragments(text="..."):
+    from pm_ai.domain.sanitize import sanitize
+
+    return (sanitize(text),)
+
+
 @pytest.mark.parametrize(
     "task_class",
     ["transcription", "extraction", "classification", "embedding", "fuzzy_match"],
 )
-def test_ad15_local_only_task_classes_never_reach_a_frontier_model(task_class):
+def test_ad15_local_only_task_classes_never_reach_a_frontier_model(task_class, tmp_path):
     """AD-15 — the cheap paths are local, always. This is the cost floor."""
     router = mod("pm_ai.models.router")
-    adapter = router.route(task_class)
-    assert adapter.is_local, (
+    from pm_ai.domain.identity import DataScope, ScopeKind
+    from pm_ai.domain.model_calls import ScopeFlow
+    from pm_ai.domain.task_classes import TaskClass
+
+    declared = TaskClass(task_class)
+    assert router.route(declared).is_local, (
         f"AD-15: {task_class} is local-only. Routing it to a frontier model breaks "
         "both the cost profile and the local-first guarantee."
+    )
+    local, frontier = _Local(), _Frontier()
+    personal = DataScope(ScopeKind.PERSONAL)
+    _router(_daemon(tmp_path).storage, local=local, frontier=frontier).complete(
+        task_class=declared,
+        instructions="pm-ai's own words",
+        external=_fragments(),
+        flow=ScopeFlow.of((personal,), personal),
+    )
+    assert local.calls == [declared] and frontier.models == [], (
+        f"AD-15: {task_class} reached the frontier adapter."
     )
 
 
 def test_ad15_frontier_tiering_matches_the_spine():
-    """AD-15 — Opus 5 where reasoning depth is the product; Sonnet 5 elsewhere."""
+    """AD-15 — Opus 5.5 where reasoning depth is the product; Sonnet 5.5 elsewhere."""
     router = mod("pm_ai.models.router")
-    assert router.route("coaching").model_id == "claude-opus-5"
-    assert router.route("research").model_id == "claude-opus-5"
-    for cheap in ("briefing_synthesis", "draft_generation", "inquiry_synthesis"):
-        assert router.route(cheap).model_id == "claude-sonnet-5"
+    from pm_ai.domain.task_classes import TaskClass
+
+    assert router.route(TaskClass.COACHING).model_id == "claude-opus-5-5"
+    assert router.route(TaskClass.RESEARCH).model_id == "claude-opus-5-5"
+    for cheap in (
+        TaskClass.BRIEFING_SYNTHESIS,
+        TaskClass.DRAFT_GENERATION,
+        TaskClass.INQUIRY_SYNTHESIS,
+        TaskClass.MEETING_SUMMARY,
+    ):
+        assert router.route(cheap).model_id == "claude-sonnet-5-5"
 
 
-def test_ad17_budget_breach_warns_but_never_degrades():
+def test_ad17_budget_breach_warns_but_never_degrades(tmp_path):
     """AD-17 — cost accounting is a gauge, not a governor.
 
     Nobody asked for silent quality degradation; a briefing that quietly gets
     worse on the 28th is a worse product than one that costs $25 and says so.
     """
-    router = mod("pm_ai.models.router")
-    router.record_spend_usd(999)  # far past the $20 target
+    from datetime import datetime, timezone
 
-    adapter = router.route("coaching")
-    assert adapter.model_id == "claude-opus-5", (
+    from pm_ai.core.disclosure_ledger import MONTHLY_TARGET_USD, DisclosureLedger
+    from pm_ai.domain.disclosure import DisclosureRecord
+    from pm_ai.domain.identity import DataScope, ScopeKind
+    from pm_ai.domain.model_calls import ScopeFlow
+    from pm_ai.domain.task_classes import TaskClass
+
+    storage = _daemon(tmp_path).storage
+    personal = DataScope(ScopeKind.PERSONAL)
+    # Far past the $20 target this month, as a line before story 7c reads.
+    storage.append_disclosure(
+        DisclosureRecord(
+            at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            task_class="coaching",
+            model="claude-opus-5-5",
+            contributing_scopes=frozenset({personal}),
+            input_tokens=1,
+            output_tokens=1,
+            estimated_cost_usd=999.0,
+            destination=personal,
+        )
+    )
+    frontier = _Frontier()
+    answer = _router(storage, frontier=frontier).complete(
+        task_class=TaskClass.COACHING,
+        instructions="pm-ai's own words",
+        external=_fragments(),
+        flow=ScopeFlow.of((personal,), personal),
+    )
+    assert frontier.models == ["claude-opus-5-5"] and answer.model == "claude-opus-5-5", (
         "AD-17: breaching the target must not downgrade the model."
     )
-    assert router.warnings(), "AD-17: a breach must produce a visible warning."
+    total = DisclosureLedger(storage).monthly_total(2026, 10, target_usd=MONTHLY_TARGET_USD)
+    assert total.breached is True, "AD-17: a breach must produce a visible warning."
 
 
 def test_ad22_retrieval_path_never_touches_a_model():
@@ -404,35 +515,60 @@ def test_ad8_loopback_api_rejects_unauthenticated_requests():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_ad31_every_frontier_call_records_scope_provenance():
+def test_ad31_every_frontier_call_records_scope_provenance(tmp_path):
     """AD-31 — D1's charter is an audit, not an assurance.
 
     Without this the privacy claim is unfalsifiable: nothing can answer
     "what has left this machine, and when".
     """
-    router = mod("pm_ai.models.router")
-    router.reset_disclosure_log()
-    router.route("coaching").complete(prompt="...", scopes={"personal"})
+    mod("pm_ai.models.router")
+    from pm_ai.core.disclosure_ledger import DisclosureLedger
+    from pm_ai.domain.disclosure import DisclosureStatus
+    from pm_ai.domain.identity import DataScope, ScopeKind
+    from pm_ai.domain.model_calls import ScopeFlow
+    from pm_ai.domain.task_classes import TaskClass
 
-    entries = router.disclosure_log()
+    storage = _daemon(tmp_path).storage
+    personal = DataScope(ScopeKind.PERSONAL)
+    _router(storage, frontier=_Frontier()).complete(
+        task_class=TaskClass.COACHING,
+        instructions="pm-ai's own words",
+        external=_fragments(),
+        flow=ScopeFlow.of((personal,), personal),
+    )
+    entries = DisclosureLedger(storage).records()
     assert entries, "AD-31: a frontier call must record scope provenance."
+    assert [e.status for e in entries] == [DisclosureStatus.SENT, DisclosureStatus.COMPLETED]
+    assert entries[0].call_id == entries[1].call_id
     e = entries[-1]
-    for field in ("scopes", "task_class", "model", "input_tokens", "output_tokens"):
-        assert field in e, f"AD-31: disclosure entry missing {field!r}."
-    assert "personal" in e["scopes"]
+    assert e.task_class == "coaching" and e.model == "claude-opus-5-5"
+    assert (e.input_tokens, e.output_tokens) == (1200, 300)
+    assert personal in e.contributing_scopes and e.destination == personal
 
 
-def test_ad31_personal_material_cannot_reach_a_project_destination():
+def test_ad31_personal_material_cannot_reach_a_project_destination(tmp_path):
     """AD-31 — the boundary is on the destination, not only the source.
 
     Burnout signals may shape your briefing; they may not reach a team-facing
     artifact via a model that read both.
     """
-    router = mod("pm_ai.models.router")
-    with pytest.raises(router.ScopeBoundaryViolation):
-        router.route("briefing_synthesis").complete(
-            prompt="...", scopes={"personal"}, destination="project:alpha"
+    mod("pm_ai.models.router")
+    from pm_ai.domain.identity import DataScope, ScopeKind
+    from pm_ai.domain.model_calls import ScopeFlow, ScopeFlowRefused
+    from pm_ai.domain.task_classes import TaskClass
+
+    storage = _daemon(tmp_path).storage
+    frontier = _Frontier()
+    with pytest.raises(ScopeFlowRefused):
+        _router(storage, frontier=frontier).complete(
+            task_class=TaskClass.BRIEFING_SYNTHESIS,
+            instructions="pm-ai's own words",
+            external=_fragments(),
+            flow=ScopeFlow.of(
+                (DataScope(ScopeKind.PERSONAL),), DataScope(ScopeKind.PROJECT, "alpha")
+            ),
         )
+    assert frontier.models == [] and storage.read_disclosure() == ""
 
 
 @pytest.mark.parametrize(

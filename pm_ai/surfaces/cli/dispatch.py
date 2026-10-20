@@ -89,7 +89,7 @@ from pm_ai.core.transcripts import (
 )
 from pm_ai.core.member_updates import MemberRefused, NamePlan
 from pm_ai.domain.meetings import AmbiguousMeeting
-from pm_ai.domain.meeting_summaries import FRONTIER_SUMMARY_REFUSED, SummaryRefused
+from pm_ai.domain.meeting_summaries import SummaryRefused
 from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
 from pm_ai.domain.transcripts import (
     CaptureNotIngested,
@@ -164,7 +164,6 @@ __all__ = [
     "DROP_WORDS",
     "SUMMARIZE_WORDS",
     "SUMMARY_MAKERS",
-    "summarize_refusal",
     "Context",
     "FirstRun",
     "GoalBook",
@@ -951,6 +950,13 @@ class Context:
 
     `None` everywhere else: a terminal sends the line to the daemon instead,
     and a process with no daemon to send it to refuses naming `pm-ai daemon run`.
+    """
+
+    frontier_key: FrontierKeyHand | None = None
+    """`pm-ai frontier key`'s hand-over of the key to the running daemon (story 7c).
+
+    The loopback client's `hand_frontier_key`, bound by the composition root;
+    `None` refuses the command naming `pm-ai daemon run`.
     """
 
     members: Members | None = None
@@ -2907,6 +2913,12 @@ def _setup(context: Context) -> int:
     _setup_project(context)
     _setup_config(first_run, existing, current)
     _setup_connector(first_run)
+    # Story 7c: after step 4, the frontier key — entered once the daemon runs.
+    _echo()
+    _echo(
+        "Optional: to let `pm-ai transcript summarize --by claude` ask Claude, start "
+        "the daemon (`pm-ai daemon run`) and run `pm-ai frontier key`."
+    )
 
     _echo()
     report = first_run.diagnose()
@@ -3921,20 +3933,9 @@ BY_OPTION = "by"
 """`transcript summarize`'s `--by local|claude`: who makes the summary."""
 
 SUMMARY_MAKERS = ("local", "claude")
-"""What `--by` takes. `local` is the default; `claude` is story 7c's."""
+"""What `--by` takes. `local` is the default; `claude` asks Claude in the daemon (7c)."""
 
 SUMMARIZE_WORDS = ("transcript", "summarize")
-
-def summarize_refusal(options: Mapping[str, str]) -> str | None:
-    """Why `transcript summarize` is refused before anything is sent, or `None`.
-
-    Asked at a terminal before the line goes to the daemon, and by the daemon
-    again: `--by claude` is refused by name until 7c.
-    """
-    if options.get(BY_OPTION, SUMMARY_MAKERS[0]) == "claude":
-        return FRONTIER_SUMMARY_REFUSED
-    return None
-
 
 def _summarize_target(options: Mapping[str, str]) -> DataScope:
     """`--scope`'s scope, required; `_Misread` when absent or naming none."""
@@ -3973,20 +3974,19 @@ class TranscriptSummarize(Protocol):
 
 
 def _transcript_summarize(context: Context) -> int:
-    """`pm-ai transcript summarize --scope <scope> --meeting <id> [--by local|claude]` (7b).
+    """`pm-ai transcript summarize --scope <scope> --meeting <id> [--by local|claude]` (7b, 7c).
 
-    Only the daemon summarises. In the daemon this asks for the summary and
-    the job's result follows when the model has answered; anywhere else no
-    pipeline is bound and the command is refused, naming `pm-ai daemon run`.
+    Only the daemon summarises, by the local model or, with `--by claude`, by
+    Claude (story 7c) — the one frontier call pm-ai makes, and only when asked.
+    In the daemon this asks for the summary and the job's result follows when
+    the model has answered; anywhere else no pipeline is bound and the command
+    is refused, naming `pm-ai daemon run`.
     """
     scope = context.target
     if scope is None:
         raise RuntimeError(
             "no target scope reached `transcript summarize`. That is a wiring fault in pm-ai."
         )
-    refused = summarize_refusal(context.options)
-    if refused is not None:
-        raise Refusal(refused)
     if scope.kind not in _DROPPABLE_KINDS:
         raise Refusal(
             f"a meeting in {scope} cannot be summarised here: summaries are made "
@@ -4010,6 +4010,67 @@ def _transcript_summarize(context: Context) -> int:
         raise Refusal(str(message)) from refusal
     _echo(requested.line)
     return EXIT_OK
+
+
+# ── `pm-ai frontier key` (story 7c) ──────────────────────────────────────────
+
+FRONTIER_KEY_WORDS = ("frontier", "key")
+
+
+class FrontierKeyHand(Protocol):
+    """`pm_ai.surfaces.cli.loopback.LoopbackClient`'s two calls `frontier key` makes."""
+
+    def reachable(self) -> object | None: ...
+
+    def hand_frontier_key(self, key: str) -> object: ...
+
+
+def _frontier_key(context: Context) -> int:
+    """`pm-ai frontier key`: read the Anthropic API key at a hidden prompt, hand it to the daemon (7c).
+
+    Never on the command line: the key is read here, without echo, and sent
+    over the authenticated loopback API to the running daemon, which checks it
+    with Anthropic (listing models, which bills nothing) and seals it under the
+    master key. Every request to Anthropic leaves from the daemon; this process
+    makes none. No daemon: refused, naming `pm-ai daemon run`, before the key
+    is asked for. A refused key, or Anthropic not answering, seals nothing, and
+    a key already held stays.
+    """
+    if not _stdin_is_terminal():
+        raise Refusal(
+            "`pm-ai frontier key` reads the key at a hidden prompt, so it needs a "
+            "terminal. stdin is not a TTY here, and a key typed into a pipe or "
+            "given on a command line would be left in history. Nothing was asked "
+            "and nothing was sealed. Run it from an interactive shell."
+        )
+    hand = context.frontier_key
+    if hand is None:
+        raise Refusal(
+            "only the running daemon checks and seals the key, and none is reachable "
+            "from here; start one with `pm-ai daemon run` and run "
+            "`pm-ai frontier key` again. Nothing was asked."
+        )
+    unreachable = hand.reachable()
+    if unreachable is not None:
+        raise Refusal(
+            f"{getattr(unreachable, 'sentence', 'the daemon could not be reached')} "
+            f"The key is handed to the running daemon (`pm-ai daemon run`), so it "
+            f"was not asked for."
+        )
+    key = _hidden("Anthropic API key (not shown as you type): ")
+    if not key:
+        raise Refusal("no key was typed, so nothing was sealed.")
+    with _interruptible():
+        answer = hand.hand_frontier_key(key)
+    output = getattr(answer, "output", None)
+    code = getattr(answer, "code", None)
+    if isinstance(output, str) and isinstance(code, int):
+        _echo(output, end="", file=sys.stdout if code == EXIT_OK else sys.stderr)
+        return code
+    raise Refusal(
+        f"{getattr(answer, 'sentence', 'the daemon gave no answer this client knows')} "
+        f"Whether the key was sealed is not known; `pm-ai doctor` says."
+    )
 
 
 # ── `pm-ai member` (story 7e) ────────────────────────────────────────────────
@@ -4153,6 +4214,8 @@ TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
         ("connector", "sign-in"),
         ("connector", "categories"),
         ("key", "enrol"),
+        # Story 7c: the key is read at a hidden prompt in the client's terminal.
+        ("frontier", "key"),
         ("logs",),
         # Story 7e: replacing a label's member is confirmed at the terminal.
         ("member", "name"),
@@ -4225,6 +4288,19 @@ TABLE: Mapping[str, Command] = {
                 "mint the master key and store it in the keychain",
                 _key_enrol,
                 target=_application,
+            ),
+        },
+    ),
+    # `7c`: the Anthropic API key, handed to the running daemon and sealed in
+    # the encrypted credential file — not a keychain item, so not under `key`.
+    "frontier": Command(
+        "the Anthropic API key `transcript summarize --by claude` uses",
+        leaves={
+            "key": Command(
+                "type the Anthropic API key at a hidden prompt; the running daemon "
+                "checks it with Anthropic and seals it in config.json",
+                _frontier_key,
+                composes=False,
             ),
         },
     ),
@@ -4305,8 +4381,9 @@ TABLE: Mapping[str, Command] = {
             # `7b`: a meeting's summary, decisions and action items, made by the
             # local model in the daemon.
             "summarize": Command(
-                "ask the daemon's local model for a meeting's summary, decisions "
-                "and action items; the daemon must be running",
+                "ask the daemon's local model (or, with --by claude, Claude) for a "
+                "meeting's summary, decisions and action items; the daemon must be "
+                "running",
                 _transcript_summarize,
                 options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, BY_OPTION),
                 requires=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
@@ -4656,6 +4733,7 @@ def dispatch(
     transcript_drop: TranscriptDrop | None = None,
     transcript_summarize: TranscriptSummarize | None = None,
     members: Members | None = None,
+    frontier_key: FrontierKeyHand | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -4690,6 +4768,7 @@ def dispatch(
             transcript_drop=transcript_drop,
             transcript_summarize=transcript_summarize,
             members=members,
+            frontier_key=frontier_key,
             serve=serve,
             unavailable=unavailable,
             undecided=undecided,
@@ -4722,6 +4801,7 @@ def _dispatch(
     transcript_drop: TranscriptDrop | None,
     transcript_summarize: TranscriptSummarize | None,
     members: Members | None,
+    frontier_key: FrontierKeyHand | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
     undecided: str | None,
@@ -4749,6 +4829,7 @@ def _dispatch(
         transcript_drop=transcript_drop,
         transcript_summarize=transcript_summarize,
         members=members,
+        frontier_key=frontier_key,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,

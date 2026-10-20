@@ -82,12 +82,16 @@ def test_the_model_pool_starts_with_the_io_pool_and_stops_before_the_writer_drai
     real_shutdown = concurrency.ModelPool.shutdown
     real_stop_writer = daemon_module._stop_writer  # noqa: SLF001
 
+    # Story 7c: the frontier pool is a second pool of one, named apart.
+    def which(pool) -> str:
+        return "frontier pool" if pool._thread.name.startswith("pm-ai-frontier") else "model pool"  # noqa: SLF001
+
     def start(self):
-        order.append("model pool started")
+        order.append(f"{which(self)} started")
         real_start(self)
 
     def shutdown(self):
-        order.append("model pool shutdown")
+        order.append(f"{which(self)} shutdown")
         real_shutdown(self)
 
     def stop_writer(requests):
@@ -107,11 +111,14 @@ def test_the_model_pool_starts_with_the_io_pool_and_stops_before_the_writer_drai
     assert isinstance(daemon.model_pool, concurrency.ModelPool)
     assert order == [
         "model pool started",
+        "frontier pool started",
         "model pool shutdown",
         "model closed",  # idle at the stop, and closed all the same (P10)
+        "frontier pool shutdown",
         "writer drains",
     ]
     assert daemon.model_pool.stopping
+    assert daemon.frontier_pool is not None and daemon.frontier_pool.stopping
 
 
 _WITHOUT_HTTPX = """

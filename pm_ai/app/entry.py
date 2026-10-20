@@ -102,6 +102,7 @@ from pm_ai.app.wiring import (
 )
 from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import Config, ConfigRefused, load_config, read_daemon_port
+from pm_ai.core.frontier_key import FRONTIER_KEY_PROBE, frontier_key_probe
 from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
 from pm_ai.app.members import MemberDesk
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
@@ -162,7 +163,6 @@ from pm_ai.storage.service import (
 )
 from pm_ai.surfaces.cli.dispatch import (
     EXIT_REFUSAL,
-    summarize_refusal,
     EXIT_UNEXPECTED,
     Answered,
     dispatch,
@@ -261,6 +261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 diagnose=lambda: Report(()),
                 probe_connectors=None,
                 goal_reader=GoalReader(application_storage(keychain)),
+                # Story 7c: `frontier key` composes nothing either; its key goes
+                # to the running daemon over the loopback API, never anywhere else.
+                frontier_key=_loopback(),
             )
         composed = _compose(keychain, parsed.target)
         daemon, failure = composed.daemon, composed.failure
@@ -393,14 +396,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _through_the_daemon(arguments: Sequence[str], options: Mapping[str, str]) -> int:
     """Send a daemon-only command's line to the running daemon and show its result (7b).
 
-    Refused before anything is sent for what the command refuses by name
-    (`--by claude`); with no daemon answering, refused naming `pm-ai daemon
-    run`. An acknowledged job is followed until its result arrives.
+    With no daemon answering, refused naming `pm-ai daemon run` — `--by claude`
+    included (story 7c): no frontier request ever leaves from this process. An
+    acknowledged job is followed until its result arrives.
     """
-    refused = summarize_refusal(options)
-    if refused is not None:
-        print(f"pm-ai: {refused}", file=sys.stderr)
-        return EXIT_REFUSAL
     client = _loopback()
     try:
         outcome = client.send(shlex.join(arguments))
@@ -1426,6 +1425,9 @@ def _diagnose(
     # `7a`: whether the named local model is pulled and runs here — the
     # adapter's own bounded presence check, reached through wiring.
     probes = (*probes, _local_model_probe(composed))
+    # `7c`: whether an Anthropic API key is held — read from the sealed store,
+    # contacting nothing.
+    probes = (*probes, _frontier_key_line(keychain, composed))
     # `7b`: under the local model line, the meetings whose summary is waiting,
     # failed or timing out — no silent backlog.
     summaries = _summaries_probe(composed)
@@ -1517,6 +1519,27 @@ def _enrolled_ids(registry: ArtifactState) -> tuple[str, ...]:
         return tuple(parse_registry(registry.raw))
     except Exception:  # noqa: BLE001 — the registry line reports it
         return ()
+
+
+def _frontier_key_line(keychain: KeychainPort, composed: _Composition) -> Probe:
+    """The `frontier key` line: held, or `ABSENT` naming `pm-ai frontier key` (7c).
+
+    Read from the sealed credential store through the composed daemon's store,
+    or the application scope's alone when none was composed. Contacts nothing.
+    """
+    try:
+        storage = (
+            composed.daemon.storage
+            if composed.daemon is not None
+            else application_storage(keychain)
+        )
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        return Probe(
+            FRONTIER_KEY_PROBE,
+            Health.WARNING,
+            f"the sealed credential store could not be opened ({type(unreadable).__name__}).",
+        )
+    return frontier_key_probe(storage)
 
 
 def _local_model_probe(composed: _Composition) -> Probe:

@@ -163,8 +163,12 @@ def test_model_port_complete_is_the_only_callable_that_accepts_cleaned_text():
         for name, function in _qualified(file.tree)
         if _accepts_sanitized(function)
     )
+    # Story 7c widened this by name: the router's `complete` and the frontier
+    # adapter's take the meeting's cleaned fragments for `--by claude`.
     assert acceptors == [
+        "models/frontier/anthropic.py::AnthropicFrontier.complete",
         "models/local/ollama.py::OllamaModel.complete",
+        "models/router.py::ModelRouter.complete",
         "ports/__init__.py::ModelPort.complete",
     ], acceptors
 
