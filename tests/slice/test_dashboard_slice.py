@@ -2855,3 +2855,35 @@ def test_7d_no_gitlab_record_also_withholds_linked_items(tmp_path):
     assert "since no GitLab record is recorded for this project" in page
     # The personal page shows it as said.
     assert "maybe secret task" in _page(built)["Time-Critical Activities"]
+
+
+def test_7d_unreadable_links_withhold_every_item_on_the_project_page(tmp_path, monkeypatch):
+    """Matrix "Links unknown" (Andrei's fail closed, 2026-10-20): `7e`'s ledger cannot
+    be read, so which items are on a confidential issue cannot be told; every item's
+    text is withheld on the project page, owner and due date kept, and the page says
+    why. The personal page is unaffected."""
+    built = daemon(tmp_path)
+    _alpha_work(built, _issue(7, _ANA))
+    _summarized(
+        built, "mtg_a", scope=ALPHA,
+        items=(SummaryActionItem("maybe secret task", "Ana", "Friday"),
+               SummaryActionItem("book the room")),
+    )
+
+    def unreadable(*, scope):
+        raise PermissionError(13, "Permission denied", "member_updates.md")
+
+    monkeypatch.setattr(built.storage, "read_member_updates", unreadable)
+    page = prepare_dashboard(built, scope=ALPHA, now=NOW).decode("utf-8")
+    assert "maybe secret task" not in page and "book the room" not in page
+    body = sections(page)["Time-Critical Activities"]
+    assert "  - Ana: an action item on a confidential issue (Friday)" in body
+    assert "  - unassigned: an action item on a confidential issue" in body
+    assert (
+        "The meeting updates' links to issues could not be read, so which action items "
+        "are on a confidential issue cannot be told, and the text of every action item "
+        "here is withheld."
+    ) in body
+    personal = _page(built)["Time-Critical Activities"]
+    assert "  - Ana: maybe secret task (Friday)" in personal
+    assert "  - unassigned: book the room" in personal

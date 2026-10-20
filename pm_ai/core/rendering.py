@@ -850,6 +850,12 @@ def _digest_block(
                     f"the text of every action item linked to an issue is withheld"
                 )
             )
+        if digests.links_unread:
+            notes.append(
+                "The meeting updates' links to issues could not be read, so which "
+                "action items are on a confidential issue cannot be told, and the text "
+                "of every action item here is withheld."
+            )
     tail = "".join(f"\n\n{note}" for note in notes)
     if not digests.shown:
         # An unreadable scope is stated, never folded into "no summaries".

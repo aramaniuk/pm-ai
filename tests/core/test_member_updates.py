@@ -766,3 +766,10 @@ def test_issue_notes_fail_closed_when_the_record_cannot_be_read():
     assert notes.confidentiality_unknown == "the project's GitLab record could not be read"
     readable = notes_for(parse_ledger(text), work(issue(41, ANA), issue(42, ANA)))
     assert readable.confidential == frozenset() and readable.confidentiality_unknown is None
+
+
+def test_issue_notes_mark_the_links_unread_when_the_ledger_cannot_be_read():
+    """Fail closed (Andrei, 2026-10-20): no ledger, no links, so every item is withheld."""
+    notes = notes_for(PermissionError("member_updates.md"), work(issue(41, ANA)))
+    assert notes.links_unread is True
+    assert notes_for(parse_ledger(None), work(issue(41, ANA))).links_unread is False

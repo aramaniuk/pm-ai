@@ -185,7 +185,9 @@ class IssueNotes:
     confidential issue than Team Activity does. When the project's GitLab
     record could not be read, which issues are confidential cannot be told, so
     `confidential` holds every action item linked to an issue (fail closed,
-    Andrei, 2026-10-20) and `confidentiality_unknown` says why.
+    Andrei, 2026-10-20) and `confidentiality_unknown` says why. When `7e`'s
+    ledger itself could not be read, which items are linked to an issue cannot
+    be told either, so `links_unread` withholds every action item's text.
     """
 
     rows: Mapping[int, tuple[str, ...]] = field(
@@ -197,6 +199,7 @@ class IssueNotes:
     )
     confidential: frozenset[str] = frozenset()
     confidentiality_unknown: str | None = None
+    links_unread: bool = False
 
 
 NO_ISSUE_NOTES = IssueNotes()

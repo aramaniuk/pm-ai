@@ -1090,7 +1090,9 @@ def issue_notes_for(
         closing.append(
             _sentence(f"The meeting updates could not be read: {_reason(ledger)}")
         )
-        return IssueNotes(closing=tuple(closing))
+        # Story 7d (Andrei, 2026-10-20, fail closed): with no links to read,
+        # which items are on a confidential issue cannot be told.
+        return IssueNotes(closing=tuple(closing), links_unread=True)
     record = _record(work)
     issues = {issue.iid: issue for issue in record.issues} if record is not None else {}
     # Story 7d (Andrei, 2026-10-20): every action item linked to a confidential

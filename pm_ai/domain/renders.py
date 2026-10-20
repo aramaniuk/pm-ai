@@ -261,6 +261,8 @@ class ProjectMeetingDigests:
     `confidentiality_unknown` is why the project's GitLab record could not
     tell which issues are confidential, when it could not: every item linked
     to an issue then has its text withheld (Andrei, 2026-10-20).
+    `links_unread`: `7e`'s ledger could not be read, so which items are linked
+    to an issue cannot be told, and every item's text was withheld.
     """
 
     scope: DataScope
@@ -269,6 +271,7 @@ class ProjectMeetingDigests:
     unread: tuple[ScopeUnreadable, ...] = ()
     aliases_unread: str | None = None
     confidentiality_unknown: str | None = None
+    links_unread: bool = False
 
     def __post_init__(self) -> None:
         if self.scope.kind is not ScopeKind.PROJECT:

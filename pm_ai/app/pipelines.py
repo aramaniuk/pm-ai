@@ -1978,6 +1978,7 @@ def _meeting_digest(
     owner_of: OwnerOf,
     shown_elsewhere: Mapping[str, tuple[int, ...]],
     confidential: frozenset[str] = frozenset(),
+    withhold_all: bool = False,
 ) -> MeetingDigest | DigestUnreadable:
     """One row's meeting: its record read by id, its open items, its maker.
 
@@ -2014,7 +2015,8 @@ def _meeting_digest(
             payload = proposal.payload if isinstance(proposal.payload, Mapping) else {}
             # Andrei, 2026-10-20: an item on a confidential issue never shows
             # its text on a project page; the owner and due date stay.
-            hidden_text = proposal.proposal_id in confidential
+            # With `7e`'s links unread, every item's (fail closed).
+            hidden_text = withhold_all or proposal.proposal_id in confidential
             items.append(
                 DigestItem(
                     what="" if hidden_text else _payload_text(payload, "what") or proposal.summary,
@@ -2057,6 +2059,7 @@ def _digests_over(
     owner_of: OwnerOf,
     shown_elsewhere: Mapping[str, tuple[int, ...]],
     confidential: frozenset[str] = frozenset(),
+    withhold_all: bool = False,
 ) -> tuple[tuple[MeetingDigest | DigestUnreadable, ...], int]:
     """The `MAX_MEETING_DIGESTS` most recently recorded rows read, and how many more."""
     ordered = sorted(rows, key=lambda r: (-r.at.timestamp(), str(r.scope), r.meeting_id))
@@ -2068,6 +2071,7 @@ def _digests_over(
             owner_of=owner_of,
             shown_elsewhere=shown_elsewhere,
             confidential=confidential,
+            withhold_all=withhold_all,
         )
         for row in ordered[:MAX_MEETING_DIGESTS]
     )
@@ -2160,6 +2164,10 @@ def project_meeting_digests(
         owner_of=member,
         shown_elsewhere=issue_notes.items,
         confidential=issue_notes.confidential,
+        withhold_all=issue_notes.links_unread,
+    )
+    withheld = any(
+        isinstance(d, MeetingDigest) and any(i.confidential for i in d.items) for d in shown
     )
     return ProjectMeetingDigests(
         scope=scope,
@@ -2172,10 +2180,8 @@ def project_meeting_digests(
             isinstance(d, MeetingDigest) and d.items for d in shown
         ) else None,
         # Stated when it withheld something: fail closed (Andrei, 2026-10-20).
-        confidentiality_unknown=issue_notes.confidentiality_unknown if any(
-            isinstance(d, MeetingDigest) and any(i.confidential for i in d.items)
-            for d in shown
-        ) else None,
+        confidentiality_unknown=issue_notes.confidentiality_unknown if withheld else None,
+        links_unread=issue_notes.links_unread and withheld,
     )
 
 
