@@ -30,9 +30,7 @@ context:
 - **Ingestion and the attempt cap are unchanged.** Storing a part resets the meeting's ingestion attempts, as `33g` does. Ingestion reads only `stored` rows, so the kept parts are ingested in part order into the one meeting.
 - **Summaries are unchanged.** `7b` offers the meeting's summary once its parts are ingested and summarises the stored parts in order; when a part arrives later (the refused one succeeding on a later run), `7b`'s existing re-open of an automatic summary applies, and `7e`'s member lines follow the summary job as they do today. The summary says nothing about a refused part (see Ask First).
 
-**Ask First:**
-1. **The parts after the refused one.** As written above (recommended, and the reading of Andrei's decision): the refused part keeps no row, and the parts after it are stored only if the refused part later downloads while the meeting is still asked; a part deleted from Teams therefore costs every part after it. The alternative: the refused part gets a row in a new state, `refused`, with its number, its instants and its reason; it is never downloaded again, still counts in `33g`'s overlap and earlier-than-stored checks, and the parts after it are downloaded in the same run and numbered after it, leaving a gap in the stored part numbers. That keeps more of the meeting but adds a part state that ingestion, `7b`'s whole-meeting reader and `doctor` must each skip or show (`doctor` reads no part state today).
-2. **Whether a summary says a part is missing.** As written (recommended): no. The meeting's row and the run's refusals name the refused part, and the summary covers the stored parts. The alternative: `7b`'s summary, and `7d`'s dashboard line, say that part *n* could not be read. That needs a stored fact to read from — the `refused` row of question 1's alternative — so it is only available with that alternative.
+**Ask First:** Nothing. Both questions were answered by Andrei on 2026-10-20, each as written: the refused part keeps no row, and the parts after it are stored only if it later downloads while the meeting is still asked; a summary does not say a part is missing.
 
 **Never:** No change to `33g`'s five decisions before the download, to the placement window, the asked-again rule, the naming rule, or `7b`'s re-open. No part stored out of time order. No retry of a refused part within one run. No new permission.
 
@@ -91,6 +89,7 @@ Verified against `2d8a559` (origin/main) on 2026-10-20.
 ## Spec Change Log
 
 - **2026-10-20, created.** Carries Andrei's decision of 2026-10-19 (`33g` review): a new part refused for good no longer discards the parts downloaded before it; they are returned in time order with the refusal named. Settled here: only refusals waiting cannot clear keep earlier parts; parts after the refused one are not downloaded; the refused part keeps no row; `33g`'s asked-again rule and attempt reset and `7b`'s re-open apply unchanged. Two questions for Andrei in Ask First. Depends on no spine amendment.
+- **2026-10-20, Ask First answered (Andrei):** (1) the refused part keeps no row; later parts wait for it while the meeting is still asked, so a part deleted from Teams costs the parts after it — accepted; (2) a summary does not say a part is missing. Spec ready for its build checkpoint.
 
 ## Design Notes
 
