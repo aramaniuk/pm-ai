@@ -1555,3 +1555,24 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/7b-a-transcript-yields-summary-decisions-and-actions.md`
   summary: **DECIDED 2026-10-20 (Andrei): requests go first** — a requested summary is queued ahead of automatic ones. Was: Needs Andrei's decision. The `DAEMON_BOUNDS` entry for `transcript summarize` is 600 seconds, which is the 300-second call plus its one retry. It does not count time queued: the model pool has one slot, and up to three automatic jobs per harvest can be ahead of a request, each allowed a call and a retry. So a request can pass its stated bound before its first call starts.
   evidence: Blind-hunter review. Options: keep 600 s and say in the help that queued time is not counted; let a request go ahead of queued automatic jobs; or make the bound cover the queue (up to 3 × 600 s more).
+
+## Surfaced by the story-7e review (2026-10-20)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md`
+  summary: **Needs Andrei's decision.** Completing `member name`'s `<member>` reads `8t`'s member rows from `operational.db`, on a read-only connection and never through `StorageService`. `4u`'s readers were declared never to touch that store.
+  evidence: The spec asks for the project's member usernames and handles as the value source, and they are only in `operational.db`. Options: keep the read-only read (the `Readers` docstring now says so); offer only the handles already in `aliases.md`; or leave `<member>` as free text.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md`
+  summary: **Needs Andrei's decision.** A requested `transcript summarize` is told its result when `7b`'s writes end, before the title match and before the row is settled, as the spec says. If the lease is then lost or the settle fails, the PM has already been told the summary was made, and nothing reports the difference.
+  evidence: Blind-hunter and verification-gap reviews. `SummaryJobs.start` tells `on_done` once. Options: accept it, since the summary's own writes are done by then; or add a second line to the job's record when the settle does not happen.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md`
+  summary: **Needs Andrei's decision.** A line linked by a number said in the meeting is certain and cannot be rejected. `member link --reject` is only for a model-matched line. A misheard number, or one that meant another project's issue, stays on the page until a re-summary changes it.
+  evidence: Blind-hunter review. The ledger grammar would allow a rejection; the command refuses it, because the spec gives `--confirm|--reject` for model-matched links. Options: keep it; or allow `--reject` on any line.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md`
+  summary: **Needs Andrei's decision.** The title-match prompt lists every open, non-confidential issue, with no cap. A project with many hundreds of open issues may not fit the local model's window, so the call would fail three times and the items would be given up, with `doctor` naming the meeting.
+  evidence: Blind-hunter review. No measurement was made: no model runs in pytest. Options: keep it; cap the list (for example, the most recently updated N issues); or measure on a real project first.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md`
+  summary: **Needs Andrei's decision.** Ollama not answering (no local model, the server down, the model not pulled) is not counted as one of the 3 title-match attempts; a failed call, a timeout or an unreadable answer is. The spec lists "Ollama not answering" among the failures that the 3 attempts cover.
+  evidence: The build followed `7b`, where "waiting" is not an attempt, so a stopped Ollama never gives up a meeting's items. Options: keep it; or count it, as the spec's wording reads.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md`
+  summary: **Needs Andrei's decision.** `member link` requires `--scope project:<id>`, which the spec's usage line (`pm-ai member link <update id> --confirm|--reject`) does not show.
+  evidence: An update id does not say which project's ledger it is in, and `member_updates.md` is per project. Options: keep `--scope`; or put the project in the update id.
