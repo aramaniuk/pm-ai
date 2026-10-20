@@ -87,7 +87,8 @@ class DigestItem:
     on the personal page; on a project page the member it resolves to by `7e`'s
     read-time rule, or `None` — shown as unassigned — when it resolves to none.
     `confidential`, on a project page only, is an item linked to a
-    confidential issue (Andrei, 2026-10-20): its text is never shown, and
+    confidential issue — or to any issue, when the project's GitLab record
+    could not be read (Andrei, 2026-10-20): its text is never shown, and
     `what` is empty; the meeting, owner and due date stay.
     """
 
@@ -257,6 +258,9 @@ class ProjectMeetingDigests:
     project page by a wrong branch: it fails here, at construction.
     `aliases_unread` is why the saved alias table could not be read, when it
     could not: owners were then matched by exact name only.
+    `confidentiality_unknown` is why the project's GitLab record could not
+    tell which issues are confidential, when it could not: every item linked
+    to an issue then has its text withheld (Andrei, 2026-10-20).
     """
 
     scope: DataScope
@@ -264,6 +268,7 @@ class ProjectMeetingDigests:
     earlier: int = 0
     unread: tuple[ScopeUnreadable, ...] = ()
     aliases_unread: str | None = None
+    confidentiality_unknown: str | None = None
 
     def __post_init__(self) -> None:
         if self.scope.kind is not ScopeKind.PROJECT:

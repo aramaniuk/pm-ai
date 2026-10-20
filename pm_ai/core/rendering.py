@@ -832,15 +832,24 @@ def _digest_block(
                     f"this window could not be checked: {reason}"
                 )
             )
-    elif digests.aliases_unread is not None:
-        reason = _bounded(escape(digests.aliases_unread)) or "the read gave no reason"
-        notes.append(
-            _sentence(
-                f"The saved alias table could not be read, so action item owners were "
-                f"matched by exact display name or username only, and the others show "
-                f"as unassigned: {reason}"
+    else:
+        if digests.aliases_unread is not None:
+            reason = _bounded(escape(digests.aliases_unread)) or "the read gave no reason"
+            notes.append(
+                _sentence(
+                    f"The saved alias table could not be read, so action item owners "
+                    f"were matched by exact display name or username only, and the "
+                    f"others show as unassigned: {reason}"
+                )
             )
-        )
+        if digests.confidentiality_unknown is not None:
+            why = _clause(_bounded(escape(digests.confidentiality_unknown)))
+            notes.append(
+                _sentence(
+                    f"Whether an issue is confidential cannot be told, since {why}, so "
+                    f"the text of every action item linked to an issue is withheld"
+                )
+            )
     tail = "".join(f"\n\n{note}" for note in notes)
     if not digests.shown:
         # An unreadable scope is stated, never folded into "no summaries".

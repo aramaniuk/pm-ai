@@ -182,7 +182,10 @@ class IssueNotes:
     `confidential` holds the item ids of every action item linked to a
     confidential issue (Andrei, 2026-10-20), whether or not a row here shows
     it, so a digest never shows its text: the page shows no more about a
-    confidential issue than Team Activity does.
+    confidential issue than Team Activity does. When the project's GitLab
+    record could not be read, which issues are confidential cannot be told, so
+    `confidential` holds every action item linked to an issue (fail closed,
+    Andrei, 2026-10-20) and `confidentiality_unknown` says why.
     """
 
     rows: Mapping[int, tuple[str, ...]] = field(
@@ -193,6 +196,7 @@ class IssueNotes:
         default_factory=lambda: MappingProxyType({})
     )
     confidential: frozenset[str] = frozenset()
+    confidentiality_unknown: str | None = None
 
 
 NO_ISSUE_NOTES = IssueNotes()

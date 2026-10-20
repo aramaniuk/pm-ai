@@ -1095,14 +1095,26 @@ def issue_notes_for(
     issues = {issue.iid: issue for issue in record.issues} if record is not None else {}
     # Story 7d (Andrei, 2026-10-20): every action item linked to a confidential
     # issue, at any age, so the meeting digests never show its text either.
-    confidential = frozenset(
-        line.item
+    # With no record to tell by, every item linked to an issue: fail closed.
+    linked = [
+        line
         for line in ledger.live.values()
-        if line.kind is ItemKind.ACTION
-        and ledger.shown(line)
-        and (issue := issues.get(line.issue)) is not None
-        and issue.confidential
-    )
+        if line.kind is ItemKind.ACTION and ledger.shown(line)
+    ]
+    unknown_why: str | None = None
+    if record is None:
+        unknown_why = (
+            "the project's GitLab record could not be read"
+            if isinstance(work, HarvestFailure)
+            else "no GitLab record is recorded for this project"
+        )
+        confidential = frozenset(line.item for line in linked)
+    else:
+        confidential = frozenset(
+            line.item
+            for line in linked
+            if (issue := issues.get(line.issue)) is not None and issue.confidential
+        )
     floor = now - UPDATE_WINDOW
     updates = sorted(
         (
@@ -1113,7 +1125,11 @@ def issue_notes_for(
         key=_order,
     )
     if not updates:
-        return IssueNotes(closing=tuple(closing), confidential=confidential)
+        return IssueNotes(
+            closing=tuple(closing),
+            confidential=confidential,
+            confidentiality_unknown=unknown_why,
+        )
     people = people_of(work)
     grouped: dict[int, list[UpdateLine]] = {}
     unmatched: set[str] = set()
@@ -1209,6 +1225,7 @@ def issue_notes_for(
         closing=tuple(closing),
         items=items,
         confidential=confidential,
+        confidentiality_unknown=unknown_why,
     )
 
 

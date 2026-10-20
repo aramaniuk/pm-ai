@@ -2808,3 +2808,50 @@ def test_7d_open_items_of_a_meeting_whose_id_prefixes_another_stay_apart(tmp_pat
         found = built.storage.open_action_items(action_item_prefix(PERSONAL, meeting_id), at=NOW)
         assert [p.summary for p in found.items] == [expected]
         assert found.unreadable == 0
+
+
+def test_7d_an_unreadable_gitlab_record_withholds_every_linked_item(tmp_path, monkeypatch):
+    """Matrix "Confidentiality unknown" (Andrei, 2026-10-20): the project's GitLab
+    record cannot be read, so whether #142 is confidential cannot be told; every
+    item linked to an issue has its text withheld, and the page says why. An item
+    linked to no issue is unaffected."""
+    built = daemon(tmp_path)
+    start = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
+    linked = SummaryActionItem("maybe secret task", "Ana", "Friday")
+    free = SummaryActionItem("book the room", "Ana")
+    _summarized(built, "mtg_a", scope=ALPHA, start=start, items=(linked, free))
+    built.storage.append_member_updates(
+        (_link(ALPHA, "mtg_a", linked, 142, start=start),), scope=ALPHA, after=0
+    )
+
+    def unreadable(scope):
+        raise PermissionError(13, "Permission denied", "operational.db")
+
+    monkeypatch.setattr(built.storage, "project_work", unreadable)
+    page = prepare_dashboard(built, scope=ALPHA, now=NOW).decode("utf-8")
+    assert "maybe secret task" not in page
+    body = sections(page)["Time-Critical Activities"]
+    # No record, so no members to resolve "Ana" to: unassigned, as 7e's rule says.
+    assert "  - unassigned: an action item on a confidential issue (Friday)" in body
+    assert "  - unassigned: book the room" in body
+    assert (
+        "Whether an issue is confidential cannot be told, since the project's GitLab "
+        "record could not be read, so the text of every action item linked to an issue "
+        "is withheld."
+    ) in body
+
+
+def test_7d_no_gitlab_record_also_withholds_linked_items(tmp_path):
+    """No record harvested yet: confidentiality cannot be told either — fail closed."""
+    built = daemon(tmp_path)
+    start = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
+    linked = SummaryActionItem("maybe secret task", "Ana")
+    _summarized(built, "mtg_a", scope=ALPHA, start=start, items=(linked,))
+    built.storage.append_member_updates(
+        (_link(ALPHA, "mtg_a", linked, 142, start=start),), scope=ALPHA, after=0
+    )
+    page = prepare_dashboard(built, scope=ALPHA, now=NOW).decode("utf-8")
+    assert "maybe secret task" not in page
+    assert "since no GitLab record is recorded for this project" in page
+    # The personal page shows it as said.
+    assert "maybe secret task" in _page(built)["Time-Critical Activities"]

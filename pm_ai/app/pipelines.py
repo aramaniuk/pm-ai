@@ -2171,6 +2171,11 @@ def project_meeting_digests(
         aliases_unread=aliases_unread if any(
             isinstance(d, MeetingDigest) and d.items for d in shown
         ) else None,
+        # Stated when it withheld something: fail closed (Andrei, 2026-10-20).
+        confidentiality_unknown=issue_notes.confidentiality_unknown if any(
+            isinstance(d, MeetingDigest) and any(i.confidential for i in d.items)
+            for d in shown
+        ) else None,
     )
 
 

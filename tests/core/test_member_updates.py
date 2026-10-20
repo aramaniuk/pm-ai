@@ -751,3 +751,18 @@ def test_issue_notes_name_every_item_on_a_confidential_issue_at_any_age():
     # Only the old item: nothing in the window, and still named.
     only_old = notes_for(parse_ledger(old), work(secret))
     assert only_old.rows == {} and only_old.confidential == frozenset({"prp_old"})
+
+
+def test_issue_notes_fail_closed_when_the_record_cannot_be_read():
+    """Andrei, 2026-10-20: with no readable record, every item linked to an issue
+    counts as confidential, and why is carried."""
+    text = write(
+        Link(action("prp_a", "fix #42", "Ana Ivanova"), 42, LinkKind.NUMBER),
+        Link(action("prp_b", "ship #41", "Ana Ivanova"), 41, LinkKind.NUMBER),
+    )
+    failed = HarvestFailure(reason="the record is unreadable", retryable=False)
+    notes = notes_for(parse_ledger(text), failed)
+    assert notes.confidential == frozenset({"prp_a", "prp_b"})
+    assert notes.confidentiality_unknown == "the project's GitLab record could not be read"
+    readable = notes_for(parse_ledger(text), work(issue(41, ANA), issue(42, ANA)))
+    assert readable.confidential == frozenset() and readable.confidentiality_unknown is None
