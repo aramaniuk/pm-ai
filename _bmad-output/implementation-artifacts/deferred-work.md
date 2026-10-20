@@ -1576,3 +1576,21 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/7e-transcripts-update-member-priorities.md`
   summary: **DECIDED 2026-10-20 (Andrei): keep `--scope`**; the spec's usage line now shows it (cosmetic). Was: Needs Andrei's decision. `member link` requires `--scope project:<id>`, which the spec's usage line (`pm-ai member link <update id> --confirm|--reject`) does not show.
   evidence: An update id does not say which project's ledger it is in, and `member_updates.md` is per project. Options: keep `--scope`; or put the project in the update id.
+
+## Surfaced by the story-7c review (2026-10-20)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7c-a-frontier-summary-on-request.md`
+  summary: **Needs Andrei's decision.** `doctor`'s `frontier key` line is `ABSENT` when no key is held, as the frozen matrix says, and `ABSENT` is not healthy, so `pm-ai doctor` exits 4 on every machine where no Anthropic key was entered. `setup` does not show the line, so on a fresh machine `setup` reports healthy and `doctor` does not.
+  evidence: All three review layers. The key is optional, and the 2026-10-19 ruling for the optional local model was the opposite: unset is `OK`, saying how to set one up, and does not affect the exit code (`7a`). Two first-run tests now hold a test key so their `doctor` stays healthy. Options: keep `ABSENT` (the matrix as written); or `OK` saying how to enter a key, as `7a` does, which amends the frozen matrix row.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7c-a-frontier-summary-on-request.md`
+  summary: **Needs Andrei's decision / needs the key.** Whether the API accepts an empty tool set through the Tool Runner (`max_iterations=1`, no tools). If it refuses, the Ask First question stands: call `messages.create` without tools, which AD-16's letter does not name.
+  evidence: Assumed in the spec; no request can be made without a key. Every test uses a mock transport. The manual check in the story's Verification section settles it.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7c-a-frontier-summary-on-request.md`
+  summary: **Needs Andrei's decision / needs the key.** Whether `output_config.format` accepts `7b`'s schema as sent, with `minLength`, `maxLength` and `maxItems`. If the API refuses those keywords, the schema sent must drop them and `7b`'s validator alone enforces them.
+  evidence: Assumed in the spec; the API's structured-output schema subset is not something the SDK checks locally.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7c-a-frontier-summary-on-request.md`
+  summary: **Needs the key.** Two smaller assumptions the first real call settles: that listing models (the key check) bills nothing, and that the answer's `model` field is exactly `claude-sonnet-5-5`. The model check refuses any other value by name, after the call is paid for.
+  evidence: Anthropic's models overview (read 2026-10-20) says every model ID is a pinned snapshot, the dateless ones included, so the exact match is expected to hold. If it does not, every `--by claude` call is refused and billed, and the manual check shows it at once.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7c-a-frontier-summary-on-request.md`
+  summary: `7b`'s local summary call and `7e`'s title-match call go to `Daemon.model` directly, not through `Daemon.router`, so the router's `flow` check does not run on them. AD-15 describes one router for every model call.
+  evidence: Blind-hunter review. The spec kept `Daemon.model` the local model and left `offer_summaries` unchanged on purpose; both calls carry their own `flow` from the meeting's scope to itself. Moving every local call onto the router is a later slice's change.

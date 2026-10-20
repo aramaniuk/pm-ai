@@ -2,7 +2,8 @@
 title: 'A frontier summary of one meeting, on request and disclosed'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: 'fec0645ae3b842abb79d03b61f38b5c7d4c90b63'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -93,29 +94,29 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/task_classes.py` -- `MEETING_SUMMARY` -- a declared purpose for the one frontier call
-- [ ] `pm_ai/models/router.py` -- routes every class, checks `flow`, tiers per AD-15; writes the `sent` line before and the `completed` or `failed` line after every frontier adapter call, from the usage a refusal carries -- AD-15's one router, AD-31's every call
-- [ ] `pm_ai/models/frontier/anthropic.py`, `pm_ai/models/frontier/models.py` -- the client built explicitly, the Tool Runner call, stop reasons, model check; the dated price and window table -- AD-16, cost computed
-- [ ] `pm_ai/domain/disclosure.py`, `pm_ai/core/disclosure_ledger.py` -- call id and status on a line; totals count completed calls and name unfinished ones -- disclosed before it leaves
-- [ ] `pm_ai/app/pipelines.py` -- `request_summary`'s `by` (refused at `:3053` until this slice) reaches `summary_steps`, whose `_call` (`:2470`) is the call; the frontier path calls the router, skips `7b`'s one retry on an invalid or stopped answer, then `7b`'s writes; reports cost and month total -- one path, `7b`'s
-- [ ] `pm_ai/core/frontier_key.py` -- seal and read the key under its own top-level key of the credential file -- held where API credentials are held
-- [ ] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/surfaces/api/app.py`, `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- `--by`; `frontier key` through the daemon; setup's line; the `frontier key` probe -- the PM's controls
-- [ ] `pm_ai/app/wiring.py` -- a `Daemon.router` added; `Daemon.model` stays the local model -- one door, `7b`'s gating unchanged
-- [ ] `pm_ai/domain/meeting_summaries.py` -- `SummaryMaker` gains `frontier`; `FRONTIER_SUMMARY_REFUSED` retired -- the made-by value stored
-- [ ] `pm_ai/core/meeting_summary.py` -- the provenance line written and parsed for Claude as well as "the local model" -- the record names who made it
-- [ ] `pm_ai/app/daemon.py`, `pm_ai/app/concurrency.py` -- the frontier pool of one thread, started and shut down beside the model pool -- AD-19
-- [ ] `pm_ai/surfaces/cli/loopback.py` -- the client side of handing the key to the daemon -- `frontier key` through the daemon
-- [ ] `tests/slice/test_meeting_summary_slice.py:969` -- the test asserting `7b`'s `--by claude` refusal replaced -- the refusal is gone
-- [ ] `.importlinter` -- `httpx2` added to the forbidden lists beside `httpx` -- the frontier client's stack confined as the local one's is
-- [ ] `tests/architecture/test_domain_invariants.py`, `tests/conftest.py` -- the router tests rewritten to the real port; `EXPECTED_SKIPS` lowered by nine -- the skips become passes
-- [ ] `tests/architecture/test_transcript_path_boundary.py` -- the router's and the frontier adapter's `complete` added by name to the functions allowed to take cleaned text -- extended deliberately
-- [ ] `tests/models/test_router.py`, `tests/models/test_frontier_adapter.py`, `tests/slice/test_frontier_summary.py` -- one test per matrix row with a fake client; the environment row with the variables set -- the matrix is the contract
-- [ ] `stories/2i-disclosure-ledger-append.md`, `stories/2j-disclosure-ledger-reads.md` -- a dated Change Log line each: the line gains a call id and a status, totals count completed calls -- earlier frozen blocks amended on the record
-- [ ] `pyproject.toml` -- `httpx2==2.12.0` in the runtime extra -- imported directly, so declared
-- [ ] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- `frontier key` in `TERMINAL_BOUND` (declared in `dispatch.py`, read by `pm_ai/app/prompts.py`); `--by claude` covered by `transcript summarize`'s `DAEMON_BOUNDS` entry -- routed as AD-21 declares
-- [ ] `pm_ai/surfaces/cli/completion.py` -- `--by` already offers `local` and `claude` (`7b`, `:118`); `frontier key` takes no argument -- `4u`'s test covers every option
-- [ ] `stories/4p-setup-offers-a-connector.md` -- a dated Change Log line: a closing line after step 4 names `pm-ai frontier key` (`7c`) -- an earlier frozen block amended on the record
-- [ ] `stories/11b-the-real-transcript-path.md` -- a dated Change Log line: its only-acceptor test is widened by name to the router's and the frontier adapter's `complete` (`7c`) -- an earlier frozen block amended on the record
+- [x] `pm_ai/domain/task_classes.py` -- `MEETING_SUMMARY` -- a declared purpose for the one frontier call
+- [x] `pm_ai/models/router.py` -- routes every class, checks `flow`, tiers per AD-15; writes the `sent` line before and the `completed` or `failed` line after every frontier adapter call, from the usage a refusal carries -- AD-15's one router, AD-31's every call
+- [x] `pm_ai/models/frontier/anthropic.py`, `pm_ai/models/frontier/models.py` -- the client built explicitly, the Tool Runner call, stop reasons, model check; the dated price and window table -- AD-16, cost computed
+- [x] `pm_ai/domain/disclosure.py`, `pm_ai/core/disclosure_ledger.py` -- call id and status on a line; totals count completed calls and name unfinished ones -- disclosed before it leaves
+- [x] `pm_ai/app/pipelines.py` -- `request_summary`'s `by` (refused at `:3053` until this slice) reaches `summary_steps`, whose `_call` (`:2470`) is the call; the frontier path calls the router, skips `7b`'s one retry on an invalid or stopped answer, then `7b`'s writes; reports cost and month total -- one path, `7b`'s
+- [x] `pm_ai/core/frontier_key.py` -- seal and read the key under its own top-level key of the credential file -- held where API credentials are held
+- [x] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/surfaces/api/app.py`, `pm_ai/platform/doctor.py`, `pm_ai/app/entry.py` -- `--by`; `frontier key` through the daemon; setup's line; the `frontier key` probe -- the PM's controls
+- [x] `pm_ai/app/wiring.py` -- a `Daemon.router` added; `Daemon.model` stays the local model -- one door, `7b`'s gating unchanged
+- [x] `pm_ai/domain/meeting_summaries.py` -- `SummaryMaker` gains `frontier`; `FRONTIER_SUMMARY_REFUSED` retired -- the made-by value stored
+- [x] `pm_ai/core/meeting_summary.py` -- the provenance line written and parsed for Claude as well as "the local model" -- the record names who made it
+- [x] `pm_ai/app/daemon.py`, `pm_ai/app/concurrency.py` -- the frontier pool of one thread, started and shut down beside the model pool -- AD-19
+- [x] `pm_ai/surfaces/cli/loopback.py` -- the client side of handing the key to the daemon -- `frontier key` through the daemon
+- [x] `tests/slice/test_meeting_summary_slice.py:969` -- the test asserting `7b`'s `--by claude` refusal replaced -- the refusal is gone
+- [x] `.importlinter` -- `httpx2` added to the forbidden lists beside `httpx` -- the frontier client's stack confined as the local one's is
+- [x] `tests/architecture/test_domain_invariants.py`, `tests/conftest.py` -- the router tests rewritten to the real port; `EXPECTED_SKIPS` lowered by nine -- the skips become passes
+- [x] `tests/architecture/test_transcript_path_boundary.py` -- the router's and the frontier adapter's `complete` added by name to the functions allowed to take cleaned text -- extended deliberately
+- [x] `tests/models/test_router.py`, `tests/models/test_frontier_adapter.py`, `tests/slice/test_frontier_summary.py` -- one test per matrix row with a fake client; the environment row with the variables set -- the matrix is the contract
+- [x] `stories/2i-disclosure-ledger-append.md`, `stories/2j-disclosure-ledger-reads.md` -- a dated Change Log line each: the line gains a call id and a status, totals count completed calls -- earlier frozen blocks amended on the record
+- [x] `pyproject.toml` -- `httpx2==2.12.0` in the runtime extra -- imported directly, so declared
+- [x] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- `frontier key` in `TERMINAL_BOUND` (declared in `dispatch.py`, read by `pm_ai/app/prompts.py`); `--by claude` covered by `transcript summarize`'s `DAEMON_BOUNDS` entry -- routed as AD-21 declares
+- [x] `pm_ai/surfaces/cli/completion.py` -- `--by` already offers `local` and `claude` (`7b`, `:118`); `frontier key` takes no argument -- `4u`'s test covers every option
+- [x] `stories/4p-setup-offers-a-connector.md` -- a dated Change Log line: a closing line after step 4 names `pm-ai frontier key` (`7c`) -- an earlier frozen block amended on the record
+- [x] `stories/11b-the-real-transcript-path.md` -- a dated Change Log line: its only-acceptor test is widened by name to the router's and the frontier adapter's `complete` (`7c`) -- an earlier frozen block amended on the record
 
 **Acceptance Criteria:**
 - Given a held key and a fake client answering a valid shape with 1,200 input and 300 output tokens on `claude-sonnet-5-5`, when the PM asks for a frontier summary of a project meeting, then the ledger holds a `sent` line written before the request and a `completed` line with those counts and the table's cost, both naming that project as source and destination, and the record's block names Claude and no cost.
@@ -132,6 +133,9 @@ context:
 - **2026-10-16, spec sync:** prerequisite re-pointed to SPEC.md Assumptions (done in pull request #74).
 - **2026-10-19, re-verified against `main` at 811e973 (after `7a`, `7b`, `4s`–`4w`):** Code Map and task anchors moved to the current lines; `7b`'s `--by claude` refusal named as what this slice replaces; the pipeline task names `request_summary` and `summary_steps` rather than `summarize_meeting`; `TERMINAL_BOUND` is declared in `dispatch.py`, not `prompts.py`; `--by`'s completion is already `7b`'s. Frozen block unchanged.
 - **2026-10-20, readiness decisions** (engineering calls settled by the coordinating session and reported to Andrei): frozen block edited (recorded here). A `Daemon.router` is added and `Daemon.model` stays the local model; the router writes the `sent` and `completed` lines around every frontier adapter call, and refusals carry the usage the answer reported; no automatic retry on the frontier path, with a frontier-specific stop-reason refusal (not `OutputCapReached`) and two matrix rows; low-stakes: the "in chunks" wording corrected to `7b`'s one call, `frontier` as the stored made-by, the pinned environment list `ANTHROPIC_CUSTOM_HEADERS` and `ANTHROPIC_LOG`, the `disclosure_ledger.py` anchor `167-174`, no cache-token fields in `ModelAnswer`. Outside it: the ledger moved from the pipeline task to the router's; tasks added for `meeting_summaries.py`, `meeting_summary.py`, `daemon.py` with `concurrency.py`, `loopback.py`, `test_meeting_summary_slice.py:969` and `.importlinter`; what Andrei provides before the build, in Design Notes.
+- **2026-10-20, built (without a key):** where the build differs from the Tasks' wording. The side names (`ModelSide`) live in `pm_ai/domain/model_calls.py`, since the pipeline may not import the router; the pipeline asks the router which side a class is on. The frontier pool is a second `ModelPool` named `pm-ai-frontier`, one thread, started and shut down beside the model pool; a frontier step with no frontier pool wired is refused as `FrontierPoolMissing`, never run on the calling thread. The SDK variables are read only in `pm_ai/platform/environment.py` (its new `set_variables`), which wiring hands to the adapter. The `doctor` line is built in `pm_ai/app/entry.py` from `pm_ai/core/frontier_key.py`'s probe, not in `pm_ai/platform/doctor.py`. The key is sealed under the credential file's top-level key `frontier`. The key check uses the router's own frontier adapter on the frontier pool, after a local check that the key can be sealed. A requested Claude summary whose record is re-ingested becomes `failed`, still Claude's, its reason naming `--by claude`; it is never reset to a local automatic row. `uv.lock` gained the `httpx2==2.12.0` pin. The tests are `tests/models/test_router.py`, `tests/models/test_frontier_adapter.py`, `tests/models/test_frontier_review_fixes.py`, `tests/slice/test_frontier_summary.py`, `tests/slice/test_frontier_summary_review.py`, `tests/models/test_frontier_deadline.py` and `tests/surfaces/test_frontier_key_surfaces.py`, since pytest refuses two test modules with one basename.
+- **2026-10-20, Ask First (model table):** checked against Anthropic's models and pricing pages, read 2026-10-20: `claude-sonnet-5-5` $2/$10, cache hits $0.10 (0.05×); `claude-opus-5-5` $4/$20, cache hits $0.20 (0.05×); both 1M context and 128K output, the full window at standard price. They match the spine; the item is not triggered. The pages also say a dateless model id is itself the pinned snapshot, so the answer's `model` is expected to equal the id asked for. The other Ask First item (an empty tool set) needs the key (`deferred-work.md`, story-7c section).
+- **2026-10-20, review (three layers):** 18 items fixed, 0 intent or spec gaps. The main ones: one frontier call, and the key check, now end at 300 seconds in total from the send, not per network phase (the `sent` line kept, a `failed` line after it, the adapter usable for the next call); an unexpected error on the frontier call settles the row `failed` instead of leaving it waiting forever; a paid call's tokens and cost are reported even when the lease is lost; the reply's month is the `sent` line's UTC month; `breached` is unknown when the month is within $20 but has calls of unknown cost; the key check runs on the router's own adapter and the frontier pool, after a local sealability check; empty call ids and `sent` lines carrying usage are malformed; a 401 or 403 names `pm-ai frontier key`; the reply says "stored UNENCRYPTED" when encryption is off; the adapter refuses an output cap above a model's limit; a re-ingested Claude summary is never turned into a local automatic row; tests added for `build()`'s router with the SDK variables set, the loopback client, `entry`'s `frontier key`, the served endpoint, and `doctor`'s line. Needs Andrei's decision: `doctor` exits 4 with no key held, since the matrix's `ABSENT` is not healthy (`deferred-work.md`, story-7c section).
 
 ## Design Notes
 
@@ -144,6 +148,8 @@ Choices made in review (2026-10-16):
 
 Before the build, Andrei provides (2026-10-20): an Anthropic API key from a Console account with billing or credits, and an enrolled master key (the frontier key is sealed under it); optionally a spend limit set in the Console, which pm-ai never enforces. The two Ask First items stand.
 
+Built without a key (Andrei, 2026-10-20): the build starts before the key arrives. Every test uses fakes or a mock `httpx2` transport; nothing contacts `api.anthropic.com`, and no test reads or writes the real keychain or the real `~/.pm-ai` (a temporary home only). Three things only the real API can settle stay open as "Needs Andrei's decision / needs the key", and do not block the build: whether the API accepts an empty tool set through the Tool Runner; whether the model ids, prices and context windows on Anthropic's pages match the spine (the public pages may be read, no API called); whether `output_config.format` accepts `7b`'s schema with `minLength`, `maxLength` and `maxItems`. The manual steps for when the key arrives are under Verification.
+
 ## Verification
 
 **Commands:**
@@ -153,3 +159,129 @@ Before the build, Andrei provides (2026-10-20): an Anthropic API key from a Cons
 
 **Manual checks:**
 - With a real key in a throwaway home and the daemon running: `pm-ai frontier key`, then `pm-ai transcript summarize --scope personal --meeting <id> --by claude` on the authored fixture; two new lines with one call id in `~/.pm-ai/disclosure.md`, the reply's cost equal to the `completed` line's.
+
+**When the key arrives (Andrei; not yet run, 2026-10-20).** This is the one real-API check; it costs about one cent. Run each step in a fresh terminal, from the repository, with `uv` on PATH.
+1. Make a throwaway home for this shell only: `export PMAI_CHECK="$(mktemp -d)"; echo "$PMAI_CHECK"; export HOME="$PMAI_CHECK"`, then `unset ANTHROPIC_LOG ANTHROPIC_CUSTOM_HEADERS`. The macOS keychain is shared with your real home, so the master key you already enrolled is found there; setup never overwrites it.
+2. `uv run pm-ai setup`: answer as on a new machine, with `none` for the local model and no connector. Expected: step 1 says the master key is already enrolled, and the last line before the report names `pm-ai frontier key` and `pm-ai daemon run`.
+3. In a second terminal, `export HOME=<the path step 1 echoed>`, then `uv run pm-ai daemon run`. Leave it running.
+4. `uv run pm-ai frontier key`, then paste the key at the hidden prompt. Expected: `the Anthropic API key was checked with Anthropic and sealed in ~/.pm-ai/private/config.json; …`. A refused key or no network says so and seals nothing. `uv run pm-ai doctor` then shows `[     ok] frontier key`.
+5. `uv run pm-ai transcript drop <a short transcript you write yourself> --scope personal`, answering its questions, and note the `mtg_…` meeting id its reply names. Use no real meeting.
+6. `uv run pm-ai transcript summarize --scope personal --meeting <id> --by claude`. Expected:
+   - the reply says the summary was made, then `This call: N input and M output tokens, estimated $0.00xx.` and `This month (YYYY-MM, UTC): $0.00 across 1 call(s), against the $20.00 target.`;
+   - `$HOME/.pm-ai/disclosure.md` holds two new lines with one `call=` id: `status=sent` with input unknown, then `status=completed` with the same N, M and cost, both naming `personal` as source and destination;
+   - the record's `## Summary` ends with a line naming Claude `claude-sonnet-5-5`, on request, with today's date, and no cost.
+7. What a failure at step 6 means. Each is reported by name, with nothing written and the `completed` or `failed` line recorded:
+   - an error about `tools` or an empty tool list: the API refuses an empty tool set through the Tool Runner (Ask First 1);
+   - an error about the schema, `minLength`, `maxLength` or `maxItems`: `output_config.format` does not accept `7b`'s schema;
+   - `FrontierModelMismatch`: the answer named a model id other than `claude-sonnet-5-5`;
+   - a charge for step 4 on the Console's usage page: listing models is billed.
+   Send the reply and the two ledger lines, with the transcript text removed, to the coordinating session.
+8. Stop the daemon (Ctrl-C), remove the throwaway home with `rm -rf "$PMAI_CHECK"` in the first terminal, then close both terminals. The key sealed there goes with it; enter it again in your real home with `pm-ai frontier key`.
+
+## Suggested Review Order
+
+**The router: one door, the ledger around every frontier call**
+
+- Entry point: checks `flow`, picks the side and tier, writes `sent` before the adapter is reached.
+  [`router.py:188`](../../../../pm_ai/models/router.py#L188)
+
+- The `sent` line, written before anything leaves; unwritable means nothing is sent.
+  [`router.py:292`](../../../../pm_ai/models/router.py#L292)
+
+- The `completed` or `failed` line for a refusal, from the usage it carries.
+  [`router.py:323`](../../../../pm_ai/models/router.py#L323)
+
+**The adapter: nothing reaches anywhere but Anthropic**
+
+- The refused SDK variables, the pinned list.
+  [`anthropic.py:102`](../../../../pm_ai/models/frontier/anthropic.py#L102)
+
+- The client: explicit key and base URL, own `httpx2` client, no environment, no retries.
+  [`anthropic.py:300`](../../../../pm_ai/models/frontier/anthropic.py#L300)
+
+- The one Tool Runner call: no tools, one iteration, structured output.
+  [`anthropic.py:408`](../../../../pm_ai/models/frontier/anthropic.py#L408)
+
+- Every stop reason but `end_turn`, and another model, refused by name.
+  [`anthropic.py:508`](../../../../pm_ai/models/frontier/anthropic.py#L508)
+
+- One call's total 300-second deadline, closing only that call's transport.
+  [`anthropic.py:153`](../../../../pm_ai/models/frontier/anthropic.py#L153)
+
+- The key check, on the same client, listing models.
+  [`anthropic.py:459`](../../../../pm_ai/models/frontier/anthropic.py#L459)
+
+- The dated price and window table; the local length estimate.
+  [`models.py:41`](../../../../pm_ai/models/frontier/models.py#L41)
+
+**The summary job: `7b`'s path with a frontier call**
+
+- The frontier call on the frontier pool; no retry; unexpected errors settle `failed`.
+  [`pipelines.py:2582`](../../../../pm_ai/app/pipelines.py#L2582)
+
+- The reply's tokens, cost and month total, warned on, never enforced.
+  [`pipelines.py:2621`](../../../../pm_ai/app/pipelines.py#L2621)
+
+- Where the frontier branch joins `7b`'s writes and `7e`'s step.
+  [`pipelines.py:2823`](../../../../pm_ai/app/pipelines.py#L2823)
+
+- A re-ingested Claude summary is never turned into a local automatic row.
+  [`service.py:4823`](../../../../pm_ai/storage/service.py#L4823)
+
+**The ledger: call ids, statuses, totals by call**
+
+- The line gains call id and status; empty ids and `sent` lines with usage refused.
+  [`disclosure.py:107`](../../../../pm_ai/domain/disclosure.py#L107)
+
+- Totals pair lines by call; unfinished calls are unknown, never zero.
+  [`disclosure_ledger.py:233`](../../../../pm_ai/core/disclosure_ledger.py#L233)
+
+- Past the target is known only when the unknowns cannot change it.
+  [`disclosure_ledger.py:194`](../../../../pm_ai/core/disclosure_ledger.py#L194)
+
+**The key and the PM's controls**
+
+- The daemon checks, after a local sealability check, then seals.
+  [`prompts.py:499`](../../../../pm_ai/app/prompts.py#L499)
+
+- Sealed under its own top-level key; the doctor probe, contacting nothing.
+  [`frontier_key.py:56`](../../../../pm_ai/core/frontier_key.py#L56)
+
+- The CLI: hidden prompt, terminal-bound, refused without a daemon.
+  [`dispatch.py:4028`](../../../../pm_ai/surfaces/cli/dispatch.py#L4028)
+
+- The authenticated loopback endpoint carrying the key.
+  [`app.py:73`](../../../../pm_ai/surfaces/api/app.py#L73)
+
+- The client side of the hand-off.
+  [`loopback.py:289`](../../../../pm_ai/surfaces/cli/loopback.py#L289)
+
+**Wiring and pools**
+
+- The frontier pool of one thread, beside the model pool; the key check on it.
+  [`daemon.py:592`](../../../../pm_ai/app/daemon.py#L592)
+
+- No frontier pool wired is a named fault, never the calling thread.
+  [`daemon.py:761`](../../../../pm_ai/app/daemon.py#L761)
+
+- `Daemon.router` built; the adapter given only the refused variables.
+  [`wiring.py:705`](../../../../pm_ai/app/wiring.py#L705)
+
+- The made-by value stored, and the provenance line naming Claude.
+  [`meeting_summaries.py:135`](../../../../pm_ai/domain/meeting_summaries.py#L135)
+  [`meeting_summary.py:568`](../../../../pm_ai/core/meeting_summary.py#L568)
+
+**Peripherals**
+
+- The class and its side; `httpx2` declared and confined.
+  [`task_classes.py:66`](../../../../pm_ai/domain/task_classes.py#L66)
+  [`pyproject.toml:52`](../../../../pyproject.toml#L52)
+  [`.importlinter:45`](../../../../.importlinter#L45)
+
+- The skip count, nine lower.
+  [`conftest.py:186`](../../../../tests/conftest.py#L186)
+
+- The matrix, row by row.
+  [`test_frontier_summary.py`](../../../../tests/slice/test_frontier_summary.py)
+  [`test_frontier_adapter.py`](../../../../tests/models/test_frontier_adapter.py)
+  [`test_router.py`](../../../../tests/models/test_router.py)

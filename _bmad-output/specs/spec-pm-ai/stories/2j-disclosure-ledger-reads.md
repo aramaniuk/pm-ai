@@ -65,6 +65,7 @@ review_loop_iteration: 0
 
 - **2026-08-29, threshold resolved by passing it in.** The review of the set found this matrix row unimplementable: it required a configured target while the Ask First said no story owned the key, so one of six rows could neither ship nor be tested. Taking the target as an argument removes the dependency entirely — the domain gains no budget figure, and a caller with a configured value supplies it. With no target the result reports the breach as unknown rather than as false, because "nothing was compared" and "nothing was exceeded" are different facts and AD-17's figure is evidence.
 - **The tokenizer moves to `domain/event_entries.py` beside `render_value`.** 2j parses the encoding 2i writes, and duplicating the scanner would be the failure rule 3 names — the same Markdown parsed two ways. Encoder and decoder now sit together and both core parsers import them.
+- **2026-10-20, amended by `7c`.** The monthly total counts calls, not lines: lines are paired by call id, a call belongs to the UTC month of its `sent` line, and the total sums every last line that reports usage, `completed` or `failed`. A `sent` line with no later line, a `failed` line without usage, and usage with no cost are each a call of unknown cost (`MonthlyTotal.unknown`), never counted as zero; a line written before `7c` counts as a completed call of the cost it states. `skip_malformed=True` totals past an unreadable line and names it (`MonthlyTotal.malformed`); without it a malformed line still refuses the total.
 
 ## Design Notes
 
