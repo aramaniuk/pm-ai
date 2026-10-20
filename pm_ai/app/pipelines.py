@@ -23,7 +23,7 @@ import logging
 import secrets
 import sqlite3
 import threading
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
@@ -50,6 +50,7 @@ from pm_ai.core.command_authorization import EXECUTE
 from pm_ai.core.extraction import Extraction, SpokenCommand, extract
 from pm_ai.core.jobs import idempotency_key
 from pm_ai.core.meeting_records import (
+    MEETINGS,
     DuplicateCalendarReference,
     MalformedMeeting,
     MeetingDisplaced,
@@ -90,9 +91,12 @@ from pm_ai.core.normalize import attribute_all
 from pm_ai.core.cadence import LookBack, coverage_cutoff, look_back
 from pm_ai.core.transcript_acquisition import acquire_transcripts
 from pm_ai.core.rendering import (
+    MAX_DIGEST_ITEMS,
+    MAX_MEETING_DIGESTS,
     CalendarAnswer,
     EventLogAnswer,
     PmHandles,
+    SpendAnswer,
     render_dashboard,
     render_project_dashboard,
 )
@@ -114,6 +118,8 @@ from pm_ai.core.member_updates import (
     lines_to_append,
     listed_issues,
     parse_ledger,
+    people_of,
+    resolve_label,
     split_numbered,
     unlinked,
 )
@@ -148,12 +154,22 @@ from pm_ai.domain.meeting_summaries import (
     SummaryMaker,
     SummaryRefused,
     SummaryRule,
+    SummaryState,
     SummaryStateKind,
 )
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.model_calls import ModelAnswer, ModelSide, ScopeFlow, ScopeFlowRefused
 from pm_ai.domain.proposals import Proposal
-from pm_ai.domain.renders import RenderUnrecorded
+from pm_ai.domain.renders import (
+    DigestItem,
+    DigestMaker,
+    DigestUnreadable,
+    MeetingDigest,
+    MeetingDigests,
+    ProjectMeetingDigests,
+    RenderUnrecorded,
+    ScopeUnreadable,
+)
 from pm_ai.connectors.graph.auth import StoreBusy
 from pm_ai.domain.harvest import (
     UNCLASSIFIED_FAULT_IS_RETRYABLE,
@@ -1826,6 +1842,11 @@ def prepare_dashboard(
     )
 
     if scope.kind is ScopeKind.PERSONAL:
+        # Story 7d: the meetings whose summary was recorded in this window —
+        # personal and every enrolled project's, read by id — and the month's
+        # frontier spend. Reads only; no model is reached (AD-5, AD-17).
+        digests = personal_meeting_digests(daemon, since=since, now=now)
+        spend = _month_spend(daemon, now=now)
         # `read_artifact` answers `None` for an absent file, which `parse_goals`
         # is defined to read as "no file" — distinct from `b""`, a file the PM
         # created and has not filled in. The two need different sentences.
@@ -1840,6 +1861,8 @@ def prepare_dashboard(
             tz=zone,
             pm=pm,
             since=since,
+            digests=digests,
+            spend=spend,
         )
     else:
         # A different function, not a flag. `render_project_dashboard` has no
@@ -1850,6 +1873,19 @@ def prepare_dashboard(
         # outside the bounded step, which `9b` keeps for the calendar alone
         # (`23g`). No GitLab request: the record is what the harvest stored.
         work = _project_work(daemon, scope=scope)
+        # Story 7e: the meeting updates in Team Activity's slot, the ledger
+        # and the alias table read afresh for this render (AD-5).
+        aliases = _read_aliases(daemon)
+        notes = _issue_notes(
+            daemon,
+            scope=scope,
+            work=work,
+            entries=entries,
+            now=now,
+            since=since,
+            zone=zone,
+            aliases=aliases,
+        )
         document = render_project_dashboard(
             meetings,
             entries,
@@ -1858,13 +1894,323 @@ def prepare_dashboard(
             pm=pm,
             since=since,
             work=work,
-            # Story 7e: the meeting updates in Team Activity's slot, the
-            # ledger and the alias table read afresh for this render (AD-5).
-            issue_notes=_issue_notes(
-                daemon, scope=scope, work=work, entries=entries, now=now, since=since, zone=zone
+            issue_notes=notes,
+            # Story 7d: this project's own summary rows, records and
+            # proposals, owners resolved by `7e`'s rule — nothing else.
+            digests=project_meeting_digests(
+                daemon,
+                scope=scope,
+                since=since,
+                now=now,
+                work=work,
+                aliases=aliases,
+                issue_notes=notes,
             ),
         )
     return document.encode("utf-8")
+
+
+# ── Story 7d: meeting summaries and the month's spend, for the dashboard ─────
+
+
+_DIGEST_REFUSALS: tuple[type[BaseException], ...] = (
+    KeyError,  # `MeetingNotFound`; a proposal body missing a field
+    TypeError,
+    ValueError,  # `MalformedMeeting`, `MalformedSummary`, a record that is not UTF-8
+    OSError,
+    DecryptionFailed,
+    ScopeResolutionError,
+    sqlite3.Error,
+    OperationalStoreUnavailable,
+)
+"""What reading one meeting's record and open items may refuse: stated by name."""
+
+_SCOPE_REFUSALS: tuple[type[BaseException], ...] = (
+    OSError,
+    DecryptionFailed,
+    ScopeResolutionError,
+    sqlite3.Error,
+    OperationalStoreUnavailable,
+    ValueError,
+)
+"""What reading a scope's summary rows or its `meetings/` may refuse: one line naming it."""
+
+OwnerOf = Callable[[str | None, str], str | None]
+"""An action item's owner label and its meeting id, to the text a page shows."""
+
+
+def _refusal_text(refused: BaseException) -> str:
+    """A refusal's own words — a `KeyError`'s without the quotes `str` adds — or its type."""
+    if isinstance(refused, KeyError) and refused.args:
+        text = str(refused.args[0])
+    else:
+        text = str(refused)
+    return text.strip() or type(refused).__name__
+
+
+def _rows_in_window(
+    daemon: Daemon, scope: DataScope, *, since: datetime, now: datetime
+) -> tuple[tuple[SummaryState, ...], ScopeUnreadable | None]:
+    """`scope`'s summary rows recorded in the window, and its `meetings/` checked readable.
+
+    A scope with rows whose records cannot be listed — a project that cannot
+    be resolved or read — is one stated line, and none of its rows is shown.
+    """
+    try:
+        rows = daemon.storage.summaries_recorded_between(scope, since=since, until=now)
+        if rows:
+            daemon.storage.list_collection(scope=scope, artifact=MEETINGS)
+    except _SCOPE_REFUSALS as refused:
+        return (), ScopeUnreadable(scope, _refusal_text(refused))
+    return rows, None
+
+
+def _payload_text(payload: Mapping[str, object], name: str) -> str | None:
+    value = payload.get(name)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _meeting_digest(
+    daemon: Daemon,
+    row: SummaryState,
+    *,
+    now: datetime,
+    owner_of: OwnerOf,
+    shown_elsewhere: Mapping[str, tuple[int, ...]],
+    confidential: frozenset[str] = frozenset(),
+    withhold_all: bool = False,
+) -> MeetingDigest | DigestUnreadable:
+    """One row's meeting: its record read by id, its open items, its maker.
+
+    Reads only — the record, then the meeting's open action items. A record
+    that cannot be read, or a value in it that cannot be shown, is named, so
+    the other meetings still show; one item whose stored body cannot be read
+    is counted on its meeting.
+    """
+    try:
+        record = daemon.meetings.get(row.meeting_id, scope=row.scope)
+        open_items = daemon.storage.open_action_items(
+            action_item_prefix(row.scope, row.meeting_id), at=now
+        )
+        recorded = record.summary
+        # In the record's order, the summary's own items first; any other open
+        # item (an earlier summary's, still staged) after them by id.
+        order: dict[str, int] = {}
+        if recorded is not None:
+            for index, item in enumerate(recorded.answer.action_items):
+                order.setdefault(action_item_id(row.scope, row.meeting_id, item), index)
+        ordered = sorted(
+            open_items.items,
+            key=lambda p: (order.get(p.proposal_id, len(order)), p.proposal_id),
+        )
+        items: list[DigestItem] = []
+        placed: set[int] = set()
+        placed_count = 0
+        for proposal in ordered:
+            under = shown_elsewhere.get(proposal.proposal_id)
+            if under:
+                placed.update(under)
+                placed_count += 1
+                continue
+            payload = proposal.payload if isinstance(proposal.payload, Mapping) else {}
+            # Andrei, 2026-10-20: an item on a confidential issue never shows
+            # its text on a project page; the owner and due date stay.
+            # With `7e`'s links unread, every item's (fail closed).
+            hidden_text = withhold_all or proposal.proposal_id in confidential
+            items.append(
+                DigestItem(
+                    what="" if hidden_text else _payload_text(payload, "what") or proposal.summary,
+                    owner=owner_of(_payload_text(payload, "owner"), row.meeting_id),
+                    due=_payload_text(payload, "due"),
+                    confidential=hidden_text,
+                )
+            )
+        maker = (
+            None
+            if recorded is None
+            else DigestMaker(recorded.made_by, recorded.model, recorded.requested)
+        )
+        return MeetingDigest(
+            scope=row.scope,
+            meeting_id=row.meeting_id,
+            start=record.meeting.start,
+            title=record.meeting.title,
+            recorded=row.at,
+            state=row.state,
+            waiting_for=row.made_by,
+            reason=row.reason,
+            summary=None if recorded is None else recorded.answer.summary,
+            maker=maker,
+            items=tuple(items[:MAX_DIGEST_ITEMS]),
+            hidden=max(0, len(items) - MAX_DIGEST_ITEMS),
+            placed=tuple(sorted(placed)),
+            placed_count=placed_count,
+            unreadable_items=open_items.unreadable,
+        )
+    except _DIGEST_REFUSALS as refused:
+        return DigestUnreadable(row.scope, row.meeting_id, row.at, _refusal_text(refused))
+
+
+def _digests_over(
+    daemon: Daemon,
+    rows: Sequence[SummaryState],
+    *,
+    now: datetime,
+    owner_of: OwnerOf,
+    shown_elsewhere: Mapping[str, tuple[int, ...]],
+    confidential: frozenset[str] = frozenset(),
+    withhold_all: bool = False,
+) -> tuple[tuple[MeetingDigest | DigestUnreadable, ...], int]:
+    """The `MAX_MEETING_DIGESTS` most recently recorded rows read, and how many more."""
+    ordered = sorted(rows, key=lambda r: (-r.at.timestamp(), str(r.scope), r.meeting_id))
+    shown = tuple(
+        _meeting_digest(
+            daemon,
+            row,
+            now=now,
+            owner_of=owner_of,
+            shown_elsewhere=shown_elsewhere,
+            confidential=confidential,
+            withhold_all=withhold_all,
+        )
+        for row in ordered[:MAX_MEETING_DIGESTS]
+    )
+    return shown, max(0, len(ordered) - MAX_MEETING_DIGESTS)
+
+
+def _as_said(label: str | None, meeting: str) -> str | None:
+    """The personal page shows an owner label as it was said."""
+    return label
+
+
+def personal_meeting_digests(
+    daemon: Daemon, *, since: LookBack, now: datetime
+) -> MeetingDigests:
+    """The personal page's digests: personal meetings and each enrolled project's.
+
+    A read across scopes, from each project into the PM's own file — the
+    direction AD-38 allows, as `_belongs` takes for meetings. A project that
+    cannot be read is one stated line; one with summaries recorded that is no
+    longer enrolled is named as such, not as a failed read; the others render.
+    No `people` row or record is read.
+    """
+    scopes = [DataScope(ScopeKind.PERSONAL)] + [
+        DataScope(ScopeKind.PROJECT, project_id) for project_id in sorted(daemon.watched)
+    ]
+    rows: list[SummaryState] = []
+    unread: list[ScopeUnreadable] = []
+    for scope in scopes:
+        found, failure = _rows_in_window(daemon, scope, since=since.since, now=now)
+        rows.extend(found)
+        if failure is not None:
+            unread.append(failure)
+    unchecked: str | None = None
+    try:
+        listed = daemon.storage.projects_with_summaries_between(since=since.since, until=now)
+    except _SCOPE_REFUSALS as refused:
+        unchecked = _refusal_text(refused)
+        listed = ()
+    shown, earlier = _digests_over(
+        daemon, rows, now=now, owner_of=_as_said, shown_elsewhere={}
+    )
+    return MeetingDigests(
+        shown=shown,
+        earlier=earlier,
+        unread=tuple(unread),
+        not_enrolled=tuple(scope for scope in listed if scope not in scopes),
+        enrolment_unchecked=unchecked,
+    )
+
+
+def project_meeting_digests(
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    since: LookBack,
+    now: datetime,
+    work: WorkAnswer,
+    aliases: AliasTable | BaseException,
+    issue_notes: IssueNotes,
+) -> ProjectMeetingDigests:
+    """One project's digests: its own rows, records and proposals, and nothing else.
+
+    An owner is shown only once `7e`'s read-time rule resolves the label to a
+    project member — the alias table, or an exact display name or username —
+    and as unassigned otherwise, so spoken names stay off the team page. An
+    alias table that cannot be read is stated, and owners then match by exact
+    name only. An item Team Activity shows under an issue is left out
+    (`issue_notes.items`); one linked to a confidential issue is listed without
+    its text (`issue_notes.confidential`, Andrei, 2026-10-20).
+    """
+    people = people_of(work)
+    table = aliases if isinstance(aliases, AliasTable) else AliasTable()
+    aliases_unread = None if isinstance(aliases, AliasTable) else _refusal_text(aliases)
+
+    def member(label: str | None, meeting: str) -> str | None:
+        person = resolve_label(label, meeting, aliases=table, people=people)
+        if person is None:
+            return None
+        if person.name and person.name.strip():
+            return person.name
+        if person.username:
+            return f"@{person.username}"
+        return str(person.handle)
+
+    rows, failure = _rows_in_window(daemon, scope, since=since.since, now=now)
+    shown, earlier = _digests_over(
+        daemon,
+        rows,
+        now=now,
+        owner_of=member,
+        shown_elsewhere=issue_notes.items,
+        confidential=issue_notes.confidential,
+        withhold_all=issue_notes.links_unread,
+    )
+    withheld = any(
+        isinstance(d, MeetingDigest) and any(i.confidential for i in d.items) for d in shown
+    )
+    return ProjectMeetingDigests(
+        scope=scope,
+        shown=shown,
+        earlier=earlier,
+        unread=() if failure is None else (failure,),
+        # Only when an owner was there to resolve: a page with no item to show
+        # has nothing the alias table would have changed.
+        aliases_unread=aliases_unread if any(
+            isinstance(d, MeetingDigest) and d.items for d in shown
+        ) else None,
+        # Stated when it withheld something: fail closed (Andrei, 2026-10-20).
+        confidentiality_unknown=issue_notes.confidentiality_unknown if withheld else None,
+        links_unread=issue_notes.links_unread and withheld,
+    )
+
+
+def _month_spend(daemon: Daemon, *, now: datetime) -> SpendAnswer:
+    """The current UTC month's frontier spend, or why the ledger could not be read (AD-17).
+
+    Over the lines that read; malformed ones are left out and named, as `7c`'s
+    `_frontier_spend` does (`skip_malformed`). A plain read.
+    """
+    month = now.astimezone(timezone.utc)
+    try:
+        return DisclosureLedger(daemon.storage).monthly_total(
+            month.year, month.month, target_usd=MONTHLY_TARGET_USD, skip_malformed=True
+        )
+    except Exception as unreadable:  # noqa: BLE001 — stated on the page, never a failed render
+        kind = type(unreadable).__name__
+        text = _refusal_text(unreadable)
+        return HarvestFailure(
+            reason=kind if text == kind else f"{kind}: {text}",
+            retryable=False,
+        )
+
+
+def _read_aliases(daemon: Daemon) -> AliasTable | BaseException:
+    """The saved alias table as it is now, or why it could not be read (`7e`)."""
+    try:
+        return parse_aliases(daemon.storage.read_aliases())
+    except (OSError, DecryptionFailed) as unreadable:
+        return unreadable
 
 
 def ask_dashboard_exclusion(daemon: Daemon, *, scope: DataScope) -> GitExclusion:
@@ -1985,6 +2331,7 @@ def _issue_notes(
     now: datetime,
     since: LookBack,
     zone: tzinfo,
+    aliases: AliasTable | BaseException,
 ) -> IssueNotes:
     """`7e`'s rows for Team Activity's slot, from the ledger and the alias table as they are now.
 
@@ -1993,15 +2340,10 @@ def _issue_notes(
     `23g`'s own function over the same inputs the render is given.
     """
     ledger: Ledger | BaseException
-    aliases: AliasTable | BaseException
     try:
         ledger = parse_ledger(daemon.storage.read_member_updates(scope=scope))
     except (OSError, DecryptionFailed) as unreadable:
         ledger = unreadable
-    try:
-        aliases = parse_aliases(daemon.storage.read_aliases())
-    except (OSError, DecryptionFailed) as unreadable:
-        aliases = unreadable
     return issue_notes_for(
         ledger,
         aliases,

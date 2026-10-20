@@ -4157,6 +4157,9 @@ PLAIN_READS: frozenset[str] = frozenset(
         "project_work",  # its own read-only connection (story 8t)
         "render_records",  # its own read-only connection
         "summaries_recorded",  # its own read-only connection (story 7b)
+        "summaries_recorded_between",  # its own read-only connection (story 7d)
+        "projects_with_summaries_between",  # its own read-only connection (story 7d)
+        "open_action_items",  # its own read-only connection (story 7d)
         "match_records",  # its own read-only connection (story 7e)
         "read_member_updates",  # a file read (story 7e)
         "read_aliases",  # a file read (story 7e)

@@ -29,6 +29,8 @@ from pm_ai.domain.payload_fields import encode_payload
 
 from pm_ai.core.rendering import PmHandles, render_project_dashboard
 from pm_ai.core.team_activity import NO_ISSUE_NOTES, IssueNotes
+from pm_ai.domain.meeting_summaries import SummaryStateKind
+from pm_ai.domain.renders import MeetingDigest, ProjectMeetingDigests
 from pm_ai.domain.work import ProjectWork
 
 NOW = datetime(2026, 9, 9, 10, 30, tzinfo=timezone.utc)
@@ -119,4 +121,31 @@ def an_unreadable_gitlab_record_and_the_default_slot() -> str:
     failure = HarvestFailure(reason="malformed", retryable=False)
     return render_project_dashboard(
         (), (), NOW, tz=DISPLAY, pm=NOBODY, work=failure, issue_notes=NO_ISSUE_NOTES
+    )
+
+
+def a_project_with_its_own_meeting_digests() -> str:
+    """`7d`: the project-only digests, a keyword after `issue_notes`."""
+    digests = ProjectMeetingDigests(
+        scope=ALPHA,
+        shown=(
+            MeetingDigest(
+                scope=ALPHA,
+                meeting_id="m_alpha_standup",
+                start=NOW,
+                title="Alpha Standup",
+                recorded=NOW,
+                state=SummaryStateKind.WAITING,
+            ),
+        ),
+    )
+    return render_project_dashboard(
+        (MEETING,),
+        (ENTRY,),
+        NOW,
+        tz=DISPLAY,
+        pm=NOBODY,
+        work=None,
+        issue_notes=NO_ISSUE_NOTES,
+        digests=digests,
     )

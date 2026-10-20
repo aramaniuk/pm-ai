@@ -63,7 +63,7 @@ from types import MappingProxyType
 
 from pm_ai.core.aliases import AliasTable, normalise
 from pm_ai.core.meeting_summary import digest
-from pm_ai.core.rendering import code, escape, fold_breaks
+from pm_ai.core.rendering import code, cut_at_word, escape, fold_breaks
 from pm_ai.core.team_activity import ACTIVE, IssueNotes, bare_references
 from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, MalformedEntry, render_value, scan_fields
 from pm_ai.domain.handles import PersonHandle
@@ -1002,21 +1002,13 @@ def resolve_label(
 # ── The rows Team Activity's slot takes ──────────────────────────────────────
 
 
-def cut_at_word(text: str, limit: int = ROW_TEXT_LIMIT) -> str:
-    """Folded, trimmed and cut to `limit` characters at a word, with `…` when cut."""
-    folded = fold_breaks(text).strip()
-    if len(folded) <= limit:
-        return folded
-    head = folded[: limit - 1]
-    space = head.rfind(" ")
-    if space > 0:
-        head = head[:space]
-    return head.rstrip() + "…"
-
-
 def _shown(text: str) -> str:
-    """Folded, cut at a word, then escaped (`23f`'s order)."""
-    return escape(cut_at_word(text))
+    """Folded, cut at a word, then escaped (`23f`'s order).
+
+    `cut_at_word` lives beside `fold_breaks` in `rendering` since story 7d,
+    which cuts its excerpts with it too: one cut, with `…`, for both stories.
+    """
+    return escape(cut_at_word(text, ROW_TEXT_LIMIT))
 
 
 def _name(person: Person) -> str:
@@ -1098,7 +1090,33 @@ def issue_notes_for(
         closing.append(
             _sentence(f"The meeting updates could not be read: {_reason(ledger)}")
         )
-        return IssueNotes(closing=tuple(closing))
+        # Story 7d (Andrei, 2026-10-20, fail closed): with no links to read,
+        # which items are on a confidential issue cannot be told.
+        return IssueNotes(closing=tuple(closing), links_unread=True)
+    record = _record(work)
+    issues = {issue.iid: issue for issue in record.issues} if record is not None else {}
+    # Story 7d (Andrei, 2026-10-20): every action item linked to a confidential
+    # issue, at any age, so the meeting digests never show its text either.
+    # With no record to tell by, every item linked to an issue: fail closed.
+    linked = [
+        line
+        for line in ledger.live.values()
+        if line.kind is ItemKind.ACTION and ledger.shown(line)
+    ]
+    unknown_why: str | None = None
+    if record is None:
+        unknown_why = (
+            "the project's GitLab record could not be read"
+            if isinstance(work, HarvestFailure)
+            else "no GitLab record is recorded for this project"
+        )
+        confidential = frozenset(line.item for line in linked)
+    else:
+        confidential = frozenset(
+            line.item
+            for line in linked
+            if (issue := issues.get(line.issue)) is not None and issue.confidential
+        )
     floor = now - UPDATE_WINDOW
     updates = sorted(
         (
@@ -1109,9 +1127,11 @@ def issue_notes_for(
         key=_order,
     )
     if not updates:
-        return IssueNotes(closing=tuple(closing))
-    record = _record(work)
-    issues = {issue.iid: issue for issue in record.issues} if record is not None else {}
+        return IssueNotes(
+            closing=tuple(closing),
+            confidential=confidential,
+            confidentiality_unknown=unknown_why,
+        )
     people = people_of(work)
     grouped: dict[int, list[UpdateLine]] = {}
     unmatched: set[str] = set()
@@ -1189,7 +1209,26 @@ def issue_notes_for(
                 f"only a number said in a meeting links an update to "
                 f"{'it' if left_out == 1 else 'them'}."
             )
-    return IssueNotes(rows=MappingProxyType(rows), closing=tuple(closing))
+    # Story 7d: the action items a row on this page shows, with the issues
+    # they are shown under — only rows under an issue the page places, and
+    # only the rows within `MAX_ROWS_PER_ISSUE`.
+    shown_under: dict[str, set[int]] = {}
+    for iid, lines in grouped.items():
+        if iid not in rows or iid not in on_page:
+            continue
+        for line in lines[:MAX_ROWS_PER_ISSUE]:
+            if line.kind is ItemKind.ACTION:
+                shown_under.setdefault(line.item, set()).add(iid)
+    items = MappingProxyType(
+        {item: tuple(sorted(iids)) for item, iids in sorted(shown_under.items())}
+    )
+    return IssueNotes(
+        rows=MappingProxyType(rows),
+        closing=tuple(closing),
+        items=items,
+        confidential=confidential,
+        confidentiality_unknown=unknown_why,
+    )
 
 
 def _reason(error: BaseException) -> str:
@@ -1254,7 +1293,7 @@ class UnmatchedReport:
             for line in self.awaiting:
                 lines.append(
                     f"  {line.update}: #{line.issue} from meeting {line.meeting} — "
-                    f"{line.kind.value}: {cut_at_word(_plain(line.text))}"
+                    f"{line.kind.value}: {cut_at_word(_plain(line.text), ROW_TEXT_LIMIT)}"
                 )
             lines.append(
                 f"  `pm-ai member link --scope {scope} <update id> --confirm` (or `--reject`)."

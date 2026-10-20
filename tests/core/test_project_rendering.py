@@ -261,7 +261,11 @@ def test_the_signature_accepts_no_goal_register():
         "since",
         "work",
         "issue_notes",
+        "digests",
     ]
+    # Story 7d: the project-only digests, after `23g`'s `issue_notes` — a type
+    # whose constructor refuses any other scope's digest.
+    assert str(parameters["digests"].annotation) == "ProjectMeetingDigests | None"
     assert not [
         name
         for name in parameters

@@ -473,3 +473,18 @@ def test_the_retry_sentences_name_each_limit_and_the_shape_refuses_an_empty_due(
     assert "due" in RETRY_SENTENCES[SummaryRule.EMPTY]
     due = SUMMARY_SHAPE["properties"]["action_items"]["items"]["properties"]["due"]  # type: ignore[index]
     assert due["minLength"] == 1
+
+
+@pytest.mark.parametrize("written", ["null", "NULL", "  Null ", "\tnull\n"])
+def test_a_due_written_as_the_word_null_is_no_due(written):
+    """Found by 7d's manual check (2026-10-20): `qwen3:8b` wrote `"due": "null"`, and
+    the page showed `(null)`. The word, in any case after trimming, is no due date."""
+    items = [{"what": "Update the runbook", "owner": "Bo", "due": written}]
+    answer = validate_answer(json.dumps(_valid(action_items=items)), labels=LABELS)
+    assert answer.action_items == (SummaryActionItem("Update the runbook", "Bo", None),)
+
+
+def test_a_due_that_only_contains_null_is_kept():
+    items = [{"what": "w", "owner": None, "due": "null by Friday"}]
+    answer = validate_answer(json.dumps(_valid(action_items=items)), labels=LABELS)
+    assert answer.action_items[0].due == "null by Friday"

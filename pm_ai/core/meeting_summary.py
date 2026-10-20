@@ -454,6 +454,10 @@ def validate_answer(text: str, *, labels: frozenset[str]) -> SummaryAnswer:
         what = _text(item["what"], WHAT_LIMIT, f"{where}'s what")
         owner = _label(item["owner"], labels, f"{where}'s owner")
         due_raw = item["due"]
+        # A model that writes the word "null" as a string means no due date
+        # (found by 7d's manual check, 2026-10-20): never stored as one.
+        if isinstance(due_raw, str) and due_raw.strip().lower() == "null":
+            due_raw = None
         due = None if due_raw is None else _text(due_raw, DUE_LIMIT, f"{where}'s due")
         items.append(SummaryActionItem(what, owner, due))
     # Every string through the sanitizer, then the bounds and non-emptiness

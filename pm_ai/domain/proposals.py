@@ -47,3 +47,16 @@ class Proposal:
                 f"terminal, and a worker re-checks at execution time (AD-37)."
             )
         return replace(self, state=to, version=self.version + 1)
+
+
+@dataclass(frozen=True, slots=True)
+class OpenActionItems:
+    """One meeting's open `action_item` proposals, and how many could not be read (7d).
+
+    A staged proposal whose stored body does not parse is counted in
+    `unreadable`, never dropped in silence and never failing the meeting's
+    other items: the dashboard states the count.
+    """
+
+    items: tuple[Proposal, ...] = ()
+    unreadable: int = 0

@@ -1594,3 +1594,9 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/7c-a-frontier-summary-on-request.md`
   summary: `7b`'s local summary call and `7e`'s title-match call go to `Daemon.model` directly, not through `Daemon.router`, so the router's `flow` check does not run on them. AD-15 describes one router for every model call.
   evidence: Blind-hunter review. The spec kept `Daemon.model` the local model and left `offer_summaries` unchanged on purpose; both calls carry their own `flow` from the meeting's scope to itself. Moving every local call onto the router is a later slice's change.
+
+## Surfaced by the story-7d review (2026-10-20)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7d-summaries-and-actions-on-the-dashboard.md`
+  summary: **DECIDED 2026-10-20 (Andrei): hide.** On a project page an action item linked to a confidential issue never shows its text, whether or not Team Activity shows its row; `7d` lists it as "an action item on a confidential issue" with its owner and due date; the frozen block and matrix are amended. Was: Needs Andrei's decision. On a project page, an open action item linked to a confidential issue. When Team Activity shows its row, `7e` hides the text there ("action (said in the meeting)"), and `7d` leaves the item out of its list and says "shown under #N", so its text is on the page nowhere. When the row is not shown (the issue past `MAX_ROWS_PER_ISSUE` rows, or not placed on the page), `7d` lists the item with its text, which Team Activity would have withheld.
+  evidence: Edge-case review. The build keeps the frozen rule as written: an item is left out only when a row Team Activity shows carries it. Options: keep it; withhold the text of any item linked to a confidential issue in `7d`'s list too (say "linked to a confidential issue"); or not count a confidential row as "shown", so the item is listed with its text.

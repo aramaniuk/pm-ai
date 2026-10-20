@@ -710,3 +710,66 @@ def test_no_record_or_an_unreadable_one_is_said_never_closed_or_capped(answer, s
     (closing,) = notes.closing
     assert f"1 not shown, since {sentence}" in closing
     assert "closed, or past" not in closing and "Ana" not in closing
+
+
+# ── Story 7d: which items a shown row carries, and which are confidential ─────
+
+
+def test_issue_notes_items_hold_only_the_rows_shown_under_a_placed_issue():
+    """Three actions on #142 (two rows shown) and one on a closed issue: only the
+    two shown are in `items`; the third and the closed one's stay out."""
+    links = [
+        Link(action(f"prp_{n}", f"step {n} on #142", "Ana Ivanova"), 142, LinkKind.NUMBER)
+        for n in range(3)
+    ]
+    links.append(Link(action("prp_closed", "fix #150", "Ana Ivanova"), 150, LinkKind.NUMBER))
+    closed = issue(150, ANA, state=CLOSED, closed_at=NOW - timedelta(days=1))
+    notes = notes_for(parse_ledger(write(*links)), work(issue(142, ANA), closed))
+    assert len(notes.rows[142]) == 3  # two rows and the "1 more" line
+    assert set(notes.items.values()) == {(142,)}
+    assert len(notes.items) == 2
+    assert "prp_closed" not in notes.items
+    assert notes.confidential == frozenset()
+
+
+def test_issue_notes_name_every_item_on_a_confidential_issue_at_any_age():
+    """Andrei, 2026-10-20: shown or not, and outside the 14-day window too."""
+    secret = issue(42, ANA, title=CONFIDENTIAL_ISSUE_TITLE, confidential=True)
+    recent = write(Link(action("prp_new", "fix #42", "Ana Ivanova"), 42, LinkKind.NUMBER))
+    old_meeting = meeting("mtg_old", start=NOW - timedelta(days=40))
+    old = write(
+        Link(action("prp_old", "fix #42 again", "Ana Ivanova"), 42, LinkKind.NUMBER),
+        ledger=parse_ledger(recent),
+        meeting_value=old_meeting,
+    )
+    plain = write(
+        Link(action("prp_plain", "fix #41", "Ana Ivanova"), 41, LinkKind.NUMBER),
+        ledger=parse_ledger(recent + old),
+    )
+    notes = notes_for(parse_ledger(recent + old + plain), work(secret, issue(41, ANA)))
+    assert notes.confidential == frozenset({"prp_new", "prp_old"})
+    # Only the old item: nothing in the window, and still named.
+    only_old = notes_for(parse_ledger(old), work(secret))
+    assert only_old.rows == {} and only_old.confidential == frozenset({"prp_old"})
+
+
+def test_issue_notes_fail_closed_when_the_record_cannot_be_read():
+    """Andrei, 2026-10-20: with no readable record, every item linked to an issue
+    counts as confidential, and why is carried."""
+    text = write(
+        Link(action("prp_a", "fix #42", "Ana Ivanova"), 42, LinkKind.NUMBER),
+        Link(action("prp_b", "ship #41", "Ana Ivanova"), 41, LinkKind.NUMBER),
+    )
+    failed = HarvestFailure(reason="the record is unreadable", retryable=False)
+    notes = notes_for(parse_ledger(text), failed)
+    assert notes.confidential == frozenset({"prp_a", "prp_b"})
+    assert notes.confidentiality_unknown == "the project's GitLab record could not be read"
+    readable = notes_for(parse_ledger(text), work(issue(41, ANA), issue(42, ANA)))
+    assert readable.confidential == frozenset() and readable.confidentiality_unknown is None
+
+
+def test_issue_notes_mark_the_links_unread_when_the_ledger_cannot_be_read():
+    """Fail closed (Andrei, 2026-10-20): no ledger, no links, so every item is withheld."""
+    notes = notes_for(PermissionError("member_updates.md"), work(issue(41, ANA)))
+    assert notes.links_unread is True
+    assert notes_for(parse_ledger(None), work(issue(41, ANA))).links_unread is False
