@@ -116,10 +116,11 @@ NUM_PREDICT = 4096
 """The output cap every request sends (`num_predict`); raised from 2,048 by `7b`.
 
 `7a` sized it from the longest valid answer it measured — 314 output tokens
-(`qwen3:8b`, the authored meeting). `7b`'s answer shape at its bounds is about
-8,000 characters, about 2,740 tokens at `7a`'s 2.92 characters per token, so
-the cap is raised to 4,096 (Andrei, 2026-10-19) and the shape's limits trimmed
-to keep that answer within three quarters of it. An answer that does not end
+(`qwen3:8b`, the authored meeting). For `7b`'s answer shape the cap was raised
+to 4,096 (Andrei, 2026-10-19); `7b`'s real answers measured at most 716 output
+tokens. The shape's limits do not guarantee the largest valid answer fits
+(Andrei, 2026-10-20): an answer that reaches the cap is refused as
+`OutputCapReached`, asked for once more, then refused. An answer that does not end
 still stops here rather than holding the model pool's one slot to the
 deadline. The real-length recording's 8,619 prompt tokens plus the cap fit
 `NUM_CTX`, leaving 12,288 tokens for a prompt.

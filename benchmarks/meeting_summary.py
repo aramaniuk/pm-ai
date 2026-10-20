@@ -13,9 +13,12 @@ slice's own path, with Ollama as `daemon.model` and every stage run inline:
 - **from the command** — `request_summary`, what `transcript summarize` runs in
   the daemon, timed until the record is written.
 
-The inputs are `7a`'s: the authored fictional meeting
-(`fixtures/mixed_ru_en.vtt`) and the letter-redacted recording from PR #72,
-whose length and alphabet are real and whose words are not.
+The inputs are `7a`'s authored fictional meeting (`fixtures/mixed_ru_en.vtt`,
+44% of its spoken letters Cyrillic), the letter-redacted recording from PR #72,
+whose length and alphabet are real and whose words are not, and `7b`'s short
+authored meeting held mostly in Russian (`fixtures/mostly_ru.vtt`, 97% of its
+spoken letters Cyrillic), the language check: its summary must be mostly
+Cyrillic.
 
 Recorded per summary: the outcome, the prompt's characters, each call's prompt
 and output tokens and model time, the wall time, the counts of decisions and
@@ -63,6 +66,7 @@ from pm_ai.domain.transcripts import CaptureFormat, TranscriptStateKind  # noqa:
 from pm_ai.models.local.ollama import NUM_PREDICT, OllamaModel  # noqa: E402
 
 AUTHORED = Path(__file__).resolve().parent / "fixtures" / "mixed_ru_en.vtt"
+MOSTLY_RUSSIAN = Path(__file__).resolve().parent / "fixtures" / "mostly_ru.vtt"
 REDACTED = REPO / "tests" / "connectors" / "fixtures" / "graph" / "transcript_recorded.vtt"
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 LABEL_CHARACTERS = 40
@@ -136,6 +140,7 @@ def measured(
         "decisions": None if answer is None else len(answer.decisions),
         "action_items": None if answer is None else len(answer.action_items),
         "cyrillic_share": None if answer is None else round(cyrillic_share(answer.summary), 2),
+        "mostly_cyrillic": None if answer is None else cyrillic_share(answer.summary) > 0.5,
         # The raw answer the validator accepted is the last one this summary got.
         "answer_characters": seen[-1][0] if answer is not None and seen else None,
         "answer_output_tokens": seen[-1][1] if answer is not None and seen else None,
@@ -192,7 +197,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="pm-ai-7b-bench-") as tmp:
-        for label, path in (("authored", AUTHORED), ("redacted", REDACTED)):
+        for label, path in (
+            ("authored", AUTHORED),
+            ("redacted", REDACTED),
+            ("mostly_russian", MOSTLY_RUSSIAN),
+        ):
             root = Path(tmp) / label
             root.mkdir()
             for row in run(args.model, label, path, root):
@@ -202,6 +211,12 @@ def main(argv: list[str] | None = None) -> int:
         r for r in results if r.get("answer_characters") and r.get("answer_output_tokens")
     ]
     report: dict[str, Any] = {"model": args.model, "output_cap": NUM_PREDICT}
+    russian = [r for r in results if r["input"] == "mostly_russian"]
+    # The language check passes only when every summary of that meeting was
+    # made and is mostly Cyrillic; a summary not made is a failed check.
+    report["language_check"] = (
+        "passed" if russian and all(r.get("mostly_cyrillic") for r in russian) else "failed"
+    )
     if valid:
         top = max(valid, key=lambda r: r["answer_characters"])
         ratio = top["answer_characters"] / top["answer_output_tokens"]

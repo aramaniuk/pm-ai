@@ -715,12 +715,14 @@ def summary_jobs(requests: RequestPath, model_pool: ModelPool) -> SummaryJobs:
     call handed back to the I/O pool — no I/O worker waits on the model pool.
     Each automatic job reads the daemon afresh (`requests.fresh`) and hands
     its writes to the writer thread as claimed steps; after the model pool's
-    shutdown has begun no answer is handed on.
+    shutdown has begun no answer is handed on. A requested summary's call is
+    queued ahead of the automatic ones (Andrei, 2026-10-20).
     """
     writer = requests.writer
     return SummaryJobs(
         io=requests.pool.submit,
         model=model_pool.submit,
+        model_first=lambda stage: model_pool.submit(stage, ahead=True),
         daemon_for=lambda: handed_daemon(
             requests.fresh(), hand=lambda work, label: writer.call(work, label=label)
         ),

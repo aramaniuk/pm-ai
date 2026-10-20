@@ -43,15 +43,19 @@ __all__ = [
 ]
 
 # ── The answer's bounds ──────────────────────────────────────────────────────
-# Set so the largest valid answer fits the 4,096-token output cap with margin
-# (story 7b): at `7a`'s 2.92 characters per token the largest valid answer,
-# JSON included and each speaker label counted at 40 characters, is about
-# 8,000 characters, about 2,740 tokens, within three quarters of the cap.
+# Bounds on what one answer may hold (story 7b). They do not guarantee that the
+# largest valid answer fits the 4,096-token output cap (Andrei, 2026-10-20):
+# at its bounds, JSON included and each speaker label counted at 40
+# characters, it is 12,268 characters, which is about 3,300 tokens at the
+# 3.72 characters per token measured on `qwen3:8b`'s largest real answer. Real
+# answers measured at most 716 tokens. An answer that does reach the cap is
+# `OutputCapReached`: asked once more, then refused naming the cap.
 
 SUMMARY_LIMIT = 600
 """The summary's most characters."""
 
-MAX_DECISIONS = 10
+MAX_DECISIONS = 25
+"""Raised from 10 (Andrei, 2026-10-20): a long meeting can make more decisions than 10."""
 STATEMENT_LIMIT = 200
 """A decision's statement's most characters."""
 

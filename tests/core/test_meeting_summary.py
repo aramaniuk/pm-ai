@@ -163,12 +163,14 @@ def test_every_returned_string_passes_the_sanitizer():
     assert "[redacted-injection]" in answer.summary
 
 
-def test_the_largest_valid_answer_fits_three_quarters_of_the_output_cap_at_7a_s_ratio():
-    """The limits are set so the largest valid answer fits 4,096 tokens with margin.
+def test_the_largest_valid_answer_is_accepted_and_its_size_is_known():
+    """The limits bound an answer; they do not promise it fits the output cap.
 
-    Computed, not measured: 2.92 characters per token is `7a`'s measured figure
-    for `qwen3:8b`; the build's own measurement on a real model is recorded in
-    the story's Design Notes. Each speaker label counted at 40 characters.
+    Andrei, 2026-10-20: decisions were raised to 25 and the cap stayed at
+    4,096, so an answer at every bound — 12,268 characters with each speaker
+    label at 40 — may reach the cap. That answer is still valid by shape; one
+    that the model cannot finish inside the cap is `OutputCapReached`, asked
+    once more and then refused naming the cap (the slice's "Output cap" row).
     """
     label = "L" * 40
     largest = json.dumps(
@@ -182,8 +184,9 @@ def test_the_largest_valid_answer_fits_three_quarters_of_the_output_cap_at_7a_s_
         },
         ensure_ascii=False,
     )
+    assert MAX_DECISIONS == 25
     assert validate_answer(largest, labels=frozenset({label}))
-    assert len(largest) / 2.92 <= 0.75 * 4096, len(largest)
+    assert len(largest) == 12_268
 
 
 def test_the_shape_is_the_same_bounds_and_carries_no_label():

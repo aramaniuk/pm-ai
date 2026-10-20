@@ -1469,3 +1469,83 @@ def test_ctrl_c_while_following_says_the_daemon_finishes_it(capsys, monkeypatch)
     code = entry.main(["transcript", "summarize", "--scope", "personal", "--meeting", "m"])
     assert code == EXIT_REFUSAL
     assert "finishes it on its own" in capsys.readouterr().err
+
+
+# ── Requests go first (Andrei, 2026-10-20) ───────────────────────────────────
+
+
+def test_the_model_pool_runs_work_submitted_ahead_before_queued_work_in_its_own_order():
+    """Row "Request queued": work submitted ahead runs after the job running and
+    before every ordinary job queued, and keeps its own order."""
+    import threading
+
+    from pm_ai.app.concurrency import ModelPool
+
+    pool = ModelPool()
+    pool.start()
+    release = threading.Event()
+    ran: list[str] = []
+    try:
+        running = pool.submit(release.wait)
+        queued = [
+            pool.submit(lambda: ran.append("auto 1")),
+            pool.submit(lambda: ran.append("auto 2")),
+            pool.submit(lambda: ran.append("request 1"), ahead=True),
+            pool.submit(lambda: ran.append("auto 3")),
+            pool.submit(lambda: ran.append("request 2"), ahead=True),
+        ]
+        release.set()
+        running.result(timeout=10)
+        for future in queued:
+            future.result(timeout=10)
+    finally:
+        pool.shutdown()
+    assert ran == ["request 1", "request 2", "auto 1", "auto 2", "auto 3"]
+
+
+def test_a_requested_summarys_call_is_handed_to_the_model_pool_ahead(tmp_path):
+    """Row "Request queued": a request's model stage goes through `model_first`,
+    an automatic job's through `model`, so a request is not queued behind the
+    harvest's jobs and its bound covers only its own call and retry."""
+    daemon = _daemon(tmp_path, _answer(), _answer())
+    handed: list[str] = []
+
+    def through(kind):
+        def submit(stage):
+            handed.append(kind)
+            stage()
+
+        return submit
+
+    daemon.summaries = SummaryJobs(model=through("queued"), model_first=through("ahead"))
+    _ingested(daemon, _meeting("mtg_a"))
+    _ingested(daemon, _meeting("mtg_b"))
+
+    offer_summaries(daemon)
+    automatic = list(handed)
+    handed.clear()
+    request_summary(daemon, scope=PROJECT, meeting_id="mtg_a", job="job_req")
+
+    assert automatic and set(automatic) == {"queued"}
+    assert handed and set(handed) == {"ahead"}
+
+
+def test_the_daemons_summary_jobs_submit_a_request_ahead_on_the_model_pool(monkeypatch):
+    """`daemon.summary_jobs` wires `model_first` to `ModelPool.submit(..., ahead=True)`."""
+    from types import SimpleNamespace
+
+    from pm_ai.app import daemon as daemon_module
+
+    calls: list[bool] = []
+
+    class Pool:
+        stopping = False
+
+        def submit(self, stage, *, ahead=False):
+            calls.append(ahead)
+
+    requests = SimpleNamespace(pool=SimpleNamespace(submit=lambda stage: None), writer=None)
+    jobs = daemon_module.summary_jobs(requests, Pool())  # type: ignore[arg-type]
+    jobs._model(lambda: None)
+    jobs._model_first(lambda: None)
+    assert calls == [False, True]

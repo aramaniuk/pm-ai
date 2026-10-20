@@ -2811,6 +2811,9 @@ class SummaryJobs:
     builds the daemon one job's stages use — in the daemon, read afresh with its
     own door to the writer (`handed_daemon`); `model_stopping` says the model
     pool's shutdown has begun, after which no answer is handed on.
+    `model_first` hands a requested job's call to the model pool ahead of the
+    automatic ones queued there (Andrei, 2026-10-20), so a request's bound
+    covers only its own call and retry; by default it is `model`.
     """
 
     def __init__(
@@ -2818,11 +2821,13 @@ class SummaryJobs:
         *,
         io: Callable[[Callable[[], None]], object] | None = None,
         model: Callable[[Callable[[], None]], object] | None = None,
+        model_first: Callable[[Callable[[], None]], object] | None = None,
         daemon_for: Callable[[], Daemon] | None = None,
         model_stopping: Callable[[], bool] = lambda: False,
     ) -> None:
         self._io = io or _here
         self._model = model or _here
+        self._model_first = model_first or self._model
         self._daemon_for = daemon_for
         self._model_stopping = model_stopping
         self._lock = threading.Lock()
@@ -2885,15 +2890,21 @@ class SummaryJobs:
         except BaseException:
             done(_stopping())
             raise
-        self._drive(steps, done)
+        self._drive(steps, done, requested=fence is not None)
         return True
 
     def _drive(
         self,
         steps: Generator[Hop, None, SummaryOutcome],
         done: Callable[[SummaryOutcome | BaseException], None],
+        *,
+        requested: bool = False,
     ) -> None:
-        """Run `steps`, handing each stage to the pool it names, waiting on none."""
+        """Run `steps`, handing each stage to the pool it names, waiting on none.
+
+        A requested job's model stages go ahead of the automatic ones queued.
+        """
+        model = self._model_first if requested else self._model
 
         def stop() -> None:
             steps.close()
@@ -2912,7 +2923,7 @@ class SummaryJobs:
                 stop()
                 return
             try:
-                (self._model if hop is Hop.MODEL else self._io)(resume)
+                (model if hop is Hop.MODEL else self._io)(resume)
             except Exception:  # noqa: BLE001 — a pool that stopped taking work
                 stop()
 
