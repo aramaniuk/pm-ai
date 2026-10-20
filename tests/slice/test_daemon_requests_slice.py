@@ -11,7 +11,6 @@ from __future__ import annotations
 import http.client
 import json
 import os
-import select
 import signal
 import socket
 import sqlite3
@@ -25,8 +24,7 @@ from pathlib import Path
 import pytest
 
 from pm_ai.app.daemon import NO_KEY_ENROLLED
-
-STARTUP_SECONDS = 30.0
+from test_daemon_slice import announced_lines
 
 
 def _free_port() -> int:
@@ -112,23 +110,9 @@ def home(tmp_path: Path) -> Home:
 
 
 def _wait_listening(process: subprocess.Popen[str]) -> list[str]:
-    assert process.stdout is not None
-    lines: list[str] = []
-    deadline = time.monotonic() + STARTUP_SECONDS
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([process.stdout], [], [], 0.2)
-        if ready:
-            line = process.stdout.readline()
-            lines.append(line)
-            if "listening on" in line:
-                return lines
-            if not line and process.poll() is not None:
-                break
-        elif process.poll() is not None:
-            break
-    process.kill()
-    out, err = process.communicate()
-    pytest.fail(f"the daemon never announced itself:\nstdout: {out}\nstderr: {err}")
+    # Read on a thread, not by `select` on the pipe, which misses a second line
+    # already taken into the text buffer (4x).
+    return announced_lines(process)
 
 
 def _stop(process: subprocess.Popen[str], sig: int = signal.SIGINT) -> tuple[int, str, str]:

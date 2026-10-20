@@ -1268,6 +1268,47 @@ class _OperationalConnection(sqlite3.Connection):
 _CONTROL = ("BEGIN", "COMMIT", "ROLLBACK", "END", "SAVEPOINT", "RELEASE", "PRAGMA")
 """Statements that manage a transaction themselves, and so never open one."""
 
+WAL_SWITCH_INTERVAL = 0.01
+"""Seconds between tries of the open's `journal_mode=WAL` when it is refused busy (4x)."""
+
+
+def _enter_wal(db: _OperationalConnection) -> None:
+    """`PRAGMA journal_mode=WAL`, tried again while another opener holds the file (4x).
+
+    Two processes opening a brand-new `operational.db` at once both ask for
+    WAL, and switching needs the file's write lock. The pragma reads the file
+    before it asks for that lock, and SQLite does not run the busy wait for a
+    connection that already holds a read (the two could deadlock), so the
+    second asker was refused busy at once — before it reached whatever
+    decides between the two, which for `daemon run` is the port. Once the
+    winner has switched, the file stays WAL and asking again succeeds.
+
+    Tried again until the connection's own busy wait has passed since the
+    first try; one try already under way can run its own busy wait past that.
+    Then the open is refused as busy, naming the store and the time measured.
+    """
+    started = time.monotonic()
+    try:
+        bound = int(db.execute("PRAGMA busy_timeout").fetchone()[0]) / 1000
+    except sqlite3.Error:
+        bound = 5.0
+    while True:
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            return
+        except OperationalStoreBusy as busy:
+            waited = time.monotonic() - started
+            if waited >= bound:
+                raise OperationalStoreBusy(
+                    f"the operational store at {db.store} could not be opened in "
+                    f"WAL mode: it was refused as busy for {waited * 1000:.0f} ms "
+                    f"(the connection's busy wait is {bound * 1000:.0f} ms) — "
+                    f"another connection holds its lock. The store was not "
+                    f"switched to WAL. Run the command again once the other one "
+                    f"finishes."
+                ) from busy
+        time.sleep(WAL_SWITCH_INTERVAL)
+
 
 class SchemaVersionTooNew(RuntimeError):
     """The store was written by a later version of pm-ai than this one.
@@ -2127,7 +2168,7 @@ class StorageService:
         # process exit reclaimed them eventually, but a caller that catches the
         # refusal and retries held one leaked connection per attempt.
         try:
-            self._db.execute("PRAGMA journal_mode=WAL")  # AD-5 — sole writer, WAL
+            _enter_wal(self._db)  # AD-5 — sole writer, WAL
             # Asked BEFORE `_SCHEMA` runs, because afterwards every store looks
             # created-by-us. It is the only way to tell a brand-new file from one
             # written in the unversioned era, and the two need opposite handling:
