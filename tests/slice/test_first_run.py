@@ -139,6 +139,18 @@ def operator(monkeypatch: pytest.MonkeyPatch) -> Operator:
     return scripted
 
 
+def hold_a_frontier_key(keychain: Keychain) -> None:
+    """Seal a test Anthropic key, as `pm-ai frontier key` would in the daemon (story 7c).
+
+    With none held, `doctor`'s `frontier key` line is `OK` and says how to add
+    one (Andrei, 2026-10-20); a test holds one to see the held line.
+    """
+    from pm_ai.app.wiring import application_storage
+    from pm_ai.core.frontier_key import seal_frontier_key
+
+    seal_frontier_key(application_storage(keychain), "test-key-not-real")
+
+
 @pytest.fixture
 def installed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runtime extra stood in, as `test_doctor.py` stands it in."""
@@ -862,7 +874,25 @@ def step_four(printed: str) -> str:
     start = printed.index("[4/4]")
     report = _REPORT_LINE.search(printed, start)
     end = report.start() if report else len(printed)
+    # Story 7c: setup's closing line naming `pm-ai frontier key` follows step 4.
+    closing = printed.find(FRONTIER_KEY_CLOSING, start, end)
+    if closing != -1:
+        end = closing
     return printed[start:end].rstrip()
+
+
+FRONTIER_KEY_CLOSING = "Optional: to let `pm-ai transcript summarize --by claude` ask Claude"
+
+
+def test_setup_closes_after_step_four_naming_frontier_key(home, tmp_path, keychain, operator, capsys):
+    """Story 7c: the key is entered once the daemon runs, so setup only names the command."""
+    operator.script(*answers_for(tmp_path / "alpha"))
+    setup()
+    printed = capsys.readouterr().out
+    at = printed.index(FRONTIER_KEY_CLOSING)
+    assert at > printed.index("[4/4]")
+    line = printed[at:].splitlines()[0]
+    assert "`pm-ai frontier key`" in line and "`pm-ai daemon run`" in line
 
 
 def test_step_four_says_it_is_optional_and_why(home, tmp_path, keychain, operator, capsys):

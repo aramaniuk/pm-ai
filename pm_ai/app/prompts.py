@@ -55,6 +55,7 @@ from typing import Any, TypeVar
 from pm_ai.app.concurrency import (
     WRITER_START_WAIT_SECONDS,
     IOPool,
+    ModelPool,
     StepKind,
     WriterBusy,
     WriterStopped,
@@ -86,6 +87,7 @@ from pm_ai.app.wiring import (
     CLAIM_WAIT_INTERVAL,
     REGISTRY_ARTIFACT,
     Daemon,
+    FrontierKeyCheck,
     HandedRefreshTokenStore,
     refreshed,
 )
@@ -96,7 +98,9 @@ from pm_ai.core.dispatch import JobState, plan
 from pm_ai.core.project_registry import RegistryRefused, parse_registry
 from pm_ai.domain.health import Report
 from pm_ai.domain.identity import DataScope, ScopeKind
-from pm_ai.ports import ArtifactBusy, DaemonRefused, KeyNotFound
+from pm_ai.core.frontier_key import assert_sealable, seal_frontier_key
+from pm_ai.storage.crypto import PlaintextCrypto
+from pm_ai.ports import ArtifactBusy, DaemonRefused, FrontierKeyRefused, KeyNotFound
 from pm_ai.storage.service import (
     OperationalStoreStuck,
     OperationalStoreUnavailable,
@@ -400,6 +404,10 @@ class RequestPath:
     _render_slots_lock: threading.Lock = field(default_factory=threading.Lock)
     _renders: set[_Rendering] = field(default_factory=set)
     """The renders in flight, for the shutdown's own step."""
+    key_check: FrontierKeyCheck | None = None
+    """The frontier adapter's key check, for `pm-ai frontier key` (story 7c)."""
+    key_pool: ModelPool | None = None
+    """The frontier pool the key check runs on, so the shutdown's abort covers it (7c)."""
 
     # ── the endpoints ────────────────────────────────────────────────────────
 
@@ -486,6 +494,82 @@ class RequestPath:
                     or tuple(words[:1]) in DEDUPLICATED,
                 )
             )
+        )
+
+    async def frontier_key(self, key: str) -> Reply:
+        """`POST /v1/frontier-key`: check the key with Anthropic, then seal it (story 7c).
+
+        The check — listing models with the key, which carries no prompt and
+        writes no ledger line — runs on an I/O worker through the frontier
+        adapter's own client, so every request to Anthropic leaves from the
+        daemon. Only a key Anthropic accepted is sealed, in one claimed step on
+        the writer thread, under the master key; a refused key, or Anthropic
+        not answering, seals nothing and a key already held stays. Answered
+        inline, as a line is; the key is never in an answer or a log line.
+        """
+        if not key.strip():
+            return _inline("pm-ai: no key was given, so nothing was sealed.\n", EXIT_REFUSAL)
+        checker = self.key_check
+        if checker is None:
+            return _inline(
+                "pm-ai: this daemon cannot check a key: the frontier adapter needs the "
+                "runtime extra (`uv sync --extra runtime`). Nothing was sealed.\n",
+                EXIT_REFUSAL,
+            )
+        storage = self.daemon.storage
+        try:
+            # Locally first, contacting nothing: a key with nowhere to be sealed
+            # is never sent to Anthropic.
+            await self.pool.run(lambda: assert_sealable(storage))
+        except Exception as unsealable:  # noqa: BLE001 — named by type and sentence
+            return _inline(
+                f"pm-ai: a key could not be sealed here, so none was asked of Anthropic: "
+                f"{type(unsealable).__name__}: {unsealable}\n",
+                EXIT_REFUSAL,
+            )
+        pool = self.key_pool
+        if pool is None:
+            return _inline(
+                "pm-ai: this daemon has no frontier pool to check a key on. That is a "
+                "wiring fault in pm-ai; nothing was sealed.\n",
+                EXIT_UNEXPECTED,
+            )
+        try:
+            await pool.run(lambda: checker.check_key(key))
+        except FrontierKeyRefused as refused:
+            return _inline(f"pm-ai: {refused}\n", EXIT_REFUSAL)
+        except Exception as error:  # noqa: BLE001 — named by type, never by text
+            return _inline(
+                f"pm-ai: {_unexpected(error, doing='checking the key')} Nothing was sealed.\n",
+                EXIT_UNEXPECTED,
+            )
+        try:
+            await self.writer.call_async(
+                lambda: seal_frontier_key(storage, key),
+                label="seal the frontier key",
+                start_within=WRITER_START_WAIT_SECONDS,
+            )
+        except WriterBusy as busy:
+            return _busy(str(busy))
+        except (WriterStopped, SchemaVersionChanged) as stopped:
+            return _inline(f"pm-ai: the key was checked and not sealed: {stopped}\n", EXIT_REFUSAL)
+        except (ArtifactBusy, KeyNotFound, OperationalStoreUnavailable) as refused:
+            return _inline(f"pm-ai: the key was checked and not sealed: {refused}\n", EXIT_REFUSAL)
+        except Exception as error:  # noqa: BLE001 — named by type, never by text
+            return _inline(
+                f"pm-ai: {_unexpected(error, doing='sealing the key')} Nothing was sealed.\n",
+                EXIT_UNEXPECTED,
+            )
+        how = (
+            "stored UNENCRYPTED (PM_AI_DISABLE_ENCRYPTION is set for this daemon) in"
+            if isinstance(self.daemon.crypto, PlaintextCrypto)
+            else "sealed in"
+        )
+        return _inline(
+            f"the Anthropic API key was checked with Anthropic and {how} "
+            f"~/.pm-ai/private/config.json; `pm-ai transcript summarize --by claude` "
+            f"uses it from now on.\n",
+            EXIT_OK,
         )
 
     async def _unwatched(self, target: DataScope | None) -> str | None:

@@ -45,6 +45,11 @@ runtime = [
     # the connection's socket down. Declared at the lock's version, which
     # `httpx` 0.28.1 already pulled in; the lock gains no package.
     "httpcore==1.0.9",
+    # Story 7c: the frontier adapter builds its own `httpx2` client (trust_env
+    # off, no redirects, AD-1 class F), so it is imported directly and declared
+    # at the lock's version rather than left to `anthropic` 1.2.0's own
+    # `<3,>=2.0.0` range. 2.13.1 was the newest on PyPI on 2026-10-16.
+    "httpx2==2.12.0",
     "sqlite-vec==0.1.9",           # pre-1.0; a minor bump is a reindex event (AD-3)
     "fastapi==0.141.1",
     # Pinned beside fastapi (story 4e review): fastapi declares only a floor

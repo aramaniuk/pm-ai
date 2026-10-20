@@ -956,20 +956,25 @@ def test_summarize_with_no_daemon_is_refused_naming_daemon_run(capsys):
     assert "pm-ai daemon run" in capsys.readouterr().err
 
 
-def test_summarize_by_claude_is_refused_before_anything_is_sent(capsys, monkeypatch):
+def test_summarize_by_claude_goes_to_the_daemon_and_nothing_is_composed_here(capsys, monkeypatch):
+    """Story 7c replaced `7b`'s refusal of `--by claude`: the line goes to the
+    daemon, the only process that may ask Claude; nothing is composed here."""
+    words = ["transcript", "summarize", "--scope", "personal", "--meeting", "m", "--by", "claude"]
     sent: list[str] = []
 
     class Client:
         def send(self, line):
             sent.append(line)
-            raise AssertionError("nothing may be sent")
+            return Answer("asked of Claude.\n", 0)
+
+    def no_composition(*_args, **_kwargs):
+        raise AssertionError("nothing is composed in the CLI process")
 
     monkeypatch.setattr(entry, "_loopback", lambda: Client())
-    code = entry.main(
-        ["transcript", "summarize", "--scope", "personal", "--meeting", "m", "--by", "claude"]
-    )
-    assert code == EXIT_REFUSAL and sent == []
-    assert "7c" in capsys.readouterr().err
+    monkeypatch.setattr(entry, "_compose", no_composition)
+    assert entry.main(words) == EXIT_OK
+    assert sent == [shlex.join(words)]
+    assert "7c" not in capsys.readouterr().err
 
 
 def test_summarize_from_a_terminal_goes_to_the_daemon_and_follows_its_job(capsys, monkeypatch):

@@ -93,6 +93,7 @@ Setup walks a new machine through three steps — master key, one project, `conf
 ## Spec Change Log
 
 - **2026-10-19, frozen block amended by `4s`** (Outlook categories are asked; Andrei, 2026-10-16). Step 4 now asks the Outlook category questions through the shared `connector add graph` path, one per enrolled project, after its four questions and before the sign-in; its shape, order, y/n with Enter as no, and already-done reading of an enabled Graph row are unchanged, and an interruption or refusal at a category question ends setup at step 4 as any other does. The Never line naming no category-mapping question is replaced.
+- **2026-10-20, amended by `7c`.** After step 4, setup prints one closing line naming `pm-ai frontier key` (and `pm-ai daemon run`, since the key is handed to the running daemon), before the probe report. Nothing is asked; step 4 itself is unchanged.
 
 ## Verification
 

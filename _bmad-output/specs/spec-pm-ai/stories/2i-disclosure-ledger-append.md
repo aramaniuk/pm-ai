@@ -66,6 +66,7 @@ review_loop_iteration: 0
 
 - **2026-08-29, grammar question resolved: shared encoding, separate vocabulary.** Sharing 2c's `LedgerCategory` would have created a spelling for a disclosure that `append_event_log` accepts into any scope — and the leak guard runs only on the batch path, so a project-scope write would land unrefused. The line therefore reuses the value encoding (so one tokenizer serves both files) and takes no category and no id: every line in `disclosure.md` is a frontier call, and the file is the vocabulary.
 - **Sorted scopes added to the Always list.** `contributing_scopes` is a frozenset; rendering it unsorted makes the same call produce different bytes on different runs.
+- **2026-10-20, amended by `7c`.** A line gains a call id (`call=`, random, `uuid4`) and a status (`status=sent|completed|failed`) after `at`: a `sent` line is written before a frontier request, input unknown, and a `completed` or `failed` line with the same call id after it. A count or a cost the line cannot state renders `unknown`, never zero, and only on a line with a status. A line without the two fields is the grammar above, rendered byte for byte as before.
 
 ## Verification
 

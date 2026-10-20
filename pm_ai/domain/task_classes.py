@@ -63,5 +63,7 @@ class TaskClass(Enum):
     EXTRACTION = "extraction"
     FUZZY_MATCH = "fuzzy_match"
     INQUIRY_SYNTHESIS = "inquiry_synthesis"
+    MEETING_SUMMARY = "meeting_summary"
+    """One meeting's summary, asked of Claude only on the PM's explicit request (story 7c)."""
     RESEARCH = "research"
     TRANSCRIPTION = "transcription"

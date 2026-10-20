@@ -128,6 +128,11 @@ def probes(monkeypatch):
         "local_model_check",
         lambda name: LocalModelPresence(Probe("local model", Health.OK, "stood in")),
     )
+    # Story 7c: the `frontier key` line, stood in as a key held; its own
+    # behaviour is `tests/slice/test_frontier_summary.py`'s.
+    monkeypatch.setattr(
+        entry, "frontier_key_probe", lambda storage: Probe("frontier key", Health.OK, "stood in")
+    )
     return install
 
 
@@ -1163,7 +1168,9 @@ def test_every_daemon_backed_command_declares_its_target():
         name for name, command in _every_runnable_command() if command.target is None
     }
     # `logs` (story 4w) reads the daemon's log files and needs no daemon.
-    assert untargeted == {"doctor", "setup", "project add", "logs"}
+    # `frontier key` (story 7c) composes nothing: its key goes to the running
+    # daemon over the loopback API.
+    assert untargeted == {"doctor", "setup", "project add", "logs", "frontier key"}
 
     for name, command in _every_runnable_command():
         assert command.run is not None

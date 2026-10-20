@@ -94,6 +94,28 @@ def _never_a_real_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _never_a_real_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reaches Anthropic's API (story 7c).
+
+    The frontier adapter's real transport is replaced by one that answers every
+    request as a refused connection, so a test that goes through wiring — the
+    daemon, `frontier key`, a `--by claude` request — meets an unreachable
+    Anthropic rather than the network. A test that wants an answer injects an
+    `httpx2.MockTransport` itself.
+    """
+    import httpx2
+
+    from pm_ai.models.frontier import anthropic as frontier
+
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError(
+            "tests never reach Anthropic: inject an httpx2.MockTransport", request=request
+        )
+
+    monkeypatch.setattr(frontier, "_default_transport", lambda: httpx2.MockTransport(refuse))
+
+
 RUNTIME_EXTRA = "uv sync --extra runtime"
 RUNTIME_MODULES = ("starlette", "fastapi", "uvicorn")
 
@@ -157,7 +179,11 @@ _require_runtime_extra()
 # 21 → 20, story 4r: `pm_ai.core.dispatch` exists, so
 # `test_ad21_slow_requests_acknowledge_instead_of_blocking` runs instead of
 # skipping.
-EXPECTED_SKIPS = 20
+# 20 → 11, story 7c: `pm_ai.models.router` exists, so the nine router items in
+# `test_domain_invariants.py` — the five local-only classes, the tiering, the
+# budget breach and the two AD-31 checks, rewritten to the real port — run
+# instead of skipping.
+EXPECTED_SKIPS = 11
 
 _VERDICT = pytest.StashKey[str]()
 

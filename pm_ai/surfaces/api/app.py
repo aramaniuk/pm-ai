@@ -46,6 +46,7 @@ from typing import Any
 
 __all__ = [
     "AuthenticatedApp",
+    "FRONTIER_KEY_PATH",
     "IDENTITY_HEADER",
     "JOB_EVENTS_PATH",
     "JOB_PATH",
@@ -68,6 +69,16 @@ JOB_PATH = "/v1/jobs/{job_id}"
 
 JOB_EVENTS_PATH = "/v1/jobs/{job_id}/events"
 """One job's state changes, as an event stream that closes after the last."""
+
+FRONTIER_KEY_PATH = "/v1/frontier-key"
+"""Takes `{"key": "..."}` from `pm-ai frontier key`; answers inline, as a line is (story 7c).
+
+The one secret the API carries, over the authenticated loopback channel (AD-8):
+the daemon checks it with Anthropic and seals it. The request log records the
+method, path and status only, never a body."""
+
+KEY_LIMIT = 4096
+"""A key of this many characters or more is refused `400`."""
 
 LINE_LIMIT = 4096
 """A line of this many characters or more is refused `400`, naming `line`."""
@@ -132,6 +143,7 @@ def create_app(
     prompt: Prompt | None = None,
     job: Job | None = None,
     job_events: JobEvents | None = None,
+    frontier_key: Prompt | None = None,
 ) -> AuthenticatedApp:
     """The application: one bearer check, one endpoint, one request log.
 
@@ -199,6 +211,27 @@ def create_app(
     # handed the class itself rather than a name it cannot resolve.
     post_prompt.__annotations__["body"] = PromptBody
     api.post(PROMPT_PATH)(post_prompt)
+
+    class KeyBody(BaseModel):
+        """`{"key": "..."}`; anything else is the framework's `422`."""
+
+        model_config = ConfigDict(extra="ignore")
+        key: StrictStr
+
+    async def post_frontier_key(body: KeyBody) -> JSONResponse:
+        # Story 7c: never logged, never echoed — the answer names no part of it.
+        if not body.key or len(body.key) >= KEY_LIMIT:
+            return JSONResponse(
+                {"detail": f"`key` must be between 1 and {KEY_LIMIT - 1} characters."},
+                status_code=400,
+            )
+        if frontier_key is None:
+            return JSONResponse({"detail": "no key handler was composed"}, status_code=503)
+        reply = await frontier_key(body.key)
+        return JSONResponse(dict(reply.body), status_code=reply.status, headers=dict(reply.headers))
+
+    post_frontier_key.__annotations__["body"] = KeyBody
+    api.post(FRONTIER_KEY_PATH)(post_frontier_key)
 
     @api.get(JOB_PATH)
     async def get_job(job_id: str) -> JSONResponse:

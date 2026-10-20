@@ -20,7 +20,6 @@ from pm_ai.domain.identity import DataScope
 __all__ = [
     "ACTION_ITEM",
     "DUE_LIMIT",
-    "FRONTIER_SUMMARY_REFUSED",
     "MAX_ACTION_ITEMS",
     "MAX_DECISIONS",
     "MAX_TIMEOUTS",
@@ -134,17 +133,33 @@ class SummaryAnswer:
 
 
 class SummaryMaker(Enum):
-    """Who made a summary. Only the local model in this slice; `7c` adds Claude."""
+    """Who made a summary: the local model, or Claude on the PM's request (story 7c).
+
+    The value is what the state row stores; the CLI's word for `FRONTIER` is
+    `claude` (`--by claude`), read by `SummaryMaker.from_word`.
+    """
 
     LOCAL = "local"
+    FRONTIER = "frontier"
+
+    @classmethod
+    def from_word(cls, word: str) -> SummaryMaker:
+        """`--by`'s word as a maker: `local`, or `claude` for `FRONTIER`."""
+        if word == "claude":
+            return cls.FRONTIER
+        if word == cls.LOCAL.value:
+            return cls.LOCAL
+        raise ValueError(f"`--by` takes local or claude, not {word!r}.")
 
 
 @dataclass(frozen=True, slots=True)
 class RecordedSummary:
     """What a meeting record's `## Summary` region holds (story 7b).
 
-    The provenance — made by the local model `model`, automatically or on
-    request, on `made_on` — and the answer. pm-ai's region: written only by
+    The provenance — made by the local model or by Claude (`made_by`, story
+    7c), the model `model`, automatically or on request, on `made_on` — and
+    the answer. No cost: a frontier call's cost lives only in the disclosure
+    ledger (CAP-27). pm-ai's region: written only by
     `MeetingRecords.put_summary`, carried over by every `put`.
     """
 
@@ -224,17 +239,9 @@ class SummaryRefused(RuntimeError):
     """A summary was refused before any model call, naming why (story 7b).
 
     The meeting is not recorded, its transcript row is not `ingested` (a part
-    that failed ingestion is named), a capture is missing or purged, `--by
-    claude` was asked for (`7c`), or no daemon is there to run it.
+    that failed ingestion is named), a capture is missing or purged, or no
+    daemon is there to run it.
     """
-
-
-FRONTIER_SUMMARY_REFUSED = (
-    "`--by claude` asks Claude for the summary, which story 7c builds; it is "
-    "not built yet, so nothing was sent. `--by local` (the default) asks the "
-    "local model."
-)
-"""The refusal of a frontier summary until `7c`, said by the CLI and the daemon."""
 
 
 @dataclass(frozen=True, slots=True)

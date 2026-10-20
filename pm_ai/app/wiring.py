@@ -148,9 +148,12 @@ from pm_ai.domain.health import (
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.member_ledgers import MEMBER_UPDATES
+from pm_ai.domain.task_classes import TaskClass
+from pm_ai.core.frontier_key import held_frontier_key
 from pm_ai.domain.model_calls import (
     LOCAL_MODEL_PROBE,
     LocalModelPresence,
+    ModelSide,
     normalize_model_name,
     unset_local_model,
 )
@@ -158,11 +161,13 @@ from pm_ai.domain.scope_model import PROJECT_DIRNAME, PROJECT_TREE
 from pm_ai.domain.storage_tiers import API_TOKEN, CAPTURES, EVENT_LOG, GITIGNORE_FILENAME
 from pm_ai.platform.claims import FlockClaims
 from pm_ai.platform.environment import encryption_disabled as encryption_off
+from pm_ai.platform.environment import set_variables
 from pm_ai.platform.keychain import MacOSKeychainAdapter
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.platform.vcs import GIT_TIMEOUT_SECONDS, GitVcs
 from pm_ai.ports import (
     MASTER_KEY_NAME,
+    StoragePort,
     ArtifactBusy,
     ConnectorPort,
     CryptoPort,
@@ -183,7 +188,11 @@ from pm_ai.surfaces.cli.dispatch import RESTART_SENTENCE
 
 __all__ = [
     "Bootstrap",
+    "FrontierKeyCheck",
     "LocalModel",
+    "Router",
+    "frontier_key_check",
+    "model_router",
     "CONFIG_ARTIFACT",
     "ConnectorRows",
     "Daemon",
@@ -241,6 +250,38 @@ class LocalModel(ModelPort, Protocol):
         ...
 
 
+class Router(ModelPort, Protocol):
+    """The one router (AD-15, story 7c) as the daemon holds it.
+
+    `pm_ai.models.router.ModelRouter`, named by shape here because the router
+    imports the frontier adapter, which needs the runtime extra; without it
+    every command must still compose far enough to say so.
+    """
+
+    def side_of(self, task_class: TaskClass) -> ModelSide:
+        """The side `task_class` runs on, which picks its pool (AD-19)."""
+        ...
+
+    def bound(self, storage: StoragePort) -> Router:
+        """This router, writing the ledger and reading the key through `storage`."""
+        ...
+
+    def close(self) -> None:
+        """Close the frontier side's connections (the frontier pool's shutdown)."""
+        ...
+
+    @property
+    def frontier(self) -> Any:
+        """The one frontier adapter, the key check's too (story 7c)."""
+        ...
+
+
+class FrontierKeyCheck(Protocol):
+    """The frontier adapter's key check (`AnthropicFrontier.check_key`), by shape."""
+
+    def check_key(self, key: str) -> None: ...
+
+
 class SummaryStarter(Protocol):
     """Where the daemon starts a meeting's summary job (story 7b).
 
@@ -260,6 +301,7 @@ class SummaryStarter(Protocol):
         offered: Any = None,
         prepared: Any = None,
         on_done: Any = None,
+        maker: Any = None,
     ) -> bool: ...
 
     def in_flight(self, scope: DataScope, meeting_id: str) -> bool: ...
@@ -383,6 +425,19 @@ class Daemon:
     """
     model_pool: ModelPool | None = None
     """The daemon's model pool of one, once started (AD-19, story 7a); `None` elsewhere."""
+    router: Router | None = None
+    """The one router every model call may go through (AD-15, story 7c).
+
+    Routes every task class: the local ones to `model` (refused `NoLocalModel`
+    when none is named), the frontier-eligible ones to the frontier adapter at
+    their tier, writing the disclosure ledger around each frontier call. `model`
+    stays the local model, so `7b`'s automatic summaries, the model pool's abort
+    and the `LocalModel` slot are unchanged. `None` without the runtime extra.
+    A job's daemon (`handed_daemon`) holds it bound to the handed store, so its
+    ledger lines are claimed steps on the writer thread.
+    """
+    frontier_pool: ModelPool | None = None
+    """The daemon's frontier pool of one, once started (AD-19, story 7c); `None` elsewhere."""
     summaries: SummaryStarter | None = None
     """The daemon's summary jobs, once `daemon run` has started its pools (story 7b).
 
@@ -616,6 +671,7 @@ def build(
         connectors[instance] = enrolled
         filed[instance] = filed_under
     sources = _transcript_sources(connectors)
+    local = local_model(config)
     return Daemon(
         storage=storage,
         crypto=crypto,
@@ -639,10 +695,60 @@ def build(
         # has to build a second one.
         clock=clock,
         config=config if config is not None else Config(),
-        model=local_model(config),
+        model=local,
+        router=model_router(local, storage, clock),
         instance_scopes=filed,
         unbuilt=unbuilt,
     )
+
+
+def model_router(
+    local: LocalModel | None, storage: StoragePort, clock: Callable[[], datetime]
+) -> Router | None:
+    """The one router over `local` and the frontier adapter (AD-15, story 7c).
+
+    Constructing it contacts nothing: the frontier adapter builds its client
+    for each call. `None` when the runtime extra is missing (the adapter needs
+    `anthropic` and `httpx2`). The key is read from the sealed store at each
+    call, so a key sealed while the daemon runs takes effect at once.
+    """
+    try:
+        from pm_ai.models.router import ModelRouter
+    except ImportError:
+        return None
+    return ModelRouter(
+        local=local,
+        frontier=frontier_adapter(),
+        storage=storage,
+        key=held_frontier_key,
+        clock=clock,
+    )
+
+
+def frontier_key_check(daemon: Daemon) -> FrontierKeyCheck | None:
+    """The key check for `pm-ai frontier key` in the daemon: the router's own adapter (7c).
+
+    One adapter instance for every request to Anthropic — the summaries' and
+    the key check's — built one way, so the frontier pool's shutdown, which
+    closes that adapter, covers the check too. `None` without the runtime
+    extra.
+    """
+    router = daemon.router
+    return None if router is None else router.frontier
+
+
+def frontier_adapter() -> Any:
+    """The frontier adapter, built one way, or `None` without the runtime extra (7c).
+
+    Handed the SDK variables it refuses on, read through
+    `pm_ai.platform.environment` — the one place the environment is read —
+    at every call, so a variable set while the daemon runs is still refused.
+    """
+    try:
+        from pm_ai.models.frontier.anthropic import REFUSED_ENVIRONMENT, AnthropicFrontier
+    except ImportError:
+        return None
+    return AnthropicFrontier(environ=lambda: set_variables(REFUSED_ENVIRONMENT))
 
 
 def local_model(config: Config | None) -> LocalModel | None:
@@ -4180,6 +4286,8 @@ def handed_daemon(daemon: Daemon, *, hand: Hand) -> Daemon:
         storage=handed,
         skills=skills,
         meetings=cast(MeetingRecords, HandedMeetings(daemon.meetings, storage, hand)),
+        # Story 7c: the router's ledger lines are claimed steps, like every write.
+        router=None if daemon.router is None else daemon.router.bound(handed),
     )
 
 

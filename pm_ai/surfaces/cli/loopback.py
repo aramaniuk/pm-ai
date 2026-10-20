@@ -44,7 +44,12 @@ from pm_ai.domain.api_token import (
     check_api_token,
     symlinked,
 )
-from pm_ai.surfaces.api.app import IDENTITY_HEADER, JOB_EVENTS_PATH, PROMPT_PATH
+from pm_ai.surfaces.api.app import (
+    FRONTIER_KEY_PATH,
+    IDENTITY_HEADER,
+    JOB_EVENTS_PATH,
+    PROMPT_PATH,
+)
 
 __all__ = [
     "Acknowledged",
@@ -279,9 +284,21 @@ class LoopbackClient:
         Ctrl-C raises `WaitAbandoned`, saying whether the line had been sent; the
         daemon finishes a sent line on its own. Nothing else is raised.
         """
+        return self._sent(PROMPT_PATH, {"line": line})
+
+    def hand_frontier_key(self, key: str) -> Outcome:
+        """`POST` the key `pm-ai frontier key` read to the daemon (story 7c); its answer.
+
+        The key travels only in the body of one request over the authenticated
+        loopback channel (AD-8), never in a line, an address or a log; the
+        daemon checks it with Anthropic and seals it. Answered inline, as a line.
+        """
+        return self._sent(FRONTIER_KEY_PATH, {"key": key})
+
+    def _sent(self, path: str, payload: Mapping[str, str]) -> Outcome:
         progress = _Progress()
         try:
-            return self._send(line, progress)
+            return self._send(path, payload, progress)
         except KeyboardInterrupt as interrupted:
             raise WaitAbandoned(sent=progress.sent) from interrupted
         except Exception as error:  # noqa: BLE001 — named, never the end of the session
@@ -348,15 +365,15 @@ class LoopbackClient:
 
     # ── the line ─────────────────────────────────────────────────────────────
 
-    def _send(self, line: str, progress: _Progress) -> Outcome:
+    def _send(self, path: str, payload: Mapping[str, str], progress: _Progress) -> Outcome:
         ready = self._ready()
         if isinstance(ready, _Blocked):
             return ready.for_line()
         port, token, token_path = ready
         address = f"{LOOPBACK}:{port}"
-        body = json.dumps({"line": line}).encode("utf-8")
+        body = json.dumps(dict(payload)).encode("utf-8")
         request = (
-            f"POST {PROMPT_PATH} HTTP/1.1\r\nHost: {address}\r\n"
+            f"POST {path} HTTP/1.1\r\nHost: {address}\r\n"
             f"Authorization: Bearer {token}\r\nContent-Type: application/json\r\n"
             f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
         ).encode("ascii") + body
