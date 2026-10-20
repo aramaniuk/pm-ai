@@ -19,7 +19,6 @@ import errno
 import http.client
 import json
 import os
-import select
 import signal
 import socket
 import subprocess
@@ -124,23 +123,67 @@ def home(tmp_path: Path) -> Home:
     return Home(root, port)
 
 
+def announced_lines(process: subprocess.Popen[str]) -> list[str]:
+    """Standard output up to and including the announcement, or fail with what was said.
+
+    Read line by line on a thread, never by `select` on the pipe (4x): `select`
+    asks the descriptor, and a `readline` that took two lines off it in one
+    read leaves the second in the text buffer, where `select` cannot see it.
+    A daemon that printed the mode-walk line and the announcement together was
+    reported as never announcing itself, although it was serving.
+    """
+    assert process.stdout is not None
+    stdout = process.stdout
+    lines: list[str] = []
+    announced = threading.Event()
+
+    def read() -> None:
+        for line in stdout:
+            lines.append(line)
+            if "listening on" in line:
+                announced.set()
+                return
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(STARTUP_SECONDS)
+    if announced.is_set():
+        return lines
+    process.kill()
+    reader.join(10)
+    out, err = process.communicate()
+    pytest.fail(
+        f"the daemon never announced itself:\nstdout: {''.join(lines)}{out}\nstderr: {err}"
+    )
+
+
 def _wait_listening(process: subprocess.Popen[str]) -> str:
     """The announcement line, or fail with whatever the process said instead."""
-    assert process.stdout is not None
-    deadline = time.monotonic() + STARTUP_SECONDS
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([process.stdout], [], [], 0.2)
-        if ready:
-            line = process.stdout.readline()
-            if "listening on" in line:
-                return line
-            if not line and process.poll() is not None:
-                break
-        elif process.poll() is not None:
-            break
-    process.kill()
-    out, err = process.communicate()
-    pytest.fail(f"the daemon never announced itself:\nstdout: {out}\nstderr: {err}")
+    return announced_lines(process)[-1]
+
+
+def test_an_announcement_written_with_the_line_before_it_is_seen():
+    """Two lines in one write reach the reader as two lines, the second kept (4x)."""
+    process = subprocess.Popen(
+        [
+            sys.executable, "-c",
+            "import sys, time; sys.stdout.write('pm-ai: made 1 folder\\n"
+            "pm-ai: listening on 127.0.0.1:1\\n'); sys.stdout.flush(); time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        started = time.monotonic()
+        assert announced_lines(process) == [
+            "pm-ai: made 1 folder\n",
+            "pm-ai: listening on 127.0.0.1:1\n",
+        ]
+        assert time.monotonic() - started < 10
+    finally:
+        process.kill()
+        process.communicate()
 
 
 def _stop(process: subprocess.Popen[str], sig: int = signal.SIGTERM) -> tuple[int, str, str]:
