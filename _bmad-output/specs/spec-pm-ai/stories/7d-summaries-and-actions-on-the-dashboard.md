@@ -24,7 +24,7 @@ context:
 - **Placement** (memlog "7d placement", 2026-10-16). Under Time-Critical Activities as a nested list after the day's schedule, no new heading — CAP-9's four stay exactly four. A summary is quoted from a record, not synthesized at render. Leadership Notes stays synthesis-free; its sentence that nothing in the dashboard "was written rather than computed" stops being true once a model-written excerpt appears, so it now says no synthesis runs at render and that the summaries above are quoted from their records, each naming the model that wrote it. The project file has no Leadership Notes; there each excerpt's own attribution is the statement.
 - **Which meetings: by when the summary was recorded.** Summary state rows in the scope whose recorded instant lies between the scope's look-back instant (`9b`'s `since`: the last render, 24 hours when none, never more than 7 days) and the render's instant, in states `summarized`, `waiting`, `failed` or `nothing said` — the last listed with "the transcript held no words after cleaning" and no excerpt. At most 10, the most recently recorded; more are stated as a count. Each record is read on its own, by id, so one malformed record is stated by name and the others still show.
 - **What each shows.** Start in the display zone, title, the summary as `7b`'s parser decodes it (`render_value`'s escapes undone), its line breaks folded as `23f` folds them, then cut to 200 characters by `cut_at_word` — at the last space before the limit, a hard cut when there is none, with "…" when cut — then escaped (`23f`'s order: fold, cut, escape); who made it, from the record's parsed `RecordedSummary` fields (`made_by`, `model`, `requested`): the local model or Claude, the model, automatically or on request; up to 5 open action items as `owner: what (due)` with the rest as a count — on a project dashboard the owner is shown only once the label is resolved to a project member by `7e`'s read-time rule (the alias table, or an exact display name or username), otherwise as unassigned, so spoken names stay off the team page; the personal dashboard shows the label; and the meeting id with the command that asks for a summary. A row `waiting` or `failed` with no summary in the record says so, with the reason cut to the section's bound; a `waiting` one names its maker from the row's `made_by` (the local model or Claude). A row `waiting` or `failed` while the record still holds an earlier summary (a later part re-opened it) shows that summary and adds that a newer one is waiting, or failed with its reason. Every string goes through `escape`.
-- **Open action items:** proposals of type `action_item` for that scope and meeting — the scope is part of `7b`'s id — that are `staged` and whose `expires_at` is after the render's instant. `11b`'s pattern promises are not listed, so one item found both ways is not shown twice. On a project dashboard an item that `7e` places on the same page under an issue — a row Team Activity shows — is left out of the list and does not count toward the 5; its meeting shows "shown under #N" in its place, so one item is never shown twice on the page. On a project dashboard an item linked to a confidential issue never shows its text, whether or not Team Activity shows its row: it is listed as "an action item on a confidential issue" with its owner and due date, so the page never shows more about a confidential issue than Team Activity does (Andrei, 2026-10-20).
+- **Open action items:** proposals of type `action_item` for that scope and meeting — the scope is part of `7b`'s id — that are `staged` and whose `expires_at` is after the render's instant. `11b`'s pattern promises are not listed, so one item found both ways is not shown twice. On a project dashboard an item that `7e` places on the same page under an issue — a row Team Activity shows — is left out of the list and does not count toward the 5; its meeting shows "shown under #N" in its place, so one item is never shown twice on the page. On a project dashboard an item linked to a confidential issue never shows its text, whether or not Team Activity shows its row: it is listed as "an action item on a confidential issue" with its owner and due date, so the page never shows more about a confidential issue than Team Activity does (Andrei, 2026-10-20). When the project's GitLab record cannot be read, so which issues are confidential cannot be told, every item linked to an issue is withheld the same way and the page says why; an item linked to no issue is unaffected (fail closed, Andrei, 2026-10-20).
 - **Project dashboards never read personal records (AD-25, AD-38) — by signature.** The project renderer takes a `ProjectMeetingDigests` value whose constructor refuses a digest from any scope but that project; a personal digest cannot be passed to it. A project's dashboard reads that project's summary state rows, meeting records and proposals, plus `7e`'s resolver, which reads `aliases.md` and `8t`'s members for that project — and nothing else. The personal dashboard reads personal ones and each enrolled project's — a new read across scopes, from project into the PM's own file, the direction AD-38 allows and `_belongs` already takes for meetings (`pipelines.py:2326`); a project that cannot be read or is no longer enrolled is stated in one line naming it, and the others render. `people` rows and records are never read for either dashboard.
 - **The month's frontier spend, personal dashboard only.** One line in Leadership Notes, from `DisclosureLedger.monthly_total` over the current UTC month (a call counted in the month of its `sent` line): calls whose lines report usage — `completed`, or `failed` with usage — and their total cost against the $20 monitored target, calls of unknown cost if any, and a warning when the total is past it (AD-17, NFR-13). A ledger that cannot be read is stated with its reason; malformed lines are left out of the total and named after it, as `7c`'s `_frontier_spend` does (`skip_malformed`). Never on a project dashboard: the ledger names every scope.
 - **No model at render time.** `core/rendering.py` stays pure; `prepare_dashboard` reads state rows, records, proposals and the ledger as reads on the worker (AD-5, `4r`), and never reaches `Daemon.model` or `Daemon.router`. A test renders with a `Daemon.model` and a `Daemon.router` that each raise if called, and the dashboard path imports nothing from `pm_ai.models`.
@@ -49,6 +49,7 @@ context:
 | Pattern promise | an `11b` promise for the same meeting | not listed | N/A |
 | Placed by `7e` | on a project page, an open item that Team Activity shows under issue #142 | left out of the meeting's items, not counted toward 5; the meeting shows "shown under #142" | N/A |
 | Confidential issue | on a project page, open items linked to a confidential issue, one with its row shown, one past Team Activity's rows | the shown one counted "shown under #N"; the other listed as "owner: an action item on a confidential issue (due)"; neither one's text anywhere on the page | N/A |
+| Confidentiality unknown | on a project page, the GitLab record cannot be read; one item linked to #142, one to no issue | the linked one listed as "owner: an action item on a confidential issue (due)", and the page says the record could not be read so linked items are withheld; the other shown with its text | stated |
 | Waiting / failed | no summary yet | "summary waiting for the local model" (or "for Claude", by the row's maker) / "summary failed: <reason>" | N/A |
 | Re-opened | record holds a summary; row `waiting` after a later part | the summary shown, "a newer summary is waiting" | N/A |
 | Project render | a personal meeting summarized the same day | absent; the renderer cannot take it | N/A |
@@ -115,6 +116,7 @@ context:
 - **2026-10-20, build:** built against `main` at 2d8a559. `wiring.py`'s `PLAIN_READS` gains the three new storage reads, so the daemon's storage-call classification test holds (a file the Code Map did not name). The project render signature, its mypy fixture and the `23a` and `23d` Change Log lines follow the tasks.
 - **2026-10-20, review (blind hunter, edge-case hunter, verification gap), triaged and fixed:** Leadership Notes' sentence that the summaries are quoted, each naming its model, is printed only when the page quotes at least one excerpt (a page that quotes none does not claim it); a project no longer enrolled is named as such, not as a failed read, and a failed enrolment check is stated narrowly; an unreadable alias table is stated on the project page; a project meeting names its scope on the personal page; the look-back window is `(since, now]`, so a row written at the last render's instant is not listed twice; the title, owner, due date and model are cut as the excerpt is; a blank item text falls back to the proposal's summary; the digest values refuse counts that render nonsense; a malformed proposal body is counted on its meeting instead of hiding the meeting; a value that cannot be shown names the meeting instead of failing the render; the spend line's no-call, unknown-only and malformed-only wordings; the no-model render now runs every 7d read. Tests added for each.
 - **2026-10-20, review decision (Andrei): confidential issues are hidden.** Frozen block edited (recorded here): an action item linked to a confidential issue never shows its text on a project page, whether or not Team Activity shows its row; it is listed as "an action item on a confidential issue" with its owner and due date ("Open action items" and matrix row "Confidential issue" added). An item whose row Team Activity shows stays counted as "shown under #N", so it is still never listed twice. `IssueNotes` carries the confidential items' ids, from every ledger line at any age. The personal page shows the item as said.
+- **2026-10-20, review decision (Andrei): fail closed.** Frozen block edited (recorded here): when the project's GitLab record cannot be read (or none is recorded), so which issues are confidential cannot be told, every action item linked to an issue has its text withheld as "an action item on a confidential issue", keeping its meeting, owner and due date, and the page says why; an item linked to no issue is unaffected ("Open action items" and matrix row "Confidentiality unknown" added). Andrei also confirmed that an item Team Activity shows under a confidential issue still counts as "shown under #N". Built on `main` at b23b50f (merged in).
 
 ## Design Notes
 
@@ -140,10 +142,10 @@ Choices made in review (2026-10-16): the spend line goes in Leadership Notes bec
 **The wall as a type**
 
 - The only digests the project renderer takes; refuses any other scope at construction.
-  [`renders.py:251`](../../../../pm_ai/domain/renders.py#L251)
+  [`renders.py:252`](../../../../pm_ai/domain/renders.py#L252)
 
 - The personal page's digests: personal and project scopes only, never `people`.
-  [`renders.py:200`](../../../../pm_ai/domain/renders.py#L200)
+  [`renders.py:201`](../../../../pm_ai/domain/renders.py#L201)
 
 **What is read, with no model**
 
@@ -160,18 +162,18 @@ Choices made in review (2026-10-16): the spend line goes in Leadership Notes bec
   [`pipelines.py:2121`](../../../../pm_ai/app/pipelines.py#L2121)
 
 - The window `(since, until]`, so a row is shown by one render only.
-  [`service.py:4956`](../../../../pm_ai/storage/service.py#L4956)
+  [`service.py:4997`](../../../../pm_ai/storage/service.py#L4997)
 
 - Open items: staged, unexpired, exact-length id; a malformed body counted.
-  [`service.py:5013`](../../../../pm_ai/storage/service.py#L5013)
+  [`service.py:5054`](../../../../pm_ai/storage/service.py#L5054)
 
 **No item twice, and confidential issues hidden**
 
-- Every action item linked to a confidential issue, at any age (Andrei).
-  [`member_updates.py:1098`](../../../../pm_ai/core/member_updates.py#L1098)
+- Items on confidential issues, at any age; all linked ones with no record (Andrei).
+  [`member_updates.py:1099`](../../../../pm_ai/core/member_updates.py#L1099)
 
 - Only rows Team Activity shows count as "shown under #N".
-  [`member_updates.py:1194`](../../../../pm_ai/core/member_updates.py#L1194)
+  [`member_updates.py:1210`](../../../../pm_ai/core/member_updates.py#L1210)
 
 **What the page says**
 
@@ -179,16 +181,16 @@ Choices made in review (2026-10-16): the spend line goes in Leadership Notes bec
   [`rendering.py:801`](../../../../pm_ai/core/rendering.py#L801)
 
 - One meeting: excerpt fold-cut-escape, maker, items, state, command.
-  [`rendering.py:922`](../../../../pm_ai/core/rendering.py#L922)
+  [`rendering.py:931`](../../../../pm_ai/core/rendering.py#L931)
 
 - The quoted-summaries sentence only when an excerpt is quoted.
-  [`rendering.py:1794`](../../../../pm_ai/core/rendering.py#L1794)
+  [`rendering.py:1803`](../../../../pm_ai/core/rendering.py#L1803)
 
 - AD-17's month total against $20; unknown and malformed lines stated.
-  [`rendering.py:1817`](../../../../pm_ai/core/rendering.py#L1817)
+  [`rendering.py:1826`](../../../../pm_ai/core/rendering.py#L1826)
 
 - The shared cut, moved from `member_updates`.
-  [`rendering.py:1983`](../../../../pm_ai/core/rendering.py#L1983)
+  [`rendering.py:1992`](../../../../pm_ai/core/rendering.py#L1992)
 
 **Tests**
 
