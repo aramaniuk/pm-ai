@@ -37,6 +37,7 @@ from pm_ai.core.meeting_records import MEETINGS, MalformedMeeting, capture_name
 from pm_ai.core.meeting_summary import (
     RETRY_SENTENCES,
     SUMMARY_INSTRUCTIONS,
+    MeetingLanguage,
     action_item_id,
     decision_reference,
     instructions_for,
@@ -417,7 +418,7 @@ def test_the_output_cap_is_asked_once_more_with_its_sentence_then_fails_naming_i
     outcome = summarize_meeting(daemon, PROJECT, "mtg_a")
 
     assert outcome.result is SummaryResult.FAILED
-    assert daemon.model.calls[1]["instructions"] == instructions_for(SummaryRule.OUTPUT_CAP)
+    assert daemon.model.calls[1]["instructions"] == instructions_for(SummaryRule.OUTPUT_CAP, language=MeetingLanguage.ENGLISH)
     assert "output cap" in _state(daemon, meeting).reason
 
 
@@ -875,6 +876,34 @@ def test_a_mostly_russian_meeting_is_kept_as_the_model_wrote_it(tmp_path):
     assert record.answer.action_items[0].due == "к четвергу"
 
 
+def test_a_meeting_spoken_mostly_in_russian_names_russian_in_the_instructions(tmp_path):
+    """Row "Main language named": the language found from the spoken letters is
+    named in a fixed sentence, on the first call and on the retry; the
+    answer's language is not checked (an English answer is recorded)."""
+    spoken = (
+        "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n<v Ana>Переносим релиз на пятницу.\n\n"
+        "00:00:05.000 --> 00:00:09.000\n<v Bo>Я напишу release notes к четвергу.\n"
+    )
+    daemon = _daemon(tmp_path, "not json", _answer())
+    _ingested(daemon, _meeting(), text=spoken)
+
+    outcome = summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    first, retry = (call["instructions"] for call in daemon.model.calls)
+    assert first == instructions_for(None, language=MeetingLanguage.RUSSIAN)
+    assert first.endswith("Write in Russian.") and "Write in Russian." in retry
+    assert outcome.result is SummaryResult.SUMMARIZED
+
+
+def test_a_meeting_spoken_in_english_names_english_in_the_instructions(tmp_path):
+    daemon = _daemon(tmp_path, _answer())
+    _ingested(daemon, _meeting())
+
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    assert daemon.model.calls[0]["instructions"].endswith("Write in English.")
+
+
 def test_a_russian_injection_is_not_redacted_and_the_answer_is_still_only_staged(tmp_path):
     spoken = (
         "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n"
@@ -902,7 +931,11 @@ def test_the_instructions_are_constants_with_no_provider_or_model_text_in_them(t
 
     summarize_meeting(daemon, PROJECT, "mtg_a")
 
-    allowed = {instructions_for(None), *(instructions_for(rule) for rule in SummaryRule)}
+    allowed = {
+        instructions_for(rule, language=language)
+        for language in MeetingLanguage
+        for rule in (None, *SummaryRule)
+    }
     for call in daemon.model.calls:
         assert call["instructions"] in allowed
         assert marker not in call["instructions"]

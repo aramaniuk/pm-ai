@@ -2476,7 +2476,7 @@ def _call(
         model = require_model(daemon)
         result: ModelAnswer | BaseException = model.complete(
             task_class=TaskClass.EXTRACTION,
-            instructions=instructions_for(rule),
+            instructions=instructions_for(rule, language=prepared.prompt.language),
             external=prepared.prompt.fragments,
             flow=ScopeFlow.of((scope,), scope),
             shape=SUMMARY_SHAPE,

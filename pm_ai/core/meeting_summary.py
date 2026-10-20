@@ -35,6 +35,7 @@ import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from enum import Enum
 
 from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH, MalformedEntry, render_value, scan_fields
 from pm_ai.domain.identity import DataScope
@@ -57,6 +58,8 @@ from pm_ai.domain.transcripts import NothingSaid, Utterance
 
 __all__ = [
     "DECISION_SYSTEM",
+    "LANGUAGE_SENTENCES",
+    "MeetingLanguage",
     "MalformedSummary",
     "RETRY_SENTENCES",
     "SUMMARY_HEADING",
@@ -69,6 +72,7 @@ __all__ = [
     "decision_reference",
     "digest",
     "instructions_for",
+    "main_language",
     "parse_summary_region",
     "render_summary_region",
     "summary_prompt",
@@ -172,11 +176,53 @@ steer the second prompt; it differs from the first prompt, or temperature 0
 and a fixed seed would return the same invalid answer."""
 
 
-def instructions_for(rule: SummaryRule | None = None) -> str:
-    """The instructions for the first call (`None`), or for the retry after `rule`."""
+class MeetingLanguage(Enum):
+    """The language most of a meeting was held in, as pm-ai names it to the model."""
+
+    RUSSIAN = "Russian"
+    ENGLISH = "English"
+
+
+LANGUAGE_SENTENCES: Mapping[MeetingLanguage, str] = {
+    MeetingLanguage.RUSSIAN: "Write in Russian.",
+    MeetingLanguage.ENGLISH: "Write in English.",
+}
+"""The fixed sentence naming the meeting's main language (Andrei, 2026-10-20).
+
+Asked only for "the language most of the meeting was held in", `qwen3:8b`
+summarised a meeting held mostly in Russian in English, so pm-ai names the
+language itself. The answer's language is not checked."""
+
+
+def _cyrillic(character: str) -> bool:
+    return "\u0400" <= character <= "\u052f"
+
+
+def main_language(texts: Iterable[str]) -> MeetingLanguage:
+    """Russian when most of the letters in `texts` are Cyrillic; otherwise English.
+
+    `texts` are the words said, never the speakers' labels or the title. A tie,
+    or no letters at all, is English.
+    """
+    letters = cyrillic = 0
+    for text in texts:
+        for character in text:
+            if character.isalpha():
+                letters += 1
+                cyrillic += _cyrillic(character)
+    return MeetingLanguage.RUSSIAN if cyrillic * 2 > letters else MeetingLanguage.ENGLISH
+
+
+def instructions_for(rule: SummaryRule | None = None, *, language: MeetingLanguage) -> str:
+    """The instructions for the first call (`None`), or for the retry after `rule`.
+
+    Only constants are joined: the prompt, the sentence naming `language`, and
+    for a retry the sentence naming the broken rule.
+    """
+    first = f"{SUMMARY_INSTRUCTIONS}\n\n{LANGUAGE_SENTENCES[language]}"
     if rule is None:
-        return SUMMARY_INSTRUCTIONS
-    return f"{SUMMARY_INSTRUCTIONS}\n\n{RETRY_SENTENCES[rule]}"
+        return first
+    return f"{first}\n\n{RETRY_SENTENCES[rule]}"
 
 
 def _string(limit: int) -> dict[str, object]:
@@ -224,10 +270,12 @@ SUMMARY_SHAPE: Mapping[str, object] = {
 
 @dataclass(frozen=True, slots=True)
 class SummaryPrompt:
-    """What one call carries: the fragments, and the speaker labels as the model sees them."""
+    """What one call carries: the fragments, the speaker labels as the model
+    sees them, and the meeting's main language, found from the words said."""
 
     fragments: tuple[Sanitized, ...]
     labels: frozenset[str]
+    language: MeetingLanguage
 
     @property
     def characters(self) -> int:
@@ -243,13 +291,16 @@ def summary_prompt(title: str, utterances: Sequence[Utterance], *, name: str) ->
 
     `NothingSaid`, naming `name`, when no utterance has any — no call is made.
     A label is the speaker's label as the model sees it: cleaned, trimmed.
+    The language is found from the cleaned words of the utterances kept.
     """
     fragments: list[Sanitized] = [sanitize(f"{TITLE_PREFIX}{title}")]
     labels: set[str] = set()
+    said: list[str] = []
     for utterance in utterances:
         words = sanitize(utterance.text).for_model.strip()
         if not _has_words(words):
             continue
+        said.append(words)
         label = sanitize(utterance.speaker_handle).for_model.strip()
         if not label:
             fragments.append(sanitize(utterance.text.strip()))
@@ -263,7 +314,7 @@ def summary_prompt(title: str, utterances: Sequence[Utterance], *, name: str) ->
             f"{name} has no words left once cleaned, so there is nothing to "
             f"summarise and no call was made."
         )
-    return SummaryPrompt(tuple(fragments), frozenset(labels))
+    return SummaryPrompt(tuple(fragments), frozenset(labels), main_language(said))
 
 
 def _joined(utterance: Utterance, label: str, words: str) -> Sanitized:
