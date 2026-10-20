@@ -68,7 +68,7 @@ from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestRecord, PersistR
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.payload_fields import encode_payload
-from pm_ai.domain.proposals import Proposal
+from pm_ai.domain.proposals import OpenActionItems, Proposal
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.scope_model import ADDRESS, CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
 from pm_ai.domain.meeting_summaries import (
@@ -4952,6 +4952,109 @@ class StorageService:
             ),
         ).fetchall()
         return tuple(self._summary_row(row) for row in rows)
+
+    def summaries_recorded_between(
+        self, scope: DataScope, *, since: datetime, until: datetime
+    ) -> tuple[SummaryState, ...]:
+        """`scope`'s summary rows whose last write lies in `(since, until]` (story 7d).
+
+        `since` is exclusive: it is the previous render's instant, and a row
+        written exactly then was that render's to show, so it is never listed
+        twice.
+
+        A plain read on a read-only connection of its own, for a dashboard
+        render on its worker. Only `scope`'s rows are read — never another
+        scope's, a `people` row least of all. The most recently recorded first,
+        then by meeting id. No store or no table yet is no rows; a row whose
+        instants cannot be read is skipped and logged.
+        """
+        rows = self._plain_rows(
+            f"SELECT {self._SUMMARY_COLUMNS} FROM meeting_summaries WHERE scope = ?",
+            (str(scope),),
+        )
+        found: list[SummaryState] = []
+        for row in rows:
+            try:
+                state = self._summary_row(row)
+            except ValueError:
+                _storage_log.warning("a meeting_summaries row could not be read; it is skipped")
+                continue
+            if state.at.tzinfo is None:
+                _storage_log.warning("a meeting_summaries row has no timezone; it is skipped")
+                continue
+            if since < state.at <= until:
+                found.append(state)
+        found.sort(key=lambda state: (-state.at.timestamp(), state.meeting_id))
+        return tuple(found)
+
+    def projects_with_summaries_between(
+        self, *, since: datetime, until: datetime
+    ) -> tuple[DataScope, ...]:
+        """The project scopes with a summary row last written in `(since, until]` (7d).
+
+        Only the scope and instant columns of project rows are read, so the
+        personal dashboard can name a project it is not reading — one no longer
+        enrolled — without reading a `people` row or another row's content.
+        """
+        rows = self._plain_rows(
+            "SELECT scope, at FROM meeting_summaries WHERE scope LIKE 'project:%'", ()
+        )
+        scopes: set[DataScope] = set()
+        for scope, at in rows:
+            try:
+                parsed = DataScope.parse(str(scope))
+                when = datetime.fromisoformat(str(at))
+            except ValueError:
+                continue
+            if parsed.kind is ScopeKind.PROJECT and when.tzinfo is not None and since < when <= until:
+                scopes.add(parsed)
+        return tuple(sorted(scopes, key=str))
+
+    def open_action_items(self, prefix: str, *, at: datetime) -> OpenActionItems:
+        """The `action_item` proposals under `prefix` still open at `at` (story 7d).
+
+        `prefix` is `action_item_prefix(scope, meeting_id)`, which carries the
+        scope, so this is one meeting's items in one scope, matched as
+        `stage_summary_items` matches them: the prefix, then the 12-hex digest
+        and nothing more. Open is `staged` with `expires_at` after `at`. A
+        plain read on a read-only connection; by proposal id. A staged body
+        that cannot be read is counted in `unreadable`, so the meeting's other
+        items still show and the page states the count.
+        """
+        rows = self._plain_rows(
+            "SELECT proposal_id, body FROM proposals "
+            "WHERE substr(proposal_id, 1, ?) = ? AND length(proposal_id) = ? "
+            "AND state = ? ORDER BY proposal_id",
+            (len(prefix), prefix, len(prefix) + _ITEM_DIGEST, ProposalState.STAGED.value),
+        )
+        found: list[Proposal] = []
+        unreadable = 0
+        for proposal_id, body in rows:
+            if not _HEX12.fullmatch(str(proposal_id)[len(prefix):]):
+                continue
+            try:
+                proposal = _load_proposal(body)
+            except (ValueError, KeyError, TypeError):
+                _storage_log.warning("a staged proposal body could not be read; it is counted")
+                unreadable += 1
+                continue
+            if proposal.type != ACTION_ITEM or proposal.state is not ProposalState.STAGED:
+                continue
+            if proposal.expires_at > at:
+                found.append(proposal)
+        return OpenActionItems(items=tuple(found), unreadable=unreadable)
+
+    def _plain_rows(self, sql: str, parameters: tuple[Any, ...]) -> list[Sequence[Any]]:
+        """A plain read's rows on a read-only connection; none before the store or table exists."""
+        if not self._store.exists():
+            return []
+        try:
+            with self._reader() as reader:
+                return reader.execute(sql, parameters).fetchall()
+        except sqlite3.OperationalError as unread:
+            if "no such table" in str(unread):
+                return []
+            raise
 
     def summaries_recorded(self) -> tuple[tuple[SummaryState, bool], ...]:
         """Every summary row, across scopes, on a read-only connection of its own.

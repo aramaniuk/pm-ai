@@ -174,12 +174,25 @@ class IssueNotes:
     under Unassigned. The closing lines follow the unlinked-work line, one
     paragraph each. Nothing in either is escaped here: `7e` renders and
     escapes its own rows. The default, `NO_ISSUE_NOTES`, prints nothing.
+
+    `items` (story 7d) holds, for each action item a row here shows under an
+    issue the page places, its item id (`7b`'s proposal id) and the iids it
+    is shown under, so the meeting digests in Time-Critical Activities leave it
+    out and say "shown under #N": one item is never shown twice on a page.
+    `confidential` holds the item ids of every action item linked to a
+    confidential issue (Andrei, 2026-10-20), whether or not a row here shows
+    it, so a digest never shows its text: the page shows no more about a
+    confidential issue than Team Activity does.
     """
 
     rows: Mapping[int, tuple[str, ...]] = field(
         default_factory=lambda: MappingProxyType({})
     )
     closing: tuple[str, ...] = ()
+    items: Mapping[str, tuple[int, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    confidential: frozenset[str] = frozenset()
 
 
 NO_ISSUE_NOTES = IssueNotes()

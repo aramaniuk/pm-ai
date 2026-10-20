@@ -84,6 +84,7 @@ from pm_ai.core.cadence import (
     LookBackKind,
     look_back,
 )
+from pm_ai.core.disclosure_ledger import MONTHLY_TARGET_USD, MonthlyTotal
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.event_log import LogRead
 from pm_ai.core.event_log import Unplaceable as _Unplaceable
@@ -114,18 +115,33 @@ from pm_ai.domain.harvest import (
     NoCalendarConnector,
     PartialCalendar,
 )
+from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.meeting_summaries import SummaryMaker, SummaryStateKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.payload_fields import decode_payload
+from pm_ai.domain.renders import (
+    DigestUnreadable,
+    MeetingDigest,
+    MeetingDigests,
+    ProjectMeetingDigests,
+    ScopeUnreadable,
+)
 from pm_ai.domain.work import Section, SectionStatus
 
 __all__ = [
     "APP_MARKER",
     "CalendarAnswer",
+    "EXCERPT_LIMIT",
+    "MAX_DIGEST_ITEMS",
+    "MAX_MEETING_DIGESTS",
+    "SpendAnswer",
     "EventLogAnswer",
     "GOALS_PATH",
     "HARVESTED_MARKER",
     "HEADINGS",
     "LEADERSHIP_NOTES",
+    "LEADERSHIP_SENTENCE",
+    "QUOTED_SENTENCE",
     "MAX_SIGNAL_LINES",
     "MENTIONS_YOU",
     "MESSAGE_WINDOW",
@@ -139,6 +155,7 @@ __all__ = [
     "TIME_CRITICAL",
     "UNKNOWN_SENDER",
     "code",
+    "cut_at_word",
     "escape",
     "fold_breaks",
     "render_dashboard",
@@ -167,6 +184,26 @@ no two of them can be collapsed into one sentence:
 Widened from two members to four by story `23b`, the slice that performs the
 fetch and therefore the only one that can tell these four apart.
 """
+
+
+SpendAnswer = MonthlyTotal | HarvestFailure
+"""The month's frontier spend as `DisclosureLedger.monthly_total` answered it
+(story 7d, AD-17), or why the disclosure ledger could not be read."""
+
+
+MAX_MEETING_DIGESTS = 10
+"""Meetings listed with their summary in Time-Critical Activities (story 7d),
+the most recently recorded; the rest are counted."""
+
+MAX_DIGEST_ITEMS = 5
+"""Open action items listed under one meeting (story 7d); the rest are counted."""
+
+EXCERPT_LIMIT = 200
+"""A summary's excerpt (and a digest's title, owner, due and model) cut to at
+most this many characters, its `…` included, before escaping (story 7d).
+
+The order is `23f`'s — fold, cut, escape — so the limit counts the text as
+recorded; an escaped character (`\\|`, `\\*`) adds to the rendered length."""
 
 
 EventLogAnswer = Sequence[EventEntry] | HarvestFailure
@@ -346,6 +383,8 @@ def render_dashboard(
     tz: tzinfo | None,
     pm: PmHandles,
     since: LookBack | None = None,
+    digests: MeetingDigests | None = None,
+    spend: SpendAnswer | None = None,
 ) -> str:
     """CAP-9's four sections, as Markdown, from these inputs and this instant.
 
@@ -376,20 +415,32 @@ def render_dashboard(
     (`cadence.look_back`, story 9b): the scope's last render, or `None` for no
     render recorded, which looks back `MESSAGE_WINDOW`.
 
+    `digests` (story 7d) are the meetings whose summary, or its failure, was
+    recorded in the same window — personal meetings and every enrolled
+    project's — listed after the day's schedule; `spend` is the month's
+    frontier spend, one line in Leadership Notes (AD-17). `None` renders
+    neither, so a caller that read neither prints nothing about them.
+
     `now` must be aware UTC and `tz` must be supplied. Rendering the same inputs
     twice returns byte-identical output: nothing here reads a clock and every
     ordering is total.
     """
     tz = _require_tz(tz)
     _assert_utc(now, name="now")
+    if digests is not None and not isinstance(digests, MeetingDigests):
+        raise TypeError(
+            f"render_dashboard takes the personal page's MeetingDigests, not "
+            f"{type(digests).__name__}."
+        )
 
     return _document(
         HEADINGS,
         (
-            _time_critical(meetings, now=now, tz=tz),
+            _time_critical(meetings, now=now, tz=tz)
+            + _digest_block(digests, now=now, tz=tz, since=since),
             _proactive_enablement(entries, pm=pm, now=now, tz=tz, since=since),
             _strategic_milestones(goals),
-            _leadership_notes(),
+            _leadership_notes(spend, quoted=_quotes_a_summary(digests)),
         ),
     )
 
@@ -404,6 +455,7 @@ def render_project_dashboard(
     since: LookBack | None = None,
     work: WorkAnswer = None,
     issue_notes: IssueNotes = NO_ISSUE_NOTES,
+    digests: ProjectMeetingDigests | None = None,
 ) -> str:
     """A project's day, as Markdown — and nothing of the PM's.
 
@@ -443,12 +495,27 @@ def render_project_dashboard(
     placed under each issue Team Activity shows, and closing lines; its default
     prints nothing, so a render without it is byte-identical to one with it.
 
+    `digests` (story 7d) is this project's meetings whose summary, or its
+    failure, was recorded since this scope's last render. A
+    `ProjectMeetingDigests`, whose constructor refuses any other scope's
+    digest, so a personal summary has no way onto this page — the wall as a
+    type, beside the missing goals parameter. Owners were resolved to members
+    by `7e`'s rule before it was built, and an item Team Activity shows under
+    an issue is already left out of it. There is no spend line here: the
+    disclosure ledger names every scope (AD-17).
+
     Rendering the same inputs twice returns byte-identical output, and so does
     rendering them through the other function: the first two sections are the
     same two functions.
     """
     tz = _require_tz(tz)
     _assert_utc(now, name="now")
+    if digests is not None and not isinstance(digests, ProjectMeetingDigests):
+        raise TypeError(
+            f"render_project_dashboard takes ProjectMeetingDigests only, not "
+            f"{type(digests).__name__}: a personal digest has no place on a "
+            f"project page (AD-25)."
+        )
 
     activity = build_team_activity(
         work, entries, now=now, since=since, issue_notes=issue_notes
@@ -456,7 +523,8 @@ def render_project_dashboard(
     return _document(
         PROJECT_HEADINGS,
         (
-            _time_critical(meetings, now=now, tz=tz),
+            _time_critical(meetings, now=now, tz=tz)
+            + _digest_block(digests, now=now, tz=tz, since=since),
             _proactive_enablement(entries, pm=pm, now=now, tz=tz, since=since),
             _team_activity(activity, notes=issue_notes, now=now, tz=tz),
         ),
@@ -721,6 +789,214 @@ def _duration_words(delta: timedelta) -> str:
         if count:
             parts.append(f"{count} {unit}" + ("" if count == 1 else "s"))
     return " ".join(parts)
+
+
+# ── Meeting summaries, after the schedule (story 7d) ─────────────────────────
+
+
+_MAKER_WORDS = {SummaryMaker.LOCAL: "the local model", SummaryMaker.FRONTIER: "Claude"}
+"""Who made a summary, as the page and the record's provenance line name them."""
+
+
+def _digest_block(
+    digests: MeetingDigests | ProjectMeetingDigests | None,
+    *,
+    now: datetime,
+    tz: tzinfo,
+    since: LookBack | None,
+) -> str:
+    """The meetings whose summary was recorded in the window, after the schedule.
+
+    A nested list under Time-Critical Activities, no heading of its own (CAP-9's
+    four stay four). The window is Proactive Enablement's (story 9b): since the
+    scope's last render, 24 hours when none, never more than 7 days, and the
+    block names it the same way whether or not anything is listed. Every
+    excerpt is quoted from its record, never synthesized here. Empty when no
+    digests were handed in.
+    """
+    if digests is None:
+        return ""
+    window = since if since is not None else look_back(None, now)
+    span = (
+        f"between {_local(window.since, tz=tz, now=now, dated=True)} and "
+        f"{_local(now, tz=tz, now=now, dated=True)} — {_window_words(window, now=now, tz=tz)}"
+    )
+    notes = [_scope_unreadable(failure) for failure in digests.unread]
+    if isinstance(digests, MeetingDigests):
+        notes.extend(_not_enrolled(scope) for scope in digests.not_enrolled)
+        if digests.enrolment_unchecked is not None:
+            reason = _bounded(escape(digests.enrolment_unchecked)) or "the read gave no reason"
+            notes.append(
+                _sentence(
+                    f"Whether a project no longer enrolled has meeting summaries in "
+                    f"this window could not be checked: {reason}"
+                )
+            )
+    elif digests.aliases_unread is not None:
+        reason = _bounded(escape(digests.aliases_unread)) or "the read gave no reason"
+        notes.append(
+            _sentence(
+                f"The saved alias table could not be read, so action item owners were "
+                f"matched by exact display name or username only, and the others show "
+                f"as unassigned: {reason}"
+            )
+        )
+    tail = "".join(f"\n\n{note}" for note in notes)
+    if not digests.shown:
+        # An unreadable scope is stated, never folded into "no summaries".
+        where = " in the scopes that could be read" if digests.unread else ""
+        return f"\n\nNo meeting summary was recorded{where} {span}.{tail}"
+    personal_page = isinstance(digests, MeetingDigests)
+    lines: list[str] = []
+    for digest in digests.shown:
+        if isinstance(digest, DigestUnreadable):
+            reason = _bounded(escape(digest.reason)) or "the read gave no reason"
+            lines.append(
+                f"- meeting `{code(digest.meeting_id)}` in `{code(str(digest.scope))}`: "
+                f"its record could not be read, so its summary is not shown: {reason}"
+            )
+        else:
+            lines.extend(
+                _digest_lines(
+                    digest,
+                    now=now,
+                    tz=tz,
+                    name_scope=personal_page and digest.scope.kind is not ScopeKind.PERSONAL,
+                )
+            )
+    if digests.earlier:
+        n = digests.earlier
+        lines.append(
+            f"- and {n} earlier {'summary' if n == 1 else 'summaries'} recorded in "
+            f"this window {'is' if n == 1 else 'are'} not shown"
+        )
+    heading = f"Meeting summaries recorded {span}, quoted from the meeting records:"
+    return "\n\n" + heading + "\n\n" + "\n".join(lines) + tail
+
+
+def _scope_unreadable(failure: ScopeUnreadable) -> str:
+    """One scope whose summaries could not be read, in one line naming it."""
+    reason = _bounded(escape(failure.reason)) or "the read gave no reason"
+    if failure.scope is None:
+        return _sentence(f"The meeting summaries could not be read: {reason}")
+    return _sentence(
+        f"The meeting summaries of `{code(str(failure.scope))}` could not be read, "
+        f"so none of its meetings is listed: {reason}"
+    )
+
+
+def _not_enrolled(scope: DataScope) -> str:
+    """A project with summaries in the window that is no longer enrolled: skipped, not failed."""
+    return (
+        f"`{code(str(scope))}` has meeting summaries recorded in this window and is "
+        f"no longer enrolled, so its meetings are not listed."
+    )
+
+
+def _made(digest: MeetingDigest) -> str:
+    """Who made the record's summary, from its parsed fields: maker, model, how."""
+    maker = digest.maker
+    if maker is None:
+        return ""
+    how = "on request" if maker.requested else "automatically"
+    model = _shown_text(maker.model)
+    who = _MAKER_WORDS[maker.made_by] + (f" {model}" if model else "")
+    return f"made by {who}, {how}"
+
+
+def _digest_reason(digest: MeetingDigest) -> str:
+    return _clause(_bounded(escape(digest.reason))) or "no reason was recorded"
+
+
+def _shown_text(text: str | None) -> str:
+    """A short field of a digest (title, owner, due, model): folded, cut, escaped.
+
+    Each comes from a record or a model's answer, so each is bounded as the
+    excerpt is: cut at a word to `EXCERPT_LIMIT` before escaping.
+    """
+    if text is None:
+        return ""
+    return escape(cut_at_word(text, EXCERPT_LIMIT))
+
+
+def _digest_lines(
+    digest: MeetingDigest, *, now: datetime, tz: tzinfo, name_scope: bool = False
+) -> list[str]:
+    """One meeting: start, title, excerpt or state, maker, open items, id and command.
+
+    The excerpt is the summary folded, cut at a word to `EXCERPT_LIMIT`, then
+    escaped (`23f`'s order). A row waiting or failed while the record holds an
+    earlier summary shows that summary and the newer state; with none, the
+    state alone. `nothing said` has no excerpt. `name_scope` names a project
+    meeting's scope beside its title, on the personal page.
+    """
+    title = _shown_text(digest.title) or "(untitled)"
+    head = f"- **{_local(digest.start, tz=tz, now=now)}** {title}"
+    if name_scope:
+        head += f" (`{code(str(digest.scope))}`)"
+    state = digest.state
+    waiting = f"waiting for {_MAKER_WORDS[digest.waiting_for]}"
+    if state is SummaryStateKind.NOTHING_SAID:
+        head += " — the transcript held no words after cleaning"
+    elif digest.summary is not None:
+        excerpt = escape(cut_at_word(digest.summary, EXCERPT_LIMIT))
+        head += f" — {excerpt or '(an empty summary)'}"
+        made = _made(digest)
+        if made:
+            head += f" ({made})"
+        if state is SummaryStateKind.WAITING:
+            head += f"; a newer summary is {waiting}"
+        elif state is SummaryStateKind.FAILED:
+            head += f"; a newer summary failed: {_digest_reason(digest)}"
+    elif state is SummaryStateKind.WAITING:
+        head += f" — summary {waiting}"
+    elif state is SummaryStateKind.FAILED:
+        head += f" — summary failed: {_digest_reason(digest)}"
+    else:
+        head += " — recorded as summarized, but the record holds no summary"
+    lines = [head]
+    for item in digest.items:
+        owner = _shown_text(item.owner) or "unassigned"
+        what = (
+            "an action item on a confidential issue"
+            if item.confidential
+            else _shown_text(item.what) or "(no text recorded)"
+        )
+        line = f"  - {owner}: {what}"
+        due = _shown_text(item.due)
+        if due:
+            line += f" ({due})"
+        lines.append(line)
+    if digest.hidden:
+        n = digest.hidden
+        lines.append(f"  - and {n} more open action {'item' if n == 1 else 'items'}")
+    if digest.placed_count:
+        n = digest.placed_count
+        under = ", ".join(f"#{iid}" for iid in digest.placed)
+        lines.append(
+            f"  - {n} open action {'item' if n == 1 else 'items'} shown under "
+            f"{under} in Team Activity"
+        )
+    if digest.unreadable_items:
+        n = digest.unreadable_items
+        lines.append(
+            f"  - {n} open action {'item' if n == 1 else 'items'} could not be read "
+            f"from the proposals store, so {'it is' if n == 1 else 'they are'} not listed"
+        )
+    if (
+        state is not SummaryStateKind.NOTHING_SAID
+        and digest.summary is not None
+        and not (
+            digest.items or digest.hidden or digest.placed_count or digest.unreadable_items
+        )
+    ):
+        lines.append("  - no open action item")
+    meeting = code(digest.meeting_id)
+    lines.append(
+        f"  - meeting `{meeting}`; to ask for a summary: `pm-ai transcript summarize "
+        f"--scope {code(str(digest.scope))} --meeting {meeting}`"
+    )
+    return lines
 
 
 # ── Proactive Enablement ─────────────────────────────────────────────────────
@@ -1491,19 +1767,105 @@ def _goal_line(goal: Goal) -> str:
 # ── Leadership Notes ─────────────────────────────────────────────────────────
 
 
-def _leadership_notes() -> str:
-    """The heading renders; the synthesis behind it does not exist.
+LEADERSHIP_SENTENCE = (
+    "No synthesis runs when this dashboard is rendered: it is a deterministic "
+    "function with no model in its path."
+)
+"""Leadership Notes' statement (story 7d, amending `23a`).
+
+It said nothing here "was written rather than computed", which stops being
+true once a model-written excerpt is quoted under Time-Critical Activities.
+What stays true is that no synthesis runs at render."""
+
+QUOTED_SENTENCE = (
+    "The meeting summaries under Time-Critical Activities are quoted from their "
+    "meeting records, each naming the model that wrote it."
+)
+"""Added after `LEADERSHIP_SENTENCE` only when the page quotes at least one
+summary excerpt (story 7d): a page that quotes none does not claim it does."""
+
+
+def _quotes_a_summary(digests: MeetingDigests | None) -> bool:
+    return digests is not None and any(
+        isinstance(digest, MeetingDigest) and digest.quoted for digest in digests.shown
+    )
+
+
+def _leadership_notes(spend: SpendAnswer | None, *, quoted: bool = False) -> str:
+    """No synthesis at render, and — personal page only — the month's frontier spend.
 
     Recorded as a deviation rather than papered over. CAP-9's "no empty section"
     clause is met in the sense that no section is blank, and knowingly not met
-    in the sense CAP-9 intended — for this section always, and for Proactive
-    Enablement until `33d`.
+    in the sense CAP-9 intended. `quoted` adds that the summaries above are
+    quoted from their records, when the page quotes one. The spend line
+    (story 7d, AD-17) is computed from the disclosure ledger; `None` prints none.
     """
-    return (
-        "Synthesis is not enabled in this build. This dashboard is rendered by "
-        "a deterministic function with no model in its path, so there is "
-        "nothing here that was written rather than computed."
-    )
+    text = f"{LEADERSHIP_SENTENCE} {QUOTED_SENTENCE}" if quoted else LEADERSHIP_SENTENCE
+    if spend is None:
+        return text
+    return f"{text}\n\n{_spend_line(spend)}"
+
+
+def _dollars(amount: float) -> str:
+    return f"${amount:.2f}"
+
+
+def _calls(n: int) -> str:
+    return f"{n} {'call' if n == 1 else 'calls'}"
+
+
+def _spend_line(spend: SpendAnswer) -> str:
+    """AD-17's monthly total against the monitored target: a warning, never a cap.
+
+    Calls whose lines report usage and have a cost are totalled; calls of
+    unknown cost are counted, never as zero; malformed ledger lines are left
+    out of the total and named after it, as `7c`'s reply does.
+    """
+    target = _dollars(MONTHLY_TARGET_USD)
+    if isinstance(spend, HarvestFailure):
+        reason = _bounded(escape(spend.reason)) or "the read gave no reason"
+        return _sentence(
+            f"This month's frontier spend could not be read from the disclosure "
+            f"ledger: {reason}"
+        )
+    month = f"{spend.year}-{spend.month:02d}, UTC"
+    read = " in the ledger lines that could be read" if spend.malformed else ""
+    if spend.records == 0 and spend.unknown == 0:
+        line = (
+            f"Frontier spend this month ({month}): no frontier call is recorded{read}, "
+            f"against the {target} monitored target."
+        )
+    elif spend.records == 0:
+        line = (
+            f"Frontier spend this month ({month}): {_calls(spend.unknown)} of unknown "
+            f"cost and none of known cost{read}, against the {target} monitored target."
+        )
+    else:
+        line = (
+            f"Frontier spend this month ({month}): {_dollars(spend.cost_usd)} across "
+            f"{_calls(spend.records)} of known cost{read}, against the {target} "
+            f"monitored target"
+        )
+        if spend.unknown:
+            line += f", and {_calls(spend.unknown)} of unknown cost"
+        line += "."
+    if spend.breached:
+        line += (
+            f" Warning: the month is past the {target} target. A target to watch, "
+            f"not a cap: nothing is refused or downgraded."
+        )
+    elif spend.breached is None and spend.unknown:
+        line += (
+            f" With calls of unknown cost, whether the month is past the {target} "
+            f"target cannot be told."
+        )
+    if spend.malformed:
+        named = "; ".join(_clause(_bounded(escape(text))) for text in spend.malformed)
+        line += (
+            f" The disclosure ledger has lines that could not be read, left out of "
+            f"the total: {named}."
+        )
+    return line
 
 
 # ── Shared ───────────────────────────────────────────────────────────────────
@@ -1616,6 +1978,25 @@ def fold_breaks(text: str) -> str:
     too; the stored text is never changed.
     """
     return _BREAK_RUN.sub(" ", text)
+
+
+def cut_at_word(text: str, limit: int) -> str:
+    """Folded, trimmed and cut to `limit` characters at a word, with `…` when cut.
+
+    At the last space before the limit, a hard cut when there is none; the
+    result with its `…` is at most `limit` characters. Escape after, never
+    before (`23f`'s order: fold, cut, escape). Moved here from
+    `member_updates` by story 7d, which cuts its excerpts with it, so the two
+    stories share one cut.
+    """
+    folded = fold_breaks(text).strip()
+    if len(folded) <= limit:
+        return folded
+    head = folded[: limit - 1]
+    space = head.rfind(" ")
+    if space > 0:
+        head = head[:space]
+    return head.rstrip() + "…"
 
 
 _INVISIBLE = frozenset(

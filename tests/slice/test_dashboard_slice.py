@@ -460,7 +460,7 @@ def test_a_malformed_event_log_segment_is_stated_and_the_file_is_written(tmp_pat
     assert "record marker" in body["Proactive Enablement"]  # the ledger's reason
     assert "Payments Sync" in body["Time-Critical Activities"]
     assert "Reach staff engineer" in body["3-Tier Strategic Milestones"]
-    assert "Synthesis is not enabled" in body["Leadership Notes"]
+    assert "No synthesis runs" in body["Leadership Notes"]
     # Saved nowhere: the log is exactly the corrupt line it was.
     assert (segments / "2026-09.md").read_bytes() == b"this line is not a ledger entry\n"
 
@@ -1734,8 +1734,11 @@ def test_a_day_of_only_an_all_day_marker_never_says_it_has_ended(tmp_path):
     built = daemon(tmp_path, _DayCalendar("graph:contoso", live=(marker,)))
     run_dashboard(built, now=seven)
     body = sections(written(built))["Time-Critical Activities"]
-    assert body == "- **all day** Public holiday — 2 attendees"
+    schedule, summaries = body.split("\n\n")
+    assert schedule == "- **all day** Public holiday — 2 attendees"
     assert "has ended" not in body and "have ended" not in body
+    # Story 7d: the summaries' window follows the schedule, stated when empty.
+    assert summaries.startswith("No meeting summary was recorded between")
 
 
 # ── Multi-day all-day entries (story 23h) ────────────────────────────────────
@@ -2071,3 +2074,737 @@ def test_an_os_or_type_error_from_the_reader_is_stated(tmp_path, monkeypatch, er
     answer = _project_work(built, scope=ALPHA)
     assert isinstance(answer, HarvestFailure)
     assert str(error) == answer.reason
+
+
+# ── Story 7d: meeting summaries and open action items on the dashboard ───────
+#
+# Spec: `_bmad-output/specs/spec-pm-ai/stories/7d-summaries-and-actions-on-the-dashboard.md`.
+# The rows about what is *read*: which rows the window selects, the project
+# wall, the `people` scope, an unreadable record or project, the open items,
+# the spend line from the ledger, and no model on the path. What the page
+# *says* is in `tests/core/test_rendering_sections.py`.
+
+from pm_ai.app.pipelines import prepare_dashboard  # noqa: E402
+from pm_ai.core.aliases import AliasRow, normalise, render_alias_row  # noqa: E402
+from pm_ai.core.meeting_summary import action_item_id  # noqa: E402
+from pm_ai.core.member_updates import (  # noqa: E402
+    ItemKind,
+    LinkKind,
+    UpdateLine,
+    render_update,
+)
+from pm_ai.domain.disclosure import DisclosureRecord, DisclosureStatus  # noqa: E402
+from pm_ai.domain.handles import gitlab_handle  # noqa: E402
+from pm_ai.domain.lifecycle import ProposalState  # noqa: E402
+from pm_ai.domain.meeting_summaries import (  # noqa: E402
+    RecordedSummary,
+    SummaryActionItem,
+    SummaryAnswer,
+    SummaryMaker,
+    SummaryStateKind,
+)
+from pm_ai.domain.proposals import Proposal  # noqa: E402
+from pm_ai.domain.work import (  # noqa: E402
+    GitLabPerson,
+    Issue,
+    Member,
+    Section,
+    SectionRead,
+    WorkChange,
+)
+
+_PEOPLE = DataScope(ScopeKind.PEOPLE, person_id="p_1")
+_GITLAB = "https://gitlab.example.com"
+_IVAN = GitLabPerson(gitlab_handle(_GITLAB, 2), "Ivan Petrov", "ivan.p", False)
+_ANA = GitLabPerson(gitlab_handle(_GITLAB, 1), "Ana", "ana.k", False)
+
+
+def _summarized(
+    built,
+    meeting_id: str,
+    *,
+    scope: DataScope = PERSONAL,
+    title: str = "Release sync",
+    start: datetime = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc),
+    recorded: datetime = datetime(2026, 9, 9, 9, 0, tzinfo=timezone.utc),
+    state: SummaryStateKind = SummaryStateKind.SUMMARIZED,
+    made_by: SummaryMaker = SummaryMaker.LOCAL,
+    requested: bool = False,
+    summary: str | None = "The team planned the release.",
+    items: tuple[SummaryActionItem, ...] = (),
+    reason: str = "",
+    record: bool = True,
+) -> None:
+    """A recorded meeting, its `## Summary` region, its state row and its items."""
+    if record:
+        built.meetings.put(meeting(meeting_id, title, start=start, scope=scope))
+    if record and summary is not None:
+        built.meetings.put_summary(
+            meeting_id,
+            scope=scope,
+            summary=RecordedSummary(
+                "qwen3:8b" if made_by is SummaryMaker.LOCAL else "claude-sonnet-5-5",
+                requested,
+                start.date(),
+                SummaryAnswer(summary, (), items),
+                made_by,
+            ),
+        )
+    _summary_row(
+        built, scope, meeting_id, state=state, at=recorded, start=start,
+        made_by=made_by, requested=requested, reason=reason,
+    )
+    for item in items:
+        _stage_item(built, scope, meeting_id, item)
+
+
+def _summary_row(
+    built,
+    scope: DataScope,
+    meeting_id: str,
+    *,
+    state: SummaryStateKind,
+    at: datetime,
+    start: datetime,
+    made_by: SummaryMaker = SummaryMaker.LOCAL,
+    requested: bool = False,
+    reason: str = "",
+) -> None:
+    """A `meeting_summaries` row written as the store keeps it, `at` chosen."""
+    db = built.storage._db  # noqa: SLF001 — a fixture's row, not a code path
+    db.execute(
+        "INSERT OR REPLACE INTO meeting_summaries (scope, meeting_id, state, made_by, "
+        "requested, model, attempts, reason, at, version, meeting_start, job) "
+        "VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, 1, ?, NULL)",
+        (
+            str(scope), meeting_id, state.value, made_by.value, int(requested), reason,
+            at.isoformat(), start.isoformat(),
+        ),
+    )
+    db.commit()
+
+
+def _stage_item(
+    built,
+    scope: DataScope,
+    meeting_id: str,
+    item: SummaryActionItem,
+    *,
+    state: ProposalState = ProposalState.STAGED,
+    created: datetime = NOW,
+    ttl: timedelta = timedelta(days=7),
+) -> str:
+    proposal_id = action_item_id(scope, meeting_id, item)
+    built.storage.stage_proposal(
+        Proposal(
+            proposal_id=proposal_id,
+            type="action_item",
+            summary=item.what[:80],
+            payload={"what": item.what, "owner": item.owner, "due": item.due},
+            target=None,
+            cites=SourceRef.parse(f"meeting:{meeting_id}"),
+            created_at=created,
+            state=state,
+            ttl=ttl,
+        )
+    )
+    return proposal_id
+
+
+def _page(built, scope: DataScope = PERSONAL, *, now: datetime = NOW) -> dict[str, str]:
+    return sections(prepare_dashboard(built, scope=scope, now=now).decode("utf-8"))
+
+
+def _alpha_work(built, *issues: Issue) -> None:
+    built.storage.record_project_work(
+        ALPHA,
+        WorkChange(
+            instance="gitlab:alpha",
+            started_at=NOW - timedelta(hours=1),
+            members=(Member(_ANA, "active"), Member(_IVAN, "active")),
+            issues=issues,
+            sections=(
+                SectionRead(Section.MEMBERS, True),
+                SectionRead(Section.ISSUES, True),
+                SectionRead(Section.MERGE_REQUESTS, True),
+            ),
+        ),
+    )
+
+
+def _issue(iid: int, *assignees: GitLabPerson) -> Issue:
+    return Issue(
+        iid=iid,
+        title=f"Issue {iid}",
+        state="opened",
+        assignees=assignees,
+        milestone_title="Sprint 9",
+        milestone_due=datetime(2026, 9, 20).date(),
+        labels=(),
+        updated_at=NOW - timedelta(days=2),
+        closed_at=None,
+        web_url=None,
+        confidential=False,
+    )
+
+
+def test_7d_acceptance_both_pages_at_0700_and_each_keeps_its_headings(tmp_path):
+    """Acceptance 1: a personal and a project meeting summarized yesterday
+    afternoon; at 07:00 the personal file lists both, the project file only its own."""
+    built = daemon(tmp_path)
+    seven = datetime(2026, 9, 9, 5, 0, tzinfo=timezone.utc)
+    afternoon = datetime(2026, 9, 8, 14, 0, tzinfo=timezone.utc)
+    _summarized(built, "mtg_home", title="Career chat", recorded=afternoon)
+    _summarized(built, "mtg_alpha", scope=ALPHA, title="Alpha planning", recorded=afternoon)
+
+    personal = _page(built, now=seven)
+    project = _page(built, ALPHA, now=seven)
+
+    assert list(personal) == list(HEADINGS)
+    assert list(project) == list(PROJECT_HEADINGS)
+    assert "Career chat" in personal["Time-Critical Activities"]
+    assert "Alpha planning" in personal["Time-Critical Activities"]
+    assert "--scope project:alpha --meeting mtg_alpha" in personal["Time-Critical Activities"]
+    assert "Alpha planning" in project["Time-Critical Activities"]
+    assert "Career chat" not in "\n".join(project.values())
+
+
+def test_7d_acceptance_a_personal_claude_summary_never_reaches_the_project_page(tmp_path):
+    """Acceptance 2 (moved from `7c`)."""
+    built = daemon(tmp_path)
+    _summarized(
+        built, "mtg_home", title="Salary review", made_by=SummaryMaker.FRONTIER,
+        requested=True, summary="We discussed the offer in detail.",
+        items=(SummaryActionItem("send the counter-offer", "Me"),),
+    )
+    page = prepare_dashboard(built, scope=ALPHA, now=NOW).decode("utf-8")
+    for leaked in ("Salary review", "the offer", "counter-offer", "mtg_home", "Claude"):
+        assert leaked not in page
+    assert "Frontier spend" not in page
+
+
+def test_7d_meetings_are_chosen_by_when_the_summary_was_recorded(tmp_path):
+    """Matrix "Summary written late": last Tuesday's meeting, summarized since
+    the last render, is listed — and the render after does not repeat it."""
+    built = daemon(tmp_path)
+    built.storage.record_render(PERSONAL, at=NOW - timedelta(hours=6))
+    tuesday = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+    _summarized(built, "mtg_late", title="Old sync", start=tuesday, recorded=NOW - timedelta(hours=1))
+    _summarized(built, "mtg_seen", title="Seen sync", recorded=NOW - timedelta(hours=7))
+
+    body = _page(built)["Time-Critical Activities"]
+    assert "**2026-09-01 11:00** Old sync" in body
+    assert "Seen sync" not in body
+    assert "since the last render at 2026-09-09 06:30" in body
+
+    built.storage.record_render(PERSONAL, at=NOW)
+    later = _page(built, now=NOW + timedelta(hours=1))["Time-Critical Activities"]
+    assert "Old sync" not in later
+    assert "No meeting summary was recorded between" in later
+
+
+def test_7d_open_items_exclude_approved_expired_and_pattern_promises(tmp_path):
+    """Matrix "Approved or expired" and "Pattern promise": none listed."""
+    built = daemon(tmp_path)
+    kept = SummaryActionItem("ship the build", "Ана", "Friday")
+    approved = SummaryActionItem("approved one")
+    expired = SummaryActionItem("expired one")
+    _summarized(built, "mtg_a", items=(kept,))
+    _stage_item(built, PERSONAL, "mtg_a", approved, state=ProposalState.APPROVED)
+    _stage_item(
+        built, PERSONAL, "mtg_a", expired, created=NOW - timedelta(days=8),
+        ttl=timedelta(days=7),
+    )
+    # An `11b` pattern promise for the same meeting: another type, another id.
+    built.storage.stage_proposal(
+        Proposal(
+            proposal_id="prp_promise_mtg_a",
+            type="promise",
+            summary="I will send the notes",
+            payload={"what": "I will send the notes"},
+            target=None,
+            cites=SourceRef.parse("meeting:mtg_a"),
+            created_at=NOW,
+        )
+    )
+    body = _page(built)["Time-Critical Activities"]
+    assert "  - Ана: ship the build (Friday)" in body
+    for absent in ("approved one", "expired one", "send the notes"):
+        assert absent not in body
+
+
+def test_7d_eight_open_items_show_five_and_count_three(tmp_path):
+    """Matrix "Many items", read from the proposals store."""
+    built = daemon(tmp_path)
+    items = tuple(SummaryActionItem(f"task {n}") for n in range(8))
+    _summarized(built, "mtg_a", items=items)
+    body = _page(built)["Time-Critical Activities"]
+    assert [line for line in body.split("\n") if line.startswith("  - unassigned: ")] == [
+        f"  - unassigned: task {n}" for n in range(5)
+    ]
+    assert "  - and 3 more open action items" in body
+
+
+def test_7d_a_project_owner_shows_only_once_resolved_to_a_member(tmp_path):
+    """Matrix "Owner on a project page": "Ваня" with no alias row is unassigned;
+    with a row to a member, that member's display name. The personal page shows
+    the label as said."""
+    built = daemon(tmp_path)
+    _alpha_work(built, _issue(7, _ANA))
+    _summarized(
+        built, "mtg_a", scope=ALPHA, items=(SummaryActionItem("rework the export", "Ваня"),),
+    )
+    assert "  - unassigned: rework the export" in _page(built, ALPHA)["Time-Critical Activities"]
+    assert "  - Ваня: rework the export" in _page(built)["Time-Critical Activities"]
+
+    built.storage.append_alias(
+        render_alias_row(AliasRow(normalise("Ваня"), "Ваня", _IVAN.handle, None, NOW)),
+        after=0,
+    )
+    body = _page(built, ALPHA)["Time-Critical Activities"]
+    assert "  - Ivan Petrov: rework the export" in body
+    assert "Ваня" not in body
+
+
+def test_7d_an_item_team_activity_places_is_shown_once(tmp_path):
+    """Matrix "Placed by `7e`": the item Team Activity shows under #142 is left out
+    of the meeting's items, does not count toward 5, and "shown under #142"."""
+    built = daemon(tmp_path)
+    _alpha_work(built, _issue(142, _ANA))
+    placed = SummaryActionItem("fix #142", "Ana", "Thursday")
+    others = tuple(SummaryActionItem(f"task {n}") for n in range(5))
+    start = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
+    _summarized(built, "mtg_a", scope=ALPHA, start=start, items=(placed, *others))
+    line = UpdateLine(
+        kind=ItemKind.ACTION,
+        meeting="mtg_a",
+        start=start,
+        title="Release sync",
+        item=action_item_id(ALPHA, "mtg_a", placed),
+        issue=142,
+        by=LinkKind.NUMBER,
+        text=placed.what,
+        at=NOW,
+        owner=placed.owner,
+        due=placed.due,
+    )
+    built.storage.append_member_updates((render_update(line),), scope=ALPHA, after=0)
+
+    page = _page(built, ALPHA)
+    team = page["Team Activity"]
+    assert "fix #142" in team
+    body = page["Time-Critical Activities"]
+    assert "fix #142" not in body
+    assert body.count("  - unassigned: task") == 5
+    assert "more open action" not in body
+    assert "  - 1 open action item shown under #142 in Team Activity" in body
+    # The personal page has no Team Activity, so the item is listed there.
+    assert "  - Ana: fix #142 (Thursday)" in _page(built)["Time-Critical Activities"]
+
+
+def test_7d_a_project_that_cannot_be_read_is_one_line_and_the_rest_renders(tmp_path, monkeypatch):
+    """Matrix "Project unreadable": the personal page names it; others render."""
+    built = daemon(tmp_path)
+    _summarized(built, "mtg_home", title="Career chat")
+    _summarized(built, "mtg_alpha", scope=ALPHA, title="Alpha planning")
+    listing = built.storage.list_collection
+
+    def broken(*, scope, artifact):
+        if scope == ALPHA:
+            raise PermissionError(13, "Permission denied", "meetings/")
+        return listing(scope=scope, artifact=artifact)
+
+    monkeypatch.setattr(built.storage, "list_collection", broken)
+    body = _page(built)["Time-Critical Activities"]
+    assert "Career chat" in body and "Alpha planning" not in body
+    assert "The meeting summaries of `project:alpha` could not be read" in body
+    assert "Permission denied" in body
+
+
+def test_7d_a_project_not_enrolled_is_named(tmp_path):
+    """A project with summaries recorded and no longer enrolled: one line naming it."""
+    built = daemon(tmp_path)
+    gone = DataScope(ScopeKind.PROJECT, project_id="beta")
+    _summary_row(
+        built, gone, "mtg_beta", state=SummaryStateKind.SUMMARIZED,
+        at=NOW - timedelta(hours=1), start=NOW - timedelta(days=1),
+    )
+    body = _page(built)["Time-Critical Activities"]
+    # Skipped on purpose, not a failed read: named as no longer enrolled.
+    assert (
+        "`project:beta` has meeting summaries recorded in this window and is no "
+        "longer enrolled, so its meetings are not listed."
+    ) in body
+    assert "could not be read" not in body
+    assert "in the scopes that could be read" not in body
+    assert "mtg_beta" not in body.replace("`project:beta`", "")
+
+
+def test_7d_a_people_row_is_never_read(tmp_path, monkeypatch):
+    """Matrix "People meeting": a `people` row in the window is never read."""
+    built = daemon(tmp_path)
+    _summary_row(
+        built, _PEOPLE, "mtg_1on1", state=SummaryStateKind.SUMMARIZED,
+        at=NOW - timedelta(hours=1), start=NOW - timedelta(days=1),
+    )
+    asked: list[DataScope] = []
+    reading = built.storage.summaries_recorded_between
+    getting = built.meetings.get
+
+    def rows(scope, **window):
+        asked.append(scope)
+        return reading(scope, **window)
+
+    def get(meeting_id, *, scope):
+        asked.append(scope)
+        return getting(meeting_id, scope=scope)
+
+    monkeypatch.setattr(built.storage, "summaries_recorded_between", rows)
+    monkeypatch.setattr(built.meetings, "get", get)
+    for scope in (PERSONAL, ALPHA):
+        page = prepare_dashboard(built, scope=scope, now=NOW).decode("utf-8")
+        assert "mtg_1on1" not in page and "people" not in page
+    assert asked and all(scope.kind is not ScopeKind.PEOPLE for scope in asked)
+
+
+def test_7d_one_malformed_record_is_named_and_the_other_shows(tmp_path):
+    """Matrix "One malformed record": two rows; one record malformed."""
+    built = daemon(tmp_path)
+    _summarized(built, "mtg_good", title="Good sync")
+    _summarized(built, "mtg_bad", title="Bad sync", recorded=NOW - timedelta(hours=2))
+    (member,) = [
+        name
+        for name in built.storage.list_collection(scope=PERSONAL, artifact="meetings/")
+        if "mtg_bad" in name
+    ]
+    raw = built.storage.read_artifact(scope=PERSONAL, artifact="meetings/", name=member)
+    text = raw.decode("utf-8").replace("## Summary\n", "## Summary\nprose\n")
+    built.storage.write_artifact(
+        text.encode("utf-8"), scope=PERSONAL, artifact="meetings/", name=member
+    )
+    body = _page(built)["Time-Critical Activities"]
+    assert "Good sync — The team planned the release." in body
+    assert "- meeting `mtg_bad` in `personal`: its record could not be read" in body
+    assert "Bad sync" not in body
+
+
+def test_7d_fourteen_rows_list_the_ten_most_recent(tmp_path):
+    """Matrix "More than 10": 10 most recent, "and 4 earlier"."""
+    built = daemon(tmp_path)
+    for n in range(14):
+        _summarized(
+            built, f"mtg_{n:02d}", title=f"Sync {n:02d}",
+            recorded=NOW - timedelta(minutes=10 * (n + 1)),
+        )
+    body = _page(built)["Time-Critical Activities"]
+    assert [f"Sync {n:02d}" in body for n in range(14)] == [True] * 10 + [False] * 4
+    assert body.endswith("- and 4 earlier summaries recorded in this window are not shown")
+
+
+def test_7d_waiting_failed_and_reopened_read_from_the_row_and_record(tmp_path):
+    """Matrix "Waiting / failed" and "Re-opened", end to end."""
+    built = daemon(tmp_path)
+    _summarized(
+        built, "mtg_w", title="Waiting sync", state=SummaryStateKind.WAITING, summary=None,
+        made_by=SummaryMaker.FRONTIER, requested=True,
+    )
+    _summarized(
+        built, "mtg_f", title="Failed sync", state=SummaryStateKind.FAILED, summary=None,
+        reason="the transcript is too long for the window.",
+    )
+    _summarized(built, "mtg_r", title="Reopened sync", state=SummaryStateKind.WAITING)
+    body = _page(built)["Time-Critical Activities"]
+    assert "Waiting sync — summary waiting for Claude" in body
+    assert "Failed sync — summary failed: the transcript is too long for the window" in body
+    assert "Reopened sync — The team planned the release." in body
+    assert "a newer summary is waiting for the local model" in body
+
+
+def _ledger_line(at: datetime, call: str, status: DisclosureStatus, cost: float | None) -> DisclosureRecord:
+    usage = status is not DisclosureStatus.SENT
+    return DisclosureRecord(
+        at=at,
+        task_class="meeting_summary",
+        model="claude-sonnet-5-5",
+        contributing_scopes=frozenset({PERSONAL}),
+        input_tokens=1000 if usage else None,
+        output_tokens=100 if usage else None,
+        estimated_cost_usd=cost,
+        destination=PERSONAL,
+        call_id=call,
+        status=status,
+    )
+
+
+def test_7d_the_spend_line_reads_the_month_from_the_ledger(tmp_path):
+    """Matrix "Spend line": $21.40 this UTC month, one call unfinished — personal only."""
+    built = daemon(tmp_path)
+    for call, cost in (("c1", 20.0), ("c2", 1.4)):
+        built.storage.append_disclosure(_ledger_line(NOW - timedelta(days=1), call, DisclosureStatus.SENT, None))
+        built.storage.append_disclosure(_ledger_line(NOW - timedelta(days=1), call, DisclosureStatus.COMPLETED, cost))
+    built.storage.append_disclosure(_ledger_line(NOW - timedelta(hours=1), "c3", DisclosureStatus.SENT, None))
+    # Last month's call is not this month's.
+    built.storage.append_disclosure(
+        _ledger_line(datetime(2026, 8, 30, tzinfo=timezone.utc), "c0", DisclosureStatus.COMPLETED, 9.0)
+    )
+    notes = _page(built)["Leadership Notes"]
+    assert (
+        "Frontier spend this month (2026-09, UTC): $21.40 across 2 calls of known "
+        "cost, against the $20.00 monitored target, and 1 call of unknown cost. "
+        "Warning: the month is past the $20.00 target."
+    ) in notes
+    assert "Frontier spend" not in prepare_dashboard(built, scope=ALPHA, now=NOW).decode("utf-8")
+
+
+def test_7d_an_unreadable_or_malformed_ledger_is_stated(tmp_path, monkeypatch):
+    """Matrix "Ledger unreadable": the fault; or the total, then the malformed lines."""
+    built = daemon(tmp_path)
+    built.storage.append_disclosure(_ledger_line(NOW, "c1", DisclosureStatus.SENT, None))
+    built.storage.append_disclosure(_ledger_line(NOW, "c1", DisclosureStatus.COMPLETED, 0.5))
+    ledger = built.storage.paths.resolve(DataScope(ScopeKind.APPLICATION), "disclosure.md")
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write("this line is not a record\n")
+    notes = _page(built)["Leadership Notes"]
+    assert "$0.50 across 1 call of known cost" in notes
+    assert "lines that could not be read, left out of the total:" in notes
+
+    def unreadable() -> str:
+        raise PermissionError(13, "Permission denied", "disclosure.md")
+
+    monkeypatch.setattr(built.storage, "read_disclosure", unreadable)
+    notes = _page(built)["Leadership Notes"]
+    assert "This month's frontier spend could not be read from the disclosure ledger" in notes
+    assert "Permission denied" in notes
+    # The rest of the page still renders.
+    assert "No synthesis runs" in notes
+
+
+# Matrix "Model wired" is `tests/architecture/test_dashboard_has_no_model.py`'s
+# render with summaries, records and open items present.
+
+
+def test_7d_hostile_text_in_a_record_stays_one_bullet(tmp_path):
+    """Matrix "Hostile text", end to end: a newline and `|` in a summary."""
+    built = daemon(tmp_path)
+    _summarized(built, "mtg_a", title="Sync | weekly", summary="first line\n- second | line")
+    page = _page(built)
+    assert list(page) == list(HEADINGS)
+    (line,) = [line for line in page["Time-Critical Activities"].split("\n") if "Sync" in line]
+    assert "Sync \\| weekly — first line - second \\| line" in line
+
+
+# ── Story 7d, review: the boundaries the first build left unpinned ───────────
+
+import sqlite3  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+from pm_ai.core.meeting_summary import action_item_prefix  # noqa: E402
+
+
+def _confidential(iid: int, *assignees: GitLabPerson) -> Issue:
+    return replace(_issue(iid, *assignees), title="confidential issue", confidential=True)
+
+
+def _link(
+    scope: DataScope, meeting_id: str, item: SummaryActionItem, iid: int, *, start: datetime
+) -> str:
+    """`7e`'s ledger line linking one staged item to issue `iid` by its spoken number."""
+    return render_update(
+        UpdateLine(
+            kind=ItemKind.ACTION,
+            meeting=meeting_id,
+            start=start,
+            title="Release sync",
+            item=action_item_id(scope, meeting_id, item),
+            issue=iid,
+            by=LinkKind.NUMBER,
+            text=item.what,
+            at=NOW,
+            owner=item.owner,
+            due=item.due,
+        )
+    )
+
+
+def test_7d_a_row_written_at_the_last_render_instant_is_not_listed_twice(tmp_path):
+    """The window is `(since, now]`: a row written exactly at the previous render's
+    instant was that render's to show, so the next does not repeat it."""
+    built = daemon(tmp_path)
+    last = NOW - timedelta(hours=3)
+    built.storage.record_render(PERSONAL, at=last)
+    _summarized(built, "mtg_edge", title="Edge sync", recorded=last)
+    _summarized(built, "mtg_after", title="After sync", recorded=last + timedelta(seconds=1))
+    body = _page(built)["Time-Critical Activities"]
+    assert "After sync" in body
+    assert "Edge sync" not in body
+
+
+def test_7d_a_project_page_names_its_own_unreadable_summaries(tmp_path, monkeypatch):
+    """Matrix "Project unreadable", on the project page itself: the failure is
+    named, never rendered as a quiet window."""
+    built = daemon(tmp_path)
+    _summarized(built, "mtg_alpha", scope=ALPHA, title="Alpha planning")
+    listing = built.storage.list_collection
+
+    def broken(*, scope, artifact):
+        if scope == ALPHA:
+            raise PermissionError(13, "Permission denied", "meetings/")
+        return listing(scope=scope, artifact=artifact)
+
+    monkeypatch.setattr(built.storage, "list_collection", broken)
+    body = _page(built, ALPHA)["Time-Critical Activities"]
+    assert "No meeting summary was recorded in the scopes that could be read" in body
+    assert "The meeting summaries of `project:alpha` could not be read" in body
+    assert "Permission denied" in body
+
+
+def test_7d_a_failed_enrolment_check_is_stated_narrowly(tmp_path, monkeypatch):
+    """The check for projects no longer enrolled fails: only that is said, and the
+    summaries that were read still show."""
+    built = daemon(tmp_path)
+    _summarized(built, "mtg_home", title="Career chat")
+
+    def broken(**window):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(built.storage, "projects_with_summaries_between", broken)
+    body = _page(built)["Time-Critical Activities"]
+    assert "Career chat — The team planned the release." in body
+    assert (
+        "Whether a project no longer enrolled has meeting summaries in this window "
+        "could not be checked: database is locked."
+    ) in body
+    assert "The meeting summaries could not be read" not in body
+
+
+def test_7d_an_unreadable_alias_table_is_stated_on_the_project_page(tmp_path, monkeypatch):
+    built = daemon(tmp_path)
+    _alpha_work(built, _issue(7, _ANA))
+    _summarized(
+        built,
+        "mtg_a",
+        scope=ALPHA,
+        items=(SummaryActionItem("rework the export", "Ваня"), SummaryActionItem("ship it", "Ana")),
+    )
+
+    def unreadable() -> bytes:
+        raise PermissionError(13, "Permission denied", "aliases.md")
+
+    monkeypatch.setattr(built.storage, "read_aliases", unreadable)
+    body = _page(built, ALPHA)["Time-Critical Activities"]
+    assert "  - unassigned: rework the export" in body
+    assert "  - Ana: ship it" in body  # an exact display name still matches
+    assert (
+        "The saved alias table could not be read, so action item owners were matched"
+    ) in body
+    assert "Permission denied" in body
+
+
+def test_7d_only_the_rows_team_activity_shows_are_left_out(tmp_path):
+    """Three action updates on #142: Team Activity shows two (`MAX_ROWS_PER_ISSUE`),
+    so the third stays in the meeting's list; one on an issue the page does not
+    place stays too."""
+    built = daemon(tmp_path)
+    _alpha_work(built, _issue(142, _ANA))
+    start = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
+    on_142 = tuple(SummaryActionItem(f"step {n}", "Ana") for n in range(3))
+    elsewhere = SummaryActionItem("unplaced work", "Ana")
+    _summarized(built, "mtg_a", scope=ALPHA, start=start, items=(*on_142, elsewhere))
+    lines = tuple(_link(ALPHA, "mtg_a", item, 142, start=start) for item in on_142)
+    lines += (_link(ALPHA, "mtg_a", elsewhere, 999, start=start),)
+    built.storage.append_member_updates(lines, scope=ALPHA, after=0)
+
+    page = _page(built, ALPHA)
+    body = page["Time-Critical Activities"]
+    assert "  - 2 open action items shown under #142 in Team Activity" in body
+    listed = [f"step {n}" for n in range(3) if f"  - Ana: step {n}" in body]
+    assert len(listed) == 1
+    assert listed[0] not in page["Team Activity"]
+    assert "  - Ana: unplaced work" in body
+
+
+def test_7d_an_item_on_a_confidential_issue_never_shows_its_text(tmp_path):
+    """Matrix "Confidential issue" (Andrei, 2026-10-20): placed or not, the text of
+    an action item linked to a confidential issue is on the project page nowhere;
+    it is listed as "an action item on a confidential issue" with its owner and
+    due date. The personal page shows it as said."""
+    built = daemon(tmp_path)
+    _alpha_work(built, _confidential(142, _ANA), _confidential(143, _ANA))
+    start = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
+    shown_row = SummaryActionItem("secret placed task", "Ana", "Thursday")
+    past_cap = tuple(SummaryActionItem(f"secret task {n}", "Ana", "Friday") for n in range(3))
+    _summarized(built, "mtg_a", scope=ALPHA, start=start, items=(shown_row, *past_cap))
+    # An older meeting, outside `7e`'s 14-day window: still withheld.
+    old_start = NOW - timedelta(days=30)
+    old = SummaryActionItem("secret old task", "Ana")
+    _summarized(
+        built, "mtg_old", scope=ALPHA, title="Old sync", start=old_start, items=(old,),
+        recorded=NOW - timedelta(hours=2),
+    )
+    lines = (_link(ALPHA, "mtg_a", shown_row, 142, start=start),)
+    lines += tuple(_link(ALPHA, "mtg_a", item, 143, start=start) for item in past_cap)
+    lines += (_link(ALPHA, "mtg_old", old, 143, start=old_start),)
+    built.storage.append_member_updates(lines, scope=ALPHA, after=0)
+
+    page = prepare_dashboard(built, scope=ALPHA, now=NOW).decode("utf-8")
+    assert "secret" not in page
+    body = sections(page)["Time-Critical Activities"].split("\n")
+    # The rows Team Activity shows: one under #142, two under #143 (its cap).
+    assert "  - 3 open action items shown under #142, #143 in Team Activity" in body
+    assert body.count("  - Ana: an action item on a confidential issue (Friday)") == 1
+    assert body.count("  - Ana: an action item on a confidential issue") == 1  # the old one
+    personal = _page(built)["Time-Critical Activities"]
+    assert "  - Ana: secret placed task (Thursday)" in personal
+
+
+def test_7d_a_malformed_item_body_is_counted_and_the_meeting_still_shows(tmp_path):
+    built = daemon(tmp_path)
+    good = SummaryActionItem("send the deck", "Ana")
+    bad = SummaryActionItem("this body breaks")
+    _summarized(built, "mtg_a", items=(good, bad))
+    db = built.storage._db  # noqa: SLF001 — a fixture's damage, not a code path
+    db.execute(
+        "UPDATE proposals SET body = ? WHERE proposal_id = ?",
+        ("{not json", action_item_id(PERSONAL, "mtg_a", bad)),
+    )
+    db.commit()
+    body = _page(built)["Time-Critical Activities"]
+    assert "Release sync — The team planned the release." in body
+    assert "  - Ana: send the deck" in body
+    assert (
+        "  - 1 open action item could not be read from the proposals store, so it is "
+        "not listed"
+    ) in body
+
+
+def test_7d_a_non_mapping_payload_or_blank_text_still_renders(tmp_path):
+    """A payload that is not a mapping, or a blank `what`, falls back to the
+    proposal's summary — never `owner: ` with nothing after it."""
+    built = daemon(tmp_path)
+    _summarized(built, "mtg_a")
+    for n, payload in enumerate((["a", "list"], {"what": "   ", "owner": "Ana"})):
+        built.storage.stage_proposal(
+            Proposal(
+                proposal_id=action_item_id(PERSONAL, "mtg_a", SummaryActionItem(f"x{n}")),
+                type="action_item",
+                summary=f"fallback {n}",
+                payload=payload,  # type: ignore[arg-type]
+                target=None,
+                cites=SourceRef.parse("meeting:mtg_a"),
+                created_at=NOW,
+            )
+        )
+    body = _page(built)["Time-Critical Activities"]
+    assert "  - unassigned: fallback 0" in body
+    assert "  - Ana: fallback 1" in body
+
+
+def test_7d_open_items_of_a_meeting_whose_id_prefixes_another_stay_apart(tmp_path):
+    """`mtg_a` and `mtg_ab`: each meeting's items are its own."""
+    built = daemon(tmp_path)
+    _summarized(built, "mtg_a", title="A sync", items=(SummaryActionItem("task for a"),))
+    _summarized(built, "mtg_ab", title="AB sync", items=(SummaryActionItem("task for ab"),))
+    for meeting_id, expected in (("mtg_a", "task for a"), ("mtg_ab", "task for ab")):
+        found = built.storage.open_action_items(action_item_prefix(PERSONAL, meeting_id), at=NOW)
+        assert [p.summary for p in found.items] == [expected]
+        assert found.unreadable == 0

@@ -934,10 +934,14 @@ def test_goals_are_ordered_by_id_so_reordering_the_file_changes_nothing():
     ids=["empty", "full", "failed-calendar", "default-goals"],
 )
 def test_leadership_notes_states_that_synthesis_is_not_enabled(kwargs):
-    """Matrix row 13 — any input, the same computed-nothing statement."""
+    """Matrix row 13 — any input, the same statement (amended by `7d`): no
+    synthesis runs at render. With no summary quoted on the page, it claims
+    none is."""
     body = sections(render(**kwargs))["Leadership Notes"]
-    assert "Synthesis is not enabled in this build" in body
+    assert "No synthesis runs when this dashboard is rendered" in body
     assert "no model" in body
+    assert "quoted from their meeting records" not in body
+    assert "written rather than computed" not in body
 
 
 # ── Matrix: refusals ─────────────────────────────────────────────────────────
@@ -1120,7 +1124,7 @@ def test_no_empty_section_claims_a_state_of_the_world(case):
     # And each section names its own source: a query, a window, a file, a build.
     assert "calendar" in body["Time-Critical Activities"]
     assert "event log between" in body["Proactive Enablement"]
-    assert "in this build" in body["Leadership Notes"]
+    assert "when this dashboard is rendered" in body["Leadership Notes"]  # amended by `7d`
     if not goals(case["register"]):
         # Only an *empty* tier section is an empty-section string. A populated
         # one lists goals, and asserting it names the file too would be asking
@@ -1524,7 +1528,7 @@ def test_an_unreadable_log_is_stated_never_rendered_as_a_quiet_day():
     # The other sections render from their own inputs.
     assert "Payments Gateway Sync" in body["Time-Critical Activities"]
     assert "Reach staff engineer" in body["3-Tier Strategic Milestones"]
-    assert "Synthesis is not enabled" in body["Leadership Notes"]
+    assert "No synthesis runs" in body["Leadership Notes"]
 
 
 def test_an_unreadable_log_with_a_blank_reason_still_reads_as_a_sentence():
@@ -1981,3 +1985,535 @@ def test_no_render_carries_a_spelled_out_line_break():
     for raw in ("\v", "\f", "\x85", "\u2028", "\u2029"):
         assert raw not in text
     assert "a b c d e f g h" in text
+
+
+# ── Story 7d: meeting summaries after the schedule, and the spend line ───────
+#
+# Spec: `_bmad-output/specs/spec-pm-ai/stories/7d-summaries-and-actions-on-the-dashboard.md`.
+# The rows that are about what the page *says* are here, rendered from values;
+# the rows about what is read (the window, the wall, the `people` scope, an
+# unreadable record or project, open items) are in `tests/slice/test_dashboard_slice.py`.
+
+from pm_ai.core.cadence import look_back  # noqa: E402
+from pm_ai.core.disclosure_ledger import MonthlyTotal  # noqa: E402
+from pm_ai.core.rendering import (  # noqa: E402
+    LEADERSHIP_SENTENCE,
+    PROJECT_HEADINGS,
+    cut_at_word,
+    render_project_dashboard,
+)
+from pm_ai.domain.meeting_summaries import SummaryMaker, SummaryStateKind  # noqa: E402
+from pm_ai.domain.renders import (  # noqa: E402
+    DigestItem,
+    DigestMaker,
+    DigestUnreadable,
+    MeetingDigest,
+    MeetingDigests,
+    ProjectMeetingDigests,
+    ScopeUnreadable,
+)
+
+ALPHA = DataScope(ScopeKind.PROJECT, project_id="alpha")
+DIGESTS_GOLDEN = Path(__file__).parent / "goldens" / "dashboard_with_summaries.md"
+QWEN = DigestMaker(SummaryMaker.LOCAL, "qwen3:8b", requested=False)
+CLAUDE = DigestMaker(SummaryMaker.FRONTIER, "claude-sonnet-5-5", requested=True)
+
+
+def digest(
+    meeting_id: str = "mtg_a",
+    *,
+    title: str = "Release sync",
+    start: datetime = datetime(2026, 9, 9, 7, 0, tzinfo=timezone.utc),
+    recorded: datetime = datetime(2026, 9, 9, 9, 0, tzinfo=timezone.utc),
+    state: SummaryStateKind = SummaryStateKind.SUMMARIZED,
+    summary: str | None = "The team planned the release.",
+    maker: DigestMaker | None = QWEN,
+    scope: DataScope = PERSONAL,
+    **fields,
+) -> MeetingDigest:
+    return MeetingDigest(
+        scope=scope,
+        meeting_id=meeting_id,
+        start=start,
+        title=title,
+        recorded=recorded,
+        state=state,
+        summary=summary,
+        maker=maker if summary is not None else None,
+        **fields,
+    )
+
+
+def with_digests(*shown, earlier: int = 0, unread=(), now: datetime = NOW, spend=None) -> str:
+    return render_dashboard(
+        (),
+        (),
+        goals(),
+        now,
+        tz=DISPLAY,
+        pm=NOBODY,
+        digests=MeetingDigests(shown=tuple(shown), earlier=earlier, unread=tuple(unread)),
+        spend=spend,
+    )
+
+
+def time_critical(text: str) -> str:
+    return sections(text)["Time-Critical Activities"]
+
+
+def test_7d_afternoon_render_lists_the_summary_after_the_schedule():
+    """Matrix "Afternoon render": excerpt, "the local model qwen3:8b, automatically", 3 items."""
+    items = (
+        DigestItem("send the deck", "Ana", "Friday"),
+        DigestItem("book the room"),
+        DigestItem("update the plan", "Bo"),
+    )
+    text = render_dashboard(
+        FULL_DAY_MEETINGS,
+        (),
+        goals(),
+        NOW,
+        tz=DISPLAY,
+        pm=NOBODY,
+        digests=MeetingDigests(shown=(digest(items=items),)),
+    )
+    body = time_critical(text)
+    schedule, heading, listing = body.split("\n\n")
+    assert "Payments Gateway Sync" in schedule and "Release sync" not in schedule
+    assert heading == (
+        "Meeting summaries recorded between 2026-09-08 12:30 and 2026-09-09 12:30 — "
+        "in the last 24 hours (no earlier render recorded), quoted from the meeting "
+        "records:"
+    )
+    lines = listing.split("\n")
+    assert lines[0] == (
+        "- **09:00** Release sync — The team planned the release. "
+        "(made by the local model qwen3:8b, automatically)"
+    )
+    assert lines[1:4] == [
+        "  - Ana: send the deck (Friday)",
+        "  - unassigned: book the room",
+        "  - Bo: update the plan",
+    ]
+    assert lines[4] == (
+        "  - meeting `mtg_a`; to ask for a summary: "
+        "`pm-ai transcript summarize --scope personal --meeting mtg_a`"
+    )
+    # No new heading: CAP-9's four stay exactly four.
+    assert list(sections(text)) == list(HEADINGS)
+
+
+def test_7d_a_0700_render_lists_yesterdays_claude_summary_on_request():
+    """Matrix "07:00 render": a 15:00 meeting summarized by Claude at 18:00 yesterday."""
+    seven = datetime(2026, 9, 9, 5, 0, tzinfo=timezone.utc)
+    shown = digest(
+        start=datetime(2026, 9, 8, 13, 0, tzinfo=timezone.utc),
+        recorded=datetime(2026, 9, 8, 16, 0, tzinfo=timezone.utc),
+        maker=CLAUDE,
+    )
+    body = time_critical(with_digests(shown, now=seven))
+    assert "- **2026-09-08 15:00** Release sync" in body
+    assert "(made by Claude claude-sonnet-5-5, on request)" in body
+
+
+def test_7d_a_long_summary_is_cut_at_the_last_space_then_escaped():
+    """Matrix "Long summary": 450 characters, a space at 193 — cut there with "…"."""
+    summary = "a" * 193 + " " + "|" * 256
+    assert len(summary) == 450
+    assert cut_at_word(summary, 200) == "a" * 193 + "…"
+    body = time_critical(with_digests(digest(summary=summary)))
+    assert f"— {'a' * 193}… (made by" in body
+    # Escaped after the cut: no pipe survived the cut to be escaped.
+    assert "|" not in body
+
+
+def test_7d_a_summary_with_no_space_is_cut_hard_at_199():
+    """Matrix "No space": 250 characters — a hard cut at 199 with "…", 200 in all."""
+    summary = "b" * 250
+    cut = cut_at_word(summary, 200)
+    assert cut == "b" * 199 + "…" and len(cut) == 200
+    assert f"— {cut} (made by" in time_critical(with_digests(digest(summary=summary)))
+
+
+def test_7d_many_items_show_five_and_count_the_rest():
+    """Matrix "Many items": 8 open items — 5 shown, "and 3 more"."""
+    items = tuple(DigestItem(f"task {n}") for n in range(5))
+    body = time_critical(with_digests(digest(items=items, hidden=3)))
+    assert body.count("  - unassigned: task") == 5
+    assert "  - and 3 more open action items" in body
+
+
+def test_7d_waiting_and_failed_with_no_summary_say_so():
+    """Matrix "Waiting / failed": the maker from the row, the reason bounded."""
+    local = digest(state=SummaryStateKind.WAITING, summary=None)
+    claude = digest(
+        "mtg_b", state=SummaryStateKind.WAITING, summary=None,
+        waiting_for=SummaryMaker.FRONTIER,
+    )
+    failed = digest(
+        "mtg_c", state=SummaryStateKind.FAILED, summary=None, reason="x" * 400,
+    )
+    body = time_critical(with_digests(local, claude, failed))
+    assert "Release sync — summary waiting for the local model" in body
+    assert "Release sync — summary waiting for Claude" in body
+    assert f"Release sync — summary failed: {'x' * 300}…" in body
+    assert "x" * 301 not in body
+    assert "made by" not in body
+
+
+def test_7d_a_reopened_summary_is_shown_with_its_newer_state():
+    """Matrix "Re-opened": the record's summary, and that a newer one is waiting."""
+    waiting = digest(state=SummaryStateKind.WAITING)
+    failed = digest("mtg_b", state=SummaryStateKind.FAILED, reason="the model timed out.")
+    body = time_critical(with_digests(waiting, failed))
+    assert (
+        "— The team planned the release. (made by the local model qwen3:8b, "
+        "automatically); a newer summary is waiting for the local model"
+    ) in body
+    assert "; a newer summary failed: the model timed out" in body
+
+
+def test_7d_nothing_said_has_no_excerpt():
+    shown = digest(state=SummaryStateKind.NOTHING_SAID, summary=None)
+    body = time_critical(with_digests(shown))
+    assert "Release sync — the transcript held no words after cleaning" in body
+    assert "made by" not in body
+
+
+def test_7d_the_project_render_cannot_take_a_personal_digest():
+    """Matrix "Project render": the constructor refuses it; the renderer refuses the
+    personal type outright."""
+    with pytest.raises(ValueError, match="AD-25"):
+        ProjectMeetingDigests(scope=ALPHA, shown=(digest(scope=PERSONAL),))
+    with pytest.raises(ValueError, match="not a project"):
+        ProjectMeetingDigests(scope=PERSONAL)
+    with pytest.raises(ValueError, match="AD-38"):
+        ProjectMeetingDigests(scope=ALPHA, unread=(ScopeUnreadable(PERSONAL, "x"),))
+    with pytest.raises(TypeError, match="AD-25"):
+        render_project_dashboard(
+            (), (), NOW, tz=DISPLAY, pm=NOBODY,
+            digests=MeetingDigests(shown=(digest(),)),  # type: ignore[arg-type]
+        )
+
+
+def test_7d_a_people_digest_is_refused_for_the_personal_page():
+    """Matrix "People meeting": no `people` digest can be built for a dashboard."""
+    people = DataScope(ScopeKind.PEOPLE, person_id="p_1")
+    with pytest.raises(ValueError, match="never shown on a dashboard"):
+        MeetingDigests(shown=(digest(scope=people),))
+
+
+def test_7d_a_project_summary_by_claude_is_listed_with_its_attribution_and_no_spend():
+    """Matrix "Frontier summary in a project": listed, attributed; no spend line there."""
+    shown = digest(scope=ALPHA, maker=CLAUDE)
+    text = render_project_dashboard(
+        (), (), NOW, tz=DISPLAY, pm=NOBODY,
+        digests=ProjectMeetingDigests(scope=ALPHA, shown=(shown,)),
+    )
+    assert list(sections(text)) == list(PROJECT_HEADINGS)
+    body = time_critical(text)
+    assert "(made by Claude claude-sonnet-5-5, on request)" in body
+    assert "--scope project:alpha --meeting mtg_a" in body
+    assert "Frontier spend" not in text and "Leadership Notes" not in text
+
+
+def test_7d_an_item_placed_by_7e_shows_where_it_is():
+    """Matrix "Placed by `7e`": left out of the list; "shown under #142" in its place."""
+    shown = digest(scope=ALPHA, placed=(142,), placed_count=1, items=(DigestItem("other"),))
+    text = render_project_dashboard(
+        (), (), NOW, tz=DISPLAY, pm=NOBODY,
+        digests=ProjectMeetingDigests(scope=ALPHA, shown=(shown,)),
+    )
+    body = time_critical(text)
+    assert "  - 1 open action item shown under #142 in Team Activity" in body
+    assert "  - unassigned: other" in body
+
+
+def test_7d_nothing_to_show_names_the_window():
+    """Matrix "Nothing to show": a sentence naming the window it looked over."""
+    body = time_critical(with_digests())
+    assert body.endswith(
+        "No meeting summary was recorded between 2026-09-08 12:30 and 2026-09-09 "
+        "12:30 — in the last 24 hours (no earlier render recorded)."
+    )
+    since = look_back(datetime(2026, 9, 9, 5, 0, tzinfo=timezone.utc), NOW)
+    text = render_dashboard(
+        (), (), goals(), NOW, tz=DISPLAY, pm=NOBODY, since=since,
+        digests=MeetingDigests(),
+    )
+    assert "since the last render at 2026-09-09 07:00" in time_critical(text)
+
+
+def test_7d_an_unreadable_scope_or_record_is_stated_never_no_summaries():
+    """Matrix "Project unreadable" / "One malformed record", as the page says them."""
+    unread = ScopeUnreadable(ALPHA, "the project directory is gone")
+    body = time_critical(with_digests(unread=(unread,)))
+    assert "No meeting summary was recorded in the scopes that could be read" in body
+    assert (
+        "The meeting summaries of `project:alpha` could not be read, so none of its "
+        "meetings is listed: the project directory is gone."
+    ) in body
+    broken = DigestUnreadable(PERSONAL, "mtg_bad", NOW, "mtg_bad.md has prose in the region")
+    body = time_critical(with_digests(digest(), broken))
+    assert "Release sync — The team planned" in body
+    assert (
+        "- meeting `mtg_bad` in `personal`: its record could not be read, so its "
+        "summary is not shown: mtg_bad.md has prose in the region"
+    ) in body
+
+
+def test_7d_hostile_text_stays_one_escaped_bullet():
+    """Matrix "Hostile text": a newline and `|` in a title or summary."""
+    shown = digest(title="Sync\n## Leadership Notes|x", summary="line one\nline two | three")
+    text = with_digests(shown)
+    assert list(sections(text)) == list(HEADINGS)
+    body = time_critical(text)
+    (line,) = [line for line in body.split("\n") if "Sync" in line]
+    assert line.startswith("- **09:00** Sync ## Leadership Notes\\|x — line one line two \\| three")
+
+
+def test_7d_more_than_ten_are_counted():
+    """Matrix "More than 10": the renderer counts what the reader did not list."""
+    shown = tuple(digest(f"mtg_{n:02d}") for n in range(10))
+    body = time_critical(with_digests(*shown, earlier=4))
+    assert body.count("  - meeting `mtg_") == 10
+    assert body.endswith("- and 4 earlier summaries recorded in this window are not shown")
+
+
+def spend_total(**fields) -> MonthlyTotal:
+    values: dict = dict(
+        year=2026, month=9, records=3, input_tokens=1, output_tokens=1, cost_usd=21.4,
+        breached=True, unknown=1,
+    )
+    values.update(fields)
+    return MonthlyTotal(**values)
+
+
+def test_7d_the_spend_line_is_in_personal_leadership_notes():
+    """Matrix "Spend line": $21.40, one call unfinished — total, target, unknown, warning."""
+    body = sections(with_digests(spend=spend_total()))["Leadership Notes"]
+    first, spend = body.split("\n\n")
+    assert first == LEADERSHIP_SENTENCE  # no excerpt on this page, so no claim of one
+    assert spend == (
+        "Frontier spend this month (2026-09, UTC): $21.40 across 3 calls of known "
+        "cost, against the $20.00 monitored target, and 1 call of unknown cost. "
+        "Warning: the month is past the $20.00 target. A target to watch, not a "
+        "cap: nothing is refused or downgraded."
+    )
+
+
+def test_7d_the_spend_line_states_an_unreadable_ledger_or_its_malformed_lines():
+    """Matrix "Ledger unreadable": the fault; or the total, then the malformed lines."""
+    failed = HarvestFailure(reason="PermissionError: disclosure.md", retryable=False)
+    body = sections(with_digests(spend=failed))["Leadership Notes"]
+    assert body.endswith(
+        "This month's frontier spend could not be read from the disclosure ledger: "
+        "PermissionError: disclosure.md."
+    )
+    total = spend_total(
+        records=1, cost_usd=0.5, breached=False, unknown=0,
+        malformed=("disclosure.md line 3: not a record",),
+    )
+    body = sections(with_digests(spend=total))["Leadership Notes"]
+    assert (
+        "$0.50 across 1 call of known cost in the ledger lines that could be read, "
+        "against the $20.00 monitored target."
+    ) in body
+    assert "Warning" not in body
+    assert body.endswith(
+        "left out of the total: disclosure.md line 3: not a record."
+    )
+
+
+def test_7d_the_render_with_summaries_matches_its_golden_file():
+    """The whole artifact with summaries and a spend line, byte for byte — read and
+    regenerated deliberately."""
+    shown = (
+        digest(
+            items=(DigestItem("send the deck", "Ваня", "Friday"), DigestItem("book the room")),
+            hidden=2,
+        ),
+        digest(
+            "mtg_b", title="Vendor call", state=SummaryStateKind.WAITING, summary=None,
+            waiting_for=SummaryMaker.FRONTIER,
+            start=datetime(2026, 9, 8, 13, 0, tzinfo=timezone.utc),
+            recorded=datetime(2026, 9, 9, 8, 0, tzinfo=timezone.utc),
+        ),
+        digest("mtg_c", scope=ALPHA, title="Alpha planning", maker=CLAUDE),
+    )
+    text = render_dashboard(
+        FULL_DAY_MEETINGS,
+        FULL_DAY_ENTRIES,
+        goals(),
+        NOW,
+        tz=DISPLAY,
+        pm=NOBODY,
+        digests=MeetingDigests(shown=shown, earlier=1),
+        spend=spend_total(cost_usd=4.25, breached=None, records=2, unknown=1),
+    )
+    assert text == DIGESTS_GOLDEN.read_text(encoding="utf-8")
+
+
+# ── Story 7d, review: what the page says at its edges ────────────────────────
+
+from pm_ai.core.rendering import EXCERPT_LIMIT, QUOTED_SENTENCE  # noqa: E402
+
+
+def test_7d_leadership_notes_claim_a_quoted_summary_only_when_one_is_quoted():
+    """The second sentence is computed: a page that quotes no excerpt never says
+    its summaries are quoted, each naming a model."""
+    quoted = sections(with_digests(digest()))["Leadership Notes"]
+    assert quoted == f"{LEADERSHIP_SENTENCE} {QUOTED_SENTENCE}"
+    for shown in (
+        (),
+        (digest(state=SummaryStateKind.WAITING, summary=None),),
+        (digest(state=SummaryStateKind.NOTHING_SAID, summary=None),),
+        (DigestUnreadable(PERSONAL, "mtg_bad", NOW, "unreadable"),),
+    ):
+        assert sections(with_digests(*shown))["Leadership Notes"] == LEADERSHIP_SENTENCE
+
+
+def test_7d_the_cut_counts_the_text_before_escaping():
+    """Fold, cut, escape: `|` inside the first 200 characters counts once in the
+    cut and is escaped after it, so the rendered excerpt may be longer than 200."""
+    summary = "|" * 150 + " " + "a" * 100
+    body = time_critical(with_digests(digest(summary=summary)))
+    assert f"— {'\\|' * 150}… (made by" in body
+
+
+def test_7d_title_owner_due_and_model_are_bounded():
+    long = "word " * 100
+    shown = digest(
+        title=long,
+        maker=DigestMaker(SummaryMaker.LOCAL, "m" * 400, requested=False),
+        items=(DigestItem("do it", owner=long, due=long),),
+    )
+    body = time_critical(with_digests(shown))
+    cut = cut_at_word(long, EXCERPT_LIMIT)
+    assert len(cut) <= EXCERPT_LIMIT and cut.endswith("…")
+    assert f"** {cut} — " in body
+    assert f"  - {cut}: do it ({cut})" in body
+    assert "m" * 200 not in body
+
+
+def test_7d_an_empty_model_or_text_leaves_no_dangling_words():
+    shown = digest(
+        maker=DigestMaker(SummaryMaker.FRONTIER, "", requested=True),
+        items=(DigestItem("   ", "Ana"),),
+    )
+    body = time_critical(with_digests(shown))
+    assert "(made by Claude, on request)" in body
+    assert "  - Ana: (no text recorded)" in body
+
+
+def test_7d_digests_refuse_counts_that_render_nonsense():
+    with pytest.raises(ValueError, match="at least 0"):
+        digest(hidden=-1)
+    with pytest.raises(ValueError, match="no issue is named"):
+        digest(scope=ALPHA, placed_count=1)
+    with pytest.raises(ValueError, match="no action item shown"):
+        digest(scope=ALPHA, placed=(142,))
+    with pytest.raises(ValueError, match="no Team Activity"):
+        MeetingDigests(shown=(digest(placed=(142,), placed_count=1),))
+    with pytest.raises(ValueError, match="none shown"):
+        MeetingDigests(earlier=3)
+    with pytest.raises(ValueError, match="none shown"):
+        ProjectMeetingDigests(scope=ALPHA, earlier=3)
+    with pytest.raises(ValueError, match="not a project"):
+        MeetingDigests(not_enrolled=(PERSONAL,))
+    with pytest.raises(ValueError, match="carries no text"):
+        DigestItem("the text", confidential=True)
+    with pytest.raises(ValueError, match="only a project page withholds"):
+        MeetingDigests(shown=(digest(items=(DigestItem("", confidential=True),)),))
+
+
+def test_7d_a_confidential_item_is_listed_without_its_text():
+    """Matrix "Confidential issue" as the page says it: owner and due kept."""
+    shown = digest(scope=ALPHA, items=(DigestItem("", "Ana", "Friday", confidential=True),))
+    text = render_project_dashboard(
+        (), (), NOW, tz=DISPLAY, pm=NOBODY,
+        digests=ProjectMeetingDigests(scope=ALPHA, shown=(shown,)),
+    )
+    assert "  - Ana: an action item on a confidential issue (Friday)" in time_critical(text)
+
+
+def test_7d_unreadable_items_not_enrolled_and_unchecked_are_each_stated():
+    shown = digest(unreadable_items=2)
+    beta = DataScope(ScopeKind.PROJECT, project_id="beta")
+    text = render_dashboard(
+        (), (), goals(), NOW, tz=DISPLAY, pm=NOBODY,
+        digests=MeetingDigests(
+            shown=(shown,), not_enrolled=(beta,), enrolment_unchecked=None,
+        ),
+    )
+    body = time_critical(text)
+    assert (
+        "  - 2 open action items could not be read from the proposals store, so they "
+        "are not listed"
+    ) in body
+    assert "no open action item" not in body
+    assert body.endswith(
+        "`project:beta` has meeting summaries recorded in this window and is no longer "
+        "enrolled, so its meetings are not listed."
+    )
+    text = render_dashboard(
+        (), (), goals(), NOW, tz=DISPLAY, pm=NOBODY,
+        digests=MeetingDigests(enrolment_unchecked="database is locked"),
+    )
+    body = time_critical(text)
+    assert "No meeting summary was recorded between" in body
+    assert body.endswith(
+        "Whether a project no longer enrolled has meeting summaries in this window "
+        "could not be checked: database is locked."
+    )
+
+
+def test_7d_a_project_meeting_names_its_scope_on_the_personal_page_only():
+    shown = digest(scope=ALPHA, title="Alpha planning")
+    personal = time_critical(with_digests(shown))
+    assert "** Alpha planning (`project:alpha`) — " in personal
+    project = time_critical(
+        render_project_dashboard(
+            (), (), NOW, tz=DISPLAY, pm=NOBODY,
+            digests=ProjectMeetingDigests(scope=ALPHA, shown=(shown,)),
+        )
+    )
+    assert "** Alpha planning — " in project
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        (
+            dict(records=0, cost_usd=0.0, breached=False, unknown=0),
+            "Frontier spend this month (2026-09, UTC): no frontier call is recorded, "
+            "against the $20.00 monitored target.",
+        ),
+        (
+            dict(records=0, cost_usd=0.0, breached=None, unknown=2),
+            "Frontier spend this month (2026-09, UTC): 2 calls of unknown cost and none "
+            "of known cost, against the $20.00 monitored target. With calls of unknown "
+            "cost, whether the month is past the $20.00 target cannot be told.",
+        ),
+        (
+            dict(
+                records=0, cost_usd=0.0, breached=False, unknown=0,
+                malformed=("disclosure.md line 2: not a record",),
+            ),
+            "Frontier spend this month (2026-09, UTC): no frontier call is recorded in "
+            "the ledger lines that could be read, against the $20.00 monitored target. "
+            "The disclosure ledger has lines that could not be read, left out of the "
+            "total: disclosure.md line 2: not a record.",
+        ),
+    ],
+    ids=["quiet-month", "only-unknown", "quiet-but-malformed"],
+)
+def test_7d_the_spend_line_with_no_call_of_known_cost(fields, expected):
+    body = sections(with_digests(spend=spend_total(**fields)))["Leadership Notes"]
+    assert body.split("\n\n")[1] == expected
+
+
+def test_7d_a_blank_ledger_refusal_is_not_repeated():
+    failed = HarvestFailure(reason="PermissionError", retryable=False)
+    body = sections(with_digests(spend=failed))["Leadership Notes"]
+    assert body.endswith("could not be read from the disclosure ledger: PermissionError.")

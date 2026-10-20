@@ -26,10 +26,11 @@ from pm_ai.domain.harvest import (
 from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow
-from pm_ai.domain.meeting_summaries import SummaryFence
+from pm_ai.domain.meeting_summaries import SummaryFence, SummaryState
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.member_ledgers import MatchFence
 from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow
+from pm_ai.domain.proposals import OpenActionItems
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.sanitize import Sanitized
 from pm_ai.domain.task_classes import TaskClass
@@ -832,6 +833,22 @@ class StoragePort(Protocol):
         """Every dashboard scope's render record, a plain read (9b)."""
     def last_render(self, scope: DataScope) -> datetime | None:
         """`scope`'s last successful render instant, a keyed plain read (9b)."""
+    # Story 7d: what the dashboard reads of meeting summaries, plain reads.
+    def summaries_recorded_between(
+        self, scope: DataScope, *, since: datetime, until: datetime
+    ) -> tuple[SummaryState, ...]:
+        """`scope`'s summary rows last written in `(since, until]`, most recent first.
+
+        Only that scope's rows: the dashboard never reads a `people` row."""
+    def projects_with_summaries_between(
+        self, *, since: datetime, until: datetime
+    ) -> tuple[DataScope, ...]:
+        """The project scopes with a summary row last written in `(since, until]`."""
+    def open_action_items(self, prefix: str, *, at: datetime) -> OpenActionItems:
+        """One meeting's `action_item` proposals still `staged` and unexpired at `at`,
+        and the count of staged bodies that could not be read.
+
+        `prefix` is `action_item_prefix(scope, meeting_id)`, which carries the scope."""
     def was_executed(self, idempotency_key: str) -> bool: ...
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None: ...
     # Reads, added with story 2h. The port declared only writes, so an accessor

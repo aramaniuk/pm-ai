@@ -22,4 +22,4 @@ Message signals in the last 24 hours (no earlier render recorded), up to 2026-09
 
 ## Leadership Notes
 
-Synthesis is not enabled in this build. This dashboard is rendered by a deterministic function with no model in its path, so there is nothing here that was written rather than computed.
+No synthesis runs when this dashboard is rendered: it is a deterministic function with no model in its path.
