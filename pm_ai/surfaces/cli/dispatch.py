@@ -4332,7 +4332,7 @@ TABLE: Mapping[str, Command] = {
                 target=_member_target,
             ),
             "link": Command(
-                "confirm or reject an issue the local model matched to a meeting update",
+                "confirm or reject the issue a meeting update is linked to",
                 _member_link,
                 takes=(UPDATE_ARGUMENT,),
                 options=(SCOPE_ARGUMENT,),

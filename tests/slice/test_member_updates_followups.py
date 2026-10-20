@@ -528,3 +528,90 @@ def test_the_page_renders_and_says_so_when_a_ledger_cannot_be_read(tmp_path, whi
     else:
         assert "The saved alias table could not be read" in section
         assert "action for Ana: fix #142" in section
+
+
+# ── Andrei's decisions of 2026-10-20 ─────────────────────────────────────────
+
+
+def test_a_line_linked_by_a_spoken_number_can_be_rejected_and_confirmed_back(tmp_path):
+    """Matrix: "Reject a spoken number" — `--reject` works on any line."""
+    from pm_ai.core.member_updates import update_id
+
+    daemon = _daemon(tmp_path, _answer(items=(("fix #41", "Ваня", None),)))
+    _work(daemon, _issue(41, IVAN))
+    _ingested(daemon, _meeting())
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+    (line,) = _ledger(daemon).live.values()
+    assert line.by is LinkKind.NUMBER
+    upd = update_id(line.item, 41)
+    assert "fix #41" in _team_activity(daemon)
+
+    before = _ledger_bytes(daemon)
+    code, said = _run(daemon, "member", "link", upd, "--scope", "project:alpha", "--confirm")
+    assert code == EXIT_OK and "already shown as certain" in said
+    assert before == _ledger_bytes(daemon), "nothing written"
+
+    code, said = _run(daemon, "member", "link", upd, "--scope", "project:alpha", "--reject")
+    assert code == EXIT_OK and "rejected" in said
+    assert "fix #41" not in _team_activity(daemon)
+
+    code, said = _run(daemon, "member", "link", upd, "--scope", "project:alpha", "--confirm")
+    assert code == EXIT_OK and "confirmed" in said
+    assert "fix #41" in _team_activity(daemon) and "(said in the meeting)" in _team_activity(daemon)
+
+
+def test_the_title_match_lists_the_200_most_recently_updated_and_the_page_says_so(tmp_path):
+    """Matrix: "Many open issues" — at most 200 listed; the page counts the rest."""
+    from pm_ai.core.member_updates import MAX_LISTED_ISSUES
+
+    issues = [
+        _issue(iid, title=f"Task {iid}", updated_at=NOW - timedelta(minutes=iid))
+        for iid in range(1, MAX_LISTED_ISSUES + 6)
+    ]
+    issues.append(_issue(900, title="Secret", confidential=False, state="closed"))
+    daemon = _daemon(tmp_path, _answer(items=(("rework the export", None, None),)), _matches((1, 3)))
+    _work(daemon, *issues)
+    _ingested(daemon, _meeting())
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    (call,) = [c for c in daemon.model.calls if c["task_class"].value == "classification"]
+    listed = [f.for_model for f in call["external"] if "Task " in f.for_model]
+    assert len(listed) == MAX_LISTED_ISSUES
+    assert not any(f"Task {iid}" in text.split(": ", 1)[-1] for text in listed for iid in (201, 205))
+    assert any(text.endswith("Task 1") for text in listed)
+    page = _team_activity(daemon)
+    assert "lists only the 200 most recently updated open issues, so 5 open issues were left out" in page
+
+
+def test_the_page_says_nothing_of_the_cap_when_nothing_was_left_out(tmp_path):
+    daemon = _summarised(tmp_path)
+    assert "most recently updated open issues" not in _team_activity(daemon)
+
+
+def test_a_request_told_its_result_whose_settle_then_fails_shows_failed_in_doctor(tmp_path):
+    """Accepted limit (Andrei, 2026-10-20): the request was told at the end of
+    `7b`'s writes; a failed settle after it is the row `doctor` names as failed."""
+    from pm_ai.app.pipelines import request_summary
+
+    daemon = _daemon(tmp_path, _answer(items=(("fix #41", None, None),)))
+    _work(daemon, _issue(41))
+    _ingested(daemon, _meeting())
+    settle = daemon.storage.settle_summary
+    broke: list[bool] = []
+
+    def failing(fence, *, state, reason, model=None):
+        if state is SummaryStateKind.SUMMARIZED and not broke:
+            broke.append(True)
+            raise RuntimeError("the disk said no")
+        return settle(fence, state=state, reason=reason, model=model)
+
+    daemon.storage.settle_summary = failing  # type: ignore[method-assign]
+    told: list = []
+    request_summary(daemon, scope=PROJECT, meeting_id="mtg_a", job="job_1", on_done=told.append)
+
+    assert [o.result for o in told] == [SummaryResult.SUMMARIZED], "told once, before the settle"
+    state = daemon.storage.summary_state(PROJECT, "mtg_a")
+    assert state.state is SummaryStateKind.FAILED
+    probe = entry._summaries_probe(types.SimpleNamespace(daemon=daemon))  # type: ignore[arg-type]
+    assert probe is not None and probe.health is Health.WARNING
+    assert "1 failed: meeting mtg_a" in probe.detail and "RuntimeError" in probe.detail

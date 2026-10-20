@@ -111,6 +111,7 @@ from pm_ai.core.member_updates import (
     issue_notes_for,
     judge_classification,
     lines_to_append,
+    listed_issues,
     parse_ledger,
     split_numbered,
     unlinked,
@@ -3051,7 +3052,7 @@ def _update_steps(
         )
     split = split_numbered(inputs.candidates, (issue.iid for issue in work.issues))
     ask = unlinked(ledger, split.unnumbered)
-    listable = [i for i in work.issues if is_open(i.state) and not i.confidential]
+    listable, _ = listed_issues(work.issues)
     links: list[Link] = list(split.links)
     failure: BaseException | None = None
     asked = bool(ask and listable)

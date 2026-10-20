@@ -220,7 +220,7 @@ class MemberDesk:
     # ── `member link` ────────────────────────────────────────────────────
 
     def link(self, scope: DataScope, update: str, *, confirm: bool) -> str:
-        """Confirm or reject one model-matched link, appended to the ledger."""
+        """Confirm or reject one line's link, appended to the ledger; any line, a spoken number too."""
         self._project(scope)
         raw = self._ledger_raw(scope)
         ledger = parse_ledger(raw)
@@ -235,12 +235,14 @@ class MemberDesk:
                 f"no update {update!r} is recorded in {scope}; `pm-ai member unmatched "
                 f"--scope {scope}` lists the links awaiting your word."
             )
-        if line.by is LinkKind.NUMBER:
-            raise MemberRefused(
-                f"{update}'s issue #{line.issue} was a number said in the meeting, so it "
-                f"is already certain and needs no word from you."
-            )
         verdict = ledger.verdicts.get(update)
+        if line.by is LinkKind.NUMBER and confirm and (verdict is None or verdict.confirmed):
+            # A spoken number is certain without a word; rejecting one is
+            # allowed (Andrei, 2026-10-20), and confirming undoes a rejection.
+            return (
+                f"{update}'s issue #{line.issue} was a number said in the meeting, so it "
+                f"is already shown as certain; nothing was written."
+            )
         word = "confirmed" if confirm else "rejected"
         if verdict is not None and verdict.confirmed == confirm:
             return f"{update} (#{line.issue}) is already {word}; nothing was written."

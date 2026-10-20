@@ -78,6 +78,7 @@ from pm_ai.domain.work import GitLabPerson, Issue, ProjectWork, Section, is_open
 __all__ = [
     "CLASSIFICATION_INSTRUCTIONS",
     "CLASSIFICATION_SHAPE",
+    "MAX_LISTED_ISSUES",
     "MAX_ROWS_PER_ISSUE",
     "ROW_TEXT_LIMIT",
     "UPDATE_WINDOW",
@@ -117,6 +118,7 @@ __all__ = [
     "spoken_numbers",
     "unlinked",
     "unmatched_report",
+    "listed_issues",
     "update_id",
 ]
 
@@ -125,6 +127,24 @@ UPDATE_WINDOW = timedelta(days=14)
 
 MAX_ROWS_PER_ISSUE = 2
 """Update rows shown under one issue, newest meeting first."""
+
+MAX_LISTED_ISSUES = 200
+"""The title match lists at most this many issues: the most recently updated
+open, non-confidential ones (Andrei, 2026-10-20), so a large project's prompt
+still fits the local model's window. Only a spoken number can match the rest."""
+
+
+def listed_issues(issues: Iterable[Issue]) -> tuple[tuple[Issue, ...], int]:
+    """The issues the title match lists, and how many listable ones were left out.
+
+    Open and not confidential; the most recently updated first, then by iid,
+    at most `MAX_LISTED_ISSUES`.
+    """
+    listable = sorted(
+        (issue for issue in issues if is_open(issue.state) and not issue.confidential),
+        key=lambda issue: (-issue.updated_at.timestamp(), issue.iid),
+    )
+    return tuple(listable[:MAX_LISTED_ISSUES]), max(0, len(listable) - MAX_LISTED_ISSUES)
 
 ROW_TEXT_LIMIT = 100
 """An item's text, a title, a name and a due are cut to this many characters,
@@ -387,12 +407,10 @@ def classification_prompt(
     Only open issues that are not confidential are listed: a confidential
     issue's title never enters a prompt, so only a spoken number can match
     one. Each fragment passes the sanitizer: an issue title is text a person
-    typed on GitLab and sits outside AD-48's declarations (AD-12).
+    typed on GitLab and sits outside AD-48's declarations (AD-12). At most
+    `MAX_LISTED_ISSUES`, the most recently updated (`listed_issues`).
     """
-    listed = sorted(
-        (issue for issue in issues if is_open(issue.state) and not issue.confidential),
-        key=lambda issue: issue.iid,
-    )
+    listed = sorted(listed_issues(issues)[0], key=lambda issue: issue.iid)
     fragments = [
         sanitize(f"{NOTE_PREFIX}{number}: {candidate.text}")
         for number, candidate in enumerate(candidates, start=1)
@@ -1161,6 +1179,16 @@ def issue_notes_for(
             "The project members were not read, so speaker labels were matched "
             "against the issues' assignees."
         )
+    if record is not None:
+        _, left_out = listed_issues(record.issues)
+        if left_out:
+            closing.append(
+                f"The title match lists only the {MAX_LISTED_ISSUES} most recently "
+                f"updated open issues, so {left_out} open "
+                f"{'issue was' if left_out == 1 else 'issues were'} left out of it; "
+                f"only a number said in a meeting links an update to "
+                f"{'it' if left_out == 1 else 'them'}."
+            )
     return IssueNotes(rows=MappingProxyType(rows), closing=tuple(closing))
 
 
