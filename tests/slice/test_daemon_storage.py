@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -236,6 +238,195 @@ def test_opening_a_store_another_connection_is_writing_refuses_naming_it(tmp_pat
         other.rollback()
         other.close()
     assert str(store) in str(refused.value)
+
+
+# ── Two openers of a brand-new store (4x) ────────────────────────────────────
+
+
+def _fresh_store_held(tmp_path: Path) -> sqlite3.Connection:
+    """A write lock held on a brand-new, still empty `operational.db`.
+
+    The WAL switch is refused against it the way the race's loser is: the
+    pragma reads the file before it asks for the write lock, and SQLite does
+    not run the busy wait for a connection that already holds a read.
+    """
+    store = tmp_path / ".pm-ai" / "private" / "operational.db"
+    store.parent.mkdir(parents=True)
+    store.touch(mode=0o600)
+    other = sqlite3.connect(store, isolation_level=None, check_same_thread=False)
+    other.execute("BEGIN IMMEDIATE")
+    return other
+
+
+def _open(tmp_path: Path) -> StorageService:
+    return StorageService(
+        ScopePaths.rooted(tmp_path), now=lambda: NOW, vcs=_NoRepository(),
+        crypto=PlaintextCrypto(), claims=FlockClaims(),
+    )
+
+
+def _switch_and_release(other: sqlite3.Connection) -> None:
+    other.rollback()
+    other.execute("PRAGMA journal_mode=WAL")
+
+
+@pytest.mark.parametrize(
+    "release", [sqlite3.Connection.rollback, _switch_and_release],
+    ids=["released", "switched-to-wal-then-released"],
+)
+def test_the_second_first_open_waits_for_the_other_opener(tmp_path, release):
+    """Opened once the other opener lets go — not refused at once (4x)."""
+    other = _fresh_store_held(tmp_path)
+    released = threading.Timer(0.3, release, args=(other,))
+    started = time.monotonic()
+    released.start()
+    try:
+        service = _open(tmp_path)
+    finally:
+        released.join()
+        other.close()
+    try:
+        assert time.monotonic() - started >= 0.25
+        assert service._db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert service.load_cursor("nobody") == Cursor()
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("wait", [0.1, 0.3])
+def test_a_wal_switch_held_past_the_busy_wait_is_refused_by_name(tmp_path, monkeypatch, wait):
+    """Bounded by the connection's busy wait, shortened here (4x)."""
+    other = _fresh_store_held(tmp_path)
+    real = sqlite3.connect
+    monkeypatch.setattr(
+        service_module.sqlite3, "connect", lambda *a, **k: real(*a, timeout=wait, **k)
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(OperationalStoreBusy) as refused:
+            _open(tmp_path)
+    finally:
+        other.rollback()
+        other.close()
+    waited = time.monotonic() - started
+    store = tmp_path / ".pm-ai" / "private" / "operational.db"
+    message = str(refused.value)
+    assert wait <= waited < wait + 1
+    assert str(store) in message
+    assert f"busy wait is {wait * 1000:.0f} ms" in message
+    assert "was not switched to WAL" in message
+    check = sqlite3.connect(store)
+    try:
+        assert check.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        check.close()
+
+
+_OPEN_AT_THE_SIGNAL = """
+import pathlib, sys, time
+from datetime import datetime, timezone
+from pm_ai.platform.claims import FlockClaims
+from pm_ai.platform.paths import ScopePaths
+from pm_ai.storage.crypto import PlaintextCrypto
+from pm_ai.storage.service import StorageService
+
+class NoRepository:
+    def working_tree(self, path): return None
+    def repository_marker_above(self, path): return None
+
+root, go = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+print("ready", flush=True)
+while not go.exists():
+    pass
+StorageService(
+    ScopePaths.rooted(root), now=lambda: datetime.now(timezone.utc),
+    vcs=NoRepository(), crypto=PlaintextCrypto(), claims=FlockClaims(),
+).close()
+"""
+
+
+def test_two_processes_opening_a_brand_new_store_at_once_both_open_it(tmp_path):
+    """The whole open, on real processes released together (4x).
+
+    Each round is a fresh store. Before 4x one round in about 27 refused the
+    second opener (measured on 5 runs of 60 rounds), so this is the end-to-end
+    check that both open it and it is stamped once, current; the switch itself
+    is pinned by the row below, which meets the race in nearly every round.
+    """
+    for round_ in range(20):
+        root, go = tmp_path / f"round-{round_}", tmp_path / f"go-{round_}"
+        openers = [
+            subprocess.Popen(
+                [sys.executable, "-c", _OPEN_AT_THE_SIGNAL, str(root), str(go)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for _ in range(2)
+        ]
+        try:
+            for opener in openers:
+                assert opener.stdout is not None
+                assert opener.stdout.readline() == "ready\n"
+            go.touch()
+            results = [opener.communicate(timeout=30) for opener in openers]
+        finally:
+            for opener in openers:
+                if opener.poll() is None:
+                    opener.kill()
+                    opener.communicate()
+        assert [opener.returncode for opener in openers] == [0, 0], (round_, results)
+        store = sqlite3.connect(root / ".pm-ai" / "private" / "operational.db")
+        try:
+            assert store.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            assert store.execute("SELECT version FROM schema_version").fetchall() == [
+                (service_module.SCHEMA_VERSION,)
+            ]
+        finally:
+            store.close()
+
+
+_SWITCH_AT_THE_SIGNAL = """
+import pathlib, sqlite3, sys
+from pm_ai.storage.service import _OperationalConnection, _enter_wal
+
+store, go = sys.argv[1], pathlib.Path(sys.argv[2])
+db = sqlite3.connect(store, factory=_OperationalConnection)
+print("ready", flush=True)
+while not go.exists():
+    pass
+_enter_wal(db)
+print(db.execute("PRAGMA journal_mode").fetchone()[0], flush=True)
+"""
+
+
+def test_two_processes_switching_a_brand_new_store_to_wal_at_once_both_succeed(tmp_path):
+    """The switch alone, both connections open before the signal (4x).
+
+    Measured with a plain `PRAGMA journal_mode=WAL` in place of `_enter_wal`:
+    one of the two was refused busy at once in 297 rounds of 300.
+    """
+    for round_ in range(10):
+        store, go = tmp_path / f"store-{round_}.db", tmp_path / f"go-{round_}"
+        store.touch(mode=0o600)
+        switchers = [
+            subprocess.Popen(
+                [sys.executable, "-c", _SWITCH_AT_THE_SIGNAL, str(store), str(go)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for _ in range(2)
+        ]
+        try:
+            for switcher in switchers:
+                assert switcher.stdout is not None
+                assert switcher.stdout.readline() == "ready\n"
+            go.touch()
+            results = [switcher.communicate(timeout=30) for switcher in switchers]
+        finally:
+            for switcher in switchers:
+                if switcher.poll() is None:
+                    switcher.kill()
+                    switcher.communicate()
+        assert [switcher.returncode for switcher in switchers] == [0, 0], (round_, results)
+        assert [out for out, _ in results] == ["wal\n", "wal\n"]
 
 
 # ── The token file is a regular file of a bounded size ───────────────────────
