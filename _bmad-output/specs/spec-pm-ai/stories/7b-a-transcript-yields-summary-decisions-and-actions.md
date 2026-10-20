@@ -160,9 +160,21 @@ The retry's sentence differs from the first prompt, or temperature 0 and a fixed
 
 Choices made in review (2026-10-16): 3 meetings per harvest and nothing older than 30 days, so a backlog after a long absence costs bounded model time and never touches purged captures; owners limited to speaker labels, because a free-text owner invites the model to invent a person and `7e` needs a name the transcript actually carries; a hand-edited summary region is dropped and remade rather than kept, because keeping it would present a human's text as pm-ai's; decisions accumulate rather than being withdrawn, because the event log is append-only and a re-summary is a second reading, not a correction.
 
-Measured figures: none yet from a real model. The build session's sandbox refuses connections to Ollama, so the benchmark could not run there (`deferred-work.md`, story-7b section).
+Measured figures (2026-10-20). The coordinating session ran `benchmarks/meeting_summary.py --model qwen3:8b` in a throwaway root, because the build sandbox cannot reach Ollama. Machine: arm64 Python, M3 Pro, 18 GB. Both inputs used the 10-decision limit of the time.
 
-Computed, not measured: the largest answer the limits allow, as JSON with each speaker label counted at 40 characters, is 8,158 characters. At `7a`'s 2.92 characters per token (measured on `7a`'s input, not on an answer), that is about 2,794 tokens, within three quarters of the cap (3,072). This is pinned by `test_the_largest_valid_answer_fits_three_quarters_of_the_output_cap_at_7a_s_ratio`. `benchmarks/meeting_summary.py --model qwen3:8b` prints the measured figures: characters per token on the largest valid answer seen, the limits' largest answer at that ratio, prompt tokens, each call's model time, and the times from ingestion and from the command to the record written.
+| Input | Prompt tokens | Answer | Decisions / items | From ingestion | From the command |
+|---|---|---|---|---|---|
+| Authored meeting (`mixed_ru_en.vtt`) | 2,873 | 382 tokens, 1,144 characters | 5 / 6 | 28.7 s | 27.0 s |
+| Redacted recording | 8,789 | 716 tokens, 2,660 characters | 10 / 11 | 67.5 s | 67.2 s |
+
+- Each summary was one call, with no retries.
+- The largest answer seen was 3.72 characters per token.
+- At 10 decisions, the largest answer the limits allowed (8,158 characters) projects to 2,196 tokens, against three quarters of the cap (3,072). At 25 decisions (12,268 characters) it projects to about 3,300 tokens. That figure is computed, not measured.
+- The 600-second Ask First did not trigger.
+- Neither summary was Cyrillic (`cyrillic_share` 0.0 on both). The authored meeting's spoken letters are 44% Cyrillic, so English is its majority by letters. The redacted recording's letters are 82% Cyrillic, but its words are scrambled. The language rule stays unverified until the run on `mostly_ru.vtt` (97% Cyrillic).
+- Swap went from 0 to 4.2 GB during the run, with other apps open (Office, Chrome, ChatGPT). This is noted as an observation, not a result.
+
+CAP-3's figure from meeting end is not claimed. The figures from ingestion exclude the harvest's interval, because the script runs the job inline right after ingestion.
 
 ## Verification
 
