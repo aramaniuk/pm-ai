@@ -2517,3 +2517,11 @@ def test_7d_a_blank_ledger_refusal_is_not_repeated():
     failed = HarvestFailure(reason="PermissionError", retryable=False)
     body = sections(with_digests(spend=failed))["Leadership Notes"]
     assert body.endswith("could not be read from the disclosure ledger: PermissionError.")
+
+
+def test_7d_an_item_with_no_due_date_shows_no_parenthesis():
+    """The 7d manual check (2026-10-20): no due date, no `(…)` after the item."""
+    body = time_critical(with_digests(digest(items=(DigestItem("Update the runbook", "Bo"),))))
+    lines = body.split("\n")
+    assert "  - Bo: Update the runbook" in lines
+    assert "(null)" not in body and "(None)" not in body and "()" not in body
