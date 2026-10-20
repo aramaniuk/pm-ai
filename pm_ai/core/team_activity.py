@@ -131,6 +131,7 @@ this many characters, after folding and before escaping."""
 
 _HASH_NUMBER = re.compile(r"#([0-9]+)")
 _NOT_BEFORE = frozenset("/&!")
+_MAX_REFERENCE_DIGITS = 18
 
 
 def bare_references(message: str) -> frozenset[int]:
@@ -153,7 +154,9 @@ def bare_references(message: str) -> frozenset[int]:
         if end < len(message) and message[end].isalnum():
             continue
         digits = match.group(1)
-        if digits.startswith("0"):
+        if digits.startswith("0") or len(digits) > _MAX_REFERENCE_DIGITS:
+            # A run past `int()`'s own limit on long strings would raise; no
+            # issue number is that long (story 7e reads meeting text through this).
             continue
         found.add(int(digits))
     return frozenset(found)

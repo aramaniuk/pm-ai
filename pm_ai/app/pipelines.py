@@ -86,7 +86,7 @@ from pm_ai.core.transcripts import (
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import MalformedGoals, parse_goals
 from pm_ai.core.normalize import attribute_all
-from pm_ai.core.cadence import coverage_cutoff, look_back
+from pm_ai.core.cadence import LookBack, coverage_cutoff, look_back
 from pm_ai.core.transcript_acquisition import acquire_transcripts
 from pm_ai.core.rendering import (
     CalendarAnswer,
@@ -95,8 +95,36 @@ from pm_ai.core.rendering import (
     render_dashboard,
     render_project_dashboard,
 )
-from pm_ai.core.team_activity import WorkAnswer
+from pm_ai.core.team_activity import IssueNotes, WorkAnswer, placed_issue_numbers
+from pm_ai.core.aliases import AliasTable, parse_aliases
+from pm_ai.core.member_updates import (
+    CLASSIFICATION_INSTRUCTIONS,
+    CLASSIFICATION_SHAPE,
+    Candidate,
+    ClassificationRefused,
+    Ledger,
+    Link,
+    LinkKind,
+    ProjectScope,
+    candidates_of,
+    classification_prompt,
+    issue_notes_for,
+    judge_classification,
+    lines_to_append,
+    listed_issues,
+    parse_ledger,
+    split_numbered,
+    unlinked,
+)
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
+from pm_ai.domain.member_ledgers import (
+    MatchFence,
+    MatchMovedOn,
+    MatchState,
+    MatchStateKind,
+    NotAProjectScope,
+)
+from pm_ai.domain.work import ProjectWork, is_open
 from pm_ai.domain.events import (
     DecisionPayload,
     MeetingHeldPayload,
@@ -165,6 +193,7 @@ from pm_ai.ports import (
     DecryptionFailed,
     KeychainUnavailable,
     KeyNotFound,
+    LedgerChanged,
     LocalModelUnavailable,
     ModelTimedOut,
     NoLocalModel,
@@ -488,6 +517,9 @@ def _harvest(
     # Story 7b — the waiting summaries are offered, at most three, each job
     # handed to the daemon's pools; nothing here waits on a model.
     offered = offer_summaries(daemon)
+    # Story 7e — then the title matches that wait, retried alone, outside the
+    # summaries' budget; nothing here waits on a model either.
+    offered += offer_matches(daemon)
     if offered:
         persisted = replace(persisted, refusals=(*persisted.refusals, *offered))
     return persisted, result.failure
@@ -1814,6 +1846,7 @@ def prepare_dashboard(
         # `8t`'s record is read here, on the worker beside the log read and
         # outside the bounded step, which `9b` keeps for the calendar alone
         # (`23g`). No GitLab request: the record is what the harvest stored.
+        work = _project_work(daemon, scope=scope)
         document = render_project_dashboard(
             meetings,
             entries,
@@ -1821,7 +1854,12 @@ def prepare_dashboard(
             tz=zone,
             pm=pm,
             since=since,
-            work=_project_work(daemon, scope=scope),
+            work=work,
+            # Story 7e: the meeting updates in Team Activity's slot, the
+            # ledger and the alias table read afresh for this render (AD-5).
+            issue_notes=_issue_notes(
+                daemon, scope=scope, work=work, entries=entries, now=now, since=since, zone=zone
+            ),
         )
     return document.encode("utf-8")
 
@@ -1933,6 +1971,45 @@ def _project_work(daemon: Daemon, *, scope: DataScope) -> WorkAnswer:
         # confidential issue stored with its own title): the scope refusal is
         # raised above, before the read.
         return HarvestFailure(reason=str(refused), retryable=False)
+
+
+def _issue_notes(
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    work: WorkAnswer,
+    entries: EventLogAnswer,
+    now: datetime,
+    since: LookBack,
+    zone: tzinfo,
+) -> IssueNotes:
+    """`7e`'s rows for Team Activity's slot, from the ledger and the alias table as they are now.
+
+    Both plain reads, on the render's worker. An unreadable file is stated on
+    the page, never a failed render. Which issues the page places is asked of
+    `23g`'s own function over the same inputs the render is given.
+    """
+    ledger: Ledger | BaseException
+    aliases: AliasTable | BaseException
+    try:
+        ledger = parse_ledger(daemon.storage.read_member_updates(scope=scope))
+    except (OSError, DecryptionFailed) as unreadable:
+        ledger = unreadable
+    try:
+        aliases = parse_aliases(daemon.storage.read_aliases())
+    except (OSError, DecryptionFailed) as unreadable:
+        aliases = unreadable
+    return issue_notes_for(
+        ledger,
+        aliases,
+        work,
+        now=now,
+        tz=zone,
+        scope=ProjectScope(scope),
+        placed=lambda notes: placed_issue_numbers(
+            work, entries, now=now, since=since, issue_notes=notes
+        ),
+    )
 
 
 def _blocked_by_a_directory(
@@ -2338,6 +2415,9 @@ class Hop(Enum):
 
     MODEL = "model"
     """The model pool: the call, and nothing else."""
+    MODEL_IN_TURN = "model in turn"
+    """The model pool in its normal order, even inside a requested job: `7e`'s
+    title match, which nobody waits for."""
     IO = "io"
     """The I/O pool: reading, judging the answer, and handing each write over."""
 
@@ -2510,8 +2590,14 @@ def summary_steps(
     fence: SummaryFence | None = None,
     offered: SummaryFence | None = None,
     prepared: _Prepared | None = None,
+    delivered: Callable[[SummaryOutcome], None] | None = None,
 ) -> Generator[Hop, None, SummaryOutcome]:
     """One summary job, as stages: each `yield` names the pool the next one runs on.
+
+    Story 7e: after `7b`'s writes and before the row is settled, a project
+    meeting's member updates are written under the same lease (its title
+    match a `Hop.MODEL_IN_TURN` stage), and `delivered` — a request's — is told
+    the summary's outcome as soon as `7b`'s writes end, before that step.
 
     Preparation runs where the job starts (an I/O worker) and ends there; the
     call and its one retry are handed to the model pool, and what follows each
@@ -2596,9 +2682,15 @@ def summary_steps(
                 return outcome(SummaryResult.FAILED, reason)
         answer = judged
         model_name = calls[-1].model if calls else "the local model"
-        return _written(
+        written = _written(
             daemon, scope, meeting_id, job, fence, prepared, answer, model_name, requested, outcome
         )
+        if isinstance(written, SummaryOutcome):
+            return written
+        if delivered is not None:
+            delivered(written.outcome)
+        yield from _member_updates_after(daemon, written, prepared)
+        return _settled(daemon, scope, meeting_id, job, fence, written, outcome)
     except SummaryLeaseLost as lost:
         return outcome(SummaryResult.STOPPED, str(lost))
 
@@ -2614,8 +2706,12 @@ def _written(
     model_name: str,
     requested: bool,
     outcome: Callable[..., SummaryOutcome],
-) -> SummaryOutcome:
-    """The writes, each its own claimed step under the lease; or the row failed."""
+) -> _Written | SummaryOutcome:
+    """The writes, each its own claimed step under the lease; or the row failed.
+
+    Up to the proposals: what was written, for `7e`'s step and the settle
+    after it (`_settled`), or the job's end when it stopped or failed.
+    """
     storage = daemon.storage
     try:
 
@@ -2684,39 +2780,444 @@ def _written(
             + (f", {len(staged.superseded)} superseded" if staged.superseded else "")
             + "."
         )
-        storage.settle_summary(
-            lease, state=SummaryStateKind.SUMMARIZED, reason=reason, model=model_name
-        )
-        return outcome(
-            SummaryResult.SUMMARIZED,
-            reason,
-            answer=answer,
-            decisions=decisions,
-            action_items=items,
-            superseded=staged.superseded,
-            left=staged.left,
+        return _Written(
+            lease,
+            model_name,
+            outcome(
+                SummaryResult.SUMMARIZED,
+                reason,
+                answer=answer,
+                decisions=decisions,
+                action_items=items,
+                superseded=staged.superseded,
+                left=staged.left,
+            ),
         )
     except SummaryLeaseLost as lost:
         return outcome(SummaryResult.STOPPED, str(lost))
     except _LEFT_AS_IT_WAS:
         raise
     except Exception as broken:  # noqa: BLE001 — settled by its type, never re-offered
-        reason = (
-            f"meeting {meeting_id}'s summary could not be written: "
-            f"{type(broken).__name__}, which pm-ai did not expect. It is not offered "
-            f"again automatically; {_ask_again(scope, meeting_id)}"
+        return _failed_unexpectedly(daemon, scope, meeting_id, job, fence, broken, outcome)
+
+
+@dataclass(frozen=True, slots=True)
+class _Written:
+    """`7b`'s writes done under `lease`: the outcome the settle will record."""
+
+    lease: SummaryFence
+    model: str
+    outcome: SummaryOutcome
+
+
+def _settled(
+    daemon: Daemon,
+    scope: DataScope,
+    meeting_id: str,
+    job: str,
+    fence: SummaryFence,
+    written: _Written,
+    outcome: Callable[..., SummaryOutcome],
+) -> SummaryOutcome:
+    """The row's final state, `summarized`, under the lease; or stopped, or failed."""
+    try:
+        daemon.storage.settle_summary(
+            written.lease,
+            state=SummaryStateKind.SUMMARIZED,
+            reason=written.outcome.reason,
+            model=written.model,
         )
-        current = storage.summary_state(scope, meeting_id)
-        held = (
-            SummaryFence(scope, meeting_id, current.version, current.job)
-            if current is not None and current.job == job
-            else fence
+        return written.outcome
+    except SummaryLeaseLost as lost:
+        return outcome(SummaryResult.STOPPED, str(lost))
+    except _LEFT_AS_IT_WAS:
+        raise
+    except Exception as broken:  # noqa: BLE001 — settled by its type, never re-offered
+        return _failed_unexpectedly(daemon, scope, meeting_id, job, fence, broken, outcome)
+
+
+def _failed_unexpectedly(
+    daemon: Daemon,
+    scope: DataScope,
+    meeting_id: str,
+    job: str,
+    fence: SummaryFence,
+    broken: BaseException,
+    outcome: Callable[..., SummaryOutcome],
+) -> SummaryOutcome:
+    storage = daemon.storage
+    reason = (
+        f"meeting {meeting_id}'s summary could not be written: "
+        f"{type(broken).__name__}, which pm-ai did not expect. It is not offered "
+        f"again automatically; {_ask_again(scope, meeting_id)}"
+    )
+    current = storage.summary_state(scope, meeting_id)
+    held = (
+        SummaryFence(scope, meeting_id, current.version, current.job)
+        if current is not None and current.job == job
+        else fence
+    )
+    try:
+        storage.settle_summary(held, state=SummaryStateKind.FAILED, reason=reason)
+    except SummaryLeaseLost as lost:
+        return outcome(SummaryResult.STOPPED, str(lost))
+    return outcome(SummaryResult.FAILED, reason)
+
+
+# ── Story 7e: meeting updates on the project's issues ────────────────────────
+
+MATCH_OFFER_LIMIT = 3
+"""At most this many meetings' title matches are offered again per harvest,
+outside `SUMMARY_OFFER_LIMIT`."""
+
+_LEDGER_TRIES = 3
+"""How many times an append computed from a stale read is computed again."""
+
+_UPDATES_UNREADABLE: tuple[type[BaseException], ...] = (
+    OperationalStoreUnavailable,
+    sqlite3.Error,
+    OSError,
+    ValueError,
+    TypeError,
+    DecryptionFailed,
+)
+"""What reading `8t`'s record or the ledger may meet: the match waits instead."""
+
+
+@dataclass(frozen=True, slots=True)
+class _UpdateInputs:
+    """One meeting's candidates for the ledger, and what a re-summary withdraws."""
+
+    project: ProjectScope
+    meeting: Meeting
+    candidates: tuple[Candidate, ...]
+    withdraw_items: tuple[str, ...] = ()
+    decisions_now: tuple[str, ...] = ()
+
+
+def _member_updates_after(
+    daemon: Daemon, written: _Written, prepared: _Prepared
+) -> Generator[Hop, None, None]:
+    """`7e`'s step inside `7b`'s job, under its lease, for a project meeting only.
+
+    A personal or `people` meeting cannot be passed (`ProjectScope`), so
+    nothing is read for it and no call is made. A lost lease and the faults
+    that leave the row as it was stop the job as `7b`'s own would; anything
+    else is logged and recorded as the match waiting, so `7b`'s summary is
+    still settled.
+    """
+    try:
+        project = ProjectScope.of_meeting(prepared.meeting)
+    except NotAProjectScope:
+        return
+    done = written.outcome
+    candidates = candidates_of(done.decisions, done.action_items)
+    inputs = _UpdateInputs(
+        project,
+        prepared.meeting,
+        candidates,
+        withdraw_items=done.superseded,
+        decisions_now=tuple(reference for reference, _ in done.decisions),
+    )
+    try:
+        yield from _update_steps(daemon, inputs, fence=written.lease)
+    except _STOPS_THE_JOB:
+        raise
+    except Exception as broken:  # noqa: BLE001 — logged; the summary is still settled
+        _log.warning(
+            "meeting %s in %s: its member updates stopped on %s; the title match waits "
+            "for the next harvest",
+            prepared.meeting.meeting_id,
+            project,
+            type(broken).__name__,
         )
         try:
-            storage.settle_summary(held, state=SummaryStateKind.FAILED, reason=reason)
-        except SummaryLeaseLost as lost:
-            return outcome(SummaryResult.STOPPED, str(lost))
-        return outcome(SummaryResult.FAILED, reason)
+            daemon.storage.record_match(
+                project.scope,
+                prepared.meeting.meeting_id,
+                meeting_start=prepared.meeting.start,
+                # Pending only what there is: a meeting with no items and no
+                # decisions leaves nothing waiting, and clears a row it had.
+                pending=len(candidates),
+                reason=(
+                    f"the member updates stopped on {type(broken).__name__}"
+                    if candidates
+                    else "the meeting has no items or decisions, so nothing waits"
+                ),
+                attempted=bool(candidates),
+                fence=written.lease,
+            )
+        except _STOPS_THE_JOB:
+            raise
+        except Exception:  # noqa: BLE001 — logged above; nothing more to say
+            pass
+
+
+def _match_row_open(storage: StorageService, scope: DataScope, meeting_id: str) -> bool:
+    """Whether this meeting has a title-match row waiting or given up: a plain read."""
+    try:
+        rows = storage.match_records()
+    except _UPDATES_UNREADABLE:
+        return False
+    return any(
+        row.scope == scope
+        and row.meeting_id == meeting_id
+        and row.state is not MatchStateKind.MATCHED
+        for row in rows
+    )
+
+
+def _classify(
+    daemon: Daemon, scope: DataScope, candidates: Sequence[Candidate], issues: Sequence[Any]
+) -> Generator[Hop, None, tuple[int | None, ...] | BaseException]:
+    """The title match: one local call on the model pool, in its normal order.
+
+    `issues` are the ones the caller found listable — open, not confidential —
+    and `classification_prompt` lists exactly those.
+
+    `classification`, local-only (AD-15), project to the same project (AD-31).
+    Returns, per candidate, the listed iid the answer named or `None`; or why
+    the call gave no usable answer.
+    """
+    fragments, listed = classification_prompt(candidates, issues)
+    yield Hop.MODEL_IN_TURN
+    try:
+        model = require_model(daemon)
+        result: ModelAnswer | BaseException = model.complete(
+            task_class=TaskClass.CLASSIFICATION,
+            instructions=CLASSIFICATION_INSTRUCTIONS,
+            external=fragments,
+            flow=ScopeFlow.of((scope,), scope),
+            shape=CLASSIFICATION_SHAPE,
+        )
+    except Exception as refused:  # noqa: BLE001 — every refusal leaves the match waiting
+        result = refused
+    yield Hop.IO
+    if isinstance(result, BaseException):
+        return result
+    try:
+        return judge_classification(result.text, notes=len(candidates), listed=listed)
+    except ClassificationRefused as refused:
+        return refused
+
+
+def _match_reason(failure: BaseException) -> str:
+    if isinstance(failure, _UNAVAILABLE):
+        return f"the local model could not be asked: {type(failure).__name__}"
+    if isinstance(failure, ModelTimedOut):
+        return "the call to the local model timed out"
+    if isinstance(failure, ClassificationRefused):
+        return f"the local model's answer could not be read: {failure}"
+    return f"the call to the local model failed: {type(failure).__name__}"
+
+
+def _update_steps(
+    daemon: Daemon,
+    inputs: _UpdateInputs,
+    *,
+    fence: SummaryFence | None = None,
+    match: MatchFence | None = None,
+) -> Generator[Hop, None, MatchState | None]:
+    """Match each candidate to an issue, append what is missing, record the match.
+
+    Numbers said first, against `8t`'s record; then, for candidates with none
+    and no line yet, the title match — only when the project has an open,
+    non-confidential issue to list. Each append is one claimed step checked
+    against `fence` (a summary's lease) or `match` (a retry's row); a ledger
+    another writer grew in between is read again. A call that failed or could
+    not be made leaves those candidates pending on the row, offered again at
+    a later harvest; the numbered lines are written either way.
+    """
+    storage = daemon.storage
+    scope = inputs.project.scope
+    meeting = inputs.meeting
+    try:
+        work = storage.project_work(scope)
+        ledger = parse_ledger(storage.read_member_updates(scope=scope))
+    except _UPDATES_UNREADABLE as unreadable:
+        return storage.record_match(
+            scope,
+            meeting.meeting_id,
+            meeting_start=meeting.start,
+            pending=len(inputs.candidates),
+            reason=(
+                f"the project's GitLab record or its member updates could not be "
+                f"read: {type(unreadable).__name__}"
+                if inputs.candidates
+                else "the meeting has no items or decisions, so nothing waits"
+            ),
+            attempted=bool(inputs.candidates),
+            fence=fence,
+            match=match,
+        )
+    split = split_numbered(inputs.candidates, (issue.iid for issue in work.issues))
+    ask = unlinked(ledger, split.unnumbered)
+    listable, _ = listed_issues(work.issues)
+    links: list[Link] = list(split.links)
+    failure: BaseException | None = None
+    asked = bool(ask and listable)
+    if asked:
+        judged = yield from _classify(daemon, scope, ask, listable)
+        if not isinstance(judged, BaseException) and len(judged) != len(ask):
+            judged = ClassificationRefused(
+                f"the answer named {len(judged)} notes for the {len(ask)} asked"
+            )
+        if isinstance(judged, BaseException):
+            failure = judged
+        else:
+            links.extend(
+                Link(candidate, iid, LinkKind.MODEL)
+                for candidate, iid in zip(ask, judged)
+                if iid is not None
+            )
+    for attempt in range(_LEDGER_TRIES):
+        raw = storage.read_member_updates(scope=scope)
+        lines = lines_to_append(
+            parse_ledger(raw),
+            meeting,
+            links=links,
+            withdraw_items=inputs.withdraw_items,
+            decisions_now=inputs.decisions_now,
+            at=daemon.clock(),
+        )
+        if not lines:
+            break
+        try:
+            storage.append_member_updates(
+                lines, scope=scope, after=len(raw), fence=fence, match=match
+            )
+            break
+        except LedgerChanged:
+            if attempt == _LEDGER_TRIES - 1:
+                raise
+    if match is None and not asked and not _match_row_open(storage, scope, meeting.meeting_id):
+        # Inside a summary that asked the model nothing and left no row
+        # waiting or given up, there is nothing to record: no claimed step.
+        return None
+    pending = len(ask) if failure is not None else 0
+    if failure is not None:
+        reason = _match_reason(failure)
+    elif asked:
+        reason = "the local model answered the title match"
+    elif ask:
+        reason = "the project has no open issue to match the items to, so nothing waits"
+    else:
+        reason = "nothing was left to match: every item named its issue or was matched before"
+    return storage.record_match(
+        scope,
+        meeting.meeting_id,
+        meeting_start=meeting.start,
+        pending=pending,
+        reason=reason,
+        attempted=failure is not None and not isinstance(failure, _UNAVAILABLE),
+        fence=fence,
+        match=match,
+    )
+
+
+def match_steps(
+    daemon: Daemon, scope: DataScope, meeting_id: str, *, offered: MatchFence
+) -> Generator[Hop, None, MatchState | None]:
+    """A waiting title match, retried alone — never a re-summary (story 7e).
+
+    Stops, writing nothing, unless the row is still `waiting` at the version
+    it was offered at. The candidates are the meeting record's current
+    summary, read afresh; numbered lines are appended if missing, and the
+    title match asked again. A fault pm-ai did not expect counts as an
+    attempt, so a match never waits for ever.
+    """
+    storage = daemon.storage
+    state = storage.match_state(scope, meeting_id)
+    if state is None or state.state is not MatchStateKind.WAITING or state.version != offered.version:
+        return None
+    fence = MatchFence(scope, meeting_id, state.version)
+    try:
+        project = ProjectScope(scope)
+        record = daemon.meetings.get(meeting_id, scope=scope)
+        summary = record.summary
+        if summary is None:
+            return storage.record_match(
+                scope,
+                meeting_id,
+                meeting_start=state.meeting_start,
+                pending=0,
+                reason="the meeting's record holds no summary, so nothing waits",
+                attempted=False,
+                match=fence,
+            )
+        answer = summary.answer
+        decisions = tuple(
+            (decision_reference(meeting_id, decision.statement), decision)
+            for decision in answer.decisions
+        )
+        items = tuple((action_item_id(scope, meeting_id, item), item) for item in answer.action_items)
+        inputs = _UpdateInputs(
+            project,
+            record.meeting,
+            candidates_of(decisions, items),
+            decisions_now=tuple(reference for reference, _ in decisions),
+        )
+        return (yield from _update_steps(daemon, inputs, match=fence))
+    except MatchMovedOn:
+        return None
+    except _LEFT_AS_IT_WAS:
+        raise
+    except Exception as broken:  # noqa: BLE001 — counted, so it is given up in the end
+        try:
+            return storage.record_match(
+                scope,
+                meeting_id,
+                meeting_start=state.meeting_start,
+                pending=state.pending,
+                reason=f"the retry stopped on {type(broken).__name__}",
+                attempted=True,
+                match=fence,
+            )
+        except MatchMovedOn:
+            return None
+
+
+def offer_matches(daemon: Daemon) -> tuple[str, ...]:
+    """After a harvest: offer up to `MATCH_OFFER_LIMIT` waiting title matches (story 7e).
+
+    Only in the daemon and only with a local model named, as `offer_summaries`.
+    Outside `7b`'s summary budget: these are not summaries and take none of
+    its slots. A meeting whose summary is in flight is not offered. Sentences
+    for the harvest's refusals; never raises.
+    """
+    jobs = daemon.summaries
+    if jobs is None or daemon.model is None:
+        return ()
+    try:
+        offered = daemon.storage.matches_to_offer(since=daemon.clock() - SUMMARY_MAX_AGE)
+    except Exception as unreadable:  # noqa: BLE001 — named; the harvest is saved
+        return (
+            f"the title matches waiting could not be read ({type(unreadable).__name__}), "
+            f"so none was offered this harvest.",
+        )
+    started = 0
+    said: list[str] = []
+    for state in offered:
+        if started >= MATCH_OFFER_LIMIT:
+            break
+        if state.scope.kind is ScopeKind.PROJECT and state.scope.project_id not in daemon.watched:
+            continue
+        if jobs.in_flight(state.scope, state.meeting_id):
+            continue
+        try:
+            if jobs.start_match(
+                daemon,
+                state.scope,
+                state.meeting_id,
+                offered=MatchFence(state.scope, state.meeting_id, state.version),
+            ):
+                started += 1
+        except Exception as unstarted:  # noqa: BLE001 — one meeting, not the harvest
+            said.append(
+                f"the title match of meeting {state.meeting_id} in {state.scope} could "
+                f"not be started ({type(unstarted).__name__}); it waits for the next harvest."
+            )
+    return tuple(said)
 
 
 _LEFT_AS_IT_WAS: tuple[type[BaseException], ...] = (
@@ -2727,6 +3228,10 @@ _LEFT_AS_IT_WAS: tuple[type[BaseException], ...] = (
 )
 """Faults that clear by waiting, or the daemon stopping: the row is left as it
 was, and a waiting row is offered again at a later harvest."""
+
+_STOPS_THE_JOB: tuple[type[BaseException], ...] = (SummaryLeaseLost, *_LEFT_AS_IT_WAS)
+"""What `7e`'s step inside a summary lets through: a lost lease, or a fault that
+leaves the row as it was (story 7e)."""
 
 
 def _ask_again(scope: DataScope, meeting_id: str) -> str:
@@ -2832,6 +3337,7 @@ class SummaryJobs:
         self._model_stopping = model_stopping
         self._lock = threading.Lock()
         self._in_flight: dict[tuple[DataScope, str], str] = {}
+        self._matching: set[tuple[DataScope, str]] = set()
 
     def in_flight(self, scope: DataScope, meeting_id: str) -> bool:
         with self._lock:
@@ -2864,9 +3370,24 @@ class SummaryJobs:
         # meeting is marked in flight, so a build that raises leaves no mark.
         own = daemon if self._daemon_for is None or job is not None else self._daemon_for()
         with self._lock:
-            if fence is None and key in self._in_flight:
+            if fence is None and (key in self._in_flight or key in self._matching):
                 return False
             self._in_flight[key] = name
+        told = [False]
+
+        def first_word() -> bool:
+            """Whether `on_done` is still to be told, marking it told (7e)."""
+            with self._lock:
+                if told[0]:
+                    return False
+                told[0] = True
+                return True
+
+        def deliver(outcome: SummaryOutcome) -> None:
+            # Story 7e: a request's result reaches the PM when `7b`'s writes
+            # end, before the member updates, which nobody waits for.
+            if on_done is not None and first_word():
+                on_done(outcome)
 
         def done(result: SummaryOutcome | BaseException) -> None:
             with self._lock:
@@ -2880,12 +3401,19 @@ class SummaryJobs:
                     scope,
                     type(result).__name__,
                 )
-            if on_done is not None:
+            if on_done is not None and first_word():
                 on_done(result)
 
         try:
             steps = summary_steps(
-                own, scope, meeting_id, job=name, fence=fence, offered=offered, prepared=prepared
+                own,
+                scope,
+                meeting_id,
+                job=name,
+                fence=fence,
+                offered=offered,
+                prepared=prepared,
+                delivered=deliver if on_done is not None else None,
             )
         except BaseException:
             done(_stopping())
@@ -2893,18 +3421,50 @@ class SummaryJobs:
         self._drive(steps, done, requested=fence is not None)
         return True
 
+    def start_match(
+        self, daemon: Daemon, scope: DataScope, meeting_id: str, *, offered: MatchFence
+    ) -> bool:
+        """Start one title-match retry (story 7e); `False` when one, or a summary, is in flight."""
+        key = (scope, meeting_id)
+        own = daemon if self._daemon_for is None else self._daemon_for()
+        with self._lock:
+            if key in self._in_flight or key in self._matching:
+                return False
+            self._matching.add(key)
+
+        def done(result: object) -> None:
+            with self._lock:
+                self._matching.discard(key)
+            if isinstance(result, BaseException):
+                _log.warning(
+                    "the title match of meeting %s in %s stopped on %s; it waits for a "
+                    "later harvest",
+                    meeting_id,
+                    scope,
+                    type(result).__name__,
+                )
+
+        try:
+            steps = match_steps(own, scope, meeting_id, offered=offered)
+        except BaseException:
+            done(_stopping())
+            raise
+        self._drive(steps, done)
+        return True
+
     def _drive(
         self,
-        steps: Generator[Hop, None, SummaryOutcome],
-        done: Callable[[SummaryOutcome | BaseException], None],
+        steps: Generator[Hop, None, Any],
+        done: Callable[[Any], None],
         *,
         requested: bool = False,
     ) -> None:
         """Run `steps`, handing each stage to the pool it names, waiting on none.
 
-        A requested job's model stages go ahead of the automatic ones queued.
+        A requested job's model stages go ahead of the automatic ones queued;
+        a `Hop.MODEL_IN_TURN` stage never does (story 7e).
         """
-        model = self._model_first if requested else self._model
+        first = self._model_first if requested else self._model
 
         def stop() -> None:
             steps.close()
@@ -2922,8 +3482,15 @@ class SummaryJobs:
             if hop is Hop.IO and self._model_stopping():
                 stop()
                 return
+            pool = (
+                first
+                if hop is Hop.MODEL
+                else self._model
+                if hop is Hop.MODEL_IN_TURN
+                else self._io
+            )
             try:
-                (model if hop is Hop.MODEL else self._io)(resume)
+                pool(resume)
             except Exception:  # noqa: BLE001 — a pool that stopped taking work
                 stop()
 

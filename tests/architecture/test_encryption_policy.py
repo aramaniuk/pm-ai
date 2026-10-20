@@ -286,6 +286,8 @@ def test_the_project_scope_excludes_all_of_memory():
             "memory/commitments_log.md",
             "memory/daily_dashboard.md",
             "memory/event_log/",
+            # Story 7e: the project's meeting updates on its GitLab issues.
+            "memory/member_updates.md",
             "memory/meetings/",
             "transcripts/",
             "transcripts/temp/",
@@ -361,6 +363,8 @@ def test_the_other_three_scopes_exclusion_sets_are_pinned():
     )
     assert GITIGNORED[ScopeKind.APPLICATION] == frozenset(
         {
+            # Story 7e: the saved alias table (AD-34), beside the disclosure ledger.
+            "aliases.md",
             "connectors/",
             "disclosure.md",
             "private/",

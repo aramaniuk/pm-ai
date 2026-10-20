@@ -82,6 +82,18 @@ from pm_ai.domain.meeting_summaries import (
     SummaryStateKind,
 )
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
+from pm_ai.domain.member_ledgers import (
+    ALIAS_SCOPE,
+    ALIAS_TABLE,
+    MAX_MATCH_ATTEMPTS,
+    MEMBER_UPDATES,
+    MatchFence,
+    MatchMovedOn,
+    MatchState,
+    MatchStateKind,
+    NotAProjectScope,
+)
+from pm_ai.domain.event_entries import MAX_ENTRY_LENGTH
 from pm_ai.domain.transcripts import (
     MAX_INGEST_ATTEMPTS,
     PartState,
@@ -125,6 +137,7 @@ from pm_ai.domain.work import (
 )
 from pm_ai.ports import (
     ArtifactBusy,
+    LedgerChanged,
     CaptureAlreadyExists,
     ClaimPort,
     CryptoPort,
@@ -352,6 +365,18 @@ CREATE TABLE IF NOT EXISTS gitlab_work_status (
     last_complete TEXT,
     PRIMARY KEY (scope, instance, section)
 );
+CREATE TABLE IF NOT EXISTS member_matches (
+    scope         TEXT NOT NULL,
+    meeting_id    TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    pending       INTEGER NOT NULL,
+    attempts      INTEGER NOT NULL,
+    reason        TEXT NOT NULL,
+    at            TEXT NOT NULL,
+    version       INTEGER NOT NULL,
+    meeting_start TEXT NOT NULL,
+    PRIMARY KEY (scope, meeting_id)
+);
 """
 
 # Every table `_SCHEMA` declares, read off it rather than listed beside it, so
@@ -376,7 +401,8 @@ SCHEMA_VERSION = 1
 # the same way, and for the same reason the version did not move; so did story
 # `9a`'s `harvest_runs`, and story `9b`'s `renders`. Story `8t`'s six `gitlab_`
 # tables (AD-3's GitLab project work) are new tables too, so the version does
-# not move for them either (AD-5); nor for story `7b`'s `meeting_summaries`.
+# not move for them either (AD-5); nor for story `7b`'s `meeting_summaries`,
+# nor story `7e`'s `member_matches`.
 
 # Version 0 is the *unversioned era* — every store written before this story.
 # It is not a shape: two stores can both be at 0 and differ, because the era had
@@ -1577,6 +1603,136 @@ def summary_records_at(store: Path) -> tuple[tuple[SummaryState, bool], ...]:
         except ValueError:
             _storage_log.warning("a meeting_summaries row could not be read; it is skipped")
     return tuple(records)
+
+
+# ── Story 7e: the ledgers' helpers and the title-match rows ──────────────────
+
+
+def _require_project(scope: DataScope, *, doing: str) -> None:
+    """`NotAProjectScope`, naming `scope`, unless it is a project."""
+    if not isinstance(scope, DataScope) or scope.kind is not ScopeKind.PROJECT:
+        raise NotAProjectScope(
+            f"refused to {doing} {MEMBER_UPDATES} for {scope}: meeting updates are "
+            f"kept in a project's memory/ only, and a personal or people scope has none."
+        )
+
+
+def _ledger_text(lines: Sequence[str], *, ledger: str) -> str:
+    """`lines` as one write: each one record, newline-terminated (AD-47)."""
+    out: list[str] = []
+    for line in lines:
+        if not isinstance(line, str) or not line.startswith("- "):
+            raise ValueError(f"a line of {ledger} is a `- ` record, not {line!r:.80}.")
+        if "\n" in line or "\r" in line:
+            raise ValueError(f"a line of {ledger} holds a line break, so it is not one record.")
+        if len(line) > MAX_ENTRY_LENGTH:
+            raise ValueError(
+                f"a line of {ledger} is {len(line)} characters, past the "
+                f"{MAX_ENTRY_LENGTH} a record may be."
+            )
+        out.append(line + "\n")
+    return "".join(out)
+
+
+def _size_of(path: Path) -> int:
+    try:
+        return os.stat(path).st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _ends_in_newline(path: Path) -> bool:
+    """Whether a non-empty file's last byte is a newline."""
+    with open(path, "rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        return handle.read(1) == b"\n"
+
+
+def _utc(at: datetime) -> str:
+    """An aware instant as UTC isoformat: text order is time order (story 7e)."""
+    return at.astimezone(timezone.utc).isoformat()
+
+
+_MATCH_COLUMNS = "scope, meeting_id, state, pending, attempts, reason, at, version, meeting_start"
+
+
+def _match_row(row: Sequence[Any]) -> MatchState:
+    scope, meeting_id, state, pending, attempts, reason, at, version, meeting_start = row
+    return MatchState(
+        scope=DataScope.parse(scope),
+        meeting_id=meeting_id,
+        state=MatchStateKind(state),
+        pending=int(pending),
+        attempts=int(attempts),
+        reason=reason,
+        at=datetime.fromisoformat(at),
+        version=int(version),
+        meeting_start=datetime.fromisoformat(meeting_start),
+    )
+
+
+def match_records_at(store: Path) -> tuple[MatchState, ...]:
+    """Every title-match row in the store at `store`, read-only (story 7e).
+
+    For `pm-ai doctor`, which names a meeting whose match was given up. The
+    most recent meeting first. No store or no table yet is no rows; a row that
+    cannot be read is skipped and logged.
+    """
+    if not store.exists():
+        return ()
+    reader = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
+    try:
+        try:
+            rows = reader.execute(
+                f"SELECT {_MATCH_COLUMNS} FROM member_matches "
+                "ORDER BY meeting_start DESC, scope, meeting_id"
+            ).fetchall()
+        except sqlite3.OperationalError as missing:
+            if "no such table" in str(missing):
+                return ()
+            raise
+    finally:
+        reader.close()
+    records = []
+    for row in rows:
+        try:
+            records.append(_match_row(row))
+        except (ValueError, TypeError):
+            _storage_log.warning("a member_matches row could not be read; it is skipped")
+    return tuple(records)
+
+
+def project_member_names_at(store: Path, scope: DataScope) -> tuple[str, ...]:
+    """A project's GitLab members' usernames and handles, read-only, for completion (7e).
+
+    Active members only: no bot, nothing without a handle, no blocked or
+    deactivated member. No store or no table yet is none.
+    """
+    if not store.exists() or scope.kind is not ScopeKind.PROJECT:
+        return ()
+    reader = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
+    try:
+        try:
+            rows = reader.execute(
+                "SELECT handle, username, bot, state FROM gitlab_members WHERE scope = ? "
+                "ORDER BY instance, position",
+                (str(scope),),
+            ).fetchall()
+        except sqlite3.OperationalError as missing:
+            if "no such table" in str(missing):
+                return ()
+            raise
+    finally:
+        reader.close()
+    names: list[str] = []
+    for handle, username, bot, state in rows:
+        # The members `member name` accepts: active, not a bot, with a handle.
+        if handle is None or bot or state not in (None, "active"):
+            continue
+        for value in (username, handle):
+            if value and value not in names:
+                names.append(value)
+    return tuple(names)
 
 
 # ── GitLab project work rows (story 8t) ──────────────────────────────────────
@@ -3464,6 +3620,119 @@ class StorageService:
             return ""
         return self._read(target).decode("utf-8")
 
+    # ── Story 7e: meeting updates and the saved alias table ─────────────────
+
+    def read_member_updates(self, *, scope: DataScope) -> bytes:
+        """A project's `member_updates.md` as stored; `b""` when there is none.
+
+        A plain read. Refuses a scope that is not a project, naming it
+        (`NotAProjectScope`): a personal or `people` scope has no member
+        updates, and asking for them is a caller's mistake.
+        """
+        _require_project(scope, doing="read")
+        target = Path(self._paths.resolve(scope, MEMBER_UPDATES))
+        try:
+            return self._read(target)
+        except FileNotFoundError:
+            return b""
+
+    def append_member_updates(
+        self,
+        lines: Sequence[str],
+        *,
+        scope: DataScope,
+        after: int,
+        fence: SummaryFence | None = None,
+        match: MatchFence | None = None,
+    ) -> int:
+        """Append `lines` to a project's `member_updates.md` in one write (story 7e).
+
+        One claimed step. Refused, with nothing written: a scope that is not a
+        project (`NotAProjectScope`); a summary's lease that moved on
+        (`SummaryLeaseLost`, AD-37) or a title-match row that did
+        (`MatchMovedOn`); a ledger that is no longer `after` bytes long
+        (`LedgerChanged`) — the caller decided what was missing from a read
+        that is now stale, so it reads again. Each line is one record: no line
+        break, within `MAX_ENTRY_LENGTH`. Returns the ledger's new size.
+        """
+        _require_project(scope, doing="write")
+        text = _ledger_text(lines, ledger=MEMBER_UPDATES)
+        if fence is not None:
+            self._summary_fenced(fence)
+        if match is not None:
+            self._match_fenced(match)
+        self._assert_git_excludes(scope, MEMBER_UPDATES)
+        target = self._prepared(scope, MEMBER_UPDATES)
+        with self._claimed_unless_held(scope, MEMBER_UPDATES):
+            return self._compare_and_append(
+                target,
+                text,
+                after=after,
+                declared_mode=restricted_mode(scope.kind, MEMBER_UPDATES),
+                named=f"{scope}'s {MEMBER_UPDATES}",
+            )
+
+    @contextlib.contextmanager
+    def _claimed_unless_held(self, scope: DataScope, artifact: str) -> Iterator[None]:
+        """`exclusive`'s claim around a compare-and-append, unless this thread holds it.
+
+        So the size checked and the append are one step across processes too
+        (story 7e): another holder refuses this one as `ArtifactBusy`.
+        """
+        if self.holds_claim(scope=scope, artifact=artifact):
+            yield
+            return
+        with self.exclusive(scope=scope, artifact=artifact):
+            yield
+
+    def _compare_and_append(
+        self, target: Path, text: str, *, after: int, declared_mode: int | None, named: str
+    ) -> int:
+        """Append `text` if `target` is still `after` bytes; the new size.
+
+        A last line left without its newline — a hand edit, a torn write —
+        gets one first, so it cannot swallow the new record (AD-47).
+        """
+        size = _size_of(target)
+        if size != after:
+            raise LedgerChanged(
+                f"{named} grew since it was read ({after} bytes then, {size} now), "
+                f"so nothing was appended; it is read again."
+            )
+        if not text:
+            return size
+        if size and not _ends_in_newline(target):
+            text = "\n" + text
+        self._append(target, text, declared_mode=declared_mode)
+        return size + len(text.encode("utf-8"))
+
+    def read_aliases(self) -> bytes:
+        """The application scope's `aliases.md` as stored; `b""` when there is none."""
+        target = Path(self._paths.resolve(ALIAS_SCOPE, ALIAS_TABLE))
+        try:
+            return self._read(target)
+        except FileNotFoundError:
+            return b""
+
+    def append_alias(self, line: str, *, after: int) -> int:
+        """Append one alias row to `aliases.md`, if it is still `after` bytes (AD-34).
+
+        The table's only home is the application scope, outside every
+        repository, so — as for `disclosure.md` — no git question is asked.
+        `LedgerChanged` when the table grew since it was read. Returns the
+        table's new size.
+        """
+        text = _ledger_text((line,), ledger=ALIAS_TABLE)
+        target = self._prepared(ALIAS_SCOPE, ALIAS_TABLE)
+        with self._claimed_unless_held(ALIAS_SCOPE, ALIAS_TABLE):
+            return self._compare_and_append(
+                target,
+                text,
+                after=after,
+                declared_mode=restricted_mode(ALIAS_SCOPE.kind, ALIAS_TABLE),
+                named=ALIAS_TABLE,
+            )
+
     def event_log_segments(self, *, scope: DataScope) -> tuple[str, ...]:
         """Every dated segment in `scope`'s event log, oldest first.
 
@@ -4657,6 +4926,142 @@ class StorageService:
         out (story 7b). `summary_records_at` over this store.
         """
         return summary_records_at(self._store)
+
+    # ── `member_matches`: a meeting's title match, retried alone (story 7e) ──
+
+    def match_state(self, scope: DataScope, meeting_id: str) -> MatchState | None:
+        """This meeting's title-match row, or `None`."""
+        row = self._db.execute(
+            f"SELECT {_MATCH_COLUMNS} FROM member_matches WHERE scope = ? AND meeting_id = ?",
+            (str(scope), meeting_id),
+        ).fetchone()
+        return None if row is None else _match_row(row)
+
+    def _match_fenced(self, fence: MatchFence) -> None:
+        """`MatchMovedOn` unless the row is still at the version `fence` read."""
+        row = self._db.execute(
+            "SELECT version FROM member_matches WHERE scope = ? AND meeting_id = ?",
+            (str(fence.scope), fence.meeting_id),
+        ).fetchone()
+        if row is None or int(row[0]) != fence.version:
+            raise MatchMovedOn(
+                f"the title match of meeting {fence.meeting_id} in {fence.scope} moved "
+                f"on since this retry read it (a later summary, or another retry), so "
+                f"this retry stopped and wrote nothing more."
+            )
+
+    def record_match(
+        self,
+        scope: DataScope,
+        meeting_id: str,
+        *,
+        meeting_start: datetime,
+        pending: int,
+        reason: str,
+        attempted: bool,
+        fence: SummaryFence | None = None,
+        match: MatchFence | None = None,
+    ) -> MatchState | None:
+        """Where this meeting's title match got to, in one step (story 7e).
+
+        From a summary job (`fence`, its lease checked first) the row starts
+        afresh: its attempts are 1 when this call failed and 0 when the model
+        could not be asked at all. From a retry (`match`) it moves only from
+        the version the retry read (`MatchMovedOn` otherwise), adding one
+        attempt when `attempted`. With items `pending` it is `waiting`, or
+        `given up` at `MAX_MATCH_ATTEMPTS`; with none it is `matched` — and
+        with none and no row, nothing is written and `None` returned.
+        """
+        at = self._at().isoformat()
+        try:
+            if fence is not None:
+                self._summary_fenced(fence)
+            row = self._db.execute(
+                f"SELECT {_MATCH_COLUMNS} FROM member_matches WHERE scope = ? AND meeting_id = ?",
+                (str(scope), meeting_id),
+            ).fetchone()
+            held = None if row is None else _match_row(row)
+            if match is not None:
+                if held is None or held.version != match.version:
+                    raise MatchMovedOn(
+                        f"the title match of meeting {meeting_id} in {scope} moved on "
+                        f"since this retry read it, so it wrote nothing."
+                    )
+                attempts = held.attempts + (1 if attempted else 0)
+            else:
+                attempts = 1 if attempted else 0
+            if pending <= 0:
+                if held is None:
+                    self._db.commit()
+                    return None
+                state = MatchStateKind.MATCHED
+            elif attempts >= MAX_MATCH_ATTEMPTS:
+                state = MatchStateKind.GIVEN_UP
+            else:
+                state = MatchStateKind.WAITING
+            version = 1 if held is None else held.version + 1
+            values = (
+                str(scope),
+                meeting_id,
+                state.value,
+                max(pending, 0),
+                attempts,
+                reason,
+                at,
+                version,
+                _utc(meeting_start),
+            )
+            if held is None:
+                self._db.execute(
+                    f"INSERT INTO member_matches ({_MATCH_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    values,
+                )
+            else:
+                changed = self._db.execute(
+                    "UPDATE member_matches SET state = ?, pending = ?, attempts = ?, "
+                    "reason = ?, at = ?, version = ?, meeting_start = ? "
+                    "WHERE scope = ? AND meeting_id = ? AND version = ?",
+                    (*values[2:], str(scope), meeting_id, held.version),
+                ).rowcount
+                if changed != 1:
+                    raise MatchMovedOn(
+                        f"the title match of meeting {meeting_id} in {scope} moved on "
+                        f"while it was being recorded, so nothing was written."
+                    )
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return MatchState(
+            scope=scope,
+            meeting_id=meeting_id,
+            state=state,
+            pending=max(pending, 0),
+            attempts=attempts,
+            reason=reason,
+            at=datetime.fromisoformat(at),
+            version=version,
+            meeting_start=meeting_start,
+        )
+
+    def matches_to_offer(self, *, since: datetime) -> tuple[MatchState, ...]:
+        """Every `waiting` title match a harvest may offer, the most recent meeting first."""
+        rows = self._db.execute(
+            f"SELECT {_MATCH_COLUMNS} FROM member_matches WHERE state = ? AND meeting_start >= ? "
+            "ORDER BY meeting_start DESC, scope, meeting_id",
+            (MatchStateKind.WAITING.value, _utc(since)),
+        ).fetchall()
+        offered = []
+        for row in rows:
+            try:
+                offered.append(_match_row(row))
+            except (ValueError, TypeError):
+                _storage_log.warning("a member_matches row could not be read; it is skipped")
+        return tuple(offered)
+
+    def match_records(self) -> tuple[MatchState, ...]:
+        """Every title-match row, on a read-only connection of its own (story 7e)."""
+        return match_records_at(self._store)
 
     def take_summary_lease(self, fence: SummaryFence, *, job: str) -> SummaryFence:
         """The job's first write: compare-and-set the row from the version it read.

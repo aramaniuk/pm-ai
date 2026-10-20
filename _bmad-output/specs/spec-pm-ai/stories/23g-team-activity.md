@@ -242,6 +242,7 @@ Re-verified against `5f4f43e` on 2026-10-18 (first verified against `a1182f8` on
   - `project_work` refuses a non-project scope with `ValueError`. The pipeline lets that refusal through and turns an unreadable store or a malformed row into a stated value.
 
   Review: three layers. Twelve findings were patched (among them the five-minute clamp, times without a timezone, unread merge-request links kept out of the unlinked count, the unlinked line without a record, full stops, and eight missing tests). Rejected: the per-member "N more open issues" line (required by the frozen caps), `7e` rows placed verbatim (frozen), both sections unread hiding older rows (the frozen rule), de-duplicating commits by id, grapheme-safe cutting, and making `work` required. Nothing needs Andrei's decision.
+- **2026-10-20, amended by `7e`.** `bare_references` now skips a run of more than 18 digits instead of handing it to `int()`, which raised on a run of thousands of digits. `7e` reads meeting text through it. No 18-digit run can be an issue iid. Frozen block unchanged.
 
 ## Design Notes
 

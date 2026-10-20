@@ -2,7 +2,8 @@
 title: 'Meetings update a project member''s priorities'
 type: 'feature'
 created: '2026-10-16'
-status: 'draft'
+status: 'done'
+baseline_commit: 'a3b8847913e384c0f8316a200b48ce8e3dc91af4'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -21,12 +22,12 @@ context:
 **Always:**
 - **Prerequisites.** `7b`, handing this slice, inside its own summary job, what its writes produced (`SummaryOutcome`): the validated answer, items with their ids, owners that are speaker labels of that transcript or null, decisions with their references, the item ids a re-summary superseded, and those the PM had acted on (`left`); `8t`'s record of members, issues and merge requests, read through `StoragePort.project_work(scope) -> ProjectWork` (`pm_ai/domain/work.py`): per member a `gitlab:<host>:<numeric user id>` handle (AD-34 as amended 2026-10-16), display name, username and state; per issue its iid, title (`confidential issue` for a confidential one), state, assignees (handle, display name, username — no state; a person's state is taken from the member row), milestone title and due date. `8t` stores no references, so this slice builds an issue's `gitlab:<pm-ai project id>:issue:<iid>` from the scope and the iid; the `gitlab` handle system `8t` adds to AD-34; `23g`, landed first, with its `issue_notes` slot and its placed-issues function; the spine amendments in the Change Log. If `8t` or `23g` land with a different shape, halt and ask.
 - **Project meetings only — by type.** The step and the ledger take a `ProjectScope`, built only from a meeting record whose own scope is a project; a personal or `people` meeting cannot be passed, so no issue list enters its prompt and nothing is written. The project ledger `member_updates.md` is declared in the project tree's `memory/` only — Tier 1, `encrypted=False`, `gitignored=True` — and reading or writing it for a personal or `people` scope raises.
-- **Where it runs: inside `7b`'s summary job, under its lease.** For automatic and requested summaries alike, this step runs after `7b`'s writes (the record, the decision events, the proposals) and before `7b` settles the summary row, so every append is a claimed step that checks `7b`'s lease (AD-37), and the classification call is handed to the model pool like `7b`'s own call (AD-19), in the pool's normal order, since nobody waits for it — a requested summary's priority applies to `7b`'s call only. A requested summary's result is delivered to the PM when `7b`'s writes end; `transcript summarize` does not wait for this step, and its bound is unchanged. A daemon stop before the settle leaves the row as `7b` leaves it, offered again at the next harvest, and the keyed lines make the repeat append only what is missing. An older job whose lease a newer summary revoked writes nothing.
+- **Where it runs: inside `7b`'s summary job, under its lease.** For automatic and requested summaries alike, this step runs after `7b`'s writes (the record, the decision events, the proposals) and before `7b` settles the summary row, so every append is a claimed step that checks `7b`'s lease (AD-37), and the classification call is handed to the model pool like `7b`'s own call (AD-19), in the pool's normal order, since nobody waits for it — a requested summary's priority applies to `7b`'s call only. A requested summary's result is delivered to the PM when `7b`'s writes end; `transcript summarize` does not wait for this step, and its bound is unchanged. *Accepted limit (Andrei, 2026-10-20):* the request is told before the row is settled; a lease lost or a settle that fails after that is not told to it, and a failed settle is the failed row `doctor` names. A daemon stop before the settle leaves the row as `7b` leaves it, offered again at the next harvest, and the keyed lines make the repeat append only what is missing. An older job whose lease a newer summary revoked writes nothing.
 - **Append-only, enforced.** `member_updates.md` and the alias table join `_APPEND_ONLY_KEYS`, are written only through a storage append method, and join `LEDGERS` in the static-rules test, so a whole-file write of either is refused by the writer.
 - **What an update is: a meeting note on an issue, never a new priority.** Priority belongs to GitLab and to the people who set it there; pm-ai inferring "this is now high priority" from talk would be invented evidence on a page the team reads. A line is an action item (what, owner label, due as said, and a date when it resolves) or a decision (the statement). A resolved due is labelled as said in the meeting and shown beside the milestone's due date, never replacing it.
 - **Due dates resolve only when unambiguous**, against the meeting's day in the display zone: a weekday means its next occurrence after the meeting day, and the meeting's own weekday is ambiguous, so no date; a day and month without a year means the next occurrence on or after the meeting day; anything else ("soon", "next sprint") keeps the words and no date.
-- **Which issue.** First, every bare number in the item's own text — `#142`, `issue 142`, `задача 142`, bare by `23g`'s rule, through its `bare_references` (no letter, digit, `/`, `&` or `!` before the `#`, no letter or digit after, no leading zero; a path-qualified `other/proj#142` is ignored) — that is an iid in `8t`'s record; an item naming two gets one line per number; shown as certain. Then, for items with none, one local-model call (`classification`, local-only; `flow` project to project) given the items and the project's open, non-confidential issues (iid and title, each a sanitized fragment) answers, per item, one listed iid or none; an iid not in its list is discarded. Such a link is shown as **model-matched** and listed by `member unmatched` for the PM to confirm or reject (`pm-ai member link <update id> --confirm|--reject`, appended to the ledger); confirmed, it shows as certain; rejected, it is hidden. Confidential issues never enter the prompt — only the placeholder title is stored — so only a spoken number can match one. *Admitted limit:* an issue title is text a person typed, and the sanitizer's phrase lists are English, so a title can steer the match; what bounds it is that only a listed iid is accepted and the link is marked model-matched until confirmed.
-- **When the classification call failed or was unavailable** — Ollama not answering, the call failing, timing out or answering unparseably — the numbered lines are written, the rest are recorded as title match pending with the reason, and the match alone is retried — never a re-summary: its own Tier-2 attempt row, keyed by (scope, meeting), offers the pending items again at the next harvest, outside `7b`'s summary budget, at most 3 attempts; then the pending items are dropped from matching and `doctor` names the meeting.
+- **Which issue.** First, every bare number in the item's own text — `#142`, `issue 142`, `задача 142`, bare by `23g`'s rule, through its `bare_references` (no letter, digit, `/`, `&` or `!` before the `#`, no letter or digit after, no leading zero; a path-qualified `other/proj#142` is ignored) — that is an iid in `8t`'s record; an item naming two gets one line per number; shown as certain. Then, for items with none, one local-model call (`classification`, local-only; `flow` project to project) given the items and the project's open, non-confidential issues — at most the 200 most recently updated, the page saying how many were left out when more are open (Andrei, 2026-10-20) — (iid and title, each a sanitized fragment) answers, per item, one listed iid or none; an iid not in its list is discarded. Such a link is shown as **model-matched** and listed by `member unmatched` for the PM to confirm or reject (`pm-ai member link --scope project:<id> <update id> --confirm|--reject`, appended to the ledger); confirmed, it shows as certain; rejected, it is hidden. `--reject` works on any line, one linked by a spoken number too, and `--confirm` undoes it (Andrei, 2026-10-20). Confidential issues never enter the prompt — only the placeholder title is stored — so only a spoken number can match one. *Admitted limit:* an issue title is text a person typed, and the sanitizer's phrase lists are English, so a title can steer the match; what bounds it is that only a listed iid is accepted and the link is marked model-matched until confirmed.
+- **When the classification call failed or was unavailable** — Ollama not answering, the call failing, timing out or answering unparseably — the numbered lines are written, the rest are recorded as title match pending with the reason, and the match alone is retried — never a re-summary: its own Tier-2 attempt row, keyed by (scope, meeting), offers the pending items again at the next harvest, outside `7b`'s summary budget, at most 3 attempts — Ollama not answering is not counted as one, as for `7b`'s summary (Andrei, 2026-10-20); then the pending items are dropped from matching and `doctor` names the meeting.
 - **Names become people only in the saved alias table (AD-34).** A speaker label is a display name, never a handle; the alias table is the one place a name becomes a handle. This slice saves that table: Tier 1, in the application scope (`aliases.md`, beside `disclosure.md`, `encrypted=False`, `gitignored=True`), append-only, one row per confirmed name → handle, keyed by one `normalise()` (Unicode NFKC, case-folding, trimming, collapsing whitespace), optionally scoped to one meeting; a later row removing or replacing a mapping. Later name resolution — Graph speakers, chat senders — reads the same table; there is no second map. This closes the name half of the spine's open risk: no page shows a name resolved with nothing saved behind it. The handle → person table stays unsaved, and that half stays open (AD-34, Open Risks). The daemon reads `aliases.md` again for every render and every `member link` and `member unmatched` (AD-5's refresh list); `member name` appends to it from the client's own process.
 - **How a label resolves, at read time, never guessed.** In order: (1) an alias row for that label scoped to this meeting, then an unscoped one, whose handle is a member in `8t`'s record; (2) exactly one active member — not a bot, and with a usable `gitlab` handle — whose display name or username equals the label through the same `normalise()`. When `8t`'s members section is unread or absent, rule (2) compares against the assignees `8t` recorded on the project's issues — likewise never a bot or one without a usable `gitlab` handle —, and the page says members were not read; with neither, every label is unmatched. A generic label — `Speaker <n>`, `Unknown`, `Guest`, their Russian forms, or one with no letters — never matches by rule (2). An owner binds to a member only through a speaker label of that meeting's transcript, which `7b` guarantees. *Why:* Teams speaker labels come from the same company directory as GitLab display names, so equality covers the common case with no judgement; nicknames and transliterations ("Ваня", "Vanya", "Ivan") cannot be told apart from a different person by any rule pm-ai could state, and a wrong match puts work on a colleague's page the whole team reads. *Admitted limit:* a speaker who is not a member but carries a member's exact display name binds to that member until the PM removes the match.
 - **The PM's commands.** `member name` asks for a confirmation, so it joins `TERMINAL_BOUND`; `member link` and `member unmatched` have `DAEMON_BOUNDS` entries. `pm-ai member name --scope project:<id> "<label>" <member>` appends an alias row to that member's `gitlab:<host>:<id>` handle — the table stays application-wide, and the host keeps one server's user apart from another's; one handle per name is confirmed app-wide unless the row names one meeting, an accepted limit (AD-34); `<member>` is the handle, a username, or a display name exactly one active member carries. A member not in `8t`'s record is refused, naming the members it knows. A label already mapped elsewhere is replaced only after a confirmation at the terminal, naming both. `--remove` appends a removal. A generic label is refused unless `--meeting <id>` is given, and then the row applies to that meeting only — one confirmation never attributes every meeting's "Speaker 2" to a colleague. `pm-ai member unmatched --scope project:<id>` lists unmatched labels with their counts, model-matched links awaiting confirmation, and skipped malformed lines.
@@ -50,6 +51,8 @@ context:
 | Two numbers / path-qualified | "#142 and #150" / "other/proj#142" | two lines / ignored, offered to the title match | N/A |
 | Title match | "переделать экспорт отчётов", open "Report export rework" | line "model-matched"; listed by `member unmatched` | N/A |
 | Confirm / reject | `member link <id> --confirm` / `--reject` | shown as certain / hidden | N/A |
+| Reject a spoken number | `member link <id> --reject` on a line linked by `#142` | hidden; `--confirm` shows it again | N/A |
+| Many open issues | 205 open, non-confidential issues | the 200 most recently updated listed; the page says 5 were left out | N/A |
 | Invented iid | answer names #999, not listed | discarded | N/A |
 | Classification call failed | Ollama down or answer unparseable | numbered lines written; rest pending; the match alone offered next harvest from its own attempt row, no re-summary, 3 attempts | `doctor` names it after |
 | Steering title | an open issue's title carries an instruction | accepted only as a listed iid, marked model-matched | admitted limit |
@@ -90,17 +93,17 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/scope_model.py`, `pm_ai/domain/storage_tiers.py` -- the two ledgers declared and append-only -- the boundary and the discipline by declaration
-- [ ] `pm_ai/storage/service.py`, `pm_ai/ports/__init__.py` -- an append method for both; reading `member_updates.md` for a non-project scope raises -- enforced, not remembered
-- [ ] `pm_ai/storage/service.py` -- the match attempt table, keyed by (scope, meeting): pending count, attempts, reason; created on open, no version bump; offered at harvest outside `7b`'s budget -- a failed match retried alone (spine gate)
-- [ ] `pm_ai/core/aliases.py` -- the saved name → handle table: rows, `normalise()`, scoped and removal rows, the read; beside `handles.ALIASES`, which is unchanged -- one place a name becomes a handle
-- [ ] `pm_ai/core/member_updates.py` -- new, pure: `ProjectScope`, generic labels, bare numbers, due resolution, line render and parse with skip counts, keys, withdrawals, confirmations, the read-time rule, the rows `23g`'s slot takes -- decisions stated where checked
-- [ ] `pm_ai/app/pipelines.py` -- inside `summary_steps`, after `_written`'s proposal step and before its settle, under the same lease (the classification call a `Hop.MODEL` stage); `SummaryJobs` delivers a request's outcome to `on_done` when `7b`'s writes end, before this step; for a project summary: number match, the classification call checked against its list, pending items, appends; `prepare_dashboard` builds the `IssueNotes` value, asking `23g`'s placed-issues function what was placed -- one step, one reader
-- [ ] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- `member name` (`--meeting`, `--remove`, replacement confirmation), `member link`, `member unmatched` -- the PM's controls
-- [ ] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- `member name` in `TERMINAL_BOUND` (declared in `dispatch.py`; `pm_ai/app/prompts.py` reads it); `DAEMON_BOUNDS` entries for `member link` and `member unmatched` -- routed as AD-21 declares
-- [ ] `pm_ai/surfaces/cli/completion.py` -- value sources for `--scope` (enrolled projects), `<member>` (the project's member usernames and handles), `--meeting` (the project's meeting ids), `<update id>` (updates awaiting confirmation); `<label>` free text; `--remove`, `--confirm`, `--reject` as flags -- `4u`'s test covers every argument
-- [ ] `tests/architecture/test_encryption_policy.py`, `tests/architecture/test_paths.py`, `tests/architecture/test_static_rules.py` -- the new files in the excluded set, the paths table and `LEDGERS` -- the declarations checked
-- [ ] `tests/core/test_member_updates.py`, `tests/core/test_aliases.py`, `tests/slice/test_member_updates.py` -- one test per matrix row with a fake model and `8t`-shaped records; the personal-read test -- the matrix is the contract
+- [x] `pm_ai/domain/scope_model.py`, `pm_ai/domain/storage_tiers.py` -- the two ledgers declared and append-only -- the boundary and the discipline by declaration
+- [x] `pm_ai/storage/service.py`, `pm_ai/ports/__init__.py` -- an append method for both; reading `member_updates.md` for a non-project scope raises -- enforced, not remembered
+- [x] `pm_ai/storage/service.py` -- the match attempt table, keyed by (scope, meeting): pending count, attempts, reason; created on open, no version bump; offered at harvest outside `7b`'s budget -- a failed match retried alone (spine gate)
+- [x] `pm_ai/core/aliases.py` -- the saved name → handle table: rows, `normalise()`, scoped and removal rows, the read; beside `handles.ALIASES`, which is unchanged -- one place a name becomes a handle
+- [x] `pm_ai/core/member_updates.py` -- new, pure: `ProjectScope`, generic labels, bare numbers, due resolution, line render and parse with skip counts, keys, withdrawals, confirmations, the read-time rule, the rows `23g`'s slot takes -- decisions stated where checked
+- [x] `pm_ai/app/pipelines.py` -- inside `summary_steps`, after `_written`'s proposal step and before its settle, under the same lease (the classification call a `Hop.MODEL` stage); `SummaryJobs` delivers a request's outcome to `on_done` when `7b`'s writes end, before this step; for a project summary: number match, the classification call checked against its list, pending items, appends; `prepare_dashboard` builds the `IssueNotes` value, asking `23g`'s placed-issues function what was placed -- one step, one reader
+- [x] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- `member name` (`--meeting`, `--remove`, replacement confirmation), `member link`, `member unmatched` -- the PM's controls
+- [x] `pm_ai/surfaces/cli/dispatch.py`, `pm_ai/app/entry.py` -- `member name` in `TERMINAL_BOUND` (declared in `dispatch.py`; `pm_ai/app/prompts.py` reads it); `DAEMON_BOUNDS` entries for `member link` and `member unmatched` -- routed as AD-21 declares
+- [x] `pm_ai/surfaces/cli/completion.py` -- value sources for `--scope` (enrolled projects), `<member>` (the project's member usernames and handles), `--meeting` (the project's meeting ids), `<update id>` (updates awaiting confirmation); `<label>` free text; `--remove`, `--confirm`, `--reject` as flags -- `4u`'s test covers every argument
+- [x] `tests/architecture/test_encryption_policy.py`, `tests/architecture/test_paths.py`, `tests/architecture/test_static_rules.py` -- the new files in the excluded set, the paths table and `LEDGERS` -- the declarations checked
+- [x] `tests/core/test_member_updates.py`, `tests/core/test_aliases.py`, `tests/slice/test_member_updates.py` -- one test per matrix row with a fake model and `8t`-shaped records; the personal-read test -- the matrix is the contract
 
 **Acceptance Criteria:**
 - Given a personal meeting whose action item says `#142`, when it is summarised, then no project file changes and no classification call is made.
@@ -122,6 +125,25 @@ context:
 - **2026-10-20, low-stakes (coordinating session):** frozen block edited (recorded here). The bare-number wording corrected to `23g`'s built rule and `bare_references` named (no letter or digit after, no leading zero), cosmetic; rule (2) leaves out bots and GitLab people with no usable handle, as `23g` does.
 - **2026-10-20, readiness gaps (coordinating session, reported to Andrei):** frozen block edited (recorded here): this slice's classification call takes the model pool's normal order, even inside a requested summary's job, since nobody waits for it; the fallback to issue assignees excludes bots and people without a usable `gitlab` handle, as rule (2) does.
 
+- **2026-10-20, built:** where the build differs from the Tasks' wording. The domain half (artifact names, the attempt row, `NotAProjectScope`, at most 3 attempts) is in the new `pm_ai/domain/member_ledgers.py`, since `pm_ai/ports` may import only `domain`. The PM's commands run through the new `pm_ai/app/members.py`. The slice tests are `tests/slice/test_member_updates_slice.py` and `tests/slice/test_member_updates_followups.py`, since pytest refuses two test modules with one basename. `--scope project:<id>` is required on all three commands, `member link` included, because an update id does not say which project it is in. Ollama not answering is not counted as a title-match attempt, as for `7b`'s summary; a failed call or an unreadable answer is. Due dates are resolved when the page renders, from the due as said, the meeting start and the display zone; they are not stored as dates. The title match asks only about items with no line yet, and only when the project has an open, non-confidential issue to list. A removal row also stops the exact-name match, so it can undo the same-name binding this spec admits as a limit. More than 2 updates on one issue add a line counting the rest. Completion reads `8t`'s member rows on a read-only connection to `operational.db`, which `4u`'s readers did not do before (`deferred-work.md`, story-7e section).
+- **2026-10-20, review (three layers):** 23 items fixed, 0 intent or spec gaps. The main ones:
+  - `member name` could save a mapping to a blocked member or a bot, which the page would never show;
+  - updates on issues missing from `8t`'s record were counted as "closed, or past the caps";
+  - a given-up title match stayed named by `doctor` after a re-summary that had nothing to ask;
+  - a phantom pending item was recorded when nothing was left to match;
+  - an append onto a torn last line was lost, and the size check before an append did not hold across processes (it now runs inside the artifact's claim);
+  - the attempt table compared meeting starts with different UTC offsets as text;
+  - a digit run of thousands of characters made `int()` raise, in this slice and in `23g`'s `bare_references`, which now has the same 18-digit guard.
+
+  Tests were added for the harvest's retry, `doctor` through its report, `member link` and `member unmatched` through the daemon, completion over real files, a step that raises, the retry's version check, and an unreadable ledger at render. Six findings need Andrei's decision and are in `deferred-work.md`.
+- **2026-10-20, review decisions (Andrei), each as recommended:** frozen block edited (recorded here).
+  1. Completion may read `8t`'s member rows from `operational.db` on a read-only connection. This is a recorded exception to `4u`'s rule, with a dated line in `4u`'s spec.
+  2. A requested summary is told its result before the row is settled. This is an accepted limit: a failed settle after it is the failed row `doctor` names, and a test pins that.
+  3. `--reject` works on any line, one linked by a spoken number too, and `--confirm` undoes it. A matrix row was added.
+  4. The title match lists at most the 200 most recently updated open, non-confidential issues, and the page says how many were left out. A matrix row was added.
+  5. Ollama not answering is not a title-match attempt, as for `7b`; the wording was corrected.
+  6. `member link`'s usage line shows `--scope` (cosmetic).
+
 ## Design Notes
 
 Storing the label as said and resolving it on read is AD-34's own rule applied to spoken names: the ledger records what was said, the alias table records what the PM confirmed, and a reader joins them, so a correction applies to every past line.
@@ -134,3 +156,100 @@ Choices made in review (2026-10-16): with members unread, issue assignees stand 
 - `uv run pytest -q` -- expected: all pass
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**Where the step runs**
+
+- Entry point: 7e's step after 7b's writes, before the settle, under 7b's lease.
+  [`pipelines.py:2691`](../../../../pm_ai/app/pipelines.py#L2691)
+
+- The step: numbered lines, withdrawals, the title match; faults leave 7b's summary settled.
+  [`pipelines.py:2897`](../../../../pm_ai/app/pipelines.py#L2897)
+
+- Reads, appends and the classification call, shared by the summary job and the retry.
+  [`pipelines.py:3013`](../../../../pm_ai/app/pipelines.py#L3013)
+
+- The classification call waits its turn on the model pool, even inside a request.
+  [`pipelines.py:2417`](../../../../pm_ai/app/pipelines.py#L2417)
+
+- A request is told its result once, when 7b's writes end.
+  [`pipelines.py:3385`](../../../../pm_ai/app/pipelines.py#L3385)
+
+**The title match retried alone**
+
+- After a harvest: waiting matches offered, outside 7b's summary limit.
+  [`pipelines.py:3179`](../../../../pm_ai/app/pipelines.py#L3179)
+
+- One retry, checked against the summary row's version; never a re-summary.
+  [`pipelines.py:3117`](../../../../pm_ai/app/pipelines.py#L3117)
+
+- The attempt row: at most 3 attempts, then given up.
+  [`service.py:4953`](../../../../pm_ai/storage/service.py#L4953)
+
+- Doctor names a meeting whose match was given up.
+  [`entry.py:1634`](../../../../pm_ai/app/entry.py#L1634)
+
+**What a line is, and who it names**
+
+- Spoken numbers through 23g's bare-reference rule, plus `issue N` / `задача N`.
+  [`member_updates.py:221`](../../../../pm_ai/core/member_updates.py#L221)
+
+- The read-time rule: alias rows, then one exact active member, never a generic label.
+  [`member_updates.py:947`](../../../../pm_ai/core/member_updates.py#L947)
+
+- The ledger grammar, keys, withdrawals and confirmations; malformed lines counted.
+  [`member_updates.py:782`](../../../../pm_ai/core/member_updates.py#L782)
+
+- Due dates resolved only when unambiguous.
+  [`member_updates.py:501`](../../../../pm_ai/core/member_updates.py#L501)
+
+- The classification answer: only a listed iid is kept.
+  [`member_updates.py:411`](../../../../pm_ai/core/member_updates.py#L411)
+
+- The saved name → handle table: one `normalise()`, meeting-scoped and removal rows.
+  [`aliases.py:144`](../../../../pm_ai/core/aliases.py#L144)
+
+**The page**
+
+- Rows under each issue; closing counts are numbers only; nobody is ranked.
+  [`member_updates.py:1050`](../../../../pm_ai/core/member_updates.py#L1050)
+
+- The render reads both ledgers again and states an unreadable one.
+  [`pipelines.py:1975`](../../../../pm_ai/app/pipelines.py#L1975)
+
+**Storage**
+
+- Compare-and-append inside the artifact's claim; the lease checked in the same step.
+  [`service.py:3639`](../../../../pm_ai/storage/service.py#L3639)
+
+- Reading the project ledger for a personal or `people` scope raises.
+  [`service.py:3625`](../../../../pm_ai/storage/service.py#L3625)
+
+- The attempt table, created on open, no schema version bump.
+  [`service.py:368`](../../../../pm_ai/storage/service.py#L368)
+
+- The two ledgers declared: Tier 1, gitignored, append-only.
+  [`scope_model.py:766`](../../../../pm_ai/domain/scope_model.py#L766)
+
+**The PM's commands**
+
+- `member name`: a member by the read-time rule; a replacement asked at the terminal.
+  [`members.py:107`](../../../../pm_ai/app/members.py#L107)
+
+- The re-read and the append under `aliases.md`'s claim.
+  [`members.py:191`](../../../../pm_ai/app/members.py#L191)
+
+- `member link` and `member unmatched`.
+  [`members.py:222`](../../../../pm_ai/app/members.py#L222)
+
+- The command table entries.
+  [`dispatch.py:4320`](../../../../pm_ai/surfaces/cli/dispatch.py#L4320)
+
+**Tests**
+
+- The matrix, row by row, with a fake model and `8t`-shaped records.
+  [`test_member_updates_slice.py:1`](../../../../tests/slice/test_member_updates_slice.py#L1)
+
+- The review's follow-ups: the harvest retry, doctor, the daemon path, completion over real files.
+  [`test_member_updates_followups.py:1`](../../../../tests/slice/test_member_updates_followups.py#L1)

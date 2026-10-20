@@ -87,6 +87,7 @@ from pm_ai.core.transcripts import (
     carried_minutes,
     drop_utterances,
 )
+from pm_ai.core.member_updates import MemberRefused, NamePlan
 from pm_ai.domain.meetings import AmbiguousMeeting
 from pm_ai.domain.meeting_summaries import FRONTIER_SUMMARY_REFUSED, SummaryRefused
 from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
@@ -950,6 +951,14 @@ class Context:
 
     `None` everywhere else: a terminal sends the line to the daemon instead,
     and a process with no daemon to send it to refuses naming `pm-ai daemon run`.
+    """
+
+    members: Members | None = None
+    """`pm-ai member name|link|unmatched`'s reads and appends (story 7e).
+
+    `pm_ai.app.members.MemberDesk` over the composed daemon: the client's own
+    writer at a terminal, the daemon's handed writer for a line the daemon
+    runs. `None` refuses the three commands as a missing daemon.
     """
 
     serve: Callable[[], int] | None = None
@@ -4003,6 +4012,137 @@ def _transcript_summarize(context: Context) -> int:
     return EXIT_OK
 
 
+# ── `pm-ai member` (story 7e) ────────────────────────────────────────────────
+
+REMOVE_FLAG = "remove"
+CONFIRM_FLAG = "confirm"
+REJECT_FLAG = "reject"
+LABEL_ARGUMENT = "label"
+MEMBER_ARGUMENT = "member"
+UPDATE_ARGUMENT = "update"
+
+
+class Members(Protocol):
+    """What the `member` commands reach: `pm_ai.app.members.MemberDesk`, by shape.
+
+    Each refusal is a `MemberRefused` carrying the sentence the PM reads.
+    """
+
+    def plan_name(
+        self,
+        scope: DataScope,
+        label: str,
+        member: str | None,
+        *,
+        meeting: str | None,
+        remove: bool,
+    ) -> NamePlan: ...
+
+    def save_name(self, plan: NamePlan) -> str: ...
+
+    def link(self, scope: DataScope, update: str, *, confirm: bool) -> str: ...
+
+    def unmatched(self, scope: DataScope) -> str: ...
+
+
+def _member_target(options: Mapping[str, str]) -> DataScope:
+    """`--scope`'s scope, required; `_Misread` when absent or naming none.
+
+    A scope that is not a project parses, and the command refuses it by name:
+    meeting updates are kept per project.
+    """
+    requested = options.get(SCOPE_ARGUMENT)
+    scope = None if requested is None else _scope(requested)
+    if scope is None:
+        raise _Misread(
+            f"the `member` commands need `--{SCOPE_ARGUMENT} project:<id>` naming an "
+            f"enrolled project"
+            + ("" if requested is None else f"; `{requested}` is not a scope")
+            + "."
+        )
+    return scope
+
+
+def _member_desk(context: Context) -> tuple[Members, DataScope]:
+    scope = context.target
+    if scope is None:
+        raise RuntimeError("no target scope reached a `member` command. That is a wiring fault in pm-ai.")
+    if scope.kind is not ScopeKind.PROJECT:
+        raise Refusal(
+            f"meeting updates are kept per project, and {scope} is not one: give "
+            f"`--{SCOPE_ARGUMENT} project:<id>`. Nothing was done."
+        )
+    context.require_daemon()
+    if context.members is None:
+        raise Refusal("the meeting updates could not be reached here; nothing was done.")
+    return context.members, scope
+
+
+def _member_name(context: Context) -> int:
+    """`pm-ai member name --scope project:<id> "<label>" <member> [--meeting <id>] [--remove]` (7e).
+
+    Saves a name the PM confirmed as a member's `gitlab:<host>:<id>` handle in
+    `aliases.md`. A label already naming someone else is replaced only after
+    a `(y/n)` at the terminal naming both; `--remove` appends a removal. A
+    generic label is named only for one meeting (`--meeting`).
+    """
+    members, scope = _member_desk(context)
+    label = context.arguments[0]
+    member = context.arguments[1] if len(context.arguments) > 1 else None
+    remove = REMOVE_FLAG in context.flags
+    if remove and member is not None:
+        raise Refusal(
+            f"`member name --{REMOVE_FLAG}` takes the label alone, not a member; nothing was written."
+        )
+    try:
+        plan = members.plan_name(
+            scope, label, member, meeting=context.options.get(MEETING_ARGUMENT), remove=remove
+        )
+        if plan.row is not None and plan.replaces is not None:
+            if not _stdin_is_terminal():
+                raise Refusal(
+                    f"the label is named as {plan.replaces} now, and replacing it is asked "
+                    f"at a terminal; stdin is not one here. Nothing was written."
+                )
+            _echo(f"the label is named as {plan.replaces} now.")
+            if not _confirmed(f"name it as {plan.names} instead? (y/n): "):
+                raise Refusal("the label was not renamed; nothing was written.")
+        said = members.save_name(plan)
+    except MemberRefused as refused:
+        raise Refusal(str(refused)) from refused
+    _echo(said)
+    return EXIT_OK
+
+
+def _member_link(context: Context) -> int:
+    """`pm-ai member link --scope project:<id> <update id> --confirm|--reject` (7e)."""
+    members, scope = _member_desk(context)
+    confirm = CONFIRM_FLAG in context.flags
+    reject = REJECT_FLAG in context.flags
+    if confirm == reject:
+        raise Refusal(
+            f"`member link` takes exactly one of `--{CONFIRM_FLAG}` and `--{REJECT_FLAG}`; "
+            f"nothing was written."
+        )
+    try:
+        said = members.link(scope, context.arguments[0], confirm=confirm)
+    except MemberRefused as refused:
+        raise Refusal(str(refused)) from refused
+    _echo(said)
+    return EXIT_OK
+
+
+def _member_unmatched(context: Context) -> int:
+    """`pm-ai member unmatched --scope project:<id>` (7e): labels, links, skipped lines."""
+    members, scope = _member_desk(context)
+    try:
+        report = members.unmatched(scope)
+    except MemberRefused as refused:
+        raise Refusal(str(refused)) from refused
+    _echo(report, end="")
+    return EXIT_OK
+
+
 TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
     {
         ("goal", "set"),
@@ -4014,6 +4154,8 @@ TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
         ("connector", "categories"),
         ("key", "enrol"),
         ("logs",),
+        # Story 7e: replacing a label's member is confirmed at the terminal.
+        ("member", "name"),
     }
 )
 """The commands that need this terminal: they ask questions, read a secret, or
@@ -4170,6 +4312,41 @@ TABLE: Mapping[str, Command] = {
                 requires=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
                 target=_summarize_target,
                 via_daemon=True,
+            ),
+        },
+    ),
+    # `7e`: meeting updates on the project's GitLab issues, and the saved
+    # names they are attributed by.
+    "member": Command(
+        "meeting updates on a project's GitLab issues, and who a speaker label names",
+        leaves={
+            "name": Command(
+                "save that a speaker label names a project member (aliases.md); "
+                "--remove ends it, --meeting limits it to one meeting",
+                _member_name,
+                takes=(LABEL_ARGUMENT,),
+                optional=(MEMBER_ARGUMENT,),
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
+                requires=(SCOPE_ARGUMENT,),
+                flags=(REMOVE_FLAG,),
+                target=_member_target,
+            ),
+            "link": Command(
+                "confirm or reject the issue a meeting update is linked to",
+                _member_link,
+                takes=(UPDATE_ARGUMENT,),
+                options=(SCOPE_ARGUMENT,),
+                requires=(SCOPE_ARGUMENT,),
+                flags=(CONFIRM_FLAG, REJECT_FLAG),
+                target=_member_target,
+            ),
+            "unmatched": Command(
+                "list speaker labels matched to no member, links awaiting your word, "
+                "and lines skipped",
+                _member_unmatched,
+                options=(SCOPE_ARGUMENT,),
+                requires=(SCOPE_ARGUMENT,),
+                target=_member_target,
             ),
         },
     ),
@@ -4478,6 +4655,7 @@ def dispatch(
     daemon_log: DaemonLog | None = None,
     transcript_drop: TranscriptDrop | None = None,
     transcript_summarize: TranscriptSummarize | None = None,
+    members: Members | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -4511,6 +4689,7 @@ def dispatch(
             daemon_log=daemon_log,
             transcript_drop=transcript_drop,
             transcript_summarize=transcript_summarize,
+            members=members,
             serve=serve,
             unavailable=unavailable,
             undecided=undecided,
@@ -4542,6 +4721,7 @@ def _dispatch(
     daemon_log: DaemonLog | None,
     transcript_drop: TranscriptDrop | None,
     transcript_summarize: TranscriptSummarize | None,
+    members: Members | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
     undecided: str | None,
@@ -4568,6 +4748,7 @@ def _dispatch(
         daemon_log=daemon_log,
         transcript_drop=transcript_drop,
         transcript_summarize=transcript_summarize,
+        members=members,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,

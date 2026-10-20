@@ -129,6 +129,9 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.pm-ai/config.toml",
     (ScopeKind.APPLICATION, "disclosure.md"):
         "/home/pm/.pm-ai/disclosure.md",
+    # Story 7e: the saved alias table (AD-34), beside the disclosure ledger.
+    (ScopeKind.APPLICATION, "aliases.md"):
+        "/home/pm/.pm-ai/aliases.md",
     (ScopeKind.APPLICATION, "projects.toml"):
         "/home/pm/.pm-ai/projects.toml",
     (ScopeKind.APPLICATION, "connectors/"):
@@ -228,6 +231,9 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/repositories/alpha/.project-ai/memory/daily_dashboard.md",
     (ScopeKind.PROJECT, "commitments_log.md"):
         "/repositories/alpha/.project-ai/memory/commitments_log.md",
+    # Story 7e: the project's meeting updates on its GitLab issues.
+    (ScopeKind.PROJECT, "member_updates.md"):
+        "/repositories/alpha/.project-ai/memory/member_updates.md",
     (ScopeKind.PROJECT, "meetings/"):
         "/repositories/alpha/.project-ai/memory/meetings",
     (ScopeKind.PROJECT, "event_log/"):

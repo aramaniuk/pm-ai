@@ -76,6 +76,8 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
         (("transcript", "drop"), "start"),
         (("transcript", "drop"), "attendees"),
         (("transcript", "drop"), "duration"),
+        # Story 7e: a speaker label as said in a meeting, typed by the PM.
+        (("member", "name"), "label"),
     }
 )
 """`(command, name)` pairs whose value is free text, offered nothing."""
@@ -83,8 +85,9 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
 FREE_TEXT_NAMES: frozenset[str] = frozenset({"alias", _TITLE, MEETING_ARGUMENT})
 """Names that are free text wherever a command declares them.
 
-`--meeting` is a meeting id, which is not completed: the ids need the meeting
-records, a later slice.
+`--meeting` is a meeting id, not completed for the transcript commands; `member
+name` (story 7e) offers the enrolled projects' meeting ids through
+`_BY_COMMAND`, which is consulted first.
 """
 
 SCOPES = "scopes"
@@ -96,6 +99,9 @@ GOAL_IDS = "goal ids"
 LOG_LEVEL_NAMES = "log levels"
 SUMMARY_MAKER_NAMES = "summary makers"
 PATHS = "paths"
+MEMBERS = "project members"
+MEETING_IDS = "meeting ids"
+UPDATE_IDS = "update ids"
 
 _BY_NAME: Mapping[str, str] = {
     SCOPE_ARGUMENT: SCOPES,
@@ -116,6 +122,11 @@ _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("logs",), "level"): LOG_LEVEL_NAMES,
     # Story 7b: who makes a summary — `local` today, `claude` refused until 7c.
     (("transcript", "summarize"), "by"): SUMMARY_MAKER_NAMES,
+    # Story 7e: the members a label may name (usernames and handles), the
+    # meetings a generic label may be limited to, the links awaiting a word.
+    (("member", "name"), "member"): MEMBERS,
+    (("member", "name"), "meeting"): MEETING_IDS,
+    (("member", "link"), "update"): UPDATE_IDS,
 }
 """Names whose value depends on the command declaring them."""
 
@@ -126,10 +137,12 @@ def source_of(command: tuple[str, ...], name: str) -> str | None:
     Raises `LookupError` for a name that is neither: the test over `TABLE`
     turns that into a failure naming the command and the name.
     """
-    if (command, name) in FREE_TEXT or name in FREE_TEXT_NAMES:
-        return None
+    # A command's own source first: `member name --meeting` offers the
+    # project's meeting ids, while `--meeting` stays free text elsewhere.
     if (command, name) in _BY_COMMAND:
         return _BY_COMMAND[(command, name)]
+    if (command, name) in FREE_TEXT or name in FREE_TEXT_NAMES:
+        return None
     if name in _BY_NAME:
         return _BY_NAME[name]
     raise LookupError(
@@ -142,19 +155,31 @@ def _no_values() -> Sequence[str]:
     return ()
 
 
+def _no_project_values(project: str) -> Sequence[str]:
+    return ()
+
+
 @dataclass(frozen=True, slots=True)
 class Readers:
     """The local files completion reads, each as a call the composition root built.
 
     `projects` answers the enrolled project ids (`projects.toml`),
     `graph_instances` every Graph row's instance in `connectors/`, enabled or
-    not, and `goal_ids` the ids in `strategic_goals.md`. None of them may
-    touch the master key, the keychain, `operational.db` or the daemon.
+    not, and `goal_ids` the ids in `strategic_goals.md`. Story 7e adds, over
+    every enrolled project, `members` (the GitLab members' usernames and
+    handles), `meetings` (the recorded meetings' ids) and `updates` (the
+    model-matched links awaiting the PM's word). None of them may touch the
+    master key, the keychain or the daemon; `members` alone reads
+    `operational.db`, on a read-only connection of its own, never a
+    `StorageService`.
     """
 
     projects: Callable[[], Sequence[str]] = _no_values
     graph_instances: Callable[[], Sequence[str]] = _no_values
     goal_ids: Callable[[], Sequence[str]] = _no_values
+    members: Callable[[str], Sequence[str]] = _no_project_values
+    meetings: Callable[[str], Sequence[str]] = _no_project_values
+    updates: Callable[[str], Sequence[str]] = _no_project_values
 
 
 # ── Splitting a line that may still be open ─────────────────────────────────
@@ -362,15 +387,22 @@ class Completion:
     _projects: _Cached = field(init=False)
     _graph: _Cached = field(init=False)
     _goals: _Cached = field(init=False)
+    _scoped: dict[tuple[str, str], _Cached] = field(init=False)
 
     def __post_init__(self) -> None:
         self._projects = _Cached(self.readers.projects)
         self._graph = _Cached(self.readers.graph_instances)
         self._goals = _Cached(self.readers.goal_ids)
+        self._scoped = {}
 
     def forget(self) -> None:
         """Read every file again at the next Tab that needs it (a command ran)."""
-        for cached in (self._projects, self._graph, self._goals):
+        for cached in (
+            self._projects,
+            self._graph,
+            self._goals,
+            *self._scoped.values(),
+        ):
             cached.forget()
 
     # ── Tab ──────────────────────────────────────────────────────────────
@@ -399,30 +431,31 @@ class Completion:
         reading = _reading(words)
         if reading is None:
             return []
+        project = _named_project(words)
         entry = reading.entry
         positional = (*entry.takes, *entry.optional)
         if reading.ended:
             # After a bare `--` a word starting with `--` is a positional.
             if reading.positionals < len(positional):
                 name = positional[reading.positionals]
-                return offered(self._values(reading.command, name, current))
+                return offered(self._values(reading.command, name, current, project))
             return []
         if reading.awaiting is not None and not current.startswith("--"):
             if reading.awaiting not in entry.options:
                 return []
-            return offered(self._values(reading.command, reading.awaiting, current))
+            return offered(self._values(reading.command, reading.awaiting, current, project))
         if current.startswith("--"):
             name, assigned, partial = current[2:].partition("=")
             if assigned:
                 if name not in entry.options:
                     return []
                 return offered(
-                    self._values(reading.command, name, partial), prefix=f"--{name}="
+                    self._values(reading.command, name, partial, project), prefix=f"--{name}="
                 )
             return offered(self._unused(entry, reading.given))
         if reading.positionals < len(positional):
             name = positional[reading.positionals]
-            return offered(self._values(reading.command, name, current))
+            return offered(self._values(reading.command, name, current, project))
         if not current:
             return offered(self._unused(entry, reading.given))
         return []
@@ -431,7 +464,9 @@ class Completion:
         """The options and flags not yet given, spelled `--name`."""
         return [f"--{name}" for name in (*entry.options, *entry.flags) if name not in given]
 
-    def _values(self, command: tuple[str, ...], name: str, partial: str) -> Sequence[str]:
+    def _values(
+        self, command: tuple[str, ...], name: str, partial: str, project: str | None = None
+    ) -> Sequence[str]:
         try:
             source = source_of(command, name)
         except LookupError:
@@ -454,6 +489,19 @@ class Completion:
             return SUMMARY_MAKERS
         if source == PATHS:
             return _paths(partial)
+        readers = {
+            MEMBERS: self.readers.members,
+            MEETING_IDS: self.readers.meetings,
+            UPDATE_IDS: self.readers.updates,
+        }
+        if source in readers:
+            if project is None:
+                return ()
+            key = (source, project)
+            if key not in self._scoped:
+                read = readers[source]
+                self._scoped[key] = _Cached(lambda: read(project))
+            return self._scoped[key].get()
         return ()
 
     # ── The bottom line ──────────────────────────────────────────────────
@@ -485,6 +533,19 @@ class Completion:
         if not entry.leaves:
             return f"{first}  —  {entry.summary}; no subcommand is implemented yet"
         return f"{first} {{{', '.join(entry.leaves)}}}  —  {entry.summary}"
+
+
+def _named_project(words: Sequence[str]) -> str | None:
+    """The project a finished `--scope project:<id>` word on the line names, if any."""
+    named: str | None = None
+    for index, word in enumerate(words):
+        if word == f"--{SCOPE_ARGUMENT}" and index + 1 < len(words):
+            named = words[index + 1]
+        elif word.startswith(f"--{SCOPE_ARGUMENT}="):
+            named = word.split("=", 1)[1]
+    if named is None or not named.startswith("project:"):
+        return None
+    return named.removeprefix("project:") or None
 
 
 def _paths(partial: str) -> list[str]:

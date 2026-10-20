@@ -147,6 +147,7 @@ from pm_ai.domain.health import (
     UnbuiltConnector,
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.member_ledgers import MEMBER_UPDATES
 from pm_ai.domain.model_calls import (
     LOCAL_MODEL_PROBE,
     LocalModelPresence,
@@ -260,6 +261,14 @@ class SummaryStarter(Protocol):
         prepared: Any = None,
         on_done: Any = None,
     ) -> bool: ...
+
+    def in_flight(self, scope: DataScope, meeting_id: str) -> bool: ...
+
+    def start_match(
+        self, daemon: Daemon, scope: DataScope, meeting_id: str, *, offered: Any
+    ) -> bool:
+        """A meeting's title match retried alone (story 7e)."""
+        ...
 
 
 @dataclass
@@ -4000,6 +4009,15 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "check_summary_lease": ("check the summary's lease", _asks_none),
     "summary_state": ("read the summary's state", _asks_none),
     "summaries_to_offer": ("read the summaries to offer", _asks_none),
+    # Story 7e: the project's meeting updates, appended under the summary's
+    # lease or a title-match retry's row, and that row.
+    "append_member_updates": ("append the meeting's member updates", _named(MEMBER_UPDATES)),
+    # Asks no `git`: the alias table's only home is the application scope,
+    # outside every working tree, as `disclosure.md`'s is.
+    "append_alias": ("append to the alias table", _asks_none),
+    "record_match": ("record the meeting's title match", _asks_none),
+    "match_state": ("read the title match's row", _asks_none),
+    "matches_to_offer": ("read the title matches to offer", _asks_none),
     "stage_proposal": ("stage a proposal", _asks_none),
     "transition_proposal": ("move a proposal", _asks_none),
     "begin_execution": ("record a skill call before it is made", _asks_none),
@@ -4033,6 +4051,9 @@ PLAIN_READS: frozenset[str] = frozenset(
         "project_work",  # its own read-only connection (story 8t)
         "render_records",  # its own read-only connection
         "summaries_recorded",  # its own read-only connection (story 7b)
+        "match_records",  # its own read-only connection (story 7e)
+        "read_member_updates",  # a file read (story 7e)
+        "read_aliases",  # a file read (story 7e)
         "last_render",  # its own read-only connection
         "ask_git_exclusion",  # `git`'s answer, uncached: a bounded step
         "assert_writable",  # `git`'s answer and the key check: a bounded step

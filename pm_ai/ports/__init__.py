@@ -26,7 +26,9 @@ from pm_ai.domain.harvest import (
 from pm_ai.domain.health import Probe
 from pm_ai.domain.identity import DataScope, SkillPermission, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow
+from pm_ai.domain.meeting_summaries import SummaryFence
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.member_ledgers import MatchFence
 from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.sanitize import Sanitized
@@ -208,6 +210,17 @@ class ArtifactBusy(RuntimeError):
     changed and asks for the command to be run again. It names no file to
     remove, because there is none: the claim is a kernel lock, released with
     its holder however that holder died (story `1r`).
+    """
+
+
+class LedgerChanged(RuntimeError):
+    """An append-only ledger grew since its caller read it, so nothing was appended.
+
+    Story 7e's two ledgers, `member_updates.md` and `aliases.md`, are appended
+    only after the caller has read them and decided what is missing; the
+    append is a compare-and-append on the size read. A ledger another writer
+    appended to in between refuses here, and the caller reads it again and
+    decides again — never an append computed from a stale read.
     """
 
 
@@ -786,6 +799,29 @@ class StoragePort(Protocol):
         `23g` and `7e` read nothing else of it. A plain read. Refuses a scope
         that is not a project (`ValueError`), as `record_project_work` does.
         """
+    # Story 7e: the two append-only ledgers, each read whole and appended to
+    # only if it has not grown since (`LedgerChanged`).
+    def read_member_updates(self, *, scope: DataScope) -> bytes:
+        """A project's `member_updates.md`, `b""` when absent. Refuses any other scope
+        (`NotAProjectScope`)."""
+    def append_member_updates(
+        self,
+        lines: Sequence[str],
+        *,
+        scope: DataScope,
+        after: int,
+        fence: SummaryFence | None = None,
+        match: MatchFence | None = None,
+    ) -> int:
+        """Append `lines` to a project's ledger in one write, if it is still `after` bytes.
+
+        Under a summary's lease (`fence`) or a title-match retry's row
+        (`match`) when given, checked inside the step. Returns the new size.
+        """
+    def read_aliases(self) -> bytes:
+        """The application scope's `aliases.md`, `b""` when absent."""
+    def append_alias(self, line: str, *, after: int) -> int:
+        """Append one alias row, if the table is still `after` bytes; the new size."""
     def record_render(self, scope: DataScope, *, at: datetime) -> None:
         """A successful render of `scope` at `at`, in one statement (9b)."""
     def record_render_failure(
