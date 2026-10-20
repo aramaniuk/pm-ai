@@ -83,14 +83,15 @@ through verbatim on every rewrite. That is what lets this slice replace fields
 on a rewrite *and* honour the rule that a hand edit is never silently
 overwritten — the regions differ, so both hold.
 
-`## Summary` is reserved and left empty here. It is transcript-derived and needs
-a model, which is out of waves 1 and 2; amendments — the other half of that
-design — are queued in `deferred-work.md` with the reasoning that removed them.
+`## Summary` holds the meeting's summary since story `7b`, in one fixed grammar
+(`pm_ai.core.meeting_summary`): written only by `put_summary`, carried over by
+every `put` as `## Notes` is. Amendments are queued in `deferred-work.md`.
 
-**Reserved means refused, not ignored.** Everything between the field block and
-`## Notes` is pm-ai's, and the only thing this slice writes there is the
-`## Summary` heading — so anything else a hand edit leaves in that region is a
-`MalformedMeeting` naming the region and pointing at `## Notes`. Until this was
+**pm-ai's region means refused, not ignored.** Everything between the field
+block and `## Notes` is pm-ai's, so anything a hand edit leaves there that is
+not the grammar is a `MalformedMeeting` on read, naming the region and pointing
+at `## Notes`; a `put` drops it and says so (`KeptRecord.summary_dropped`), so
+the summary is made again rather than a human's text kept as pm-ai's. Until this was
 enforced the region was parsed past and dropped on the next rewrite: a
 hand-written summary body vanished, and a `duration_minutes=999` line placed one
 line *below* the blank separator parsed away in silence while the record went on
@@ -103,10 +104,16 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 
+from pm_ai.core.meeting_summary import (
+    SUMMARY_HEADING,
+    MalformedSummary,
+    parse_summary_region,
+    render_summary_region,
+)
 from pm_ai.domain.event_entries import (
     MAX_ENTRY_LENGTH,
     MalformedEntry,
@@ -114,6 +121,7 @@ from pm_ai.domain.event_entries import (
     scan_fields,
 )
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
+from pm_ai.domain.meeting_summaries import RecordedSummary
 from pm_ai.domain.meetings import (
     MATCH_TOLERANCE,
     InvalidAttendeeCount,
@@ -155,7 +163,6 @@ is the node type rather than a convention typed by hand. Named here so the three
 methods below cannot disagree about which artifact they address.
 """
 
-SUMMARY_HEADING = "## Summary"
 NOTES_HEADING = "## Notes"
 
 _SLUG_LIMIT = 32
@@ -318,6 +325,9 @@ class KeptRecord:
     adopted: bool = False
     unadopted: tuple[str, ...] = ()
     notices: tuple[str, ...] = ()
+    summary_dropped: bool = False
+    """The record's `## Summary` region did not parse and was dropped (story 7b):
+    the caller sets the summary row back to offered, so it is made again."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +347,9 @@ class MeetingRecord:
 
     meeting: Meeting
     notes: str = ""
+    summary: RecordedSummary | None = None
+    """pm-ai's `## Summary` region (story 7b). Never an argument to `put`:
+    carried over from the existing record, and written only by `put_summary`."""
 
 
 def as_stored(meeting: Meeting) -> Meeting:
@@ -555,10 +568,21 @@ def render_record(record: MeetingRecord) -> str:
         if key in values
     ]
     head = "\n".join(lines)
-    return f"{head}\n\n{SUMMARY_HEADING}\n\n{NOTES_HEADING}\n{record.notes}"
+    if record.summary is None:
+        return f"{head}\n\n{SUMMARY_HEADING}\n\n{NOTES_HEADING}\n{record.notes}"
+    try:
+        region = "\n".join(render_summary_region(record.summary))
+    except MalformedSummary as unrenderable:
+        raise MalformedMeeting(f"the summary of {meeting.meeting_id}: {unrenderable}") from unrenderable
+    return f"{head}\n\n{SUMMARY_HEADING}\n{region}\n\n{NOTES_HEADING}\n{record.notes}"
 
 
 def parse_record(text: str, *, source: str) -> MeetingRecord:
+    """The inverse of `render_record`; `source` names the file in every refusal."""
+    return _parse_record(text, source=source, lenient=False)[0]
+
+
+def _parse_record(text: str, *, source: str, lenient: bool) -> tuple[MeetingRecord, bool]:
     """The inverse of `render_record`; `source` names the file in every refusal.
 
     The field block is the leading run of lines, ending at the first blank line
@@ -572,12 +596,10 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
     empty notes rather than a refusal: the machine-owned region is intact, the
     human region is simply absent, and the next `put` writes the heading back.
 
-    Between the two lies the reserved `## Summary` region, which is pm-ai's and
-    which this slice leaves empty — so anything in it beyond the heading itself
-    is refused rather than parsed past. That region used to be read and dropped:
-    a hand-written summary body disappeared on the next `put`, and a
-    `duration_minutes=` line one line below the blank separator was ignored
-    while the writer believed it had been stored.
+    Between the two lies the `## Summary` region, which is pm-ai's (story 7b):
+    empty, or the summary in its one grammar — anything else is refused
+    rather than parsed past. `lenient` (for `put`, which can repair it) drops
+    an unparseable region instead and says so in the second value.
     """
     lines = text.splitlines(keepends=True)
     notes_at = next(
@@ -605,7 +627,21 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
         _assert_readable_length(line, where=f"{source}: a field")
         key, value = _parse_field(line, fields=fields, source=source)
         fields[key] = value
-    _assert_reserved_region_empty(head[reserved_at:], source=source)
+    region = head[reserved_at:]
+    dropped = False
+    try:
+        _assert_no_field_below(region, source=source)
+        summary = parse_summary_region(region, source=source)
+    except MalformedSummary as unparsed:
+        if not lenient:
+            raise MalformedMeeting(str(unparsed)) from unparsed
+        summary, dropped = None, True
+    except MalformedMeeting:
+        # A field-shaped line in pm-ai's region: refused on read; dropped,
+        # with the rest of the region, by the one write that may repair it.
+        if not lenient:
+            raise
+        summary, dropped = None, True
 
     missing = sorted(_REQUIRED - fields.keys())
     if missing:
@@ -642,7 +678,7 @@ def parse_record(text: str, *, source: str) -> MeetingRecord:
         )
     except InvalidAttendeeCount as contradiction:
         raise MalformedMeeting(f"{source}: {contradiction}") from contradiction
-    return MeetingRecord(meeting=meeting, notes=notes)
+    return MeetingRecord(meeting=meeting, notes=notes, summary=summary), dropped
 
 
 # ── The accessor ─────────────────────────────────────────────────────────────
@@ -718,11 +754,52 @@ class MeetingRecords:
         """
         scope = _assert_records_meetings(meeting.scope, where="Meeting.scope")
         record_name(meeting.meeting_id, meeting.start)  # refuse an unrecordable id first
+        dropped: list[str] = []
         with self._storage.exclusive(scope=scope, artifact=MEETINGS):
             if meeting.calendar_event_ref is None:
-                notices = self._write(meeting, scope=scope)
-                return KeptRecord(meeting.meeting_id, notices=notices)
-            return self._put_calendar(meeting, scope=scope)
+                notices = self._write(meeting, scope=scope, dropped=dropped)
+                kept = KeptRecord(meeting.meeting_id, notices=notices)
+            else:
+                kept = self._put_calendar(meeting, scope=scope, dropped=dropped)
+        return replace(kept, summary_dropped=True) if dropped else kept
+
+    def put_summary(
+        self,
+        meeting_id: str,
+        *,
+        scope: DataScope,
+        summary: RecordedSummary,
+        check: Callable[[], None] = lambda: None,
+    ) -> None:
+        """Write the record's `## Summary` region, and nothing else (story 7b).
+
+        `put` takes a `Meeting` and never writes this region; this takes the
+        summary and changes neither the fields nor `## Notes`. Under the same
+        claim as `put`, read and written in one step; `check` runs inside it,
+        after the read and before the write — a summary job's lease check
+        (AD-37), so a job whose lease is gone writes nothing. A region that did
+        not parse is replaced. `MeetingNotFound` when no record carries the id.
+        """
+        scope = _assert_records_meetings(scope, where="put_summary(scope=…)")
+        with self._storage.exclusive(scope=scope, artifact=MEETINGS):
+            for member in self._members_for(meeting_id, scope=scope):
+                text = self._text(member, scope=scope)
+                if text is None:
+                    continue
+                record, _ = _parse_record(text, source=member, lenient=True)
+                _assert_name_agrees(member, record.meeting)
+                check()
+                self._storage.write_artifact(
+                    render_record(replace(record, summary=summary)).encode("utf-8"),
+                    scope=scope,
+                    artifact=MEETINGS,
+                    name=member,
+                )
+                return
+        raise MeetingNotFound(
+            f"no meeting {meeting_id!r} is recorded in {scope}, so its summary has "
+            f"no record to be written into."
+        )
 
     def find_candidates(
         self, scope: DataScope, title: str, start: datetime
@@ -851,10 +928,12 @@ class MeetingRecords:
 
     # ── Internals ────────────────────────────────────────────────────────────
 
-    def _put_calendar(self, meeting: Meeting, *, scope: DataScope) -> KeptRecord:
+    def _put_calendar(
+        self, meeting: Meeting, *, scope: DataScope, dropped: list[str]
+    ) -> KeptRecord:
         """`put` for a calendar-sourced meeting: look up, adopt, or write. Claimed."""
         if self._members_for(meeting.meeting_id, scope=scope):
-            return KeptRecord(meeting.meeting_id, notices=self._write(meeting, scope=scope))
+            return KeptRecord(meeting.meeting_id, notices=self._write(meeting, scope=scope, dropped=dropped))
         records, skipped = self._scan(scope)
         reference = meeting.calendar_event_ref or ""
         by_reference = sorted(
@@ -873,7 +952,10 @@ class MeetingRecords:
         if by_reference:
             kept = by_reference[0]
             notices = self._write(
-                replace(meeting, meeting_id=kept, manual_only=False), scope=scope, adopting=True
+                replace(meeting, meeting_id=kept, manual_only=False),
+                scope=scope,
+                adopting=True,
+                dropped=dropped,
             )
             return KeptRecord(kept, notices=(*skipped, *notices))
         manual = sorted(
@@ -885,10 +967,13 @@ class MeetingRecords:
         if len(manual) == 1:
             kept = manual[0]
             notices = self._write(
-                replace(meeting, meeting_id=kept, manual_only=False), scope=scope, adopting=True
+                replace(meeting, meeting_id=kept, manual_only=False),
+                scope=scope,
+                adopting=True,
+                dropped=dropped,
             )
             return KeptRecord(kept, adopted=True, notices=(*skipped, *notices))
-        notices = self._write(meeting, scope=scope)
+        notices = self._write(meeting, scope=scope, dropped=dropped)
         return KeptRecord(
             meeting.meeting_id,
             unadopted=tuple(manual) if len(manual) > 1 else (),
@@ -896,7 +981,12 @@ class MeetingRecords:
         )
 
     def _write(
-        self, meeting: Meeting, *, scope: DataScope, adopting: bool = False
+        self,
+        meeting: Meeting,
+        *,
+        scope: DataScope,
+        adopting: bool = False,
+        dropped: list[str] | None = None,
     ) -> tuple[str, ...]:
         """Write `meeting` under its own name, carrying `## Notes` over. Claimed.
 
@@ -913,11 +1003,13 @@ class MeetingRecords:
         """
         name = record_name(meeting.meeting_id, meeting.start)
         notes_of: dict[str, str] = {}
+        summary_of: dict[str, tuple[RecordedSummary | None, bool]] = {}
         manual: list[str] = []
         moved: list[str] = []
         for member in self._members_for(meeting.meeting_id, scope=scope):
             text = self._repairable_text(member, scope=scope)
             notes_of[member] = _notes_of(text)
+            summary_of[member] = _summary_of(text, source=member)
             hand_recorded = _is_manual_only(text)
             if hand_recorded:
                 manual.append(member)
@@ -934,14 +1026,24 @@ class MeetingRecords:
         kept_from = manual[0] if manual else name
         notes = notes_of.get(kept_from, "")
         notices: tuple[str, ...] = ()
+        summary, unparsed = summary_of.get(kept_from, (None, False))
+        if unparsed:
+            if dropped is not None:
+                dropped.append(kept_from)
+            notices = (
+                f"{kept_from} in {scope} had content in pm-ai's ## Summary region "
+                f"that is not its grammar, so the region was dropped and the "
+                f"summary is made again; ## Notes was kept.",
+            )
         if len({text for text in notes_of.values() if text}) > 1:
             notices = (
+                *notices,
                 f"{meeting.meeting_id} in {scope} had {len(notes_of)} records with "
                 f"different ## Notes ({', '.join(sorted(notes_of))}); the notes of "
                 f"{kept_from} were kept and the others were not carried over.",
             )
         self._storage.write_artifact(
-            render_record(MeetingRecord(meeting, notes)).encode("utf-8"),
+            render_record(MeetingRecord(meeting, notes, summary)).encode("utf-8"),
             scope=scope,
             artifact=MEETINGS,
             name=name,
@@ -1381,47 +1483,27 @@ def _assert_name_agrees(member: str, meeting: Meeting) -> None:
         )
 
 
-def _assert_reserved_region_empty(lines: list[str], *, source: str) -> None:
-    """Nothing between the field block and `## Notes` but the reserved heading.
+def _assert_no_field_below(lines: list[str], *, source: str) -> None:
+    """No field-shaped line below the field block, in pm-ai's `## Summary` region.
 
-    That region is pm-ai's — `## Summary` is machine-owned and this slice leaves
-    it empty — and it used to be read past and dropped on the next rewrite. Two
-    silent losses came out of that, and they are the two this refuses:
-
-    - a hand-written `## Summary` body disappeared on the next `put`, with no
-      message and nothing in the file to say it had been there;
-    - a field-shaped line placed one line *below* the blank separator was
-      ignored, so `duration_minutes=999` or `title=hijacked` parsed away while
-      the record went on reporting the value it already held.
-
-    The second is what `_parse_field` refuses an unknown key for, in this file's
-    own words: a typo silently dropped is a value the writer believes it stored.
-    The first is the same rule for prose. Both point the human at `## Notes`,
-    which is theirs, is copied through verbatim, and is where a hand-written
-    paragraph belongs until a model can fill the summary in (`11b`, story 7).
+    A field placed one line *below* the blank separator was ignored, so
+    `duration_minutes=999` or `title=hijacked` parsed away while the record
+    went on reporting the value it already held — what `_parse_field` refuses
+    an unknown key for: a typo silently dropped is a value the writer believes
+    it stored. Anything else in the region is the summary grammar's to judge.
     """
     for raw in lines:
         line = raw.rstrip("\r\n")
-        if not line.strip() or line == SUMMARY_HEADING:
-            continue
         key = line.partition("=")[0].strip()
         if "=" in line and key in _FIELDS:
             raise MalformedMeeting(
-                f"{source} declares {key!r} below the field block, in the "
-                f"reserved `## Summary` region, where nothing reads it. The field "
+                f"{source} declares {key!r} below the field block, in pm-ai's "
+                f"`## Summary` region, where nothing reads it. The field "
                 f"block is the *leading* run of lines and ends at the first blank "
                 f"line, so this line is dropped and the record keeps whatever "
                 f"value it already had — the same silent loss an unknown key is "
                 f"refused for. Move it up into the field block."
             )
-        raise MalformedMeeting(
-            f"{source} has content in the reserved `## Summary` region: "
-            f"{line!r}. That region is pm-ai's and this slice writes nothing into "
-            f"it — it is transcript-derived and needs a model — so anything left "
-            f"there is dropped by the next write rather than kept. Hand-written "
-            f"prose belongs under `## Notes`, which is copied through "
-            f"byte-identical."
-        )
 
 
 def _assert_utc(moment: datetime, *, where: str) -> datetime:
@@ -1514,6 +1596,32 @@ def _is_manual_only(text: str) -> bool:
         if line == f"{_MANUAL_ONLY}={_MANUAL_ONLY_VALUE}":
             return True
     return False
+
+
+def _summary_of(text: str, *, source: str) -> tuple[RecordedSummary | None, bool]:
+    """A member's `## Summary`, read off its raw text, and whether it failed to parse.
+
+    For `put`, which replaces the fields anyway and must carry the summary
+    over byte-identical: only the region between the field block and
+    `## Notes` is read, so a hand-mangled field never costs the summary.
+    """
+    lines = text.splitlines(keepends=True)
+    end = next(
+        (index for index, line in enumerate(lines) if line.rstrip("\r\n") == NOTES_HEADING),
+        len(lines),
+    )
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines[:end])
+            if not line.strip() or line.startswith("##")
+        ),
+        end,
+    )
+    try:
+        return parse_summary_region(lines[start:end], source=source), False
+    except MalformedSummary:
+        return None, True
 
 
 def _notes_of(text: str) -> str:

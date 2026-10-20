@@ -72,6 +72,9 @@ from pm_ai.app.pipelines import (
     publish_dashboard,
     record_failed_render,
     render_unrecorded,
+    SummaryOutcome,
+    request_summary,
+    summary_closing,
 )
 from pm_ai.connectors.registry import run_bounded
 from pm_ai.domain.renders import RenderUnrecorded
@@ -106,6 +109,7 @@ from pm_ai.surfaces.cli.dispatch import (
     EXIT_UNEXPECTED,
     EXIT_USAGE,
     RESTART_SENTENCE,
+    SUMMARIZE_WORDS,
     TAKES_A_PATH,
     TERMINAL_BOUND,
     Answered,
@@ -308,6 +312,56 @@ class _Rendering:
     """It holds its scope's render slot; before that it waits behind another."""
     finished: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class _PendingSummary:
+    """A summary job's row, settled once both halves are in (story 7b).
+
+    The command's own output arrives when `dispatch` returns; the summary's
+    outcome when its last stage ends, on another thread, possibly first.
+    """
+
+    def __init__(self, settle: Callable[[str, int], None]) -> None:
+        self._settle = settle
+        self._lock = threading.Lock()
+        self._started = False
+        self._output: tuple[str, int] | None = None
+        self._outcome: SummaryOutcome | BaseException | None = None
+        self._arrived = False
+        self._done = False
+
+    @property
+    def has_started(self) -> bool:
+        with self._lock:
+            return self._started or self._arrived
+
+    def started(self) -> None:
+        with self._lock:
+            self._started = True
+
+    def finished(self, outcome: SummaryOutcome | BaseException) -> None:
+        with self._lock:
+            self._outcome, self._arrived = outcome, True
+        self._maybe()
+
+    def returned(self, output: str, code: int) -> None:
+        with self._lock:
+            self._output = (output, code)
+        self._maybe()
+
+    def _maybe(self) -> None:
+        with self._lock:
+            if self._done or self._output is None:
+                return
+            if self._started and not self._arrived:
+                return  # the summary is still running; its end settles the row
+            self._done = True
+            output, code = self._output
+            outcome = self._outcome
+        if outcome is not None:
+            line, ended = summary_closing(outcome)
+            output, code = output + line, max(code, ended)
+        self._settle(output, code)
 
 
 @dataclass
@@ -756,6 +810,9 @@ class RequestPath:
     def _job_body(self, job_id: str, parsed: Parsed, kind: str) -> None:
         if not self._move(job_id, JobState.QUEUED, JobState.RUNNING, label="start the job"):
             return
+        if kind == " ".join(SUMMARIZE_WORDS):
+            self._summary_job(job_id, parsed, kind)
+            return
         try:
             output, code = self._command(parsed, job=job_id)
         except (WriterStopped, SchemaVersionChanged):
@@ -785,6 +842,76 @@ class RequestPath:
                 label="settle the job", result=result, final=True,
             )
             return
+        self._move(
+            job_id,
+            JobState.RUNNING,
+            JobState.DONE,
+            label="settle the job",
+            result={"output": output, "exit": code},
+            final=True,
+        )
+
+    def _summary_job(self, job_id: str, parsed: Parsed, kind: str) -> None:
+        """`transcript summarize` as a job whose result arrives when the model has answered (7b).
+
+        The command runs here, on this worker: its checks, the row's move to a
+        new version, and the job's start. Then this worker is free — it never
+        waits on the model pool (AD-19) — and the job's row is settled by
+        whichever finishes last, this command or the summary job, with the
+        command's output and the summary's closing line.
+        """
+        pending = _PendingSummary(lambda output, code: self._settle(job_id, output, code))
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            fresh = self._fresh(job_id)
+        except ConfigRefused as refused:
+            pending.returned(f"pm-ai: {refused}\n", EXIT_REFUSAL)
+            return
+        handed = handed_daemon(fresh, hand=self._hand_for(job_id))
+
+        def summarize(*, scope: DataScope, meeting_id: str, by: str) -> Any:
+            requested = request_summary(
+                handed,
+                scope=scope,
+                meeting_id=meeting_id,
+                job=job_id,
+                by=by,
+                on_done=pending.finished,
+            )
+            pending.started()
+            return requested
+
+        try:
+            code = dispatch(
+                parsed,
+                daemon=fresh,
+                diagnose=self.diagnose,
+                probe_connectors=None,
+                transcript_summarize=summarize,
+                out=out,
+                err=err,
+                terminal=False,
+            )
+        except BaseException as error:  # noqa: BLE001 — the row is always settled
+            if isinstance(error, (WriterStopped, SchemaVersionChanged)):
+                sentence = f"the {kind} job stopped: the daemon is stopping ({error})."
+            elif isinstance(error, (ArtifactBusy, OperationalStoreUnavailable)):
+                sentence = str(error)
+            else:
+                _log.warning(
+                    "the %s job %s stopped on an unexpected %s",
+                    kind, job_id, type(error).__name__, extra={"job": job_id},
+                )
+                sentence = _unexpected(error, doing=f"the {kind} job")
+            # Settled whether or not the summary had started: a row left
+            # `running` would hold a terminal following it for ever. Once the
+            # summary has started, its own end settles the row with this line.
+            said = out.getvalue() + err.getvalue() + f"pm-ai: {sentence}\n"
+            pending.returned(said, EXIT_UNEXPECTED)
+            return
+        pending.returned(out.getvalue() + err.getvalue(), code)
+
+    def _settle(self, job_id: str, output: str, code: int) -> None:
         self._move(
             job_id,
             JobState.RUNNING,

@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import errno
 import logging
+import secrets
 import sqlite3
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
 from pathlib import Path
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
 from pm_ai.app.concurrency import WriterStopped
@@ -35,6 +37,7 @@ from pm_ai.app.wiring import (
     GIT_QUESTION_SECONDS,
     Daemon,
     read_pm_identity,
+    require_model,
 )
 from pm_ai.connectors.gitlab.client import FETCH_BUDGET as GITLAB_FETCH_BUDGET
 from pm_ai.connectors.graph.client import FETCH_BUDGET as GRAPH_FETCH_BUDGET
@@ -57,6 +60,16 @@ from pm_ai.core.meeting_records import (
     has_capture,
     render_record,
 )
+from pm_ai.core.meeting_summary import (
+    SUMMARY_SHAPE,
+    SummaryPrompt,
+    action_item_id,
+    action_item_prefix,
+    decision_reference,
+    instructions_for,
+    summary_prompt,
+    validate_answer,
+)
 from pm_ai.core.transcripts import (
     MAX_DROP_MINUTES,
     MIN_DROP_MINUTES,
@@ -68,6 +81,7 @@ from pm_ai.core.transcripts import (
     drop_utterances,
     failure_reason,
     ingest,
+    meeting_utterances,
 )
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import MalformedGoals, parse_goals
@@ -83,10 +97,33 @@ from pm_ai.core.rendering import (
 )
 from pm_ai.core.team_activity import WorkAnswer
 from pm_ai.domain.event_entries import MalformedEntry, UnknownCategory
-from pm_ai.domain.events import MeetingHeldPayload, NormalizedEvent, ObservedEventType
+from pm_ai.domain.events import (
+    DecisionPayload,
+    MeetingHeldPayload,
+    NormalizedEvent,
+    ObservedEventType,
+    Provenance,
+)
+from pm_ai.domain.handles import NO_PERSON
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.lifecycle import ProposalState
+from pm_ai.domain.meeting_summaries import (
+    ACTION_ITEM,
+    FRONTIER_SUMMARY_REFUSED,
+    ModelAnswerRefused,
+    RecordedSummary,
+    SummaryActionItem,
+    SummaryAnswer,
+    SummaryDecision,
+    SummaryFence,
+    SummaryLeaseLost,
+    SummaryMaker,
+    SummaryRefused,
+    SummaryRule,
+    SummaryStateKind,
+)
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.renders import RenderUnrecorded
 from pm_ai.connectors.graph.auth import StoreBusy
@@ -104,8 +141,11 @@ from pm_ai.domain.harvest import (
 from pm_ai.domain.scope_model import ScopeResolutionError, artifacts_in
 from pm_ai.domain.disclosure import CommittedScopeLeak
 from pm_ai.domain.storage_tiers import CAPTURES, UnprotectedCaptureDir
+from pm_ai.domain.task_classes import TaskClass
 from pm_ai.domain.transcripts import (
     CaptureFormat,
+    CaptureMissing,
+    NothingSaid,
     CaptureNotIngested,
     DropInterrupted,
     DropRefused,
@@ -125,6 +165,11 @@ from pm_ai.ports import (
     DecryptionFailed,
     KeychainUnavailable,
     KeyNotFound,
+    LocalModelUnavailable,
+    ModelTimedOut,
+    NoLocalModel,
+    OutputCapReached,
+    PossiblyTruncated,
 )
 from pm_ai.storage.service import (
     GitExclusion,
@@ -133,8 +178,10 @@ from pm_ai.storage.service import (
     OperationalStoreUnavailable,
     ProposalNotFound,
     SchemaVersionChanged,
+    StorageService,
 )
 from pm_ai.skills.registry import ExecutedButUnrecorded, Invocation
+from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL, EXIT_UNEXPECTED, RESTART_SENTENCE
 
 _log = logging.getLogger(__name__)
 
@@ -345,6 +392,10 @@ def _harvest(
             refusals.append(f"calendar meeting {meeting.meeting_id} was not recorded: {refused}")
             continue
         refusals.extend(kept.notices)
+        if kept.summary_dropped:
+            # Story 7b: a hand edit in pm-ai's region is never kept as pm-ai's;
+            # the region was dropped and the summary is made again (AD-37).
+            refusals.extend(_summary_made_again(daemon, meeting, kept.meeting_id))
         if kept.meeting_id != meeting.meeting_id:
             kept_ids[meeting.meeting_id] = kept.meeting_id
         if kept.unadopted:
@@ -434,6 +485,11 @@ def _harvest(
             # success that save stamped (story 9a).
             abandoned.after_save = True
             raise
+    # Story 7b — the waiting summaries are offered, at most three, each job
+    # handed to the daemon's pools; nothing here waits on a model.
+    offered = offer_summaries(daemon)
+    if offered:
+        persisted = replace(persisted, refusals=(*persisted.refusals, *offered))
     return persisted, result.failure
 
 
@@ -657,6 +713,8 @@ def ingest_captures(daemon: Daemon, report: TranscriptReport) -> TranscriptRepor
                 _record_ingestion(daemon, scope, meeting_id, TranscriptStateKind.INGEST_FAILED, reason)
             )
             continue
+        for _, outcome in done:
+            refusals.extend(outcome.notices)
         if part_failures:
             # A part that failed does not stop the parts after it (story 33g):
             # each is ingested on its own, and the ones that worked stay so.
@@ -678,6 +736,9 @@ def ingest_captures(daemon: Daemon, report: TranscriptReport) -> TranscriptRepor
                 daemon, scope, meeting_id, TranscriptStateKind.INGESTED, _ingested_parts(done)
             )
         )
+        # Story 7b: its summary offered — a new row waiting, or an automatic
+        # summary re-opened over the whole meeting when a later part arrived.
+        refusals.extend(note_summary_input(daemon, scope, meeting_id, ingested_now=bool(done)))
     return replace(
         report,
         ingested=tuple(ingested),
@@ -964,6 +1025,9 @@ class TranscriptIngestion:
     failures: tuple[str, ...] = ()
     unrecorded: tuple[str, ...] = ()
     left: tuple[str, ...] = ()
+    notices: tuple[str, ...] = ()
+    """Sentences for the run's refusals: what went wrong beside the ingestion
+    itself — a summary that could not be offered again (story 7b)."""
 
 
 def bind_transcript(
@@ -1019,7 +1083,12 @@ def run_transcript_ingestion(
     # staging leaves a record its partial proposals can still be resolved
     # against. A transcript that extracts nothing still leaves its record: the
     # meeting happened, and `33c` records meetings with no transcript at all.
-    daemon.meetings.put(meeting)
+    kept = daemon.meetings.put(meeting)
+    notices: tuple[str, ...] = ()
+    if kept.summary_dropped:
+        # Story 7b: the region was dropped (named in `kept.notices`) and the
+        # summary is made again.
+        notices = (*kept.notices, *_summary_made_again(daemon, meeting, kept.meeting_id))
 
     # **Nothing below may end the ingestion** except a staging write that
     # fails: a target with no enrolled skill stages, a skill that raises has its
@@ -1074,6 +1143,7 @@ def run_transcript_ingestion(
         failures=tuple(failures),
         unrecorded=tuple(unrecorded),
         left=tuple(left),
+        notices=notices,
     )
 
 
@@ -1323,6 +1393,13 @@ def drop_transcript(
             f"its proposals are staged regardless; {_NO_REINGEST}, so the "
             f"missing row stays missing"
         ),
+    )
+    # Story 7b: recorded as waiting wherever the drop runs; only the daemon
+    # summarises, at its next harvest.
+    notices = (
+        *notices,
+        *outcome.notices,
+        *note_summary_input(daemon, home, meeting.meeting_id, ingested_now=False),
     )
     return TranscriptDropped(
         capture=capture,
@@ -2233,3 +2310,856 @@ def _deduplicate(meetings: list[Meeting]) -> tuple[Meeting, ...]:
             seen_unidentified.add(meeting.meeting_id)
         kept.append(meeting)
     return tuple(kept)
+
+
+# ── A meeting's summary, decisions and action items (story 7b) ───────────────
+
+
+SUMMARY_CALL_DEADLINE_SECONDS = 300.0
+"""One model call's deadline: the local adapter's own (`MODEL_CALL_DEADLINE_SECONDS`).
+
+Spelled here, beside the pipeline, because the pipeline imports no model
+client; a test holds the two equal."""
+
+TRANSCRIPT_SUMMARIZE_BOUND_SECONDS = 2 * SUMMARY_CALL_DEADLINE_SECONDS
+"""`transcript summarize`'s bound (AD-21): the call and its one retry. Over five
+seconds, so the command is acknowledged as a job."""
+
+SUMMARY_OFFER_LIMIT = 3
+"""At most this many meetings are offered for a summary per harvest."""
+
+SUMMARY_MAX_AGE = timedelta(days=30)
+"""A meeting that started longer ago than this is never offered automatically:
+its transcript is purged at 30 days (NFR-09)."""
+
+
+class Hop(Enum):
+    """Where a summary job's next stage runs (AD-19)."""
+
+    MODEL = "model"
+    """The model pool: the call, and nothing else."""
+    IO = "io"
+    """The I/O pool: reading, judging the answer, and handing each write over."""
+
+
+class SummaryResult(Enum):
+    """How one summary job ended."""
+
+    SUMMARIZED = "summarized"
+    NOTHING_SAID = "nothing said"
+    WAITING = "waiting"
+    """No local model, Ollama not answering, or the model not pulled: not an attempt."""
+    TIMED_OUT = "timed out"
+    FAILED = "failed"
+    STOPPED = "stopped"
+    """Its row moved past the version it read: something else is on record."""
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryCall:
+    """What one model call reported, for the measured figures (story 7b)."""
+
+    model: str
+    prompt_tokens: int
+    output_tokens: int
+    total_ns: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryOutcome:
+    """What `summarize_meeting` did, handed on for `7e` rather than re-read.
+
+    `decisions` pairs each decision with its reference, `action_items` each
+    item with its proposal id; `superseded` names the staged items a
+    re-summary moved to `superseded`, and `left` those the PM had acted on.
+    """
+
+    scope: DataScope
+    meeting_id: str
+    result: SummaryResult
+    reason: str
+    answer: SummaryAnswer | None = None
+    decisions: tuple[tuple[str, SummaryDecision], ...] = ()
+    action_items: tuple[tuple[str, SummaryActionItem], ...] = ()
+    superseded: tuple[str, ...] = ()
+    left: tuple[str, ...] = ()
+    calls: tuple[SummaryCall, ...] = ()
+    prompt_characters: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    meeting: Meeting
+    prompt: SummaryPrompt
+
+
+def _prepare(daemon: Daemon, scope: DataScope, meeting_id: str) -> _Prepared:
+    """The meeting's whole transcript as the call's fragments, or why not.
+
+    `SummaryRefused` naming the reason when the meeting is not recorded, its
+    transcript row is not `ingested` (a part that failed ingestion named), or
+    a capture is missing; `NothingSaid` when no utterance has words left.
+    Reads only: the parts and their captures through storage, handed to the
+    whole-meeting reader.
+    """
+    try:
+        meeting = daemon.meetings.get(meeting_id, scope=scope).meeting
+    except MeetingNotFound:
+        raise SummaryRefused(
+            f"no meeting {meeting_id!r} is recorded in {scope}, so there is no "
+            f"transcript to summarise. Nothing was asked of the model."
+        ) from None
+    except MalformedMeeting as unreadable:
+        raise SummaryRefused(
+            f"meeting {meeting_id}'s record in {scope} could not be read, so it is "
+            f"not summarised: {unreadable} Nothing was asked of the model."
+        ) from unreadable
+    state = daemon.storage.transcript_states(scope).get(meeting_id)
+    if state is None:
+        raise SummaryRefused(
+            f"meeting {meeting_id} in {scope} has no transcript ingested, so there "
+            f"is nothing to summarise. Nothing was asked of the model."
+        )
+    if state.state == TranscriptStateKind.INGEST_FAILED.value:
+        raise SummaryRefused(
+            f"a part of meeting {meeting_id}'s transcript in {scope} failed "
+            f"ingestion, so it is not summarised: {state.reason} Nothing was asked "
+            f"of the model."
+        )
+    if state.state != TranscriptStateKind.INGESTED.value:
+        raise SummaryRefused(
+            f"meeting {meeting_id}'s transcript in {scope} is {state.state}, "
+            f"not ingested, so it is not summarised. Nothing was asked of the model."
+        )
+    stem = capture_stem(meeting_id, meeting.start)
+    parts = daemon.storage.transcript_parts(scope).get(meeting_id, ())
+    try:
+        captures: dict[str, str] = {}
+        for name in daemon.storage.list_collection(scope=scope, artifact=CAPTURES):
+            if not name.startswith(stem):
+                continue
+            raw = daemon.storage.read_artifact(scope=scope, artifact=CAPTURES, name=name)
+            if raw is not None:
+                captures[name] = raw.decode("utf-8")
+        utterances = meeting_utterances(meeting_id, meeting.start, parts=parts, captures=captures)
+    except CaptureMissing as missing:
+        raise SummaryRefused(f"{missing} Nothing was asked of the model.") from missing
+    except (UnreadableTranscript, UnicodeDecodeError) as unreadable:
+        raise SummaryRefused(
+            f"meeting {meeting_id}'s transcript in {scope} could not be read: "
+            f"{failure_reason(unreadable)}. Nothing was asked of the model."
+        ) from unreadable
+    prompt = summary_prompt(
+        meeting.title, utterances, name=f"meeting {meeting_id}'s transcript in {scope}"
+    )
+    return _Prepared(meeting, prompt)
+
+
+_UNAVAILABLE: tuple[type[BaseException], ...] = (NoLocalModel, LocalModelUnavailable)
+"""No local model, Ollama not answering, the model not pulled: waiting, not an attempt."""
+
+_CALL_REFUSALS: tuple[type[BaseException], ...] = (
+    NoLocalModel,
+    LocalModelUnavailable,
+    ModelTimedOut,
+    PossiblyTruncated,
+    OutputCapReached,
+)
+
+
+def _call(
+    daemon: Daemon, scope: DataScope, prepared: _Prepared, rule: SummaryRule | None
+) -> Generator[Hop, None, ModelAnswer | BaseException]:
+    """One call on the model pool; then back to the I/O pool with its answer or refusal."""
+    yield Hop.MODEL
+    try:
+        model = require_model(daemon)
+        result: ModelAnswer | BaseException = model.complete(
+            task_class=TaskClass.EXTRACTION,
+            instructions=instructions_for(rule, language=prepared.prompt.language),
+            external=prepared.prompt.fragments,
+            flow=ScopeFlow.of((scope,), scope),
+            shape=SUMMARY_SHAPE,
+        )
+    except _CALL_REFUSALS as refused:
+        result = refused
+    yield Hop.IO
+    return result
+
+
+def _judged(
+    result: ModelAnswer | BaseException, labels: frozenset[str]
+) -> SummaryAnswer | SummaryRule | BaseException:
+    """A valid answer, the rule a refused one broke, or the call's own refusal."""
+    if isinstance(result, OutputCapReached):
+        return SummaryRule.OUTPUT_CAP
+    if isinstance(result, BaseException):
+        return result
+    try:
+        return validate_answer(result.text, labels=labels)
+    except ModelAnswerRefused as refused:
+        return refused.rule
+
+
+def summary_steps(
+    daemon: Daemon,
+    scope: DataScope,
+    meeting_id: str,
+    *,
+    job: str,
+    fence: SummaryFence | None = None,
+    offered: SummaryFence | None = None,
+    prepared: _Prepared | None = None,
+) -> Generator[Hop, None, SummaryOutcome]:
+    """One summary job, as stages: each `yield` names the pool the next one runs on.
+
+    Preparation runs where the job starts (an I/O worker) and ends there; the
+    call and its one retry are handed to the model pool, and what follows each
+    call back to the I/O pool, so no I/O worker waits on the model pool
+    (AD-19). Every write is one claimed step: the lease on the state row, the
+    record's block, the decision events, the proposals with their
+    supersession, then the row's final state, each checked against the lease
+    inside its own step (AD-37). A lost lease stops the job with nothing
+    further written.
+
+    `fence` is a request's (`request_summary` moved the row first). Otherwise
+    the job reads the row and stops unless it is still `waiting` — at the
+    version it was `offered` at, when a harvest offered it — so a job that
+    starts after a request or another job moved the row writes nothing.
+
+    After preparation, a fault pm-ai does not expect settles the row `failed`
+    naming its type, so the model is not asked again every harvest; a busy
+    store or claim, or the writer stopping, leaves the row as it was, to be
+    offered again.
+    """
+    storage = daemon.storage
+    calls: list[SummaryCall] = []
+
+    def outcome(result: SummaryResult, reason: str, **found: Any) -> SummaryOutcome:
+        return SummaryOutcome(
+            scope,
+            meeting_id,
+            result,
+            reason,
+            calls=tuple(calls),
+            prompt_characters=0 if prepared is None else prepared.prompt.characters,
+            **found,
+        )
+
+    try:
+        if fence is None:
+            state = storage.summary_state(scope, meeting_id)
+            if state is None:
+                return outcome(SummaryResult.STOPPED, "no summary row offers this meeting")
+            if state.state is not SummaryStateKind.WAITING or (
+                offered is not None and state.version != offered.version
+            ):
+                return outcome(
+                    SummaryResult.STOPPED,
+                    f"meeting {meeting_id}'s summary row moved on since it was "
+                    f"offered ({state.state.value}), so this job did nothing",
+                )
+            fence = SummaryFence(scope, meeting_id, state.version)
+            requested = state.requested
+        else:
+            requested = True
+        if prepared is None:
+            try:
+                prepared = _prepare(daemon, scope, meeting_id)
+            except NothingSaid as silent:
+                reason = str(silent)
+                storage.settle_summary(fence, state=SummaryStateKind.NOTHING_SAID, reason=reason)
+                return outcome(SummaryResult.NOTHING_SAID, reason)
+            except SummaryRefused as refused:
+                reason = str(refused)
+                storage.settle_summary(fence, state=SummaryStateKind.FAILED, reason=reason)
+                return outcome(SummaryResult.FAILED, reason)
+        labels = prepared.prompt.labels
+
+        first = yield from _call(daemon, scope, prepared, None)
+        if isinstance(first, ModelAnswer):
+            calls.append(_measured(first))
+        judged = _judged(first, labels)
+        if isinstance(judged, BaseException):
+            return _without_answer(storage, fence, judged, prepared, outcome, retried=False)
+        if isinstance(judged, SummaryRule):
+            rule = judged
+            second = yield from _call(daemon, scope, prepared, rule)
+            if isinstance(second, ModelAnswer):
+                calls.append(_measured(second))
+            judged = _judged(second, labels)
+            if isinstance(judged, BaseException):
+                return _without_answer(storage, fence, judged, prepared, outcome, retried=True)
+            if isinstance(judged, SummaryRule):
+                reason = _refused_twice(scope, meeting_id, rule, judged)
+                storage.settle_summary(fence, state=SummaryStateKind.FAILED, reason=reason)
+                return outcome(SummaryResult.FAILED, reason)
+        answer = judged
+        model_name = calls[-1].model if calls else "the local model"
+        return _written(
+            daemon, scope, meeting_id, job, fence, prepared, answer, model_name, requested, outcome
+        )
+    except SummaryLeaseLost as lost:
+        return outcome(SummaryResult.STOPPED, str(lost))
+
+
+def _written(
+    daemon: Daemon,
+    scope: DataScope,
+    meeting_id: str,
+    job: str,
+    fence: SummaryFence,
+    prepared: _Prepared,
+    answer: SummaryAnswer,
+    model_name: str,
+    requested: bool,
+    outcome: Callable[..., SummaryOutcome],
+) -> SummaryOutcome:
+    """The writes, each its own claimed step under the lease; or the row failed."""
+    storage = daemon.storage
+    try:
+
+        # In order, each complete on its own and keyed, so a re-run repeats
+        # only what is missing.
+        lease = storage.take_summary_lease(fence, job=job)
+        now = daemon.clock()
+        daemon.meetings.put_summary(
+            meeting_id,
+            scope=scope,
+            summary=RecordedSummary(
+                model=model_name,
+                requested=requested,
+                made_on=now.astimezone(timezone.utc).date(),
+                answer=answer,
+            ),
+            check=lambda: storage.check_summary_lease(lease),
+        )
+        decisions = tuple(
+            (decision_reference(meeting_id, decision.statement), decision)
+            for decision in answer.decisions
+        )
+        storage.persist_decisions(
+            tuple(
+                NormalizedEvent(
+                    scope=scope,
+                    type=ObservedEventType.DECISION,
+                    source_ref=SourceRef.parse(reference),
+                    # A speaker label is not a person (AD-34).
+                    actor=NO_PERSON,
+                    occurred_at=prepared.meeting.start,
+                    payload=DecisionPayload(statement=decision.statement),
+                    # pm-ai's reading of a transcript is never evidence (AD-36).
+                    authored_by=Provenance.PM_AI,
+                )
+                for reference, decision in decisions
+            ),
+            scope=scope,
+            fence=lease,
+        )
+        items = tuple(
+            (action_item_id(scope, meeting_id, item), item) for item in answer.action_items
+        )
+        cites = SourceRef.parse(f"meeting:{meeting_id}")
+        staged = storage.stage_summary_items(
+            tuple(
+                Proposal(
+                    proposal_id=proposal_id,
+                    type=ACTION_ITEM,
+                    summary=item.what[:80],
+                    payload={"what": item.what, "owner": item.owner, "due": item.due},
+                    target=None,  # never executed
+                    cites=cites,  # AD-33 — the meeting
+                    created_at=now,
+                    state=ProposalState.STAGED,
+                )
+                for proposal_id, item in items
+            ),
+            prefix=action_item_prefix(scope, meeting_id),
+            fence=lease,
+        )
+        reason = (
+            f"summarised by the local model {model_name}"
+            f"{' on request' if requested else ''}: {len(decisions)} decision(s), "
+            f"{len(items)} action item(s) staged"
+            + (f", {len(staged.superseded)} superseded" if staged.superseded else "")
+            + "."
+        )
+        storage.settle_summary(
+            lease, state=SummaryStateKind.SUMMARIZED, reason=reason, model=model_name
+        )
+        return outcome(
+            SummaryResult.SUMMARIZED,
+            reason,
+            answer=answer,
+            decisions=decisions,
+            action_items=items,
+            superseded=staged.superseded,
+            left=staged.left,
+        )
+    except SummaryLeaseLost as lost:
+        return outcome(SummaryResult.STOPPED, str(lost))
+    except _LEFT_AS_IT_WAS:
+        raise
+    except Exception as broken:  # noqa: BLE001 — settled by its type, never re-offered
+        reason = (
+            f"meeting {meeting_id}'s summary could not be written: "
+            f"{type(broken).__name__}, which pm-ai did not expect. It is not offered "
+            f"again automatically; {_ask_again(scope, meeting_id)}"
+        )
+        current = storage.summary_state(scope, meeting_id)
+        held = (
+            SummaryFence(scope, meeting_id, current.version, current.job)
+            if current is not None and current.job == job
+            else fence
+        )
+        try:
+            storage.settle_summary(held, state=SummaryStateKind.FAILED, reason=reason)
+        except SummaryLeaseLost as lost:
+            return outcome(SummaryResult.STOPPED, str(lost))
+        return outcome(SummaryResult.FAILED, reason)
+
+
+_LEFT_AS_IT_WAS: tuple[type[BaseException], ...] = (
+    WriterStopped,
+    ArtifactBusy,
+    OperationalStoreUnavailable,
+    SchemaVersionChanged,
+)
+"""Faults that clear by waiting, or the daemon stopping: the row is left as it
+was, and a waiting row is offered again at a later harvest."""
+
+
+def _ask_again(scope: DataScope, meeting_id: str) -> str:
+    return f"`pm-ai transcript summarize --scope {scope} --meeting {meeting_id}` asks again."
+
+
+def _refused_twice(
+    scope: DataScope, meeting_id: str, first: SummaryRule, second: SummaryRule
+) -> str:
+    """The failure's reason, from both refusals as they were."""
+    if first is second is SummaryRule.OUTPUT_CAP:
+        broke = f"both answers stopped at the {_OUTPUT_CAP_WORDS}"
+    elif first is second:
+        broke = f"both answers were refused for {first.value}"
+    else:
+        broke = f"the first answer was refused for {first.value}, the second for {second.value}"
+    return (
+        f"the local model's answer was refused twice, so meeting {meeting_id} was "
+        f"not summarised and is not offered again automatically: {broke}. "
+        f"{_ask_again(scope, meeting_id)}"
+    )
+
+
+_OUTPUT_CAP_WORDS = "local model's output cap"
+
+
+def _measured(answer: ModelAnswer) -> SummaryCall:
+    return SummaryCall(answer.model, answer.prompt_tokens, answer.output_tokens, answer.total_ns)
+
+
+def _without_answer(
+    storage: StorageService,
+    fence: SummaryFence,
+    refused: BaseException,
+    prepared: _Prepared,
+    outcome: Callable[..., SummaryOutcome],
+    *,
+    retried: bool,
+) -> SummaryOutcome:
+    """The row's state when a call gave no answer to judge."""
+    meeting_id = fence.meeting_id
+    if isinstance(refused, _UNAVAILABLE):
+        reason = (
+            f"the local model could not be asked{' for the retry' if retried else ''}, "
+            f"so meeting {meeting_id} waits for the next harvest"
+            + (" and the first answer was discarded" if retried else "")
+            + f": {refused}"
+        )
+        storage.settle_summary(fence, state=SummaryStateKind.WAITING, reason=reason)
+        return outcome(SummaryResult.WAITING, reason)
+    if isinstance(refused, ModelTimedOut):
+        state = storage.record_summary_timeout(
+            fence,
+            reason=(
+                f"a call to the local model about meeting {meeting_id} outlasted its "
+                f"{SUMMARY_CALL_DEADLINE_SECONDS:g}-second deadline"
+            ),
+        )
+        result = (
+            SummaryResult.FAILED if state.state is SummaryStateKind.FAILED else SummaryResult.TIMED_OUT
+        )
+        return outcome(result, state.reason)
+    if isinstance(refused, PossiblyTruncated):
+        reason = (
+            f"meeting {meeting_id}'s transcript does not fit the local model's "
+            f"window in one call, so it was not summarised and is not offered again "
+            f"automatically; the prompt is {prepared.prompt.characters} characters of "
+            f"transcript besides the instructions: {refused} A frontier summary "
+            f"(story 7c) is the way to summarise it."
+        )
+        storage.settle_summary(fence, state=SummaryStateKind.FAILED, reason=reason)
+        return outcome(SummaryResult.FAILED, reason)
+    raise refused
+
+
+class SummaryJobs:
+    """The daemon's summary jobs: one in flight per (scope, meeting), and where each stage runs.
+
+    `io` and `model` hand a stage to the I/O pool and the model pool without
+    waiting for it; by default each runs where it is, which is how a test (and
+    nothing else outside the daemon) runs a whole job inline. `daemon_for`
+    builds the daemon one job's stages use — in the daemon, read afresh with its
+    own door to the writer (`handed_daemon`); `model_stopping` says the model
+    pool's shutdown has begun, after which no answer is handed on.
+    `model_first` hands a requested job's call to the model pool ahead of the
+    automatic ones queued there (Andrei, 2026-10-20), so a request's bound
+    covers only its own call and retry; by default it is `model`.
+    """
+
+    def __init__(
+        self,
+        *,
+        io: Callable[[Callable[[], None]], object] | None = None,
+        model: Callable[[Callable[[], None]], object] | None = None,
+        model_first: Callable[[Callable[[], None]], object] | None = None,
+        daemon_for: Callable[[], Daemon] | None = None,
+        model_stopping: Callable[[], bool] = lambda: False,
+    ) -> None:
+        self._io = io or _here
+        self._model = model or _here
+        self._model_first = model_first or self._model
+        self._daemon_for = daemon_for
+        self._model_stopping = model_stopping
+        self._lock = threading.Lock()
+        self._in_flight: dict[tuple[DataScope, str], str] = {}
+
+    def in_flight(self, scope: DataScope, meeting_id: str) -> bool:
+        with self._lock:
+            return (scope, meeting_id) in self._in_flight
+
+    def start(
+        self,
+        daemon: Daemon,
+        scope: DataScope,
+        meeting_id: str,
+        *,
+        job: str | None = None,
+        fence: SummaryFence | None = None,
+        offered: SummaryFence | None = None,
+        prepared: _Prepared | None = None,
+        on_done: Callable[[SummaryOutcome | BaseException], None] | None = None,
+    ) -> bool:
+        """Start one job; `False` when an automatic one is already in flight.
+
+        A request (`fence` given, from `request_summary`) always starts: it
+        has already moved the row to a new version, so a job in flight for
+        the same meeting stops before its next write. An automatic job is
+        given the version it was `offered` at, and stops unless the row is
+        still there.
+        """
+        key = (scope, meeting_id)
+        name = job or f"summary_{secrets.token_hex(6)}"
+        # A request runs on its own job's daemon; an automatic job gets one of
+        # its own, never the harvest's that offered it. Built before the
+        # meeting is marked in flight, so a build that raises leaves no mark.
+        own = daemon if self._daemon_for is None or job is not None else self._daemon_for()
+        with self._lock:
+            if fence is None and key in self._in_flight:
+                return False
+            self._in_flight[key] = name
+
+        def done(result: SummaryOutcome | BaseException) -> None:
+            with self._lock:
+                if self._in_flight.get(key) == name:
+                    del self._in_flight[key]
+            if isinstance(result, BaseException):
+                _log.warning(
+                    "the summary of meeting %s in %s stopped on %s; its row was left "
+                    "as it was, and a waiting row is offered again at a later harvest",
+                    meeting_id,
+                    scope,
+                    type(result).__name__,
+                )
+            if on_done is not None:
+                on_done(result)
+
+        try:
+            steps = summary_steps(
+                own, scope, meeting_id, job=name, fence=fence, offered=offered, prepared=prepared
+            )
+        except BaseException:
+            done(_stopping())
+            raise
+        self._drive(steps, done, requested=fence is not None)
+        return True
+
+    def _drive(
+        self,
+        steps: Generator[Hop, None, SummaryOutcome],
+        done: Callable[[SummaryOutcome | BaseException], None],
+        *,
+        requested: bool = False,
+    ) -> None:
+        """Run `steps`, handing each stage to the pool it names, waiting on none.
+
+        A requested job's model stages go ahead of the automatic ones queued.
+        """
+        model = self._model_first if requested else self._model
+
+        def stop() -> None:
+            steps.close()
+            done(_stopping())
+
+        def resume() -> None:
+            try:
+                hop = next(steps)
+            except StopIteration as stopped:
+                done(stopped.value)
+                return
+            except BaseException as raised:  # noqa: BLE001 — named in the log, never lost
+                done(raised)
+                return
+            if hop is Hop.IO and self._model_stopping():
+                stop()
+                return
+            try:
+                (model if hop is Hop.MODEL else self._io)(resume)
+            except Exception:  # noqa: BLE001 — a pool that stopped taking work
+                stop()
+
+        try:
+            self._io(resume)
+        except Exception:  # noqa: BLE001 — a pool that stopped taking work
+            stop()
+
+
+def _here(stage: Callable[[], None]) -> None:
+    stage()
+
+
+def _stopping() -> WriterStopped:
+    return WriterStopped(
+        "a summary job's next stage could not be handed to its pool (the daemon "
+        "is stopping), so nothing more was written; a waiting row is offered "
+        "again at a later harvest."
+    )
+
+
+def summarize_meeting(
+    daemon: Daemon,
+    scope: DataScope,
+    meeting_id: str,
+    *,
+    job: str = "summary",
+    fence: SummaryFence | None = None,
+) -> SummaryOutcome:
+    """One meeting's summary, run inline, start to end; the validated answer handed on.
+
+    The stages `summary_steps` names, run where this is called — for a test,
+    or a caller already on the right thread. The daemon runs the same stages
+    through `SummaryJobs`, each on its own pool.
+    """
+    steps = summary_steps(daemon, scope, meeting_id, job=job, fence=fence)
+    try:
+        while True:
+            next(steps)
+    except StopIteration as stopped:
+        return stopped.value
+
+
+def offer_summaries(daemon: Daemon) -> tuple[str, ...]:
+    """After a harvest: start up to `SUMMARY_OFFER_LIMIT` waiting summaries (story 7b).
+
+    Only in the daemon (`daemon.summaries`): elsewhere nothing is offered and a
+    waiting row waits; and only with a local model named — with `local_model`
+    unset nothing is started and nothing read (a model named but not
+    answering goes through the job and waits). The most recent meetings
+    first; none older than `SUMMARY_MAX_AGE`; only a meeting whose transcript
+    row is `ingested`; one job in flight per meeting; each job given the
+    version it was offered at. Returns a sentence for each meeting skipped or
+    whose job could not start, for the harvest's refusals; never raises.
+    """
+    jobs = daemon.summaries
+    if jobs is None or daemon.model is None:
+        return ()
+    try:
+        offered = daemon.storage.summaries_to_offer(since=daemon.clock() - SUMMARY_MAX_AGE)
+    except Exception as unreadable:  # noqa: BLE001 — named; the harvest is saved
+        return (
+            f"the summaries waiting could not be read ({type(unreadable).__name__}), "
+            f"so none was offered this harvest.",
+        )
+    started = 0
+    said: list[str] = []
+    for state in offered:
+        if started >= SUMMARY_OFFER_LIMIT:
+            break
+        if state.scope.kind is ScopeKind.PROJECT and state.scope.project_id not in daemon.watched:
+            said.append(
+                f"meeting {state.meeting_id}'s summary waits in {state.scope}, which this "
+                f"daemon does not watch, so it was not offered. {RESTART_SENTENCE}"
+            )
+            continue
+        try:
+            if jobs.start(
+                daemon,
+                state.scope,
+                state.meeting_id,
+                offered=SummaryFence(state.scope, state.meeting_id, state.version),
+            ):
+                started += 1
+        except Exception as unstarted:  # noqa: BLE001 — one meeting, not the harvest
+            said.append(
+                f"the summary of meeting {state.meeting_id} in {state.scope} could not "
+                f"be started ({type(unstarted).__name__}); it waits for the next harvest."
+            )
+    return tuple(said)
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryRequested:
+    """`transcript summarize`'s acknowledgement: the job started, in the daemon."""
+
+    scope: DataScope
+    meeting_id: str
+    title: str
+
+    @property
+    def line(self) -> str:
+        return (
+            f"the summary of meeting {self.meeting_id} ({self.title!r}) in "
+            f"{self.scope} was asked of the local model; any summary running for "
+            f"it was stopped before its next write."
+        )
+
+
+def request_summary(
+    daemon: Daemon,
+    *,
+    scope: DataScope,
+    meeting_id: str,
+    job: str,
+    by: str = SummaryMaker.LOCAL.value,
+    on_done: Callable[[SummaryOutcome | BaseException], None] | None = None,
+) -> SummaryRequested:
+    """`transcript summarize`: checked, then started in the daemon (story 7b).
+
+    Refused by name before any model call: `--by claude` (`7c`), no daemon to
+    run it, a meeting not recorded, a transcript not ingested (a failed part
+    named), a capture missing. Then the row moves to a new version — revoking
+    any job running for it — and the job starts; this returns at once, and
+    `on_done` is told how it ended.
+    """
+    if by != SummaryMaker.LOCAL.value:
+        raise SummaryRefused(FRONTIER_SUMMARY_REFUSED)
+    jobs = daemon.summaries
+    if jobs is None:
+        raise SummaryRefused(
+            "only the daemon summarises a transcript, and this process is not the "
+            "daemon; start it with `pm-ai daemon run` and ask again."
+        )
+    prepared: _Prepared | None
+    try:
+        prepared = _prepare(daemon, scope, meeting_id)
+        meeting = prepared.meeting
+    except NothingSaid:
+        # Settled by the job as "nothing said", with no call.
+        prepared = None
+        meeting = daemon.meetings.get(meeting_id, scope=scope).meeting
+    fence = daemon.storage.request_summary(
+        scope,
+        meeting_id,
+        meeting_start=meeting.start,
+        reason="asked for with `pm-ai transcript summarize`",
+    )
+    jobs.start(daemon, scope, meeting_id, job=job, fence=fence, prepared=prepared, on_done=on_done)
+    return SummaryRequested(scope, meeting_id, meeting.title)
+
+
+def summary_closing(outcome: SummaryOutcome | BaseException) -> tuple[str, int]:
+    """How a requested summary ended, as the job's last line and exit code."""
+    if isinstance(outcome, BaseException):
+        return (
+            f"pm-ai: the summary stopped on {type(outcome).__name__}; its row was left "
+            f"as it was, and a waiting row is offered again at a later harvest.\n",
+            EXIT_UNEXPECTED,
+        )
+    if outcome.result is SummaryResult.SUMMARIZED:
+        return (
+            f"meeting {outcome.meeting_id} in {outcome.scope}: {outcome.reason} The "
+            f"record's ## Summary holds it.\n",
+            EXIT_OK,
+        )
+    if outcome.result is SummaryResult.NOTHING_SAID:
+        return f"meeting {outcome.meeting_id} in {outcome.scope}: {outcome.reason}\n", EXIT_OK
+    return f"pm-ai: {outcome.reason}\n", EXIT_REFUSAL
+
+
+def note_summary_input(
+    daemon: Daemon, scope: DataScope, meeting_id: str, *, ingested_now: bool
+) -> tuple[str, ...]:
+    """After a meeting's transcript is ingested: its summary row offered (story 7b).
+
+    A meeting with no row gets one, `waiting`. One whose automatic summary was
+    made, failed or found nothing said is offered again over the whole meeting
+    when this ingestion ingested a later part (`ingested_now`) — unless an
+    earlier part's capture is gone (purged), when nothing is re-opened. One the
+    PM asked for is kept. Sentences for the run's refusals; never raises.
+    """
+    try:
+        meeting = daemon.meetings.get(meeting_id, scope=scope).meeting
+        reopen = ingested_now and _stored_parts_on_disk(daemon, scope, meeting)
+        daemon.storage.offer_summary(
+            scope,
+            meeting_id,
+            meeting_start=meeting.start,
+            reason=(
+                "a later part of the transcript was ingested, so the summary is "
+                "made again over the whole meeting"
+                if reopen
+                else "the transcript was ingested; the daemon summarises it at its next harvest"
+            ),
+            reopen=reopen,
+        )
+    except Exception as unrecorded:  # noqa: BLE001 — named; the ingestion stands
+        return (
+            f"meeting {meeting_id} in {scope} was ingested but its summary could not "
+            f"be offered ({type(unrecorded).__name__}); the next ingestion offers it.",
+        )
+    return ()
+
+
+def _stored_parts_on_disk(daemon: Daemon, scope: DataScope, meeting: Meeting) -> bool:
+    """Whether every stored Graph part's capture of the meeting is still on disk.
+
+    Only the `transcript_parts` rows are checked: a meeting with none (a single
+    `-graph.vtt`, or a dropped capture) answers `True`, since a re-open comes
+    only from a later part, which has a row.
+    """
+    rows = daemon.storage.transcript_parts(scope).get(meeting.meeting_id, ())
+    names = set(daemon.storage.list_collection(scope=scope, artifact=CAPTURES))
+    return all(
+        capture_name(meeting.meeting_id, meeting.start, CaptureFormat.GRAPH, part=row.part) in names
+        for row in rows
+        if row.state is PartState.STORED
+    )
+
+
+def _summary_made_again(daemon: Daemon, meeting: Meeting, kept_id: str) -> tuple[str, ...]:
+    """The summary row set back to offered after a record's region was dropped."""
+    try:
+        daemon.storage.reset_summary(
+            meeting.scope,
+            kept_id,
+            meeting_start=meeting.start,
+            reason=(
+                "the record's ## Summary region held something not in its grammar "
+                "and was dropped, so the summary is made again"
+            ),
+        )
+    except Exception as unrecorded:  # noqa: BLE001 — named; the record is written
+        return (
+            f"meeting {kept_id} in {meeting.scope}: its summary could not be offered "
+            f"again ({type(unrecorded).__name__}); `pm-ai transcript summarize` asks for it.",
+        )
+    return ()

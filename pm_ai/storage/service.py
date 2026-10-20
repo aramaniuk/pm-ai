@@ -44,6 +44,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from pm_ai.domain import clocks
 from pm_ai.domain.api_token import MAX_TOKEN_FILE_BYTES, check_api_token, symlinked
@@ -70,6 +71,16 @@ from pm_ai.domain.payload_fields import encode_payload
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.scope_model import ADDRESS, CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
+from pm_ai.domain.meeting_summaries import (
+    ACTION_ITEM,
+    MAX_TIMEOUTS,
+    SummaryFence,
+    SummaryItemsStaged,
+    SummaryLeaseLost,
+    SummaryMaker,
+    SummaryState,
+    SummaryStateKind,
+)
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
 from pm_ai.domain.transcripts import (
     MAX_INGEST_ATTEMPTS,
@@ -234,6 +245,21 @@ CREATE TABLE IF NOT EXISTS transcript_part_asks (
     asked_at   TEXT NOT NULL,
     PRIMARY KEY (scope, meeting_id)
 );
+CREATE TABLE IF NOT EXISTS meeting_summaries (
+    scope         TEXT NOT NULL,
+    meeting_id    TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    made_by       TEXT NOT NULL,
+    requested     INTEGER NOT NULL,
+    model         TEXT,
+    attempts      INTEGER NOT NULL,
+    reason        TEXT NOT NULL,
+    at            TEXT NOT NULL,
+    version       INTEGER NOT NULL,
+    meeting_start TEXT NOT NULL,
+    job           TEXT,
+    PRIMARY KEY (scope, meeting_id)
+);
 CREATE TABLE IF NOT EXISTS renders (
     scope        TEXT PRIMARY KEY,
     last_success TEXT,
@@ -350,7 +376,7 @@ SCHEMA_VERSION = 1
 # the same way, and for the same reason the version did not move; so did story
 # `9a`'s `harvest_runs`, and story `9b`'s `renders`. Story `8t`'s six `gitlab_`
 # tables (AD-3's GitLab project work) are new tables too, so the version does
-# not move for them either (AD-5).
+# not move for them either (AD-5); nor for story `7b`'s `meeting_summaries`.
 
 # Version 0 is the *unversioned era* — every store written before this story.
 # It is not a shape: two stores can both be at 0 and differ, because the era had
@@ -1503,6 +1529,53 @@ def render_records_at(store: Path) -> tuple[RenderRecord, ...]:
                 retryable=bool(retryable) and last_failure is not None,
             )
         )
+    return tuple(records)
+
+
+_ITEM_DIGEST = 12
+_HEX12 = re.compile(r"[0-9a-f]{12}")
+"""An action item id's tail: the 12-hex digest (`pm_ai.core.meeting_summary.digest`)."""
+
+
+def summary_records_at(store: Path) -> tuple[tuple[SummaryState, bool], ...]:
+    """Every `meeting_summaries` row in the store at `store`, read-only (7b).
+
+    Each with whether its meeting's transcript row is `ingested`, which is
+    what a harvest offers on. The most recent meeting first. No store, or no
+    table yet, is no rows; a row that cannot be read is skipped and logged, so
+    one bad row never fails `doctor`'s line.
+    """
+    if not store.exists():
+        return ()
+    reader = sqlite3.connect(f"{store.as_uri()}?mode=ro", uri=True)
+    try:
+        try:
+            rows = reader.execute(
+                "SELECT "
+                + ", ".join(
+                    f"s.{column.strip()}" for column in StorageService._SUMMARY_COLUMNS.split(",")
+                )
+                + ", t.state FROM meeting_summaries s LEFT JOIN transcript_state t "
+                "ON t.scope = s.scope AND t.meeting_id = s.meeting_id "
+                "ORDER BY s.meeting_start DESC, s.scope, s.meeting_id"
+            ).fetchall()
+        except sqlite3.OperationalError as missing:
+            if "no such table" in str(missing):
+                return ()
+            raise
+    finally:
+        reader.close()
+    records = []
+    for row in rows:
+        try:
+            records.append(
+                (
+                    StorageService._summary_row(row[:-1]),
+                    row[-1] == TranscriptStateKind.INGESTED.value,
+                )
+            )
+        except ValueError:
+            _storage_log.warning("a meeting_summaries row could not be read; it is skipped")
     return tuple(records)
 
 
@@ -4381,6 +4454,414 @@ class StorageService:
         return tuple(
             (DataScope.parse(scope), meeting_id, reason)
             for scope, meeting_id, reason in rows
+        )
+
+    # ── A meeting's summary (story 7b): Tier 2, never the record ─────────────
+    # One row per (scope, meeting): where its summary got to, and a version
+    # that moves with every write. A job reads the version when it starts and
+    # takes a lease with its first write — a compare-and-set naming the job —
+    # and every later write checks the lease inside its own claimed step
+    # (AD-37). Created by `_SCHEMA` on open, so `SCHEMA_VERSION` does not move.
+
+    _SUMMARY_COLUMNS = (
+        "scope, meeting_id, state, made_by, requested, model, attempts, reason, at, "
+        "version, meeting_start, job"
+    )
+
+    @staticmethod
+    def _summary_row(row: Sequence[Any]) -> SummaryState:
+        (
+            scope, meeting_id, state, made_by, requested, model, attempts, reason, at,
+            version, meeting_start, job,
+        ) = row
+        return SummaryState(
+            scope=DataScope.parse(scope),
+            meeting_id=meeting_id,
+            state=SummaryStateKind(state),
+            made_by=SummaryMaker(made_by),
+            requested=bool(requested),
+            model=model,
+            attempts=int(attempts),
+            reason=reason,
+            at=datetime.fromisoformat(at),
+            version=int(version),
+            meeting_start=datetime.fromisoformat(meeting_start),
+            job=job,
+        )
+
+    def _summary_fenced(self, fence: SummaryFence) -> None:
+        """`SummaryLeaseLost` unless the row is still at `fence` — its version and lease."""
+        row = self._db.execute(
+            "SELECT version, job FROM meeting_summaries WHERE scope = ? AND meeting_id = ?",
+            (str(fence.scope), fence.meeting_id),
+        ).fetchone()
+        if row is None or int(row[0]) != fence.version or (
+            fence.job is not None and row[1] != fence.job
+        ):
+            raise SummaryLeaseLost(
+                f"the summary of meeting {fence.meeting_id} in {fence.scope} moved on "
+                f"since this job read it (a request, a later part or a calendar write), "
+                f"so this job stopped and wrote nothing more."
+            )
+
+    def offer_summary(
+        self,
+        scope: DataScope,
+        meeting_id: str,
+        *,
+        meeting_start: datetime,
+        reason: str,
+        reopen: bool = False,
+    ) -> bool:
+        """Offer this meeting's summary: a new row `waiting`, or an automatic one re-opened.
+
+        No row: one is written `waiting`. A row already there is left as it
+        is, unless `reopen` (a later part was ingested): then an automatic
+        summary — made, failed, nothing said or waiting — is offered again at
+        a new version, which revokes a job running on the old one. One the PM
+        asked for is kept. `True` when the row changed.
+        """
+        at = self._at().isoformat()
+        try:
+            inserted = self._db.execute(
+                "INSERT INTO meeting_summaries "
+                f"({self._SUMMARY_COLUMNS}) VALUES (?, ?, ?, ?, 0, NULL, 0, ?, ?, 1, ?, NULL) "
+                "ON CONFLICT(scope, meeting_id) DO NOTHING",
+                (
+                    str(scope),
+                    meeting_id,
+                    SummaryStateKind.WAITING.value,
+                    SummaryMaker.LOCAL.value,
+                    reason,
+                    at,
+                    meeting_start.isoformat(),
+                ),
+            ).rowcount
+            reopened = 0
+            if not inserted and reopen:
+                reopened = self._db.execute(
+                    "UPDATE meeting_summaries SET state = ?, attempts = 0, reason = ?, at = ?, "
+                    "version = version + 1, job = NULL "
+                    "WHERE scope = ? AND meeting_id = ? AND requested = 0",
+                    (SummaryStateKind.WAITING.value, reason, at, str(scope), meeting_id),
+                ).rowcount
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return bool(inserted or reopened)
+
+    def reset_summary(
+        self, scope: DataScope, meeting_id: str, *, meeting_start: datetime, reason: str
+    ) -> None:
+        """A record's summary region was dropped: the summary is made again (AD-37).
+
+        Whoever made it: `waiting`, automatic, at a new version, so a job
+        running on the old one stops before its next write.
+        """
+        at = self._at().isoformat()
+        try:
+            self._db.execute(
+                "INSERT INTO meeting_summaries "
+                f"({self._SUMMARY_COLUMNS}) VALUES (?, ?, ?, ?, 0, NULL, 0, ?, ?, 1, ?, NULL) "
+                "ON CONFLICT(scope, meeting_id) DO UPDATE SET state = excluded.state, "
+                "requested = 0, attempts = 0, reason = excluded.reason, at = excluded.at, "
+                "version = meeting_summaries.version + 1, job = NULL",
+                (
+                    str(scope),
+                    meeting_id,
+                    SummaryStateKind.WAITING.value,
+                    SummaryMaker.LOCAL.value,
+                    reason,
+                    at,
+                    meeting_start.isoformat(),
+                ),
+            )
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+
+    def request_summary(
+        self, scope: DataScope, meeting_id: str, *, meeting_start: datetime, reason: str
+    ) -> SummaryFence:
+        """The PM asked: the row moves to a new version first, `waiting`, asked for.
+
+        The move revokes any job's lease on the old version, so that job stops
+        before its next write. The fence returned is what the requested job
+        reads.
+        """
+        at = self._at().isoformat()
+        try:
+            self._db.execute(
+                "INSERT INTO meeting_summaries "
+                f"({self._SUMMARY_COLUMNS}) VALUES (?, ?, ?, ?, 1, NULL, 0, ?, ?, 1, ?, NULL) "
+                "ON CONFLICT(scope, meeting_id) DO UPDATE SET state = excluded.state, "
+                "requested = 1, attempts = 0, reason = excluded.reason, at = excluded.at, "
+                "version = meeting_summaries.version + 1, job = NULL",
+                (
+                    str(scope),
+                    meeting_id,
+                    SummaryStateKind.WAITING.value,
+                    SummaryMaker.LOCAL.value,
+                    reason,
+                    at,
+                    meeting_start.isoformat(),
+                ),
+            )
+            (version,) = self._db.execute(
+                "SELECT version FROM meeting_summaries WHERE scope = ? AND meeting_id = ?",
+                (str(scope), meeting_id),
+            ).fetchone()
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return SummaryFence(scope, meeting_id, int(version))
+
+    def summary_state(self, scope: DataScope, meeting_id: str) -> SummaryState | None:
+        """This meeting's summary row, or `None`."""
+        row = self._db.execute(
+            f"SELECT {self._SUMMARY_COLUMNS} FROM meeting_summaries "
+            "WHERE scope = ? AND meeting_id = ?",
+            (str(scope), meeting_id),
+        ).fetchone()
+        return None if row is None else self._summary_row(row)
+
+    def summaries_to_offer(self, *, since: datetime) -> tuple[SummaryState, ...]:
+        """Every `waiting` summary a harvest may offer, the most recent meeting first.
+
+        Only a meeting that started at or after `since` and whose transcript
+        row is `ingested`: a part that failed ingestion, no capture or a purged
+        one is never offered.
+        """
+        rows = self._db.execute(
+            "SELECT "
+            + ", ".join(f"s.{column.strip()}" for column in self._SUMMARY_COLUMNS.split(","))
+            + " FROM meeting_summaries s JOIN transcript_state t "
+            "ON t.scope = s.scope AND t.meeting_id = s.meeting_id "
+            "WHERE s.state = ? AND t.state = ? AND s.meeting_start >= ? "
+            "ORDER BY s.meeting_start DESC, s.scope, s.meeting_id",
+            (
+                SummaryStateKind.WAITING.value,
+                TranscriptStateKind.INGESTED.value,
+                since.astimezone(timezone.utc).isoformat(),
+            ),
+        ).fetchall()
+        return tuple(self._summary_row(row) for row in rows)
+
+    def summaries_recorded(self) -> tuple[tuple[SummaryState, bool], ...]:
+        """Every summary row, across scopes, on a read-only connection of its own.
+
+        For `pm-ai doctor`, which names the meetings waiting, failed and timing
+        out (story 7b). `summary_records_at` over this store.
+        """
+        return summary_records_at(self._store)
+
+    def take_summary_lease(self, fence: SummaryFence, *, job: str) -> SummaryFence:
+        """The job's first write: compare-and-set the row from the version it read.
+
+        `SummaryLeaseLost` when the row has moved on. The lease returned names
+        the job and the new version; every later write checks it.
+        """
+        try:
+            taken = self._db.execute(
+                "UPDATE meeting_summaries SET version = version + 1, job = ?, at = ? "
+                "WHERE scope = ? AND meeting_id = ? AND version = ?",
+                (job, self._at().isoformat(), str(fence.scope), fence.meeting_id, fence.version),
+            ).rowcount
+            if taken != 1:
+                raise SummaryLeaseLost(
+                    f"the summary of meeting {fence.meeting_id} in {fence.scope} moved "
+                    f"on since this job read it, so this job stopped and wrote nothing."
+                )
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return SummaryFence(fence.scope, fence.meeting_id, fence.version + 1, job)
+
+    def check_summary_lease(self, fence: SummaryFence) -> None:
+        """`SummaryLeaseLost` unless the row is still at `fence`; inside a write's step."""
+        self._summary_fenced(fence)
+
+    def settle_summary(
+        self,
+        fence: SummaryFence,
+        *,
+        state: SummaryStateKind,
+        reason: str,
+        model: str | None = None,
+    ) -> SummaryState:
+        """The row's final state for this job, if the row is still at `fence`.
+
+        Summarised or nothing said clears the timeout count; waiting and failed
+        keep it. The version moves and the lease is released.
+        """
+        try:
+            self._summary_fenced(fence)
+            self._db.execute(
+                "UPDATE meeting_summaries SET state = ?, reason = ?, at = ?, "
+                "model = COALESCE(?, model), version = version + 1, job = NULL, "
+                "attempts = CASE WHEN ? THEN 0 ELSE attempts END "
+                "WHERE scope = ? AND meeting_id = ?",
+                (
+                    state.value,
+                    reason,
+                    self._at().isoformat(),
+                    model,
+                    int(state in (SummaryStateKind.SUMMARIZED, SummaryStateKind.NOTHING_SAID)),
+                    str(fence.scope),
+                    fence.meeting_id,
+                ),
+            )
+            settled = self.summary_state(fence.scope, fence.meeting_id)
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        if settled is None:
+            raise SummaryLeaseLost(
+                f"the summary row of meeting {fence.meeting_id} in {fence.scope} "
+                f"vanished while it was settled."
+            )
+        return settled
+
+    def record_summary_timeout(self, fence: SummaryFence, *, reason: str) -> SummaryState:
+        """A call timed out: an attempt. `waiting` to be offered again; the third fails it."""
+        try:
+            self._summary_fenced(fence)
+            (attempts,) = self._db.execute(
+                "SELECT attempts FROM meeting_summaries WHERE scope = ? AND meeting_id = ?",
+                (str(fence.scope), fence.meeting_id),
+            ).fetchone()
+            count = int(attempts) + 1
+            failed = count >= MAX_TIMEOUTS
+            said = (
+                f"{reason}; that is the {count} time(s) running, so it failed as timing "
+                f"out and is not offered again automatically."
+                if failed
+                else f"{reason} ({count} of {MAX_TIMEOUTS}); it is offered again at the next harvest."
+            )
+            self._db.execute(
+                "UPDATE meeting_summaries SET state = ?, reason = ?, at = ?, attempts = ?, "
+                "version = version + 1, job = NULL WHERE scope = ? AND meeting_id = ?",
+                (
+                    (SummaryStateKind.FAILED if failed else SummaryStateKind.WAITING).value,
+                    said,
+                    self._at().isoformat(),
+                    count,
+                    str(fence.scope),
+                    fence.meeting_id,
+                ),
+            )
+            settled = self.summary_state(fence.scope, fence.meeting_id)
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        if settled is None:
+            raise SummaryLeaseLost(
+                f"the summary row of meeting {fence.meeting_id} in {fence.scope} "
+                f"vanished while it was settled."
+            )
+        return settled
+
+    def persist_decisions(
+        self, events: tuple[NormalizedEvent, ...], *, scope: DataScope, fence: SummaryFence
+    ) -> PersistResult:
+        """`persist_events` for a summary's decisions, under its lease, in one step."""
+        at = self._at()
+        try:
+            self._summary_fenced(fence)
+            result = self._append_batch(events, at, scope=scope)
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return result
+
+    def stage_summary_items(
+        self, proposals: Sequence[Proposal], *, prefix: str, fence: SummaryFence
+    ) -> SummaryItemsStaged:
+        """A summary's action items staged, and the ones it no longer produces superseded.
+
+        Under the summary's lease, in one step. Each proposal is staged unless
+        one under its id has left `staged` (`stage_unless_acted`'s rule); then
+        every still-staged action item whose id starts with `prefix` — this
+        scope's and meeting's — and is not among `proposals` is moved to
+        `superseded` by compare-and-set. One the PM acted on is left as it is.
+        """
+        produced = {proposal.proposal_id for proposal in proposals}
+        staged: list[str] = []
+        left: list[str] = []
+        superseded: list[str] = []
+        kept_superseded: list[str] = []
+        try:
+            self._summary_fenced(fence)
+            for proposal in proposals:
+                written = self._db.execute(
+                    "INSERT INTO proposals (proposal_id, body, version, state) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(proposal_id) DO UPDATE SET body = excluded.body, "
+                    "version = excluded.version, state = excluded.state "
+                    "WHERE proposals.state = ?",
+                    (
+                        proposal.proposal_id,
+                        _dump_proposal(proposal),
+                        proposal.version,
+                        proposal.state.value,
+                        ProposalState.STAGED.value,
+                    ),
+                ).rowcount
+                if written == 1:
+                    staged.append(proposal.proposal_id)
+                    continue
+                (held,) = self._db.execute(
+                    "SELECT state FROM proposals WHERE proposal_id = ?", (proposal.proposal_id,)
+                ).fetchone()
+                if held == ProposalState.SUPERSEDED.value:
+                    kept_superseded.append(proposal.proposal_id)
+                else:
+                    left.append(proposal.proposal_id)
+            # Exactly this meeting's items: the prefix, then the 12-hex digest
+            # and nothing more, so another meeting whose id merely begins with
+            # this one's is never matched.
+            rows = self._db.execute(
+                "SELECT proposal_id, body FROM proposals "
+                "WHERE substr(proposal_id, 1, ?) = ? AND length(proposal_id) = ? "
+                "AND state = ? ORDER BY proposal_id",
+                (len(prefix), prefix, len(prefix) + _ITEM_DIGEST, ProposalState.STAGED.value),
+            ).fetchall()
+            for proposal_id, body in rows:
+                if proposal_id in produced or not _HEX12.fullmatch(proposal_id[len(prefix):]):
+                    continue
+                current = _load_proposal(body)
+                if current.type != ACTION_ITEM:
+                    continue
+                moved = current.transition(
+                    ProposalState.SUPERSEDED, expected_version=current.version
+                )
+                changed = self._db.execute(
+                    "UPDATE proposals SET body = ?, version = ?, state = ? "
+                    "WHERE proposal_id = ? AND version = ? AND state = ?",
+                    (
+                        _dump_proposal(moved),
+                        moved.version,
+                        moved.state.value,
+                        proposal_id,
+                        current.version,
+                        ProposalState.STAGED.value,
+                    ),
+                ).rowcount
+                if changed == 1:
+                    superseded.append(proposal_id)
+        except BaseException:
+            self._db.rollback()
+            raise
+        self._db.commit()
+        return SummaryItemsStaged(
+            tuple(staged), tuple(left), tuple(superseded), tuple(kept_superseded)
         )
 
     def was_executed(self, idempotency_key: str) -> bool:

@@ -158,10 +158,13 @@ class SkillPermission(Enum):
 # different shapes, in two modules, both claiming to be canonical.
 
 _REF = re.compile(r"^(?P<system>[a-z0-9_]+):(?P<scope>[A-Za-z0-9_.-]+):(?P<kind>[a-z0-9_]+):(?P<native_id>\S+)$")
-# Global entities belong to no project, so they take the two-part form:
-# `meeting:mtg_01HX`, `goal:goal_01HX`. A closed set (AD-34) — adding a member
-# is a deliberate change here, not something a caller may assume.
-SCOPELESS_SYSTEMS = frozenset({"meeting", "goal"})
+# Scopeless systems take the two-part form: `meeting:mtg_01HX`,
+# `goal:goal_01HX`, `decision:<meeting id>_<digest>` (story 7b, AD-33). An id
+# here names one entity without a scope component; the scope that owns each
+# record travels in the event's envelope and the natural key (AD-34). A closed
+# set — adding a member is a deliberate change here, not something a caller may
+# assume. A `decision` is scopeless because the meeting it extends is.
+SCOPELESS_SYSTEMS = frozenset({"meeting", "goal", "decision"})
 # Public because `pm_ai.domain.handles` keeps the person-handle systems apart
 # from it (AD-34).
 _NON_DURABLE = frozenset({"transcript", "file", "chat_history"})
@@ -178,7 +181,8 @@ _NON_DURABLE = frozenset({"transcript", "file", "chat_history"})
 # could prove that pm-ai's own promise had been kept, reached through AD-33's
 # citation rule rather than through a connector, which is the door AD-36 was
 # watching.
-PM_AI_MINTED = frozenset({"goal"})
+# A decision is pm-ai's reading of a transcript (story 7b): never outside evidence.
+PM_AI_MINTED = frozenset({"goal", "decision"})
 
 
 class InconsistentReferenceModel(RuntimeError):

@@ -240,6 +240,28 @@ class LocalModel(ModelPort, Protocol):
         ...
 
 
+class SummaryStarter(Protocol):
+    """Where the daemon starts a meeting's summary job (story 7b).
+
+    `pm_ai.app.pipelines.SummaryJobs`, named by shape here because the
+    pipeline imports this module. `None` on a daemon outside `daemon run`:
+    only the daemon summarises.
+    """
+
+    def start(
+        self,
+        daemon: Daemon,
+        scope: DataScope,
+        meeting_id: str,
+        *,
+        job: str | None = None,
+        fence: Any = None,
+        offered: Any = None,
+        prepared: Any = None,
+        on_done: Any = None,
+    ) -> bool: ...
+
+
 @dataclass
 class Daemon:
     storage: StorageService
@@ -352,6 +374,12 @@ class Daemon:
     """
     model_pool: ModelPool | None = None
     """The daemon's model pool of one, once started (AD-19, story 7a); `None` elsewhere."""
+    summaries: SummaryStarter | None = None
+    """The daemon's summary jobs, once `daemon run` has started its pools (story 7b).
+
+    `None` everywhere else, which is what "only the daemon summarises" means:
+    a harvest or a drop elsewhere records a meeting as waiting and starts
+    nothing."""
     instance_scopes: Mapping[str, DataScope] = field(default_factory=dict)
     """The scope each connector instance was filed under when it was built (9a).
 
@@ -3960,6 +3988,18 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "mark_part_ingested": ("mark a transcript part ingested", _asks_none),
     "record_part_ask": ("record when a meeting's transcript was asked for", _asks_none),
     "stage_unless_acted": ("stage a proposal", _asks_none),
+    # Story 7b: a meeting's summary row, its lease, and the writes under it.
+    "offer_summary": ("offer a meeting's summary", _asks_none),
+    "reset_summary": ("offer a meeting's summary again", _asks_none),
+    "request_summary": ("record a requested summary", _asks_none),
+    "take_summary_lease": ("take the summary's lease", _asks_none),
+    "settle_summary": ("record the summary's state", _asks_none),
+    "record_summary_timeout": ("record a summary call that timed out", _asks_none),
+    "persist_decisions": ("persist the meeting's decisions", _named(EVENT_LOG)),
+    "stage_summary_items": ("stage the meeting's action items", _asks_none),
+    "check_summary_lease": ("check the summary's lease", _asks_none),
+    "summary_state": ("read the summary's state", _asks_none),
+    "summaries_to_offer": ("read the summaries to offer", _asks_none),
     "stage_proposal": ("stage a proposal", _asks_none),
     "transition_proposal": ("move a proposal", _asks_none),
     "begin_execution": ("record a skill call before it is made", _asks_none),
@@ -3992,6 +4032,7 @@ PLAIN_READS: frozenset[str] = frozenset(
         "harvest_records",  # its own read-only connection
         "project_work",  # its own read-only connection (story 8t)
         "render_records",  # its own read-only connection
+        "summaries_recorded",  # its own read-only connection (story 7b)
         "last_render",  # its own read-only connection
         "ask_git_exclusion",  # `git`'s answer, uncached: a bounded step
         "assert_writable",  # `git`'s answer and the key check: a bounded step
@@ -4091,6 +4132,14 @@ class HandedMeetings:
     def put(self, meeting: Any) -> Any:
         self._storage.assert_writable(scope=meeting.scope, artifact=MEETINGS)
         return self._hand(lambda: self._meetings.put(meeting), "save the meeting record")
+
+    def put_summary(self, meeting_id: str, *, scope: DataScope, **summary: Any) -> Any:
+        """The record's `## Summary` region: one claimed step, its `check` inside it (7b)."""
+        self._storage.assert_writable(scope=scope, artifact=MEETINGS)
+        return self._hand(
+            lambda: self._meetings.put_summary(meeting_id, scope=scope, **summary),
+            "save the meeting's summary",
+        )
 
 
 def handed_daemon(daemon: Daemon, *, hand: Hand) -> Daemon:

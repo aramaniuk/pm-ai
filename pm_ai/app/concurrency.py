@@ -368,6 +368,8 @@ class IOPool:
         self._work: collections.deque[tuple[Callable[[], Any], Future[Any]]] = (
             collections.deque()
         )
+        self._ahead = 0
+        """How many of the queued items at the front of `_work` were submitted ahead."""
         self._condition = threading.Condition()
         self._closed = False
         self._threads = [
@@ -407,6 +409,7 @@ class IOPool:
             for _, future in self._work:
                 future.cancel()
             self._work.clear()
+            self._ahead = 0
             self._condition.notify_all()
 
     def _run(self) -> None:
@@ -455,6 +458,12 @@ class ModelPool:
     abandoned by the shutdown would have written is written, whichever side
     of the call's end the shutdown lands on.
 
+    **Work submitted `ahead` is queued before ordinary work** (story 7b,
+    Andrei, 2026-10-20): a summary the PM asked for is not left behind the
+    harvest's automatic ones, so its bound covers its own call and retry. It
+    never interrupts the job running, and work submitted ahead keeps its own
+    order.
+
     A job's deadline is the request's own, so the slot is held until the
     request has actually ended and a second job never overlaps a generation
     still running. A model call never runs on the loop, the writer thread or
@@ -467,6 +476,8 @@ class ModelPool:
         self._work: collections.deque[tuple[Callable[[], Any], Future[Any]]] = (
             collections.deque()
         )
+        self._ahead = 0
+        """How many of the queued items at the front of `_work` were submitted ahead."""
         self._condition = threading.Condition()
         self._gate = threading.Lock()
         self._closed = False
@@ -491,12 +502,17 @@ class ModelPool:
         self._started = True
         self._thread.start()
 
-    def submit(self, work: Callable[[], _T]) -> Future[_T]:
+    def submit(self, work: Callable[[], _T], *, ahead: bool = False) -> Future[_T]:
+        """Queue `work`; with `ahead`, after any work queued ahead and before the rest."""
         future: Future[_T] = Future()
         with self._condition:
             if self._closed:
                 raise RuntimeError("the daemon's model pool has stopped taking work")
-            self._work.append((work, future))
+            if ahead:
+                self._work.insert(self._ahead, (work, future))
+                self._ahead += 1
+            else:
+                self._work.append((work, future))
             self._condition.notify()
         return future
 
@@ -524,6 +540,7 @@ class ModelPool:
             for _, future in self._work:
                 future.cancel()
             self._work.clear()
+            self._ahead = 0
             self._condition.notify_all()
         if self._abort is not None:
             try:
@@ -539,6 +556,8 @@ class ModelPool:
                 if not self._work:
                     return
                 work, future = self._work.popleft()
+                if self._ahead:
+                    self._ahead -= 1
                 if not future.set_running_or_notify_cancel():
                     continue
                 self._running = future

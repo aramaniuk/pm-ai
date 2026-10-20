@@ -738,3 +738,8 @@ def test_inside_double_quotes_the_specials_are_escaped_and_split_back():
     # `shlex` escapes only `"` and `\\` inside double quotes; `$` stays as is.
     assert quoted == '"a \\"b\\" $c `d` \\\\e"'
     assert shlex.split(quoted) == ['a "b" $c `d` \\e']
+
+
+def test_transcript_summarize_by_offers_exactly_local_and_claude():
+    """Story 7b: `--by` completes to who makes a summary, and nothing else."""
+    assert _offered("transcript summarize --scope personal --by ") == ["local", "claude"]

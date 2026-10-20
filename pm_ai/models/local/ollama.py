@@ -112,16 +112,18 @@ does not fit 8,192; 16,384 is the smallest power of two holding it and an
 answer. Ollama's runner peaked at 7.1–7.5 GB at this window (M3 Pro, 18 GB).
 """
 
-NUM_PREDICT = 2048
-"""The output cap every request sends (`num_predict`; Andrei, 2026-10-19).
+NUM_PREDICT = 4096
+"""The output cap every request sends (`num_predict`); raised from 2,048 by `7b`.
 
-Sized from the longest valid answer measured — 314 output tokens (`qwen3:8b`,
-the authored meeting) — with about 6.5 times that as headroom. Measured on the
-re-run (2026-10-19): `llama3.1:8b`'s generation on the redacted recording,
-which does not end, now stops at the cap and the whole call takes 121–124
-seconds, inside `MODEL_CALL_DEADLINE_SECONDS`, rather than holding the model
-pool's one slot to the deadline. The 8,619-token recording plus the cap fits
-`NUM_CTX`. Not measured against `7b`'s answer shape at its bounds.
+`7a` sized it from the longest valid answer it measured — 314 output tokens
+(`qwen3:8b`, the authored meeting). For `7b`'s answer shape the cap was raised
+to 4,096 (Andrei, 2026-10-19); `7b`'s real answers measured at most 716 output
+tokens. The shape's limits do not guarantee the largest valid answer fits
+(Andrei, 2026-10-20): an answer that reaches the cap is refused as
+`OutputCapReached`, asked for once more, then refused. An answer that does not end
+still stops here rather than holding the model pool's one slot to the
+deadline. The real-length recording's 8,619 prompt tokens plus the cap fit
+`NUM_CTX`, leaving 12,288 tokens for a prompt.
 """
 
 _log = logging.getLogger(__name__)
