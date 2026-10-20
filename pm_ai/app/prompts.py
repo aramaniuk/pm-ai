@@ -61,6 +61,7 @@ from pm_ai.app.concurrency import (
     WriterThread,
 )
 from pm_ai.app.goals import GoalReader
+from pm_ai.app.members import MemberDesk
 from pm_ai.app.pipelines import (
     CALENDAR_FETCH_BUDGET_SECONDS,
     FetchAbandoned,
@@ -1006,6 +1007,10 @@ class RequestPath:
             # afresh for this line (AD-7), and only read — setting, updating and
             # deleting a goal are `TERMINAL_BOUND` and never reach the daemon.
             goal_reader=GoalReader(fresh.storage),
+            # `member link` and `member unmatched` (story 7e): the ledger,
+            # `aliases.md` and `8t`'s record read afresh for this line (AD-5);
+            # the one append handed over. `member name` is `TERMINAL_BOUND`.
+            members=MemberDesk(handed_daemon(fresh, hand=hand)),
             unbuilt_connectors=fresh.unbuilt,
             out=out,
             err=err,

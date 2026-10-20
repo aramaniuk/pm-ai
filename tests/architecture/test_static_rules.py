@@ -430,7 +430,9 @@ def test_ad1_core_stays_io_free(layer, forbidden):
     )
 
 
-LEDGERS = ("event_log", "commitments_log", "coaching_1on1_history")
+# `member_updates` and `aliases` joined with story 7e: the project's meeting
+# updates and the saved alias table are append-only too.
+LEDGERS = ("event_log", "commitments_log", "coaching_1on1_history", "member_updates", "aliases")
 
 # Words this codebase uses for a Tier-1 path when the artifact key itself is a
 # parameter: `self._segment(scope, artifact, at).open(...)` names no ledger.

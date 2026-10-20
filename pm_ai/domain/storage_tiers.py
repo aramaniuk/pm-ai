@@ -190,7 +190,12 @@ def requires_git_exclusion(scope_kind: ScopeKind, artifact: str) -> bool:
 # and left out of this set, so `write_artifact` would have replaced the audit
 # ledger whole — keeping one record and destroying every one before it, which
 # is exactly the loss `AppendOnlyArtifact` exists to refuse.
-_APPEND_ONLY_KEYS = frozenset({EVENT_LOG, "commitments_log.md", "disclosure.md"})
+# `member_updates.md` and `aliases.md` joined with story 7e: a project's meeting
+# updates and the saved alias table are written only through their storage
+# append methods.
+_APPEND_ONLY_KEYS = frozenset(
+    {EVENT_LOG, "commitments_log.md", "disclosure.md", "member_updates.md", "aliases.md"}
+)
 
 
 def is_append_only(scope_kind: ScopeKind, artifact: str) -> bool:

@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import functools
 import shlex
+import sqlite3
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
@@ -102,11 +103,20 @@ from pm_ai.app.wiring import (
 from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import Config, ConfigRefused, load_config, read_daemon_port
 from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
+from pm_ai.app.members import MemberDesk
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import GOALS_SCOPE, parse_goals
 from pm_ai.domain.health import GRAPH_SYSTEM, EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry, parse_registry
+from pm_ai.core.meeting_records import MEETINGS, parse_record
+from pm_ai.core.member_updates import parse_ledger
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.member_ledgers import (
+    MAX_MATCH_ATTEMPTS,
+    MEMBER_UPDATES,
+    MatchState,
+    MatchStateKind,
+)
 from pm_ai.domain.meeting_summaries import SummaryState, SummaryStateKind
 from pm_ai.domain.model_calls import LOCAL_MODEL_PROBE, LocalModelPresence
 from pm_ai.domain.scope_model import APPLICATION_DIRNAME, ScopeResolutionError
@@ -145,6 +155,8 @@ from pm_ai.storage.service import (
     StorageService,
     diagnostic_log_files,
     is_collection_member,
+    match_records_at,
+    project_member_names_at,
     render_records_at,
     summary_records_at,
 )
@@ -335,6 +347,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if daemon is None
                 else functools.partial(drop_transcript, daemon)
             ),
+            # `7e`'s `member` commands, over this process's own writer: `member
+            # name` asks at this terminal and appends to `aliases.md` from here.
+            members=None if daemon is None else MemberDesk(daemon),
             # `4e`'s `daemon run`, bound to the daemon this process composed —
             # composed once, here, and never again per request.
             serve=_serve(keychain, composed),
@@ -551,6 +566,10 @@ DAEMON_BOUNDS: Mapping[tuple[str, ...], Callable[[Daemon], float]] = {
     # Story 4t: a read of one local file and a print, `config show`'s shape.
     ("goal", "list"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
     ("goal", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    # Story 7e: reads of two local files and the operational store, and at most
+    # one append — `config show`'s shape. `member name` is `TERMINAL_BOUND`.
+    ("member", "link"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    ("member", "unmatched"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
     ("daemon", "run"): lambda daemon: DAEMON_RUN_BOUND_SECONDS,
 }
 """Every command the daemon runs, with its declared bound (AD-21, story 4r).
@@ -1412,6 +1431,10 @@ def _diagnose(
     summaries = _summaries_probe(composed)
     if summaries is not None:
         probes = (*probes, summaries)
+    # `7e`: then the meetings whose title match waits or was given up.
+    matches = _matches_probe(composed)
+    if matches is not None:
+        probes = (*probes, matches)
     if composed.failure is None or composed.failure.name in {p.name for p in probes}:
         return Report(probes)
     return Report((*probes, composed.failure))
@@ -1604,6 +1627,72 @@ def _summaries_probe(composed: _Composition) -> Probe | None:
     return Probe(SUMMARIES_PROBE, Health.OK, detail)
 
 
+MATCHES_PROBE = "meeting updates"
+"""The probe naming meetings whose title match was given up (story 7e)."""
+
+
+def _matches_probe(composed: _Composition) -> Probe | None:
+    """The meetings whose title match waits, or was given up after its attempts (7e).
+
+    Read straight from the operational store, contacting nothing. Absent when
+    no match waits or was given up. `WARNING` naming each meeting given up —
+    its items are dropped from matching — and `OK` while some only wait.
+    """
+    daemon = composed.daemon
+    try:
+        paths = daemon.storage.paths if daemon is not None else ScopePaths.production()
+        rows = match_records_at(Path(paths.resolve(APPLICATION, OPERATIONAL_DB)))
+    except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
+        return Probe(
+            MATCHES_PROBE,
+            Health.WARNING,
+            f"the operational store could not be asked which meetings' title matches "
+            f"wait or were given up: {type(unreadable).__name__}.",
+        )
+    now = daemon.clock() if daemon is not None else datetime.now(timezone.utc)
+    oldest = now - SUMMARY_MAX_AGE
+    open_rows = [row for row in rows if row.state is MatchStateKind.WAITING]
+    # A harvest offers a match no older than a summary may be; an older one
+    # waits for nothing, so it is never named as waiting.
+    waiting = [row for row in open_rows if row.meeting_start >= oldest]
+    unoffered = [row for row in open_rows if row.meeting_start < oldest]
+    given_up = [row for row in rows if row.state is MatchStateKind.GIVEN_UP]
+    if not (waiting or given_up or unoffered):
+        return None
+
+    def named(group: Sequence[MatchState], *, why: bool = False) -> str:
+        shown = [
+            f"meeting {row.meeting_id} in {row.scope}" + (f" ({row.reason})" if why else "")
+            for row in group[:_NAMED_AT_MOST]
+        ]
+        more = len(group) - len(shown)
+        return "; ".join(shown) + (f"; and {more} more" if more > 0 else "")
+
+    parts = []
+    if waiting:
+        parts.append(f"{len(waiting)} waiting for the local model's title match: {named(waiting)}")
+    if unoffered:
+        parts.append(
+            f"{len(unoffered)} not offered again — the meeting is older than "
+            f"{SUMMARY_MAX_AGE.days} days: {named(unoffered)}"
+        )
+    if given_up:
+        parts.append(
+            f"{len(given_up)} given up after {MAX_MATCH_ATTEMPTS} failed calls, their "
+            f"unnumbered items dropped from matching: {named(given_up, why=True)}"
+        )
+    detail = ". ".join(parts) + "."
+    if given_up:
+        return Probe(
+            MATCHES_PROBE,
+            Health.WARNING,
+            detail,
+            "a meeting's issue numbers were still linked; `pm-ai transcript summarize "
+            "--scope <scope> --meeting <id>` summarises it again, which asks again.",
+        )
+    return Probe(MATCHES_PROBE, Health.OK, detail)
+
+
 INGESTION_PROBE = "transcript ingestion"
 """The probe naming captures whose ingestion failed too often to retry (11b)."""
 
@@ -1685,8 +1774,88 @@ def _completion() -> Completion:
             projects=_enrolled_projects,
             graph_instances=_graph_instances,
             goal_ids=_goal_ids,
+            members=_member_names,
+            meetings=_meeting_ids,
+            updates=_awaiting_updates,
         )
     )
+
+
+def _enrolled_paths() -> ScopePaths:
+    """The production resolver, knowing the projects `projects.toml` enrols."""
+    path = ScopePaths.production().resolve(APPLICATION, REGISTRY_ARTIFACT)
+    registry = parse_registry(_read_or_none(path))
+    return ScopePaths.production(projects={pid: entry.path for pid, entry in registry.items()})
+
+
+def _project_scope(project: str) -> tuple[ScopePaths, DataScope] | None:
+    """The resolver and the scope of `project` when it is enrolled, else `None`."""
+    if project not in _enrolled_projects():
+        return None
+    return _enrolled_paths(), DataScope(ScopeKind.PROJECT, project)
+
+
+_READER_FAULTS = (sqlite3.Error, OSError, ScopeResolutionError, ValueError)
+"""What one project's completion read may meet: it offers nothing, never raises."""
+
+
+def _member_names(project: str) -> tuple[str, ...]:
+    """The line's project's active GitLab members' usernames and handles (story 7e).
+
+    Read off `operational.db` on a read-only connection of its own — never a
+    `StorageService`, which would open the store for writing.
+    """
+    try:
+        found = _project_scope(project)
+        if found is None:
+            return ()
+        paths, scope = found
+        return project_member_names_at(Path(paths.resolve(APPLICATION, OPERATIONAL_DB)), scope)
+    except _READER_FAULTS:
+        return ()
+
+
+def _meeting_ids(project: str) -> tuple[str, ...]:
+    """The line's project's recorded meeting ids, newest day first, read by path (7e)."""
+    try:
+        located = _project_scope(project)
+        if located is None:
+            return ()
+        paths, scope = located
+        directory = Path(paths.resolve(scope, MEETINGS))
+        if not directory.is_dir():
+            return ()
+        names = sorted(directory.iterdir(), reverse=True)
+    except _READER_FAULTS:
+        return ()
+    found: list[str] = []
+    for entry in names:
+        if not is_collection_member(entry.name) or not entry.name.endswith(".md"):
+            continue
+        try:
+            record = parse_record(entry.read_text(encoding="utf-8"), source=str(entry))
+        except (OSError, UnicodeDecodeError, ValueError):
+            continue
+        if record.meeting.meeting_id not in found:
+            found.append(record.meeting.meeting_id)
+    return tuple(found)
+
+
+def _awaiting_updates(project: str) -> tuple[str, ...]:
+    """The line's project's model-matched links awaiting the PM, once each (7e)."""
+    try:
+        located = _project_scope(project)
+        if located is None:
+            return ()
+        paths, scope = located
+        raw = _read_or_none(Path(paths.resolve(scope, MEMBER_UPDATES)))
+    except _READER_FAULTS:
+        return ()
+    found: list[str] = []
+    for line in parse_ledger(raw).awaiting():
+        if line.update not in found:
+            found.append(line.update)
+    return tuple(found)
 
 
 def _read_or_none(path: Path) -> bytes | None:

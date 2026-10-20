@@ -434,6 +434,11 @@ APPLICATION_TREE: tuple[LayoutNode, ...] = (
     # AD-38 — one ledger, outside every repository. Per-scope would push it into
     # a committed one.
     File("disclosure.md", Tier.TRUTH, encrypted=False, gitignored=True),
+    # AD-34 — the saved alias table (story 7e): one row per name the PM
+    # confirmed, mapping it to a handle. Here, beside the disclosure ledger,
+    # because a name → handle row describes a person, not a project, and one
+    # table serves every scope. Append-only (`storage_tiers`).
+    File("aliases.md", Tier.TRUTH, encrypted=False, gitignored=True),
     # The registry `pm-ai project add` writes. AD-11: this file is the only way a
     # repository enters the system, which is why `production()` takes it as an
     # argument and never searches for `.project-ai` directories. Tier 1 and not
@@ -755,6 +760,10 @@ PROJECT_TREE: tuple[LayoutNode, ...] = (
             # Spoken commitments & promise tracking. Append-only, with the same
             # clobber window as a segment.
             File("commitments_log.md", Tier.TRUTH, encrypted=False, gitignored=True),
+            # Story 7e — meeting updates on the project's GitLab issues: the
+            # issue and the speaker label as said, append-only and keyed. A
+            # project's file only: storage refuses it for any other scope.
+            File("member_updates.md", Tier.TRUTH, encrypted=False, gitignored=True),
             # Meeting SUMMARIES — the citation root for every extracted fact. A
             # commitment in this scope may cite only a meeting in this scope.
             Collection("meetings", Tier.TRUTH, encrypted=False, gitignored=True),

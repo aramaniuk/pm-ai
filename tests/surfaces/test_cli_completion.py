@@ -131,6 +131,66 @@ def test_goal_ids_on_file_are_offered(tmp_path, monkeypatch):
         assert _offered(f"goal {leaf} ", entry._completion()) == ["g_b", "g_a"]
 
 
+def test_the_member_commands_offer_the_named_projects_members_meetings_and_links(tmp_path, monkeypatch):
+    """Story 7e, through the composition root's readers over real files."""
+    from datetime import datetime, timedelta, timezone
+
+    from pm_ai.app.wiring import build
+    from pm_ai.core.member_updates import ItemKind, LinkKind, UpdateLine, render_update
+    from pm_ai.core.project_registry import ProjectEntry, render_registry
+    from pm_ai.domain.handles import gitlab_handle
+    from pm_ai.domain.identity import Actor, DataScope, ScopeKind
+    from pm_ai.domain.meetings import Meeting
+    from pm_ai.domain.work import GitLabPerson, Member, Section, SectionRead, WorkChange
+    from pm_ai.platform.paths import ScopePaths
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+    repos = {"alpha": tmp_path / "alpha", "beta": tmp_path / "beta"}
+    for repo in repos.values():
+        repo.mkdir()
+    registry = tmp_path / ".pm-ai" / "projects.toml"
+    registry.parent.mkdir(parents=True)
+    registry.write_bytes(render_registry({pid: ProjectEntry(path) for pid, path in repos.items()}))
+    daemon = build(
+        None, "alpha", paths=ScopePaths.production(home=tmp_path, projects=repos), now=lambda: now
+    )
+    alpha = DataScope(ScopeKind.PROJECT, "alpha")
+    host = "https://gitlab.example.com"
+    ivan = GitLabPerson(gitlab_handle(host, 2), "Ivan Petrov", "ivan.p", False)
+    old = GitLabPerson(gitlab_handle(host, 5), "Old Timer", "old.t", False)
+    bot = GitLabPerson(gitlab_handle(host, 6), "Release Bot", "release-bot", True)
+    daemon.storage.record_project_work(
+        alpha,
+        WorkChange(
+            instance="gitlab:alpha",
+            started_at=now - timedelta(hours=1),
+            members=(Member(ivan, "active"), Member(old, "blocked"), Member(bot, "active")),
+            sections=tuple(SectionRead(section, True) for section in Section),
+        ),
+    )
+    daemon.meetings.put(
+        Meeting("mtg_a", "Weekly planning", now - timedelta(days=1), 30, (Actor("email:a@example.com"),), alpha)
+    )
+    line = UpdateLine(
+        kind=ItemKind.ACTION, meeting="mtg_a", start=now - timedelta(days=1), title="Weekly planning",
+        item="prp_x", issue=41, by=LinkKind.MODEL, text="rework export", at=now, owner="Ваня",
+    )
+    daemon.storage.append_member_updates([render_update(line)] * 2, scope=alpha, after=0)
+    daemon.storage.close()
+
+    completion = entry._completion()
+    assert _offered("member name --scope project:alpha Ваня ", completion) == [
+        "ivan.p",
+        str(ivan.handle),
+    ]
+    assert _offered("member name --scope project:alpha Ваня ivan.p --meeting ", completion) == ["mtg_a"]
+    assert _offered("member link --scope project:alpha ", completion) == [line.update]
+    assert _offered("member link --scope project:beta ", completion) == []
+    assert _offered("member link ", completion) == []
+    assert _offered("member name --scope project:nowhere Ваня ", completion) == []
+
+
 def test_a_broken_goal_file_offers_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     goals = tmp_path / ".manager-ai" / "memory" / "strategic_goals.md"
@@ -312,7 +372,18 @@ def test_no_tab_reaches_the_daemon_or_opens_a_store(tmp_path, monkeypatch):
     monkeypatch.setattr(entry, "StorageService", forbidden)
     monkeypatch.setattr(entry, "MacOSKeychainAdapter", forbidden)
     completion = entry._completion()
-    for line in ("", "da", "dashboard --scope ", "connector sign-in ", "goal show ", "transcript drop "):
+    for line in (
+        "",
+        "da",
+        "dashboard --scope ",
+        "connector sign-in ",
+        "goal show ",
+        "transcript drop ",
+        # Story 7e: the member commands read by path or read-only, never a store.
+        "member name --scope project:alpha Ваня ",
+        "member name --scope project:alpha Ваня ivan.p --meeting ",
+        "member link --scope project:alpha ",
+    ):
         completion.complete(line)
         completion.hint(line)
     assert _offered("dashboard --scope ", completion) == ["personal"]
