@@ -473,7 +473,7 @@ def test_the_key_is_sealed_under_its_own_top_level_key_and_connectors_are_kept(t
         artifact=CREDENTIAL_STORE,
     )
     assert held_frontier_key(daemon.storage) is None
-    assert frontier_key_probe(daemon.storage).health is Health.ABSENT
+    assert frontier_key_probe(daemon.storage).health is Health.OK
     seal_frontier_key(daemon.storage, KEY)
     document = json.loads(daemon.storage.read_artifact(scope=APPLICATION, artifact=CREDENTIAL_STORE))
     assert document[FRONTIER_KEY] == {"api_key": KEY}
@@ -483,9 +483,20 @@ def test_the_key_is_sealed_under_its_own_top_level_key_and_connectors_are_kept(t
     assert probe.name == FRONTIER_KEY_PROBE and probe.health is Health.OK and KEY not in str(probe)
 
 
-def test_doctor_names_frontier_key_absent_with_the_command(tmp_path):
+def test_doctor_with_no_frontier_key_says_how_to_add_one_and_is_not_a_failure(tmp_path):
+    # A missing key is not a failure (Andrei, 2026-10-20), as an unset local model.
     probe = frontier_key_probe(_plain(tmp_path).storage)
-    assert probe.health is Health.ABSENT and "pm-ai frontier key" in probe.remediation
+    assert probe.health is Health.OK and probe.health.is_healthy
+    assert "none held" in probe.detail and "not a failure" in probe.detail
+    assert "pm-ai frontier key" in probe.remediation
+
+
+def test_doctor_with_an_unreadable_credential_store_warns_on_the_frontier_key_line(tmp_path):
+    daemon = _plain(tmp_path)
+    daemon.storage.write_artifact(b"{not json", scope=APPLICATION, artifact=CREDENTIAL_STORE)
+    probe = frontier_key_probe(daemon.storage)
+    assert probe.name == FRONTIER_KEY_PROBE and probe.health is Health.WARNING
+    assert not probe.health.is_healthy
 
 
 def test_frontier_key_needs_a_terminal_and_a_daemon(monkeypatch, capsys):

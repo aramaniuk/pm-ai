@@ -142,8 +142,8 @@ def operator(monkeypatch: pytest.MonkeyPatch) -> Operator:
 def hold_a_frontier_key(keychain: Keychain) -> None:
     """Seal a test Anthropic key, as `pm-ai frontier key` would in the daemon (story 7c).
 
-    `doctor`'s `frontier key` line is `ABSENT` until one is held, which is not
-    healthy; a test pinning `doctor` to exit 0 holds one first.
+    With none held, `doctor`'s `frontier key` line is `OK` and says how to add
+    one (Andrei, 2026-10-20); a test holds one to see the held line.
     """
     from pm_ai.app.wiring import application_storage
     from pm_ai.core.frontier_key import seal_frontier_key
@@ -497,7 +497,6 @@ def test_setup_and_doctor_agree_on_a_machine_with_two_projects(
     from_setup = setup()
     setup_said = capsys.readouterr().out
 
-    hold_a_frontier_key(keychain)  # story 7c: `doctor` alone names the key
     from_doctor = entry.main(["doctor"])
     doctor_said = capsys.readouterr().out
 

@@ -84,10 +84,12 @@ def assert_sealable(storage: StoragePort) -> None:
 
 
 def frontier_key_probe(storage: StoragePort) -> Probe:
-    """The `frontier key` line: held, or `ABSENT` naming the command. Contacts nothing.
+    """The `frontier key` line: held, or none held and how to add one. Contacts nothing.
 
-    Reads the sealed store (the master key decrypts it); a store that cannot be
-    read is a `WARNING` naming why. Never says the key.
+    A missing key is not a failure (Andrei, 2026-10-20, as for an unset local
+    model on 2026-10-19): with none held the line is `OK`, saying how to add
+    one, and `doctor`'s exit code is unaffected. Only a store that cannot be
+    read affects it — a `WARNING` naming why. Never says the key.
     """
     try:
         held = held_frontier_key(storage)
@@ -102,9 +104,9 @@ def frontier_key_probe(storage: StoragePort) -> Probe:
     if held is None:
         return Probe(
             FRONTIER_KEY_PROBE,
-            Health.ABSENT,
-            "no Anthropic API key is held, so `transcript summarize --by claude` is refused.",
-            f"Start the daemon (`pm-ai daemon run`), then run `{_COMMAND}`.",
+            Health.OK,
+            "none held, so `transcript summarize --by claude` is refused; not a failure.",
+            f"To add one: start the daemon (`pm-ai daemon run`), then run `{_COMMAND}`.",
         )
     return Probe(
         FRONTIER_KEY_PROBE,

@@ -263,10 +263,10 @@ def test_the_served_daemon_wires_the_frontier_key_endpoint(tmp_path, monkeypatch
     assert answer.status_code != 503 and answer.json()["exit"] == EXIT_REFUSAL
 
 
-# ── Item 18e: `doctor` prints the frontier key line ─────────────────────────
+# ── Item 18e: `doctor` prints the frontier key line; none held is not a failure ─────────────────────────
 
 
-def test_doctor_prints_the_frontier_key_line_absent_then_held(
+def test_doctor_prints_the_frontier_key_line_none_held_then_held_and_stays_healthy(
     home, tmp_path, keychain, operator, installed, capsys  # noqa: F811
 ):
     from tests.slice.test_first_run import answers_for, hold_a_frontier_key, setup
@@ -274,10 +274,10 @@ def test_doctor_prints_the_frontier_key_line_absent_then_held(
     operator.script(*answers_for(tmp_path / "alpha"))
     setup()
     capsys.readouterr()
-    entry.main(["doctor"])
+    assert entry.main(["doctor"]) == EXIT_OK  # Andrei, 2026-10-20: not a failure
     printed = capsys.readouterr().out
     line = next(line for line in printed.splitlines() if "] frontier key:" in line)
-    assert "[ absent]" in line
+    assert "[     ok]" in line and "none held" in line and "not a failure" in line
     assert "pm-ai frontier key" in printed.split("] frontier key:")[1].split("\n[")[0]
     hold_a_frontier_key(keychain)
     entry.main(["doctor"])

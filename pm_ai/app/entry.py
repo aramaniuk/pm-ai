@@ -1522,7 +1522,7 @@ def _enrolled_ids(registry: ArtifactState) -> tuple[str, ...]:
 
 
 def _frontier_key_line(keychain: KeychainPort, composed: _Composition) -> Probe:
-    """The `frontier key` line: held, or `ABSENT` naming `pm-ai frontier key` (7c).
+    """The `frontier key` line: held, or none held saying how to add one (7c).
 
     Read from the sealed credential store through the composed daemon's store,
     or the application scope's alone when none was composed. Contacts nothing.
