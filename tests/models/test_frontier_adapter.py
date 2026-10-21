@@ -16,6 +16,7 @@ import httpx2
 import pytest
 
 from pm_ai.core.meeting_summary import SUMMARY_SHAPE
+from pm_ai.models.frontier.anthropic import frontier_schema
 from pm_ai.domain.sanitize import sanitize
 from pm_ai.models.frontier import anthropic as frontier
 from pm_ai.models.frontier.anthropic import (
@@ -139,7 +140,9 @@ def test_the_body_carries_no_fallbacks_no_sampling_no_prefill_and_the_schema():
     assert [m["role"] for m in body["messages"]] == ["user"]  # no assistant prefill
     assert body["model"] == SONNET_TIER and body["max_tokens"] == MAX_TOKENS
     assert body.get("tools", []) == []
-    assert body["output_config"]["format"] == {"type": "json_schema", "schema": dict(SUMMARY_SHAPE)}
+    assert body["output_config"]["format"] == {
+        "type": "json_schema", "schema": frontier_schema(SUMMARY_SHAPE)
+    }
     assert body["system"] == "pm-ai's own instructions"
     texts = [block["text"] for block in body["messages"][0]["content"]]
     assert texts == ["Meeting title: Sync", "Ana: hello"]
@@ -366,3 +369,57 @@ def test_a_closed_adapter_sends_nothing():
     with pytest.raises(FrontierNotSent):
         _call(adapter)
     assert recorder.requests == []
+
+
+# ── What structured outputs is sent (measured with a real key, 2026-10-21) ────
+
+
+def _keywords(node: object) -> set[str]:
+    if isinstance(node, list):
+        return set().union(*(_keywords(item) for item in node)) if node else set()
+    if not isinstance(node, dict):
+        return set()
+    found = set(node)
+    for value in node.values():
+        found |= _keywords(value)
+    return found
+
+
+def test_the_schema_sent_carries_no_limit_structured_outputs_refuses():
+    """Anthropic answered 400 to `maxItems`; the documented unsupported limits go too."""
+    sent = frontier_schema(SUMMARY_SHAPE)
+    assert not _keywords(sent) & {"minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum"}
+    assert not any(isinstance(n.get("type"), list) for n in _walk(sent))
+
+
+def _walk(node: object):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk(item)
+
+
+def test_the_schema_sent_keeps_the_shape_7b_validates():
+    sent = frontier_schema(SUMMARY_SHAPE)
+    assert sent["required"] == SUMMARY_SHAPE["required"]
+    assert sent["additionalProperties"] is False
+    assert set(sent["properties"]) == set(SUMMARY_SHAPE["properties"])
+    for node in _walk(sent):
+        if node.get("type") == "object":
+            assert node.get("additionalProperties") is False
+
+
+def test_a_list_of_types_becomes_any_of_and_the_original_is_unchanged():
+    shape = {"type": "object", "properties": {"due": {"type": ["string", "null"], "maxLength": 40}},
+             "required": ["due"], "additionalProperties": False}
+    before = repr(shape)
+    assert frontier_schema(shape)["properties"]["due"] == {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert repr(shape) == before
+
+
+def test_only_supported_string_formats_are_kept():
+    assert frontier_schema({"type": "string", "format": "date"}) == {"type": "string", "format": "date"}
+    assert frontier_schema({"type": "string", "format": "phone"}) == {"type": "string"}

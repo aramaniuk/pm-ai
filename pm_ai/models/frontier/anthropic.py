@@ -28,8 +28,12 @@ without the PM. `7b`'s schema goes as structured output
 (`output_config.format`); no temperature, `top_p` or `top_k`, no prefill, no
 server-side `fallbacks`, and `MAX_TOKENS` sized for thinking and the answer
 together. *Assumed, not verified (no key at build):* that the API accepts an
-empty tool list through the Tool Runner, and that `output_config.format`
-accepts `7b`'s schema with its `minLength`, `maxLength` and `maxItems`.
+empty tool list through the Tool Runner. **Measured with a real key
+(2026-10-21):** `output_config.format` refuses `maxItems` with a 400, and the
+structured-outputs documentation lists the string, number and array limits as
+unsupported, so `7b`'s schema is sent through `frontier_schema`: those limits
+are left out and a list of types becomes `anyOf`. Nothing is lost — `7b`'s
+validator checks every limit on the answer and never trusts the schema.
 
 **The answer** is refused by name before its content is read: any stop reason
 but `end_turn` (`FrontierStopped`), and a model other than the one asked for
@@ -103,6 +107,53 @@ REFUSED_ENVIRONMENT = ("ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_LOG")
 """The SDK 1.2.0 environment reads an explicit argument does not override (spine gate)."""
 
 _QUOTE_LIMIT = 200
+
+UNSUPPORTED_SCHEMA_KEYWORDS = frozenset({
+    "minLength", "maxLength", "pattern",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties",
+})
+"""Limits structured outputs refuse (measured 2026-10-21: `maxItems` is a 400)
+or does not list as supported; left out of what is sent, checked by `7b`'s
+validator on the answer."""
+
+SUPPORTED_STRING_FORMATS = frozenset({
+    "date-time", "time", "date", "duration", "email", "hostname", "uri",
+    "ipv4", "ipv6", "uuid",
+})
+"""The string formats structured outputs supports; any other is left out."""
+
+
+def frontier_schema(shape: Any) -> Any:
+    """`shape` as structured outputs accepts it: limits it refuses left out,
+    unsupported string formats left out, and a list of types as `anyOf`.
+
+    Pure and recursive; `shape` itself is never changed. What is left out is
+    still checked — `7b`'s validator reads every limit on the answer.
+    """
+    if isinstance(shape, list):
+        return [frontier_schema(item) for item in shape]
+    if not isinstance(shape, Mapping):
+        return shape
+    out: dict[str, Any] = {}
+    for key, value in shape.items():
+        if key in UNSUPPORTED_SCHEMA_KEYWORDS:
+            continue
+        if key == "format" and value not in SUPPORTED_STRING_FORMATS:
+            continue
+        if key in ("properties", "$defs", "definitions") and isinstance(value, Mapping):
+            out[key] = {name: frontier_schema(sub) for name, sub in value.items()}
+        else:
+            out[key] = frontier_schema(value)
+    kinds = out.get("type")
+    if isinstance(kinds, list):
+        del out["type"]
+        branches = [{"type": kind} for kind in kinds]
+        if "anyOf" in out:
+            out["allOf"] = [{"anyOf": branches}, {"anyOf": out.pop("anyOf")}]
+        else:
+            out["anyOf"] = branches
+    return out
 
 
 def refused_environment(environ: Mapping[str, str]) -> str | None:
@@ -402,7 +453,7 @@ class AnthropicFrontier:
             options: dict[str, Any] = {}
             if shape is not None:
                 options["output_config"] = {
-                    "format": {"type": "json_schema", "schema": dict(shape)}
+                    "format": {"type": "json_schema", "schema": frontier_schema(shape)}
                 }
             try:
                 runner = client.beta.messages.tool_runner(
