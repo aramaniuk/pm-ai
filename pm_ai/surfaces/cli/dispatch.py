@@ -47,7 +47,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol, TextIO, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Any, Protocol, TextIO, runtime_checkable
 
 from pm_ai.core.cadence import CYCLE, FIRST_RETRY, START_SPREAD
 from pm_ai.core.config import Config, ConfigRefused, load_config, render_config
@@ -78,14 +79,12 @@ from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.core.meeting_records import (
     MalformedMeeting,
     MeetingNotFound,
-    check_title,
     parse_attendees,
 )
+from pm_ai.core.transcript_details import title_refusal
 from pm_ai.core.transcripts import (
     MAX_DROP_MINUTES,
     MIN_DROP_MINUTES,
-    carried_minutes,
-    drop_utterances,
 )
 from pm_ai.core.member_updates import MemberRefused, NamePlan
 from pm_ai.domain.meetings import AmbiguousMeeting
@@ -182,10 +181,10 @@ __all__ = [
     "TAKES_A_PATH",
     "TERMINAL_BOUND",
     "TranscriptDrop",
+    "DropPreviewOutcome",
+    "DroppedFieldOutcome",
     "TranscriptDropOutcome",
-    "ask_drop_here",
     "dispatch",
-    "drop_would_ask",
     "names_a_command",
     "parse",
     "usage",
@@ -698,6 +697,49 @@ class GitLabCheck(Protocol):
         ...
 
 
+class DroppedFieldOutcome(Protocol):
+    """One decided field — `pm_ai.app.pipelines.DroppedField`, named by shape (story 11e)."""
+
+    @property
+    def value(self) -> Any: ...
+    @property
+    def source(self) -> str: ...
+    @property
+    def estimated(self) -> bool: ...
+
+
+@runtime_checkable
+class DropPreviewOutcome(Protocol):
+    """What `--dry-run` found — `pm_ai.app.pipelines.DropPreview`, named by shape (11e)."""
+
+    @property
+    def title(self) -> DroppedFieldOutcome: ...
+    @property
+    def start(self) -> DroppedFieldOutcome: ...
+    @property
+    def duration(self) -> DroppedFieldOutcome: ...
+    @property
+    def participants(self) -> tuple[tuple[str, str | None], ...]: ...
+    @property
+    def outcome(self) -> str:
+        """`join`, `new` or `refused`."""
+        ...
+    @property
+    def meeting_id(self) -> str | None: ...
+    @property
+    def meeting_title(self) -> str | None: ...
+    @property
+    def candidates(self) -> tuple[str, ...]: ...
+    @property
+    def reason(self) -> str: ...
+    @property
+    def zone(self) -> str: ...
+    @property
+    def notices(self) -> tuple[str, ...]: ...
+    @property
+    def found_by(self) -> str: ...
+
+
 @runtime_checkable
 class TranscriptDropOutcome(Protocol):
     """What a drop did — `pm_ai.app.pipelines.TranscriptDropped`, named by shape."""
@@ -721,9 +763,21 @@ class TranscriptDropOutcome(Protocol):
     @property
     def left(self) -> int: ...
     @property
-    def duration_minutes(self) -> int | None: ...
+    def title_field(self) -> DroppedFieldOutcome | None: ...
     @property
-    def duration_from_last_cue(self) -> bool: ...
+    def start_field(self) -> DroppedFieldOutcome | None: ...
+    @property
+    def duration(self) -> DroppedFieldOutcome | None: ...
+    @property
+    def participants(self) -> tuple[tuple[str, str | None], ...]: ...
+    @property
+    def candidates(self) -> tuple[str, ...]: ...
+    @property
+    def found_by(self) -> str:
+        """How a matched record was found: `start` or `same day` (story 11e)."""
+        ...
+    @property
+    def zone(self) -> str: ...
     @property
     def from_docx(self) -> bool:
         """The capture is the text taken from a `.docx` (story 11d)."""
@@ -748,10 +802,15 @@ class TranscriptDrop(Protocol):
         file_name: str,
         scope: DataScope,
         meeting_id: str | None,
-        identify: Callable[[], tuple[str, datetime]] | None,
-        describe: Callable[[bool], tuple[tuple[Actor, ...], int | None]] | None,
         from_docx: bool = False,
-    ) -> TranscriptDropOutcome: ...
+        modified: datetime | None = None,
+        created: datetime | None = None,
+        title: str | None = None,
+        start: datetime | None = None,
+        duration: int | None = None,
+        attendees: tuple[Actor, ...] = (),
+        dry_run: bool = False,
+    ) -> TranscriptDropOutcome | DropPreviewOutcome: ...
 
 
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
@@ -3253,12 +3312,17 @@ START_OPTION = "start"
 ATTENDEES_OPTION = "attendees"
 DURATION_OPTION = "duration"
 DROP_ANSWERS = (TITLE_OPTION, START_OPTION, ATTENDEES_OPTION, DURATION_OPTION)
-"""The answers to `transcript drop`'s questions, given as options (story 11d).
+"""What `transcript drop` may be told about the meeting, as options (stories 11d, 11e).
 
-Typed at the prompt, a drop asks its questions in the prompt's own process and
-sends the daemon these options, so the daemon never asks (AD-21). At a terminal
-each one given is not asked; without a terminal, each one binding needs must be
-given. Each is checked as its question checks the answer typed to it."""
+Nothing is asked: each one given wins over what pm-ai would read from the file,
+the records or the file's times. Each is checked as it is read, and one the
+rule refuses is a usage error."""
+
+DRY_RUN_FLAG = "dry-run"
+JSON_FLAG = "json"
+DROP_FLAGS = (DRY_RUN_FLAG, JSON_FLAG)
+"""`--dry-run` previews what a drop would store and writes nothing; `--json`,
+only with it, prints the preview as one JSON object (story 11e)."""
 
 DROP_WORDS = ("transcript", "drop")
 
@@ -3272,8 +3336,8 @@ RELATIVE_PATHS = "a relative <file> is read from the folder pm-ai was started in
 _DROPPABLE_KINDS = frozenset({ScopeKind.PERSONAL, ScopeKind.PROJECT})
 
 START_FORMS = ("2026-10-10T14:00+03:00", "2026-10-10T11:00Z")
-"""The spellings the start question names: a date-time with its offset, or in
-UTC with `Z`. Seconds and fractions of a second are accepted too."""
+"""The spellings `--start` takes: a date-time with its offset, or in UTC with
+`Z`. Seconds and fractions of a second are accepted too."""
 
 _START = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$"
@@ -3324,19 +3388,14 @@ def _start_refusal(answer: str) -> str | None:
         else:
             return None
     return (
-        f"{answer!r} is not a start pm-ai can read. Type a date and time with "
+        f"{answer!r} is not a start pm-ai can read. Give a date and time with "
         f"its offset from UTC, as {START_FORMS[0]}, or in UTC, as {START_FORMS[1]}."
     )
 
 
 def _title_refusal(answer: str) -> str | None:
-    if not answer:
-        return "a title is required: it is half of what matches a meeting."
-    try:
-        check_title(answer)
-    except MalformedMeeting as refused:
-        return str(refused)
-    return None
+    # One rule for a typed title and one read from the file (story 11e).
+    return title_refusal(answer)
 
 
 def _attendee_refusal(answer: str) -> str | None:
@@ -3344,7 +3403,7 @@ def _attendee_refusal(answer: str) -> str | None:
         parse_attendees(answer)
     except MalformedMeeting as refused:
         return (
-            f"{refused} Type handles separated by commas with no spaces, as "
+            f"{refused} Give handles separated by commas with no spaces, as "
             f"email:ana@example.com,email:bo@example.com; a handle cannot "
             f"carry a comma."
         )
@@ -3355,14 +3414,14 @@ def _duration_refusal(minutes: int) -> str | None:
     if MIN_DROP_MINUTES <= minutes <= MAX_DROP_MINUTES:
         return None
     return (
-        f"{minutes} minutes is not a meeting's length here; type "
+        f"{minutes} minutes is not a meeting's length here; give "
         f"{MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}."
     )
 
 
 @dataclass(frozen=True, slots=True)
 class _Given:
-    """The answers given as options, each checked; `None` where none was given."""
+    """The options given, each checked; `None` where none was given."""
 
     title: str | None = None
     start: datetime | None = None
@@ -3371,11 +3430,11 @@ class _Given:
 
 
 class _BadAnswer(Exception):
-    """An answer given as an option that its question would not accept: a usage error."""
+    """An option its rule would not accept: a usage error."""
 
 
 def _given(options: Mapping[str, str]) -> _Given:
-    """The answer options, each judged as its question judges a typed answer."""
+    """The meeting options, each judged by its rule."""
     title = options.get(TITLE_OPTION)
     start = options.get(START_OPTION)
     attendees = options.get(ATTENDEES_OPTION)
@@ -3422,84 +3481,13 @@ def _given(options: Mapping[str, str]) -> _Given:
 
 
 def _drop_misused(sentence: str) -> int:
-    """A `transcript drop` answer pm-ai cannot read: the usage error, exit 2."""
+    """A `transcript drop` command line pm-ai cannot read: the usage error, exit 2."""
     leaf = TABLE["transcript"].leaves["drop"]
     _echo(
         f"pm-ai: {sentence}\n\nusage: pm-ai transcript {_spelled('drop', leaf)}",
         file=sys.stderr,
     )
     return EXIT_USAGE
-
-
-def _drop_identify(given: _Given | None = None) -> tuple[str, datetime]:
-    """The title and start: given as options, else asked at the terminal; refused without one."""
-    given = given if given is not None else _Given()
-    if given.title is not None and given.start is not None:
-        return given.title, given.start
-    if not _stdin_is_terminal():
-        missing = [
-            f"`--{name} <{name}>`"
-            for name, value in ((TITLE_OPTION, given.title), (START_OPTION, given.start))
-            if value is None
-        ]
-        raise Refusal(
-            "binding this transcript needs the meeting's title and start, and "
-            "stdin is not a terminal to ask them at — a pipe, a cron job or a "
-            "CI step. Nothing was written. Name the meeting with "
-            f"`--{MEETING_ARGUMENT} <id>`, or give {_listed_words(missing)}, to "
-            f"drop without being asked."
-        )
-    title = (
-        given.title
-        if given.title is not None
-        else _ask_until("Meeting title (required): ", judge=_title_refusal)
-    )
-    if given.start is not None:
-        return title, given.start
-    start = _ask_until(
-        f"Meeting start, as {START_FORMS[0]} or {START_FORMS[1]}: ",
-        judge=_start_refusal,
-    )
-    return title, datetime.fromisoformat(start).astimezone(timezone.utc)
-
-
-_ATTENDEES_QUESTION = (
-    "No recorded meeting matches, so a new record is made. Attendees, as "
-    "handles separated by commas with no spaces (Enter for none): "
-)
-_DURATION_QUESTION = f"Duration in minutes ({MIN_DROP_MINUTES} to {MAX_DROP_MINUTES}): "
-
-
-def _drop_describe(
-    ask_duration: bool, given: _Given | None = None
-) -> tuple[tuple[Actor, ...], int | None]:
-    """The attendees, and the duration when the file does not carry one.
-
-    Each given as an option is not asked; without a terminal, each that is
-    missing is refused by name, before anything is written.
-    """
-    given = given if given is not None else _Given()
-    attendees = given.attendees
-    minutes = given.duration if ask_duration else None
-    missing = [
-        f"`--{name} <{name}>`"
-        for name, needed in (
-            (ATTENDEES_OPTION, attendees is None),
-            (DURATION_OPTION, ask_duration and minutes is None),
-        )
-        if needed
-    ]
-    if missing and not _stdin_is_terminal():
-        raise Refusal(
-            f"no recorded meeting matches, so a new record is made, and it needs "
-            f"{_listed_words(missing)}; stdin is not a terminal to ask at. "
-            f"Nothing was written."
-        )
-    if attendees is None:
-        attendees = parse_attendees(_ask_until(_ATTENDEES_QUESTION, judge=_attendee_refusal))
-    if ask_duration and minutes is None:
-        minutes = _ask_minutes(_DURATION_QUESTION, judge=_duration_refusal)
-    return attendees, minutes
 
 
 def _drop_path(given: str) -> tuple[Path, str]:
@@ -3530,15 +3518,27 @@ def _drop_path(given: str) -> tuple[Path, str]:
     return folder / path, f" ({given} is relative, and {RELATIVE_PATHS}, {folder})"
 
 
-def _read_drop(path: Path, note: str = "") -> tuple[str, bool]:
-    """The dropped file's text and whether it was taken from a `.docx`, or a refusal.
+@dataclass(frozen=True, slots=True)
+class _DropRead:
+    """The dropped file as read: its text, whether from a `.docx`, and its times (story 11e)."""
+
+    text: str
+    from_docx: bool
+    modified: datetime
+    created: datetime | None = None
+
+
+def _read_drop(path: Path, note: str = "") -> _DropRead:
+    """The dropped file's text and times, or a refusal.
 
     Checked in this order: there is something at the path, it is not a
     document format pm-ai refuses, it is a regular file, it is within
     `MAX_DROP_BYTES`, it can be read; then a `.docx` is read as bytes by
-    `pm_ai.core.docx_text`, imported here and only here, and anything else is
-    decoded as UTF-8. Every refusal names the absolute path, with `note` for a
-    relative one, and ends with `DROP_FORMATS`.
+    `pm_ai.core.docx_text`, imported here and only here — its text, and its
+    `dcterms:created` when it has one in UTC (story 11e) — and anything else
+    is decoded as UTF-8. The modification time comes from the same `stat`.
+    Every refusal names the absolute path, with `note` for a relative one,
+    and ends with `DROP_FORMATS`.
     """
     where = f"{path}{note}"
     tail = f"Nothing was written. {DROP_FORMATS}"
@@ -3572,6 +3572,7 @@ def _read_drop(path: Path, note: str = "") -> tuple[str, bool]:
             f"{where} is {status.st_size} bytes, over the {MAX_DROP_BYTES // (1024 * 1024)} "
             f"MiB a dropped transcript may be. {tail}"
         )
+    modified = datetime.fromtimestamp(status.st_mtime, tz=timezone.utc)
     try:
         raw = path.read_bytes()
     except OSError as unreadable:
@@ -3580,16 +3581,17 @@ def _read_drop(path: Path, note: str = "") -> tuple[str, bool]:
     if path.suffix.lower() == _DOCX:
         # Story 11d: imported when a `.docx` is dropped, so the prompt's
         # startup never loads the reader.
-        from pm_ai.core.docx_text import DocxRefused, docx_text
+        from pm_ai.core.docx_text import DocxRefused, docx_created, docx_text
 
         try:
-            return docx_text(raw, name=str(path)), True
+            text = docx_text(raw, name=str(path))
         except DocxRefused as refused:
             # The reader names the absolute path; a relative one's note follows.
             said = f"{str(refused).rstrip('.')}{note}." if note else str(refused)
             raise Refusal(f"{said} {tail}") from refused
+        return _DropRead(text, True, modified, docx_created(raw))
     try:
-        return raw.decode("utf-8"), False
+        return _DropRead(raw.decode("utf-8"), False, modified)
     except UnicodeDecodeError as undecodable:
         raise Refusal(
             f"{where} is not UTF-8 text (byte {undecodable.start} does not decode), "
@@ -3597,15 +3599,58 @@ def _read_drop(path: Path, note: str = "") -> tuple[str, bool]:
         ) from undecodable
 
 
+def _when(start: datetime, zone: str) -> str:
+    """A start in UTC, and in `display_timezone` when one is set."""
+    shown = start.astimezone(timezone.utc).isoformat()
+    if not zone:
+        return shown
+    try:
+        local = start.astimezone(ZoneInfo(zone))
+    except (ZoneInfoNotFoundError, ValueError):
+        return shown
+    return f"{shown} ({local.strftime('%Y-%m-%d %H:%M')} in {zone})"
+
+
+def _from(source: str, estimated: bool) -> str:
+    """Where a value came from, and the word `estimated` when it is an estimate."""
+    what = "given as an option" if source == "option" else f"from the {source}"
+    return f"estimated {what}" if estimated else what
+
+
+def _clauses_sentence(clauses: Sequence[str]) -> str:
+    text = "; ".join(clauses)
+    return f"{text[:1].upper()}{text[1:]}."
+
+
+def _field_words(
+    title: DroppedFieldOutcome,
+    start: DroppedFieldOutcome,
+    duration: DroppedFieldOutcome,
+    zone: str,
+) -> list[str]:
+    """Each decided field, its source, and whether it is an estimate, as clauses."""
+    said = [f"title {title.value!r}, {_from(title.source, title.estimated)}"]
+    said.append(f"start {_when(start.value, zone)}, {_from(start.source, start.estimated)}")
+    if duration.value is None:
+        said.append("length unknown")
+    else:
+        said.append(f"{duration.value} minutes, {_from(duration.source, duration.estimated)}")
+    return said
+
+
+def _participant_words(participants: Sequence[tuple[str, str | None]]) -> str:
+    if not participants:
+        return "no participants (no turn names a speaker)"
+    return "participants " + ", ".join(
+        f"{name} ({handle if handle is not None else 'not linked'})"
+        for name, handle in participants
+    )
+
+
 def _closing_line(dropped: TranscriptDropOutcome) -> str:
-    """The exit-0 sentence: where the capture is, which meeting, what was staged."""
+    """The exit-0 sentence: the capture, the meeting, what was staged, and each value's source."""
     if dropped.bound_by == "minted":
         how = f"a new manual-only record {dropped.meeting_id}"
-    elif dropped.bound_by == "matched":
-        how = (
-            f"the recorded meeting {dropped.meeting_id}, {dropped.title!r} at "
-            f"{dropped.start.isoformat()}"
-        )
     else:
         how = f"the recorded meeting {dropped.meeting_id}"
     line = (
@@ -3617,16 +3662,114 @@ def _closing_line(dropped: TranscriptDropOutcome) -> str:
             f" {dropped.left} left as they were, already approved, rejected or "
             f"expired."
         )
-    if dropped.bound_by == "minted" and dropped.duration_minutes is not None:
-        source = (
-            "taken from the last cue's end"
-            if dropped.duration_from_last_cue
-            else "as answered"
+    if dropped.bound_by == "matched":
+        found = (
+            "found by --start" if dropped.found_by == "start" else "found by title on the same day"
         )
-        line += f" Its duration is {dropped.duration_minutes} minutes, {source}."
+        line += (
+            f" It joined the existing meeting {dropped.title!r} "
+            f"({dropped.meeting_id}), {found}."
+        )
+    elif dropped.bound_by == "minted":
+        line += f" It is a new meeting {dropped.meeting_id}"
+        if dropped.candidates:
+            line += (
+                f": {len(dropped.candidates)} meetings that day share its title "
+                f"({', '.join(dropped.candidates)}), so none was joined"
+            )
+        line += "."
+    if (
+        dropped.title_field is not None
+        and dropped.start_field is not None
+        and dropped.duration is not None
+    ):
+        clauses = _field_words(
+            dropped.title_field, dropped.start_field, dropped.duration, dropped.zone
+        )
+        line += " " + _clauses_sentence(clauses)
+    line += " " + _clauses_sentence([_participant_words(dropped.participants)])
     if dropped.from_docx:
         line += " The capture is the text taken from the .docx; the .docx itself is not kept."
     return line
+
+
+def _preview_text(preview: DropPreviewOutcome) -> str:
+    """`--dry-run`'s report: each field, its source, the participants and the outcome."""
+    lines = ["A drop would store (nothing was written):"]
+    title, start, duration = preview.title, preview.start, preview.duration
+    if title.value is not None:
+        lines.append(f"  title: {title.value} — {_from(title.source, title.estimated)}")
+    if isinstance(start.value, datetime):
+        lines.append(
+            f"  start: {_when(start.value, preview.zone)} — {_from(start.source, start.estimated)}"
+        )
+    if duration.value is not None:
+        lines.append(
+            f"  length: {duration.value} minutes — {_from(duration.source, duration.estimated)}"
+        )
+    elif duration.source != "unknown" or title.value is not None:
+        # Nothing gave a length; a refused `--meeting` decided no field at all.
+        lines.append("  length: unknown")
+    lines.append(
+        "  participants: "
+        + (
+            ", ".join(
+                f"{name} ({handle if handle is not None else 'not linked'})"
+                for name, handle in preview.participants
+            )
+            or "none"
+        )
+    )
+    if preview.outcome == "join":
+        found = {"start": ", found by --start", "same day": ", found by title on the same day"}
+        lines.append(
+            f"  outcome: join the existing meeting {preview.meeting_title!r} ({preview.meeting_id})"
+            f"{found.get(preview.found_by, '')}"
+        )
+    elif preview.outcome == "new":
+        said = "  outcome: new meeting"
+        if preview.candidates:
+            said += (
+                f" — {len(preview.candidates)} meetings that day share its title "
+                f"({', '.join(preview.candidates)}), so none would be joined"
+            )
+        lines.append(said)
+    else:
+        lines.append(f"  outcome: refused — {preview.reason}")
+    return "\n".join(lines)
+
+
+def _json_field(field: DroppedFieldOutcome, *, instant: bool = False) -> dict[str, object]:
+    value = field.value
+    if instant and isinstance(value, datetime):
+        value = value.astimezone(timezone.utc).isoformat()
+    return {"value": value, "source": field.source, "estimated": field.estimated}
+
+
+def _preview_json(preview: DropPreviewOutcome) -> str:
+    """`--dry-run --json`: one object, a wrapper's contract (story 11e)."""
+    if preview.outcome == "join":
+        outcome: dict[str, object] = {
+            "kind": "join",
+            "meeting_id": preview.meeting_id,
+            "title": preview.meeting_title,
+        }
+    elif preview.outcome == "new":
+        outcome = {"kind": "new", "candidates": list(preview.candidates)}
+    else:
+        outcome = {"kind": "refused", "reason": preview.reason}
+    return json.dumps(
+        {
+            "title": _json_field(preview.title),
+            "start": _json_field(preview.start, instant=True),
+            "duration_minutes": _json_field(preview.duration),
+            "participants": [
+                {"name": name, "handle": handle} for name, handle in preview.participants
+            ],
+            "outcome": outcome,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _refuse_undroppable(scope: DataScope) -> None:
@@ -3650,124 +3793,31 @@ def _file_refusal(refused: UnreadableTranscript | NothingSaid) -> Refusal:
     return Refusal(f"{refused} {DROP_FORMATS}")
 
 
-def _drop_left_to_ask(words: Sequence[str]) -> tuple[Parsed, _Given] | None:
-    """The parsed drop and its given answers when the prompt may need to ask; else `None`.
-
-    `None` for a usage error or help (the daemon answers it), `--meeting`
-    given, an answer option its question would refuse (the daemon's usage
-    error names it), every answer given, or no terminal to ask at (the daemon
-    refuses by name).
-    """
-    parsed = parse(words)
-    if isinstance(parsed, Answered) or not parsed.arguments:
-        return None
-    if MEETING_ARGUMENT in parsed.options:
-        return None
-    try:
-        given = _given(parsed.options)
-    except _BadAnswer:
-        return None
-    if None not in (given.title, given.start, given.attendees, given.duration):
-        return None
-    if not _stdin_is_terminal():
-        return None
-    return parsed, given
-
-
-def drop_would_ask(words: Sequence[str]) -> bool:
-    """Whether `ask_drop_here` may ask a question for these words (story 11d).
-
-    The prompt asks this first, so it can find out whether a daemon answers
-    before asking anything a line that could not be sent would waste.
-    """
-    return _drop_left_to_ask(words) is not None
-
-
-def ask_drop_here(words: Sequence[str]) -> list[str]:
-    """At the prompt: a drop's questions asked in this process, and the words to send (AD-21).
-
-    Typed at `pm-ai>`, `transcript drop` runs in the daemon, which never asks.
-    So a drop without `--meeting` that would need to ask asks here first —
-    the title and start, then the attendees a new record needs and, when the
-    file carries none, the duration — and the line goes to the daemon with the
-    answers added as options (story 11d). The prompt cannot read the meeting
-    records without composing, so the attendees and duration are asked before
-    the daemon knows whether a record matches; they are used only if it makes
-    one.
-
-    Checked before any question, and refused here (`Refusal`): the scope kind
-    (`people:<id>` and `application` are refused), and the file — the path,
-    its kind and size, its decoding or `.docx` text, and whether a reader
-    accepts it and anything is said in it. Not checked here, so refused by the
-    daemon after the questions: whether the project is one the daemon watches,
-    the binding itself (a named meeting, two candidates), and the capture.
-
-    The words come back unchanged when nothing is left to ask
-    (`_drop_left_to_ask`). Otherwise the answers are added as options before a
-    bare `--`, if the words hold one; each non-empty value is joined to its
-    option with `=`, so a title starting with `--` is never read as an option.
-    Ctrl-C or end of input at a question is `Refusal`, and nothing is sent.
-    """
-    left = _drop_left_to_ask(words)
-    if left is None:
-        return list(words)
-    parsed, given = left
-    if parsed.target is not None:
-        _refuse_undroppable(parsed.target)
-    path, note = _drop_path(parsed.arguments[0])
-    text, from_docx = _read_drop(path, note)
-    try:
-        drop_utterances(text, name=str(path), from_docx=from_docx)
-    except (UnreadableTranscript, NothingSaid) as refused:
-        raise _file_refusal(refused) from refused
-    title, start = _drop_identify(given)
-    answers = {TITLE_OPTION: title}
-    if given.start is None:
-        answers[START_OPTION] = start.isoformat()
-    if given.attendees is None:
-        answers[ATTENDEES_OPTION] = _ask_until(
-            "If no recorded meeting matches, a new record is made. Attendees, as "
-            "handles separated by commas with no spaces (Enter for none): ",
-            judge=_attendee_refusal,
-        )
-    if given.duration is None and carried_minutes(str(path), text, from_docx=from_docx) is None:
-        minutes = _ask_minutes(
-            f"Duration in minutes, if a new record is made ({MIN_DROP_MINUTES} to "
-            f"{MAX_DROP_MINUTES}): ",
-            judge=_duration_refusal,
-        )
-        answers[DURATION_OPTION] = str(minutes)
-    added: list[str] = []
-    for name, value in answers.items():
-        if name in parsed.options:
-            continue
-        # `--attendees=` is refused as an empty value, so no attendees go as
-        # `--attendees ''`; an empty word is never read as an option.
-        added += [f"--{name}={value}"] if value else [f"--{name}", value]
-    words = list(words)
-    at = words.index("--", len(DROP_WORDS)) if "--" in words[len(DROP_WORDS):] else len(words)
-    return [*words[:at], *added, *words[at:]]
-
-
 def _transcript_drop(context: Context) -> int:
-    """`pm-ai transcript drop <file> --scope <scope> [--meeting <id>] [answers]` (11c, 11d).
+    """`pm-ai transcript drop <file> --scope <scope> [--meeting <id>] [options] [--dry-run [--json]]`.
 
-    The surface of `pm_ai.app.pipelines.drop_transcript`: it refuses the scopes
-    a drop cannot go to and a path that is not a readable transcript file —
-    `~` expanded here, a relative path read from the folder pm-ai was started
-    in, a `.docx` read for its text — then hands the text to the pipeline with
-    the two question sets — the title and start, then the attendees and
-    duration — which the pipeline asks only when binding needs them, and
-    never for an answer given as an option (`DROP_ANSWERS`). Every refusal the
-    pipeline meets, a filesystem error included, is passed through verbatim as
-    exit `3`, and those about the file end with `DROP_FORMATS`; it writes
-    nothing before the capture, and a failure or Ctrl-C after it says whether
-    the capture was kept.
+    Stories 11c, 11d and 11e. The surface of `pm_ai.app.pipelines.drop_transcript`:
+    it refuses the scopes a drop cannot go to and a path that is not a readable
+    transcript file — `~` expanded here, a relative path read from the folder
+    pm-ai was started in, a `.docx` read for its text and its creation time —
+    then hands the text, the file's times and the options to the pipeline,
+    which decides every field and asks nothing. `--dry-run` prints what a drop
+    would store and writes nothing; `--json` with it prints one object.
+    Every refusal the pipeline meets, a filesystem error included, is passed
+    through verbatim as exit `3`, and those about the file end with
+    `DROP_FORMATS`; it writes nothing before the capture, and a failure or
+    Ctrl-C after it says whether the capture was kept.
     """
     scope = context.target
     if scope is None:
         raise RuntimeError(
             "no target scope reached `transcript drop`. That is a wiring fault in pm-ai."
+        )
+    dry_run = DRY_RUN_FLAG in context.flags
+    if JSON_FLAG in context.flags and not dry_run:
+        return _drop_misused(
+            f"`--{JSON_FLAG}` prints `--{DRY_RUN_FLAG}`'s preview as one object, so it "
+            f"is given only with `--{DRY_RUN_FLAG}`."
         )
     try:
         given = _given(context.options)
@@ -3776,7 +3826,7 @@ def _transcript_drop(context: Context) -> int:
     _refuse_undroppable(scope)
     (file,) = context.arguments
     path, note = _drop_path(file)
-    text, from_docx = _read_drop(path, note)
+    read = _read_drop(path, note)
     context.require_daemon()
     drop = context.transcript_drop
     if drop is None:
@@ -3786,13 +3836,18 @@ def _transcript_drop(context: Context) -> int:
         )
     try:
         dropped = drop(
-            text=text,
+            text=read.text,
             file_name=str(path),
             scope=scope,
             meeting_id=context.options.get(MEETING_ARGUMENT),
-            identify=lambda: _drop_identify(given),
-            describe=lambda ask_duration: _drop_describe(ask_duration, given),
-            from_docx=from_docx,
+            from_docx=read.from_docx,
+            modified=read.modified,
+            created=read.created,
+            title=given.title,
+            start=given.start,
+            duration=given.duration,
+            attendees=given.attendees or (),
+            dry_run=dry_run,
         )
     except (UnreadableTranscript, NothingSaid) as refused:
         raise _file_refusal(refused) from refused
@@ -3820,6 +3875,9 @@ def _transcript_drop(context: Context) -> int:
         raise Refusal(f"the drop stopped and nothing was written: {failed}") from failed
     for notice in dropped.notices:
         _echo(f"pm-ai: {notice}", file=sys.stderr)
+    if isinstance(dropped, DropPreviewOutcome):
+        _echo(_preview_json(dropped) if JSON_FLAG in context.flags else _preview_text(dropped))
+        return EXIT_OK
     _echo(_closing_line(dropped))
     return EXIT_OK
 
@@ -4375,6 +4433,7 @@ TABLE: Mapping[str, Command] = {
                 _transcript_drop,
                 takes=("file",),
                 options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, *DROP_ANSWERS),
+                flags=DROP_FLAGS,
                 requires=(SCOPE_ARGUMENT,),
                 target=_drop_target,
             ),

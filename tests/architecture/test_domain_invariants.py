@@ -358,7 +358,7 @@ def _fragments(text="..."):
 
 @pytest.mark.parametrize(
     "task_class",
-    ["transcription", "extraction", "classification", "embedding", "fuzzy_match"],
+    ["transcription", "extraction", "classification", "embedding", "fuzzy_match", "header_reading"],
 )
 def test_ad15_local_only_task_classes_never_reach_a_frontier_model(task_class, tmp_path):
     """AD-15 — the cheap paths are local, always. This is the cost floor."""

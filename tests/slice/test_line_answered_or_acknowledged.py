@@ -974,5 +974,7 @@ def test_a_command_that_would_ask_a_question_never_asks_at_the_daemons_terminal(
     # Its declared bound (the capture guard's `git` question) makes it a job.
     assert reply.status == 202, reply.body
     result = json.loads(rig.wait(reply.body["job_id"], "done", "failed").result)
-    assert result["exit"] == EXIT_REFUSAL, result
-    assert "not a terminal" in result["output"]
+    # Story 11e: a drop asks nothing, so the daemon decides every field and
+    # stores it; nothing was asked at its terminal.
+    assert result["exit"] == EXIT_OK, result
+    assert "length unknown" in result["output"]

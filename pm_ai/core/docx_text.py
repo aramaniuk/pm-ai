@@ -14,7 +14,9 @@ and a soft hyphen as nothing; any other character that would end a line,
 inside a run's text, as a space; text inside hyperlinks,
 content controls and tracked insertions; of an alternative-content block, the
 first choice only, never its fallback copy. Deleted text in tracked changes,
-comments, headers, footers, images and document properties are not read. A
+comments, headers, footers, images and document properties are not read — but
+one: `docx_created` reads `docProps/core.xml`'s `dcterms:created`, alone, as a
+UTC instant (story 11e, by Andrei's decision of 2026-10-21). A
 paragraph nested in another (a text box anchored in it) comes out as its own
 line, before the line of the paragraph holding it.
 
@@ -27,7 +29,9 @@ dropped, so the prompt's startup never loads it.
 from __future__ import annotations
 
 import io
+import re
 import zipfile
+from datetime import datetime, timezone
 from xml.parsers import expat
 
 __all__ = [
@@ -51,6 +55,7 @@ __all__ = [
     "TextTooLarge",
     "TooManyEntries",
     "UnsupportedCompression",
+    "docx_created",
     "docx_text",
 ]
 
@@ -59,6 +64,10 @@ COMPOUND_SIGNATURE = b"\xd0\xcf\x11\xe0"
 saved with a password (Word encrypts it into one)."""
 
 DOCUMENT_PART = "word/document.xml"
+CORE_PROPERTIES_PART = "docProps/core.xml"
+MAX_CORE_PROPERTIES_BYTES = 64 * 1024
+"""The most `docProps/core.xml` may hold uncompressed: 64 KiB. Word writes well
+under one; a larger part is not read, and gives no creation time."""
 MAX_ENTRIES = 10_000
 MAX_DOCUMENT_XML_BYTES = 64 * 1024 * 1024
 """The most `word/document.xml` may hold uncompressed: 64 MiB, checked from the
@@ -391,3 +400,70 @@ class _Extractor:
             self._paragraphs[-1].append(piece)
         else:
             self._out.append(piece)
+
+
+_DCTERMS_CREATED = f"http://purl.org/dc/terms/{_SEPARATOR}created"
+_UTC_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
+
+
+def docx_created(data: bytes) -> datetime | None:
+    """`docProps/core.xml`'s `dcterms:created`, as aware UTC, or `None` (story 11e).
+
+    The one document property pm-ai reads, and only in Word's form, in UTC
+    (`2026-09-14T08:05:00Z`). No archive, no part, two parts, an encrypted or
+    oversized part, a damaged one, a document type declaration, no element or
+    a value in any other form all give `None` — never a refusal: the drop
+    estimates its start without it. No other property is read.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            parts = [entry for entry in archive.infolist() if entry.filename == CORE_PROPERTIES_PART]
+            if len(parts) != 1:
+                return None
+            (part,) = parts
+            if part.flag_bits & 0x1 or part.file_size > MAX_CORE_PROPERTIES_BYTES:
+                return None
+            with archive.open(part) as stream:
+                raw = stream.read(MAX_CORE_PROPERTIES_BYTES + 1)
+    except Exception:  # noqa: BLE001 — a creation time is a hint, never a refusal
+        return None
+    if len(raw) > MAX_CORE_PROPERTIES_BYTES:
+        return None
+    found: list[str] = []
+    inside = False
+
+    def declared(*_: object) -> None:
+        raise ValueError("a document type declaration")
+
+    def start(element: str, _attributes: object) -> None:
+        nonlocal inside
+        inside = element == _DCTERMS_CREATED and not found
+        if inside:
+            found.append("")
+
+    def end(_element: str) -> None:
+        nonlocal inside
+        inside = False
+
+    def characters(data: str) -> None:
+        if inside:
+            found[-1] += data
+
+    parser = expat.ParserCreate(namespace_separator=_SEPARATOR)
+    parser.StartDoctypeDeclHandler = declared
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = characters
+    try:
+        parser.Parse(raw, True)
+    except Exception:  # noqa: BLE001 — a damaged part gives no creation time
+        return None
+    if not found:
+        return None
+    value = found[0].strip()
+    if not _UTC_STAMP.match(value):
+        return None
+    try:
+        return datetime.fromisoformat(value).astimezone(timezone.utc)
+    except ValueError:
+        return None

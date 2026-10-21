@@ -75,8 +75,20 @@ def test_a_group_offers_its_subcommands_as_the_table_declares_them():
 
 def test_options_are_offered_and_one_already_given_is_not():
     answers = ["--title", "--start", "--attendees", "--duration"]
-    assert _offered("transcript drop x.vtt --") == ["--scope", "--meeting", *answers]
-    assert _offered("transcript drop x.vtt --scope personal --") == ["--meeting", *answers]
+    # Story 11e: `--dry-run` and `--json` are flags of `drop`, offered from the table.
+    flags = ["--dry-run", "--json"]
+    assert _offered("transcript drop x.vtt --") == ["--scope", "--meeting", *answers, *flags]
+    assert _offered("transcript drop x.vtt --scope personal --") == [
+        "--meeting",
+        *answers,
+        *flags,
+    ]
+    assert _offered("transcript drop x.vtt --dry-run --") == [
+        "--scope",
+        "--meeting",
+        *answers,
+        "--json",
+    ]
 
 
 def test_a_flag_is_offered_like_an_option():

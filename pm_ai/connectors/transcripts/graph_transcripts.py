@@ -722,7 +722,8 @@ def _fits(transcript: _Listed, meeting: Meeting) -> bool:
     if transcript.created is None:
         return False
     begin = meeting.start - PLACEMENT_SLACK
-    end = meeting.start + timedelta(minutes=meeting.duration_minutes) + PLACEMENT_SLACK
+    # A calendar meeting always has a length (story 11e: only a minted record may not).
+    end = meeting.start + timedelta(minutes=meeting.duration_minutes or 0) + PLACEMENT_SLACK
     if not begin <= transcript.created <= end:
         return False
     return transcript.ended is None or transcript.ended > meeting.start

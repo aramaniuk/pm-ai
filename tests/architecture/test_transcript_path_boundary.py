@@ -1,15 +1,17 @@
 """The model obligation `8e` handed story `11b`, kept as a test (AD-12, AD-15).
 
-No model is on the wave-2 transcript path (prototype path, decision 2):
-extraction is pattern matching. So the obligation is two checks rather than a
-model call:
+Extraction is pattern matching (prototype path, decision 2), and the one model
+call on the transcript path is story `11e`'s header reading: local-only
+(`header_reading`), over a dropped file's cleaned header lines, never the body.
+So the obligation is these checks:
 
 - the transcript path's source — the pipeline, extraction, and the readers —
   imports no model client and no HTTP client, read from the source itself;
 - `ModelPort.complete`, and its implementations named one by one (the local
   adapter's since story `7a`), are the only callables anywhere in `pm_ai`
   declared to accept cleaned text (`Sanitized`), so cleaned text has one door
-  out.
+  out;
+- the drop's only `complete` call declares `TaskClass.HEADER_READING` (11e).
 """
 
 from __future__ import annotations
@@ -90,7 +92,8 @@ def test_the_readers_and_extraction_reach_no_model_or_io_client():
     assert not violations, format_violations(
         violations,
         "story 11b: the transcript path is pattern matching, and no model or I/O "
-        "client may be reachable from its readers or its extraction.",
+        "client may be reachable from its readers or its extraction; story 11e's "
+        "header reading goes through `ModelPort` from the pipeline, never from here.",
     )
 
 
@@ -103,8 +106,48 @@ def test_the_pipeline_imports_no_model_client():
         if any(_is(name, forbidden) for forbidden in (*MODEL_CLIENTS, "pm_ai.models"))
     ]
     assert not violations, format_violations(
-        violations, "story 11b: no model is in the wave-2 transcript path."
+        violations,
+        "story 11b: the pipeline reaches a model only through `ModelPort` "
+        "(`require_model`); story 11e's header reading is its one call on the drop path.",
     )
+
+
+DROP_PATH = (
+    "drop_transcript",
+    "drop_file",
+    "preview_drop",
+    "_plan_drop",
+    "_header_by_model",
+    "_new_meeting",
+    "_preview_of",
+    "_write_participants",
+    "_drop_aliases",
+)
+"""The pipeline's functions a drop runs through (story 11e)."""
+
+
+def test_the_drops_only_model_call_is_the_header_reading():
+    """Story 11e: one `complete` call on the drop path, declaring `header_reading`."""
+    tree = ast.parse(_path_of(PIPELINE).read_text())
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name in DROP_PATH
+    }
+    assert set(functions) == set(DROP_PATH), sorted(set(DROP_PATH) - set(functions))
+    calls = [
+        (name, node)
+        for name, function in functions.items()
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "complete"
+    ]
+    assert [name for name, _ in calls] == ["_header_by_model"], calls
+    (_, call), = calls
+    declared = {keyword.arg: keyword.value for keyword in call.keywords}
+    task_class = declared["task_class"]
+    assert isinstance(task_class, ast.Attribute) and task_class.attr == "HEADER_READING"
 
 
 def _accepts_sanitized(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:

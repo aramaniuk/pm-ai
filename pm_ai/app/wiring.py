@@ -4259,9 +4259,17 @@ class HandedMeetings:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._meetings, name)
 
-    def put(self, meeting: Any) -> Any:
+    def put(self, meeting: Any, **where: Any) -> Any:
         self._storage.assert_writable(scope=meeting.scope, artifact=MEETINGS)
-        return self._hand(lambda: self._meetings.put(meeting), "save the meeting record")
+        return self._hand(lambda: self._meetings.put(meeting, **where), "save the meeting record")
+
+    def put_participants(self, meeting_id: str, *, scope: DataScope, **listed: Any) -> Any:
+        """The record's `## Participants` region: one claimed step (story 11e)."""
+        self._storage.assert_writable(scope=scope, artifact=MEETINGS)
+        return self._hand(
+            lambda: self._meetings.put_participants(meeting_id, scope=scope, **listed),
+            "save the meeting's participants",
+        )
 
     def put_summary(self, meeting_id: str, *, scope: DataScope, **summary: Any) -> Any:
         """The record's `## Summary` region: one claimed step, its `check` inside it (7b)."""

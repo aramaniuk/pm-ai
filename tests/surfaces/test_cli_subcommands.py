@@ -16,6 +16,7 @@ needs a subprocess.
 from __future__ import annotations
 
 import dataclasses
+import json
 import ast
 import base64
 import threading
@@ -1138,6 +1139,13 @@ DROP_START = _datetime(2026, 10, 9, 11, 0, tzinfo=_timezone.utc)
 
 
 @dataclasses.dataclass
+class _Field:
+    value: object
+    source: str
+    estimated: bool = False
+
+
+@dataclasses.dataclass
 class _Dropped:
     capture: Path
     meeting_id: str
@@ -1147,43 +1155,64 @@ class _Dropped:
     start: _datetime = DROP_START
     staged: int = 1
     left: int = 0
-    duration_minutes: int | None = None
-    duration_from_last_cue: bool = False
+    title_field: _Field | None = None
+    start_field: _Field | None = None
+    duration: _Field | None = None
+    participants: tuple = (("Andrei", None),)
+    candidates: tuple[str, ...] = ()
+    found_by: str = ""
+    zone: str = ""
     from_docx: bool = False
     notices: tuple[str, ...] = ()
 
 
-class _Drop:
-    """A pipeline stand-in: records each call; `ask` makes it ask like the real one."""
+@dataclasses.dataclass
+class _Preview:
+    title: _Field
+    start: _Field
+    duration: _Field
+    participants: tuple
+    outcome: str
+    meeting_id: str | None = None
+    meeting_title: str | None = None
+    candidates: tuple[str, ...] = ()
+    reason: str = ""
+    zone: str = ""
+    notices: tuple[str, ...] = ()
+    found_by: str = ""
 
-    def __init__(self, *, ask: bool = False, ask_duration: bool = True, raises=None,
-                 answer: _Dropped | None = None) -> None:
+
+class _Drop:
+    """A pipeline stand-in: records each call and answers as the real one is shaped."""
+
+    def __init__(self, *, raises=None, answer=None) -> None:
         self.calls: list[dict] = []
-        self.ask = ask
-        self.ask_duration = ask_duration
         self.raises = raises
         self.answer = answer
-        self.answers: tuple = ()
 
-    def __call__(self, *, text, file_name, scope, meeting_id, identify, describe,
-                 from_docx=False):
+    def __call__(self, *, text, file_name, scope, meeting_id, from_docx=False,
+                 modified=None, created=None, title=None, start=None, duration=None,
+                 attendees=(), dry_run=False):
         self.calls.append(
             {"text": text, "file_name": file_name, "scope": scope, "meeting_id": meeting_id,
-             "from_docx": from_docx}
+             "from_docx": from_docx, "modified": modified, "created": created,
+             "title": title, "start": start, "duration": duration, "attendees": attendees,
+             "dry_run": dry_run}
         )
         if self.raises is not None:
             raise self.raises
-        if self.ask and meeting_id is None:
-            title, start = identify()
-            attendees, duration = describe(self.ask_duration)
-            self.answers = (title, start, attendees, duration)
         if self.answer is not None:
             return self.answer
+        if meeting_id is not None:
+            return _Dropped(Path("/captures/x-manual.vtt"), meeting_id, scope, "named")
         return _Dropped(
             Path("/captures/x-manual.vtt"),
-            meeting_id or "mtg_new",
+            "mtg_new",
             scope,
-            "named" if meeting_id else "minted",
+            "minted",
+            title_field=_Field("Weekly Sync", "file name"),
+            start_field=_Field(DROP_START, "file modification time", True),
+            duration=_Field(1, "last cue"),
         )
 
 
@@ -1262,20 +1291,13 @@ def test_a_required_option_is_required_on_a_command_without_leaves(monkeypatch, 
 def test_a_named_meeting_is_handed_on_and_nothing_is_asked(dropped_file, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
-    drop = _Drop(ask=True)
+    drop = _Drop()
     code = _drop([str(dropped_file), "--scope", "project:alpha", "--meeting", "mtg_x"], drop)
     assert code == EXIT_OK
     assert drop.calls[0]["meeting_id"] == "mtg_x"
     assert drop.calls[0]["scope"] == DataScope(ScopeKind.PROJECT, "alpha")
     out = capsys.readouterr().out
     assert "mtg_x" in out and "1 staged" in out and "executed" not in out
-
-
-def test_a_match_names_the_meetings_title_and_start(dropped_file, capsys):
-    answer = _Dropped(Path("/c.vtt"), "mtg_m", DataScope(ScopeKind.PERSONAL), "matched")
-    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(answer=answer)) == EXIT_OK
-    out = capsys.readouterr().out
-    assert "'Weekly Sync' at 2026-10-09T11:00:00+00:00" in out
 
 
 def test_proposals_left_as_acted_on_are_counted(dropped_file, capsys):
@@ -1405,51 +1427,22 @@ def test_an_unusable_path_is_refused_by_name_not_a_traceback(kind, said, tmp_pat
     assert drop.calls == []
 
 
-def test_without_a_terminal_a_drop_that_must_ask_is_refused(dropped_file, monkeypatch, capsys):
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
-    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(ask=True)) == EXIT_REFUSAL
-    err = capsys.readouterr().err
-    assert "terminal" in err and "--meeting" in err
-
-
-def _answers(monkeypatch, *typed) -> list[str]:
-    prompts: list[str] = []
-    queue = list(typed)
-
-    def answer(prompt: str = "") -> str:
-        prompts.append(prompt)
-        given = queue.pop(0)
-        if isinstance(given, BaseException):
-            raise given
-        return given
-
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", answer)
-    return prompts
-
-
-def test_a_start_without_its_offset_is_asked_again_naming_both_forms(
+def test_without_a_terminal_a_drop_asks_nothing_and_is_handed_on(
     dropped_file, monkeypatch, capsys
 ):
-    prompts = _answers(
-        monkeypatch,
-        "Weekly Sync",
-        "2026-10-09 14:00",
-        "2026-10-09T14:00",
-        "2026-10-09T14:00+03:00",
-        "email:ana@example.com",
-        "45",
-    )
-    drop = _Drop(ask=True)
+    """Story 11e: nothing is asked, and nothing refused for missing details."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    drop = _Drop()
     assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
-    assert sum(p.startswith("Meeting start") for p in prompts) == 3
-    err = capsys.readouterr().err
-    assert err.count("2026-10-10T14:00+03:00") == 2 and err.count("2026-10-10T11:00Z") == 2
-    title, start, attendees, duration = drop.answers
-    assert start == DROP_START
-    assert attendees == (Actor("email:ana@example.com"),)
-    assert duration == 45
+    (call,) = drop.calls
+    assert call["title"] is None and call["start"] is None and call["duration"] is None
+    assert call["modified"] is not None and call["modified"].tzinfo is not None
+    out = capsys.readouterr().out
+    assert "Title 'Weekly Sync', from the file name" in out
+    assert "estimated from the file modification time" in out
+    assert "1 minutes, from the last cue" in out
+    assert "Participants Andrei (not linked)." in out
 
 
 @pytest.mark.parametrize(
@@ -1459,65 +1452,111 @@ def test_a_start_without_its_offset_is_asked_again_naming_both_forms(
         ("2026-10-09T14:00:30.250+03:00", DROP_START.replace(second=30, microsecond=250000)),
     ],
 )
-def test_a_start_in_utc_or_with_fractional_seconds_is_stored_as_utc(
-    typed, utc, dropped_file, monkeypatch
+def test_a_start_in_utc_or_with_fractional_seconds_is_handed_on_as_utc(
+    typed, utc, dropped_file
 ):
-    _answers(monkeypatch, "Weekly Sync", typed, "", "30")
-    drop = _Drop(ask=True)
-    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
-    assert drop.answers[1] == utc and drop.answers[1].tzinfo == _timezone.utc
+    drop = _Drop()
+    assert _drop([str(dropped_file), "--scope", "personal", "--start", typed], drop) == EXIT_OK
+    assert drop.calls[0]["start"] == utc and drop.calls[0]["start"].tzinfo == _timezone.utc
 
 
-@pytest.mark.parametrize("typed", ["Weekly\x07Sync", "x" * 20000])
-def test_a_title_the_record_refuses_is_asked_again(typed, dropped_file, monkeypatch, capsys):
-    prompts = _answers(monkeypatch, typed, "Weekly Sync", "2026-10-09T11:00Z", "", "30")
-    drop = _Drop(ask=True)
-    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
-    assert sum(p.startswith("Meeting title") for p in prompts) == 2
-    assert "the title typed" in capsys.readouterr().err
-    assert drop.answers[0] == "Weekly Sync"
+@pytest.mark.parametrize(
+    ("option", "typed", "said"),
+    [
+        ("--start", "2026-10-09 14:00", "2026-10-10T14:00+03:00"),
+        ("--start", "2026-10-09T14:00", "2026-10-10T11:00Z"),
+        ("--title", "Weekly\x07Sync", "the title typed"),
+        ("--title", "x" * 20000, "the title typed"),
+        ("--attendees", "Smith, Bob", "separated by commas with no spaces"),
+        ("--attendees", "ana,,bo", "separated by commas with no spaces"),
+        ("--attendees", "ana,ana", "separated by commas with no spaces"),
+        ("--duration", "0", "give 1 to 1440"),
+        ("--duration", "1441", "give 1 to 1440"),
+    ],
+    ids=["start-space", "start-no-offset", "title-control", "title-long", "attendees-comma",
+         "attendees-empty", "attendees-twice", "duration-0", "duration-1441"],
+)
+def test_an_option_its_rule_refuses_is_a_usage_error(option, typed, said, dropped_file, capsys):
+    drop = _Drop()
+    assert _drop([str(dropped_file), "--scope", "personal", option, typed], drop) == EXIT_USAGE
+    assert said in capsys.readouterr().err
+    assert drop.calls == []
 
 
-@pytest.mark.parametrize("typed", ["Smith, Bob", "ana,,bo", "ana,ana"])
-def test_attendees_the_record_refuses_are_asked_again_naming_the_rule(
-    typed, dropped_file, monkeypatch, capsys
-):
-    prompts = _answers(
-        monkeypatch, "Weekly Sync", "2026-10-09T14:00+03:00", typed, "ana,bo", "30"
+def test_the_options_are_handed_on_as_given(dropped_file):
+    drop = _Drop()
+    code = _drop(
+        [str(dropped_file), "--scope", "personal", "--title", "Other", "--duration", "45",
+         "--attendees", "email:ana@example.com,email:bo@example.com"],
+        drop,
     )
-    drop = _Drop(ask=True)
-    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
-    assert sum(p.startswith("No recorded meeting matches") for p in prompts) == 2
-    assert "separated by commas with no spaces" in capsys.readouterr().err
-    assert drop.answers[2] == (Actor("ana"), Actor("bo"))
+    assert code == EXIT_OK
+    (call,) = drop.calls
+    assert call["title"] == "Other" and call["duration"] == 45
+    assert call["attendees"] == (Actor("email:ana@example.com"), Actor("email:bo@example.com"))
 
 
-@pytest.mark.parametrize("typed", ["0", "1441"])
-def test_a_duration_out_of_range_is_asked_again(typed, dropped_file, monkeypatch, capsys):
-    prompts = _answers(monkeypatch, "Weekly Sync", "2026-10-09T11:00Z", "", typed, "1440")
-    drop = _Drop(ask=True)
-    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
-    assert sum(p.startswith("Duration") for p in prompts) == 2
-    assert "type 1 to 1440" in capsys.readouterr().err
-    assert drop.answers[3] == 1440
+def test_json_without_dry_run_is_a_usage_error_naming_dry_run(dropped_file, capsys):
+    drop = _Drop()
+    assert _drop([str(dropped_file), "--scope", "personal", "--json"], drop) == EXIT_USAGE
+    assert "--dry-run" in capsys.readouterr().err
+    assert drop.calls == []
 
 
-def test_the_duration_is_not_asked_when_the_file_carries_it(dropped_file, monkeypatch):
-    prompts = _answers(monkeypatch, "Weekly Sync", "2026-10-09T14:00+03:00", "")
-    drop = _Drop(ask=True, ask_duration=False)
-    assert _drop([str(dropped_file), "--scope", "personal"], drop) == EXIT_OK
-    assert not any(p.startswith("Duration") for p in prompts)
-    assert drop.answers[2:] == ((), None)
+_PREVIEW = _Preview(
+    _Field("Weekly Sync", "file header"),
+    _Field(DROP_START, "file header", True),
+    _Field(None, "unknown"),
+    (("Alex Morgan", "email:alex@example.com"), ("Sam Rivera", None)),
+    "new",
+    candidates=("mtg_a", "mtg_b"),
+    zone="Europe/Warsaw",
+)
 
 
-@pytest.mark.parametrize("stop", [KeyboardInterrupt(), EOFError()], ids=["ctrl-c", "eof"])
-def test_ctrl_c_or_eof_at_a_drop_question_is_a_named_interruption(
-    stop, dropped_file, monkeypatch, capsys
-):
-    _answers(monkeypatch, "Weekly Sync", stop)
-    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(ask=True)) == EXIT_REFUSAL
-    err = capsys.readouterr().err
-    assert "interrupted" in err and "Traceback" not in err
+def test_a_dry_run_prints_each_field_its_source_and_the_outcome(dropped_file, capsys):
+    drop = _Drop(answer=_PREVIEW)
+    assert _drop([str(dropped_file), "--scope", "personal", "--dry-run"], drop) == EXIT_OK
+    assert drop.calls[0]["dry_run"] is True
+    out = capsys.readouterr().out
+    assert "nothing was written" in out
+    assert "title: Weekly Sync — from the file header" in out
+    assert "2026-10-09T11:00:00+00:00 (2026-10-09 13:00 in Europe/Warsaw)" in out
+    assert "estimated from the file header" in out
+    assert "length: unknown" in out
+    assert "Alex Morgan (email:alex@example.com), Sam Rivera (not linked)" in out
+    assert "outcome: new meeting" in out and "mtg_a, mtg_b" in out
+
+
+def test_a_dry_run_with_json_prints_one_object(dropped_file, capsys):
+    drop = _Drop(answer=_PREVIEW)
+    code = _drop([str(dropped_file), "--scope", "personal", "--dry-run", "--json"], drop)
+    assert code == EXIT_OK
+    found = json.loads(capsys.readouterr().out)
+    assert found == {
+        "title": {"value": "Weekly Sync", "source": "file header", "estimated": False},
+        "start": {"value": "2026-10-09T11:00:00+00:00", "source": "file header",
+                  "estimated": True},
+        "duration_minutes": {"value": None, "source": "unknown", "estimated": False},
+        "participants": [
+            {"name": "Alex Morgan", "handle": "email:alex@example.com"},
+            {"name": "Sam Rivera", "handle": None},
+        ],
+        "outcome": {"kind": "new", "candidates": ["mtg_a", "mtg_b"]},
+    }
+
+
+def test_a_joined_meeting_is_named_in_the_closing_line(dropped_file, capsys):
+    answer = _Dropped(
+        Path("/c.vtt"), "mtg_m", DataScope(ScopeKind.PERSONAL), "matched",
+        title_field=_Field("Weekly Sync", "calendar"),
+        start_field=_Field(DROP_START, "calendar"),
+        duration=_Field(30, "calendar"),
+    )
+    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(answer=answer)) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "joined the existing meeting 'Weekly Sync' (mtg_m), found by title on the same day" in out
+    assert "start 2026-10-09T11:00:00+00:00, from the calendar" in out
 
 
 @pytest.mark.parametrize(

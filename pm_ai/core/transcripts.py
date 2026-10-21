@@ -78,11 +78,14 @@ __all__ = [
     "MIN_DROP_MINUTES",
     "is_webvtt",
     "last_cue_end_minutes",
+    "last_turn_seconds",
     "meeting_utterances",
     "mint_meeting_id",
     "read_transcript",
     "register_adapter",
     "registered_adapters",
+    "turn_header",
+    "unmarked_line",
 ]
 
 
@@ -452,6 +455,59 @@ def _read_turns(lines: list[str]) -> tuple[Utterance, ...] | None:
             continue
         utterances.append(Utterance(speaker, line.strip(), offset))
     return tuple(utterances)
+
+
+def _turn_layout(text: str) -> tuple[list[str], list[tuple[str, int] | None], int] | None:
+    """The non-blank lines, each judged, and the first turn's index — for a file
+    `read_transcript` reads as speaker-and-time turns; `None` for any other."""
+    lines = text.removeprefix("﻿").splitlines()
+    first_line = next((line.strip() for line in lines if line.strip()), "")
+    if _is_header(first_line) or _TIMING.match(first_line):
+        return None
+    present = [line for line in lines if line.strip()]
+    judged = [_turn(line) for line in present]
+    first = next((index for index, turn in enumerate(judged) if turn is not None), None)
+    if first is None:
+        return None
+    count = sum(turn is not None for turn in judged)
+    if count < 2 or count * 4 < len(present) - first:
+        return None
+    return present, judged, first
+
+
+def turn_header(text: str) -> tuple[str, ...]:
+    """The header of a speaker-and-time file: its non-blank lines before the first turn (11e).
+
+    As `_read_turns` defines them, unprepared. Empty for a file read by any
+    other reader — WebVTT and `Speaker: words` files have no header — and for
+    a turns file whose first line is a turn.
+    """
+    layout = _turn_layout(text)
+    if layout is None:
+        return ()
+    present, _, first = layout
+    return tuple(present[:first])
+
+
+def last_turn_seconds(text: str) -> int | None:
+    """The time of a speaker-and-time file's last turn line, in seconds (story 11e).
+
+    The last in the file, times out of order kept as read. `None` for a file
+    read by any other reader.
+    """
+    layout = _turn_layout(text)
+    if layout is None:
+        return None
+    _, judged, _ = layout
+    return next(turn[1] for turn in reversed(judged) if turn is not None)
+
+
+def unmarked_line(line: str) -> str:
+    """`line` with the Markdown marks a speaker-and-time line sets aside (story 11e).
+
+    The header reader prepares its lines with the same step (`_unmarked`).
+    """
+    return _unmarked(line)
 
 
 # ── A dropped file (stories 11c, 11d) ────────────────────────────────────────

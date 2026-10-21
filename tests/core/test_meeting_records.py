@@ -1191,3 +1191,176 @@ def test_a_zone_that_really_is_utc_is_still_accepted():
             MeetingRecord(meeting(start=datetime(2026, 9, 4, 9, 0, tzinfo=zone)))
         )
         assert parse_record(text, source="a.md").meeting.start == NOW
+
+
+# ── Story 11e: participants by name, an estimated start, an unknown length ───
+
+from dataclasses import replace as _replace  # noqa: E402
+
+from pm_ai.core.meeting_records import PARTICIPANTS_HEADING, MalformedMeeting as _Malformed  # noqa: E402
+
+_MINTED_START = datetime(2026, 9, 14, 7, 30, tzinfo=UTC)
+
+
+def _minted(**changes) -> Meeting:
+    meeting = Meeting(
+        meeting_id="mtg_0011223344556677aabb",
+        title="Example Weekly Sync-up",
+        start=_MINTED_START,
+        duration_minutes=None,
+        attendees=(),
+        scope=PERSONAL,
+        attendee_count=2,
+        manual_only=True,
+        start_estimated_from="header",
+    )
+    return _replace(meeting, **changes)
+
+
+def _calendar(start: datetime, *, title: str = "Example Weekly Sync-up") -> Meeting:
+    return Meeting(
+        meeting_id="AAMk-weekly",
+        title=title,
+        start=start,
+        duration_minutes=30,
+        attendees=(Actor("email:alex@example.com"),),
+        scope=PERSONAL,
+        calendar_event_ref="ref-weekly",
+    )
+
+
+def test_participants_round_trip_quoted_and_names_with_a_comma_stay_one():
+    record = MeetingRecord(_minted(), participants=("Alex Morgan", "Rivera, Sam", "-dash", "#hash"))
+    text = render_record(record)
+    assert (
+        f'{PARTICIPANTS_HEADING}\n- "Alex Morgan"\n- "Rivera, Sam"\n- "-dash"\n- "#hash"\n\n## Notes'
+        in text
+    )
+    assert parse_record(text, source="x") == record
+    assert record.meeting.attendees == ()
+
+
+def test_a_record_without_participants_renders_as_before():
+    assert PARTICIPANTS_HEADING not in render_record(MeetingRecord(_minted()))
+
+
+def test_a_hand_edit_under_participants_is_refused_on_read():
+    text = render_record(MeetingRecord(_minted(), participants=("Alex Morgan",)))
+    edited = text.replace('- "Alex Morgan"', "Alex Morgan was here")
+    with pytest.raises(_Malformed, match="Participants"):
+        parse_record(edited, source="x")
+
+
+def test_an_unknown_length_is_omitted_only_beside_manual_only():
+    text = render_record(MeetingRecord(_minted()))
+    assert "duration_minutes" not in text and "start_estimated_from=header" in text
+    assert parse_record(text, source="x").meeting.duration_minutes is None
+    with pytest.raises(_Malformed):
+        render_record(MeetingRecord(_minted(manual_only=False, start_estimated_from=None)))
+    unmarked = text.replace("manual_only=true\n", "")
+    with pytest.raises(_Malformed, match="duration_minutes"):
+        parse_record(unmarked, source="x")
+
+
+def test_an_estimate_source_outside_the_four_is_refused():
+    text = render_record(MeetingRecord(_minted()))
+    with pytest.raises(_Malformed, match="start_estimated_from"):
+        parse_record(text.replace("=header", "=guess"), source="x")
+
+
+def test_put_participants_writes_only_its_region_and_put_carries_it(records):
+    records.put(_minted())
+    records.put_participants(
+        "mtg_0011223344556677aabb", scope=PERSONAL, participants=("Alex Morgan", "Sam Rivera")
+    )
+    held = records.get("mtg_0011223344556677aabb", scope=PERSONAL)
+    assert held.participants == ("Alex Morgan", "Sam Rivera") and held.meeting == _minted()
+    records.put(_minted(title="Renamed"))
+    assert records.get("mtg_0011223344556677aabb", scope=PERSONAL).participants == (
+        "Alex Morgan",
+        "Sam Rivera",
+    )
+
+
+def test_put_participants_needs_a_record(records):
+    with pytest.raises(MeetingNotFound):
+        records.put_participants("mtg_absent", scope=PERSONAL, participants=("A",))
+
+
+def test_an_estimated_start_is_adopted_by_same_day_and_title_and_participants_survive(records):
+    records.put(_minted())
+    records.put_participants("mtg_0011223344556677aabb", scope=PERSONAL, participants=("Alex Morgan",))
+    # 20 minutes off: outside the 15-minute window, inside the same day.
+    kept = records.put(_calendar(_MINTED_START + timedelta(minutes=20)))
+    assert kept.adopted and kept.meeting_id == "mtg_0011223344556677aabb"
+    held = records.get("mtg_0011223344556677aabb", scope=PERSONAL)
+    assert held.meeting.start == _MINTED_START + timedelta(minutes=20)
+    assert held.meeting.start_estimated_from is None and not held.meeting.manual_only
+    assert held.meeting.duration_minutes == 30
+    assert held.participants == ("Alex Morgan",)
+
+
+def test_an_estimated_start_on_another_day_is_not_adopted(records):
+    records.put(_minted())
+    kept = records.put(_calendar(_MINTED_START + timedelta(days=1)))
+    assert not kept.adopted and kept.meeting_id == "AAMk-weekly"
+
+
+def test_the_same_day_may_be_the_display_zones(records):
+    # 23:30 UTC on the 13th is 01:30 on the 14th in Warsaw, the record's own day there.
+    records.put(_minted(start=datetime(2026, 9, 14, 0, 30, tzinfo=UTC)))
+    kept = records.put(
+        _calendar(datetime(2026, 9, 13, 23, 30, tzinfo=UTC)), zone=ZoneInfo("Europe/Warsaw")
+    )
+    assert kept.adopted
+
+
+def test_a_record_with_no_estimate_keeps_the_15_minute_window(records):
+    records.put(_minted(start_estimated_from=None, duration_minutes=30))
+    kept = records.put(_calendar(_MINTED_START + timedelta(minutes=20)))
+    assert not kept.adopted
+
+
+def test_a_calendar_record_of_the_title_already_that_day_stops_same_day_adoption(records):
+    records.put(_minted())
+    other = _replace(
+        _calendar(_MINTED_START + timedelta(hours=5)),
+        meeting_id="AAMk-evening",
+        calendar_event_ref="ref-evening",
+    )
+    records.put(other)
+    kept = records.put(_calendar(_MINTED_START + timedelta(minutes=20)))
+    assert not kept.adopted and kept.meeting_id == "AAMk-weekly"
+
+
+def test_same_day_rivals_in_one_harvest_stop_same_day_adoption(records):
+    records.put(_minted())
+    kept = records.put(_calendar(_MINTED_START + timedelta(minutes=20)), same_day_rivals=True)
+    assert not kept.adopted
+
+
+def test_a_participants_region_that_does_not_parse_is_dropped_with_a_notice(records, storage):
+    records.put(_minted())
+    records.put_participants("mtg_0011223344556677aabb", scope=PERSONAL, participants=("Alex",))
+    (member,) = [
+        name for name in storage.list_collection(scope=PERSONAL, artifact="meetings/")
+        if name.endswith(".md")
+    ]
+    raw = storage.read_artifact(scope=PERSONAL, artifact="meetings/", name=member).decode()
+    assert "- Alex\n" in raw
+    storage.write_artifact(
+        raw.replace("- Alex\n", "Alex was here\n").encode(),
+        scope=PERSONAL, artifact="meetings/", name=member,
+    )
+    kept = records.put(_minted(title="Renamed"))
+    assert any(PARTICIPANTS_HEADING in notice for notice in kept.notices)
+    assert records.get("mtg_0011223344556677aabb", scope=PERSONAL).participants == ()
+
+
+def test_check_participant_refuses_what_the_region_cannot_hold():
+    from pm_ai.core.meeting_records import check_participant
+
+    assert check_participant("Rivera, Sam") == "Rivera, Sam"
+    for bad in ("A\x01lice", " padded", "", "x" * 20000):
+        with pytest.raises(_Malformed):
+            check_participant(bad)

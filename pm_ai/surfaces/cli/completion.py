@@ -70,7 +70,7 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
         (("goal", "set"), "id"),
         # How many log lines: a number, nothing on file to offer (story 4w).
         (("logs",), "lines"),
-        # A drop's answers given as options (story 11d): a start, handles and
+        # A drop's meeting options (stories 11d, 11e): a start, handles and
         # minutes, none of them on file to offer. `--title` is free text
         # already, by `FREE_TEXT_NAMES` (it is `goal set`'s `title` too).
         (("transcript", "drop"), "start"),

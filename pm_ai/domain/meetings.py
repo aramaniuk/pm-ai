@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from pm_ai.domain.identity import Actor, DataScope, SourceRef
 
@@ -46,6 +46,33 @@ def normalised_title(title: str) -> str:
     """
     folded = unicodedata.normalize("NFKC", title).casefold()
     return " ".join(unicodedata.normalize("NFKC", folded).split())
+
+
+ESTIMATE_SOURCES = frozenset({"docx-created", "header", "model-header", "file-modified"})
+"""The spellings of `Meeting.start_estimated_from` (story 11e)."""
+
+
+def falls_on_day(start: datetime, day: date, zone: tzinfo | None) -> bool:
+    """Whether `start`'s date in UTC, or in `zone` when one is set, is `day` (story 11e)."""
+    if start.astimezone(timezone.utc).date() == day:
+        return True
+    return zone is not None and start.astimezone(zone).date() == day
+
+
+def is_same_day_candidate(meeting: Meeting, *, title: str, start: datetime, zone: tzinfo | None) -> bool:
+    """Whether a calendar arrival at `start` titled `title` is `meeting`, a record with
+    an estimated start, by same day and title (story 11e, AD-33).
+
+    Same title after `normalised_title`, and the arrival falls on the record's
+    own start's day in UTC, or in `zone` when set — an estimate can be tens of
+    minutes off, so the 15-minute window would miss it.
+    """
+    wanted = normalised_title(title)
+    if not wanted or normalised_title(meeting.title) != wanted:
+        return False
+    if start.astimezone(timezone.utc).date() == meeting.start.astimezone(timezone.utc).date():
+        return True
+    return zone is not None and start.astimezone(zone).date() == meeting.start.astimezone(zone).date()
 
 
 def is_candidate(meeting: Meeting, *, title: str, start: datetime) -> bool:
@@ -103,7 +130,9 @@ class Meeting:
     meeting_id: str
     title: str
     start: datetime
-    duration_minutes: int
+    # `None` only for a record pm-ai minted from a dropped transcript whose
+    # length nothing gave (story 11e): stored by omission, beside `manual_only`.
+    duration_minutes: int | None
     attendees: tuple[Actor, ...]
     # AD-33/AD-38 — a Meeting belongs to the scope that owns its subject: a team
     # meeting to its project, a 1:1 with a direct report to `people`. This is
@@ -162,6 +191,12 @@ class Meeting:
     # manual-only record is adopted, and adoption clears the mark. Stored in
     # the record, written only when set.
     manual_only: bool = False
+    # Where a minted record's estimated start came from (story 11e, AD-33):
+    # `docx-created`, `header`, `model-header` or `file-modified`; `None` when
+    # the start is not an estimate. Stored, written only when set. A calendar
+    # harvest adopts such a record by same day and title rather than by
+    # `MATCH_TOLERANCE`, and adoption clears it.
+    start_estimated_from: str | None = None
     # Carried in memory and written to no file, on `tentative`'s precedent
     # (story 23e, Andrei's decision on field-test finding 7, 2026-10-16).
     #
@@ -205,11 +240,14 @@ class Meeting:
         """
         return self.scope
 
-    def man_hour_cost(self, blended_hourly_rate: float) -> float:
+    def man_hour_cost(self, blended_hourly_rate: float) -> float | None:
         """FR-03. A single PM-configured rate, never per-attendee salary data.
 
         Multiplies by `attendee_count`, not `len(attendees)`: the list holds only
         the attendees pm-ai could name, and the cost counts every attendee.
+        `None` when the length is unknown (story 11e).
         """
+        if self.duration_minutes is None:
+            return None
         count = len(self.attendees) if self.attendee_count is None else self.attendee_count
         return count * (self.duration_minutes / 60) * blended_hourly_rate

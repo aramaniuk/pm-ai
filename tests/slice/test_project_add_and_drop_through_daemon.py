@@ -356,97 +356,14 @@ def test_connector_check_s_credential_saves_are_noted_as_the_job_s_steps(rig):
     assert rig.path.notes.last("job_noted0000000000") == "save gitlab:beta's refreshed credential"
 
 
-# ── Story 11d: a drop typed at the prompt asks there; the daemon never asks ──
-
-
-def test_a_tilde_drop_at_the_prompt_asks_there_and_the_daemon_reads_the_home_file(
-    rig, tmp_path, monkeypatch, capsys
-):
-    from pm_ai.surfaces.cli import repl
-    from pm_ai.surfaces.cli.loopback import Answer
-
-    home = tmp_path / "person"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    (home / "x.vtt").write_text(SAID)
-    answers = ["Standup", "2026-10-14T12:00+03:00", "email:alex@example.com"]
-    asked: list[str] = []
-
-    def typed(prompt: str = "") -> str:
-        asked.append(prompt)
-        return answers.pop(0)
-
-    monkeypatch.setattr("builtins.input", typed)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    sent: list[str] = []
-
-    class Client:
-        def send(self, line: str):
-            sent.append(line)
-            return Answer("", EXIT_OK)
-
-        def follow(self, job_id, on_state=None):  # pragma: no cover — never acknowledged
-            raise AssertionError("not acknowledged")
-
-        def reachable(self):
-            return None
-
-    words = ["transcript", "drop", "~/x.vtt", "--scope", "personal"]
-    repl._through_daemon(words, Client(), None, " ".join(words))  # noqa: SLF001
-
-    # Every question was asked in the prompt's process; the file carries its
-    # duration (its last cue), so none was asked for it.
-    assert len(asked) == 3 and answers == []
-    assert not any(prompt.startswith("Duration") for prompt in asked)
-    (line,) = sent
-    assert "~/x.vtt" in line
-    assert "--title=Standup" in line and "--attendees=email:alex@example.com" in line
-    assert "--start" in line and "--duration" not in line
-
-    def no_questions(prompt: str = "") -> str:
-        raise AssertionError(f"the daemon asked {prompt!r}")
-
-    monkeypatch.setattr("builtins.input", no_questions)
-    result = _job_result(rig, line)
-    assert result["exit"] == EXIT_OK, result
-    output = str(result["output"])
-    assert "a new manual-only record" in output
-    captures = list((rig.root / ".manager-ai" / "transcripts").glob("*-manual.vtt"))
-    assert len(captures) == 1 and captures[0].read_text() == SAID
-    assert str(captures[0]) in output
-
-
-def test_a_drop_at_the_prompt_with_a_file_it_refuses_asks_nothing_and_sends_nothing(
-    tmp_path, monkeypatch, capsys
-):
-    from pm_ai.surfaces.cli import repl
-
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"asked {prompt!r}"))
-    sent: list[str] = []
-
-    class Client:
-        def send(self, line: str):  # pragma: no cover — must not be reached
-            sent.append(line)
-
-        def reachable(self):
-            return None
-
-    monkeypatch.chdir(tmp_path)
-    words = ["transcript", "drop", "absent.vtt", "--scope", "personal"]
-    repl._through_daemon(words, Client(), None, " ".join(words))  # noqa: SLF001
-    err = capsys.readouterr().err
-    assert sent == []
-    assert str(tmp_path / "absent.vtt") in err or str(Path.cwd() / "absent.vtt") in err
-    assert ".vtt, .txt, .md, .docx" in err
+# ── Story 11e: a drop typed at the prompt is sent as typed; nobody asks ──────
 
 
 class _Recording:
     """A prompt's client that records what it would send, and answers 0."""
 
-    def __init__(self, unreached=None) -> None:
+    def __init__(self) -> None:
         self.sent: list[str] = []
-        self.unreached = unreached
 
     def send(self, line: str):
         from pm_ai.surfaces.cli.loopback import Answer
@@ -457,22 +374,13 @@ class _Recording:
     def follow(self, job_id, on_state=None):  # pragma: no cover — never acknowledged
         raise AssertionError("not acknowledged")
 
-    def reachable(self):
-        return self.unreached
+    def reachable(self):  # pragma: no cover — the prompt no longer asks first
+        raise AssertionError("a drop asks nothing, so the prompt checks nothing first")
 
 
-def _typing(monkeypatch, answers: list[str]) -> list[str]:
-    asked: list[str] = []
-
-    def typed(prompt: str = "") -> str:
-        asked.append(prompt)
-        if not answers:
-            raise AssertionError(f"asked {prompt!r} with no answer left")
-        return answers.pop(0)
-
-    monkeypatch.setattr("builtins.input", typed)
+def _nobody_asks(monkeypatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    return asked
+    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"asked {prompt!r}"))
 
 
 def _at_the_prompt(words: list[str], client: _Recording) -> None:
@@ -486,102 +394,103 @@ FIXTURE_DOCX = (
 )
 
 
-def test_a_docx_at_the_prompt_asks_the_duration_there_and_the_daemon_mints_without_asking(
+def test_a_tilde_drop_at_the_prompt_is_sent_as_typed_and_the_daemon_reads_the_home_file(
+    rig, tmp_path, monkeypatch
+):
+    home = tmp_path / "person"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (home / "x.vtt").write_text(SAID)
+    _nobody_asks(monkeypatch)
+    client = _Recording()
+    words = ["transcript", "drop", "~/x.vtt", "--scope", "personal"]
+
+    _at_the_prompt(words, client)
+
+    (line,) = client.sent
+    assert shlex.split(line) == words
+    result = _job_result(rig, line)
+    assert result["exit"] == EXIT_OK, result
+    output = str(result["output"])
+    assert "a new manual-only record" in output
+    assert "Title 'x', from the file name" in output and "from the last cue" in output
+    captures = list((rig.root / ".manager-ai" / "transcripts").glob("*-manual.vtt"))
+    assert len(captures) == 1 and captures[0].read_text() == SAID
+    assert str(captures[0]) in output
+
+
+def test_a_relative_drop_at_the_prompt_is_sent_with_its_path_made_absolute(
+    tmp_path, monkeypatch
+):
+    _nobody_asks(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    client = _Recording()
+
+    _at_the_prompt(["transcript", "drop", "absent.vtt", "--scope", "personal"], client)
+
+    (line,) = client.sent
+    assert shlex.split(line) == [
+        "transcript", "drop", str(Path.cwd() / "absent.vtt"), "--scope", "personal"
+    ]
+
+
+def test_the_recorded_docx_at_the_prompt_asks_nothing_and_the_daemon_names_each_source(
+    rig, tmp_path, monkeypatch
+):
+    """Matrix, "At the prompt": the daemon decides every field and says where from."""
+    dropped = tmp_path / "export.docx"
+    dropped.write_bytes(FIXTURE_DOCX.read_bytes())
+    _nobody_asks(monkeypatch)
+    client = _Recording()
+    words = ["transcript", "drop", str(dropped), "--scope", "personal"]
+
+    _at_the_prompt(words, client)
+
+    (line,) = client.sent
+    assert shlex.split(line) == words
+    result = _job_result(rig, line)
+    assert result["exit"] == EXIT_OK, result
+    output = str(result["output"])
+    assert "a new manual-only record" in output
+    assert "Title 'Example Weekly Sync-up', from the file header" in output
+    assert "30 minutes, from the file header" in output
+    # The rig's `display_timezone` is UTC, so the header's 09:30 is read in it.
+    assert "start 2026-09-14T09:30:00+00:00 (2026-09-14 09:30 in UTC), estimated from the file header" in output
+    assert "Participants Alex Morgan (not linked), Sam Rivera (not linked)." in output
+    captures = list((rig.root / ".manager-ai" / "transcripts").glob("*-manual.txt"))
+    assert len(captures) == 1 and str(captures[0]) in output
+
+
+def test_a_dry_run_at_the_prompt_is_sent_as_typed_and_the_daemon_prints_the_object(
     rig, tmp_path, monkeypatch
 ):
     dropped = tmp_path / "export.docx"
     dropped.write_bytes(FIXTURE_DOCX.read_bytes())
-    answers = ["Weekly Sync", "2026-10-14T12:00+03:00", "", "29"]
-    asked = _typing(monkeypatch, answers)
+    _nobody_asks(monkeypatch)
     client = _Recording()
+    words = ["transcript", "drop", str(dropped), "--scope", "personal", "--dry-run", "--json"]
+    meetings = rig.root / ".manager-ai" / "meetings"
+    before = sorted(meetings.iterdir()) if meetings.exists() else []
 
-    _at_the_prompt(["transcript", "drop", str(dropped), "--scope", "personal"], client)
+    _at_the_prompt(words, client)
 
-    assert answers == [] and any(prompt.startswith("Duration") for prompt in asked)
     (line,) = client.sent
-    assert "--duration=29" in shlex.split(line) and "--title=Weekly Sync" in shlex.split(line)
-    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"the daemon asked {prompt!r}"))
+    assert set(shlex.split(line)) == set(words)
     result = _job_result(rig, line)
     assert result["exit"] == EXIT_OK, result
-    output = str(result["output"])
-    assert "a new manual-only record" in output and "29 minutes, as answered" in output
-    captures = list((rig.root / ".manager-ai" / "transcripts").glob("*-manual.txt"))
-    assert len(captures) == 1 and str(captures[0]) in output
-    assert captures[0].read_text(encoding="utf-8").startswith("Example Weekly Sync")
-
-
-@pytest.mark.parametrize(
-    "options",
-    [
-        ["--meeting", MEETING],
-        ["--title", "Standup", "--start", "2026-10-14T09:00Z", "--attendees", "",
-         "--duration", "15"],
-    ],
-    ids=["meeting", "every-answer"],
-)
-def test_a_drop_with_nothing_left_to_ask_asks_nothing_and_is_sent_as_typed(
-    options, tmp_path, monkeypatch
-):
-    from pm_ai.surfaces.cli.dispatch import ask_drop_here
-
-    dropped = tmp_path / "notes.txt"
-    dropped.write_text("Ana: hello\nBo: hi\n")
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"asked {prompt!r}"))
-    words = ["transcript", "drop", str(dropped), "--scope", "personal", *options]
-    assert ask_drop_here(words) == words
-
-
-def test_the_answers_go_before_a_bare_double_dash_and_a_dashed_title_stays_a_value(
-    tmp_path, monkeypatch
-):
-    from pm_ai.surfaces.cli.dispatch import ask_drop_here, parse
-
-    dropped = tmp_path / "--odd.vtt"
-    dropped.write_text(SAID)
-    _typing(monkeypatch, ["--scope odd", "2026-10-14T12:00+03:00", ""])
-    monkeypatch.chdir(tmp_path)
-    words = ask_drop_here(["transcript", "drop", "--scope", "personal", "--", "--odd.vtt"])
-    assert words[-2:] == ["--", "--odd.vtt"]
-    parsed = parse(words)
-    assert parsed.arguments == ("--odd.vtt",)  # type: ignore[union-attr]
-    assert parsed.options["title"] == "--scope odd"  # type: ignore[union-attr]
-    assert parsed.options["scope"] == "personal"  # type: ignore[union-attr]
-    assert parsed.options["attendees"] == ""  # type: ignore[union-attr]
-
-
-@pytest.mark.parametrize("stop", [KeyboardInterrupt, EOFError], ids=["ctrl-c", "eof"])
-def test_an_interrupted_question_at_the_prompt_sends_nothing(stop, tmp_path, monkeypatch, capsys):
-    dropped = tmp_path / "standup.vtt"
-    dropped.write_text(SAID)
-    answers = ["Standup"]
-
-    def typed(prompt: str = "") -> str:
-        if answers:
-            return answers.pop(0)
-        raise stop
-
-    monkeypatch.setattr("builtins.input", typed)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    client = _Recording()
-    _at_the_prompt(["transcript", "drop", str(dropped), "--scope", "personal"], client)
-    assert client.sent == []
-    assert "interrupted before every question was answered, so nothing was saved" in (
-        capsys.readouterr().err
-    )
-
-
-def test_with_no_daemon_the_prompt_asks_nothing_and_says_so(tmp_path, monkeypatch, capsys):
-    from pm_ai.surfaces.cli.loopback import NoDaemon
-
-    dropped = tmp_path / "standup.vtt"
-    dropped.write_text(SAID)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail(f"asked {prompt!r}"))
-    client = _Recording(unreached=NoDaemon.refused(1))
-    _at_the_prompt(["transcript", "drop", str(dropped), "--scope", "personal"], client)
-    assert client.sent == []
-    assert "pm-ai daemon run" in capsys.readouterr().err
+    found = json.loads(str(result["output"]))
+    assert found["title"] == {
+        "value": "Example Weekly Sync-up", "source": "file header", "estimated": False
+    }
+    assert found["duration_minutes"] == {"value": 30, "source": "file header", "estimated": False}
+    assert found["start"] == {
+        "value": "2026-09-14T09:30:00+00:00", "source": "file header", "estimated": True
+    }
+    assert found["participants"] == [
+        {"name": "Alex Morgan", "handle": None}, {"name": "Sam Rivera", "handle": None}
+    ]
+    assert found["outcome"] == {"kind": "new", "candidates": []}
+    assert (sorted(meetings.iterdir()) if meetings.exists() else []) == before
 
 
 def test_the_loopback_client_says_no_daemon_without_a_token_file(tmp_path):
@@ -589,3 +498,61 @@ def test_the_loopback_client_says_no_daemon_without_a_token_file(tmp_path):
 
     client = LoopbackClient(token_path=lambda: tmp_path / "absent", port=lambda: 1)
     assert isinstance(client.reachable(), NoDaemon)
+
+
+def test_the_drops_bound_is_the_git_question_and_one_model_call():
+    """Story 11e: the header reading runs inside the drop, so its deadline is in the bound."""
+    from pm_ai.app.entry import DAEMON_BOUNDS
+    from pm_ai.app.pipelines import SUMMARY_CALL_DEADLINE_SECONDS, TRANSCRIPT_DROP_BOUND_SECONDS
+    from pm_ai.app.wiring import GIT_QUESTION_SECONDS
+
+    assert TRANSCRIPT_DROP_BOUND_SECONDS == GIT_QUESTION_SECONDS + SUMMARY_CALL_DEADLINE_SECONDS
+    assert DAEMON_BOUNDS[("transcript", "drop")](None) == TRANSCRIPT_DROP_BOUND_SECONDS  # type: ignore[arg-type]
+
+
+class _HeaderModel:
+    def __init__(self, answer: str = "", *, delay: float = 0.0) -> None:
+        self.answer = answer
+        self.delay = delay
+        self.threads: list[str] = []
+
+    def complete(self, **call):
+        from pm_ai.domain.model_calls import ModelAnswer
+
+        self.threads.append(threading.current_thread().name)
+        time.sleep(self.delay)
+        return ModelAnswer(text=self.answer, model="fake", local=True, prompt_tokens=1, output_tokens=1)
+
+
+def _with_pool(model):
+    from types import SimpleNamespace
+
+    from pm_ai.app.concurrency import ModelPool
+
+    pool = ModelPool()
+    pool.start()
+    return SimpleNamespace(model=model, model_pool=pool), pool
+
+
+def test_the_header_call_runs_on_the_model_pool():
+    answer = json.dumps({"title": "Example Weekly Sync-up", "start": None, "length_minutes": 30})
+    model = _HeaderModel(answer)
+    daemon, pool = _with_pool(model)
+    try:
+        reading = pipelines._header_by_model(daemon, PERSONAL, ["Example Weekly Sync-up · 29m"])  # noqa: SLF001
+    finally:
+        pool.shutdown()
+    assert reading is not None and reading.title == "Example Weekly Sync-up"
+    assert reading.length == 30
+    assert model.threads == ["pm-ai-model-1"]
+
+
+def test_a_header_call_past_its_deadline_or_a_stopped_pool_reads_nothing(monkeypatch):
+    model = _HeaderModel("{}", delay=0.5)
+    daemon, pool = _with_pool(model)
+    monkeypatch.setattr(pipelines, "SUMMARY_CALL_DEADLINE_SECONDS", 0.05)
+    try:
+        assert pipelines._header_by_model(daemon, PERSONAL, ["x · 29m"]) is None  # noqa: SLF001
+    finally:
+        pool.shutdown()
+    assert pipelines._header_by_model(daemon, PERSONAL, ["x · 29m"]) is None  # noqa: SLF001

@@ -1486,7 +1486,9 @@ def test_the_record_is_written_before_its_event_is_persisted(tmp_path, monkeypat
     put, persist = daemon.meetings.put, daemon.storage.persist_events
 
     monkeypatch.setattr(
-        daemon.meetings, "put", lambda meeting: (order.append("record"), put(meeting))[1]
+        daemon.meetings,
+        "put",
+        lambda meeting, **where: (order.append("record"), put(meeting, **where))[1],
     )
     monkeypatch.setattr(
         daemon.storage,
@@ -1503,7 +1505,7 @@ def test_a_meetings_write_that_refuses_persists_no_event(tmp_path, monkeypatch):
     """Matrix: `meetings/` refuses → the event is **not** emitted, and it propagates."""
     daemon = _wired(tmp_path, _ended())
 
-    def _refuse(meeting):
+    def _refuse(meeting, **_where):
         raise OSError("the collection refused")
 
     monkeypatch.setattr(daemon.meetings, "put", _refuse)
@@ -1834,3 +1836,34 @@ def test_an_all_day_row_ending_not_after_its_start_is_flagged_not_refused(days):
     (meeting,) = (*result.records, *result.live)
     assert meeting.all_day_date == date(2026, 9, 3)
     assert meeting.duration_minutes == 0
+
+
+def test_the_harvest_passes_the_display_zone_and_same_day_rivals_to_adoption(
+    tmp_path, monkeypatch
+):
+    """Story 11e: adoption of an estimated start reads `display_timezone`, and two
+    same-titled rows on one day are each told the other exists."""
+    from dataclasses import replace as _replace
+    from zoneinfo import ZoneInfo
+
+    daemon = _wired(
+        tmp_path,
+        _ended(id="AAMk-one", iCalUId="one"),
+        _ended(id="AAMk-two", iCalUId="two"),
+        _ended(id="AAMk-other", iCalUId="other", subject="Planning"),
+    )
+    daemon.config = _replace(daemon.config, display_timezone="Europe/Warsaw")
+    seen: list[tuple[str, dict]] = []
+    put = daemon.meetings.put
+    monkeypatch.setattr(
+        daemon.meetings,
+        "put",
+        lambda meeting, **where: (seen.append((meeting.title, where)), put(meeting, **where))[1],
+    )
+
+    run_harvest(daemon, INSTANCE)
+
+    assert seen, "nothing was recorded"
+    assert all(where["zone"] == ZoneInfo("Europe/Warsaw") for _, where in seen)
+    rivals = {title: where["same_day_rivals"] for title, where in seen}
+    assert rivals == {"Sprint review": True, "Planning": False}

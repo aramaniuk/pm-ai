@@ -1801,7 +1801,8 @@ class GraphConnector:
             payload=MeetingHeldPayload(
                 meeting_id=meeting.meeting_id,
                 attendee_count=len(row.attendees),
-                duration_minutes=meeting.duration_minutes,
+                # Built from the calendar row just above, which always has one.
+                duration_minutes=meeting.duration_minutes or 0,
             ),
             # AD-36 — a connector may NEVER assert `external`. It cannot see the
             # executed-mutation ledger, so it cannot know whether this is pm-ai's

@@ -31,7 +31,10 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
-from pm_ai.app.concurrency import WriterStopped
+from concurrent.futures import CancelledError
+from concurrent.futures import TimeoutError as FutureTimeout
+
+from pm_ai.app.concurrency import ModelJobAbandoned, WriterStopped
 from pm_ai.app.wiring import (
     CONFIG_ARTIFACT,
     GIT_QUESTION_SECONDS,
@@ -57,6 +60,7 @@ from pm_ai.core.meeting_records import (
     MeetingRecord,
     MeetingNotFound,
     capture_name,
+    check_participant,
     capture_stem,
     has_capture,
     render_record,
@@ -73,18 +77,40 @@ from pm_ai.core.meeting_summary import (
     validate_answer,
 )
 from pm_ai.core.transcripts import (
-    MAX_DROP_MINUTES,
-    MIN_DROP_MINUTES,
     MeetingDetails,
-    bind_candidates,
     bind_meeting,
-    carried_minutes,
     drop_capture_format,
     drop_utterances,
     failure_reason,
     ingest,
     meeting_utterances,
+    mint_meeting_id,
 )
+from pm_ai.core.transcript_details import (
+    ESTIMATED_FROM,
+    HEADER_INSTRUCTIONS,
+    HEADER_SHAPE,
+    SOURCE_CALENDAR,
+    SOURCE_RECORD,
+    SOURCE_UNKNOWN,
+    Decided,
+    DropFacts,
+    DropPlan,
+    HeaderReading,
+    Participant,
+    attendee_count,
+    candidate_span,
+    decide_fields,
+    decide_plan,
+    header_fragments,
+    header_lines,
+    model_header,
+    needs_model,
+    participants,
+    read_header,
+    read_model_answer,
+)
+from pm_ai.core.transcript_details import linked as linked_participants
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
 from pm_ai.core.goal_register import MalformedGoals, parse_goals
 from pm_ai.core.normalize import attribute_all
@@ -157,7 +183,12 @@ from pm_ai.domain.meeting_summaries import (
     SummaryState,
     SummaryStateKind,
 )
-from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.meetings import (
+    AmbiguousMeeting,
+    InvalidAttendeeCount,
+    Meeting,
+    is_same_day_candidate,
+)
 from pm_ai.domain.model_calls import ModelAnswer, ModelSide, ScopeFlow, ScopeFlowRefused
 from pm_ai.domain.proposals import Proposal
 from pm_ai.domain.renders import (
@@ -200,6 +231,7 @@ from pm_ai.domain.transcripts import (
     TranscriptStateKind,
     UnboundTranscript,
     UnreadableTranscript,
+    Utterance,
 )
 from pm_ai.ports import (
     ArtifactBusy,
@@ -427,9 +459,15 @@ def _harvest(
     kept_ids: dict[str, str] = {}
     unrecorded: set[str] = set()
     refusals: list[str] = []
+    # Story 11e: a minted record with an estimated start is adopted by same
+    # day, in UTC or in `display_timezone`, and title.
+    zone = _zone(daemon)
+    rivals = _same_day_rivals(result.records, zone)
     for index, meeting in enumerate(result.records, start=1):
         try:
-            kept = daemon.meetings.put(meeting)
+            kept = daemon.meetings.put(
+                meeting, zone=zone, same_day_rivals=meeting.meeting_id in rivals
+            )
         except ArtifactBusy as busy:
             _record_busy_meetings(
                 daemon, instance, cursor, (index, meeting), total, busy, result.failure
@@ -1247,17 +1285,55 @@ def _execute(
 
 
 @dataclass(frozen=True, slots=True)
+class DroppedField:
+    """One decided field as the closing line and `--dry-run` show it (story 11e)."""
+
+    value: object
+    source: str
+    estimated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DropPreview:
+    """What `pm-ai transcript drop --dry-run` would store, writing nothing (story 11e).
+
+    `outcome` is `join`, `new` or `refused`; `meeting_id` and `meeting_title`
+    name the record a join binds to, `candidates` the same-day records a new
+    record was made beside, `reason` a refusal's sentence. `participants`
+    pairs each name with the handle `aliases.md` links it to, or `None`.
+    `zone` is `display_timezone`, empty when unset.
+    """
+
+    title: DroppedField
+    start: DroppedField
+    duration: DroppedField
+    participants: tuple[tuple[str, str | None], ...]
+    outcome: str
+    meeting_id: str | None = None
+    meeting_title: str | None = None
+    candidates: tuple[str, ...] = ()
+    reason: str = ""
+    zone: str = ""
+    notices: tuple[str, ...] = ()
+    found_by: str = ""
+    """How a joined record was found: `start` or `same day`; empty otherwise."""
+
+
+@dataclass(frozen=True, slots=True)
 class TranscriptDropped:
-    """What `pm-ai transcript drop` did, for the closing line (story 11c).
+    """What `pm-ai transcript drop` did, for the closing line (stories 11c, 11e).
 
     `bound_by` is how the meeting was found: `named` (`--meeting`), `matched`
-    (a title and start), or `minted` (a new manual-only record). `title` and
-    `start` are the bound meeting's own, so a match can be confirmed.
-    `duration_minutes` is a minted record's duration and
-    `duration_from_last_cue` says it came from the file rather than an answer.
-    `from_docx` says the capture is the text taken from a `.docx` (story 11d).
-    `staged` counts the proposals staged and `left` those already approved,
-    rejected or expired and so left as they were; a dropped transcript never
+    (one record of the same title on the same day, or within 15 minutes of
+    `--start`), or `minted` (a new manual-only record). `title`, `start` and
+    `duration` are what the bound record holds, each with the source that
+    decided it — carried here from where it was decided, never inferred
+    afterwards; `None` for a `--meeting` drop, which decides none of them.
+    `participants` are the speakers by name, each with the handle `aliases.md`
+    links it to. `candidates` names the same-day records a new record was
+    made beside. `from_docx` says the capture is the text taken from a
+    `.docx` (story 11d). `staged` counts the proposals staged and `left`
+    those already approved, rejected or expired; a dropped transcript never
     executes anything (AD-32). `notices` are what went wrong after the
     ingestion itself succeeded.
     """
@@ -1270,8 +1346,14 @@ class TranscriptDropped:
     start: datetime
     staged: int
     left: int = 0
-    duration_minutes: int | None = None
-    duration_from_last_cue: bool = False
+    title_field: DroppedField | None = None
+    start_field: DroppedField | None = None
+    duration: DroppedField | None = None
+    participants: tuple[tuple[str, str | None], ...] = ()
+    candidates: tuple[str, ...] = ()
+    found_by: str = ""
+    """How a matched record was found: `start` or `same day` (story 11e)."""
+    zone: str = ""
     from_docx: bool = False
     notices: tuple[str, ...] = ()
 
@@ -1283,12 +1365,6 @@ class TranscriptDropped:
 DROP_NAMED = "named"
 DROP_MATCHED = "matched"
 DROP_MINTED = "minted"
-
-Identify = Callable[[], tuple[str, datetime]]
-"""Asks for a dropped transcript's meeting title and its start, as aware UTC."""
-
-Describe = Callable[[bool], tuple[tuple[Actor, ...], int | None]]
-"""Asks for a meeting's attendees and, when told to, its duration in minutes."""
 
 _INGESTION_REFUSALS: tuple[type[BaseException], ...] = (
     MalformedMeeting,
@@ -1317,10 +1393,224 @@ _NO_REINGEST = (
 )
 
 
-TRANSCRIPT_DROP_BOUND_SECONDS = GIT_QUESTION_SECONDS
-"""`drop_transcript`'s bound (AD-21, story 4r): the capture guard's `git`
-question (AD-43), bounded at ten seconds. Over five, so `transcript drop` sent
-through the daemon is a job."""
+@dataclass(frozen=True, slots=True)
+class DropFile:
+    """The dropped file as the surface read it (stories 11c, 11d, 11e).
+
+    `text` is what the readers read — a `.docx`'s taken text when `from_docx`.
+    `modified` is the file's modification time and `created` a `.docx`'s
+    `dcterms:created`, both aware UTC; `created` is `None` otherwise.
+    """
+
+    text: str
+    name: str
+    modified: datetime
+    from_docx: bool = False
+    created: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DropOptions:
+    """What the command line gave: each `None` (or empty) when not given."""
+
+    meeting_id: str | None = None
+    title: str | None = None
+    start: datetime | None = None
+    duration: int | None = None
+    attendees: tuple[Actor, ...] = ()
+
+
+_HEADER_REFUSALS: tuple[type[BaseException], ...] = (
+    *(
+        NoLocalModel,
+        LocalModelUnavailable,
+        ModelTimedOut,
+        PossiblyTruncated,
+        OutputCapReached,
+    ),
+    ScopeFlowRefused,
+    ModelJobAbandoned,
+    FutureTimeout,
+    CancelledError,
+)
+"""Every way the header call can fail to answer: each passes the fields to the
+next source, and the drop goes on (story 11e)."""
+
+
+def _header_by_model(
+    daemon: Daemon, scope: DataScope, lines: Sequence[str]
+) -> HeaderReading | None:
+    """The local model's validated reading of the header lines, or `None`.
+
+    The one model call on the transcript path (story 11e): local-only
+    (`header_reading`), over the prepared header lines each cleaned
+    (`header_fragments`) — never the body — for the scope's own flow, on the daemon's
+    model pool in its one local slot (AD-19), queued ahead of the harvest's
+    summaries because the PM is waiting; in a process with no model pool (a
+    terminal's own composed daemon), on this thread. Every refusal, a pool that
+    has stopped and an answer past `SUMMARY_CALL_DEADLINE_SECONDS` give `None`.
+    """
+    shown = model_header(lines)
+    if shown is None:
+        return None
+    fragments = header_fragments(shown)
+
+    def call() -> ModelAnswer:
+        return require_model(daemon).complete(
+            task_class=TaskClass.HEADER_READING,
+            instructions=HEADER_INSTRUCTIONS,
+            external=fragments,
+            flow=ScopeFlow.of((scope,), scope),
+            shape=HEADER_SHAPE,
+        )
+
+    try:
+        pool = daemon.model_pool
+        if pool is None:
+            answer = call()
+        else:
+            try:
+                future = pool.submit(call, ahead=True)
+            except RuntimeError:
+                return None
+            try:
+                answer = future.result(timeout=SUMMARY_CALL_DEADLINE_SECONDS)
+            except FutureTimeout:
+                future.cancel()
+                raise
+    except _HEADER_REFUSALS:
+        return None
+    return read_model_answer(answer.text, shown)
+
+
+def _same_day_rivals(meetings: Sequence[Meeting], zone: tzinfo | None) -> frozenset[str]:
+    """The ids of calendar rows another row of the same title shares a day with (11e).
+
+    A record a drop minted with an estimated start is adopted only by the one
+    calendar meeting of its title that day; with two in one harvest, neither
+    adopts it.
+    """
+    rivals: set[str] = set()
+    for meeting in meetings:
+        for other in meetings:
+            if other is not meeting and is_same_day_candidate(
+                other, title=meeting.title, start=meeting.start, zone=zone
+            ):
+                rivals.add(meeting.meeting_id)
+    return frozenset(rivals)
+
+
+def _zone(daemon: Daemon) -> tzinfo | None:
+    """`display_timezone`, or `None` when unset: pm-ai never assumes the machine's zone."""
+    name = daemon.config.display_timezone
+    return ZoneInfo(name) if name else None
+
+
+@dataclass(frozen=True, slots=True)
+class _Planned:
+    plan: DropPlan
+    utterances: tuple[Utterance, ...]
+    notices: tuple[str, ...]
+
+
+def _plan_drop(
+    daemon: Daemon, *, dropped: DropFile, scope: DataScope, options: DropOptions
+) -> _Planned:
+    """Every field of a drop without `--meeting`, decided — the drop's and the preview's.
+
+    Reads the file's utterances (the readers' refusals pass through), the
+    alias table, the records that may be the meeting, and, when the fixed
+    readers leave a header field unread that no option gives, asks the local
+    model. Writes nothing.
+    """
+    utterances = drop_utterances(dropped.text, name=dropped.name, from_docx=dropped.from_docx)
+    names, unrecorded = _speakers(utterances)
+    zone = _zone(daemon)
+    facts = DropFacts(
+        text=dropped.text,
+        file_name=dropped.name,
+        modified=dropped.modified,
+        from_docx=dropped.from_docx,
+        created=dropped.created,
+        zone=zone,
+        title=options.title,
+        start=options.start,
+        duration=options.duration,
+    )
+    lines = header_lines(dropped.text)
+    fixed = read_header(lines)
+    model = _header_by_model(daemon, scope, lines) if needs_model(facts, lines, fixed) else None
+    fields = decide_fields(facts, fixed, model)
+    begin, end = candidate_span(fields)
+    records = tuple(
+        record.meeting for record in daemon.meetings.between(begin, end, scope=scope)
+    )
+    aliases, notices = _drop_aliases(daemon)
+    plan = decide_plan(
+        fields, records, names=names, aliases=aliases, zone=zone, scope_name=str(scope)
+    )
+    return _Planned(plan, utterances, (*unrecorded, *notices))
+
+
+def _speakers(utterances: Sequence[Utterance]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The speakers' names the record can hold, and a notice for each it cannot (11e).
+
+    A name with a control character, padding or past a line's bound is left
+    out of `## Participants` rather than refusing the drop: participants are
+    read from the file, never asked for.
+    """
+    kept: list[str] = []
+    notices: list[str] = []
+    for name in participants(utterances):
+        try:
+            kept.append(check_participant(name))
+        except MalformedMeeting as refused:
+            notices.append(
+                f"a speaker's name in the file cannot be recorded as a participant, "
+                f"so it is left out: {failure_reason(refused)}."
+            )
+    return tuple(kept), tuple(notices)
+
+
+def _drop_aliases(daemon: Daemon) -> tuple[AliasTable, tuple[str, ...]]:
+    found = _read_aliases(daemon)
+    if isinstance(found, BaseException):
+        return AliasTable(), (
+            f"aliases.md could not be read ({type(found).__name__}), so no participant "
+            f"is linked to a handle; the names are recorded as said.",
+        )
+    return found, ()
+
+
+def _shown(decided: Decided[Any]) -> DroppedField:
+    return DroppedField(decided.value, decided.source, decided.estimated)
+
+
+def _pairs(linked: Sequence[Participant]) -> tuple[tuple[str, str | None], ...]:
+    return tuple(
+        (person.name, None if person.handle is None else str(person.handle)) for person in linked
+    )
+
+
+def _new_meeting(plan: DropPlan, *, scope: DataScope, attendees: tuple[Actor, ...]) -> Meeting:
+    """A new manual-only record from the plan, checked by the record's own rules."""
+    handles = [attendee.actor_id for attendee in attendees]
+    start = plan.start
+    meeting = Meeting(
+        meeting_id=mint_meeting_id(),
+        title=plan.title.value,
+        start=start.value,
+        duration_minutes=plan.length.value,
+        attendees=attendees,
+        scope=scope,
+        attendee_count=attendee_count(plan, handles),
+        manual_only=True,
+        start_estimated_from=ESTIMATED_FROM.get(start.source) if start.estimated else None,
+    )
+    # The record's own rules, asked before the capture is written: a title or
+    # attendee list `put` would refuse must not leave a capture behind it.
+    render_record(MeetingRecord(meeting, participants=tuple(p.name for p in plan.participants)))
+    return meeting
 
 
 def drop_transcript(
@@ -1330,26 +1620,169 @@ def drop_transcript(
     file_name: str,
     scope: DataScope,
     meeting_id: str | None = None,
-    identify: Identify | None = None,
-    describe: Describe | None = None,
     from_docx: bool = False,
+    modified: datetime | None = None,
+    created: datetime | None = None,
+    title: str | None = None,
+    start: datetime | None = None,
+    duration: int | None = None,
+    attendees: tuple[Actor, ...] = (),
+    dry_run: bool = False,
+) -> TranscriptDropped | DropPreview:
+    """`pm-ai transcript drop`, as the surface calls it: the drop, or with
+    `dry_run` its preview (`preview_drop`), which writes nothing.
+
+    `modified` is the file's modification time, aware UTC — the daemon's
+    clock when not given; `created` a `.docx`'s `dcterms:created`. The
+    options are as the command line gave them, each `None` when not given.
+    """
+    dropped = DropFile(
+        text=text,
+        name=file_name,
+        modified=daemon.clock() if modified is None else modified,
+        from_docx=from_docx,
+        created=created,
+    )
+    options = DropOptions(
+        meeting_id=meeting_id, title=title, start=start, duration=duration, attendees=attendees
+    )
+    if dry_run:
+        return preview_drop(daemon, dropped=dropped, scope=scope, options=options)
+    return drop_file(daemon, dropped=dropped, scope=scope, options=options)
+
+
+def preview_drop(
+    daemon: Daemon, *, dropped: DropFile, scope: DataScope, options: DropOptions
+) -> DropPreview:
+    """`transcript drop --dry-run`: what a drop would store, writing nothing (story 11e).
+
+    The same decision the drop makes (`_plan_drop`), the model call included.
+    A refusal about the file, the scope or the records' reading passes
+    through as the drop's would; the outcome's own refusals — a named meeting
+    that does not exist, two records matching `--start`, a meeting that
+    already has a capture — are reported as the outcome `refused`, naming why.
+    """
+    zone = daemon.config.display_timezone
+    if options.meeting_id is not None:
+        utterances = drop_utterances(dropped.text, name=dropped.name, from_docx=dropped.from_docx)
+        names, unrecorded = _speakers(utterances)
+        aliases, notices = _drop_aliases(daemon)
+        notices = (*unrecorded, *notices)
+        try:
+            meeting = daemon.meetings.get(options.meeting_id, scope=scope).meeting
+        except MeetingNotFound as missing:
+            unlinked = linked_participants(names, aliases, None)
+            unknown = DroppedField(None, SOURCE_UNKNOWN)
+            return DropPreview(
+                unknown, unknown, unknown, _pairs(unlinked), "refused",
+                reason=str(missing.args[0] if missing.args else missing), zone=zone,
+                notices=notices,
+            )
+        source = SOURCE_CALENDAR if meeting.calendar_event_ref is not None else SOURCE_RECORD
+        return _preview_of(
+            daemon,
+            DroppedField(meeting.title, source),
+            DroppedField(meeting.start, source),
+            DroppedField(meeting.duration_minutes, source),
+            _pairs(linked_participants(names, aliases, meeting.meeting_id)),
+            meeting=meeting,
+            scope=scope,
+            zone=zone,
+            notices=notices,
+        )
+    planned = _plan_drop(daemon, dropped=dropped, scope=scope, options=options)
+    plan = planned.plan
+    title, start, length = _shown(plan.title), _shown(plan.start), _shown(plan.length)
+    if plan.outcome == "refused":
+        return DropPreview(
+            title, start, length, _pairs(plan.participants), "refused",
+            reason=plan.refusal, zone=zone, notices=planned.notices,
+        )
+    if plan.joined is not None:
+        return _preview_of(
+            daemon, title, start, length, _pairs(plan.participants),
+            meeting=plan.joined, scope=scope, zone=zone, notices=planned.notices,
+            found_by=plan.found_by,
+        )
+    redrop = _captured_same_day(daemon, plan)
+    if redrop is not None:
+        return DropPreview(
+            title, start, length, _pairs(plan.participants), "refused",
+            reason=_redrop_sentence(*redrop, scope), zone=zone, notices=planned.notices,
+        )
+    try:
+        _new_meeting(plan, scope=scope, attendees=options.attendees)
+    except (MalformedMeeting, InvalidAttendeeCount) as refused:
+        return DropPreview(
+            title, start, length, _pairs(plan.participants), "refused",
+            reason=str(refused), zone=zone, notices=planned.notices,
+        )
+    return DropPreview(
+        title, start, length, _pairs(plan.participants), "new",
+        candidates=plan.candidates, zone=zone, notices=planned.notices,
+    )
+
+
+def _preview_of(
+    daemon: Daemon,
+    title: DroppedField,
+    start: DroppedField,
+    length: DroppedField,
+    pairs: tuple[tuple[str, str | None], ...],
+    *,
+    meeting: Meeting,
+    scope: DataScope,
+    zone: str,
+    notices: tuple[str, ...],
+    found_by: str = "",
+) -> DropPreview:
+    """A join's preview, refused when the meeting already has a capture."""
+    home = meeting.transcript_home
+    stem = capture_stem(meeting.meeting_id, meeting.start)
+    names = daemon.storage.list_collection(scope=home, artifact=CAPTURES)
+    if has_capture(names, stem):
+        present = ", ".join(name for name in names if name.startswith(stem))
+        return DropPreview(
+            title, start, length, pairs, "refused",
+            meeting_id=meeting.meeting_id, meeting_title=meeting.title,
+            reason=(
+                f"meeting {meeting.meeting_id} in {home} already has a capture: "
+                f"{present}. A transcript is verbatim input and is never amended or "
+                f"replaced."
+            ),
+            zone=zone, notices=notices,
+        )
+    return DropPreview(
+        title, start, length, pairs, "join",
+        meeting_id=meeting.meeting_id, meeting_title=meeting.title, zone=zone, notices=notices,
+        found_by=found_by,
+    )
+
+
+def drop_file(
+    daemon: Daemon,
+    *,
+    dropped: DropFile,
+    scope: DataScope,
+    options: DropOptions = DropOptions(),
 ) -> TranscriptDropped:
-    """Read, bind, capture and ingest a hand-supplied transcript (story 11c, AD-23).
+    """Read, decide, bind, capture and ingest a hand-supplied transcript (11c, 11e, AD-23).
 
-    In that order, and a refusal at any step leaves nothing from the later
-    ones:
+    Asks nothing (story 11e, AD-21). In this order, and a refusal at any step
+    leaves nothing from the later ones:
 
-    1. **Read** `text` to utterances by the readers (`11b`, `11d`):
+    1. **Read** the text to utterances by the readers (`11b`, `11d`):
        `drop_utterances` — `NothingSaid` for a file with nothing in it, cues
        or turns that say nothing, or a `.docx` holding only its header; the
        readers' own `UnreadableTranscript` for text no reader accepts.
-    2. **Bind** in `scope` by `11b`'s rule, reading the records once and
-       writing nothing: a named `meeting_id` must exist there
-       (`MeetingNotFound`); otherwise `identify` gives a title and start, two
-       candidates are `AmbiguousMeeting`, one binds, and none asks `describe`
-       for the attendees — and the duration, unless the file is WebVTT and its
-       last cue gives one in range — and mints a manual-only record in memory,
-       checked against the record's own rules before anything is written.
+    2. **Decide and bind** in `scope`, reading the records and writing
+       nothing: a named `--meeting` must exist there (`MeetingNotFound`);
+       otherwise every field is decided from the options, the file, its times,
+       the records and, for a header no fixed reader knows, the local model
+       (`_plan_drop`). One same-day calendar record of the same title joins (or,
+       with `--start`, one within 15 minutes; two refuse, `AmbiguousMeeting`);
+       otherwise a manual-only record is minted in memory, checked against the
+       record's own rules before anything is written.
     3. **Capture** through `write_capture`, under `33e`'s name with
        `-manual.vtt` or `-manual.txt`. A meeting that already has a capture of
        any source is `CaptureAlreadyExists` naming it; the writer's own
@@ -1357,7 +1790,9 @@ def drop_transcript(
     4. **Ingest** as `TranscriptSource.MANUAL`, which writes the record and
        stages, never executes (AD-32). A refusal here is `CaptureNotIngested`,
        naming the kept capture, what was staged and how to drop again; on
-       success the capture's row in the transcript table is `ingested`.
+       success the capture's row in the transcript table is `ingested`, and
+       the speakers are written to the record's `## Participants` (a failure
+       there is a notice).
 
     Ctrl-C during the capture write or the ingestion is `DropInterrupted`,
     saying whether the capture was kept. A busy or unopenable operational store
@@ -1365,24 +1800,39 @@ def drop_transcript(
 
     The capture format is the file's extension for `.vtt` and `.txt` — a
     `.txt` holding WebVTT is still read as WebVTT and stored as `-manual.txt` —
-    text taken from a `.docx` (`from_docx`) is `-manual.txt`, and otherwise
-    it is what the content is. A `.docx` itself is never kept (story 11d).
+    text taken from a `.docx` is `-manual.txt`, and otherwise it is what the
+    content is. A `.docx` itself is never kept (story 11d).
     """
-    utterances = drop_utterances(text, name=file_name, from_docx=from_docx)
+    text, file_name, from_docx = dropped.text, dropped.name, dropped.from_docx
     form = drop_capture_format(file_name, text, from_docx=from_docx)
-    # `None` unless the file is stored as WebVTT and its last cue ends within
-    # a meeting's length (`carried_minutes`); otherwise binding asks for the duration.
-    from_cues = carried_minutes(file_name, text, from_docx=from_docx)
-
+    notices: tuple[str, ...] = ()
+    title_field = start_field = duration = None
+    candidates: tuple[str, ...] = ()
+    found_by = ""
     try:
-        meeting, bound_by, duration = _bind_drop(
-            daemon,
-            scope=scope,
-            meeting_id=meeting_id,
-            identify=identify,
-            describe=describe,
-            from_cues=from_cues,
-        )
+        if options.meeting_id is not None:
+            utterances = drop_utterances(text, name=file_name, from_docx=from_docx)
+            meeting = bind_transcript(daemon, scope=scope, meeting_id=options.meeting_id)
+            bound_by = DROP_NAMED
+            names, unrecorded = _speakers(utterances)
+            aliases, notices = _drop_aliases(daemon)
+            notices = (*unrecorded, *notices)
+            linked = linked_participants(names, aliases, meeting.meeting_id)
+        else:
+            planned = _plan_drop(daemon, dropped=dropped, scope=scope, options=options)
+            plan, utterances, notices = planned.plan, planned.utterances, planned.notices
+            if plan.outcome == "refused":
+                raise AmbiguousMeeting(plan.refusal, plan.ambiguous)
+            if plan.joined is not None:
+                meeting, bound_by, found_by = plan.joined, DROP_MATCHED, plan.found_by
+            else:
+                _refuse_a_redrop(daemon, plan)
+                meeting = _new_meeting(plan, scope=scope, attendees=options.attendees)
+                bound_by = DROP_MINTED
+                candidates = plan.candidates
+            linked = plan.participants
+            title_field, start_field = _shown(plan.title), _shown(plan.start)
+            duration = _shown(plan.length)
         home = meeting.transcript_home
         stem = capture_stem(meeting.meeting_id, meeting.start)
         names = daemon.storage.list_collection(scope=home, artifact=CAPTURES)
@@ -1434,17 +1884,21 @@ def drop_transcript(
             f"the transcript again."
         )
         raise
-    notices = _record_ingestion(
-        daemon,
-        home,
-        meeting.meeting_id,
-        TranscriptStateKind.INGESTED,
-        _ingested(name, outcome),
-        unrecorded=(
-            f"its proposals are staged regardless; {_NO_REINGEST}, so the "
-            f"missing row stays missing"
+    notices = (
+        *notices,
+        *_record_ingestion(
+            daemon,
+            home,
+            meeting.meeting_id,
+            TranscriptStateKind.INGESTED,
+            _ingested(name, outcome),
+            unrecorded=(
+                f"its proposals are staged regardless; {_NO_REINGEST}, so the "
+                f"missing row stays missing"
+            ),
         ),
     )
+    notices = (*notices, *_write_participants(daemon, meeting, linked))
     # Story 7b: recorded as waiting wherever the drop runs; only the daemon
     # summarises, at its next harvest.
     notices = (
@@ -1461,61 +1915,77 @@ def drop_transcript(
         start=meeting.start,
         staged=len(outcome.staged),
         left=len(outcome.left),
-        duration_minutes=duration if bound_by == DROP_MINTED else None,
-        duration_from_last_cue=bound_by == DROP_MINTED and from_cues is not None,
+        title_field=title_field,
+        start_field=start_field,
+        duration=duration,
+        participants=_pairs(linked),
+        candidates=candidates,
+        found_by=found_by,
+        zone=daemon.config.display_timezone,
         from_docx=from_docx,
         notices=notices,
     )
 
 
-def _bind_drop(
-    daemon: Daemon,
-    *,
-    scope: DataScope,
-    meeting_id: str | None,
-    identify: Identify | None,
-    describe: Describe | None,
-    from_cues: int | None,
-) -> tuple[Meeting, str, int | None]:
-    """The meeting, how it was bound, and a minted record's duration.
+_PARTICIPANT_REFUSALS: tuple[type[BaseException], ...] = (*_INGESTION_REFUSALS, MeetingNotFound)
 
-    Asks only what binding needs, in order: nothing for a named meeting; the
-    title and start otherwise; the attendees and duration only when nothing
-    matched. The candidates are read once, and the choice is made among those
-    by `11b`'s own step, so a record that vanishes between a read and a bind
-    cannot turn a match into a record minted from placeholders. Writes nothing.
-    """
-    if meeting_id is not None or identify is None:
-        meeting = bind_transcript(daemon, scope=scope, meeting_id=meeting_id)
-        return meeting, DROP_NAMED, None
-    title, start = identify()
-    found = daemon.meetings.find_candidates(scope, title, start)
-    if found:
-        # One binds and several refuse naming each; the duration given here is
-        # never read, because nothing is minted from a match.
-        details = MeetingDetails(title=title, start=start, duration_minutes=0)
-        return bind_candidates(found, scope=scope, details=details), DROP_MATCHED, None
-    if describe is None:
-        raise UnboundTranscript(
-            f"no meeting in {scope} matches {title!r} at {start.isoformat()}, and "
-            f"nothing was given to ask for the attendees a new record needs."
-        )
-    attendees, typed = describe(from_cues is None)
-    duration = from_cues if from_cues is not None else typed
-    if duration is None or not MIN_DROP_MINUTES <= duration <= MAX_DROP_MINUTES:
-        raise UnboundTranscript(
-            f"a new record of {title!r} needs a duration of {MIN_DROP_MINUTES} to "
-            f"{MAX_DROP_MINUTES} minutes, and {duration!r} was given, so none was "
-            f"minted. Nothing was written."
-        )
-    details = MeetingDetails(
-        title=title, start=start, duration_minutes=duration, attendees=attendees
+
+def _captured_same_day(daemon: Daemon, plan: DropPlan) -> tuple[str, str] | None:
+    """A record pm-ai minted that day under this title and already captured: its id
+    and its captures — this file, dropped before."""
+    for minted in plan.minted_same_day:
+        home = minted.transcript_home
+        stem = capture_stem(minted.meeting_id, minted.start)
+        names = daemon.storage.list_collection(scope=home, artifact=CAPTURES)
+        if has_capture(names, stem):
+            return minted.meeting_id, ", ".join(name for name in names if name.startswith(stem))
+    return None
+
+
+def _redrop_sentence(meeting_id: str, present: str, scope: DataScope) -> str:
+    return (
+        f"meeting {meeting_id} in {scope}, which pm-ai made from a dropped "
+        f"transcript of the same title that day, already has a capture: {present}. "
+        f"A transcript is verbatim input and is never amended or replaced; to drop "
+        f"this one against it, remove that capture first and drop with "
+        f"`--meeting {meeting_id}`."
     )
-    meeting = bind_candidates((), scope=scope, details=details)
-    # The record's own rules, asked before the capture is written: a title or
-    # attendee list `put` would refuse must not leave a capture behind it.
-    render_record(MeetingRecord(meeting))
-    return meeting, DROP_MINTED, duration
+
+
+def _refuse_a_redrop(daemon: Daemon, plan: DropPlan) -> None:
+    """The capture rule for a file dropped again (story 11e): refused, as before.
+
+    Before 11e the same title and start found the minted record and its
+    capture refused the drop; the same-day step never joins a minted record,
+    so this asks the capture rule of each one it set aside.
+    """
+    found = _captured_same_day(daemon, plan)
+    if found is not None:
+        meeting_id, present = found
+        raise CaptureAlreadyExists(
+            f"{_redrop_sentence(meeting_id, present, plan.minted_same_day[0].scope)} "
+            f"Nothing was written."
+        )
+
+
+def _write_participants(
+    daemon: Daemon, meeting: Meeting, linked: Sequence[Participant]
+) -> tuple[str, ...]:
+    """The speakers written to the record's `## Participants`; a notice when that fails."""
+    if not linked:
+        return ()
+    try:
+        said = daemon.meetings.put_participants(
+            meeting.meeting_id,
+            scope=meeting.scope,
+            participants=tuple(person.name for person in linked),
+        )
+    except _PARTICIPANT_REFUSALS as failed:
+        return (
+            f"the transcript is ingested, and its speakers could not be written to "
+            f"meeting {meeting.meeting_id}'s ## Participants: {failure_reason(failed)}.",
+        )
+    return tuple(said or ())
 
 
 def _capture_kept(daemon: Daemon, scope: DataScope, name: str) -> bool:
@@ -2659,7 +3129,8 @@ def _on_day(meeting: Meeting, *, start: datetime, end: datetime, day: date) -> b
         return meeting.all_day_date <= day < ends
     if meeting.start >= end:
         return False
-    finishes = meeting.start + timedelta(minutes=meeting.duration_minutes)
+    # A calendar meeting always has a length (story 11e: only a minted record may not).
+    finishes = meeting.start + timedelta(minutes=meeting.duration_minutes or 0)
     if finishes > start:
         return True
     return finishes == meeting.start and meeting.start >= start
@@ -2742,6 +3213,11 @@ SUMMARY_CALL_DEADLINE_SECONDS = 300.0
 
 Spelled here, beside the pipeline, because the pipeline imports no model
 client; a test holds the two equal."""
+
+TRANSCRIPT_DROP_BOUND_SECONDS = GIT_QUESTION_SECONDS + SUMMARY_CALL_DEADLINE_SECONDS
+"""`drop_transcript`'s bound (AD-21, stories 4r, 11e): the capture guard's `git`
+question (AD-43), bounded at ten seconds, plus one model call's deadline for the
+header reading. Over five, so `transcript drop` sent through the daemon is a job."""
 
 TRANSCRIPT_SUMMARIZE_BOUND_SECONDS = 2 * SUMMARY_CALL_DEADLINE_SECONDS
 """`transcript summarize`'s bound (AD-21): the call and its one retry. Over five
