@@ -1517,11 +1517,41 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
   summary: **DECIDED 2026-10-19 (Andrei): accepted as a limit.** Was: Needs Andrei's decision. At the prompt, a drop without `--meeting` asks for attendees (and, when the file does not carry its length, the duration) before anyone knows whether a recorded meeting matches. The question says "If no recorded meeting matches, a new record is made", and the daemon uses those answers only when it makes a new record. When the drop binds to an existing meeting, they were asked for nothing.
   evidence: The frozen block asks in the prompt's process. To know whether a record matches, the prompt would have to read the meeting records, which means building storage and opening `operational.db` in the prompt, and `4q`'s tests forbid the prompt composing anything. Options: keep it; give the prompt a read-only lookup of meetings; or ask the daemon first and come back for the questions (a round trip).
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/11d-transcript-drop-formats-and-paths.md`
-  summary: A `.docx` export's header holds the start date and time and the meeting's length (`NNm NNs`), but the drop still asks for both. Only WebVTT's last cue is read as a duration (`carried_minutes`).
+  summary: **DONE by `11e` (2026-10-21): the header's title, start and length are read, and nothing is asked.** Was: a `.docx` export's header holds the start date and time and the meeting's length (`NNm NNs`), but the drop still asks for both. Only WebVTT's last cue is read as a duration (`carried_minutes`).
   evidence: Blind-hunter review. The frozen block keeps the duration asked for anything that is not WebVTT and gives no rule for reading a header. Reading the header would be a later slice.
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/11d-transcript-drop-formats-and-paths.md`
-  summary: `--duration` given at the command line for a WebVTT file whose last cue carries a length is dropped without a word, and `--attendees` and `--duration` are dropped when the file binds to an existing record.
+  summary: **Half DONE by `11e` (2026-10-21): `--duration` now wins over a WebVTT last cue; `--attendees` and `--duration` are still unused when the drop joins an existing record, whose own values stand.** Was: `--duration` given at the command line for a WebVTT file whose last cue carries a length is dropped without a word, and `--attendees` and `--duration` are dropped when the file binds to an existing record.
   evidence: `_drop_describe` takes `given.duration` only when it would ask. The options exist so the prompt can send its answers, and the prompt never sends one the daemon would ignore, apart from the attendees case above; a person typing them at a terminal can.
+
+## Surfaced by the story-11e review (2026-10-21)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: **Needs Andrei's decision.** A file with no header (WebVTT, `Speaker: words`, or a `.docx` whose header was removed) takes its hint day from its modification time. Last week's transcript of a weekly meeting, downloaded and dropped today, joins today's calendar record of the same title. A capture is never replaced, so today's real transcript is then refused.
+  evidence: Blind-hunter review. The spec defines the hint day this way (step 2, "the date … of the first estimate steps 3 and 5 give"). Options: keep it; use the date in a Teams file-name stamp (`-YYYYMMDD_HHMMSS-`) as the hint day when present; or join a calendar record only when the file has a header date.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: **Needs Andrei's decision.** With `display_timezone` unset, the header's date is still the hint day, but the start falls to the file's modification time. A `.docx` saved days after the meeting gets a minted start on a different day from the day it was matched on.
+  evidence: Blind-hunter review. Step 4 needs a zone, and the spec forbids assuming one. Options: keep it; or, with no zone, read the header's wall clock as UTC (within ±14 hours of the truth), which the measured export suggests.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: **Needs Andrei's decision.** A title holding a time or a year (`Standup 9:30`, `Budget 2026/27`) is date-like, so it is never the title, and as a second date-like line it also leaves the real start line unread.
+  evidence: Blind-hunter review. The date-like rule is in the frozen block. Both fields then fall to the local model, or to the file name and the modification time. Options: keep it as a recorded limit; or judge only the lines after the first for date-likeness when the first line is in no start form.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: **Needs Andrei's decision.** The local model's start and length are checked by form only (`YYYY-MM-DDTHH:MM`, 1 to 1,440 minutes), not against the header's text. The title must be text already in a header line.
+  evidence: Blind-hunter review. A start the model invents becomes the hint day and `start_estimated_from=model-header`. Options: keep it (the start is a low-criticality estimate, labelled as one); or accept the model's start only when its date's digits appear in a header line.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: **Needs Andrei's decision.** Two matrix rows disagree with the length order the spec's Always lines set: "Unknown layout, model reads it" expects 29 minutes from the last turn (the build gives 30 from the model), and "Header with no zone" expects 07:41 (the build gives 07:40, 08:10 minus the header's 30).
+  evidence: Verification-gap review. Both rows predate the 2026-10-21 length-order edit. The build follows the Always lines, and the tests say so in comments. The frozen block needs the two rows reconciled.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: **Needs Andrei's decision.** With no header date, `dcterms:created` minus the length decides the start with no bound, so a `.docx` exported days after the meeting is dated at its export.
+  evidence: Blind-hunter review. The spec's consistency check applies only "when the header gives a date and time". Options: keep it; or skip step 3 with no header date.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: Two speaker names that `aliases.md` links to one handle count as two in `attendee_count`, by the spec's formula (participants plus each unlinked `--attendees` handle).
+  evidence: Edge-case review. Rare: it needs two spellings with different `normalise()` keys saved to one person.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: A header call that has started when its 300-second deadline passes keeps running on the model pool until the adapter's own deadline, so the drop returns while the model's one slot stays busy.
+  evidence: Blind-hunter and edge-case reviews. `Future.cancel()` cannot stop a started job. A later summary waits for it, as it would for any running call.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/11e-transcript-drop-extracts-what-it-can.md`
+  summary: `--dry-run` makes the same model call as the drop, so a preview and the drop that follows can read an unknown header differently.
+  evidence: Blind-hunter review. The spec has the preview make the call. Options: keep it; or carry the preview's reading to the drop (a new option).
 
 ## Surfaced by the story-7a review (2026-10-19)
 

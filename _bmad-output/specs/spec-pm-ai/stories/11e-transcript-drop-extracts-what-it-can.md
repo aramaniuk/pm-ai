@@ -2,7 +2,7 @@
 title: 'transcript drop extracts what it can and asks nothing'
 type: 'feature'
 created: '2026-10-21'
-status: 'draft'
+status: 'done'
 baseline_commit: '84f233e6007dd7923b1b30157545755e9f085124'
 review_loop_iteration: 2
 context:
@@ -155,21 +155,21 @@ Anchors checked against `origin/main` at `84f233e`.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/core/transcripts.py` (or a new I/O-free module beside it) -- the header read (lines prepared, both date forms, the length forms, the title rule and the stamp); the participants from the utterances; the one function deciding every field from the text, the file times, the creation time, `display_timezone`, the candidate records, the alias table and the model's validated reading, returning each value with its source and whether it is estimated; the model's answer parsed and validated from plain text; the title rule moved here from `_title_refusal` so both use it -- I/O-free, no `Sanitized` parameter
-- [ ] `pm_ai/core/docx_text.py` -- read `docProps/core.xml`'s `dcterms:created` only, as a UTC instant or nothing; a missing, damaged, oversized or unparseable part gives nothing and is never a refusal; `word/document.xml`'s checks unchanged -- the one property
-- [ ] `pm_ai/domain/task_classes.py`, `pm_ai/models/router.py`, `pm_ai/models/local/ollama.py` -- `HEADER_READING = "header_reading"`, routed `_LOCAL`, in `LOCAL_ONLY_CLASSES`; `tests/architecture/test_domain_invariants.py:361` gains it -- local-only, always
-- [ ] `pm_ai/app/pipelines.py` -- the drop decides every field through the core function and asks nothing; the header call (sanitized header lines only, `header_reading`, the scope's own flow, the shape) on the model pool, every refusal passing to the next source; step 2 over the scope's calendar-sourced records; the length used only when minting, `--duration` first; the participants written to the bound record's region; each value carried with its source into `TranscriptDropped`; the dry run, writing nothing; `TRANSCRIPT_DROP_BOUND_SECONDS` plus `SUMMARY_CALL_DEADLINE_SECONDS`; `identify`, `describe` and the missing-details refusals removed -- one plan for the drop and the preview
-- [ ] `pm_ai/core/meeting_records.py`, `pm_ai/domain/meetings.py` -- the `## Participants` region (render, parse, carried over by `put`, its own writer under the claim); `start_estimated_from`; `duration_minutes` optional beside `manual_only=true`, `Meeting.duration_minutes: int | None`, `man_hour_cost` `None` when unknown; adoption of a manual-only record with an estimated start by the same-day title rule, clearing `start_estimated_from` -- the record holds names beside handles
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `--dry-run` and `--json` as flags of `drop`; the questions, `_ATTENDEES_QUESTION`, `_drop_identify`, `_drop_describe` and `ask_drop_here`'s drop path removed; the file's modification time and creation time passed to the pipeline; the closing line and the dry run's text and JSON -- nothing asked
-- [ ] `pm_ai/surfaces/cli/repl.py` -- a drop sent as typed, with no `drop_would_ask` step -- the prompt asks nothing
-- [ ] `pm_ai/ports/__init__.py`, `tests/architecture/test_transcript_path_boundary.py` -- the docstrings and failure sentences that say no model is on the transcript path now say the one model call is the header reading, local-only, over sanitized header lines; add a check that the pipeline's only `complete` call on the drop path declares `TaskClass.HEADER_READING` -- the boundary says what it allows
-- [ ] `tests/core/test_transcript_readers.py`, `tests/core/test_docx_text.py`, `tests/core/test_meeting_records.py`, `tests/slice/test_transcript_drop.py`, `tests/slice/test_project_add_and_drop_through_daemon.py`, `tests/surfaces/test_cli_completion.py` -- one test per matrix row; header variants, `docProps/core.xml` and file times built in the test; every dry-run row lists `meetings/` and `transcripts/` before and after -- the matrix is the contract
-- [ ] `tests/slice/test_transcript_drop.py:861-913` and `tests/slice/test_project_add_and_drop_through_daemon.py:489-532` -- rewrite the tests that feed typed answers: no answers; "29 minutes, as answered" becomes the last turn's length; the every-answer test keeps `--attendees ''` as an option only -- tests that encode the old questions
-- [ ] `tests/core/fixtures/transcripts/README.md` -- measure, at build, the creation-time delay after the meeting's end on the fixture (rebuilt with a `docProps/core.xml`) and on any further export Andrei runs, and record the figure as structure only; if any exceeds 15 minutes, stop and report before changing the tolerance -- the tolerance rests on one measurement
-- [ ] `ARCHITECTURE-SPINE.md` -- re-derive through the architecture skill: AD-15 (`:323`), AD-21 (`:379`), AD-33 (`:509`, `:517`) and AD-34 (`:531`), each with the sentence under Design Notes -- the spine names the questions and handles-only attendees today
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/11c-transcript-drop-command.md` -- when this slice is built: a dated Change Log line naming what this slice amends (every question and missing-details refusal withdrawn; `--duration` wins over the last cue; the 15-minute match only with `--start`) -- the earlier frozen block says it was amended
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/11d-transcript-drop-formats-and-paths.md` -- when this slice is built: a dated Change Log line naming what this slice amends: the questions at the prompt (`ask_drop_here`) withdrawn; the duration asked for anything not WebVTT withdrawn; and, by Andrei's decision of 2026-10-21, its Never "No reading … document properties from a `.docx`", which now allows `dcterms:created` alone -- the earlier frozen block says it was amended
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the 11d entry on the header as done by `11e`, and the `--duration`-with-WebVTT half of the next entry
+- [x] `pm_ai/core/transcripts.py` (or a new I/O-free module beside it) -- the header read (lines prepared, both date forms, the length forms, the title rule and the stamp); the participants from the utterances; the one function deciding every field from the text, the file times, the creation time, `display_timezone`, the candidate records, the alias table and the model's validated reading, returning each value with its source and whether it is estimated; the model's answer parsed and validated from plain text; the title rule moved here from `_title_refusal` so both use it -- I/O-free, no `Sanitized` parameter
+- [x] `pm_ai/core/docx_text.py` -- read `docProps/core.xml`'s `dcterms:created` only, as a UTC instant or nothing; a missing, damaged, oversized or unparseable part gives nothing and is never a refusal; `word/document.xml`'s checks unchanged -- the one property
+- [x] `pm_ai/domain/task_classes.py`, `pm_ai/models/router.py`, `pm_ai/models/local/ollama.py` -- `HEADER_READING = "header_reading"`, routed `_LOCAL`, in `LOCAL_ONLY_CLASSES`; `tests/architecture/test_domain_invariants.py:361` gains it -- local-only, always
+- [x] `pm_ai/app/pipelines.py` -- the drop decides every field through the core function and asks nothing; the header call (sanitized header lines only, `header_reading`, the scope's own flow, the shape) on the model pool, every refusal passing to the next source; step 2 over the scope's calendar-sourced records; the length used only when minting, `--duration` first; the participants written to the bound record's region; each value carried with its source into `TranscriptDropped`; the dry run, writing nothing; `TRANSCRIPT_DROP_BOUND_SECONDS` plus `SUMMARY_CALL_DEADLINE_SECONDS`; `identify`, `describe` and the missing-details refusals removed -- one plan for the drop and the preview
+- [x] `pm_ai/core/meeting_records.py`, `pm_ai/domain/meetings.py` -- the `## Participants` region (render, parse, carried over by `put`, its own writer under the claim); `start_estimated_from`; `duration_minutes` optional beside `manual_only=true`, `Meeting.duration_minutes: int | None`, `man_hour_cost` `None` when unknown; adoption of a manual-only record with an estimated start by the same-day title rule, clearing `start_estimated_from` -- the record holds names beside handles
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `--dry-run` and `--json` as flags of `drop`; the questions, `_ATTENDEES_QUESTION`, `_drop_identify`, `_drop_describe` and `ask_drop_here`'s drop path removed; the file's modification time and creation time passed to the pipeline; the closing line and the dry run's text and JSON -- nothing asked
+- [x] `pm_ai/surfaces/cli/repl.py` -- a drop sent as typed, with no `drop_would_ask` step -- the prompt asks nothing
+- [x] `pm_ai/ports/__init__.py`, `tests/architecture/test_transcript_path_boundary.py` -- the docstrings and failure sentences that say no model is on the transcript path now say the one model call is the header reading, local-only, over sanitized header lines; add a check that the pipeline's only `complete` call on the drop path declares `TaskClass.HEADER_READING` -- the boundary says what it allows
+- [x] `tests/core/test_transcript_readers.py`, `tests/core/test_docx_text.py`, `tests/core/test_meeting_records.py`, `tests/slice/test_transcript_drop.py`, `tests/slice/test_project_add_and_drop_through_daemon.py`, `tests/surfaces/test_cli_completion.py` -- one test per matrix row; header variants, `docProps/core.xml` and file times built in the test; every dry-run row lists `meetings/` and `transcripts/` before and after -- the matrix is the contract
+- [x] `tests/slice/test_transcript_drop.py:861-913` and `tests/slice/test_project_add_and_drop_through_daemon.py:489-532` -- rewrite the tests that feed typed answers: no answers; "29 minutes, as answered" becomes the last turn's length; the every-answer test keeps `--attendees ''` as an option only -- tests that encode the old questions
+- [x] `tests/core/fixtures/transcripts/README.md` -- measure, at build, the creation-time delay after the meeting's end on the fixture (rebuilt with a `docProps/core.xml`) and on any further export Andrei runs, and record the figure as structure only; if any exceeds 15 minutes, stop and report before changing the tolerance -- the tolerance rests on one measurement
+- [x] `ARCHITECTURE-SPINE.md` -- re-derive through the architecture skill: AD-15 (`:323`), AD-21 (`:379`), AD-33 (`:509`, `:517`) and AD-34 (`:531`), each with the sentence under Design Notes -- the spine names the questions and handles-only attendees today
+- [x] `_bmad-output/specs/spec-pm-ai/stories/11c-transcript-drop-command.md` -- when this slice is built: a dated Change Log line naming what this slice amends (every question and missing-details refusal withdrawn; `--duration` wins over the last cue; the 15-minute match only with `--start`) -- the earlier frozen block says it was amended
+- [x] `_bmad-output/specs/spec-pm-ai/stories/11d-transcript-drop-formats-and-paths.md` -- when this slice is built: a dated Change Log line naming what this slice amends: the questions at the prompt (`ask_drop_here`) withdrawn; the duration asked for anything not WebVTT withdrawn; and, by Andrei's decision of 2026-10-21, its Never "No reading … document properties from a `.docx`", which now allows `dcterms:created` alone -- the earlier frozen block says it was amended
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- mark the 11d entry on the header as done by `11e`, and the `--duration`-with-WebVTT half of the next entry
 
 **Acceptance Criteria:**
 - Given the recorded `.docx` fixture, or the same with a month-first date line, with or without a terminal, when `pm-ai transcript drop fixture.docx --scope personal` runs, then nothing is asked, a `mtg_` record titled `Example Weekly Sync-up` is stored with an estimated start labelled with its source, the closing line names each value's source, and the exit is 0.
@@ -186,6 +186,8 @@ Anchors checked against `origin/main` at `84f233e`.
 - **2026-10-21, review (three lenses) and Andrei's decisions: frozen block edited (recorded here).** Andrei's decisions of 2026-10-21: (1) no confirmation step — the `[Y/n/e]` line is removed; the drop reads the header, matches, then stores, asks only what the file lacks (the length only when a new record is made), and the closing line names what was used, each value's source, the start's zone and whether it joined an existing meeting or made a new one; options still win. (2) `--dry-run`, with `--json`, previews the same and the outcome, writes nothing, asks nothing, exits 0; both are flags `4u`'s completer offers from the table, and a dry run at the prompt runs in the daemon as typed. (3) The start's zone is worked out — `display_timezone`, a calendar record matching under exactly one offset, the `.docx`'s `dcterms:created` (the rule stated: start at or before it, it within the length plus 15 minutes, exactly one real offset), the machine's zone — and only the zone or offset (or which of two instants) is asked when none decides; without a terminal, refused naming `--start` and `display_timezone`. Reading `dcterms:created` amends `11d`'s Never on document properties, by Andrei's decision; this spec's Never forbids every other property, and a task adds the line to `11d`'s Change Log. The old Never "No default zone when `display_timezone` is unset" is withdrawn by this decision. (4) The title read from the file is trusted as a typed title, not passed through the prompt-injection filter, because he does not want to confirm it and the file is his own export. (5) Attendees, (a), unchanged. Review findings fixed: the title is the first header line only, and only when not date-like or length-like (both defined); a date-like or length-like line pm-ai cannot read leaves that field unread, never a second title; a `Transcript` line is skipped; a title over several lines is a recorded limit. A value read is used only if its question would accept it (`_title_refusal`, the 1 to 1,440 range, a real date), which covers a title empty after the stamp. Exact header forms listed: trimming and Unicode spaces folded; `am`/`pm` in any case, with or without a space; the 12-hour rules; one- or two-digit day and hour; four length forms, seconds and minutes under 60, rounding up, `0m 00s` out of range and asked; localised dates and stamps recorded as limits, read as unread; the stamp described as fitted to the fixture and seen in one more real export's structure (the fixture README does not record the original's stamp form), never the start. The cleaned title is stated as expected to equal the calendar title, not claimed, with a row where they differ and the duplicate risk named. The `.md` marks set aside on a header line listed (`_unmarked`'s, emphasis wrapping the line, backslash escapes), with rows for a heading title, a bold date and an escaped `\_` stamp. Attendees taken out of the field-by-field order: never asked, never refused; tasks remove the refusal in `_drop_describe` and the `given.attendees` check in `_drop_left_to_ask`; every reader of a minted record's attendees listed in the Code Map. At the prompt: `load_config` reads `display_timezone` in the prompt's process, `ask_drop_here` reads the header, and the resolved `--start` always goes with its offset; rows for all options given and for only `--title`. Each value's source travels with it to the closing line (`duration_from_last_cue` replaced), with rows for a header-read length direct and through the daemon, and the existing "as answered" assertion fixed by a task. `--duration` now wins over a last cue, and its row fixed. Ctrl-C or end of input at any remaining question writes nothing, exit 3; answers trimmed and judged ignoring case. Rows added: the skipped hour (`29 March 2026, 02:30am`), two start lines, two length lines, `Transcript`, `09:30AM` and `9:30am`, `29m 00s`, `0m 00s`, an impossible date, no-break spaces before `am`/`pm`, the zone from the calendar, from `dcterms:created` and undecidable, `--dry-run` text and `--json`, the joined and new outcome lines. Tasks added: rewrite the typed-answer fixture tests (`test_transcript_drop.py:861-913`, `test_project_add_and_drop_through_daemon.py:489-532`); re-derive AD-21's `transcript drop` sentence; the `11c` and `11d` Change Log lines; acceptance criteria for the pipe with everything read and for the undecidable zone without a terminal. Two points settled here that the decisions did not cover, for Andrei's review: the calendar step at the prompt is taken from the daemon's own dry run, because the prompt's process cannot read the records; and a `--sources` option carries each sent value's source from the prompt to the daemon, so the closing line says the same in both places. Code Map re-verified against `84f233e`: every anchor the created spec named holds at the same line; anchors added for `_title_refusal`, `_read_drop`, `_closing_line`, `drop_would_ask`, `TERMINAL_BOUND`, the `drop` table entry, `completion.py`, `TranscriptDropped`, `find_candidates`, `MATCH_TOLERANCE`, `calendar_event_ref`, the attendee readers, `entry.py:559`, the tests to rewrite and AD-21's line. Ask First 2 kept for the build; no Ask First added.
 - **2026-10-21, redesigned to Andrei's direction (extract by criticality, ask nothing, adaptive formats; speakers become participants; the local model reads unknown headers): frozen block rewritten (recorded here).** File renamed from `11e-transcript-drop-reads-the-header.md`. Replaces: every question, the confirmation design, the zone questions and every refusal for missing details; attendees answer (a), by speakers as participants by name, linked only through `aliases.md`; the zone steps, by five start sources with `dcterms:created` before the header-in-zone reading because the measured header time was UTC; the 15-minute creation margin, by the measured 5 minutes 18 seconds and a stated 15-minute tolerance with a build-time measurement task; the 15-minute match for an estimated start, by same day plus title with exactly one calendar candidate. Adds the local model's header reading (`header_reading`, local-only, header lines only); the month-first date form; the unknown length; `start_estimated_from`; adoption by the same-day rule. Kept: the header-line rules, options winning, `--dry-run` and `--json`, the closing line's sources, the test rewrites, the AD-21 re-derive and the `11c` and `11d` Change Log tasks. Dropped as no longer needed: `ask_drop_here` for a drop and `--sources`, since the prompt now asks nothing and the daemon decides everything. Code Map re-verified against `84f233e`.
 - **2026-10-21, length order (coordinating session):** frozen block edited (recorded here): the header's length line now comes before the WebVTT last cue end and the last turn's start time, because the last turn's start misses the last turn itself (29 against the header's 30 on the fixture); the fixture rows say 30 minutes.
+
+- **2026-10-21, built and reviewed.** Spine amended first (AD-34, AD-15, AD-33, AD-21; its own commit). Ask First 2 cleared: the recorded fixture's header, read through `docx_text`, is exactly the three forms defined (title with the stamp, `14 September 2026, 09:30am`, `29m 03s`). Built as specified, with these choices recorded: the length order of the Always lines is followed, so the rows "Unknown layout, model reads it" (30, from the model, not 29) and "Header with no zone" (07:40, not 07:41) differ from their text, which predates the length-order edit — both named in `deferred-work.md` for Andrei; the header's fragments are made in `pm_ai/core/transcript_details.py` (`header_fragments`), as `meeting_summary` makes the summary's, because a test forbids the sanitizer in `pipelines.py`; a joined record's title, start and length are reported as the record's own (`calendar`, or `recorded meeting` for one matched by `--start`); `--dry-run` reports a refusal as the outcome `refused` with exit 0. Three review layers ran (blind hunter, edge-case hunter, verification gap). Fixed from them: a start year outside 1900–2099 is not read (it overflowed); a file dropped again without `--meeting` is refused by the capture rule naming the record pm-ai minted, as before 11e; a speaker name the record cannot hold is left out with a notice instead of refusing the drop; `--attendees` in another case is matched canonically; a model title that is date-like or length-like is refused; the last turn's length is labelled `estimated`; a `## Participants` region that does not parse is dropped with a notice; a harvest adopts a minted record with an estimated start only when its arrival is the one calendar meeting of that title that day (`same_day_rivals`, and any calendar record already stored); the preview says how a join was found. Tests added for the gaps (zone-only hint day, the harvest's zone, `--meeting` participants, every `refused` preview, the model pool path and the bound, the creation time with no header date). Deferred for Andrei's decision: the hint day of a header-less file, the header date with no zone, a title holding a time, the model's start checked by form only, the creation time with no header date, and the two matrix rows that predate the length order. The creation-time tolerance rests on the one measurement recorded in the fixture README; the fixture has no `docProps/core.xml` to measure.
 
 ## Design Notes
 
@@ -209,3 +211,86 @@ Anchors checked against `origin/main` at `84f233e`.
 
 **Manual checks:**
 - `HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1 .venv/bin/pm-ai transcript drop <a real export>.docx --scope personal --dry-run`, then without `--dry-run`, on Andrei's machine with each of the two export forms (never committed) -- expected: nothing asked; the dry run names each value, its source and whether it is estimated, the participants and the outcome, and writes nothing; the drop stores it and closes with the same values; exit 0
+
+## Suggested Review Order
+
+**Deciding every field**
+
+- One I/O-free function decides title, length and the estimated start, each with its source.
+  [`transcript_details.py:548`](../../../../pm_ai/core/transcript_details.py#L548)
+
+- Steps 3–5: creation time within tolerance, header in zone, modification time.
+  [`transcript_details.py:635`](../../../../pm_ai/core/transcript_details.py#L635)
+
+- Join by `--start` (11b) or one same-day calendar record; minted records only for the re-drop check.
+  [`transcript_details.py:705`](../../../../pm_ai/core/transcript_details.py#L705)
+
+- Length order: option, header, last cue, model, last turn (an estimate).
+  [`transcript_details.py:587`](../../../../pm_ai/core/transcript_details.py#L587)
+
+**Reading the header**
+
+- Lines prepared: spaces folded, Markdown marks set aside.
+  [`transcript_details.py:237`](../../../../pm_ai/core/transcript_details.py#L237)
+
+- Fixed readers: one date-like line, one length-like line, the first line as title.
+  [`transcript_details.py:356`](../../../../pm_ai/core/transcript_details.py#L356)
+
+- The model's answer validated field by field; its title must be header text.
+  [`transcript_details.py:427`](../../../../pm_ai/core/transcript_details.py#L427)
+
+**The drop and the preview**
+
+- The one plan both run: header, model when needed, records, aliases.
+  [`pipelines.py:1516`](../../../../pm_ai/app/pipelines.py#L1516)
+
+- The header call: local-only, cleaned header lines, model pool ahead, every refusal passes.
+  [`pipelines.py:1440`](../../../../pm_ai/app/pipelines.py#L1440)
+
+- Drop: no questions; re-drop refused; participants written after ingestion.
+  [`pipelines.py:1762`](../../../../pm_ai/app/pipelines.py#L1762)
+
+- Preview: same decision, writes nothing, refusals as the outcome.
+  [`pipelines.py:1654`](../../../../pm_ai/app/pipelines.py#L1654)
+
+- The bound now holds one model call's deadline.
+  [`pipelines.py:3217`](../../../../pm_ai/app/pipelines.py#L3217)
+
+**The record**
+
+- `## Participants`, names only, quoted; its own writer under the claim.
+  [`meeting_records.py:900`](../../../../pm_ai/core/meeting_records.py#L900)
+
+- Same-day adoption for an estimated start, never with a same-day rival.
+  [`meeting_records.py:1101`](../../../../pm_ai/core/meeting_records.py#L1101)
+
+- `start_estimated_from` and an optional duration on `Meeting`.
+  [`meetings.py:199`](../../../../pm_ai/domain/meetings.py#L199)
+
+- `dcterms:created`, the one document property read.
+  [`docx_text.py:409`](../../../../pm_ai/core/docx_text.py#L409)
+
+**Surfaces**
+
+- No questions; options and flags handed on; preview printed as text or JSON.
+  [`dispatch.py:3796`](../../../../pm_ai/surfaces/cli/dispatch.py#L3796)
+
+- The closing line names each value's source and the participants.
+  [`dispatch.py:3650`](../../../../pm_ai/surfaces/cli/dispatch.py#L3650)
+
+- The prompt sends a drop as typed.
+  [`repl.py:642`](../../../../pm_ai/surfaces/cli/repl.py#L642)
+
+- `header_reading`, routed local.
+  [`router.py:106`](../../../../pm_ai/models/router.py#L106)
+
+**Tests**
+
+- One test per matrix row, through `main()`.
+  [`test_transcript_drop_extracts.py`](../../../../tests/slice/test_transcript_drop_extracts.py)
+
+- Header forms, model answers, the start's rules.
+  [`test_transcript_details.py`](../../../../tests/core/test_transcript_details.py)
+
+- The drop's only model call declares `header_reading`.
+  [`test_transcript_path_boundary.py:129`](../../../../tests/architecture/test_transcript_path_boundary.py#L129)
