@@ -27,8 +27,8 @@ with no tools and `max_iterations=1`, so nothing is ever sent a second time
 without the PM. `7b`'s schema goes as structured output
 (`output_config.format`); no temperature, `top_p` or `top_k`, no prefill, no
 server-side `fallbacks`, and `MAX_TOKENS` sized for thinking and the answer
-together. *Assumed, not verified (no key at build):* that the API accepts an
-empty tool list through the Tool Runner. **Measured with a real key
+together. **Measured with a real key (2026-10-21):** the API accepts an empty
+tool list through the Tool Runner, and the answer names the model asked for. **Also measured with a real key
 (2026-10-21):** `output_config.format` refuses `maxItems` with a 400, and the
 structured-outputs documentation lists the string, number and array limits as
 unsupported, so `7b`'s schema is sent through `frontier_schema`: those limits
