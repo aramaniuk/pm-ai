@@ -39,7 +39,7 @@ from pm_ai.connectors.transcripts.graph_transcripts import (
     UnenrolledGraphTranscripts,
 )
 from pm_ai.core.meeting_records import MEETINGS, capture_name, capture_stem
-from pm_ai.domain.harvest import Cursor
+from pm_ai.domain.harvest import UNCLASSIFIED_FAULT_IS_RETRYABLE, Cursor
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.meetings import Meeting
@@ -203,7 +203,9 @@ class FakeGraph:
             raise AssertionError(f"the fixture has no answer for {key!r}")
         answer = table[key]
         if isinstance(answer, list):
-            return answer.pop(0) if len(answer) > 1 else answer[0]
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
+        if isinstance(answer, BaseException):
+            raise answer
         return answer
 
     def listing(self, online_id: str, *rows: dict) -> None:
@@ -1537,16 +1539,230 @@ def test_one_acquisition_over_five_days_asks_three_requests_per_untranscribed_me
     assert len(graph.requests) == 3 * UNTRANSCRIBED == 60
 
 
-@pytest.mark.parametrize("failing, other", [("T-2", "T-1"), ("T-1", "T-2")], ids=["part 2 fails", "part 1 fails"])
-def test_a_part_whose_download_fails_returns_the_refusal_and_no_other_part(failing, other):
-    """All or nothing: a capture is never returned without the part beside it."""
+# ── Story 33j: a refused part keeps the parts before it ──────────────────────
+
+
+def test_a_first_new_part_refused_for_good_returns_the_refusal_alone_and_asks_nothing_after_it():
+    """Row "Part 1 answers 404, nothing stored": as before 33j."""
     graph = FakeGraph()
     held = _one_off(graph)
     _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
-    graph.contents[(failing, VTT)] = error(404, "NotFound")
+    graph.contents[("T-1", VTT)] = error(404, "NotFound")
 
     (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
 
     assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
-    assert failing in outcome.reason and "404" in outcome.reason
-    assert other not in outcome.reason
+    assert "T-1" in outcome.reason and "404" in outcome.reason
+    assert "T-2" not in outcome.reason
+    asked = graph.asked("/content")
+    assert asked and all("T-1" in unquote(url) for url in asked), "T-1 asked for, nothing after it"
+
+
+def _refused_on(graph: FakeGraph, transcript_id: str, how: str) -> None:
+    if how == "404":
+        graph.contents[(transcript_id, VTT)] = error(404, "NotFound")
+    elif how == "not UTF-8":
+        graph.contents[(transcript_id, VTT)] = content(b"WEBVTT\n\n\xff\xfe broken")
+    elif how == "attribution":
+        graph.contents[(transcript_id, VTT)] = error(403, "Forbidden", "SpeakerAttributionNotAllowed")
+        graph.contents[(transcript_id, UNATTRIBUTED)] = error(403, "Forbidden", "SpeakerAttributionNotAllowed")
+    elif how == "permission":
+        graph.contents[(transcript_id, VTT)] = error(403, "Forbidden")
+    elif how == "rejected":
+        graph.contents[(transcript_id, VTT)] = error(400, "BadRequest", "SomethingElse")
+    elif how == "unreadable":
+        from pm_ai.connectors.graph.client import GraphProtocolError
+
+        graph.contents[(transcript_id, VTT)] = GraphProtocolError("an answer from a different origin.")
+    elif how == "expired":
+        graph.contents[(transcript_id, VTT)] = error(400, "BadRequest", "MeetingHasExpired")
+    else:
+        raise AssertionError(how)
+
+
+_NAMED = {
+    "404": "404",
+    "not UTF-8": "UTF-8",
+    "attribution": "SpeakerAttributionNotAllowed",
+    "permission": TRANSCRIPT_PERMISSION,
+    "rejected": "SomethingElse",
+    "unreadable": "could not be downloaded",
+    "expired": "expired",
+}
+
+
+@pytest.mark.parametrize("how", list(_NAMED))
+def test_part_2_refused_for_good_returns_part_1_with_the_refusal_named(how):
+    """Rows "Part 2 answers 404", "Attribution refused on part 2", "Expired on
+    part 2", and the other refusals waiting cannot clear."""
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
+    _refused_on(graph, "T-2", how)
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-1"]
+    assert outcome.captures[0].text == "WEBVTT\n\nT-1\n"
+    assert outcome.refused_part is not None
+    assert "T-2" in outcome.refused_part and _NAMED[how] in outcome.refused_part
+    assert "provider prose" not in outcome.refused_part
+
+
+def test_part_3_of_three_refused_returns_parts_1_and_2_in_time_order():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 15), ("T-2", 20, 35), ("T-3", 40, 55))
+    _refused_on(graph, "T-3", "not UTF-8")
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-1", "T-2"]
+    assert outcome.refused_part is not None
+    assert "T-3" in outcome.refused_part and "UTF-8" in outcome.refused_part
+    assert "not asked for" not in outcome.refused_part, "no later part to name"
+
+
+def test_part_2_of_three_refused_names_part_3_as_not_asked_for_and_never_downloads_it():
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 15), ("T-2", 20, 35), ("T-3", 40, 55))
+    _refused_on(graph, "T-2", "404")
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-1"]
+    assert outcome.refused_part is not None
+    assert "T-2" in outcome.refused_part and "404" in outcome.refused_part
+    assert "Later new part T-3 was not asked for" in outcome.refused_part
+    assert not any("T-3" in unquote(url) for url in graph.asked("/content"))
+
+
+@pytest.mark.parametrize("raw", [b"", b"  \r\n\t "], ids=["zero bytes", "whitespace"])
+def test_an_empty_part_2_keeps_all_or_nothing_and_is_tried_again(raw):
+    """Row "Empty body on part 2": a refusal waiting may clear returns nothing."""
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
+    graph.contents[("T-2", VTT)] = content(raw)
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptRefused) and outcome.retryable
+    assert "T-2" in outcome.reason and "empty" in outcome.reason
+
+
+def test_a_throttle_on_part_2_stops_the_run_and_returns_nothing_of_the_meeting():
+    """Row "Throttle on part 2"."""
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
+    graph.contents[("T-2", VTT)] = throttled(90)
+    later = meeting("AAMk-later", START - timedelta(hours=3))
+    graph.events["AAMk-later"] = ok(event_body("AAMk-later", later.start, join=f"{JOIN}&later"))
+
+    outcomes = _adapter(graph).acquire([held, later], since=SINCE, stored={})
+
+    (only,) = outcomes
+    assert isinstance(only, TranscriptRefused) and only.retryable
+    assert only.retry_after == timedelta(seconds=90)
+    assert graph.asked("AAMk-later") == [], "the run stopped at this meeting"
+
+
+def test_an_unclassified_fault_on_part_2_returns_nothing_of_the_meeting(monkeypatch):
+    from pm_ai.connectors.transcripts import graph_transcripts
+
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
+    real = graph_transcripts._Run._download
+
+    def broken(self, meeting_id, online_id, transcript):
+        if transcript.transcript_id == "T-2":
+            raise KeyError("an answer this adapter has no reading for")
+        return real(self, meeting_id, online_id, transcript)
+
+    monkeypatch.setattr(graph_transcripts._Run, "_download", broken)
+
+    (outcome,) = _adapter(graph).acquire([held], since=SINCE, stored={})
+
+    assert isinstance(outcome, TranscriptRefused) and "KeyError" in outcome.reason
+    assert outcome.retryable is UNCLASSIFIED_FAULT_IS_RETRYABLE
+
+
+def test_a_meeting_already_holding_part_1_returns_part_2_and_names_part_3():
+    """Row "Meeting already holding part 1"."""
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 15), ("T-2", 20, 35), ("T-3", 40, 55))
+    _refused_on(graph, "T-3", "404")
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-1", 1, 15),)}
+    )
+
+    assert isinstance(outcome, TranscriptCaptured)
+    assert [c.transcript_id for c in outcome.captures] == ["T-2"]
+    assert outcome.refused_part is not None and "T-3" in outcome.refused_part
+    assert not any("T-1" in unquote(url) for url in graph.asked("/content"))
+
+
+def test_a_refused_part_tried_again_alone_is_the_refusal_alone():
+    """Row "Refused part tried again, still refused": T-2 is now the first new part."""
+    graph = FakeGraph()
+    held = _one_off(graph)
+    _parts(graph, ("T-1", 1, 20), ("T-2", 25, 50))
+    _refused_on(graph, "T-2", "404")
+
+    (outcome,) = _adapter(graph).acquire(
+        [held], since=SINCE, stored={held.meeting_id: (_stored("T-1", 1, 20),)}
+    )
+
+    assert isinstance(outcome, TranscriptRefused) and not outcome.retryable
+    assert "T-2" in outcome.reason
+
+
+def test_a_captured_outcomes_refused_part_is_never_blank():
+    from pm_ai.domain.transcripts import TranscriptCapture
+
+    capture = TranscriptCapture(
+        meeting_id="AAMk-one", transcript_id="T-1", created=START, ended=START + timedelta(minutes=5),
+        text="WEBVTT\n", attributed=True, format=CaptureFormat.GRAPH,
+    )
+    assert TranscriptCaptured("AAMk-one", (capture,)).refused_part is None
+    with pytest.raises(ValueError):
+        TranscriptCaptured("AAMk-one", (capture,), refused_part="  ")
+
+
+def test_acceptance_part_2_answering_404_keeps_part_1_byte_identical_through_a_harvest(tmp_path):
+    """Acceptance 1, through `run_harvest` over the fake Graph."""
+    graph = FakeGraph()
+    graph.calendar = [_calendar_row("AAMk-one", START)]
+    _one_off(graph)
+    graph.listing(
+        ONLINE,
+        transcript_row("T-2", START + timedelta(minutes=25), START + timedelta(minutes=50)),
+        transcript_row("T-1", START + timedelta(minutes=1), START + timedelta(minutes=20)),
+    )
+    graph.contents[("T-1", VTT)] = content(VTT_BYTES)
+    graph.contents[("T-2", VTT)] = error(404, "NotFound")
+    daemon = _daemon(tmp_path, graph)
+
+    persisted = run_harvest(daemon, INSTANCE)
+
+    name = capture_name("AAMk-one", START, CaptureFormat.GRAPH)
+    assert (daemon.storage.paths.resolve(PERSONAL, CAPTURES) / name).read_bytes() == VTT_BYTES
+    assert [(p.part, p.transcript_id) for p in daemon.storage.transcript_parts(PERSONAL)["AAMk-one"]] == [
+        (1, "T-1")
+    ]
+    report = persisted.transcripts
+    assert report is not None
+    (entry,) = report.captured
+    assert entry.state is TranscriptStateKind.FETCHED and entry.capture_names == (name,)
+    tail = entry.reason.split("Not stored:", 1)[1]
+    assert "T-2" in tail and "404" in tail
+    assert any("T-2" in refusal and "404" in refusal for refusal in report.refusals)
+    assert report.ingested == ((PERSONAL, "AAMk-one"),)
