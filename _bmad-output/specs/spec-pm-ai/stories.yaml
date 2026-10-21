@@ -524,6 +524,7 @@
     WAVE 2, decided 2026-10-09 (step 3): one record per meeting per scope and the first record keeps its id - a hand drop binds by title and start, a calendar harvest adopts a manual-only record. 11b wires the real transcript path (the typed extraction carrier, the VTT reader, the binding rule, the Graph capture 33e stores) and 11c adds the `pm-ai transcript drop` command (.vtt/.txt; .docx deferred); the citation guard uses the meeting's scope; Extraction.detail is typed; the path reaches no model.
     WAVE 2, 2026-10-11 (Andrei, AD-34/AD-32): who spoke is decided by pm_identity() against the utterance's person handle (2o), and a speaker label is never a handle - a Graph transcript stages because its utterances carry no handle. 11b lands after 2o.
     WAVE 3, decided 2026-10-16 (Andrei): 11d transcript drop reads .vtt, .txt, .md and .docx (standard library only) and says how a path is resolved.
+    WAVE 3, decided 2026-10-21 (Andrei, after his first real drop): 11e transcript drop reads the title, start and length from a Teams export's header (start read in display_timezone, offset shown), confirms them in one line, and asks only what is missing; --title, --start and --duration still win. Spec under stories/; Ask First on attendees open.
 
 - id: "12"
   title: Spoken anchor resolution and fuzzy recovery
