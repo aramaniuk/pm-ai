@@ -2,8 +2,8 @@
 title: 'A refused transcript part keeps the parts before it'
 type: 'bugfix'
 created: '2026-10-20'
-status: 'draft'
-baseline_commit: '2d8a55912a7b6def3dcbfd35d7214d4555a1b5df'
+status: 'done'
+baseline_commit: '82c2edb92303fed10a2777b4160bf658b7632dc9'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -57,27 +57,28 @@ context:
 
 ## Code Map
 
-Verified against `2d8a559` (origin/main) on 2026-10-20.
+Verified against `2d8a559` (origin/main) on 2026-10-20; re-verified against `82c2edb` (main) on 2026-10-21. Since then 11e changed one line each in the adapter (`_fits`) and acquisition (`_select_in`), neither in this slice's path; 7b, 7e, 7c, 7d and 4x touched none of the anchors below except by moving line numbers in storage, `core/transcripts.py` and pipelines (updated here).
 
-- `pm_ai/connectors/transcripts/graph_transcripts.py:32` the module's "all or nothing"; `:297` `_Run.go` (a provider fault or unclassified error refuses the meeting and nothing is returned); `:351` `_match`; `:468-477` decision 5, the all-or-nothing return at `:473`; `:596` `_download` and its refusals (attribution `:611-630`, permission `:630-632`, expired `:634`, 404 `:640`, protocol `:648`, not UTF-8 `:657`, empty body `:664` retryable)
-- `pm_ai/domain/transcripts.py:225` `TranscriptCaptured` (gains the optional refusal); `:276` `TranscriptRefused`; `:328` `PartState` (unchanged unless question 1 takes the alternative)
-- `pm_ai/core/transcript_acquisition.py:167` `_select_in`, asked-again rule at `:213`; `:380` `_ends_asking` (a capture counts as asked); `:391` `_settled`; `:440` `_kept`; `:449` `_stored`, its "Not stored:" reason and run refusal, the lost-write path at `:544`
-- `pm_ai/connectors/transcripts/manual.py:33-37` `acquire` (never sets the refusal)
-- `pm_ai/storage/service.py:242` `transcript_parts` table; `:4531` `record_pending_part`; `:4579` `mark_part_stored` (the attempt reset); `:4609` `drop_pending_part`; `:4776` `offer_summary` (the re-open)
-- `pm_ai/core/transcripts.py:556` `meeting_utterances` (reads `stored` rows only)
-- `pm_ai/app/pipelines.py:715` `ingest_captures`, stored, un-ingested parts only at `:829`; `:3914` `note_summary_input`; `:3948` `_stored_parts_on_disk`
-- `tests/connectors/test_graph_transcripts.py:1540-1552` `test_a_part_whose_download_fails_returns_the_refusal_and_no_other_part`, whose "part 2 fails" case flips and whose "part 1 fails" case stays
+- `pm_ai/connectors/transcripts/graph_transcripts.py:32` the module's "all or nothing"; `:297` `_Run.go` (a provider fault or unclassified error refuses the meeting and nothing is returned); `:351` `_match`; `:468-477` decision 5, the all-or-nothing return at `:473`; `:596` `_download` and its refusals (attribution `:611-630`, permission `:630-632`, expired `:634` — a `TranscriptAbsent`, 404 `:640`, protocol `:648`, not UTF-8 `:657`, empty body `:664` retryable)
+- `pm_ai/domain/transcripts.py:225` `TranscriptCaptured` (gains the optional refusal); `:276` `TranscriptRefused`; `:328` `PartState` (unchanged)
+- `pm_ai/core/transcript_acquisition.py:167` `_select_in`, asked-again rule at `:213`; `:346` the ask recorded for a capture; `:380` `_ends_asking` (a capture counts as asked); `:391` `_settled`; `:440` `_kept`; `:449` `_stored`, its "Not stored:" reason and run refusal, the lost-write path at `:544`
+- `pm_ai/connectors/transcripts/manual.py:28` `acquire` (never sets the refusal)
+- `pm_ai/storage/service.py:242` `transcript_parts` table; `:4572` `record_pending_part`; `:4620` `mark_part_stored` (the attempt reset); `:4650` `drop_pending_part`; `:4817` `offer_summary` (the re-open)
+- `pm_ai/core/transcripts.py:612` `meeting_utterances` (reads `stored` rows only)
+- `pm_ai/app/pipelines.py:770` `ingest_captures`, stored, un-ingested parts only at `:884`; `:577` the harvest offers waiting summaries; `:4764` `note_summary_input`; `:4798` `_stored_parts_on_disk`
+- `tests/connectors/test_graph_transcripts.py:1540-1552` `test_a_part_whose_download_fails_returns_the_refusal_and_no_other_part`, whose "part 2 fails" case flips and whose "part 1 fails" case stays; `:984` `_daemon`, the `run_harvest` acceptance harness over `FakeGraph`
 - `tests/core/test_transcript_acquisition.py:579` the refusal-keeps-rows test; `:747` the lost-write test, the model for the new acquisition tests
+- `tests/slice/test_transcript_path.py:1516` the exhausted-ingestion test, the model for the 33j one; `tests/slice/test_meeting_summary_slice.py:801` a later part re-opening the summary through a harvest
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/transcripts.py` -- `TranscriptCaptured` gains the optional refusal sentence, checked non-empty when set -- the outcome
-- [ ] `pm_ai/connectors/transcripts/graph_transcripts.py` -- decision 5 stops at the first part refused for good and returns the parts before it with the refusal; retryable refusals keep all or nothing; module and `_match` docstrings updated -- the adapter
-- [ ] `pm_ai/core/transcript_acquisition.py` -- `_stored` appends the carried refusal to the row's "Not stored:" and to the run's refusals -- the caller
-- [ ] `tests/connectors/test_graph_transcripts.py`, `tests/core/test_transcript_acquisition.py`, `tests/slice/test_transcript_path.py` -- one test per matrix row; the flipped test renamed for what it now pins
-- [ ] `_bmad-output/specs/spec-pm-ai/stories/33g-every-part-of-a-transcript.md` -- dated Change Log line: a later part refused for good keeps the parts before it, amended by `33j`; the Suggested Review Order's "all or nothing (open decision in deferred-work)" now points at `33j`
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- the DECIDED entry under "Surfaced by the story-33g review (2026-10-19)" marked built by `33j`; if question 1 keeps the recommendation, a limit: a part refused for good costs every part after it once the meeting is no longer asked
+- [x] `pm_ai/domain/transcripts.py` -- `TranscriptCaptured` gains the optional refusal sentence, checked non-empty when set -- the outcome
+- [x] `pm_ai/connectors/transcripts/graph_transcripts.py` -- decision 5 stops at the first part refused for good and returns the parts before it with the refusal; retryable refusals keep all or nothing; module and `_match` docstrings updated -- the adapter
+- [x] `pm_ai/core/transcript_acquisition.py` -- `_stored` appends the carried refusal to the row's "Not stored:" and to the run's refusals -- the caller
+- [x] `tests/connectors/test_graph_transcripts.py`, `tests/core/test_transcript_acquisition.py`, `tests/slice/test_transcript_path.py` -- one test per matrix row; the flipped test renamed for what it now pins
+- [x] `_bmad-output/specs/spec-pm-ai/stories/33g-every-part-of-a-transcript.md` -- dated Change Log line: a later part refused for good keeps the parts before it, amended by `33j`; the Suggested Review Order's "all or nothing (open decision in deferred-work)" now points at `33j`
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- the DECIDED entry under "Surfaced by the story-33g review (2026-10-19)" marked built by `33j`; if question 1 keeps the recommendation, a limit: a part refused for good costs every part after it once the meeting is no longer asked
 
 **Acceptance Criteria:**
 - Given a meeting with nothing stored and two new parts whose second answers 404, when acquisition runs, then part 1 is stored byte-identical to its download, its row is `fetched` naming the second part's transcript id and 404, and the run's refusals name it.
@@ -90,6 +91,7 @@ Verified against `2d8a559` (origin/main) on 2026-10-20.
 
 - **2026-10-20, created.** Carries Andrei's decision of 2026-10-19 (`33g` review): a new part refused for good no longer discards the parts downloaded before it; they are returned in time order with the refusal named. Settled here: only refusals waiting cannot clear keep earlier parts; parts after the refused one are not downloaded; the refused part keeps no row; `33g`'s asked-again rule and attempt reset and `7b`'s re-open apply unchanged. Two questions for Andrei in Ask First. Depends on no spine amendment.
 - **2026-10-20, Ask First answered (Andrei):** (1) the refused part keeps no row; later parts wait for it while the meeting is still asked, so a part deleted from Teams costs the parts after it — accepted; (2) a summary does not say a part is missing. Spec ready for its build checkpoint.
+- **2026-10-21, built and reviewed.** Code Map re-verified against `82c2edb` after 7b, 7e, 7c, 7d, 11e and 4x merged: frozen statements hold, line anchors in storage, `core/transcripts.py` and pipelines moved. The carried sentence is `TranscriptCaptured.refused_part`. Three review layers ran (blind hunter, edge-case hunter, verification gap). Patched: the sentence names the transcript id once and closes its reason before the later-parts clause, with singular wording for one later part; a write failure and a refused part are joined as two sentences; tests check that part 1 is asked for, that an unclassified fault's retryability is the shared rule, and that the second harvest is told part 1 is stored; the fake Graph raises a scripted exception from a list too. No finding needs Andrei's decision; the rest were rejected as decided by this spec (first refused part alone, retryable failures all or nothing, expiry and permission refusals keep earlier parts, the accepted limit in `deferred-work.md`). The summary test lives in `tests/slice/test_meeting_summary_slice.py`. Frozen block unchanged.
 
 ## Design Notes
 
@@ -106,3 +108,46 @@ Verified against `2d8a559` (origin/main) on 2026-10-20.
 - `uv run pytest -q` -- expected: all pass
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
+
+## Suggested Review Order
+
+**The adapter stops at the refused part**
+
+- Entry point: decision 5 keeps captures before a part refused for good, asks nothing after.
+  [`graph_transcripts.py:478`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L478)
+
+- Which download outcomes keep earlier parts: non-retryable refusals and expiry only.
+  [`graph_transcripts.py:847`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L847)
+
+**The outcome carries the refusal**
+
+- One optional field; blank refused, port signature unchanged.
+  [`transcripts.py:241`](../../../../pm_ai/domain/transcripts.py#L241)
+
+**Acquisition names it**
+
+- The sentence joins "Not stored:" and the run's refusals, after any write failure.
+  [`transcript_acquisition.py:574`](../../../../pm_ai/core/transcript_acquisition.py#L574)
+
+**Tests**
+
+- First new part refused: the refusal alone, as before.
+  [`test_graph_transcripts.py:1545`](../../../../tests/connectors/test_graph_transcripts.py#L1545)
+
+- Part 2 refused, every kind waiting cannot clear.
+  [`test_graph_transcripts.py:1595`](../../../../tests/connectors/test_graph_transcripts.py#L1595)
+
+- Empty body stays all or nothing.
+  [`test_graph_transcripts.py:1645`](../../../../tests/connectors/test_graph_transcripts.py#L1645)
+
+- Acceptance through a harvest: part 1 byte-identical, ingested.
+  [`test_graph_transcripts.py:1740`](../../../../tests/connectors/test_graph_transcripts.py#L1740)
+
+- Row and run refusals; lost write plus refused part.
+  [`test_transcript_acquisition.py:966`](../../../../tests/core/test_transcript_acquisition.py#L966)
+
+- Summary of the kept part, re-opened when the refused one arrives.
+  [`test_meeting_summary_slice.py:832`](../../../../tests/slice/test_meeting_summary_slice.py#L832)
+
+- Exhausted ingestion reset by a kept part.
+  [`test_transcript_path.py:1567`](../../../../tests/slice/test_transcript_path.py#L1567)
