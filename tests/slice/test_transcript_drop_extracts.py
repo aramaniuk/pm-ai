@@ -44,7 +44,10 @@ MD = FIXTURES / "teams_export_recorded.md"
 TITLE_LINE = "Example Weekly Sync-up-20260914_093000-Meeting Recording"
 DATE_LINE = "14 September 2026, 09:30am"
 LENGTH_LINE = "29m 03s"
-UNKNOWN = "Example Weekly Sync-up · 2026-09-14 · 09:30 · 29m 03s"
+UNKNOWN = ("14.09.2026 09:30", "Example Weekly Sync-up", "Duration: 29m 03s")
+"""A header no fixed reader knows: a date in another layout first (so no title is
+read from it), the title, and a length with a label."""
+TOKYO = "Asia/Tokyo"
 
 
 def _utc(hour: int, minute: int, day: int = 14) -> datetime:
@@ -59,6 +62,16 @@ def _config(machine, text: str) -> None:
     target = Path(daemon.storage.paths.resolve(DataScope(ScopeKind.APPLICATION), "config.toml"))
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def machine_zone(monkeypatch):
+    """The machine's own zone, fixed for every row: read only with no `display_timezone`."""
+    from zoneinfo import ZoneInfo
+
+    from pm_ai.app import pipelines
+
+    monkeypatch.setattr(pipelines, "_machine_zone", lambda: ZoneInfo(TOKYO))
 
 
 @pytest.fixture
@@ -310,7 +323,7 @@ def test_a_model_title_not_in_the_header_is_refused(warsaw, tmp_path, monkeypatc
 
 def _unknown_layout(tmp_path: Path) -> Path:
     return _md(tmp_path, name="sync-notes.md", replace={
-        f"{TITLE_LINE}\n\n{DATE_LINE}\n\n{LENGTH_LINE}\n": f"{UNKNOWN}\n",
+        f"{TITLE_LINE}\n\n{DATE_LINE}\n\n{LENGTH_LINE}\n": "\n\n".join(UNKNOWN) + "\n",
     })
 
 
@@ -322,15 +335,15 @@ def test_unknown_layout_the_model_reads_it(warsaw, tmp_path, monkeypatch, capsys
     (call,) = fake.calls
     assert call["task_class"] is TaskClass.HEADER_READING
     assert call["flow"] == ScopeFlow.of((PERSONAL,), PERSONAL)
-    assert [fragment.raw for fragment in call["external"]] == [UNKNOWN]
+    assert [fragment.raw for fragment in call["external"]] == list(UNKNOWN)
     meeting = _record(warsaw, _minted(out)).meeting
     assert "Title 'Example Weekly Sync-up', from the file header, read by the local model" in out
     assert meeting.start == _utc(7, 30) and meeting.start_estimated_from == "model-header"
     assert "estimated from the file header, read by the local model" in out
-    # The spec's length order puts the model before the last turn, so the
-    # model's 30 decides (the row's "29 from the last turn" predates that order).
+    # The length order puts the model before the last turn, so the model's 30
+    # decides, labelled estimated (Andrei, 2026-10-21).
     assert meeting.duration_minutes == 30
-    assert "30 minutes, from the file header, read by the local model" in out
+    assert "30 minutes, estimated from the file header, read by the local model" in out
 
 
 def _as_with_no_model(machine, out: str) -> None:
@@ -383,10 +396,23 @@ def test_a_creation_time_too_late_does_not_decide(warsaw, model, tmp_path, monke
     assert meeting.start == _utc(7, 30) and meeting.start_estimated_from == "header"
 
 
-def test_a_header_with_no_zone(machine, model, tmp_path, monkeypatch, capsys):
+def test_a_header_with_no_zone_is_read_in_the_machines_zone(
+    machine, model, tmp_path, monkeypatch, capsys
+):
     out = _ok(capsys, _drop(monkeypatch, _docx(tmp_path)))
     meeting = _record(machine, _minted(out)).meeting
-    # 08:10 minus the header's 30 minutes (the row's 07:41 predates the length order).
+    # 09:30 in Tokyo is 00:30 UTC.
+    assert meeting.start == _utc(0, 30) and meeting.start_estimated_from == "header-machine-zone"
+    assert "estimated from the file header, machine zone" in out
+
+
+def test_a_header_with_no_zone_and_no_machine_zone(machine, model, tmp_path, monkeypatch, capsys):
+    from pm_ai.app import pipelines
+
+    monkeypatch.setattr(pipelines, "_machine_zone", lambda: None)
+    out = _ok(capsys, _drop(monkeypatch, _docx(tmp_path)))
+    meeting = _record(machine, _minted(out)).meeting
+    # 08:10 minus the header's 30 minutes.
     assert meeting.start == _utc(7, 40) and meeting.start_estimated_from == "file-modified"
 
 
@@ -751,3 +777,79 @@ def test_an_option_attendee_in_another_case_is_one_person(
     _alias(warsaw, "alex morgan", "email:alex@example.com")
     out = _ok(capsys, _drop(monkeypatch, _docx(tmp_path), "--attendees", "email:Alex@Example.com"))
     assert _record(warsaw, _minted(out)).meeting.attendee_count == 2
+
+
+# ── Andrei's decisions of 2026-10-21 ─────────────────────────────────────────
+
+
+def test_a_day_from_the_modification_time_alone_never_joins(
+    warsaw, model, tmp_path, monkeypatch, capsys
+):
+    _calendar(warsaw, "AAMk-weekly", _utc(7, 30))
+    vtt = "WEBVTT\n\n00:28:00.000 --> 00:29:00.000\n<v Alex Morgan>thanks all\n"
+    path = _text(tmp_path, "Example Weekly Sync-up.vtt", vtt)
+    found = json.loads(_ok(capsys, _drop(monkeypatch, path, "--dry-run", "--json")))
+    assert found["outcome"] == {"kind": "new", "candidates": []}
+    out = _ok(capsys, _drop(monkeypatch, path))
+    assert "its day came only from the file's modification time, so no existing meeting was joined" in out
+    meeting = _record(warsaw, _minted(out)).meeting
+    assert meeting.manual_only and meeting.start_estimated_from == "file-modified"
+
+
+# In a speaker-and-time file a line ending in a time, `Standup 10:00`, is a turn by
+# `11d`'s rule (an accepted limit), so the header row's time is not last here; the
+# exact example is a row of `test_transcript_details.py`.
+@pytest.mark.parametrize("title", ["Q3 2026 planning", "Standup 10:00 (weekly)"])
+def test_a_title_holding_a_year_or_a_time_stays_the_title(
+    title, warsaw, model, tmp_path, monkeypatch, capsys
+):
+    out = _ok(capsys, _drop(monkeypatch, _md(tmp_path, replace={TITLE_LINE: title})))
+    meeting = _record(warsaw, _minted(out)).meeting
+    assert meeting.title == title
+    assert meeting.start == _utc(7, 30) and meeting.start_estimated_from == "header"
+
+
+@pytest.mark.parametrize(
+    "start", ["2026-08-01T09:30", "2026-09-20T09:30"], ids=["over-30-days-before", "after-the-file"]
+)
+def test_a_model_start_outside_the_files_times_is_refused(
+    start, warsaw, tmp_path, monkeypatch, capsys
+):
+    _answering(monkeypatch, json.dumps({
+        "title": "Example Weekly Sync-up", "start": start, "length_minutes": 30,
+    }))
+    out = _ok(capsys, _drop(monkeypatch, _unknown_layout(tmp_path)))
+    meeting = _record(warsaw, _minted(out)).meeting
+    assert meeting.start_estimated_from == "file-modified"
+    assert meeting.start == _utc(7, 40)
+
+
+def test_a_zoom_like_header_takes_the_models_title(warsaw, tmp_path, monkeypatch, capsys):
+    """The fixed readers take the first line and miss the start, so the layout is
+    unknown and the model's validated title wins (2026-10-21)."""
+    fake = _answering(monkeypatch, json.dumps(
+        {"title": "Budget review", "start": None, "length_minutes": None}
+    ))
+    path = _md(tmp_path, name="zoom.md", replace={
+        f"{TITLE_LINE}\n\n{DATE_LINE}\n\n{LENGTH_LINE}\n":
+            "Zoom Meeting Transcript\n\nTopic: Budget review\n\nDate: Oct 15, 2026 3:00 PM\n",
+    })
+    out = _ok(capsys, _drop(monkeypatch, path))
+    assert len(fake.calls) == 1
+    assert _record(warsaw, _minted(out)).meeting.title == "Budget review"
+    assert "Title 'Budget review', from the file header, read by the local model" in out
+
+
+def test_with_the_start_and_length_read_the_fixed_title_stands(
+    warsaw, tmp_path, monkeypatch, capsys
+):
+    fake = _answering(monkeypatch, json.dumps(
+        {"title": "Weekly", "start": None, "length_minutes": None}
+    ))
+    path = _md(tmp_path, replace={"Meeting Recording": "Nagranie"})
+    out = _ok(capsys, _drop(monkeypatch, path))
+    # The stamp in other words leaves only the title unread: the model fills it.
+    assert len(fake.calls) == 1 and "Title 'Weekly'" in out
+    fixed = _answering(monkeypatch)
+    out = _ok(capsys, _drop(monkeypatch, _md(tmp_path, name="again.md")))
+    assert fixed.calls == [] and "Title 'Example Weekly Sync-up', from the file header" in out

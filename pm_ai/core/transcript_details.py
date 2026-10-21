@@ -88,6 +88,7 @@ __all__ = [
     "SOURCE_FILE_NAME",
     "SOURCE_HEADER",
     "SOURCE_LAST_CUE",
+    "SOURCE_MACHINE_ZONE",
     "SOURCE_LAST_TURN",
     "SOURCE_MODEL",
     "SOURCE_MODIFIED",
@@ -123,6 +124,9 @@ SOURCE_MODEL = "file header, read by the local model"
 SOURCE_FILE_NAME = "file name"
 SOURCE_DOCX_CREATED = "docx creation time"
 SOURCE_MODIFIED = "file modification time"
+SOURCE_MACHINE_ZONE = ", machine zone"
+"""Added to a header source when its date and time were read in the machine's
+zone because `display_timezone` is unset (Andrei, 2026-10-21)."""
 SOURCE_LAST_CUE = "last cue"
 SOURCE_LAST_TURN = "last turn"
 SOURCE_UNKNOWN = "unknown"
@@ -131,6 +135,8 @@ ESTIMATED_FROM: dict[str, str] = {
     SOURCE_DOCX_CREATED: "docx-created",
     SOURCE_HEADER: "header",
     SOURCE_MODEL: "model-header",
+    SOURCE_HEADER + SOURCE_MACHINE_ZONE: "header-machine-zone",
+    SOURCE_MODEL + SOURCE_MACHINE_ZONE: "model-header-machine-zone",
     SOURCE_MODIFIED: "file-modified",
 }
 """An estimated start's source, as the record's `start_estimated_from` spells it."""
@@ -144,6 +150,11 @@ MAX_MODEL_HEADER_LINES = 20
 MAX_MODEL_HEADER_CHARACTERS = 2_000
 """The most of a header the local model is shown: 20 lines and 2,000 characters,
 chosen, not measured. A longer header is not sent at all."""
+
+MODEL_START_REACH = timedelta(days=30)
+"""How long before the file's own times (its creation or modification) a start
+the local model reads may be (Andrei, 2026-10-21). An earlier one, or one after
+them, is refused and the next source decides."""
 
 _YEARS = range(1900, 2100)
 """The years a start is read in: the date-like rule's own range. A start
@@ -271,6 +282,17 @@ _DAY_FIRST = re.compile(
 _MONTH_FIRST = re.compile(
     rf"^(?P<month>[a-z]+) (?P<day>\d{{1,2}}), (?P<year>\d{{4}}), ?{_TIME}$", re.IGNORECASE
 )
+_WEEKDAYS = frozenset(
+    {
+        *(day for day in ("monday", "tuesday", "wednesday", "thursday", "friday",
+                          "saturday", "sunday")),
+        "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+    }
+)
+_DATE_WORDS = frozenset({*_MONTHS, *(name[:3] for name in _MONTHS), "sept", "am", "pm", "at",
+                          "utc", "gmt", *_WEEKDAYS})
+_DATE_TOKEN = re.compile(r"[^\W\d_]+|\d+|[^\w\s]", re.UNICODE)
+_DATE_PUNCTUATION = frozenset(",./:-")
 _TIME_OF_DAY = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?!\d)")
 _YEAR = r"(?<!\d)(?:19|20)\d{2}(?!\d)"
 _YEAR_BY_MONTH = re.compile(
@@ -291,13 +313,26 @@ def _is_length_like(line: str) -> bool:
 
 
 def _is_date_like(line: str) -> bool:
-    """A time of day, or a year beside a month name or joined to other numbers.
+    """A line that is, as a whole, a date or a time (Andrei, 2026-10-21).
 
-    A length-like line (`1:02:03`) is never also date-like, so a header with a
-    three-field length is not read as holding two start lines.
+    It holds a time of day, or a year beside a month name or joined to other
+    numbers, and nothing else: every word in it is a month or weekday name,
+    `am`, `pm`, `at`, `UTC` or `GMT`, and every other character a digit, a
+    space or one of `, . / : -`. So a title that merely holds a year or a time
+    (`Q3 2026 planning`, `Standup 10:00`) stays a title. A length-like line
+    (`1:02:03`) is never also date-like, so a header with a three-field length
+    is not read as holding two start lines.
     """
     if _is_length_like(line):
         return False
+    for token in _DATE_TOKEN.findall(line):
+        if token.isdigit():
+            continue
+        if token[0].isalpha():
+            if token.casefold() not in _DATE_WORDS:
+                return False
+        elif token not in _DATE_PUNCTUATION:
+            return False
     return bool(
         _TIME_OF_DAY.search(line) or _YEAR_BY_MONTH.search(line) or _YEAR_IN_NUMBERS.search(line)
     )
@@ -504,7 +539,9 @@ class DropFacts:
 
     `modified` and `created` are aware UTC (`created` only for a `.docx`
     with a `dcterms:created` in UTC); `zone` is `display_timezone`, `None`
-    when unset; the options are as given, `start` aware.
+    when unset, and `machine_zone` the machine's own, which reads the
+    header's time only when `display_timezone` is unset (Andrei,
+    2026-10-21); the options are as given, `start` aware.
     """
 
     text: str
@@ -513,6 +550,7 @@ class DropFacts:
     from_docx: bool = False
     created: datetime | None = None
     zone: tzinfo | None = None
+    machine_zone: tzinfo | None = None
     title: str | None = None
     start: datetime | None = None
     duration: int | None = None
@@ -532,6 +570,14 @@ class DropFields:
     hint_day: date
     header_start: Decided[datetime] | None = None
 
+    @property
+    def day_from_modification_only(self) -> bool:
+        """The day came only from the file's modification time: no header date,
+        no creation time, no option. Such a drop never joins an existing
+        meeting (Andrei, 2026-10-21): a wrong attachment is worse than a
+        duplicate record."""
+        return self.header_start is None and self.start.source == SOURCE_MODIFIED
+
 
 def needs_model(facts: DropFacts, lines: Sequence[str], fixed: HeaderReading) -> bool:
     """Whether the header goes to the local model: it has one, and the fixed
@@ -550,6 +596,8 @@ def decide_fields(
 ) -> DropFields:
     """The title, the length and the start before the calendar step, each with its source."""
     model = model or HeaderReading()
+    if model.start is not None and not _plausible_model_start(model.start, facts):
+        model = HeaderReading(model.title, None, model.length)
     title = _decide_title(facts, fixed, model)
     length = _decide_length(facts, fixed, model)
     header_start: Decided[datetime] | None = None
@@ -568,9 +616,30 @@ def decide_fields(
     return DropFields(title, length, start, hint, header_start)
 
 
+def _plausible_model_start(start: datetime, facts: DropFacts) -> bool:
+    """Whether a start the local model read can be this file's meeting (Andrei, 2026-10-21).
+
+    Not after the file's own times (a transcript is saved after its meeting)
+    and not more than `MODEL_START_REACH` before them. The start is a wall
+    clock in no zone, so it is compared under every real offset: refused only
+    when no offset brings it inside.
+    """
+    times = [_utc(facts.modified), *([] if facts.created is None else [_utc(facts.created)])]
+    wall = start.replace(tzinfo=timezone.utc)
+    earliest, latest = wall - _LATEST_OFFSET, wall - _EARLIEST_OFFSET
+    return latest >= min(times) - MODEL_START_REACH and earliest <= max(times)
+
+
 def _decide_title(facts: DropFacts, fixed: HeaderReading, model: HeaderReading) -> Decided[str]:
     if facts.title is not None:
         return Decided(facts.title, SOURCE_OPTION)
+    # A layout the fixed readers do not know — they left the start or the
+    # length unread — is the model's to read, and its validated title wins
+    # (2026-10-21, extract the best): a Zoom-like header's first line is
+    # `Zoom Meeting Transcript`, its title on a `Topic:` line.
+    unknown_layout = fixed.start is None or fixed.length is None
+    if model.title is not None and unknown_layout:
+        return Decided(model.title, SOURCE_MODEL)
     if fixed.title is not None:
         return Decided(fixed.title, SOURCE_HEADER)
     if model.title is not None:
@@ -595,7 +664,7 @@ def _decide_length(
     if cue is not None:
         return Decided(cue, SOURCE_LAST_CUE)
     if model.length is not None:
-        return Decided(model.length, SOURCE_MODEL)
+        return Decided(model.length, SOURCE_MODEL, estimated=True)
     seconds = last_turn_seconds(facts.text)
     turn = None if seconds is None else _in_range(math.ceil(seconds / 60))
     if turn is not None:
@@ -635,7 +704,11 @@ def _created_is_consistent(
 def _estimate_start(
     facts: DropFacts, length: int | None, header: Decided[datetime] | None
 ) -> Decided[datetime]:
-    """Steps 3, 4 and 5: the creation time, the header in the zone, the modification time."""
+    """Steps 3, 4 and 5: the creation time, the header in the zone, the modification time.
+
+    With no header date the creation time decides on its own, with no further
+    bound (Andrei, 2026-10-21).
+    """
     created = facts.created
     if (
         created is not None
@@ -645,11 +718,14 @@ def _estimate_start(
         return Decided(
             _minute(_utc(created) - timedelta(minutes=length)), SOURCE_DOCX_CREATED, estimated=True
         )
-    if header is not None and facts.zone is not None:
+    zone = facts.zone or facts.machine_zone
+    if header is not None and zone is not None:
         # fold=0: a wall clock that occurs twice takes the earlier instant, and
-        # one that does not occur takes the offset before the change.
-        local = header.value.replace(tzinfo=facts.zone, fold=0)
-        return Decided(_utc(local), header.source, estimated=True)
+        # one that does not occur takes the offset before the change. With no
+        # `display_timezone`, the machine's zone reads it (Andrei, 2026-10-21).
+        local = header.value.replace(tzinfo=zone, fold=0)
+        source = header.source if facts.zone is not None else header.source + SOURCE_MACHINE_ZONE
+        return Decided(_utc(local), source, estimated=True)
     modified = _utc(facts.modified)
     if length is not None:
         modified -= timedelta(minutes=length)
@@ -696,6 +772,8 @@ class DropPlan:
     ambiguous: tuple[str, ...] = ()
     found_by: str = ""
     """How a join was found: `start` (`--start`, within 15 minutes) or `same day`."""
+    day_unknown: bool = False
+    """A new record because the day came only from the file's modification time."""
     minted_same_day: tuple[Meeting, ...] = ()
     """Records pm-ai minted with the same title on the hint day: never joined, but
     one that already has a capture means this file was dropped before (the
@@ -749,6 +827,17 @@ def decide_plan(
             return _joined(found[0], names, aliases, found_by="start")
         return DropPlan(
             fields.title, fields.start, fields.length, linked(names, aliases, None), "new"
+        )
+    if fields.day_from_modification_only:
+        # Never a join, and never refused as a re-drop: a file dated only by
+        # its modification time says nothing about which day's meeting it is.
+        return DropPlan(
+            fields.title,
+            fields.start,
+            fields.length,
+            linked(names, aliases, None),
+            "new",
+            day_unknown=True,
         )
     wanted = normalised_title(fields.title.value)
     same_day = sorted(

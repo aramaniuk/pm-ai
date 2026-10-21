@@ -1161,6 +1161,7 @@ class _Dropped:
     participants: tuple = (("Andrei", None),)
     candidates: tuple[str, ...] = ()
     found_by: str = ""
+    day_unknown: bool = False
     zone: str = ""
     from_docx: bool = False
     notices: tuple[str, ...] = ()
@@ -1180,6 +1181,7 @@ class _Preview:
     zone: str = ""
     notices: tuple[str, ...] = ()
     found_by: str = ""
+    day_unknown: bool = False
 
 
 class _Drop:

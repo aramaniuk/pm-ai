@@ -231,11 +231,19 @@ def test_the_creation_time_needs_a_length():
     assert fields.length.value is None and fields.start.source == SOURCE_HEADER
 
 
-def test_with_no_zone_the_header_time_is_not_read_in_one():
+def test_with_no_zone_and_no_machine_zone_the_header_time_is_not_read_in_one():
     fields = _fields()
     assert fields.start.source == SOURCE_MODIFIED
     assert fields.start.value == datetime(2026, 9, 14, 7, 40, tzinfo=timezone.utc)
     assert fields.hint_day.isoformat() == "2026-09-14"
+    assert not fields.day_from_modification_only
+
+
+def test_with_no_display_zone_the_machine_zone_reads_the_header():
+    fields = _fields(machine_zone=ZoneInfo("Asia/Tokyo"))
+    assert fields.start.source == "file header, machine zone" and fields.start.estimated
+    assert fields.start.value == datetime(2026, 9, 14, 0, 30, tzinfo=timezone.utc)
+    assert _fields(zone=WARSAW, machine_zone=ZoneInfo("Asia/Tokyo")).start.source == SOURCE_HEADER
 
 
 def test_a_time_that_occurs_twice_takes_the_earlier_instant():
@@ -280,3 +288,81 @@ def test_a_model_title_that_is_a_date_or_a_length_is_refused(title):
 def test_the_last_turns_length_is_an_estimate():
     fields = _fields(FIXTURE.replace("29m 03s\n", ""), zone=WARSAW)
     assert fields.length.estimated
+
+
+# ── Andrei's decisions of 2026-10-21 ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("line", "dated"),
+    [
+        ("14 September 2026, 09:30am", True),
+        ("September 24, 2026, 1:17PM", True),
+        ("2026-09-14", True),
+        ("14.09.2026 09:30", True),
+        ("Monday, 14 September 2026 at 09:30 UTC", True),
+        ("Q3 2026 planning", False),
+        ("Standup 10:00", False),
+        ("Budget 2026/27", False),
+        ("Example Weekly Sync-up · 2026-09-14 · 09:30", False),
+    ],
+)
+def test_a_line_is_date_like_only_when_it_is_a_date_as_a_whole(line, dated):
+    from pm_ai.core.transcript_details import _is_date_like
+
+    assert _is_date_like(line) is dated
+
+
+def test_a_title_holding_a_year_or_a_time_is_read_and_so_is_the_start():
+    for title in ("Q3 2026 planning", "Standup 10:00"):
+        reading = _read(title, "14 September 2026, 09:30am", "29m 03s")
+        assert reading.title == title and reading.start == datetime(2026, 9, 14, 9, 30)
+
+
+def test_a_day_from_the_modification_time_alone_is_flagged():
+    fields = _fields("Alex: hi\nSam: hello\n")
+    assert fields.day_from_modification_only
+    with_created = _fields(
+        "Alex: hi\nSam: hello\n", created=datetime(2026, 9, 14, 8, 5, tzinfo=timezone.utc)
+    )
+    # No length, so the creation time cannot decide: still the modification time.
+    assert with_created.day_from_modification_only
+
+
+@pytest.mark.parametrize(
+    ("start", "kept"),
+    [
+        (datetime(2026, 9, 14, 9, 30), True),
+        (datetime(2026, 8, 16, 9, 30), True),
+        (datetime(2026, 8, 1, 9, 30), False),
+        (datetime(2026, 9, 14, 21, 30), True),
+        (datetime(2026, 9, 15, 9, 30), False),
+    ],
+    ids=["same-day", "29-days-before", "45-days-before", "evening-under-some-offset", "next-day"],
+)
+def test_a_model_start_is_kept_only_near_the_files_times(start, kept):
+    model = HeaderReading(None, start, None)
+    given = DropFacts(text=FIXTURE, file_name="/x/a.md", modified=MODIFIED)
+    fields = decide_fields(given, HeaderReading(), model)
+    assert (fields.header_start is not None) is kept
+
+
+def test_a_model_length_is_labelled_estimated():
+    text = f"{TITLE}\n14 September 2026, 09:30am\n\nAlex Morgan   0:32\nx\n\nSam Rivera   0:00\ny\n"
+    given = DropFacts(text=text, file_name="/x/a.md", modified=MODIFIED)
+    fields = decide_fields(given, read_header(header_lines(text)), HeaderReading(None, None, 30))
+    assert fields.length.value == 30 and fields.length.estimated
+
+
+def test_the_models_title_wins_only_when_the_layout_is_unknown():
+    text = f"Zoom Meeting Transcript\nTopic: Budget review\nDate: Oct 15, 2026 3:00 PM\n\n{TURNS}"
+    fixed = read_header(header_lines(text))
+    assert fixed.title == "Zoom Meeting Transcript" and fixed.start is None
+    given = DropFacts(text=text, file_name="/x/a.md", modified=MODIFIED)
+    model = HeaderReading("Budget review", None, None)
+    assert decide_fields(given, fixed, model).title.value == "Budget review"
+    known = read_header(header_lines(FIXTURE))
+    given = DropFacts(text=FIXTURE, file_name="/x/a.md", modified=MODIFIED)
+    assert decide_fields(given, known, HeaderReading("Weekly", None, None)).title.value == (
+        "Example Weekly Sync-up"
+    )

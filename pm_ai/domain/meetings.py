@@ -48,7 +48,16 @@ def normalised_title(title: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", folded).split())
 
 
-ESTIMATE_SOURCES = frozenset({"docx-created", "header", "model-header", "file-modified"})
+ESTIMATE_SOURCES = frozenset(
+    {
+        "docx-created",
+        "header",
+        "model-header",
+        "header-machine-zone",
+        "model-header-machine-zone",
+        "file-modified",
+    }
+)
 """The spellings of `Meeting.start_estimated_from` (story 11e)."""
 
 

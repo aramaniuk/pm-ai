@@ -231,6 +231,9 @@ gave.
 
 _MANUAL_ONLY_VALUE = "true"
 
+_FROM_MODIFICATION = "file-modified"
+"""The estimate source no calendar arrival adopts: it names no day (story 11e)."""
+
 _REQUIRED: frozenset[str] = frozenset(_FIELDS) - {
     _CALENDAR_REF,
     _MANUAL_ONLY,
@@ -825,7 +828,8 @@ class MeetingRecords:
         another calendar-sourced record of the title is already recorded that
         day, or when the caller says the harvest brought another
         (`same_day_rivals`) — so a harvest never picks one of two for a record
-        the drop left unjoined.
+        the drop left unjoined. A record whose start came only from the file's
+        modification time (`file-modified`) is never adopted.
 
         **This is a read-modify-write, and it is one step.** The previous member
         is listed and read, and the replacement written, inside
@@ -1110,6 +1114,9 @@ class MeetingRecords:
             record.meeting.meeting_id
             for record in records
             if record.meeting.manual_only
+            # A start taken only from the file's modification time names no
+            # day: never adopted (Andrei, 2026-10-21).
+            and record.meeting.start_estimated_from != _FROM_MODIFICATION
             and (
                 not rivals
                 and is_same_day_candidate(

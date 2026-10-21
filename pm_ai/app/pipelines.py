@@ -19,6 +19,7 @@ on the write path, which therefore carries no second copy of anything.
 from __future__ import annotations
 
 import errno
+import os
 import logging
 import secrets
 import sqlite3
@@ -29,7 +30,7 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from concurrent.futures import CancelledError
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -1317,6 +1318,8 @@ class DropPreview:
     notices: tuple[str, ...] = ()
     found_by: str = ""
     """How a joined record was found: `start` or `same day`; empty otherwise."""
+    day_unknown: bool = False
+    """New because the day came only from the file's modification time (11e)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1353,6 +1356,9 @@ class TranscriptDropped:
     candidates: tuple[str, ...] = ()
     found_by: str = ""
     """How a matched record was found: `start` or `same day` (story 11e)."""
+    day_unknown: bool = False
+    """Minted because the day came only from the file's modification time, which
+    never joins an existing meeting (story 11e)."""
     zone: str = ""
     from_docx: bool = False
     notices: tuple[str, ...] = ()
@@ -1500,6 +1506,28 @@ def _same_day_rivals(meetings: Sequence[Meeting], zone: tzinfo | None) -> frozen
     return frozenset(rivals)
 
 
+def _machine_zone() -> tzinfo | None:
+    """The machine's own zone, read when `display_timezone` is unset (Andrei, 2026-10-21).
+
+    The IANA zone `/etc/localtime` links to, so a clock change is honoured;
+    otherwise the offset in force now; `None` when neither can be read.
+    """
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        target = ""
+    _, marker, name = target.partition("zoneinfo/")
+    if marker and name:
+        try:
+            return ZoneInfo(name)
+        except (ValueError, ZoneInfoNotFoundError):
+            pass
+    try:
+        return datetime.now().astimezone().tzinfo
+    except (OSError, ValueError):
+        return None
+
+
 def _zone(daemon: Daemon) -> tzinfo | None:
     """`display_timezone`, or `None` when unset: pm-ai never assumes the machine's zone."""
     name = daemon.config.display_timezone
@@ -1533,6 +1561,7 @@ def _plan_drop(
         from_docx=dropped.from_docx,
         created=dropped.created,
         zone=zone,
+        machine_zone=None if zone is not None else _machine_zone(),
         title=options.title,
         start=options.start,
         duration=options.duration,
@@ -1720,6 +1749,7 @@ def preview_drop(
     return DropPreview(
         title, start, length, _pairs(plan.participants), "new",
         candidates=plan.candidates, zone=zone, notices=planned.notices,
+        day_unknown=plan.day_unknown,
     )
 
 
@@ -1809,6 +1839,7 @@ def drop_file(
     title_field = start_field = duration = None
     candidates: tuple[str, ...] = ()
     found_by = ""
+    day_unknown = False
     try:
         if options.meeting_id is not None:
             utterances = drop_utterances(text, name=file_name, from_docx=from_docx)
@@ -1829,7 +1860,7 @@ def drop_file(
                 _refuse_a_redrop(daemon, plan)
                 meeting = _new_meeting(plan, scope=scope, attendees=options.attendees)
                 bound_by = DROP_MINTED
-                candidates = plan.candidates
+                candidates, day_unknown = plan.candidates, plan.day_unknown
             linked = plan.participants
             title_field, start_field = _shown(plan.title), _shown(plan.start)
             duration = _shown(plan.length)
@@ -1921,6 +1952,7 @@ def drop_file(
         participants=_pairs(linked),
         candidates=candidates,
         found_by=found_by,
+        day_unknown=day_unknown,
         zone=daemon.config.display_timezone,
         from_docx=from_docx,
         notices=notices,

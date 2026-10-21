@@ -738,6 +738,8 @@ class DropPreviewOutcome(Protocol):
     def notices(self) -> tuple[str, ...]: ...
     @property
     def found_by(self) -> str: ...
+    @property
+    def day_unknown(self) -> bool: ...
 
 
 @runtime_checkable
@@ -775,6 +777,10 @@ class TranscriptDropOutcome(Protocol):
     @property
     def found_by(self) -> str:
         """How a matched record was found: `start` or `same day` (story 11e)."""
+        ...
+    @property
+    def day_unknown(self) -> bool:
+        """Minted because the day came only from the modification time (11e)."""
         ...
     @property
     def zone(self) -> str: ...
@@ -3672,7 +3678,12 @@ def _closing_line(dropped: TranscriptDropOutcome) -> str:
         )
     elif dropped.bound_by == "minted":
         line += f" It is a new meeting {dropped.meeting_id}"
-        if dropped.candidates:
+        if dropped.day_unknown:
+            line += (
+                ": its day came only from the file's modification time, so no "
+                "existing meeting was joined"
+            )
+        elif dropped.candidates:
             line += (
                 f": {len(dropped.candidates)} meetings that day share its title "
                 f"({', '.join(dropped.candidates)}), so none was joined"
@@ -3728,7 +3739,12 @@ def _preview_text(preview: DropPreviewOutcome) -> str:
         )
     elif preview.outcome == "new":
         said = "  outcome: new meeting"
-        if preview.candidates:
+        if preview.day_unknown:
+            said += (
+                " — its day came only from the file's modification time, so no "
+                "existing meeting would be joined"
+            )
+        elif preview.candidates:
             said += (
                 f" — {len(preview.candidates)} meetings that day share its title "
                 f"({', '.join(preview.candidates)}), so none would be joined"

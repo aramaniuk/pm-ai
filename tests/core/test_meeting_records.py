@@ -1364,3 +1364,10 @@ def test_check_participant_refuses_what_the_region_cannot_hold():
     for bad in ("A\x01lice", " padded", "", "x" * 20000):
         with pytest.raises(_Malformed):
             check_participant(bad)
+
+
+def test_a_start_from_the_modification_time_alone_is_never_adopted(records):
+    """Andrei, 2026-10-21: such a start names no day."""
+    records.put(_minted(start_estimated_from="file-modified"))
+    kept = records.put(_calendar(_MINTED_START + timedelta(minutes=5)))
+    assert not kept.adopted and kept.meeting_id == "AAMk-weekly"
