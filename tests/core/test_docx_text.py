@@ -310,3 +310,80 @@ def test_a_character_that_would_end_a_line_inside_a_run_is_a_space(boundary):
         return
     assert text == "one two\n"
     assert len(text.splitlines()) == 1
+
+
+# ── Story 11e: `dcterms:created`, the one property read ──────────────────────
+
+import io as _io  # noqa: E402
+import warnings as _warnings  # noqa: E402
+import zipfile as _zipfile  # noqa: E402
+from datetime import datetime as _datetime, timezone as _timezone  # noqa: E402
+
+from pm_ai.core.docx_text import MAX_CORE_PROPERTIES_BYTES, docx_created  # noqa: E402
+
+_CORE = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/'
+    'core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" '
+    'xmlns:dcterms="http://purl.org/dc/terms/">'
+    "<dc:creator>Someone</dc:creator>{created}</cp:coreProperties>"
+)
+
+
+def _with_core(core: str | bytes | None, *, twice: bool = False) -> bytes:
+    buffer = _io.BytesIO()
+    with _zipfile.ZipFile(buffer, "w") as built:
+        built.writestr("word/document.xml", "<w:document/>")
+        for _ in range(2 if twice else 1):
+            if core is not None:
+                with _warnings.catch_warnings():
+                    # The second copy is the point of the "two-parts" case.
+                    _warnings.simplefilter("ignore", UserWarning)
+                    built.writestr("docProps/core.xml", core)
+    return buffer.getvalue()
+
+
+def test_the_creation_time_is_read_in_utc():
+    data = _with_core(_CORE.format(created="<dcterms:created>2026-09-14T08:05:00Z</dcterms:created>"))
+    assert docx_created(data) == _datetime(2026, 9, 14, 8, 5, tzinfo=_timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _with_core(None),
+        _with_core(_CORE.format(created="")),
+        _with_core(_CORE.format(created="<dcterms:created>2026-09-14T10:05:00+02:00</dcterms:created>")),
+        _with_core(_CORE.format(created="<dcterms:created>yesterday</dcterms:created>")),
+        _with_core("<cp:coreProperties"),
+        _with_core('<!DOCTYPE x [<!ENTITY a "b">]><x/>'),
+        _with_core(b" " * (MAX_CORE_PROPERTIES_BYTES + 1)),
+        _with_core(_CORE.format(created="<dcterms:created>2026-09-14T08:05:00Z</dcterms:created>"),
+                 twice=True),
+        b"not a zip",
+    ],
+    ids=["no-part", "no-element", "not-utc", "unparseable", "damaged", "declaration",
+         "oversized", "two-parts", "not-a-zip"],
+)
+def test_anything_else_gives_no_creation_time_and_no_refusal(data):
+    assert docx_created(data) is None
+
+
+def test_the_text_reader_reads_no_property():
+    """`docx_text` still reads `word/document.xml` alone: a property is never text."""
+    data = _with_core(
+        _CORE.format(created="<dcterms:created>2026-09-14T08:05:00Z</dcterms:created>")
+    )
+    buffer = _io.BytesIO()
+    with _zipfile.ZipFile(_io.BytesIO(data)) as source, _zipfile.ZipFile(buffer, "w") as built:
+        for item in source.infolist():
+            if item.filename != "word/document.xml":
+                built.writestr(item, source.read(item))
+        built.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>Alex Morgan   0:32</w:t></w:r></w:p></w:body></w:document>",
+        )
+    text = docx_text(buffer.getvalue(), name="x.docx")
+    assert text.strip() == "Alex Morgan   0:32"
+    assert "Someone" not in text and "2026" not in text

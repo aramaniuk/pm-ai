@@ -123,10 +123,12 @@ from pm_ai.domain.event_entries import (
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind
 from pm_ai.domain.meeting_summaries import RecordedSummary
 from pm_ai.domain.meetings import (
+    ESTIMATE_SOURCES,
     MATCH_TOLERANCE,
     InvalidAttendeeCount,
     Meeting,
     is_candidate,
+    is_same_day_candidate,
 )
 from pm_ai.domain.transcripts import CaptureFormat
 from pm_ai.ports import StoragePort
@@ -134,6 +136,7 @@ from pm_ai.ports import StoragePort
 __all__ = [
     "MEETINGS",
     "NOTES_HEADING",
+    "PARTICIPANTS_HEADING",
     "SUMMARY_HEADING",
     "MalformedMeeting",
     "DuplicateCalendarReference",
@@ -145,6 +148,7 @@ __all__ = [
     "as_stored",
     "capture_name",
     "capture_stem",
+    "check_participant",
     "check_title",
     "has_capture",
     "is_graph_capture",
@@ -164,6 +168,9 @@ methods below cannot disagree about which artifact they address.
 """
 
 NOTES_HEADING = "## Notes"
+
+PARTICIPANTS_HEADING = "## Participants"
+"""pm-ai's region of a dropped transcript's speakers, by name (story 11e, AD-34)."""
 
 _SLUG_LIMIT = 32
 """How much of a meeting id is kept in the filename, for a human reading `ls`.
@@ -192,6 +199,7 @@ _ATTENDEE_COUNT = "attendee_count"
 _SCOPE = "scope"
 _CALENDAR_REF = "calendar_event_ref"
 _MANUAL_ONLY = "manual_only"
+_START_ESTIMATED_FROM = "start_estimated_from"
 
 _FIELDS: tuple[str, ...] = (
     _MEETING_ID,
@@ -203,6 +211,7 @@ _FIELDS: tuple[str, ...] = (
     _SCOPE,
     _CALENDAR_REF,
     _MANUAL_ONLY,
+    _START_ESTIMATED_FROM,
 )
 """Every key the record may carry, in render order.
 
@@ -213,11 +222,24 @@ from "an event whose reference is the empty string" across a round trip.
 `manual_only` (story 11b) is optional too, and has one spelling: `true`,
 written only for a record pm-ai minted from a dropped transcript. Absent means
 not manual-only, so every record written before it existed reads unchanged.
+
+`start_estimated_from` (story 11e) is optional, written only for a minted
+record whose start is an estimate, naming its source. `duration_minutes` may be
+absent beside `manual_only=true` only: a minted record whose length nothing
+gave.
 """
 
 _MANUAL_ONLY_VALUE = "true"
 
-_REQUIRED: frozenset[str] = frozenset(_FIELDS) - {_CALENDAR_REF, _MANUAL_ONLY}
+_FROM_MODIFICATION = "file-modified"
+"""The estimate source no calendar arrival adopts: it names no day (story 11e)."""
+
+_REQUIRED: frozenset[str] = frozenset(_FIELDS) - {
+    _CALENDAR_REF,
+    _MANUAL_ONLY,
+    _START_ESTIMATED_FROM,
+    _DURATION,
+}
 
 _DECIMAL = re.compile(r"^(?:0|[1-9][0-9]*)$")
 """The one spelling of `duration_minutes` this grammar reads or writes.
@@ -350,6 +372,12 @@ class MeetingRecord:
     summary: RecordedSummary | None = None
     """pm-ai's `## Summary` region (story 7b). Never an argument to `put`:
     carried over from the existing record, and written only by `put_summary`."""
+    participants: tuple[str, ...] = ()
+    """pm-ai's `## Participants` region (story 11e, AD-34): a dropped transcript's
+    speakers, by name as written, never handles. Never an argument to `put`:
+    carried over from the existing record, and written only by
+    `put_participants`. A reader links a name to a handle through `aliases.md`
+    when it reads the record."""
 
 
 def as_stored(meeting: Meeting) -> Meeting:
@@ -533,6 +561,17 @@ def check_title(title: str) -> str:
     return title
 
 
+def check_participant(name: str) -> str:
+    """A participant's name, or `MalformedMeeting` by the region's own rules (story 11e).
+
+    Asked before a name is written, so one name the record cannot hold — a
+    control character, padding, a rendered line past `MAX_ENTRY_LENGTH` — is
+    left out with a notice rather than refusing the drop.
+    """
+    _render_participants((name,), meeting_id="the transcript")
+    return name
+
+
 def render_record(record: MeetingRecord) -> str:
     """One record as the text written to disk, with a terminating newline policy.
 
@@ -544,21 +583,31 @@ def render_record(record: MeetingRecord) -> str:
     meeting = record.meeting
     _assert_recordable_id(meeting.meeting_id)
     start = _assert_utc(meeting.start, where="Meeting.start")
-    duration = _assert_duration(meeting.duration_minutes)
     scope = _assert_records_meetings(meeting.scope, where="Meeting.scope")
     values: dict[str, str] = {
         _MEETING_ID: meeting.meeting_id,
         _TITLE: _assert_recordable_text(meeting.title, where="Meeting.title"),
         _START: start.isoformat(),
-        _DURATION: str(duration),
         _ATTENDEES: _render_attendees(meeting.attendees),
         _ATTENDEE_COUNT: str(meeting.attendee_count),
         _SCOPE: str(scope),
     }
+    if meeting.duration_minutes is not None:
+        values[_DURATION] = str(_assert_duration(meeting.duration_minutes))
+    elif not meeting.manual_only:
+        raise MalformedMeeting(
+            f"{meeting.meeting_id} has no duration and is not manual-only. Only a "
+            f"record pm-ai minted from a dropped transcript may leave its length "
+            f"unknown (story 11e); a calendar meeting always has one."
+        )
     if meeting.calendar_event_ref is not None:
         values[_CALENDAR_REF] = meeting.calendar_event_ref
     if meeting.manual_only:
         values[_MANUAL_ONLY] = _MANUAL_ONLY_VALUE
+    if meeting.start_estimated_from is not None:
+        values[_START_ESTIMATED_FROM] = _assert_estimate_source(
+            meeting.start_estimated_from, where="Meeting.start_estimated_from"
+        )
     lines = [
         _assert_readable_length(
             f"{key}={render_value(values[key], where=f'field {key!r}')}",
@@ -568,13 +617,17 @@ def render_record(record: MeetingRecord) -> str:
         if key in values
     ]
     head = "\n".join(lines)
+    participants = _render_participants(record.participants, meeting_id=meeting.meeting_id)
     if record.summary is None:
-        return f"{head}\n\n{SUMMARY_HEADING}\n\n{NOTES_HEADING}\n{record.notes}"
+        return f"{head}\n\n{SUMMARY_HEADING}\n\n{participants}{NOTES_HEADING}\n{record.notes}"
     try:
         region = "\n".join(render_summary_region(record.summary))
     except MalformedSummary as unrenderable:
         raise MalformedMeeting(f"the summary of {meeting.meeting_id}: {unrenderable}") from unrenderable
-    return f"{head}\n\n{SUMMARY_HEADING}\n{region}\n\n{NOTES_HEADING}\n{record.notes}"
+    return (
+        f"{head}\n\n{SUMMARY_HEADING}\n{region}\n\n{participants}{NOTES_HEADING}\n"
+        f"{record.notes}"
+    )
 
 
 def parse_record(text: str, *, source: str) -> MeetingRecord:
@@ -628,7 +681,16 @@ def _parse_record(text: str, *, source: str, lenient: bool) -> tuple[MeetingReco
         key, value = _parse_field(line, fields=fields, source=source)
         fields[key] = value
     region = head[reserved_at:]
+    region, listed = _split_participants(region)
     dropped = False
+    try:
+        participants = _parse_participants(listed, source=source)
+    except MalformedMeeting:
+        # The participants region is pm-ai's too: refused on read, dropped by
+        # the one write that may repair it.
+        if not lenient:
+            raise
+        participants = ()
     try:
         _assert_no_field_below(region, source=source)
         summary = parse_summary_region(region, source=source)
@@ -654,7 +716,6 @@ def _parse_record(text: str, *, source: str, lenient: bool) -> tuple[MeetingReco
     meeting_id = _assert_recordable_id(fields[_MEETING_ID])
     title = _assert_recordable_text(fields[_TITLE], where=f"{source}: title")
     start = _parse_start(fields[_START], source=source)
-    duration = _parse_duration(fields[_DURATION], source=source)
     attendees = _parse_attendees(fields[_ATTENDEES], source=source)
     attendee_count = _parse_attendee_count(fields[_ATTENDEE_COUNT], source=source)
     scope = _parse_scope(fields[_SCOPE], source=source)
@@ -664,6 +725,20 @@ def _parse_record(text: str, *, source: str, lenient: bool) -> tuple[MeetingReco
             f"{source}: manual_only={manual_only!r}. The field has one spelling, "
             f"`manual_only={_MANUAL_ONLY_VALUE}`, and is absent otherwise."
         )
+    if _DURATION in fields:
+        duration: int | None = _parse_duration(fields[_DURATION], source=source)
+    elif manual_only is not None:
+        duration = None
+    else:
+        raise MalformedMeeting(
+            f"{source} is missing ['duration_minutes']. Only a record pm-ai minted "
+            f"from a dropped transcript (`manual_only=true`) may leave its length "
+            f"unknown; pm-ai owns the field block, so a hand edit that removed it "
+            f"is a repair to make rather than a default to invent."
+        )
+    estimated = fields.get(_START_ESTIMATED_FROM)
+    if estimated is not None:
+        _assert_estimate_source(estimated, where=f"{source}: start_estimated_from")
     try:
         meeting = Meeting(
             meeting_id=meeting_id,
@@ -675,10 +750,14 @@ def _parse_record(text: str, *, source: str, lenient: bool) -> tuple[MeetingReco
             calendar_event_ref=fields.get(_CALENDAR_REF),
             attendee_count=attendee_count,
             manual_only=manual_only is not None,
+            start_estimated_from=estimated,
         )
     except InvalidAttendeeCount as contradiction:
         raise MalformedMeeting(f"{source}: {contradiction}") from contradiction
-    return MeetingRecord(meeting=meeting, notes=notes, summary=summary), dropped
+    return (
+        MeetingRecord(meeting=meeting, notes=notes, summary=summary, participants=participants),
+        dropped,
+    )
 
 
 # ── The accessor ─────────────────────────────────────────────────────────────
@@ -697,7 +776,9 @@ class MeetingRecords:
     def __init__(self, storage: StoragePort) -> None:
         self._storage = storage
 
-    def put(self, meeting: Meeting) -> KeptRecord:
+    def put(
+        self, meeting: Meeting, *, zone: tzinfo | None = None, same_day_rivals: bool = False
+    ) -> KeptRecord:
         """Write one record into the scope that owns its subject; say which id it kept.
 
         Only for a meeting that has already happened. A future meeting is not
@@ -737,6 +818,19 @@ class MeetingRecords:
         A meeting with no calendar reference — one bound by hand — is written
         under its own id, unchanged.
 
+        **A manual-only record with an estimated start** (`start_estimated_from`,
+        story 11e) is a candidate by same day and title instead
+        (`is_same_day_candidate`): the arrival's start falls on the record's
+        start's day in UTC, or in `zone` (`display_timezone`) when given.
+        Adoption replaces the start with the calendar's and clears the mark;
+        `## Participants` survives, as `## Summary` does. The arrival must be
+        the one calendar meeting of that title on that day: none is adopted when
+        another calendar-sourced record of the title is already recorded that
+        day, or when the caller says the harvest brought another
+        (`same_day_rivals`) — so a harvest never picks one of two for a record
+        the drop left unjoined. A record whose start came only from the file's
+        modification time (`file-modified`) is never adopted.
+
         **This is a read-modify-write, and it is one step.** The previous member
         is listed and read, and the replacement written, inside
         `StoragePort.exclusive` over `meetings/` — the same claim `8b` takes over
@@ -760,7 +854,13 @@ class MeetingRecords:
                 notices = self._write(meeting, scope=scope, dropped=dropped)
                 kept = KeptRecord(meeting.meeting_id, notices=notices)
             else:
-                kept = self._put_calendar(meeting, scope=scope, dropped=dropped)
+                kept = self._put_calendar(
+                    meeting,
+                    scope=scope,
+                    dropped=dropped,
+                    zone=zone,
+                    same_day_rivals=same_day_rivals,
+                )
         return replace(kept, summary_dropped=True) if dropped else kept
 
     def put_summary(
@@ -799,6 +899,44 @@ class MeetingRecords:
         raise MeetingNotFound(
             f"no meeting {meeting_id!r} is recorded in {scope}, so its summary has "
             f"no record to be written into."
+        )
+
+    def put_participants(
+        self, meeting_id: str, *, scope: DataScope, participants: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Write the record's `## Participants` region, and nothing else (story 11e).
+
+        A dropped transcript's speakers, by name. Under the same claim as `put`,
+        read and written in one step; the fields, `## Summary` and `## Notes`
+        are unchanged. `MeetingNotFound` when no record carries the id. Returns
+        a sentence when the record's `## Summary` did not parse and was dropped
+        by the rewrite.
+        """
+        scope = _assert_records_meetings(scope, where="put_participants(scope=…)")
+        _render_participants(participants, meeting_id=meeting_id)
+        with self._storage.exclusive(scope=scope, artifact=MEETINGS):
+            for member in self._members_for(meeting_id, scope=scope):
+                text = self._text(member, scope=scope)
+                if text is None:
+                    continue
+                record, unparsed = _parse_record(text, source=member, lenient=True)
+                _assert_name_agrees(member, record.meeting)
+                self._storage.write_artifact(
+                    render_record(replace(record, participants=participants)).encode("utf-8"),
+                    scope=scope,
+                    artifact=MEETINGS,
+                    name=member,
+                )
+                if unparsed:
+                    return (
+                        f"{member} in {scope} had content in pm-ai's ## Summary region "
+                        f"that is not its grammar, so the region was dropped when its "
+                        f"participants were written; ## Notes was kept.",
+                    )
+                return ()
+        raise MeetingNotFound(
+            f"no meeting {meeting_id!r} is recorded in {scope}, so its participants "
+            f"have no record to be written into."
         )
 
     def find_candidates(
@@ -929,7 +1067,13 @@ class MeetingRecords:
     # ── Internals ────────────────────────────────────────────────────────────
 
     def _put_calendar(
-        self, meeting: Meeting, *, scope: DataScope, dropped: list[str]
+        self,
+        meeting: Meeting,
+        *,
+        scope: DataScope,
+        dropped: list[str],
+        zone: tzinfo | None = None,
+        same_day_rivals: bool = False,
     ) -> KeptRecord:
         """`put` for a calendar-sourced meeting: look up, adopt, or write. Claimed."""
         if self._members_for(meeting.meeting_id, scope=scope):
@@ -958,11 +1102,29 @@ class MeetingRecords:
                 dropped=dropped,
             )
             return KeptRecord(kept, notices=(*skipped, *notices))
+        rivals = same_day_rivals or any(
+            not record.meeting.manual_only
+            and record.meeting.calendar_event_ref is not None
+            and is_same_day_candidate(
+                record.meeting, title=meeting.title, start=meeting.start, zone=zone
+            )
+            for record in records
+        )
         manual = sorted(
             record.meeting.meeting_id
             for record in records
             if record.meeting.manual_only
-            and is_candidate(record.meeting, title=meeting.title, start=meeting.start)
+            # A start taken only from the file's modification time names no
+            # day: never adopted (Andrei, 2026-10-21).
+            and record.meeting.start_estimated_from != _FROM_MODIFICATION
+            and (
+                not rivals
+                and is_same_day_candidate(
+                    record.meeting, title=meeting.title, start=meeting.start, zone=zone
+                )
+                if record.meeting.start_estimated_from is not None
+                else is_candidate(record.meeting, title=meeting.title, start=meeting.start)
+            )
         )
         if len(manual) == 1:
             kept = manual[0]
@@ -1004,12 +1166,17 @@ class MeetingRecords:
         name = record_name(meeting.meeting_id, meeting.start)
         notes_of: dict[str, str] = {}
         summary_of: dict[str, tuple[RecordedSummary | None, bool]] = {}
+        participants_of: dict[str, tuple[str, ...]] = {}
+        lost: list[str] = []
         manual: list[str] = []
         moved: list[str] = []
         for member in self._members_for(meeting.meeting_id, scope=scope):
             text = self._repairable_text(member, scope=scope)
             notes_of[member] = _notes_of(text)
             summary_of[member] = _summary_of(text, source=member)
+            participants_of[member], unread = _participants_of(text, source=member)
+            if unread:
+                lost.append(member)
             hand_recorded = _is_manual_only(text)
             if hand_recorded:
                 manual.append(member)
@@ -1042,8 +1209,15 @@ class MeetingRecords:
                 f"different ## Notes ({', '.join(sorted(notes_of))}); the notes of "
                 f"{kept_from} were kept and the others were not carried over.",
             )
+        participants = participants_of.get(kept_from, ())
+        if kept_from in lost:
+            notices = (
+                *notices,
+                f"{kept_from} in {scope} had content under {PARTICIPANTS_HEADING} that "
+                f"is not its grammar, so the region was dropped; ## Notes was kept.",
+            )
         self._storage.write_artifact(
-            render_record(MeetingRecord(meeting, notes, summary)).encode("utf-8"),
+            render_record(MeetingRecord(meeting, notes, summary, participants)).encode("utf-8"),
             scope=scope,
             artifact=MEETINGS,
             name=name,
@@ -1618,10 +1792,100 @@ def _summary_of(text: str, *, source: str) -> tuple[RecordedSummary | None, bool
         ),
         end,
     )
+    region, _ = _split_participants(lines[start:end])
     try:
-        return parse_summary_region(lines[start:end], source=source), False
+        return parse_summary_region(region, source=source), False
     except MalformedSummary:
         return None, True
+
+
+def _participants_of(text: str, *, source: str) -> tuple[tuple[str, ...], bool]:
+    """A member's `## Participants`, read off its raw text, and whether it failed to parse.
+
+    For `put`, as `_summary_of` is: a hand-mangled field never costs the list.
+    """
+    lines = text.splitlines(keepends=True)
+    end = next(
+        (index for index, line in enumerate(lines) if line.rstrip("\r\n") == NOTES_HEADING),
+        len(lines),
+    )
+    _, listed = _split_participants(lines[:end])
+    try:
+        return _parse_participants(listed, source=source), False
+    except MalformedMeeting:
+        return (), True
+
+
+def _split_participants(region: list[str]) -> tuple[list[str], list[str]]:
+    """pm-ai's region cut at `## Participants`: what is above it, and the lines below it."""
+    at = next(
+        (index for index, line in enumerate(region) if line.rstrip("\r\n") == PARTICIPANTS_HEADING),
+        None,
+    )
+    if at is None:
+        return region, []
+    return region[:at], region[at + 1 :]
+
+
+def _render_participants(participants: tuple[str, ...], *, meeting_id: str) -> str:
+    """The `## Participants` region and the blank line after it; empty with no participants.
+
+    One name per line, `- ` and the name as `render_value` writes it with
+    `quote_marks`, so a name with a comma or a space is one quoted value and
+    none can read as a heading or a list item.
+    """
+    if not participants:
+        return ""
+    lines = [PARTICIPANTS_HEADING]
+    for name in participants:
+        where = f"a participant of {meeting_id}"
+        if not name or name.strip() != name:
+            raise MalformedMeeting(f"{where} is empty or padded: {name!r}.")
+        _assert_recordable_text(name, where=where)
+        lines.append(
+            _assert_readable_length(
+                f"- {render_value(name, where=where, quote_marks=True)}", where=where
+            )
+        )
+    return "\n".join(lines) + "\n\n"
+
+
+def _parse_participants(lines: list[str], *, source: str) -> tuple[str, ...]:
+    """The names under `## Participants`, each in the one spelling `_render_participants` writes."""
+    names: list[str] = []
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if not line.strip():
+            continue
+        refused = MalformedMeeting(
+            f"{source} has {line!r} under {PARTICIPANTS_HEADING}, which is pm-ai's "
+            f"region: one `- ` and a name per line, and nothing else. A note of "
+            f"your own belongs under {NOTES_HEADING}."
+        )
+        if not line.startswith("- "):
+            raise refused
+        written = line[2:]
+        try:
+            found = scan_fields(f"n={written}", line=line)
+        except MalformedEntry:
+            raise refused from None
+        if len(found) != 1 or found[0][0] != "n" or not found[0][1]:
+            raise refused
+        name = found[0][1]
+        if render_value(name, where=source, quote_marks=True) != written:
+            raise refused
+        names.append(name)
+    return tuple(names)
+
+
+def _assert_estimate_source(value: str, *, where: str) -> str:
+    if value not in ESTIMATE_SOURCES:
+        raise MalformedMeeting(
+            f"{where}={value!r} is not a source pm-ai estimates a start from; it "
+            f"is one of {sorted(ESTIMATE_SOURCES)}, and absent when the start is "
+            f"not an estimate."
+        )
+    return value
 
 
 def _notes_of(text: str) -> str:

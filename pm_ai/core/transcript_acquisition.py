@@ -189,7 +189,7 @@ def _select_in(
         meeting = record.meeting
         if not meeting.calendar_event_ref:
             continue
-        end = meeting.start + timedelta(minutes=meeting.duration_minutes)
+        end = meeting.start + timedelta(minutes=meeting.duration_minutes or 0)  # a calendar meeting always has a length (story 11e: only a minted record may not)
         if end > now:
             continue
         state = states.get(meeting.meeting_id)

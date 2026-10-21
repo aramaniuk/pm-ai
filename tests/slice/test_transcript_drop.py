@@ -137,8 +137,21 @@ def _file(tmp_path: Path, name: str, text: str) -> Path:
     return path
 
 
-def _drop(monkeypatch, path: Path, *options: str, answers: list[str] = ()) -> tuple[int, Terminal]:
-    terminal = Terminal(list(answers))
+def _as_options(
+    title: str, start: str, attendees: str | None = None, duration: str | None = None
+) -> list[str]:
+    """What the questions asked before story 11e, given as options: nothing is asked."""
+    given = ["--title", title, "--start", start]
+    if attendees is not None:
+        given += ["--attendees", attendees]
+    if duration is not None:
+        given += ["--duration", duration]
+    return given
+
+
+def _drop(monkeypatch, path: Path, *options: str) -> tuple[int, Terminal]:
+    """`transcript drop` through `main()`; `input` fails the test if anything is asked."""
+    terminal = Terminal([])
     monkeypatch.setattr("builtins.input", terminal)
     return entry.main(["transcript", "drop", str(path), *options]), terminal
 
@@ -195,13 +208,13 @@ def test_a_vtt_matching_no_record_mints_one_captures_and_stages_one(
 
     code, terminal = _drop(
         monkeypatch, path, "--scope", "project:alpha",
-        answers=["Weekly Sync", START_TYPED, "email:alex@example.com"],
+        *_as_options("Weekly Sync", START_TYPED, "email:alex@example.com"),
     )
 
     out = capsys.readouterr().out
     assert code == EXIT_OK, out
     meeting_id = _minted(out)
-    assert not any(p.startswith("Duration") for p in terminal.prompts)
+    assert terminal.prompts == []
     record = _daemon(machine).meetings.get(meeting_id, scope=ALPHA).meeting
     assert record.manual_only and record.start == START and record.duration_minutes == 31
     capture = capture_name(meeting_id, START, CaptureFormat.MANUAL_VTT)
@@ -213,7 +226,7 @@ def test_a_vtt_matching_no_record_mints_one_captures_and_stages_one(
     with pytest.raises(ProposalNotFound):
         _proposal(machine, meeting_id, 1)
     assert "1 staged" in out and "executed" not in out
-    assert "31 minutes, taken from the last cue's end" in out
+    assert "31 minutes, from the last cue" in out
     states = _daemon(machine).storage.transcript_states(ALPHA)
     assert states[meeting_id].state == TranscriptStateKind.INGESTED.value
 
@@ -221,12 +234,12 @@ def test_a_vtt_matching_no_record_mints_one_captures_and_stages_one(
 def test_the_same_drop_again_is_refused_naming_the_capture(machine, tmp_path, monkeypatch, capsys):
     path = _file(tmp_path, "sync.vtt", SPOKEN_VTT)
     answers = ["Weekly Sync", START_TYPED, "email:alex@example.com"]
-    first, _ = _drop(monkeypatch, path, "--scope", "project:alpha", answers=answers)
+    first, _ = _drop(monkeypatch, path, "--scope", "project:alpha", *_as_options(*answers))
     meeting_id = _minted(capsys.readouterr().out)
     assert first == EXIT_OK
     before = _held(machine)
 
-    again, _ = _drop(monkeypatch, path, "--scope", "project:alpha", answers=answers[:2])
+    again, _ = _drop(monkeypatch, path, "--scope", "project:alpha", *_as_options(*answers[:2]))
 
     assert again == EXIT_REFUSAL
     err = capsys.readouterr().err
@@ -250,7 +263,7 @@ def test_a_transcripts_directory_git_would_commit_refuses_with_gits_reason(
 
     code, _ = _drop(
         monkeypatch, path, "--scope", "project:alpha",
-        answers=["Weekly Sync", START_TYPED, "email:alex@example.com", "30"],
+        *_as_options("Weekly Sync", START_TYPED, "email:alex@example.com", "30"),
     )
 
     assert code == EXIT_REFUSAL
@@ -302,13 +315,13 @@ def test_a_title_and_start_matching_one_record_bind_without_more_questions(
 
     code, terminal = _drop(
         monkeypatch, path, "--scope", "project:alpha",
-        answers=["Weekly Sync", "2026-10-10T14:07+03:00"],
+        *_as_options("Weekly Sync", "2026-10-10T14:07+03:00"),
     )
 
     out = capsys.readouterr().out
     assert code == EXIT_OK, out
-    assert len(terminal.prompts) == 2
-    assert "mtg_weekly" in out
+    assert terminal.prompts == []
+    assert "mtg_weekly" in out and "found by --start" in out
     assert _held(machine)["alpha:meetings"] == meetings_before
     states = _daemon(machine).storage.transcript_states(ALPHA)
     assert states["mtg_weekly"].state == TranscriptStateKind.INGESTED.value
@@ -321,67 +334,52 @@ def test_two_candidates_refuse_naming_both(machine, tmp_path, monkeypatch, capsy
     path = _file(tmp_path, "sync.vtt", SPOKEN_VTT)
 
     code, terminal = _drop(
-        monkeypatch, path, "--scope", "project:alpha", answers=["Weekly Sync", START_TYPED]
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Weekly Sync", START_TYPED)
     )
 
     assert code == EXIT_REFUSAL
     err = capsys.readouterr().err
     assert "mtg_one" in err and "mtg_two" in err
-    assert len(terminal.prompts) == 2
+    assert terminal.prompts == []
     assert _held(machine) == before
 
 
-def test_a_txt_matching_nothing_asks_the_duration_and_says_so(
+def test_a_txt_matching_nothing_takes_the_duration_option_and_says_so(
     machine, tmp_path, monkeypatch, capsys
 ):
     path = _file(tmp_path, "sync.txt", SAID_TXT)
 
     code, terminal = _drop(
         monkeypatch, path, "--scope", "project:alpha",
-        answers=["Planning", START_TYPED, "email:alex@example.com,email:bo@example.com", "45"],
+        *_as_options("Planning", START_TYPED, "email:alex@example.com,email:bo@example.com", "45"),
     )
 
     out = capsys.readouterr().out
     assert code == EXIT_OK, out
     meeting_id = _minted(out)
-    assert any(p.startswith("Duration") for p in terminal.prompts)
+    assert terminal.prompts == []
     record = _daemon(machine).meetings.get(meeting_id, scope=ALPHA).meeting
     assert record.duration_minutes == 45 and record.manual_only
     assert record.attendees == (Actor("email:alex@example.com"), Actor("email:bo@example.com"))
-    assert "45 minutes, as answered" in out
+    assert "45 minutes, given as an option" in out
 
 
-def test_no_match_without_a_terminal_is_refused_before_anything_is_written(
+def test_no_match_without_a_terminal_mints_a_record_asking_nothing(
     machine, tmp_path, monkeypatch, capsys
 ):
+    """Story 11e: nothing is asked and nothing refused for a missing detail."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    before = _held(machine)
     path = _file(tmp_path, "sync.vtt", SPOKEN_VTT)
 
     code, terminal = _drop(monkeypatch, path, "--scope", "project:alpha")
 
-    assert code == EXIT_REFUSAL
-    assert "terminal" in capsys.readouterr().err
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
     assert terminal.prompts == []
-    assert _held(machine) == before
-
-
-def test_answers_the_questions_refuse_are_asked_again(machine, tmp_path, monkeypatch, capsys):
-    path = _file(tmp_path, "sync.txt", SAID_TXT)
-
-    code, terminal = _drop(
-        monkeypatch, path, "--scope", "project:alpha",
-        answers=[
-            "Planning", "2026-10-09 14:00", START_TYPED,
-            "Smith, Bob", "email:bo@example.com", "30",
-        ],
-    )
-
-    assert code == EXIT_OK
-    err = capsys.readouterr().err
-    assert "2026-10-10T14:00+03:00" in err and "separated by commas with no spaces" in err
-    assert sum(p.startswith("Meeting start") for p in terminal.prompts) == 2
-    assert sum(p.startswith("No recorded meeting") for p in terminal.prompts) == 2
+    record = _daemon(machine).meetings.get(_minted(out), scope=ALPHA).meeting
+    assert record.title == "sync" and record.duration_minutes == 31
+    assert record.start_estimated_from == "file-modified"
+    assert "Title 'sync', from the file name" in out
 
 
 def test_a_personal_meeting_dropped_from_inside_a_project_lands_personally(
@@ -394,7 +392,7 @@ def test_a_personal_meeting_dropped_from_inside_a_project_lands_personally(
 
     code, _ = _drop(
         monkeypatch, path, "--scope", "personal",
-        answers=["Coaching", START_TYPED, ""],
+        *_as_options("Coaching", START_TYPED, ""),
     )
 
     out = capsys.readouterr().out
@@ -436,7 +434,7 @@ def test_a_repository_git_cannot_be_asked_about_is_refused(machine, tmp_path, mo
 
     code, _ = _drop(
         monkeypatch, path, "--scope", "project:alpha",
-        answers=["Planning", START_TYPED, "", "30"],
+        *_as_options("Planning", START_TYPED, "", "30"),
     )
 
     assert code == EXIT_REFUSAL
@@ -547,7 +545,7 @@ def test_an_ingestion_that_fails_after_the_capture_keeps_and_names_it(
 
     code, _ = _drop(
         monkeypatch, path, "--scope", "project:alpha",
-        answers=["Weekly Sync", START_TYPED, ""],
+        *_as_options("Weekly Sync", START_TYPED, ""),
     )
 
     assert code == EXIT_REFUSAL
@@ -611,20 +609,22 @@ def test_the_capture_name_and_duration_source_follow_the_rule(
 ):
     _, repository, _ = machine
     path = _file(tmp_path, name, text)
+    # Before story 11e the duration was asked for a file not stored as WebVTT;
+    # now it is given as an option, and otherwise the last cue decides.
     answers = ["Planning", START_TYPED, ""] + (["20"] if asks_duration else [])
 
-    code, terminal = _drop(monkeypatch, path, "--scope", "project:alpha", answers=answers)
+    code, terminal = _drop(monkeypatch, path, "--scope", "project:alpha", *_as_options(*answers))
 
     out = capsys.readouterr().out
     assert code == EXIT_OK, out
     meeting_id = _minted(out)
     stored = repository / ".project-ai" / "transcripts" / capture_name(meeting_id, START, form)
     assert stored.read_text() == text
-    assert any(p.startswith("Duration") for p in terminal.prompts) is asks_duration
+    assert terminal.prompts == []
     if asks_duration:
-        assert "20 minutes, as answered" in out
+        assert "20 minutes, given as an option" in out
     else:
-        assert "31 minutes, taken from the last cue's end" in out
+        assert "31 minutes, from the last cue" in out
 
 
 def test_a_bom_and_crlf_file_is_read_and_stored_byte_for_byte(
@@ -637,7 +637,7 @@ def test_a_bom_and_crlf_file_is_read_and_stored_byte_for_byte(
     path.write_bytes(text.encode("utf-8"))
 
     code, _ = _drop(
-        monkeypatch, path, "--scope", "project:alpha", answers=["Planning", START_TYPED, ""]
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Planning", START_TYPED, "")
     )
 
     out = capsys.readouterr().out
@@ -647,30 +647,31 @@ def test_a_bom_and_crlf_file_is_read_and_stored_byte_for_byte(
         meeting_id, START, CaptureFormat.MANUAL_VTT
     )
     assert stored.read_bytes() == path.read_bytes()
-    assert "1 staged" in out and "31 minutes, taken from the last cue's end" in out
+    assert "1 staged" in out and "31 minutes, from the last cue" in out
 
 
-def test_a_last_cue_ending_at_zero_is_no_duration_and_it_is_asked(
+def test_a_last_cue_ending_at_zero_is_no_duration_and_the_length_is_unknown(
     machine, tmp_path, monkeypatch, capsys
 ):
     path = _file(tmp_path, "zero.vtt", "WEBVTT\n\n00:00:00.000 --> 00:00:00.000\n<v Alex>hi\n")
     code, terminal = _drop(
-        monkeypatch, path, "--scope", "project:alpha",
-        answers=["Planning", START_TYPED, "", "15"],
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Planning", START_TYPED, "")
     )
-    assert code == EXIT_OK
-    assert any(p.startswith("Duration") for p in terminal.prompts)
-    assert "15 minutes, as answered" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
+    assert terminal.prompts == []
+    assert "length unknown" in out
+    assert _daemon(machine).meetings.get(_minted(out), scope=ALPHA).meeting.duration_minutes is None
 
 
 def test_a_timing_inside_a_note_block_is_not_the_last_cue(machine, tmp_path, monkeypatch, capsys):
     text = SPOKEN_VTT + "\nNOTE\n09:00:00.000 --> 10:00:00.000\n"
     path = _file(tmp_path, "noted.vtt", text)
     code, _ = _drop(
-        monkeypatch, path, "--scope", "project:alpha", answers=["Planning", START_TYPED, ""]
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Planning", START_TYPED, "")
     )
     assert code == EXIT_OK
-    assert "31 minutes, taken from the last cue's end" in capsys.readouterr().out
+    assert "31 minutes, from the last cue" in capsys.readouterr().out
 
 
 # ── Command-line spellings through `main()` ──────────────────────────────────
@@ -756,7 +757,7 @@ def test_a_defect_in_ingestion_is_exit_1_naming_the_kept_capture(
     path = _file(tmp_path, "sync.vtt", SPOKEN_VTT)
 
     code, _ = _drop(
-        monkeypatch, path, "--scope", "project:alpha", answers=["Planning", START_TYPED, ""]
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Planning", START_TYPED, "")
     )
 
     assert code == EXIT_UNEXPECTED
@@ -808,7 +809,7 @@ def test_ctrl_c_during_the_capture_write_says_nothing_was_kept(
     path = _file(tmp_path, "sync.vtt", SPOKEN_VTT)
 
     code, _ = _drop(
-        monkeypatch, path, "--scope", "project:alpha", answers=["Planning", START_TYPED, ""]
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Planning", START_TYPED, "")
     )
 
     assert code == EXIT_REFUSAL
@@ -826,7 +827,7 @@ def test_ctrl_c_during_ingestion_says_the_capture_was_kept(machine, tmp_path, mo
     path = _file(tmp_path, "sync.vtt", SPOKEN_VTT)
 
     code, _ = _drop(
-        monkeypatch, path, "--scope", "project:alpha", answers=["Planning", START_TYPED, ""]
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Planning", START_TYPED, "")
     )
 
     assert code == EXIT_REFUSAL
@@ -862,19 +863,19 @@ def _copy(tmp_path: Path, fixture: str, name: str | None = None) -> Path:
 def test_the_recorded_teams_docx_is_read_bound_and_stored_as_text(
     machine, tmp_path, monkeypatch, capsys, ingested
 ):
-    """Acceptance: the `.docx` fixture into `project:alpha`, the questions answered."""
+    """Acceptance: the `.docx` fixture into `project:alpha`, its details given as options."""
     _, repository, _ = machine
     path = _copy(tmp_path, "teams_export_recorded.docx")
 
     code, terminal = _drop(
         monkeypatch, path, "--scope", "project:alpha",
-        answers=["Weekly Sync", START_TYPED, "email:alex@example.com", "30"],
+        *_as_options("Weekly Sync", START_TYPED, "email:alex@example.com", "30"),
     )
 
     out = capsys.readouterr().out
     assert code == EXIT_OK, out
     meeting_id = _minted(out)
-    assert any(p.startswith("Duration") for p in terminal.prompts)
+    assert terminal.prompts == []
     assert _daemon(machine).meetings.get(meeting_id, scope=ALPHA).meeting.manual_only
     assert len(_held(machine)["alpha:meetings"]) == 1
     stored = repository / ".project-ai" / "transcripts" / capture_name(
@@ -899,7 +900,7 @@ def test_the_markdown_export_is_read_by_the_turn_reader_and_reads_again_the_same
 
     code, _ = _drop(
         monkeypatch, path, "--scope", "personal",
-        answers=["Weekly Sync", START_TYPED, "", "30"],
+        *_as_options("Weekly Sync", START_TYPED, "", "30"),
     )
 
     out = capsys.readouterr().out
@@ -920,7 +921,7 @@ def test_the_markdown_export_is_read_by_the_turn_reader_and_reads_again_the_same
 def test_speaker_words_in_md_is_read_as_today(machine, tmp_path, monkeypatch, capsys, ingested):
     path = _file(tmp_path, "notes.md", SAID_TXT)
     code, _ = _drop(
-        monkeypatch, path, "--scope", "project:alpha", answers=["Planning", START_TYPED, "", "20"]
+        monkeypatch, path, "--scope", "project:alpha", *_as_options("Planning", START_TYPED, "", "20")
     )
     assert code == EXIT_OK, capsys.readouterr().err
     (transcript,) = ingested
@@ -1118,19 +1119,21 @@ def test_answers_given_as_options_are_not_asked(machine, tmp_path, monkeypatch, 
     assert record.duration_minutes == 25 and record.attendees == (Actor("email:alex@example.com"),)
 
 
-def test_a_missing_answer_without_a_terminal_is_refused_naming_its_option(
+def test_a_drop_given_only_some_options_asks_for_nothing_else(
     machine, tmp_path, monkeypatch, capsys
 ):
+    """Story 11e: no option is required besides `--scope`; the rest is decided."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    before = _held(machine)
     path = _file(tmp_path, "sync.txt", SAID_TXT)
-    code, _ = _drop(
+    code, terminal = _drop(
         monkeypatch, path, "--scope", "project:alpha", "--title", "Planning", "--start", START_TYPED
     )
-    assert code == EXIT_REFUSAL
-    err = capsys.readouterr().err
-    assert "--attendees" in err and "--duration" in err
-    assert _held(machine) == before
+    out = capsys.readouterr().out
+    assert code == EXIT_OK, out
+    assert terminal.prompts == []
+    record = _daemon(machine).meetings.get(_minted(out), scope=ALPHA).meeting
+    assert record.attendees == () and record.duration_minutes is None
+    assert "length unknown" in out
 
 
 @pytest.mark.parametrize(

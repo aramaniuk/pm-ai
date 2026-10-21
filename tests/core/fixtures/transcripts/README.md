@@ -70,3 +70,14 @@ by word, the words of the title and the file name that are not generic meeting w
 the words of the document properties and comment authors — 10 names. The search also
 looked for every spoken line of six characters or more (240) and every document-property
 value (1). It found none of them in either file.
+
+## The creation time (story 11e)
+
+`11e` estimates a start from a `.docx`'s `dcterms:created` (in `docProps/core.xml`) when
+it falls within 15 minutes after the meeting's end. The recorded fixture carries no
+`docProps/core.xml` (removed when it was recorded, above), so the delay cannot be measured
+on it, and it was not rebuilt with one: the original was deleted. The one measurement is
+from a second export run on Andrei's machine, recorded as structure only: created 5 minutes
+18 seconds after the end its header gives (header start 13:17 read as UTC, length
+`41m 15s`). Nothing from that export is in this repository. The tests build their
+`docProps/core.xml` from fictional times.

@@ -103,6 +103,7 @@ ROUTES: Mapping[TaskClass, Route] = {
     TaskClass.EMBEDDING: _LOCAL,
     TaskClass.EXTRACTION: _LOCAL,
     TaskClass.FUZZY_MATCH: _LOCAL,
+    TaskClass.HEADER_READING: _LOCAL,
     TaskClass.INQUIRY_SYNTHESIS: Route(Side.FRONTIER, SONNET_TIER),
     TaskClass.MEETING_SUMMARY: Route(Side.FRONTIER, SONNET_TIER),
     TaskClass.RESEARCH: Route(Side.FRONTIER, OPUS_TIER),

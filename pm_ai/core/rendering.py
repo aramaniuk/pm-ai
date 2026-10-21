@@ -658,7 +658,7 @@ def _scheduled(
         # makes `_end` land before `start`, so a meeting hours away computes as
         # ended — and one such value flips the whole section to "all of today's
         # meetings have ended", a claim about every other meeting on the page.
-        if meeting.duration_minutes < 0:
+        if (meeting.duration_minutes or 0) < 0:
             raise ValueError(
                 f"meeting {meeting.meeting_id!r} has duration_minutes="
                 f"{meeting.duration_minutes}, which ends it before it starts. "
@@ -741,7 +741,9 @@ def _state(meeting: Meeting, *, now: datetime) -> str:
 
 
 def _end(meeting: Meeting) -> datetime:
-    return meeting.start + timedelta(minutes=meeting.duration_minutes)
+    # A meeting read live from the calendar always has a length (story 11e:
+    # only a record pm-ai minted may not, and no dashboard lists one).
+    return meeting.start + timedelta(minutes=meeting.duration_minutes or 0)
 
 
 def _ended(meeting: Meeting, *, now: datetime) -> bool:

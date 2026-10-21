@@ -99,6 +99,7 @@ context:
 ## Spec Change Log
 
 - **2026-10-19, amended by `11d`.** The Never line "No `.docx`" and the `.docx` matrix row are withdrawn: a `.docx` is read for its paragraph text with the standard library and stored as `-manual.txt`; `.doc`, `.pdf` and `.rtf` are still refused by name. The Never line "No change to `11b`'s path, readers…" is amended: `11d` adds a third reader (speaker-and-time turns). Also from `11d`: the usage and every refusal about the file name `.vtt, .txt, .md, .docx`; `~` is expanded by the command; path refusals name the absolute path; the title, start, attendees and duration may be given as options, and at the prompt they are asked in the prompt's process and sent to the daemon, which never asks.
+- **2026-10-21, amended by `11e`** (Andrei's direction of 2026-10-21: extract what pm-ai can, ask nothing). Every question and every refusal for a missing title, start, attendees or duration is withdrawn: the drop decides each field from the options, the file, its times and the records, and the closing line names each value's source. `--duration` now wins over a WebVTT last cue. `11b`'s 15-minute match applies only with `--start`; without it, one calendar-sourced record of the same title on the same day is joined. The frozen block above is unchanged; `11e` records the amendment.
 
 ## Suggested Review Order
 

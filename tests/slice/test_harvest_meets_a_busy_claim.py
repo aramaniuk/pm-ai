@@ -90,13 +90,13 @@ def _daemon(tmp_path: Path, monkeypatch, *, busy_at: int, failure=None):
     real = MeetingRecords.put
     calls: list[str] = []
 
-    def put(self, meeting):
+    def put(self, meeting, **where):
         nonlocal entered
         calls.append(meeting.meeting_id)
         if len(calls) == busy_at:
             holder.__enter__()
             entered = True
-        return real(self, meeting)
+        return real(self, meeting, **where)
 
     monkeypatch.setattr(MeetingRecords, "put", put)
     try:

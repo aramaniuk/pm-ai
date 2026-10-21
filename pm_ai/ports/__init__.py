@@ -1103,7 +1103,9 @@ class ModelPort(Protocol):
     would have to accept it. Keeping the two sources apart in the signature is
     what stops the type being flattened away one line before the call. The
     transcript path keeps the pair whole since story `11b`: every text field of
-    an `Extraction` is a `Sanitized`, and no model is on that path.
+    an `Extraction` is a `Sanitized`. Its one model call is story `11e`'s
+    header reading — local-only (`header_reading`), over a dropped file's
+    cleaned header lines, never the body.
 
     Internally-sourced text may be `str`: `instructions` is prose pm-ai wrote
     about itself, and there is no outside author to distrust.

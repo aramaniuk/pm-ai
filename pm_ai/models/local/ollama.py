@@ -154,6 +154,7 @@ LOCAL_ONLY_CLASSES = frozenset(
         TaskClass.CLASSIFICATION,
         TaskClass.EMBEDDING,
         TaskClass.FUZZY_MATCH,
+        TaskClass.HEADER_READING,
     }
 )
 """AD-15's local-only classes — the only ones this adapter answers."""
