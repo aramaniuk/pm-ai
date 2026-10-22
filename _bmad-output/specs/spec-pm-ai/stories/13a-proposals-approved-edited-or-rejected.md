@@ -474,6 +474,7 @@ Anchors checked against `origin/main` at `8a29acd`.
   - **Performance.** Migration 2 adds indexed columns, so the listing selects with `LIMIT` and parses only the bodies it shows; a timed test measures it.
   - **Tests and files.** `pm_ai.core.proposals` provides what the three skipping architecture tests call, and `:203` is adjusted. The Tasks name `wiring.py`'s tables, `test_cli_subcommands.py`'s `next`, the `transition_proposal` tests (signature and `TerminalState` order kept) and the dashboard tests and golden.
   - **Also recorded.** CAP-6's `[STAGED_APPROVAL]` entry is deferred to story 15. `11b`'s positional ids: a shifted staged row bumps its version, and a dropped extraction over an acted row is counted.
+- **2026-10-22, approved for build (Andrei),** after the three-lens review and his two decisions.
 
 ## Design Notes
 
