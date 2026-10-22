@@ -1567,7 +1567,7 @@ def test_a_real_drops_json_prints_one_object(dropped_file, capsys):
         "next": {
             "summarize": ["transcript", "summarize", "--scope", "personal", "--meeting",
                           "mtg_new"],
-            "resummarize": None, "drop": None, "why": None,
+            "resummarize": None, "drop": None, "why": None, "review": None,
         },
         "notices": ["a notice"],
     }

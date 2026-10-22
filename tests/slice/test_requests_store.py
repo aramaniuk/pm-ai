@@ -88,7 +88,7 @@ def test_a_version_1_store_without_requests_gains_it_under_its_own_claim_still_v
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
         version = db.execute("SELECT version FROM schema_version").fetchone()[0]
     assert "requests" in tables
-    assert version == SCHEMA_VERSION == 1
+    assert version == SCHEMA_VERSION == 2  # story 13a: migration 2
 
 
 def test_a_prepared_store_opens_without_taking_any_claim(tmp_path):

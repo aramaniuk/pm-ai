@@ -108,7 +108,7 @@ from pm_ai.app.prompts import (
     WRITER_HALT_EVENT,
     RequestPath,
 )
-from pm_ai.app.ticks import HarvestTimers, RenderTimers
+from pm_ai.app.ticks import HarvestTimers, ProposalSweep, RenderTimers
 from pm_ai.app.pipelines import PoolNotWired, SummaryJobs
 from pm_ai.app.wiring import Daemon, frontier_key_check, handed_daemon
 from pm_ai.domain.api_token import TOKEN_BYTES, ApiTokenRefused
@@ -641,6 +641,9 @@ def _serve_locked(
         # the harvests'; a render still before its claimed step is marked by
         # the shutdown's own step too.
         app.state.pm_ai_renders = RenderTimers(requests=requests, now=daemon.clock)
+        # Story 13a: the expiry sweep of staged proposals (AD-13), at start and
+        # every 15 minutes after.
+        app.state.pm_ai_sweep = ProposalSweep(requests=requests, now=daemon.clock)
         server = _server_class(uvicorn)(
             uvicorn.Config(
                 app,
@@ -1049,6 +1052,9 @@ async def _lifespan(app: Any) -> AsyncIterator[None]:
     renders: RenderTimers | None = getattr(app.state, "pm_ai_renders", None)
     if renders is not None:
         timers.append(asyncio.create_task(renders.run(), name="pm-ai-morning-render"))
+    sweep: ProposalSweep | None = getattr(app.state, "pm_ai_sweep", None)
+    if sweep is not None:
+        timers.append(asyncio.create_task(sweep.run(), name="pm-ai-proposal-sweep"))
     try:
         yield
     finally:

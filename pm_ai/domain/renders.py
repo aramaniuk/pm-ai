@@ -96,6 +96,10 @@ class DigestItem:
     owner: str | None = None
     due: str | None = None
     confidential: bool = False
+    approved: bool = False
+    """Story 13a: approved by the PM; otherwise waiting for review."""
+    review_by: datetime | None = None
+    """Story 13a: a waiting item's window end — "to review by <date>"."""
 
     def __post_init__(self) -> None:
         if self.confidential and self.what:
@@ -144,9 +148,13 @@ class MeetingDigest:
     placed: tuple[int, ...] = ()
     placed_count: int = 0
     unreadable_items: int = 0
+    expired: int = 0
+    """Story 13a: items that expired without review and have no replacement."""
+    waiting: int = 0
+    """Story 13a: items waiting for review, shown or not: the review line's cue."""
 
     def __post_init__(self) -> None:
-        for name in ("hidden", "placed_count", "unreadable_items"):
+        for name in ("hidden", "placed_count", "unreadable_items", "expired", "waiting"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name}={getattr(self, name)} counts nothing; it is at least 0.")
         if self.placed_count and not self.placed:

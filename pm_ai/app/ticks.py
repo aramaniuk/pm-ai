@@ -144,7 +144,7 @@ from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.ports import ArtifactBusy
 from pm_ai.storage.service import OperationalStoreBusy, SchemaVersionChanged
 
-__all__ = ["HarvestTimers", "RenderTimers"]
+__all__ = ["HarvestTimers", "ProposalSweep", "RenderTimers"]
 
 _log = logging.getLogger(DAEMON_LOGGER)
 _T = TypeVar("_T")
@@ -948,3 +948,153 @@ class RenderTimers:
 
     def _hand_record(self, work: Callable[[], Any], label: str) -> Any:
         return self.requests.writer.call(work, label=label)
+
+
+# ── The expiry sweep (AD-13: the scheduler owns it; story 13a) ───────────────
+
+SWEEP_INTERVAL = timedelta(minutes=15)
+"""How often the sweep runs at least: at start, then every 15 minutes."""
+
+SWEEP_BATCH = 200
+"""Proposals expired in one claimed step, at most."""
+
+SWEEP_STEP = HANDED_CALLS["expire_overdue"][0]
+
+
+@dataclass(frozen=True)
+class SweepPass:
+    """What one pass did: expired, skipped (changed in between), bodies that did not read."""
+
+    expired: int = 0
+    skipped: int = 0
+    unreadable: int = 0
+    next_expiry: datetime | None = None
+    stopped: bool = False
+    """The writer stopped mid-pass (the daemon is stopping)."""
+
+
+class ProposalSweep:
+    """The daemon's expiry sweep of staged proposals (story 13a, AD-13).
+
+    In memory like `HarvestTimers` and `RenderTimers`; story `10a` replaces it
+    with a queue row like them. Runs at daemon start, then every 15 minutes,
+    and at the earliest expiry its last pass saw when that is sooner. Each
+    pass is one indexed read of the waiting proposals past their window, on a
+    read-only connection on the I/O pool (AD-19), then claimed steps on the
+    writer thread of at most `SWEEP_BATCH` each. A row that changed in between
+    is skipped for the next pass; a body that cannot be read is counted and
+    logged without its content, never expired. A type sets only its window: it
+    never sweeps its own proposals.
+    """
+
+    def __init__(
+        self,
+        *,
+        requests: RequestPath,
+        now: Callable[[], datetime],
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        nap: float = NAP_SECONDS,
+    ) -> None:
+        self.requests = requests
+        self.now = now
+        self.sleep = sleep
+        self.nap = nap
+        self._wake: datetime | None = None
+        self.last: SweepPass | None = None
+        self._unreadable: set[str] = set()
+        """The rows the last pass could not read: the warning is logged when this changes."""
+
+    @property
+    def wake(self) -> datetime | None:
+        return self._wake
+
+    async def run(self) -> None:
+        """Until cancelled: a pass, then wait for the next one."""
+        while True:
+            try:
+                await self.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as unexpected:  # noqa: BLE001 — logged; the next pass is due
+                _log.error(
+                    "a pass of the proposal expiry sweep stopped on an unexpected %s; the "
+                    "next pass is in %s",
+                    type(unexpected).__name__,
+                    _minutes(SWEEP_INTERVAL),
+                )
+                self._wake = self.now() + SWEEP_INTERVAL
+            await self._wait()
+
+    async def tick(self) -> SweepPass:
+        """One pass: read the overdue proposals a batch at a time, expire each batch.
+
+        Each read loads at most `SWEEP_BATCH` candidates, so a large backlog is
+        never held at once; the pass reads again after each step until a read
+        finds fewer than a batch, or a step expires nothing. A body that cannot
+        be read is counted once per pass, by id, and logged only when the set
+        of such rows changes, so a stuck row is not repeated every pass.
+        """
+        rules = self.requests.daemon.proposal_types.rules()
+        expired = skipped = 0
+        unreadable: set[str] = set()
+        next_expiry: datetime | None = None
+        stopped = False
+        while True:
+            scan = await self.requests.pool.run(
+                functools.partial(
+                    self.requests.daemon.storage.overdue_proposals, rules=rules, limit=SWEEP_BATCH
+                )
+            )
+            next_expiry = scan.next_expiry
+            unreadable.update(scan.unreadable_ids)
+            batch = tuple(
+                candidate for candidate in scan.candidates if candidate[0] not in unreadable
+            )
+            if not batch:
+                break
+            try:
+                step = await self.requests.pool.run(functools.partial(self._expire, batch, rules))
+            except (WriterStopped, SchemaVersionChanged):
+                stopped = True
+                break
+            except (OperationalStoreBusy, ArtifactBusy):
+                # Busy: the rows stay staged and the next pass sees them.
+                skipped += len(batch)
+                break
+            expired += len(step.expired)
+            skipped += step.skipped
+            unreadable.update(step.unreadable_ids)
+            if not step.expired or len(scan.candidates) < SWEEP_BATCH:
+                break
+        if unreadable != self._unreadable:
+            if unreadable:
+                _log.warning(
+                    "the proposal expiry sweep met %d proposal(s) whose stored body could "
+                    "not be read; they are not expired",
+                    len(unreadable),
+                )
+            self._unreadable = set(unreadable)
+        if expired:
+            _log.info("the proposal expiry sweep expired %d proposal(s)", expired)
+        done = SweepPass(expired, skipped, len(unreadable), next_expiry, stopped)
+        self.last = done
+        now = self.now()
+        wake = now + SWEEP_INTERVAL
+        if not stopped and next_expiry is not None and next_expiry < wake:
+            wake = max(next_expiry, now)
+        self._wake = wake
+        return done
+
+    def _expire(self, batch: tuple[tuple[str, int], ...], rules: Mapping[str, Any]) -> Any:
+        storage = self.requests.daemon.storage
+        return self.requests.writer.call(
+            lambda: storage.expire_overdue(batch, rules=rules), label=SWEEP_STEP
+        )
+
+    async def _wait(self) -> None:
+        while True:
+            wake = self._wake if self._wake is not None else self.now()
+            remaining = (wake - self.now()).total_seconds()
+            if remaining <= 0:
+                return
+            await self.sleep(min(remaining, self.nap))

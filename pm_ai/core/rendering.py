@@ -984,10 +984,20 @@ def _digest_lines(
         due = _shown_text(item.due)
         if due:
             line += f" ({due})"
+        # Story 13a: each item is waiting for review or approved.
+        if item.approved:
+            line += ", approved"
+        elif item.review_by is not None:
+            line += f", to review by {item.review_by.astimezone(tz).date().isoformat()}"
         lines.append(line)
+    scope_words = code(str(digest.scope))
+    meeting_words = code(digest.meeting_id)
+    listing = f"pm-ai proposal list --scope {scope_words} --meeting {meeting_words}"
     if digest.hidden:
         n = digest.hidden
-        lines.append(f"  - and {n} more open action {'item' if n == 1 else 'items'}")
+        lines.append(
+            f"  - and {n} more open action {'item' if n == 1 else 'items'}: `{listing}`"
+        )
     if digest.placed_count:
         n = digest.placed_count
         under = ", ".join(f"#{iid}" for iid in digest.placed)
@@ -1009,6 +1019,17 @@ def _digest_lines(
         )
     ):
         lines.append("  - no open action item")
+    if digest.expired:
+        n = digest.expired
+        lines.append(
+            f"  - {n} action {'item' if n == 1 else 'items'} expired without review: "
+            f"`{listing} --state expired`"
+        )
+    if digest.waiting:
+        lines.append(
+            f"  - to review: `pm-ai proposal review --scope {scope_words} --meeting "
+            f"{meeting_words}`"
+        )
     meeting = code(digest.meeting_id)
     # Story 11f: `--again` when the record holds a summary, or the re-summary
     # guard would refuse the command this line prints.

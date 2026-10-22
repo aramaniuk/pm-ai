@@ -107,6 +107,11 @@ from pm_ai.core.frontier_key import FRONTIER_KEY_PROBE, frontier_key_probe
 from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
 from pm_ai.app.members import MemberDesk
 from pm_ai.app.meeting_listing import MeetingLister
+from pm_ai.app.proposals import (
+    PROPOSAL_WRITE_BOUND_SECONDS,
+    ProposalDesk,
+    completion_choices,
+)
 from pm_ai.core.meeting_listing import zone_of
 from pm_ai.domain.meeting_listing import ListingRefused, summarize_command
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
@@ -276,6 +281,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 frontier_key=_loopback(),
                 # Story 11f: `transcript list` reads by path; nothing is written.
                 meeting_list=_meeting_lister(),
+                # Story 13a: `proposal list` and `proposal show` read by path,
+                # on read-only connections; this desk has no writer.
+                proposals=_proposal_reader(),
             )
         keychain = MacOSKeychainAdapter()
         composed = _compose(keychain, parsed.target)
@@ -366,6 +374,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             # `7e`'s `member` commands, over this process's own writer: `member
             # name` asks at this terminal and appends to `aliases.md` from here.
             members=None if daemon is None else MemberDesk(daemon),
+            # Story 13a: `proposal approve|reject|edit|review` over this
+            # process's own writer, as `member link` writes: one claimed step
+            # each, a 1-second busy wait, no master key asked for.
+            proposals=None if daemon is None else _proposal_desk(daemon),
             # `4e`'s `daemon run`, bound to the daemon this process composed —
             # composed once, here, and never again per request.
             serve=_serve(keychain, composed),
@@ -609,6 +621,14 @@ DAEMON_BOUNDS: Mapping[tuple[str, ...], Callable[[Daemon], float]] = {
     # one append — `config show`'s shape. `member name` is `TERMINAL_BOUND`.
     ("member", "link"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
     ("member", "unmatched"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    # Story 13a: the queue's reads by path, inline — `config show`'s shape;
+    # its changes one claimed step each, inline, within 2 seconds.
+    # `proposal review` is `TERMINAL_BOUND`.
+    ("proposal", "list"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    ("proposal", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    ("proposal", "approve"): lambda daemon: PROPOSAL_WRITE_BOUND_SECONDS,
+    ("proposal", "reject"): lambda daemon: PROPOSAL_WRITE_BOUND_SECONDS,
+    ("proposal", "edit"): lambda daemon: PROPOSAL_WRITE_BOUND_SECONDS,
     ("daemon", "run"): lambda daemon: DAEMON_RUN_BOUND_SECONDS,
 }
 """Every command the daemon runs, with its declared bound (AD-21, story 4r).
@@ -1850,6 +1870,29 @@ def _daemon_answers() -> bool:
     return _loopback().reachable() is None
 
 
+def _proposal_choices(verb: str) -> tuple[tuple[str, str, str, datetime | None], ...]:
+    """Completion's `proposal <verb> <id>`: read by path, read-only (story 13a)."""
+    return completion_choices(verb, now=datetime.now(timezone.utc))
+
+
+def _proposal_reader() -> ProposalDesk:
+    """`proposal list` and `proposal show` at a terminal: by path, no writer (story 13a)."""
+    return ProposalDesk(now=lambda: datetime.now(timezone.utc), reachable=_daemon_answers)
+
+
+def _proposal_desk(daemon: Daemon) -> ProposalDesk:
+    """The queue over this process's composed writer, its changes `from the terminal` (13a)."""
+    paths = daemon.storage.paths
+    return ProposalDesk(
+        now=daemon.clock,
+        paths=paths if isinstance(paths, ScopePaths) else None,
+        storage=daemon.storage,
+        via="terminal",
+        types=daemon.proposal_types,
+        reachable=_daemon_answers,
+    )
+
+
 def _meeting_lister() -> MeetingLister:
     """`transcript list`'s reader at a terminal, from paths alone (story 11f)."""
     return MeetingLister(reachable=_daemon_answers, now=lambda: datetime.now(timezone.utc))
@@ -1870,6 +1913,7 @@ def _completion() -> Completion:
             graph_instances=_graph_instances,
             goal_ids=_goal_ids,
             members=_member_names,
+            proposals=_proposal_choices,
             meetings=_meeting_ids,
             droppable=_droppable,
             summarizable=_summarizable,

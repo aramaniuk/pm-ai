@@ -95,6 +95,7 @@ from pm_ai.connectors.transcripts.graph_transcripts import (
 )
 from pm_ai.connectors.transcripts.manual import ManualTranscriptAdapter
 from pm_ai.core import transcripts as transcript_catalogue
+from pm_ai.core.proposals import ProposalTypes, default_types
 from pm_ai.core.config import Config, load_config
 from pm_ai.core.connector_enrolment import (
     CATEGORIES_ABSENT,
@@ -401,6 +402,14 @@ class Daemon:
     connector with no entry here gets a named refusal, never another
     account's source.
     """
+    proposal_types: ProposalTypes = field(default_factory=lambda: registered_proposal_types())
+    """The registered proposal types (AD-13, story 13a), built here at start.
+
+    Today's three — `action_item`, `implicit_commitment`, `explicit_command` —
+    and any type a later feature registers; a second registration of one name
+    is refused when it is built. Every reader and writer of proposals takes
+    its windows and change rules from here, never from a type of its own.
+    """
     writer: WriterThread | None = None
     """The daemon's one writer thread, once `pm-ai daemon run` has started it (4r).
 
@@ -672,6 +681,11 @@ def build(
         filed[instance] = filed_under
     sources = _transcript_sources(connectors)
     local = local_model(config)
+    # Story 13a: the proposal types registered at start (AD-13, AD-30), and
+    # their windows handed to the single writer, so its re-stages and changes
+    # judge expiry by the same rule as every reader.
+    proposal_types = registered_proposal_types()
+    storage.register_proposal_rules(proposal_types.rules())
     return Daemon(
         storage=storage,
         crypto=crypto,
@@ -699,7 +713,21 @@ def build(
         router=model_router(local, storage, clock),
         instance_scopes=filed,
         unbuilt=unbuilt,
+        proposal_types=proposal_types,
     )
+
+
+def registered_proposal_types() -> ProposalTypes:
+    """The proposal types pm-ai registers, built in one place (AD-13, AD-30, story 13a).
+
+    `build` registers them on the daemon at start, and every reader that runs
+    without a daemon — `proposal list` and `show` at a terminal, completion,
+    `transcript list`'s review step — takes them from here too, so a type a
+    later feature registers is never "unknown" on one surface and known on
+    another. A feature adds its type here; a second registration of one name
+    is refused when this runs.
+    """
+    return default_types()
 
 
 def model_router(
@@ -4126,6 +4154,12 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "matches_to_offer": ("read the title matches to offer", _asks_none),
     "stage_proposal": ("stage a proposal", _asks_none),
     "transition_proposal": ("move a proposal", _asks_none),
+    # Story 13a: a proposal's change, an edit, a re-stage and the expiry
+    # sweep's step, each one claimed step on `operational.db`.
+    "change_proposal": ("change a proposal", _asks_none),
+    "edit_proposal": ("edit a proposal", _asks_none),
+    "restage_proposal": ("stage a proposal again", _asks_none),
+    "expire_overdue": ("expire the proposals past their window", _asks_none),
     "begin_execution": ("record a skill call before it is made", _asks_none),
     "settle_execution": ("record a skill call's outcome", _asks_none),
     "fail_execution": ("record a skill call that failed", _asks_none),
@@ -4160,6 +4194,8 @@ PLAIN_READS: frozenset[str] = frozenset(
         "summaries_recorded_between",  # its own read-only connection (story 7d)
         "projects_with_summaries_between",  # its own read-only connection (story 7d)
         "open_action_items",  # its own read-only connection (story 7d)
+        "overdue_proposals",  # its own read-only connection (story 13a)
+        "proposals_of_meetings",  # its own read-only connection (story 13a)
         "match_records",  # its own read-only connection (story 7e)
         "read_member_updates",  # a file read (story 7e)
         "read_aliases",  # a file read (story 7e)
@@ -4196,6 +4232,8 @@ NEVER_FROM_A_JOB: frozenset[str] = frozenset(
         "tighten_modes",  # the daemon's own start-up walk, before the writer thread
         "prepare_directory",  # project onboarding's own, inside its handed step
         "diagnostic_log",  # opens a file for writing: the daemon's own, at start
+        "proposal_write_wait",  # a terminal's own busy wait (story 13a)
+        "register_proposal_rules",  # the composition root's, at start (story 13a)
     }
 )
 """`StorageService` calls a job may not make at all through `HandedStorage`."""

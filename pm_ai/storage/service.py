@@ -40,8 +40,9 @@ import stat
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -68,7 +69,20 @@ from pm_ai.domain.harvest import Cursor, HarvestFailure, HarvestRecord, PersistR
 from pm_ai.domain.identity import DataScope, ScopeKind, SourceRef, TargetRef
 from pm_ai.domain.lifecycle import CoverageWindow, ProposalState
 from pm_ai.domain.payload_fields import encode_payload
-from pm_ai.domain.proposals import OpenActionItems, Proposal
+from pm_ai.domain.proposals import (
+    UNKNOWN_TYPE,
+    IllegalTransition,
+    OpenActionItems,
+    Proposal,
+    TerminalState,
+    TypeRule,
+    VersionConflict,
+    allowed,
+    repeat_key,
+    replacement_id,
+    replacement_number,
+    root_of,
+)
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.scope_model import ADDRESS, CLAIM_SIDECAR_SUFFIX, DAEMON_LOCK
 from pm_ai.domain.meeting_summaries import (
@@ -218,7 +232,14 @@ CREATE TABLE IF NOT EXISTS proposals (
     proposal_id TEXT PRIMARY KEY,
     body        TEXT NOT NULL,
     version     INTEGER NOT NULL,
-    state       TEXT NOT NULL
+    state       TEXT NOT NULL,
+    type        TEXT,
+    scope       TEXT,
+    meeting_id  TEXT,
+    staged_at   TEXT,
+    ttl_seconds REAL,
+    replaces    TEXT,
+    changed_at  TEXT
 );
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
@@ -388,7 +409,7 @@ _SCHEMA_TABLES = frozenset(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _SCHE
 # commit that appends to `MIGRATIONS`, never separately: a version with no
 # migration behind it stamps a store that was never changed, and a migration
 # with no version behind it runs on every open.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Not bumped by story `8a`, which added the `harvest_failures` table, and the
 # reason is the same one `_migrate`'s docstring gives for why it exists at all.
@@ -426,6 +447,53 @@ def _m1_settled_at(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE executed ADD COLUMN settled_at TEXT")
 
 
+_PROPOSAL_COLUMNS = (
+    ("type", "TEXT"),
+    ("scope", "TEXT"),
+    ("meeting_id", "TEXT"),
+    ("staged_at", "TEXT"),
+    ("ttl_seconds", "REAL"),
+    ("replaces", "TEXT"),
+    ("changed_at", "TEXT"),
+)
+"""The `proposals` columns story 13a indexes, each filled from the body."""
+
+_PROPOSAL_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS proposals_by_window ON proposals (state, staged_at)",
+    "CREATE INDEX IF NOT EXISTS proposals_by_meeting ON proposals (meeting_id)",
+)
+"""The listing's, the sweep's and the dashboard's indexes (13a)."""
+
+
+def _m2_proposal_columns(db: sqlite3.Connection) -> None:
+    """Add and fill `proposals`' indexed columns, and their indexes (story 13a).
+
+    Conditional on each column, like migration 1, for one reason of its own:
+    `_SCHEMA` creates a table that is missing in its current shape, so a store
+    from the unversioned era that never had `proposals` has these columns
+    already when this runs. Each row's columns are filled from its body; a body
+    that cannot be read keeps empty columns and is counted unreadable by every
+    reader. The scope is filled only from a body that records it: a row
+    without one is placed by the readers, from its id or its meeting (13a).
+    """
+    present = {row[1] for row in db.execute("PRAGMA table_info(proposals)")}
+    for name, kind in _PROPOSAL_COLUMNS:
+        if name not in present:
+            db.execute(f"ALTER TABLE proposals ADD COLUMN {name} {kind}")
+    for proposal_id, body in db.execute("SELECT proposal_id, body FROM proposals").fetchall():
+        try:
+            columns = _columns_of(_load_proposal(body))
+        except (ValueError, KeyError, TypeError):
+            continue
+        db.execute(
+            "UPDATE proposals SET type = ?, scope = ?, meeting_id = ?, staged_at = ?, "
+            "ttl_seconds = ?, replaces = ?, changed_at = ? WHERE proposal_id = ?",
+            (*columns, proposal_id),
+        )
+    for statement in _PROPOSAL_INDEXES:
+        db.execute(statement)
+
+
 # Ordered, ascending, contiguous from 1. Append only: editing a shipped entry
 # changes what a store that already ran it believes about itself.
 #
@@ -436,6 +504,7 @@ def _m1_settled_at(db: sqlite3.Connection) -> None:
 # one tier no rebuild can repair.
 MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (1, "add executed.settled_at", _m1_settled_at),
+    (2, "index the proposals' type, scope, meeting and window", _m2_proposal_columns),
 )
 
 
@@ -715,6 +784,24 @@ def _capture_name(name: str) -> str:
     return name
 
 
+def _instant_text(at: datetime | None) -> str | None:
+    """An instant as the indexed columns hold it: ISO 8601 in UTC, so text order is time order."""
+    return None if at is None else at.astimezone(timezone.utc).isoformat()
+
+
+def _columns_of(p: Proposal) -> tuple[Any, ...]:
+    """`type, scope, meeting_id, staged_at, ttl_seconds, replaces, changed_at` (13a)."""
+    return (
+        p.type,
+        p.scope,
+        p.meeting_id,
+        _instant_text(p.staged_instant),
+        p.ttl.total_seconds(),
+        p.replaces,
+        _instant_text(p.changed_at),
+    )
+
+
 def _dump_proposal(p: Proposal) -> str:
     return json.dumps(
         {
@@ -730,6 +817,12 @@ def _dump_proposal(p: Proposal) -> str:
             "state": p.state.value,
             "version": p.version,
             "ttl_seconds": p.ttl.total_seconds(),
+            # Story 13a: read as empty from a body written before it.
+            "staged_at": None if p.staged_at is None else p.staged_at.isoformat(),
+            "scope": p.scope,
+            "replaces": p.replaces,
+            "changed_at": None if p.changed_at is None else p.changed_at.isoformat(),
+            "changed_via": p.changed_via,
         },
         sort_keys=True,
     )
@@ -748,7 +841,28 @@ def _load_proposal(body: str) -> Proposal:
         state=ProposalState(d["state"]),
         version=d["version"],
         ttl=timedelta(seconds=d["ttl_seconds"]),
+        staged_at=_optional_instant(d.get("staged_at")),
+        scope=_optional_text(d.get("scope")),
+        replaces=_optional_text(d.get("replaces")),
+        changed_at=_optional_instant(d.get("changed_at")),
+        changed_via=_optional_text(d.get("changed_via")),
     )
+
+
+def _optional_instant(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{value!r} is not an instant")
+    return datetime.fromisoformat(value)
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{value!r} is not text")
+    return value
 
 
 # ── The start-up mode walk (story 1s, AD-5, AD-6) ────────────────────────────
@@ -1604,6 +1718,434 @@ _HEX12 = re.compile(r"[0-9a-f]{12}")
 """An action item id's tail: the 12-hex digest (`pm_ai.core.meeting_summary.digest`)."""
 
 
+_LIVE_IN_CHAIN = (
+    "WITH RECURSIVE chain(id) AS (SELECT proposal_id FROM proposals WHERE replaces = ? "
+    "UNION SELECT p.proposal_id FROM proposals p JOIN chain c ON p.replaces = c.id) "
+    "SELECT proposal_id FROM proposals WHERE proposal_id IN (SELECT id FROM chain) "
+    "AND state IN (?, ?)"
+)
+"""A live proposal anywhere down the replacement chain from one proposal (13a):
+`e1` superseded by a waiting `e2` still counts as a live replacement."""
+
+_ITEM_TAIL = re.compile(r"[0-9a-f]{12}(?:_e[1-9][0-9]*)?")
+"""An action item id's tail: the digest, and `_e<n>` for a PM's replacement (13a)."""
+
+
+def _meeting_in_prefix(prefix: str) -> str:
+    """The meeting id inside `action_item_prefix`'s `prp_<12 hex>_<meeting>_ai_`."""
+    return prefix[len("prp_") + _ITEM_DIGEST + 1 : -len("_ai_")]
+
+
+def _as_values(summary: object, payload: object) -> str:
+    """`summary` and `payload` as values, for the re-stage's comparison (13a)."""
+    return json.dumps([summary, payload], sort_keys=True, ensure_ascii=False)
+
+
+class RestageOutcome(Enum):
+    """What staging one proposal again did (13a)."""
+
+    STAGED = "staged"
+    UNCHANGED = "unchanged"
+    LEFT = "left"
+    DROPPED = "dropped"
+    """Left, and the new content differed from a row the PM acted on (11b's drop)."""
+    KEPT_SUPERSEDED = "kept_superseded"
+
+
+class ProposalUnreadable(RuntimeError):
+    """A proposal whose stored body does not parse: counted, never changed (13a)."""
+
+
+class ReplacementExists(RuntimeError):
+    """An expired proposal already staged again: a second attempt is refused (13a)."""
+
+    def __init__(self, message: str, *, replacement: str | None) -> None:
+        super().__init__(message)
+        self.replacement = replacement
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalEdited:
+    """An edit's two proposals: the one it superseded (or the expired one) and its replacement."""
+
+    old: Proposal
+    new: Proposal
+
+
+@dataclass(frozen=True, slots=True)
+class SweepStep:
+    """One claimed step of the expiry sweep: what it expired and what it left (13a)."""
+
+    expired: tuple[str, ...] = ()
+    skipped: int = 0
+    unreadable: int = 0
+    unreadable_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class OverdueScan:
+    """The sweep's read: candidates `(id, version)`, the next expiry, unreadable rows (13a)."""
+
+    candidates: tuple[tuple[str, int], ...] = ()
+    next_expiry: datetime | None = None
+    unreadable: int = 0
+    unreadable_ids: tuple[str, ...] = ()
+    """The waiting rows whose window could not be read, by id: counted once each."""
+
+
+@dataclass(frozen=True, slots=True)
+class MeetingProposals:
+    """The proposals citing some meetings, and how many bodies could not be read (13a)."""
+
+    proposals: tuple[Proposal, ...] = ()
+    unreadable: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalIndexRow:
+    """A proposal's indexed columns, read without its body (13a).
+
+    `type` is `None` for a row whose body could not be read when the columns
+    were filled: counted unreadable by every reader.
+    """
+
+    proposal_id: str
+    type: str | None
+    scope: str | None
+    meeting_id: str | None
+    state: str
+    version: int
+    staged_at: datetime | None
+    ttl_seconds: float | None
+    replaces: str | None
+    changed_at: datetime | None
+
+
+class ProposalsUnreadable(Exception):
+    """The operational store could not be read for the proposals (13a). The message says why."""
+
+
+PROPOSAL_READ_WAIT_SECONDS = 0.25
+"""How long a path read of the proposals waits on a locked store: inside its 1 s bound."""
+
+
+@contextlib.contextmanager
+def _proposal_snapshot(store: Path) -> Iterator[tuple[sqlite3.Connection, int] | None]:
+    """One read-only snapshot of the store for a proposals read, and its schema version (13a).
+
+    The one opener every path read of the proposals shares: a connection of
+    its own with `PROPOSAL_READ_WAIT_SECONDS` of busy wait, one read
+    transaction, and the schema version checked first. `None` when there is no
+    store. A store with no `schema_version` table is read as unversioned, so
+    a reader takes the body-parsing path. Every SQLite failure — opening
+    included — is raised as `ProposalsUnreadable`.
+    """
+    if not store.exists():
+        yield None
+        return
+    try:
+        reader = sqlite3.connect(
+            f"{store.resolve().as_uri()}?mode=ro", uri=True, timeout=PROPOSAL_READ_WAIT_SECONDS
+        )
+    except sqlite3.Error as unopened:
+        raise ProposalsUnreadable(f"it could not be opened ({unopened})") from unopened
+    try:
+        try:
+            reader.execute("BEGIN")
+            version = _stored_version(reader)
+            yield reader, version
+            reader.execute("COMMIT")
+        except ProposalsUnreadable:
+            raise
+        except sqlite3.Error as unreadable:
+            raise ProposalsUnreadable(str(unreadable)) from unreadable
+    finally:
+        reader.close()
+
+
+def _stored_version(reader: sqlite3.Connection) -> int:
+    try:
+        row = reader.execute("SELECT version FROM schema_version").fetchone()
+    except sqlite3.OperationalError as missing:
+        if "no such table" not in str(missing):
+            raise
+        # No stamp at all: a store from the unversioned era (or an empty file),
+        # read through the bodies, never through columns it may not have.
+        return UNVERSIONED
+    try:
+        found = UNVERSIONED if row is None else int(row[0])
+    except (TypeError, ValueError) as unversioned:
+        raise ProposalsUnreadable(f"its schema version {row[0]!r} is not a number") from unversioned
+    if found > SCHEMA_VERSION:
+        raise ProposalsUnreadable(
+            f"it was written by a newer pm-ai (schema {found}, this pm-ai reads {SCHEMA_VERSION})"
+        )
+    return found
+
+
+def _rows_or_none(reader: sqlite3.Connection, sql: str, parameters: tuple[Any, ...]) -> list[Any]:
+    """`sql`'s rows; none when the `proposals` table does not exist yet."""
+    try:
+        return reader.execute(sql, parameters).fetchall()
+    except sqlite3.OperationalError as missing:
+        if "no such table" not in str(missing):
+            raise
+        return []
+
+
+def _proposal_instant(text: object) -> datetime | None:
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _marks(values: Sequence[Any]) -> str:
+    return ", ".join("?" for _ in values)
+
+
+def proposal_index_at(
+    store: Path,
+    *,
+    states: Sequence[str] | None = None,
+    ids: Sequence[str] | None = None,
+    meetings: Sequence[str] | None = None,
+) -> tuple[ProposalIndexRow, ...]:
+    """Proposals' indexed columns in the store at `store`, read-only (13a).
+
+    No body is parsed — except in a store not yet migrated to schema 2, whose
+    columns are read off each body. `states` limits the read to those stored
+    states; `ids` and `meetings`, when given, to the rows with one of those
+    ids or citing one of those meetings (either). No store, or no table, is no
+    rows. `ProposalsUnreadable` when the store is locked past a short wait,
+    corrupt or newer.
+    """
+    with _proposal_snapshot(store) as snapshot:
+        if snapshot is None:
+            return ()
+        reader, version = snapshot
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if states is not None:
+            clauses.append(f"state IN ({_marks(states)})")
+            parameters += list(states)
+        if version >= 2:
+            narrowing: list[str] = []
+            if ids is not None:
+                narrowing.append(f"proposal_id IN ({_marks(ids)})" if ids else "0")
+                parameters += list(ids)
+            if meetings is not None:
+                narrowing.append(f"meeting_id IN ({_marks(meetings)})" if meetings else "0")
+                parameters += list(meetings)
+            if narrowing:
+                clauses.append("(" + " OR ".join(narrowing) + ")")
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            rows = _rows_or_none(
+                reader,
+                "SELECT proposal_id, type, scope, meeting_id, state, version, "
+                "staged_at, ttl_seconds, replaces, changed_at FROM proposals" + where,
+                tuple(parameters),
+            )
+        else:
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            rows = [
+                _old_index_row(proposal_id, body, state, stored_version)
+                for proposal_id, body, state, stored_version in _rows_or_none(
+                    reader,
+                    "SELECT proposal_id, body, state, version FROM proposals" + where,
+                    tuple(parameters),
+                )
+            ]
+            if ids is not None or meetings is not None:
+                wanted_ids = set(ids or ())
+                wanted_meetings = set(meetings or ())
+                rows = [
+                    row for row in rows if row[0] in wanted_ids or row[3] in wanted_meetings
+                ]
+    return tuple(
+        ProposalIndexRow(
+            proposal_id=str(row[0]),
+            type=None if row[1] is None else str(row[1]),
+            scope=None if row[2] is None else str(row[2]),
+            meeting_id=None if row[3] is None else str(row[3]),
+            state=str(row[4]),
+            version=int(row[5]),
+            staged_at=_proposal_instant(row[6]),
+            ttl_seconds=None if row[7] is None else float(row[7]),
+            replaces=None if row[8] is None else str(row[8]),
+            changed_at=_proposal_instant(row[9]),
+        )
+        for row in rows
+    )
+
+
+def _old_index_row(proposal_id: Any, body: Any, state: Any, version: Any) -> tuple[Any, ...]:
+    try:
+        columns = _columns_of(_load_proposal(body))
+    except (ValueError, KeyError, TypeError):
+        columns = (None,) * 7
+    return (proposal_id, columns[0], columns[1], columns[2], state, version, *columns[3:])
+
+
+def proposal_bodies_at(store: Path, proposal_ids: Sequence[str]) -> dict[str, Proposal | None]:
+    """The parsed bodies of `proposal_ids`, read-only; `None` for one that cannot be read (13a).
+
+    An id with no row is absent from the answer.
+    """
+    found: dict[str, Proposal | None] = {}
+    if not proposal_ids:
+        return found
+    rows: list[Any] = []
+    with _proposal_snapshot(store) as snapshot:
+        if snapshot is None:
+            return found
+        reader, _ = snapshot
+        unique = list(dict.fromkeys(proposal_ids))
+        for start in range(0, len(unique), 500):
+            chunk = unique[start : start + 500]
+            rows += _rows_or_none(
+                reader,
+                f"SELECT proposal_id, body FROM proposals WHERE proposal_id IN ({_marks(chunk)})",
+                tuple(chunk),
+            )
+    for proposal_id, body in rows:
+        try:
+            found[str(proposal_id)] = _load_proposal(body)
+        except (ValueError, KeyError, TypeError):
+            _storage_log.warning("a proposal body could not be read; it is counted")
+            found[str(proposal_id)] = None
+    return found
+
+
+def meeting_proposals_at(store: Path, meeting_ids: Sequence[str]) -> MeetingProposals:
+    """Every proposal citing one of `meeting_ids`, read-only, by the meeting index (13a)."""
+    if not meeting_ids:
+        return MeetingProposals()
+    unique = list(dict.fromkeys(meeting_ids))
+    rows: list[Any] = []
+    with _proposal_snapshot(store) as snapshot:
+        if snapshot is None:
+            return MeetingProposals()
+        reader, version = snapshot
+        if version < 2:
+            raise ProposalsUnreadable(
+                f"it is at schema {version} and not yet migrated to {SCHEMA_VERSION}"
+            )
+        for start in range(0, len(unique), 500):
+            chunk = unique[start : start + 500]
+            rows += _rows_or_none(
+                reader,
+                f"SELECT body FROM proposals WHERE meeting_id IN ({_marks(chunk)})",
+                tuple(chunk),
+            )
+    proposals: list[Proposal] = []
+    unreadable = 0
+    for (body,) in rows:
+        try:
+            proposals.append(_load_proposal(body))
+        except (ValueError, KeyError, TypeError):
+            unreadable += 1
+    return MeetingProposals(tuple(proposals), unreadable)
+
+
+_NEXT_EXPIRIES_READ = 50
+"""How many of the next waiting rows the sweep reads to find the earliest expiry to come."""
+
+
+def overdue_at(
+    store: Path,
+    *,
+    rules: Mapping[str, TypeRule],
+    at: datetime,
+    limit: int | None = None,
+) -> OverdueScan:
+    """The waiting proposals past their window at `at`, by the `(state, staged_at)` index (13a).
+
+    Only registered types are swept: a type no registration names keeps only
+    its `staged → rejected` change, and its readers show it expired. A
+    waiting row with no readable window is counted, never expired.
+    """
+    if not rules:
+        return OverdueScan()
+    shortest = min(rule.ttl for rule in rules.values())
+    executors = [name for name, rule in rules.items() if rule.has_executor]
+    names = list(rules)
+    marks = _marks(names)
+    before = _instant_text(at - shortest)
+    with _proposal_snapshot(store) as snapshot:
+        if snapshot is None:
+            return OverdueScan()
+        reader, version = snapshot
+        if version < 2:
+            raise ProposalsUnreadable(
+                f"it is at schema {version} and not yet migrated to {SCHEMA_VERSION}"
+            )
+        # At most `limit` rows are loaded: the sweep reads a batch at a time.
+        # Ordered by the staging instant, which is the expiry order whenever the
+        # registered window is the longer one — every row staged since 13a.
+        bounded = "" if limit is None else " LIMIT ?"
+        rows = _rows_or_none(
+            reader,
+            f"SELECT proposal_id, version, type, staged_at, ttl_seconds FROM proposals "
+            f"WHERE state = ? AND staged_at <= ? AND type IN ({marks}) ORDER BY staged_at"
+            + bounded,
+            (ProposalState.STAGED.value, before, *names, *(() if limit is None else (limit,))),
+        )
+        if executors:
+            rows += _rows_or_none(
+                reader,
+                f"SELECT proposal_id, version, type, staged_at, ttl_seconds FROM proposals "
+                f"WHERE state = ? AND staged_at <= ? AND type IN ({_marks(executors)}) "
+                f"ORDER BY staged_at",
+                (ProposalState.APPROVED.value, before, *executors),
+            )
+        upcoming = _rows_or_none(
+            reader,
+            f"SELECT type, staged_at, ttl_seconds FROM proposals "
+            f"WHERE state = ? AND staged_at > ? AND type IN ({marks}) "
+            f"ORDER BY staged_at LIMIT ?",
+            (ProposalState.STAGED.value, before, *names, _NEXT_EXPIRIES_READ),
+        )
+        unreadable_rows = _rows_or_none(
+            reader,
+            "SELECT proposal_id FROM proposals WHERE state = ? AND (staged_at IS NULL OR type IS NULL)",
+            (ProposalState.STAGED.value,),
+        )
+
+    def expiry(kind: Any, staged: Any, ttl: Any) -> datetime | None:
+        when = _proposal_instant(staged)
+        rule = rules.get(str(kind))
+        if when is None or rule is None:
+            return None
+        stored = timedelta(seconds=float(ttl)) if ttl is not None else rule.ttl
+        return when + max(stored, rule.ttl)
+
+    candidates: list[tuple[str, int]] = []
+    later: list[datetime] = []
+    for proposal_id, version, kind, staged, ttl in rows:
+        ends = expiry(kind, staged, ttl)
+        if ends is None:
+            continue
+        if ends <= at:
+            candidates.append((str(proposal_id), int(version)))
+        else:
+            later.append(ends)
+    for kind, staged, ttl in upcoming:
+        ends = expiry(kind, staged, ttl)
+        if ends is not None:
+            later.append(ends)
+    if limit is not None:
+        candidates = candidates[:limit]
+    return OverdueScan(
+        tuple(candidates),
+        min(later) if later else None,
+        len(unreadable_rows),
+        tuple(str(row[0]) for row in unreadable_rows),
+    )
+
+
 def summary_records_at(store: Path) -> tuple[tuple[SummaryState, bool], ...]:
     """Every `meeting_summaries` row in the store at `store`, read-only (7b).
 
@@ -2259,6 +2801,9 @@ class StorageService:
         self._git_checked: set[tuple[object, ...]] = set()
         self._now = now
         self._vcs = vcs
+        # Story 13a: the registered proposal types' windows and change rules,
+        # handed in by the composition root at start (`register_proposal_rules`).
+        self._proposal_rules: Mapping[str, TypeRule] | None = None
         # Tier 2 is its own file, in the application scope's enclave and outside
         # every scope's Markdown tree. `reindex` targets Tier 3 and therefore
         # cannot reach this, which is the structural guarantee AD-3 asks for.
@@ -2321,6 +2866,12 @@ class StorageService:
                     self._db.executescript(_SCHEMA)
                     self._db.commit()
                     self._migrate(preexisting=preexisting)
+                    # Story 13a: a `proposals` table `_SCHEMA` just created
+                    # gets its indexes here, as a migrated one got them in
+                    # migration 2.
+                    for statement in _PROPOSAL_INDEXES:
+                        self._db.execute(statement)
+                    self._db.commit()
             else:
                 # Nothing to change, so nothing to claim: this only reads the
                 # stamp, and refuses a store a later pm-ai wrote.
@@ -5175,39 +5726,56 @@ class StorageService:
                 scopes.add(parsed)
         return tuple(sorted(scopes, key=str))
 
-    def open_action_items(self, prefix: str, *, at: datetime) -> OpenActionItems:
-        """The `action_item` proposals under `prefix` still open at `at` (story 7d).
+    def open_action_items(
+        self,
+        prefix: str,
+        *,
+        at: datetime,
+        rules: Mapping[str, TypeRule] | None = None,
+    ) -> OpenActionItems:
+        """The `action_item` proposals under `prefix` open at `at` (stories 7d, 13a).
 
         `prefix` is `action_item_prefix(scope, meeting_id)`, which carries the
-        scope, so this is one meeting's items in one scope, matched as
-        `stage_summary_items` matches them: the prefix, then the 12-hex digest
-        and nothing more. Open is `staged` with `expires_at` after `at`. A
-        plain read on a read-only connection; by proposal id. A staged body
-        that cannot be read is counted in `unreadable`, so the meeting's other
-        items still show and the page states the count.
+        scope, so this is one meeting's items in one scope: the prefix, the
+        12-hex digest, and for a PM's replacement `_e<n>`. Open is waiting —
+        staged within its window — or approved. `expired` counts the items that
+        expired without review (moved, or staged past their window) and that no
+        proposal replaces. A plain read on a read-only connection, by the
+        meeting index. A body that cannot be read is counted in `unreadable`.
         """
-        rows = self._plain_rows(
-            "SELECT proposal_id, body FROM proposals "
-            "WHERE substr(proposal_id, 1, ?) = ? AND length(proposal_id) = ? "
-            "AND state = ? ORDER BY proposal_id",
-            (len(prefix), prefix, len(prefix) + _ITEM_DIGEST, ProposalState.STAGED.value),
+        rule = self._rule_for(
+            ACTION_ITEM, None if rules is None else rules.get(ACTION_ITEM, UNKNOWN_TYPE)
         )
+        meeting = _meeting_in_prefix(prefix)
+        rows = self._plain_rows(
+            "SELECT proposal_id, body, state, replaces FROM proposals "
+            "WHERE meeting_id = ? AND substr(proposal_id, 1, ?) = ? "
+            "UNION ALL SELECT proposal_id, body, state, replaces FROM proposals "
+            "WHERE meeting_id IS NULL AND substr(proposal_id, 1, ?) = ?",
+            (meeting, len(prefix), prefix, len(prefix), prefix),
+        )
+        replaced = {str(row[3]) for row in rows if row[3] is not None}
         found: list[Proposal] = []
         unreadable = 0
-        for proposal_id, body in rows:
-            if not _HEX12.fullmatch(str(proposal_id)[len(prefix):]):
+        expired = 0
+        for proposal_id, body, state, _ in sorted(rows, key=lambda row: str(row[0])):
+            if not _ITEM_TAIL.fullmatch(str(proposal_id)[len(prefix):]):
                 continue
             try:
                 proposal = _load_proposal(body)
             except (ValueError, KeyError, TypeError):
-                _storage_log.warning("a staged proposal body could not be read; it is counted")
-                unreadable += 1
+                if state in (ProposalState.STAGED.value, ProposalState.APPROVED.value):
+                    _storage_log.warning("a proposal body could not be read; it is counted")
+                    unreadable += 1
                 continue
-            if proposal.type != ACTION_ITEM or proposal.state is not ProposalState.STAGED:
+            if proposal.type != ACTION_ITEM:
                 continue
-            if proposal.expires_at > at:
+            seen = proposal.seen_state(rule, at)
+            if seen in (ProposalState.STAGED, ProposalState.APPROVED):
                 found.append(proposal)
-        return OpenActionItems(items=tuple(found), unreadable=unreadable)
+            elif seen is ProposalState.EXPIRED and proposal.proposal_id not in replaced:
+                expired += 1
+        return OpenActionItems(items=tuple(found), unreadable=unreadable, expired=expired)
 
     def _plain_rows(self, sql: str, parameters: tuple[Any, ...]) -> list[Sequence[Any]]:
         """A plain read's rows on a read-only connection; none before the store or table exists."""
@@ -5493,51 +6061,72 @@ class StorageService:
         return result
 
     def stage_summary_items(
-        self, proposals: Sequence[Proposal], *, prefix: str, fence: SummaryFence
+        self,
+        proposals: Sequence[Proposal],
+        *,
+        prefix: str,
+        fence: SummaryFence,
+        rules: Mapping[str, TypeRule] | None = None,
     ) -> SummaryItemsStaged:
         """A summary's action items staged, and the ones it no longer produces superseded.
 
-        Under the summary's lease, in one step. Each proposal is staged unless
-        one under its id has left `staged` (`stage_unless_acted`'s rule); then
-        every still-staged action item whose id starts with `prefix` — this
-        scope's and meeting's — and is not among `proposals` is moved to
-        `superseded` by compare-and-set. One the PM acted on is left as it is.
+        Under the summary's lease, in one step. Each proposal is re-staged by
+        `_restage`'s rule (story 13a): a new one is inserted; a staged one
+        within its window keeps its `created_at`, `staged_at` and time to live,
+        and its version moves up only when its `summary` or `payload` changed;
+        one the PM acted on, or a staged one past its window, is left as it is
+        and reported in `left`. A new item whose `what` and `owner` repeat a
+        live item of the meeting (a PM's replacement included) is not staged
+        and is reported in `left`. Then every still-staged root item under
+        `prefix` — this scope's and meeting's, the prefix and exactly 12 hex —
+        that is not among `proposals` and is within its window is moved to
+        `superseded` by compare-and-set. A replacement's id is longer, so it is
+        never superseded here.
         """
         produced = {proposal.proposal_id for proposal in proposals}
         staged: list[str] = []
         left: list[str] = []
         superseded: list[str] = []
         kept_superseded: list[str] = []
-        try:
+        at = self._at()
+        rule = self._rule_for(
+            ACTION_ITEM, None if rules is None else rules.get(ACTION_ITEM, UNKNOWN_TYPE)
+        )
+        with self._proposal_step():
             self._summary_fenced(fence)
+            # The repeat rule (13a) compares a new item with the items that
+            # stay live after this re-summary: a PM's replacement, an approved
+            # item, and a staged root this summary produces again. A staged
+            # root it no longer produces is superseded below, so an item
+            # repeating it must be staged, or the item would vanish.
+            repeats: dict[tuple[str, str], set[str]] = {}
+            for pid, key, state in self._live_under(prefix, rule=rule, at=at):
+                if (
+                    replacement_number(pid) is not None
+                    or state is ProposalState.APPROVED
+                    or pid in produced
+                ):
+                    repeats.setdefault(key, set()).add(pid)
             for proposal in proposals:
-                written = self._db.execute(
-                    "INSERT INTO proposals (proposal_id, body, version, state) "
-                    "VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT(proposal_id) DO UPDATE SET body = excluded.body, "
-                    "version = excluded.version, state = excluded.state "
-                    "WHERE proposals.state = ?",
-                    (
-                        proposal.proposal_id,
-                        _dump_proposal(proposal),
-                        proposal.version,
-                        proposal.state.value,
-                        ProposalState.STAGED.value,
-                    ),
-                ).rowcount
-                if written == 1:
-                    staged.append(proposal.proposal_id)
-                    continue
-                (held,) = self._db.execute(
-                    "SELECT state FROM proposals WHERE proposal_id = ?", (proposal.proposal_id,)
+                exists = self._db.execute(
+                    "SELECT 1 FROM proposals WHERE proposal_id = ?", (proposal.proposal_id,)
                 ).fetchone()
-                if held == ProposalState.SUPERSEDED.value:
+                key = repeat_key(proposal.payload.get("what"), proposal.payload.get("owner"))
+                if exists is None and repeats.get(key, set()) - {proposal.proposal_id}:
+                    left.append(proposal.proposal_id)
+                    continue
+                outcome = self._restage(proposal, rule=rule, at=at)
+                if outcome in (RestageOutcome.STAGED, RestageOutcome.UNCHANGED):
+                    staged.append(proposal.proposal_id)
+                    # Two folded-equal items in one batch stage once.
+                    repeats.setdefault(key, set()).add(proposal.proposal_id)
+                elif outcome is RestageOutcome.KEPT_SUPERSEDED:
                     kept_superseded.append(proposal.proposal_id)
                 else:
                     left.append(proposal.proposal_id)
-            # Exactly this meeting's items: the prefix, then the 12-hex digest
-            # and nothing more, so another meeting whose id merely begins with
-            # this one's is never matched.
+            # Exactly this meeting's root items: the prefix, then the 12-hex
+            # digest and nothing more, so another meeting whose id merely
+            # begins with this one's, and a PM's replacement, never match.
             rows = self._db.execute(
                 "SELECT proposal_id, body FROM proposals "
                 "WHERE substr(proposal_id, 1, ?) = ? AND length(proposal_id) = ? "
@@ -5547,30 +6136,21 @@ class StorageService:
             for proposal_id, body in rows:
                 if proposal_id in produced or not _HEX12.fullmatch(proposal_id[len(prefix):]):
                     continue
-                current = _load_proposal(body)
-                if current.type != ACTION_ITEM:
+                try:
+                    current = _load_proposal(body)
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if current.type != ACTION_ITEM or current.overdue(rule, at):
                     continue
                 moved = current.transition(
-                    ProposalState.SUPERSEDED, expected_version=current.version
+                    ProposalState.SUPERSEDED,
+                    expected_version=current.version,
+                    rule=rule,
+                    at=at,
+                    via="summary",
                 )
-                changed = self._db.execute(
-                    "UPDATE proposals SET body = ?, version = ?, state = ? "
-                    "WHERE proposal_id = ? AND version = ? AND state = ?",
-                    (
-                        _dump_proposal(moved),
-                        moved.version,
-                        moved.state.value,
-                        proposal_id,
-                        current.version,
-                        ProposalState.STAGED.value,
-                    ),
-                ).rowcount
-                if changed == 1:
+                if self._swap(current, moved) == 1:
                     superseded.append(proposal_id)
-        except BaseException:
-            self._db.rollback()
-            raise
-        self._db.commit()
         return SummaryItemsStaged(
             tuple(staged), tuple(left), tuple(superseded), tuple(kept_superseded)
         )
@@ -5666,40 +6246,180 @@ class StorageService:
         self.begin_execution(idempotency_key, target)
         self.settle_execution(idempotency_key, external_id)
 
-    def stage_unless_acted(self, proposal: Proposal) -> bool:
-        """Stage `proposal` unless one under its id has left `staged` (story 11b).
+    # ── Proposals (AD-13, AD-37; story 13a) ─────────────────────────────────
 
-        For re-ingestion. `stage_proposal` writes over by id, so a second
-        ingestion of the same transcript would put a proposal the PM approved,
-        rejected or let expire back to `staged`. Here a row already past
-        `staged` is left exactly as it is; a `staged` one is replaced, which for
-        an identical proposal changes nothing. One statement, so no transition
-        can land between the check and the write. `True` when it was staged.
+    def register_proposal_rules(self, rules: Mapping[str, TypeRule]) -> None:
+        """The registered types' rules, handed in once at start by the composition root.
+
+        A change or re-stage given no rule of its own judges by these; a store
+        given none (a test's, a tool's) judges each proposal by its own window
+        as a known type with no executor.
         """
-        written = self._db.execute(
-            "INSERT INTO proposals (proposal_id, body, version, state) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(proposal_id) DO UPDATE SET body = excluded.body, "
-            "version = excluded.version, state = excluded.state "
-            "WHERE proposals.state = ?",
+        self._proposal_rules = dict(rules)
+
+    def _rule_for(self, kind: str, rule: TypeRule | None) -> TypeRule | None:
+        if rule is not None or self._proposal_rules is None:
+            return rule
+        return self._proposal_rules.get(kind, UNKNOWN_TYPE)
+
+    def _live_under(
+        self, prefix: str, *, rule: TypeRule | None, at: datetime
+    ) -> list[tuple[str, tuple[str, str], ProposalState]]:
+        """The meeting's live action items under `prefix` — waiting or approved,
+        replacements included — each with its repeat key and its state."""
+        live: list[tuple[str, tuple[str, str], ProposalState]] = []
+        rows = self._db.execute(
+            "SELECT proposal_id, body FROM proposals WHERE substr(proposal_id, 1, ?) = ? "
+            "AND state IN (?, ?)",
+            (len(prefix), prefix, ProposalState.STAGED.value, ProposalState.APPROVED.value),
+        ).fetchall()
+        for proposal_id, body in rows:
+            if not _ITEM_TAIL.fullmatch(str(proposal_id)[len(prefix):]):
+                continue
+            try:
+                held = _load_proposal(body)
+            except (ValueError, KeyError, TypeError):
+                continue
+            if held.type != ACTION_ITEM or held.overdue(rule, at):
+                continue
+            payload = held.payload if isinstance(held.payload, dict) else {}
+            live.append(
+                (held.proposal_id, repeat_key(payload.get("what"), payload.get("owner")), held.state)
+            )
+        return live
+
+    def _swap(self, current: Proposal, moved: Proposal) -> int:
+        """`current` replaced by `moved`: one conditional update, its rows changed (AD-37)."""
+        return int(
+            self._db.execute(
+                "UPDATE proposals SET body = ?, version = ?, state = ?, type = ?, scope = ?, "
+                "meeting_id = ?, staged_at = ?, ttl_seconds = ?, replaces = ?, changed_at = ? "
+                "WHERE proposal_id = ? AND version = ? AND state = ?",
+                (
+                    _dump_proposal(moved),
+                    moved.version,
+                    moved.state.value,
+                    *_columns_of(moved),
+                    current.proposal_id,
+                    current.version,
+                    current.state.value,
+                ),
+            ).rowcount
+        )
+
+    def _insert_proposal(self, proposal: Proposal) -> None:
+        self._db.execute(
+            "INSERT INTO proposals (proposal_id, body, version, state, type, scope, "
+            "meeting_id, staged_at, ttl_seconds, replaces, changed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 proposal.proposal_id,
                 _dump_proposal(proposal),
                 proposal.version,
                 proposal.state.value,
-                ProposalState.STAGED.value,
+                *_columns_of(proposal),
             ),
         )
-        self._db.commit()
-        return written.rowcount == 1
+
+    def _restage(
+        self, proposal: Proposal, *, rule: TypeRule | None, at: datetime
+    ) -> RestageOutcome:
+        """One proposal staged again by a re-summary or a re-ingestion (13a).
+
+        New: inserted. Staged within its window: its stored `created_at`,
+        `staged_at`, time to live and scope are kept, and its `summary` and
+        `payload` rewritten with the version moved up by one — only when they
+        changed, compared as values. Superseded: kept. Anything else — acted
+        on, or staged past its window — is left as it is; `DROPPED` when the
+        new one differed from a row the PM acted on.
+        """
+        rule = self._rule_for(proposal.type, rule)
+        row = self._db.execute(
+            "SELECT body FROM proposals WHERE proposal_id = ?", (proposal.proposal_id,)
+        ).fetchone()
+        if row is None:
+            self._insert_proposal(proposal)
+            return RestageOutcome.STAGED
+        try:
+            current = _load_proposal(row[0])
+        except (ValueError, KeyError, TypeError):
+            return RestageOutcome.LEFT
+        if current.state is ProposalState.SUPERSEDED:
+            return RestageOutcome.KEPT_SUPERSEDED
+        same = _as_values(current.summary, current.payload) == _as_values(
+            proposal.summary, proposal.payload
+        )
+        if current.state is not ProposalState.STAGED:
+            acted = current.state in (ProposalState.APPROVED, ProposalState.REJECTED)
+            return RestageOutcome.DROPPED if acted and not same else RestageOutcome.LEFT
+        if current.overdue(rule, at):
+            return RestageOutcome.LEFT
+        if same:
+            return RestageOutcome.UNCHANGED
+        moved = replace(
+            current,
+            summary=proposal.summary,
+            payload=proposal.payload,
+            version=current.version + 1,
+            scope=current.scope if current.scope is not None else proposal.scope,
+        )
+        if self._swap(current, moved) != 1:
+            return RestageOutcome.LEFT
+        return RestageOutcome.STAGED
+
+    def restage_proposal(
+        self, proposal: Proposal, *, rule: TypeRule | None = None
+    ) -> RestageOutcome:
+        """`_restage` as its own step, for `11b`'s re-ingestion (13a)."""
+        at = self._at()
+        # The read and its write in one transaction, as the upsert it replaced was.
+        with self._proposal_step():
+            return self._restage(proposal, rule=rule, at=at)
+
+    def stage_unless_acted(self, proposal: Proposal) -> bool:
+        """Stage `proposal` unless one under its id has left `staged` (story 11b).
+
+        For re-ingestion. A row already past `staged`, or staged past its
+        window, is left exactly as it is; a staged one is re-staged by
+        `_restage`'s rule (13a). `True` when it was staged, or was already
+        staged with the same content.
+        """
+        return self.restage_proposal(proposal) in (
+            RestageOutcome.STAGED,
+            RestageOutcome.UNCHANGED,
+        )
 
     def stage_proposal(self, proposal: Proposal) -> None:
-        self._db.execute(
-            "INSERT INTO proposals (proposal_id, body, version, state) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(proposal_id) DO UPDATE SET body = excluded.body, "
-            "version = excluded.version, state = excluded.state",
-            (proposal.proposal_id, _dump_proposal(proposal), proposal.version, proposal.state.value),
-        )
-        self._db.commit()
+        """Insert `proposal`, or replace one under its id that is still `staged`.
+
+        A row that left `staged` is never overwritten: that would move it past
+        the change table (13a). `TerminalState` names it, and nothing is written.
+        """
+        with self._proposal_step():
+            written = self._db.execute(
+                "INSERT INTO proposals (proposal_id, body, version, state, type, scope, "
+                "meeting_id, staged_at, ttl_seconds, replaces, changed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(proposal_id) DO UPDATE SET body = excluded.body, "
+                "version = excluded.version, state = excluded.state, type = excluded.type, "
+                "scope = excluded.scope, meeting_id = excluded.meeting_id, "
+                "staged_at = excluded.staged_at, ttl_seconds = excluded.ttl_seconds, "
+                "replaces = excluded.replaces, changed_at = excluded.changed_at "
+                "WHERE proposals.state = ?",
+                (
+                    proposal.proposal_id,
+                    _dump_proposal(proposal),
+                    proposal.version,
+                    proposal.state.value,
+                    *_columns_of(proposal),
+                    ProposalState.STAGED.value,
+                ),
+            ).rowcount
+            if written != 1:
+                raise TerminalState(
+                    f"{proposal.proposal_id} has left `staged`, so it is not overwritten; "
+                    f"nothing was written."
+                )
 
     def load_proposal(self, proposal_id: str) -> Proposal:
         row = self._db.execute(
@@ -5713,12 +6433,286 @@ class StorageService:
             )
         return _load_proposal(row[0])
 
+    @contextlib.contextmanager
+    def _proposal_step(self) -> Iterator[sqlite3.Connection]:
+        """One proposal change: its read and its conditional writes in one transaction.
+
+        On the daemon's writer the first statement opens the claimed step's
+        `BEGIN IMMEDIATE`; on a command's own connection it is opened here, so
+        two processes changing one proposal are serialised by SQLite (AD-5,
+        AD-37). A raise rolls back everything the step wrote.
+        """
+        db = self._db
+        try:
+            if not getattr(db, "daemon_mode", False):
+                self._check_version(db)
+                if not db.in_transaction:
+                    db.execute("BEGIN IMMEDIATE")
+            yield db
+        except BaseException:
+            db.rollback()
+            raise
+        db.commit()
+
+    def _current(self, proposal_id: str) -> Proposal:
+        row = self._db.execute(
+            "SELECT body FROM proposals WHERE proposal_id = ?", (proposal_id,)
+        ).fetchone()
+        if row is None:
+            raise ProposalNotFound(f"no proposal is staged under {proposal_id!r}.")
+        try:
+            return _load_proposal(row[0])
+        except (ValueError, KeyError, TypeError) as unreadable:
+            raise ProposalUnreadable(
+                f"the stored body of {proposal_id} could not be read, so it is not changed."
+            ) from unreadable
+
+    def change_proposal(
+        self,
+        proposal_id: str,
+        to: ProposalState,
+        *,
+        expected_version: int,
+        rule: TypeRule | None = None,
+        via: str | None = None,
+    ) -> Proposal:
+        """One change, as one conditional update in one claimed step (AD-5, AD-37, 13a).
+
+        Refused, in order: `ProposalNotFound`, `TerminalState` (a waiting
+        proposal past its window as `PastWindow`), `VersionConflict`,
+        `IllegalTransition`. The window is checked against the row read in this
+        step, at this step's instant.
+        """
+        at = self._at()
+        with self._proposal_step():
+            current = self._current(proposal_id)
+            moved = current.transition(
+                to,
+                expected_version=expected_version,
+                rule=self._rule_for(current.type, rule),
+                at=at,
+                via=via,
+            )
+            if self._swap(current, moved) != 1:
+                raise VersionConflict(
+                    f"{proposal_id} changed while this change was being written — "
+                    f"reload and re-evaluate (AD-37)."
+                )
+        return moved
+
     def transition_proposal(self, proposal_id: str, to: ProposalState, *, expected_version: int) -> Proposal:
         """CAS through the single writer, so two surfaces cannot both win (AD-37)."""
-        current = self.load_proposal(proposal_id)
-        moved = current.transition(to, expected_version=expected_version)
-        self.stage_proposal(moved)
-        return moved
+        return self.change_proposal(proposal_id, to, expected_version=expected_version)
+
+    def edit_proposal(
+        self,
+        proposal_id: str,
+        *,
+        expected_version: int,
+        payload: dict[str, object],
+        summary: str,
+        approve: bool,
+        rule: TypeRule | None,
+        via: str,
+    ) -> ProposalEdited:
+        """An edit, in one claimed step: supersede and insert, or re-stage an expired one (13a).
+
+        A waiting or approved proposal moves to `superseded` by version, and
+        `<root>_e<n>` is inserted holding `payload`, in the old one's state
+        (`approved` with `approve`), with a new `staged_at` and `replaces`
+        naming it. An expired one — moved, or staged past its window — is not
+        changed: the replacement is inserted `staged` only if no live proposal
+        already replaces it, by one statement (`ReplacementExists` otherwise).
+        A rejected, superseded, executing or executed one is refused.
+        """
+        at = self._at()
+        with self._proposal_step():
+            current = self._current(proposal_id)
+            rule = self._rule_for(current.type, rule)
+            expired = current.state is ProposalState.EXPIRED or current.overdue(rule, at)
+            if current.state.is_terminal and not expired:
+                raise TerminalState(
+                    f"{proposal_id} is {current.state.value}, so it is not edited."
+                )
+            if current.state in (ProposalState.EXECUTING, ProposalState.EXECUTED):
+                raise IllegalTransition(
+                    f"{proposal_id} is {current.state.value}, so it is not edited."
+                )
+            if expected_version != current.version:
+                raise VersionConflict(
+                    f"{proposal_id} is at v{current.version}, caller expected "
+                    f"v{expected_version} — reload and re-evaluate (AD-37)."
+                )
+            # The change table, enforced here and not only by the caller: an
+            # unknown type's only change is `staged → rejected`, so no
+            # replacement is made for one.
+            if rule is not None and not rule.known:
+                raise IllegalTransition(
+                    f"{proposal_id}'s type {current.type!r} is not registered: its only "
+                    f"change is staged → rejected, so it is not edited (AD-13)."
+                )
+            if not expired and not allowed(current.state, ProposalState.SUPERSEDED, rule):
+                raise IllegalTransition(
+                    f"{proposal_id} cannot move {current.state.value} → superseded (AD-13)."
+                )
+            root = root_of(proposal_id)
+            new_id = replacement_id(root, self._replacements_made(root))
+            if expired:
+                state = ProposalState.APPROVED if approve else ProposalState.STAGED
+            else:
+                state = ProposalState.APPROVED if approve else current.state
+            replacement = Proposal(
+                proposal_id=new_id,
+                type=current.type,
+                summary=summary,
+                payload=payload,
+                target=current.target,
+                cites=current.cites,
+                created_at=current.created_at,
+                state=state,
+                version=1,
+                ttl=current.ttl,
+                staged_at=at,
+                scope=current.scope,
+                replaces=current.proposal_id,
+                changed_at=at,
+                changed_via=via,
+            )
+            if expired:
+                inserted = self._db.execute(
+                    "INSERT INTO proposals (proposal_id, body, version, state, type, scope, "
+                    "meeting_id, staged_at, ttl_seconds, replaces, changed_at) "
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+                    f"{_LIVE_IN_CHAIN})",
+                    (
+                        replacement.proposal_id,
+                        _dump_proposal(replacement),
+                        replacement.version,
+                        replacement.state.value,
+                        *_columns_of(replacement),
+                        current.proposal_id,
+                        ProposalState.STAGED.value,
+                        ProposalState.APPROVED.value,
+                    ),
+                ).rowcount
+                if inserted != 1:
+                    held = self._db.execute(
+                        _LIVE_IN_CHAIN + " ORDER BY proposal_id",
+                        (current.proposal_id, ProposalState.STAGED.value, ProposalState.APPROVED.value),
+                    ).fetchone()
+                    raise ReplacementExists(
+                        f"{proposal_id} expired and was already staged again as "
+                        f"{held[0] if held else 'another proposal'}; nothing was written.",
+                        replacement=None if held is None else str(held[0]),
+                    )
+                return ProposalEdited(old=current, new=replacement)
+            moved = current.transition(
+                ProposalState.SUPERSEDED,
+                expected_version=expected_version,
+                rule=rule,
+                at=at,
+                via=via,
+            )
+            if self._swap(current, moved) != 1:
+                raise VersionConflict(
+                    f"{proposal_id} changed while this edit was being written — reload "
+                    f"and re-evaluate (AD-37)."
+                )
+            self._insert_proposal(replacement)
+        return ProposalEdited(old=moved, new=replacement)
+
+    def _replacements_made(self, root: str) -> int:
+        """The highest `n` among `<root>_e<n>`, 0 for none."""
+        head = f"{root}_e"
+        highest = 0
+        for (found,) in self._db.execute(
+            "SELECT proposal_id FROM proposals WHERE substr(proposal_id, 1, ?) = ?",
+            (len(head), head),
+        ).fetchall():
+            number = replacement_number(str(found))
+            if number is not None and root_of(str(found)) == root:
+                highest = max(highest, number)
+        return highest
+
+    def expire_overdue(
+        self, candidates: Sequence[tuple[str, int]], *, rules: Mapping[str, TypeRule]
+    ) -> SweepStep:
+        """The sweep's claimed step: each waiting candidate past its window moved to `expired` (13a).
+
+        By version, with `changed_at` the proposal's own expiry instant and
+        `changed_via` `sweep`. A row that changed since the sweep read it is
+        skipped for the next pass; a body that cannot be read is counted and
+        never expired.
+        """
+        at = self._at()
+        expired: list[str] = []
+        skipped = 0
+        unreadable: list[str] = []
+        with self._proposal_step():
+            for proposal_id, version in candidates:
+                try:
+                    current = self._current(proposal_id)
+                except ProposalNotFound:
+                    skipped += 1
+                    continue
+                except ProposalUnreadable:
+                    unreadable.append(proposal_id)
+                    continue
+                rule = rules.get(current.type)
+                if rule is None or current.version != version or not current.overdue(rule, at):
+                    skipped += 1
+                    continue
+                try:
+                    moved = current.transition(
+                        ProposalState.EXPIRED,
+                        expected_version=version,
+                        rule=rule,
+                        at=current.expires_under(rule),
+                        via="sweep",
+                    )
+                except (TerminalState, VersionConflict, IllegalTransition):
+                    skipped += 1
+                    continue
+                if self._swap(current, moved) == 1:
+                    expired.append(proposal_id)
+                else:
+                    skipped += 1
+        return SweepStep(tuple(expired), skipped, len(unreadable), tuple(unreadable))
+
+    def overdue_proposals(
+        self, *, rules: Mapping[str, TypeRule], limit: int | None = None
+    ) -> OverdueScan:
+        """The waiting proposals past their window now, on a read-only connection (13a).
+
+        One indexed read: `staged` rows (and `approved` ones of a type with an
+        executor) staged before the shortest registered window, filtered by
+        each row's own window. Also the earliest expiry still to come, and how
+        many waiting rows have no readable window.
+        """
+        return overdue_at(self._store, rules=rules, at=self._at(), limit=limit)
+
+    def proposals_of_meetings(self, meeting_ids: Sequence[str]) -> MeetingProposals:
+        """Every proposal citing one of `meeting_ids`, read-only, by the meeting index (13a)."""
+        return meeting_proposals_at(self._store, meeting_ids)
+
+    @contextlib.contextmanager
+    def proposal_write_wait(self, seconds: float) -> Iterator[None]:
+        """This connection's busy wait set to `seconds` for a proposal change at a terminal (13a).
+
+        `approve`, `reject` and `edit` answer within their 2-second bound, so
+        they wait 1 second for another writer rather than the standard
+        library's 5. The daemon's own connection keeps its 100 ms.
+        """
+        db = self._db
+        if getattr(db, "daemon_mode", False):
+            yield
+            return
+        before = int(db.execute("PRAGMA busy_timeout").fetchone()[0])
+        db.execute(f"PRAGMA busy_timeout = {int(seconds * 1000)}")
+        try:
+            yield
+        finally:
+            db.execute(f"PRAGMA busy_timeout = {before}")
 
     def executed_mutations(self) -> dict[str, tuple[str, str]]:
         """Read by normalization to mark harvested events as pm-ai's own (AD-36).

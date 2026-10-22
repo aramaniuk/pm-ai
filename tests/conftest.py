@@ -183,7 +183,10 @@ _require_runtime_extra()
 # `test_domain_invariants.py` — the five local-only classes, the tiering, the
 # budget breach and the two AD-31 checks, rewritten to the real port — run
 # instead of skipping.
-EXPECTED_SKIPS = 11
+# 11 → 8, story 13a: `pm_ai.core.proposals` exists, so the three proposal items
+# in `test_domain_invariants.py` — types never define expiry, two surfaces
+# approving, an expired proposal never executing — run instead of skipping.
+EXPECTED_SKIPS = 8
 
 _VERDICT = pytest.StashKey[str]()
 

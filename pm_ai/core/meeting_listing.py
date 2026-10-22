@@ -17,6 +17,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -32,6 +33,7 @@ from pm_ai.domain.meeting_listing import (
     RecordReading,
     WaitingKind,
     drop_words,
+    review_words,
     summarize_words,
 )
 from pm_ai.domain.meeting_summaries import (
@@ -200,6 +202,7 @@ def decide(
     local_model: bool = False,
     daemon_reachable: bool = True,
     now: datetime,
+    waiting: int = 0,
 ) -> ListedMeeting:
     """One meeting's states and next step, from what was read (story 11f).
 
@@ -236,6 +239,9 @@ def decide(
         store_readable=store_readable,
         daemon_reachable=daemon_reachable,
     )
+    if waiting:
+        # Story 13a: the meeting's proposals are waiting for review.
+        step = replace(step, review=review_words(scope, meeting_id))
     if not readable or meeting is None:
         return ListedMeeting(
             scope=scope,
@@ -508,7 +514,17 @@ def summary_words(listed: ListedMeeting) -> str:
 
 
 def next_words(listed: ListedMeeting) -> str:
-    """The next step, or why there is none, as the listing and the drop say it."""
+    """The next step, or why there is none, as the listing and the drop say it.
+
+    Story 13a: with proposals waiting, the review command follows.
+    """
+    said = _next_step_words(listed)
+    if listed.next.review is not None:
+        said += f"; to review its proposals: pm-ai {' '.join(listed.next.review)}"
+    return said
+
+
+def _next_step_words(listed: ListedMeeting) -> str:
     step = listed.next
     first = (
         "once a daemon runs (start one with `pm-ai daemon run` first)"
@@ -631,6 +647,7 @@ def next_json(listed: ListedMeeting) -> dict[str, object]:
         "resummarize": None if step.resummarize is None else list(step.resummarize),
         "drop": None if step.drop is None else {"words": list(step.drop), "needs": ["file"]},
         "why": step.why,
+        "review": None if step.review is None else list(step.review),
     }
 
 
