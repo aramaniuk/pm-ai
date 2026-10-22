@@ -1620,7 +1620,8 @@ def test_a_requested_summarys_call_is_handed_to_the_model_pool_ahead(tmp_path):
     offer_summaries(daemon)
     automatic = list(handed)
     handed.clear()
-    request_summary(daemon, scope=PROJECT, meeting_id="mtg_a", job="job_req")
+    # Story 11f: the harvest summarised it, so the request replaces it with `--again`.
+    request_summary(daemon, scope=PROJECT, meeting_id="mtg_a", job="job_req", again=True)
 
     assert automatic and set(automatic) == {"queued"}
     assert handed and set(handed) == {"ahead"}

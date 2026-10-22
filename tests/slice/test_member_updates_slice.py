@@ -736,7 +736,12 @@ def test_completion_offers_members_meetings_and_links_awaiting():
         Readers(
             projects=lambda: ("alpha",),
             members=lambda project: ("ivan.p", str(IVAN.handle)) if project == "alpha" else (),
-            meetings=lambda project: ("mtg_a",) if project == "alpha" else (),
+            # Story 11f: by scope, as (id, start, title).
+            meetings=lambda scope: (
+                (("mtg_a", datetime(2026, 10, 1, 9, tzinfo=timezone.utc), "Planning"),)
+                if scope == "project:alpha"
+                else ()
+            ),
             updates=lambda project: ("upd_0123456789ab",) if project == "alpha" else (),
         )
     )
@@ -753,4 +758,8 @@ def test_completion_offers_members_meetings_and_links_awaiting():
     assert {"--confirm", "--reject"} <= set(offered("member link upd_0123456789ab --"))
     assert "project:alpha" in offered("member unmatched --scope ")
     assert source_of(("member", "name"), "label") is None
-    assert source_of(("transcript", "drop"), "meeting") is None
+    # Story 11f: drop's `--meeting` offers the scope's meetings; no longer free text.
+    from pm_ai.surfaces.cli.completion import DROPPABLE, MEETING_IDS
+
+    assert source_of(("transcript", "drop"), "meeting") == DROPPABLE
+    assert source_of(("member", "name"), "meeting") == MEETING_IDS

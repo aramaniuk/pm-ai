@@ -101,11 +101,11 @@ def _claude(daemon, frontier, *, key: str | None = KEY):
     return frontier
 
 
-def _ask(daemon, meeting, *, by="claude"):
+def _ask(daemon, meeting, *, by="claude", again=False):
     ended: list = []
     request_summary(
         daemon, scope=meeting.scope, meeting_id=meeting.meeting_id, job="job_t", by=by,
-        on_done=ended.append,
+        on_done=ended.append, again=again,
     )
     (outcome,) = ended
     return outcome
@@ -373,7 +373,8 @@ def test_local_over_a_frontier_summary_replaces_it(tmp_path):
     _claude(daemon, FakeFrontier(_answer(summary="Claude's summary.")))
     meeting = _ingested(daemon, _meeting())
     _ask(daemon, meeting)
-    _ask(daemon, meeting, by="local")
+    # Story 11f: replacing a summary held is said with `--again`.
+    _ask(daemon, meeting, by="local", again=True)
     record = daemon.meetings.get("mtg_a", scope=PROJECT)
     assert record.summary.made_by is SummaryMaker.LOCAL
     assert record.summary.answer.summary == "The local model's summary."

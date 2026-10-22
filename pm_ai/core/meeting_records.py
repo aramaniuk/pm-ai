@@ -130,7 +130,7 @@ from pm_ai.domain.meetings import (
     is_candidate,
     is_same_day_candidate,
 )
-from pm_ai.domain.transcripts import CaptureFormat
+from pm_ai.domain.transcripts import CaptureFormat, PartState, TranscriptPart
 from pm_ai.ports import StoragePort
 
 __all__ = [
@@ -150,7 +150,10 @@ __all__ = [
     "capture_stem",
     "check_participant",
     "check_title",
+    "capture_kept",
     "has_capture",
+    "is_record_name",
+    "record_digest_suffix",
     "is_graph_capture",
     "parse_attendees",
     "parse_record",
@@ -515,6 +518,40 @@ def is_graph_capture(name: str, stem: str) -> bool:
         return False
     # Only names `capture_name` writes: part 1 is never numbered.
     return 2 <= int(number) <= MAX_PART
+
+
+def capture_kept(stem: str, parts: Iterable[TranscriptPart], names: Iterable[str]) -> bool:
+    """Whether the meeting with `stem` keeps its whole transcript on disk (story 11f).
+
+    `meeting_utterances`' rule, read from the capture folder's names alone:
+    with stored parts, every stored part's capture is present; with none, its
+    Graph capture or its dropped capture is present. Nothing is opened.
+    """
+    present = set(names)
+    stored = [part.part for part in parts if part.state is PartState.STORED]
+    if stored:
+        return all(_stem_capture(stem, CaptureFormat.GRAPH, part) in present for part in stored)
+    return any(
+        _stem_capture(stem, form, 1) in present
+        for form in (CaptureFormat.GRAPH, CaptureFormat.MANUAL_VTT, CaptureFormat.MANUAL_TXT)
+    )
+
+
+def _stem_capture(stem: str, source: CaptureFormat, part: int) -> str:
+    """`capture_name`'s spelling, from the stem the record's file name gives."""
+    if part == 1:
+        return f"{stem}-{source.value}"
+    return f"{stem}-{_GRAPH_PART_HEAD}-{part}.{_GRAPH_PART_EXT}"
+
+
+def is_record_name(name: str) -> bool:
+    """Whether a `meetings/` member is named as this module writes a record (story 11f)."""
+    return bool(_RECORD_NAME.match(name))
+
+
+def record_digest_suffix(meeting_id: str) -> str:
+    """The tail of the record file name an id owns: `_members_for`'s match (story 11f)."""
+    return _digest_suffix(meeting_id)
 
 
 def has_capture(names: Iterable[str], stem: str) -> bool:

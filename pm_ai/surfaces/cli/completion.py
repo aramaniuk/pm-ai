@@ -27,13 +27,19 @@ import os
 import shlex
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from pm_ai.core.goal_register import DOMAIN_SPELLINGS, HORIZON_SPELLINGS
+from pm_ai.core.meeting_listing import shown_title, title_words
+from pm_ai.domain.meeting_listing import LIST_STATES
 from pm_ai.surfaces.cli.logs import LEVELS as LOG_LEVELS
 from pm_ai.surfaces.cli.dispatch import (
     GOAL_OPTIONS,
+    LIMIT_OPTION,
     MEETING_ARGUMENT,
+    ON_OPTION,
     SCOPE_ARGUMENT,
+    STATE_OPTION,
     SUMMARY_MAKERS,
     SUPPORTED_SYSTEMS,
     TABLE,
@@ -76,6 +82,10 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
         (("transcript", "drop"), "start"),
         (("transcript", "drop"), "attendees"),
         (("transcript", "drop"), "duration"),
+        # Story 11f: a date, a count and a title's words: nothing on file to offer.
+        (("transcript", "drop"), ON_OPTION),
+        (("transcript", "summarize"), ON_OPTION),
+        (("transcript", "list"), LIMIT_OPTION),
         # Story 7e: a speaker label as said in a meeting, typed by the PM.
         (("member", "name"), "label"),
     }
@@ -85,9 +95,9 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
 FREE_TEXT_NAMES: frozenset[str] = frozenset({"alias", _TITLE, MEETING_ARGUMENT})
 """Names that are free text wherever a command declares them.
 
-`--meeting` is a meeting id, not completed for the transcript commands; `member
-name` (story 7e) offers the enrolled projects' meeting ids through
-`_BY_COMMAND`, which is consulted first.
+`--meeting` is free text unless `_BY_COMMAND`, consulted first, gives it a
+source: `member name` (story 7e), and `transcript summarize` and `transcript
+drop` (story 11f) offer the meetings of the line's scope.
 """
 
 SCOPES = "scopes"
@@ -101,7 +111,13 @@ SUMMARY_MAKER_NAMES = "summary makers"
 PATHS = "paths"
 MEMBERS = "project members"
 MEETING_IDS = "meeting ids"
+SUMMARIZABLE = "summarizable meetings"
+DROPPABLE = "started meetings"
+LIST_STATE_NAMES = "list states"
 UPDATE_IDS = "update ids"
+
+MEETING_CANDIDATES = 100
+"""At most this many meetings are offered for one Tab, after filtering (11f)."""
 
 _BY_NAME: Mapping[str, str] = {
     SCOPE_ARGUMENT: SCOPES,
@@ -127,6 +143,12 @@ _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("member", "name"), "member"): MEMBERS,
     (("member", "name"), "meeting"): MEETING_IDS,
     (("member", "link"), "update"): UPDATE_IDS,
+    # Story 11f: a meeting chosen by its start and title, its id inserted —
+    # for `summarize` only those ingested and kept, for `drop` every recorded
+    # meeting that has started. And `transcript list --state`'s five words.
+    (("transcript", "summarize"), MEETING_ARGUMENT): SUMMARIZABLE,
+    (("transcript", "drop"), MEETING_ARGUMENT): DROPPABLE,
+    (("transcript", "list"), STATE_OPTION): LIST_STATE_NAMES,
 }
 """Names whose value depends on the command declaring them."""
 
@@ -159,6 +181,15 @@ def _no_project_values(project: str) -> Sequence[str]:
     return ()
 
 
+MeetingChoice = tuple[str, datetime, str] | tuple[str, datetime, str, bool]
+"""A meeting completion may offer: its id, its start (in the display zone), its
+title, and optionally whether its record holds a summary (`summarize` says so)."""
+
+
+def _no_meetings(scope: str) -> Sequence[MeetingChoice]:
+    return ()
+
+
 @dataclass(frozen=True, slots=True)
 class Readers:
     """The local files completion reads, each as a call the composition root built.
@@ -178,7 +209,15 @@ class Readers:
     graph_instances: Callable[[], Sequence[str]] = _no_values
     goal_ids: Callable[[], Sequence[str]] = _no_values
     members: Callable[[str], Sequence[str]] = _no_project_values
-    meetings: Callable[[str], Sequence[str]] = _no_project_values
+    meetings: Callable[[str], Sequence[MeetingChoice]] = _no_meetings
+    """Since story 11f, by scope (`personal` or `project:<id>`): every recorded
+    meeting that has started, most recent first, as (id, start, title)."""
+    droppable: Callable[[str], Sequence[MeetingChoice]] = _no_meetings
+    """Story 11f: `meetings`, only those that have started — `drop --meeting`'s."""
+    summarizable: Callable[[str], Sequence[MeetingChoice]] = _no_meetings
+    """Story 11f: the scope's meetings whose transcript is ingested and kept —
+    the listing's summarize check — newest first. `operational.db` is read
+    read-only, the exception 4u's readers grant to `7e`."""
     updates: Callable[[str], Sequence[str]] = _no_project_values
 
 
@@ -276,6 +315,8 @@ class Candidate:
     text: str
     start: int
     display: str
+    meta: str = ""
+    """Shown beside the candidate, never inserted: a meeting's start and title (11f)."""
 
 
 def _quoted(value: str, quote: str | None) -> str:
@@ -309,6 +350,33 @@ class _Cached:
         if self.values is None:
             try:
                 self.values = tuple(value for value in self.read() if isinstance(value, str))
+            except Exception:  # noqa: BLE001 — a reader that fails offers nothing
+                self.values = ()
+        return self.values
+
+    def forget(self) -> None:
+        self.values = None
+
+
+@dataclass(slots=True)
+class _CachedMeetings:
+    """`_Cached` for meetings: (id, start, title) triples rather than strings (11f)."""
+
+    read: Callable[[], Sequence[MeetingChoice]]
+    values: tuple[tuple[str, datetime, str, bool], ...] | None = None
+
+    def get(self) -> tuple[tuple[str, datetime, str, bool], ...]:
+        if self.values is None:
+            try:
+                self.values = tuple(
+                    (value[0], value[1], value[2], len(value) == 4 and value[3] is True)
+                    for value in self.read()
+                    if isinstance(value, tuple)
+                    and len(value) in (3, 4)
+                    and isinstance(value[0], str)
+                    and isinstance(value[1], datetime)
+                    and isinstance(value[2], str)
+                )
             except Exception:  # noqa: BLE001 — a reader that fails offers nothing
                 self.values = ()
         return self.values
@@ -388,12 +456,14 @@ class Completion:
     _graph: _Cached = field(init=False)
     _goals: _Cached = field(init=False)
     _scoped: dict[tuple[str, str], _Cached] = field(init=False)
+    _meetings: dict[tuple[str, str], _CachedMeetings] = field(init=False)
 
     def __post_init__(self) -> None:
         self._projects = _Cached(self.readers.projects)
         self._graph = _Cached(self.readers.graph_instances)
         self._goals = _Cached(self.readers.goal_ids)
         self._scoped = {}
+        self._meetings = {}
 
     def forget(self) -> None:
         """Read every file again at the next Tab that needs it (a command ran)."""
@@ -404,6 +474,8 @@ class Completion:
             *self._scoped.values(),
         ):
             cached.forget()
+        for meetings in self._meetings.values():
+            meetings.forget()
 
     # ── Tab ──────────────────────────────────────────────────────────────
 
@@ -431,8 +503,15 @@ class Completion:
         reading = _reading(words)
         if reading is None:
             return []
-        project = _named_project(words)
+        scope = _named_scope(words)
+        project = scope.removeprefix("project:") if scope and scope.startswith("project:") else None
         entry = reading.entry
+
+        def meetings_for(name: str, typed: str, prefix: str = "") -> list[Candidate] | None:
+            chosen = self._meeting_choices(reading.command, name, scope)
+            if chosen is None:
+                return None
+            return _meeting_candidates(chosen, typed, split.start, split.quote, prefix)
         positional = (*entry.takes, *entry.optional)
         if reading.ended:
             # After a bare `--` a word starting with `--` is a positional.
@@ -443,12 +522,18 @@ class Completion:
         if reading.awaiting is not None and not current.startswith("--"):
             if reading.awaiting not in entry.options:
                 return []
+            met = meetings_for(reading.awaiting, current)
+            if met is not None:
+                return met
             return offered(self._values(reading.command, reading.awaiting, current, project))
         if current.startswith("--"):
             name, assigned, partial = current[2:].partition("=")
             if assigned:
                 if name not in entry.options:
                     return []
+                met = meetings_for(name, partial, prefix=f"--{name}=")
+                if met is not None:
+                    return met
                 return offered(
                     self._values(reading.command, name, partial, project), prefix=f"--{name}="
                 )
@@ -487,11 +572,12 @@ class Completion:
             return LOG_LEVELS
         if source == SUMMARY_MAKER_NAMES:
             return SUMMARY_MAKERS
+        if source == LIST_STATE_NAMES:
+            return LIST_STATES
         if source == PATHS:
             return _paths(partial)
         readers = {
             MEMBERS: self.readers.members,
-            MEETING_IDS: self.readers.meetings,
             UPDATE_IDS: self.readers.updates,
         }
         if source in readers:
@@ -503,6 +589,33 @@ class Completion:
                 self._scoped[key] = _Cached(lambda: read(project))
             return self._scoped[key].get()
         return ()
+
+    def _meeting_choices(
+        self, command: tuple[str, ...], name: str, scope: str | None
+    ) -> tuple[tuple[str, datetime, str, bool], ...] | None:
+        """The meetings a meeting-valued name offers in `scope`; `None` when it is not one.
+
+        Keyed by the `--scope` already on the line: `personal` or a project.
+        `people:`, or no `--scope`, offers nothing (story 11f).
+        """
+        try:
+            source = source_of(command, name)
+        except LookupError:
+            return None
+        readers = {
+            MEETING_IDS: self.readers.meetings,
+            DROPPABLE: self.readers.droppable,
+            SUMMARIZABLE: self.readers.summarizable,
+        }
+        if source not in readers:
+            return None
+        if scope is None or not (scope == "personal" or scope.startswith("project:")):
+            return ()
+        key = (source, scope)
+        if key not in self._meetings:
+            read = readers[source]
+            self._meetings[key] = _CachedMeetings(lambda: read(scope))
+        return self._meetings[key].get()
 
     # ── The bottom line ──────────────────────────────────────────────────
 
@@ -535,17 +648,58 @@ class Completion:
         return f"{first} {{{', '.join(entry.leaves)}}}  —  {entry.summary}"
 
 
-def _named_project(words: Sequence[str]) -> str | None:
-    """The project a finished `--scope project:<id>` word on the line names, if any."""
+def _named_scope(words: Sequence[str]) -> str | None:
+    """The scope a finished `--scope` word on the line names, if any (story 11f).
+
+    `personal`, or `project:<id>` with an id; anything else is `None`.
+    """
     named: str | None = None
     for index, word in enumerate(words):
         if word == f"--{SCOPE_ARGUMENT}" and index + 1 < len(words):
             named = words[index + 1]
         elif word.startswith(f"--{SCOPE_ARGUMENT}="):
             named = word.split("=", 1)[1]
-    if named is None or not named.startswith("project:"):
+    if named == "personal":
+        return named
+    if named is None or not named.startswith("project:") or named == "project:":
         return None
-    return named.removeprefix("project:") or None
+    return named
+
+
+def _meeting_candidates(
+    choices: Sequence[tuple[str, datetime, str, bool]],
+    typed: str,
+    start: int,
+    quote: str | None,
+    prefix: str = "",
+) -> list[Candidate]:
+    """The meetings whose id starts with `typed`, or one of whose title's words does.
+
+    Folded as `--title` folds. Filtered first, then capped at
+    `MEETING_CANDIDATES`; each inserts its id and shows its start and title.
+    """
+    folded = title_words(typed)
+    found: list[Candidate] = []
+    for meeting_id, when, title, held in choices:
+        if typed and not meeting_id.startswith(typed):
+            words = title_words(title)
+            if not folded or not all(
+                any(word.startswith(part) for word in words) for part in folded
+            ):
+                continue
+        zone = when.tzname() or ""
+        found.append(
+            Candidate(
+                _quoted(prefix + meeting_id, quote),
+                start,
+                meeting_id,
+                meta=f"{when.strftime('%Y-%m-%d %H:%M')} {zone}  {shown_title(title)}"
+                + ("  (summary held: needs --again)" if held else ""),
+            )
+        )
+        if len(found) >= MEETING_CANDIDATES:
+            break
+    return found
 
 
 def _paths(partial: str) -> list[str]:

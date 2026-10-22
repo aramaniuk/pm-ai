@@ -631,11 +631,20 @@ def test_a_dry_run_with_the_length_unknown(warsaw, model, tmp_path, monkeypatch,
     assert found["duration_minutes"] == {"value": None, "source": "unknown", "estimated": False}
 
 
-def test_json_alone_is_a_usage_error(warsaw, model, tmp_path, monkeypatch, capsys):
+def test_json_on_a_real_drop_prints_one_object(warsaw, model, tmp_path, monkeypatch, capsys):
+    """Story 11f (amends 11e): `--json` without `--dry-run` drops, and prints one object."""
     before = _held(warsaw)
-    assert _drop(monkeypatch, _docx(tmp_path), "--json") == EXIT_USAGE
-    assert "--dry-run" in capsys.readouterr().err
-    assert _held(warsaw) == before
+    found = json.loads(_ok(capsys, _drop(monkeypatch, _docx(tmp_path), "--json")))
+    assert _held(warsaw) != before
+    assert found["format"] == 1
+    assert set(found) == {
+        "format", "title", "start", "duration_minutes", "participants", "outcome",
+        "meeting_id", "staged", "left", "summary", "next", "notices",
+    }
+    assert found["outcome"]["kind"] == "new"
+    assert found["meeting_id"].startswith("mtg_")
+    assert found["summary"]["state"] == "waiting"
+    assert found["next"]["summarize"][:2] == ["transcript", "summarize"]
 
 
 def test_header_lines_are_never_utterances(warsaw, model, tmp_path, monkeypatch, capsys):

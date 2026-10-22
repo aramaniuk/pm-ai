@@ -77,16 +77,21 @@ def test_options_are_offered_and_one_already_given_is_not():
     answers = ["--title", "--start", "--attendees", "--duration"]
     # Story 11e: `--dry-run` and `--json` are flags of `drop`, offered from the table.
     flags = ["--dry-run", "--json"]
-    assert _offered("transcript drop x.vtt --") == ["--scope", "--meeting", *answers, *flags]
+    # Story 11f: `--on` chooses one existing meeting of a day.
+    assert _offered("transcript drop x.vtt --") == [
+        "--scope", "--meeting", *answers, "--on", *flags
+    ]
     assert _offered("transcript drop x.vtt --scope personal --") == [
         "--meeting",
         *answers,
+        "--on",
         *flags,
     ]
     assert _offered("transcript drop x.vtt --dry-run --") == [
         "--scope",
         "--meeting",
         *answers,
+        "--on",
         "--json",
     ]
 
@@ -395,6 +400,11 @@ def test_no_tab_reaches_the_daemon_or_opens_a_store(tmp_path, monkeypatch):
         "member name --scope project:alpha Ваня ",
         "member name --scope project:alpha Ваня ivan.p --meeting ",
         "member link --scope project:alpha ",
+        # Story 11f: a meeting chosen at Tab, read by path and read-only.
+        "transcript summarize --scope personal --meeting ",
+        "transcript summarize --scope personal --meeting week",
+        "transcript drop x.vtt --scope personal --meeting ",
+        "transcript list --state ",
     ):
         completion.complete(line)
         completion.hint(line)

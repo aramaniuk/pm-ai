@@ -48,7 +48,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -63,6 +63,9 @@ from pm_ai.app.concurrency import (
 )
 from pm_ai.app.goals import GoalReader
 from pm_ai.app.members import MemberDesk
+from pm_ai.app.meeting_listing import MeetingLister
+from pm_ai.platform.paths import ScopePaths
+from pm_ai.domain.meeting_summaries import SummaryRefused
 from pm_ai.app.pipelines import (
     CALENDAR_FETCH_BUDGET_SECONDS,
     FetchAbandoned,
@@ -75,6 +78,7 @@ from pm_ai.app.pipelines import (
     record_failed_render,
     render_unrecorded,
     SummaryOutcome,
+    choose_meeting,
     request_summary,
     summary_closing,
 )
@@ -954,7 +958,34 @@ class RequestPath:
             return
         handed = handed_daemon(fresh, hand=self._hand_for(job_id))
 
-        def summarize(*, scope: DataScope, meeting_id: str, by: str) -> Any:
+        def summarize(
+            *,
+            scope: DataScope,
+            meeting_id: str | None,
+            by: str,
+            title: str | None = None,
+            on: date | None = None,
+            again: bool = False,
+        ) -> Any:
+            # Story 11f: `--meeting` wins; otherwise `--title [--on]` chooses
+            # exactly one meeting, through the listing's own reading code.
+            if meeting_id is not None:
+                ignored = [
+                    f"`--{name}`" for name, given in (("title", title), ("on", on))
+                    if given is not None
+                ]
+                chosen = (
+                    f"{' and '.join(ignored)} {'was' if len(ignored) == 1 else 'were'} "
+                    f"not consulted: `--meeting` names the meeting. "
+                    if ignored
+                    else ""
+                )
+            else:
+                if title is None:
+                    raise SummaryRefused("no meeting was named. Nothing was sent.")
+                meeting_id, chosen = choose_meeting(
+                    self._lister(fresh), scope=scope, title=title, on=on
+                )
             requested = request_summary(
                 handed,
                 scope=scope,
@@ -962,6 +993,8 @@ class RequestPath:
                 job=job_id,
                 by=by,
                 on_done=pending.finished,
+                again=again,
+                chosen=chosen,
             )
             pending.started()
             return requested
@@ -1095,12 +1128,28 @@ class RequestPath:
             # `aliases.md` and `8t`'s record read afresh for this line (AD-5);
             # the one append handed over. `member name` is `TERMINAL_BOUND`.
             members=MemberDesk(handed_daemon(fresh, hand=hand)),
+            # `transcript list` (story 11f): the terminal's own reader, by path,
+            # so the prompt prints what the terminal prints with a daemon running.
+            meeting_list=self._lister(fresh),
             unbuilt_connectors=fresh.unbuilt,
             out=out,
             err=err,
             terminal=False,
         )
         return out.getvalue() + err.getvalue(), code
+
+    def _lister(self, fresh: Daemon) -> MeetingLister:
+        """`transcript list`'s reader in the daemon: this daemon answers (story 11f).
+
+        Over the daemon's own resolver, as `listed_after_drop` reads, with the
+        projects `projects.toml` enrols now.
+        """
+        paths = fresh.storage.paths
+        return MeetingLister(
+            reachable=lambda: True,
+            now=fresh.clock,
+            paths=paths if isinstance(paths, ScopePaths) else None,
+        )
 
     def fresh(self) -> Daemon:
         """The daemon as a scheduled job sees it, read again now (AD-5, story 9a).

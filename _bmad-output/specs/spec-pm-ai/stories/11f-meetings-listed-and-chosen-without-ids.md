@@ -2,7 +2,7 @@
 title: 'transcript list, and a meeting chosen without copying its id'
 type: 'feature'
 created: '2026-10-21'
-status: 'draft'
+status: 'done'
 baseline_commit: '82c2edb'
 review_loop_iteration: 1
 context:
@@ -336,19 +336,19 @@ Anchors checked against `origin/main` at `82c2edb` (2026-10-22).
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/` -- `ListedMeeting` and its next step: states, whether a summary is held, kept, the commands as word lists, the reason -- the typed value both callers share
-- [ ] `pm_ai/core/` (a new I/O-free module) -- deciding each meeting's states and next step from rows, capture names, the record and the clock; the words for the text form; the `--title` match; the folding and cutting of titles -- one rule, one wording
-- [ ] `pm_ai/app/` (a new module beside `goals.py`) -- the reads: `projects.toml`, `config.toml`'s zone and `local_model`, records by path found by digest, the three tables in one read-only transaction, capture names, the loopback check; each fault named -- the terminal, the daemon and the drop share it
-- [ ] `pm_ai/surfaces/cli/dispatch.py` -- `transcript list` in `TABLE` (`--scope`, `--state`, `--limit`, `--json`; `composes=False`; target personal); the text and JSON forms; `summarize` gains `--title`, `--on`, `--again`; `drop`'s `--json` without `--dry-run`; `_closing_line` ends with the state and the next step -- the commands
-- [ ] `pm_ai/app/pipelines.py` -- the re-summary guard in `request_summary`; `--title` resolved in the daemon; `TranscriptDropped` carries the `ListedMeeting`, read after the drop commits; the "asks again" sentences through the one command function -- 7b and 7c amended
-- [ ] `pm_ai/core/rendering.py`, `pm_ai/app/entry.py:1713` -- the dashboard's and `doctor`'s summarize commands through the one command function -- no printed command is refused
-- [ ] `pm_ai/app/entry.py`, `pm_ai/app/prompts.py:1071` -- the reader on the `composes=False` path and in `_command`; `("transcript", "list")` in `DAEMON_BOUNDS`; `_meeting_ids` by scope, returning id, start and title -- the terminal, the prompt and completion
-- [ ] `pm_ai/surfaces/cli/completion.py`, `editor.py` -- `MEETING_IDS` for `summarize` and `drop`; `Readers.meetings` takes a scope; a `_Cached` variant; the `--state` source; `--limit`, `--title` and `--on` free text; descriptions; matching by id or title word, filtered then capped -- choosing at the prompt
-- [ ] Tests: `tests/slice/test_transcript_list.py` (every matrix row, the timed rows, reachability of `transcript list`, the two wordings agree); `tests/surfaces/test_cli_subcommands.py:1501` -- `test_json_without_dry_run_is_a_usage_error_naming_dry_run` replaced by a test that a real drop's `--json` prints one object; `:1149` `_Dropped` gains the listed meeting; `:786-799` gains `transcript list`; `tests/surfaces/test_cli_completion.py:373` gains the new `--meeting` lines; `tests/slice/test_member_updates_slice.py:735-756` -- drop's `--meeting` is no longer free text -- the matrix is the contract
-- [ ] `stories/7b-…md`, `stories/7c-…md` -- a dated Change Log line each: a summarize on a meeting holding a summary is refused without `--again` (`11f`) -- earlier frozen blocks amended on the record
-- [ ] `stories/7d-…md` -- a dated Change Log line: the dashboard's command adds `--again` for a held summary (`11f`)
-- [ ] `stories/11e-…md` -- a dated Change Log line: `--json` on a real drop, `format` in the dry run's object, and the closing line's summary state (`11f`)
-- [ ] `ARCHITECTURE-SPINE.md` -- AD-21's edit below, re-derived through the architecture skill
+- [x] `pm_ai/domain/` -- `ListedMeeting` and its next step: states, whether a summary is held, kept, the commands as word lists, the reason -- the typed value both callers share
+- [x] `pm_ai/core/` (a new I/O-free module) -- deciding each meeting's states and next step from rows, capture names, the record and the clock; the words for the text form; the `--title` match; the folding and cutting of titles -- one rule, one wording
+- [x] `pm_ai/app/` (a new module beside `goals.py`) -- the reads: `projects.toml`, `config.toml`'s zone and `local_model`, records by path found by digest, the three tables in one read-only transaction, capture names, the loopback check; each fault named -- the terminal, the daemon and the drop share it
+- [x] `pm_ai/surfaces/cli/dispatch.py` -- `transcript list` in `TABLE` (`--scope`, `--state`, `--limit`, `--json`; `composes=False`; target personal); the text and JSON forms; `summarize` gains `--title`, `--on`, `--again`; `drop`'s `--json` without `--dry-run`; `_closing_line` ends with the state and the next step -- the commands
+- [x] `pm_ai/app/pipelines.py` -- the re-summary guard in `request_summary`; `--title` resolved in the daemon; `TranscriptDropped` carries the `ListedMeeting`, read after the drop commits; the "asks again" sentences through the one command function -- 7b and 7c amended
+- [x] `pm_ai/core/rendering.py`, `pm_ai/app/entry.py:1713` -- the dashboard's and `doctor`'s summarize commands through the one command function -- no printed command is refused
+- [x] `pm_ai/app/entry.py`, `pm_ai/app/prompts.py:1071` -- the reader on the `composes=False` path and in `_command`; `("transcript", "list")` in `DAEMON_BOUNDS`; `_meeting_ids` by scope, returning id, start and title -- the terminal, the prompt and completion
+- [x] `pm_ai/surfaces/cli/completion.py`, `editor.py` -- `MEETING_IDS` for `summarize` and `drop`; `Readers.meetings` takes a scope; a `_Cached` variant; the `--state` source; `--limit`, `--title` and `--on` free text; descriptions; matching by id or title word, filtered then capped -- choosing at the prompt
+- [x] Tests: `tests/slice/test_transcript_list.py` (every matrix row, the timed rows, reachability of `transcript list`, the two wordings agree); `tests/surfaces/test_cli_subcommands.py:1501` -- `test_json_without_dry_run_is_a_usage_error_naming_dry_run` replaced by a test that a real drop's `--json` prints one object; `:1149` `_Dropped` gains the listed meeting; `:786-799` gains `transcript list`; `tests/surfaces/test_cli_completion.py:373` gains the new `--meeting` lines; `tests/slice/test_member_updates_slice.py:735-756` -- drop's `--meeting` is no longer free text -- the matrix is the contract
+- [x] `stories/7b-…md`, `stories/7c-…md` -- a dated Change Log line each: a summarize on a meeting holding a summary is refused without `--again` (`11f`) -- earlier frozen blocks amended on the record
+- [x] `stories/7d-…md` -- a dated Change Log line: the dashboard's command adds `--again` for a held summary (`11f`)
+- [x] `stories/11e-…md` -- a dated Change Log line: `--json` on a real drop, `format` in the dry run's object, and the closing line's summary state (`11f`)
+- [x] `ARCHITECTURE-SPINE.md` -- AD-21's edit below, re-derived through the architecture skill
 
 **Acceptance Criteria:**
 - Given a fixture dropped in personal and nothing else, when `pm-ai transcript list` runs with no daemon, then one meeting is listed with its title, estimated start, "transcript ingested" and the waiting kind, the next step says to start `pm-ai daemon run` first, and the exit is 0.
@@ -396,6 +396,24 @@ Anchors checked against `origin/main` at `82c2edb` (2026-10-22).
     - a missing `projects.toml` is no projects, as `_enrolled_projects` reads it, and is not named as unreadable; a malformed one is named.
   - **Found in revision:** every summarize command pm-ai prints (`7d`'s dashboard line, the "asks again" sentences, `doctor`'s probe) must add `--again` when a summary is held, or the guard would refuse the command it printed. Tasks added for those sites and for `7d`'s Change Log.
 - **2026-10-22, Ask First answered and spec approved (Andrei):** (a) — `drop` keeps `--title` as the meeting's title and gains `--on <date>` as the selector (join exactly one existing meeting of that day, or refuse with the candidates; never mint). Andrei approved the spec for build the same day.
+- **2026-10-22, built.** Measured on this machine by `test_timed_the_listing_and_completion_over_a_large_home` (1,000 calendar records, 200 with transcript and summary rows): `transcript list` 0.02 s, `transcript list --state not-summarized` 0.02 s, Tab on `summarize --meeting` (100 offered) 0.02 s, Tab on `drop --meeting` (100 offered) 0.07 s; the prompt's inline answer is asserted under 1 s. Where the build differs from the wording above, each recorded here:
+  - **Parsing under two filters.** `--state summarized` and `--state not-summarized` turn on whether the record holds a summary, which no row says, so under those two every candidate the rows cannot decide is parsed, not only the ones shown.
+  - **Parsing beyond the window (review, 2026-10-22).** An unreadable record cannot be told from a readable one without parsing it, so the candidates on days older than the shown window are parsed too; an unreadable one goes to the tail and none is counted in `more`. This departs from "only the records shown are parsed"; the timed test still measures it (0.02 s over 200 rows).
+  - **The tail and the filters.** A candidate with no record file, or one whose record cannot be parsed, is listed in the tail under every `--state` whose rows do not exclude it; under `summarized` and `not-summarized`, where only the record could say, it is always in the tail.
+  - **A fifth waiting kind.** A waiting row whose record cannot be read is "summary waiting, not offered automatically: the meeting's record cannot be read", never the harvest kind.
+  - **`--on`'s candidates on `drop`** are the meetings of that day that have started and hold no capture; when none is left, the refusal names the captured ones or says the day's meetings have not started.
+  - **Completion's sources.** `drop --meeting` offers only meetings that have started (`Readers.droppable`); `member name --meeting` (7e) still offers every recorded meeting. `summarize --meeting`'s description says when a summary is held and `--again` is needed.
+  - **`doctor`'s sentence** names the first given-up meeting's own command, with `--again` read from its record, instead of `<scope>` and `<id>`.
+  - **`transcript list` at a terminal** runs on the table's `composes=False` path, as `goal list` does; that path now builds `goal list`'s reader at its first use, so no keychain adapter or store is built for a listing.
+  - **Not fixed: the guard's window.** `_refuse_a_resummary` reads the record and then `request_summary` moves the row in a separate step; an automatic harvest job that writes `## Summary` between the two would be replaced without `--again`. Closing it needs the record read and the row move in one claimed step, which the record file and the store do not share. Left for Andrei's decision.
+  - **A fourth waiting kind.** A waiting row whose transcript is not ingested (fetched, failed) is "summary waiting, not offered automatically: the transcript is not ingested"; the three kinds above do not cover it.
+  - **The target.** `transcript list`'s target is `personal` whatever `--scope` names, so at the prompt a project enrolled since the daemon started is listed when named too, not refused as unwatched.
+  - **A broken `config.toml`.** The header says "UTC (config.toml could not be read, so no display_timezone is used)", and `local_model` is read as unset.
+  - **Neither `--meeting` nor `--title`** on `summarize` is a usage error (exit 2). `test_the_routing_reads_the_command_table` (`tests/surfaces/test_cli_repl.py`) gives `summarize` a `--meeting`, since neither option is in `requires` now.
+  - **`drop --on`** (Ask First 1, answered (a)): the day is read in `display_timezone`, or UTC; `--title` narrows by `--title`'s word rule; `--meeting`, `--start`, `--attendees` or `--duration` with it is a usage error; the closing line says "found by --on".
+  - **Completion** shows each meeting's start in `display_timezone` and its title beside the id (`Candidate.meta`, prompt_toolkit's `display_meta`). `Readers` gains `summarizable` beside `meetings`.
+  - **The drop's real `--json`** is written with `ensure_ascii=False`, as the dry run's is; only the listing's is ASCII.
+  - **An unreadable store and an unparseable record:** with no store to give the id, the record's file name stands in for `meeting_id`.
 
 ## Design Notes
 
@@ -422,3 +440,63 @@ Completion's read-only reading of `operational.db` stays the exception recorded 
 
 **Manual checks:**
 - In a scratch home (`HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1`), drop the recorded fixture, then run `pm-ai transcript list` and `pm-ai transcript list --json`, with no daemon and then at the prompt with one. Expected: the same meeting both times. The summarize command from the listing runs as printed. Running it again is refused, naming `--again`. At the prompt, `--meeting week<Tab>` offers the meeting by title.
+
+## Suggested Review Order
+
+**One decision, one wording**
+
+- The typed value both the listing and the drop carry; start here.
+  [`domain/meeting_listing.py:154`](../../../../pm_ai/domain/meeting_listing.py#L154)
+
+- Every state and next step decided from rows, capture names, record and clock, with no I/O.
+  [`core/meeting_listing.py:186`](../../../../pm_ai/core/meeting_listing.py#L186)
+
+- The one summarize command, which adds `--again` when a summary is held.
+  [`domain/meeting_listing.py:205`](../../../../pm_ai/domain/meeting_listing.py#L205)
+
+- Text and JSON forms rendered from the same value.
+  [`core/meeting_listing.py:556`](../../../../pm_ai/core/meeting_listing.py#L556)
+
+**Reading by path, no keychain**
+
+- The lister: scopes, config zone, records by digest, faults named.
+  [`app/meeting_listing.py:252`](../../../../pm_ai/app/meeting_listing.py#L252)
+
+- Parses only what is shown, plus older records only to find unreadable ones.
+  [`app/meeting_listing.py:397`](../../../../pm_ai/app/meeting_listing.py#L397)
+
+- Three tables in one read-only transaction; unreadable store raised as one error.
+  [`service.py:1673`](../../../../pm_ai/storage/service.py#L1673)
+
+**Choosing a meeting and the guard**
+
+- `--title` resolved in the daemon among the listed meetings; ambiguity refused with candidates.
+  [`pipelines.py:4871`](../../../../pm_ai/app/pipelines.py#L4871)
+
+- The re-summary guard, before the row changes or a job starts.
+  [`pipelines.py:4976`](../../../../pm_ai/app/pipelines.py#L4976)
+
+- `drop --on`: joins exactly one started, uncaptured meeting that day, never mints.
+  [`pipelines.py:1741`](../../../../pm_ai/app/pipelines.py#L1741)
+
+**Commands and routing**
+
+- `transcript list` in the command table, text and JSON.
+  [`dispatch.py:4251`](../../../../pm_ai/surfaces/cli/dispatch.py#L4251)
+
+- The drop's closing line and its real `--json`.
+  [`dispatch.py:3731`](../../../../pm_ai/surfaces/cli/dispatch.py#L3731)
+
+- Terminal path builds no keychain adapter: goal reader made on first use.
+  [`entry.py:409`](../../../../pm_ai/app/entry.py#L409)
+
+- The daemon's prompt reads through its own paths with the same lister.
+  [`prompts.py:1141`](../../../../pm_ai/app/prompts.py#L1141)
+
+- Tab completion of `--meeting` by start and title.
+  [`completion.py:510`](../../../../pm_ai/surfaces/cli/completion.py#L510)
+
+**Tests**
+
+- The matrix, the timed rows and the prompt path.
+  [`test_transcript_list.py:965`](../../../../tests/slice/test_transcript_list.py#L965)

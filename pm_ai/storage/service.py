@@ -1646,6 +1646,130 @@ def summary_records_at(store: Path) -> tuple[tuple[SummaryState, bool], ...]:
     return tuple(records)
 
 
+class MeetingRowsUnreadable(Exception):
+    """The operational store could not be read for `transcript list` (story 11f).
+
+    Locked past the read's short wait, corrupt, a newer schema, or a missing
+    column. The message says which.
+    """
+
+
+MEETING_ROWS_WAIT_SECONDS = 0.25
+"""How long `meeting_rows_at` waits on a locked store: inside the listing's 1 s."""
+
+
+@dataclass(frozen=True, slots=True)
+class MeetingRows:
+    """The transcript, parts and summary rows, read together (story 11f).
+
+    Each keyed by `(scope, meeting_id)`, the scope as the store spells it.
+    """
+
+    transcripts: dict[tuple[str, str], TranscriptState] = field(default_factory=dict)
+    parts: dict[tuple[str, str], tuple[TranscriptPart, ...]] = field(default_factory=dict)
+    summaries: dict[tuple[str, str], SummaryState] = field(default_factory=dict)
+
+
+def meeting_rows_at(store: Path) -> MeetingRows:
+    """Every transcript, part and summary row in the store at `store`, read-only (11f).
+
+    One read transaction on a connection of its own, so the three tables agree
+    with each other. No store is no rows; a table not yet created is none of
+    its rows. `MeetingRowsUnreadable` when the store is locked past a short
+    wait, corrupt, of a newer schema, or missing a column. Nothing is written.
+    """
+    if not store.exists():
+        return MeetingRows()
+    try:
+        reader = sqlite3.connect(
+            f"{store.resolve().as_uri()}?mode=ro", uri=True, timeout=MEETING_ROWS_WAIT_SECONDS
+        )
+    except sqlite3.Error as unopened:
+        raise MeetingRowsUnreadable(f"it could not be opened ({unopened})") from unopened
+    try:
+        reader.execute("BEGIN")
+        try:
+            row = reader.execute("SELECT version FROM schema_version").fetchone()
+        except sqlite3.OperationalError as missing:
+            if "no such table" not in str(missing):
+                raise
+            row = None
+        try:
+            found = UNVERSIONED if row is None else int(row[0])
+        except (TypeError, ValueError) as unversioned:
+            raise MeetingRowsUnreadable(
+                f"its schema version {row[0]!r} is not a number"
+            ) from unversioned
+        if found > SCHEMA_VERSION:
+            raise MeetingRowsUnreadable(
+                f"it was written by a newer pm-ai (schema {found}, this pm-ai reads "
+                f"{SCHEMA_VERSION})"
+            )
+        transcripts = _rows(
+            reader,
+            "SELECT scope, meeting_id, state, reason, retryable, retry_after, at "
+            "FROM transcript_state",
+        )
+        parts = _rows(
+            reader,
+            "SELECT scope, meeting_id, part, transcript_id, created, ended, state, "
+            "reason, ingested, stored_at FROM transcript_parts ORDER BY scope, meeting_id, part",
+        )
+        summaries = _rows(reader, f"SELECT {StorageService._SUMMARY_COLUMNS} FROM meeting_summaries")
+        reader.execute("COMMIT")
+    except MeetingRowsUnreadable:
+        raise
+    except sqlite3.Error as unreadable:
+        raise MeetingRowsUnreadable(str(unreadable)) from unreadable
+    finally:
+        reader.close()
+    rows = MeetingRows()
+    try:
+        for scope, meeting_id, state, reason, retryable, retry_after, at in transcripts:
+            rows.transcripts[(str(scope), str(meeting_id))] = TranscriptState(
+                state=str(state),
+                reason=str(reason or ""),
+                retryable=bool(retryable),
+                retry_after=timedelta(seconds=retry_after) if retry_after is not None else None,
+                at=datetime.fromisoformat(at),
+            )
+        held: dict[tuple[str, str], list[TranscriptPart]] = {}
+        for (
+            scope, meeting_id, part, transcript_id, created, ended, state, reason, ingested,
+            stored_at,
+        ) in parts:
+            held.setdefault((str(scope), str(meeting_id)), []).append(
+                TranscriptPart(
+                    meeting_id=meeting_id,
+                    part=part,
+                    transcript_id=transcript_id,
+                    created=datetime.fromisoformat(created),
+                    ended=datetime.fromisoformat(ended),
+                    state=PartState(state),
+                    ingested=bool(ingested),
+                    stored_at=datetime.fromisoformat(stored_at) if stored_at else None,
+                    reason=reason,
+                )
+            )
+        rows.parts.update({key: tuple(found) for key, found in held.items()})
+        for summary in summaries:
+            parsed = StorageService._summary_row(summary)
+            rows.summaries[(str(parsed.scope), parsed.meeting_id)] = parsed
+    except (ValueError, TypeError) as malformed:
+        raise MeetingRowsUnreadable(f"a row could not be read ({malformed})") from malformed
+    return rows
+
+
+def _rows(reader: sqlite3.Connection, query: str) -> list[Any]:
+    """`query`'s rows; none when its table has not been created yet."""
+    try:
+        return reader.execute(query).fetchall()
+    except sqlite3.OperationalError as missing:
+        if "no such table" in str(missing):
+            return []
+        raise
+
+
 # ── Story 7e: the ledgers' helpers and the title-match rows ──────────────────
 
 

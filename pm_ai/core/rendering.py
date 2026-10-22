@@ -116,6 +116,7 @@ from pm_ai.domain.harvest import (
     PartialCalendar,
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.meeting_listing import summarize_command
 from pm_ai.domain.meeting_summaries import SummaryMaker, SummaryStateKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.payload_fields import decode_payload
@@ -1009,10 +1010,12 @@ def _digest_lines(
     ):
         lines.append("  - no open action item")
     meeting = code(digest.meeting_id)
-    lines.append(
-        f"  - meeting `{meeting}`; to ask for a summary: `pm-ai transcript summarize "
-        f"--scope {code(str(digest.scope))} --meeting {meeting}`"
+    # Story 11f: `--again` when the record holds a summary, or the re-summary
+    # guard would refuse the command this line prints.
+    command = summarize_command(
+        code(str(digest.scope)), meeting, held=digest.summary is not None
     )
+    lines.append(f"  - meeting `{meeting}`; to ask for a summary: `{command}`")
     return lines
 
 
