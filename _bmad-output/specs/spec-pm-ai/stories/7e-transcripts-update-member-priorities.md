@@ -143,6 +143,7 @@ context:
   4. The title match lists at most the 200 most recently updated open, non-confidential issues, and the page says how many were left out. A matrix row was added.
   5. Ollama not answering is not a title-match attempt, as for `7b`; the wording was corrected.
   6. `member link`'s usage line shows `--scope` (cosmetic).
+- **2026-10-22, amended by `13a`:** Team Activity joins the PM's proposal decisions in at read time. A line whose item (or newest replacement) is rejected is hidden, and an edited one shows the replacement's `what`, `owner` and `due` under the same issue. If the proposals cannot be read, the page says so in one line. `member_updates.md` is never written by a decision, so update ids and `member link` are unchanged.
 
 ## Design Notes
 

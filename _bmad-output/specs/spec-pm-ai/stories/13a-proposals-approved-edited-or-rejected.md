@@ -2,7 +2,7 @@
 title: 'staged proposals approved, edited or rejected, and expired by the scheduler'
 type: 'feature'
 created: '2026-10-22'
-status: 'draft'
+status: 'done'
 baseline_commit: '8a29acd'
 review_loop_iteration: 1
 context:
@@ -411,13 +411,13 @@ Anchors checked against `origin/main` at `8a29acd`.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] **One model.** `pm_ai/domain/proposals.py`, `lifecycle.py`, a new `pm_ai/core/proposals.py`:
+- [x] **One model.** `pm_ai/domain/proposals.py`, `lifecycle.py`, a new `pm_ai/core/proposals.py`:
   - the edge table and `IllegalTransition`, checked after `ProposalNotFound`, `TerminalState` and `VersionConflict`, in that order;
   - `ProposalType`, its field schema, and the three declarations;
   - the new body fields;
   - expiry from `staged_at` and the longer window;
   - the names the architecture tests call: `registered_types()`, `approve`, `expire`, `execute`, `VersionConflict`, `TerminalState`, `sample_staged`, `sample_approved`. These are pure functions over an in-memory book that applies the same rules as the store. `execute` re-checks the state at execution time, and in 13a runs only the sample type's executor.
-- [ ] **Every change a compare-and-swap.** `pm_ai/storage/service.py`:
+- [x] **Every change a compare-and-swap.** `pm_ai/storage/service.py`:
   - migration 2 (the columns, their backfill and the indexes);
   - one conditional-update transition, keeping `transition_proposal`'s signature;
   - the edit step (supersede and insert) and the conditional re-stage of an expired item;
@@ -426,30 +426,30 @@ Anchors checked against `origin/main` at `8a29acd`.
   - `open_action_items` with replacements, approved items and the expired count;
   - indexed reads for the listing, the sweep and Team Activity on a read-only connection;
   - the 1-second busy wait for these writes at a terminal.
-- [ ] **Every new storage call declared.** `pm_ai/app/wiring.py`: each new public storage call in `HANDED_CALLS` or `PLAIN_READS` (`:4074`, `:4152`) and, where a job must not make it, `NEVER_FROM_A_JOB` (`:4187`); `transition_proposal`'s entry at `:4128` kept.
-- [ ] **One engine.** `pm_ai/app/` (a new `proposals.py`):
+- [x] **Every new storage call declared.** `pm_ai/app/wiring.py`: each new public storage call in `HANDED_CALLS` or `PLAIN_READS` (`:4074`, `:4152`) and, where a job must not make it, `NEVER_FROM_A_JOB` (`:4187`); `transition_proposal`'s entry at `:4128` kept.
+- [x] **One engine.** `pm_ai/app/` (a new `proposals.py`):
   - the registry, built in the composition root;
   - list, show, approve, reject and edit as one function each, for the terminal, the daemon and `review`;
   - the reload-and-report rules;
   - the scope rules;
   - `PROPOSAL_WRITE_BOUND_SECONDS`.
-- [ ] **One card.** `pm_ai/core/` (a new `proposal_cards.py`): `Card`, its actions, and the text, JSON and refusal renderers.
-- [ ] **The scheduler owns expiry.** `pm_ai/app/ticks.py`, `daemon.py`: `ProposalSweep`.
-- [ ] **The pages.** `pm_ai/app/pipelines.py`, `pm_ai/core/rendering.py`, `pm_ai/domain/renders.py`, `pm_ai/core/member_updates.py`:
+- [x] **One card.** `pm_ai/core/` (a new `proposal_cards.py`): `Card`, its actions, and the text, JSON and refusal renderers.
+- [x] **The scheduler owns expiry.** `pm_ai/app/ticks.py`, `daemon.py`: `ProposalSweep`.
+- [x] **The pages.** `pm_ai/app/pipelines.py`, `pm_ai/core/rendering.py`, `pm_ai/domain/renders.py`, `pm_ai/core/member_updates.py`:
   - the waiting and approved lines, their order and cap, the expired and review lines, and lookups by root id;
   - Team Activity's read-time join;
   - summarize's next step;
   - `7b` and `11b` write `scope` and `staged_at`;
   - the drop's count of dropped extractions.
-- [ ] **The queue.** `pm_ai/surfaces/cli/dispatch.py`, `completion.py`, `pm_ai/app/entry.py`, `pm_ai/app/meeting_listing.py`: the `proposal` group, the `DAEMON_BOUNDS` and `TERMINAL_BOUND` entries, completion of ids, `next.review`.
-- [ ] **New tests.** `tests/slice/test_proposals.py`, `tests/slice/test_proposal_sweep.py`: one test per matrix row, plus two processes approving one id within their busy wait, and a timed listing over 5,000 proposals.
-- [ ] **Existing tests that change.**
+- [x] **The queue.** `pm_ai/surfaces/cli/dispatch.py`, `completion.py`, `pm_ai/app/entry.py`, `pm_ai/app/meeting_listing.py`: the `proposal` group, the `DAEMON_BOUNDS` and `TERMINAL_BOUND` entries, completion of ids, `next.review`.
+- [x] **New tests.** `tests/slice/test_proposals.py`, `tests/slice/test_proposal_sweep.py`: one test per matrix row, plus two processes approving one id within their busy wait, and a timed listing over 5,000 proposals.
+- [x] **Existing tests that change.**
   - `tests/architecture/test_domain_invariants.py`: `:203` compares the window with `timedelta(0)`; `:195`, `:780` and `:790` stop skipping and pass.
   - The `transition_proposal` tests named in the Code Map keep passing unchanged. `TerminalState` is still raised first for a terminal source, and the signature is kept.
   - The dashboard tests and golden: `test_dashboard_slice.py:2306` now expects the approved item shown as approved, and its expired fixture (8 days old, 7-day window) to be staged 15 days ago, since it is waiting under 14 days. `:2342`'s and `test_rendering_sections.py:2144`'s overflow line names `proposal list`. The golden is re-recorded with the new item lines.
   - `tests/surfaces/test_cli_subcommands.py:1567`: `next` gains `review`.
   - The existing completion, bound and reachability tests take the new commands.
-- [ ] **The spine.** `ARCHITECTURE-SPINE.md`: the amendments in Design Notes, re-derived through the architecture skill.
+- [x] **The spine.** `ARCHITECTURE-SPINE.md`: the amendments in Design Notes, re-derived through the architecture skill.
 
 **Acceptance Criteria:**
 - Given a summarised fixture meeting with 3 staged items, when `pm-ai proposal list --json` runs with no daemon, then it prints one object with 3 cards whose `actions.approve.command` runs as printed, and nothing is written.
@@ -475,6 +475,16 @@ Anchors checked against `origin/main` at `8a29acd`.
   - **Tests and files.** `pm_ai.core.proposals` provides what the three skipping architecture tests call, and `:203` is adjusted. The Tasks name `wiring.py`'s tables, `test_cli_subcommands.py`'s `next`, the `transition_proposal` tests (signature and `TerminalState` order kept) and the dashboard tests and golden.
   - **Also recorded.** CAP-6's `[STAGED_APPROVAL]` entry is deferred to story 15. `11b`'s positional ids: a shifted staged row bumps its version, and a dropped extraction over an acted row is counted.
 - **2026-10-22, approved for build (Andrei),** after the three-lens review and his two decisions.
+- **2026-10-22, built.** Three review layers ran (blind hunter, edge-case hunter, verification gap); 32 findings were fixed in the build. Choices the spec left open, now recorded:
+  - **Scope of rows staged before 13a.** Migration 2 copies `scope` only from bodies that record it, since a migration sees only the database, not the enrolled projects. For older rows, every reader works the scope out from the id's digest or the one scope holding the meeting's record (`ProposalWorld.scope_of`), and never writes it back.
+  - **The store holds the registered rules,** handed in at start (`register_proposal_rules`), so `11b`'s call to `stage_unless_acted` is unchanged. One registry function (`registered_proposal_types`) serves the daemon, the terminal and completion.
+  - **`edit --approve` with the values it already holds** approves the proposal (outcome `approved`), rather than writing nothing.
+  - **Approval of an executor type is refused** in `approve` and `edit --approve` until 13b, so an approval cannot sit waiting for an executor that does not exist. No registered type has an executor in 13a.
+  - **A plain `edit` that loses to a re-stage** is retried once at the new version, re-applying only the fields given, like `approve`.
+  - **A listing with no `--scope` that spans several scopes** prints one `review` or "see more" command per scope in text; JSON `next` keeps its shape and holds the first scope's command.
+  - **The repeat check** compares a new item only with items that stay live after the re-summary (replacements, approved items, and staged roots the summary produces again), so a re-summary that only changes an item's case or spacing does not lose it.
+  - **The drop's closing line** counts extractions dropped over a row the PM approved, rejected or replaced by an edit; an expired row is left, not counted.
+  - **Deferred** (`deferred-work.md`, story-13a section): the dashboard's overflow command lists staged items only (needs Andrei's decision), and the readers' and sweep's handling of approved executor-type rows (for 13b).
 
 ## Design Notes
 
@@ -514,3 +524,83 @@ A staged spoken command is the opposite case. Approving it means "do it". An app
 **Manual checks:**
 - In a scratch home (`HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1`), drop and summarise the recorded fixture, then run `pm-ai proposal review`: approve one item, edit one and skip one. Then run `pm-ai dashboard`. Expected: the page shows the edited one waiting with its new text, the skipped one waiting, then the approved one.
 - Move the clock past the 14-day window (the test clock or a fixture), start the daemon, and wait for one sweep. Expected: the waiting items are counted as expired on the page, and `proposal list --scope personal --state expired` lists them.
+
+## Suggested Review Order
+
+**The rules: one table, one order of refusals**
+
+- Start here: the allowed-transition table every change goes through.
+  [`domain/proposals.py:94`](../../../../pm_ai/domain/proposals.py#L94)
+
+- Refusal order: not found, terminal, past window, version, table.
+  [`domain/proposals.py:276`](../../../../pm_ai/domain/proposals.py#L276)
+
+- The registered types, their fields, 14-day window and approval meaning.
+  [`core/proposals.py:276`](../../../../pm_ai/core/proposals.py#L276)
+
+**The store: every change a compare-and-swap**
+
+- One conditional UPDATE per change, inside the claimed step.
+  [`service.py:6470`](../../../../pm_ai/storage/service.py#L6470)
+
+- Edit: supersede and insert in one transaction; re-stage of an expired item is conditional.
+  [`service.py:6507`](../../../../pm_ai/storage/service.py#L6507)
+
+- Re-stage keeps staged_at and window; version moves only on a changed summary or payload.
+  [`service.py:6324`](../../../../pm_ai/storage/service.py#L6324)
+
+- Re-summary: expired rows left, repeat check against what stays live.
+  [`service.py:6063`](../../../../pm_ai/storage/service.py#L6063)
+
+- Migration 2: indexed columns, backfill, the two indexes.
+  [`service.py:468`](../../../../pm_ai/storage/service.py#L468)
+
+**The engine and its surfaces**
+
+- One desk for terminal, prompt and review; reload-and-report on a lost swap.
+  [`app/proposals.py:697`](../../../../pm_ai/app/proposals.py#L697)
+
+- Edit at the engine: fields, retry at the new version, --approve.
+  [`app/proposals.py:891`](../../../../pm_ai/app/proposals.py#L891)
+
+- Scope fallback for rows without a stored scope; fails closed.
+  [`proposal_reads.py:89`](../../../../pm_ai/app/proposal_reads.py#L89)
+
+- One card for every surface; actions carry the exact commands.
+  [`proposal_cards.py:143`](../../../../pm_ai/core/proposal_cards.py#L143)
+
+- The `proposal` group and the review walk.
+  [`dispatch.py:4833`](../../../../pm_ai/surfaces/cli/dispatch.py#L4833)
+
+- Bounds at the prompt: 1 s for reads, 2 s for writes.
+  [`entry.py:626`](../../../../pm_ai/app/entry.py#L626)
+
+**The scheduler owns expiry**
+
+- The sweep: batched candidates, CAS to expired at the expiry instant.
+  [`ticks.py:1028`](../../../../pm_ai/app/ticks.py#L1028)
+
+- The store's sweep step.
+  [`service.py:6637`](../../../../pm_ai/storage/service.py#L6637)
+
+**The pages**
+
+- Dashboard digest: waiting then approved, by root id, expired count.
+  [`pipelines.py:2677`](../../../../pm_ai/app/pipelines.py#L2677)
+
+- Team Activity's read-time join of decisions.
+  [`pipelines.py:3089`](../../../../pm_ai/app/pipelines.py#L3089)
+
+- How a decided line is shown.
+  [`member_updates.py:1077`](../../../../pm_ai/core/member_updates.py#L1077)
+
+**Peripherals**
+
+- The registry built once in the composition root.
+  [`wiring.py:720`](../../../../pm_ai/app/wiring.py#L720)
+
+- Matrix-row tests.
+  [`test_proposals.py`](../../../../tests/slice/test_proposals.py)
+
+- Sweep tests.
+  [`test_proposal_sweep.py`](../../../../tests/slice/test_proposal_sweep.py)
