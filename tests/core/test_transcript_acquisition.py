@@ -952,3 +952,143 @@ def test_a_meeting_with_parts_whose_record_is_gone_is_not_offered_for_ingestion(
     report = _at(daemon, Source(), 40)
 
     assert report.awaiting_ingestion == ()
+
+
+# ── Story 33j: a refused part keeps the parts before it ──────────────────────
+
+_T2_404 = "transcript T-2 was listed and its content answered 404: it is gone."
+
+
+def _kept_with(held: Meeting, *parts: TranscriptCapture, refused: str = _T2_404) -> Source:
+    return Source({held.meeting_id: TranscriptCaptured(held.meeting_id, parts, refused_part=refused)})
+
+
+def test_part_1_is_stored_and_the_refused_part_2_is_named_in_the_row_and_the_run(tmp_path):
+    """Row "Part 2 answers 404, nothing stored"."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    first = _part(held, "T-1", 3, 9)
+
+    report = _at(daemon, _kept_with(held, first), 40)
+
+    (one,) = _names(held, 1)
+    assert daemon.storage.read_artifact(scope=PERSONAL, artifact=CAPTURES, name=one) == first.text.encode()
+    assert [(p.part, p.transcript_id, p.state) for p in _parts_of(daemon)] == [(1, "T-1", PartState.STORED)]
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert state.state == "fetched" and one in state.reason
+    assert state.reason.endswith(f"Not stored: {_T2_404}")
+    (entry,) = report.captured
+    assert entry.capture_names == (one,)
+    assert any("AAMk-one" in r and "T-2" in r and "404" in r for r in report.refusals)
+    assert report.awaiting_ingestion == ((PERSONAL, "AAMk-one"),)
+    assert daemon.storage.transcript_part_asks(PERSONAL)["AAMk-one"] == SLOT + timedelta(minutes=40), (
+        "a capture counts as asked"
+    )
+
+
+def test_parts_1_and_2_are_stored_when_part_3_is_refused(tmp_path):
+    """Row "Part 3 of three refused"."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    refused = "transcript T-3's content is not UTF-8 text, so it is not stored."
+
+    _at(daemon, _kept_with(held, _part(held, "T-1", 3, 9), _part(held, "T-2", 12, 18), refused=refused), 40)
+
+    assert [(p.part, p.transcript_id) for p in _parts_of(daemon)] == [(1, "T-1"), (2, "T-2")]
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert state.state == "fetched" and state.reason.endswith(f"Not stored: {refused}")
+
+
+def test_a_meeting_holding_part_1_stores_part_2_and_names_part_3(tmp_path):
+    """Row "Meeting already holding part 1"."""
+    held, daemon = _with_part_1(tmp_path, at=35)
+    refused = "transcript T-3 was listed and its content answered 404: it is gone."
+
+    report = _at(daemon, _kept_with(held, _part(held, "T-2", 12, 18), refused=refused), 40)
+
+    one, two = _names(held, 1, 2)
+    assert [(p.part, p.transcript_id) for p in _parts_of(daemon)] == [(1, "T-1"), (2, "T-2")]
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert state.state == "fetched" and one in state.reason and two in state.reason and "T-3" in state.reason
+    assert any("T-3" in r for r in report.refusals)
+
+
+def test_the_refused_part_refused_again_stores_nothing_and_keeps_the_row(tmp_path):
+    """Row "Refused part tried again, still refused": inside the window."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    _at(daemon, _kept_with(held, _part(held, "T-1", 3, 9)), 31)
+    before = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    again = Source(
+        {"AAMk-one": TranscriptRefused("AAMk-one", "transcript T-2 was listed and its content answered 404: it is gone.", retryable=False)}
+    )
+
+    report = _at(daemon, again, 40)
+
+    assert again.asked == [["AAMk-one"]], "asked again: the run that stored part 1 started inside the window"
+    assert [p.transcript_id for p in again.stored["AAMk-one"]] == ["T-1"]
+    assert [p.transcript_id for p in _parts_of(daemon)] == ["T-1"]
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"] == before, "row kept"
+    assert report.entries == ()
+    assert any("AAMk-one" in r and "T-2" in r for r in report.refusals)
+
+
+def test_the_refused_part_downloading_later_is_stored_as_part_2(tmp_path):
+    """Row "Refused part succeeds later": inside the window."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    _at(daemon, _kept_with(held, _part(held, "T-1", 3, 9)), 31)
+    second = _part(held, "T-2", 12, 18)
+    later = Source({"AAMk-one": TranscriptCaptured("AAMk-one", (second,))})
+
+    report = _at(daemon, later, 40)
+
+    assert later.asked == [["AAMk-one"]]
+    (_, two) = _names(held, 1, 2)
+    assert [(p.part, p.transcript_id, p.state) for p in _parts_of(daemon)] == [
+        (1, "T-1", PartState.STORED),
+        (2, "T-2", PartState.STORED),
+    ]
+    assert daemon.storage.read_artifact(scope=PERSONAL, artifact=CAPTURES, name=two) == second.text.encode()
+    state = daemon.storage.transcript_states(PERSONAL)["AAMk-one"]
+    assert state.state == "fetched" and "Not stored" not in state.reason
+    assert report.awaiting_ingestion == ((PERSONAL, "AAMk-one"),)
+
+
+def test_a_meeting_whose_part_1_was_kept_after_the_window_is_not_asked_again(tmp_path):
+    """Row "Asked after the window": window ends at 45; part 1 kept at 50."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    _at(daemon, _kept_with(held, _part(held, "T-1", 3, 9)), 50)
+
+    later = Source()
+    _at(daemon, later, 300)
+
+    assert later.asked == []
+    assert [p.transcript_id for p in _parts_of(daemon)] == ["T-1"]
+
+
+def test_a_lost_write_of_part_1_then_a_refused_part_2_names_both_in_a_refused_row(tmp_path):
+    """Row "Write of part 1 lost, then part 2 refused"."""
+    held = _slot_meeting()
+    daemon = _daemon(tmp_path, held)
+    (name,) = _names(held, 1)
+
+    class Racing(Source):
+        def acquire(self, meetings, *, since, stored=None):
+            daemon.storage.write_capture("the first\n", scope=PERSONAL, name=name)
+            return super().acquire(meetings, since=since, stored=stored)
+
+    source = Racing(
+        {"AAMk-one": TranscriptCaptured("AAMk-one", (_part(held, "T-1", 3, 9),), refused_part=_T2_404)}
+    )
+    report = _at(daemon, source, 40)
+
+    assert _parts_of(daemon) == ()
+    (entry,) = report.refused
+    assert not entry.retryable
+    assert "lost" in entry.reason and "never overwritten" in entry.reason
+    assert "T-2" in entry.reason and "404" in entry.reason
+    again = Source()
+    _at(daemon, again, 41)
+    assert again.asked == [], "non-retryable: not asked again"

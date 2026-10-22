@@ -112,6 +112,7 @@ context:
 - **2026-10-19:** Code Map re-verified against `3fa6783` after 23g, 33i, 4v and 4w merged. Moved: `domain/transcripts.py` attempt-cap rule `:278-292`→`:276-290`; `ports/__init__.py` `:670`→`:690`; `meeting_records.py` `:405/417/432`→`:411/423/438`; `pipelines.py` `:606/672/981/1190`→`:624/690/999/1208`; `wiring.py` `HANDED_CALLS` `:3506`→`:3631`; `storage/service.py` `:117/179`→`:134/196`. Graph adapter, `transcript_acquisition.py`, test anchors and the `33e`/`11b` line references unchanged; behaviour claims hold; frozen block unchanged.
 - **2026-10-19, decision (Andrei):** the re-open of an automatic summary when a later part arrives belongs to `7b`; AD-37 no longer binds `33g`. This slice takes no version lease. Frozen block unchanged.
 - **2026-10-19, built and reviewed.** Three review layers ran (blind hunter, edge-case hunter, verification gap). Patched: every part write after the claim is guarded so one meeting's store fault never ends the run; a repair failure costs one meeting, not the scope; a repaired part rewrites an `ingested` row to `fetched`; duplicate transcript ids in one answer refused; `is_graph_capture` matches only names `capture_name` writes; ingestion checks the record still exists; `TranscriptPart` validated; the `.capture` shortcut removed; tests added for a failed later-part download, a retryable refusal after the window, and a busy store inside the per-part loop. Built choice: a part whose ingestion fails does not stop later parts (they are still tried in part order), so the matrix row "new part after exhausted ingestion" holds. Two findings need Andrei's decision and three accepted limits are recorded in `deferred-work.md` under "Surfaced by the story-33g review (2026-10-19)". Frozen block unchanged.
+- **2026-10-21, amended by `33j`:** a later new part refused for good (404, not UTF-8, attribution refused in both formats, a permission or other rejection, an unreadable answer, the meeting expired) keeps the parts downloaded before it: they are returned in time order with the refused part named, stored as any new part is, and the row's reason ends "Not stored:" naming it. Decision 5's "all or nothing" now holds only for a refusal waiting may clear, a provider fault and an unclassified error. Frozen block unchanged.
 
 ## Design Notes
 
@@ -138,7 +139,7 @@ Part 1 keeps the unnumbered name so the field test's stored capture, `_awaiting_
 - Entry point: unfinished, two-occurrence, overlap, earlier-than-stored, then store — before any download.
   [`graph_transcripts.py:351`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L351)
 
-- Only new parts are downloaded, all or nothing (open decision in deferred-work).
+- Only new parts are downloaded; a part refused for good keeps the parts before it (amended by `33j`).
   [`graph_transcripts.py:468`](../../../../pm_ai/connectors/transcripts/graph_transcripts.py#L468)
 
 **Each part one claimed step**

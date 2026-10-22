@@ -456,6 +456,10 @@ def _stored(
     no later part is numbered ahead of it: a refusal waiting may clear leaves
     it `pending` with its reason, and one it cannot removes the pending row and
     names the part as lost.
+
+    A part the source could not download (`outcome.refused_part`, story 33j)
+    keeps no row; it is named after "Not stored:" and in the run's refusals,
+    after any write failure, the same way a lost write is.
     """
     meeting = chosen.meeting
     rows = chosen.parts
@@ -567,6 +571,13 @@ def _stored(
             break
         new.append((part, name, capture.transcript_id, capture.attributed))
 
+    if outcome.refused_part is not None:
+        # Story 33j: the source stopped at a part it could not download; the
+        # parts before it were returned. Named after any write failure.
+        if problem is None:
+            problem = outcome.refused_part
+        else:
+            problem = f"{problem} {outcome.refused_part}"
     holds_parts = bool(new) or bool(chosen.stored)
     if new:
         earlier = [
