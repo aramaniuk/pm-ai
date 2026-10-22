@@ -721,7 +721,9 @@ class TranscriptSourcePort(Protocol):
         already stored (story 33g); a meeting absent from it holds none. A
         source returns only new parts, in time order, in one
         `TranscriptCaptured`, and reads the stored parts' instants from here,
-        not from its listing, when it tests a new part against them.
+        not from its listing, when it tests a new part against them. A source
+        that stops at a new part refused in a way waiting cannot clear returns
+        the parts before it with that refusal in `refused_part` (story 33j).
 
         A meeting missing from the answer was not reached: a provider fault
         (a throttle, a server error, no answer) stops the run at the meeting it

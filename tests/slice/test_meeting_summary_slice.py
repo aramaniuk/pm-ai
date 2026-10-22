@@ -829,6 +829,64 @@ def test_a_later_part_ingested_by_a_harvest_is_summarised_again_over_both_parts(
     assert texts[-1] == "Bo: Part two words." and texts[1].startswith("Ana: ")
 
 
+def test_a_part_kept_before_a_refused_one_is_summarised_alone_and_reopened_when_it_arrives(tmp_path):
+    """Story 33j, through two harvests inside the meeting's placement window:
+    part 1 kept while T-2 answers 404 is summarised as the only part; T-2
+    downloading on the next run re-opens the automatic summary over both."""
+    from pm_ai.domain.transcripts import TranscriptCapture, TranscriptCaptured
+    from tests.slice.test_transcript_path import INSTANCE, _daemon as graph_daemon, _row
+
+    start = NOW - timedelta(minutes=40)
+    daemon, _ = graph_daemon(tmp_path, rows=[_row("AAMk-sync", start, subject="Release sync")])
+    daemon.model = FakeModel(_answer(summary="Part one only."), _answer(summary="Both parts."))  # type: ignore[assignment]
+    daemon.summaries = SummaryJobs()
+
+    def part(transcript_id: str, text: str, created: int) -> TranscriptCapture:
+        return TranscriptCapture(
+            meeting_id="AAMk-sync", transcript_id=transcript_id,
+            created=start + timedelta(minutes=created), ended=start + timedelta(minutes=created + 5),
+            text=text, attributed=True, format=CaptureFormat.GRAPH,
+        )
+
+    refusal = "transcript T-2 was listed and its content answered 404: it is gone."
+    answers = [
+        TranscriptCaptured(
+            "AAMk-sync", (part("T-1", VTT, 1),), refused_part=refusal
+        ),
+        TranscriptCaptured("AAMk-sync", (part("T-2", PART_2, 20),)),
+    ]
+
+    told: list[list[str]] = []
+
+    class Scripted:
+        name, requires_network = "graph", True
+
+        def acquire(self, meetings, *, since, stored=None):
+            told.append([p.transcript_id for p in (stored or {}).get("AAMk-sync", ())])
+            return tuple(answers.pop(0) for m in meetings if m.meeting_id == "AAMk-sync")
+
+    daemon.transcript_sources[INSTANCE] = Scripted()
+
+    first = run_harvest(daemon, INSTANCE)
+
+    assert any("T-2" in r for r in first.transcripts.refusals)
+    meeting = daemon.meetings.get("AAMk-sync", scope=PERSONAL).meeting
+    assert [r.part for r in daemon.storage.transcript_parts(PERSONAL)["AAMk-sync"]] == [1]
+    assert daemon.meetings.get("AAMk-sync", scope=PERSONAL).summary.answer.summary == "Part one only."
+    (call,) = daemon.model.calls
+    texts = [f.for_model for f in call["external"]]
+    assert not any("Part two" in t for t in texts) and any(t.startswith("Ana: ") for t in texts)
+    assert "T-2" not in _record_text(daemon, meeting), "the summary says nothing about a refused part"
+
+    run_harvest(daemon, INSTANCE)
+
+    assert told == [[], ["T-1"]], "the second harvest is told part 1 is stored, so only T-2 is new"
+    assert [r.part for r in daemon.storage.transcript_parts(PERSONAL)["AAMk-sync"]] == [1, 2]
+    assert daemon.meetings.get("AAMk-sync", scope=PERSONAL).summary.answer.summary == "Both parts."
+    texts = [f.for_model for f in daemon.model.calls[-1]["external"]]
+    assert texts[-1] == "Bo: Part two words."
+
+
 def test_a_summary_containing_notes_heading_round_trips_and_notes_stays_intact(tmp_path):
     tricky = "First line.\n## Notes\n# heading\n- dash"
     daemon = _daemon(tmp_path, _answer(summary=tricky))

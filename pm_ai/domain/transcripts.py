@@ -228,12 +228,26 @@ class TranscriptCaptured:
     `captures` holds every new part, in time order (by `created`), each one
     verbatim; parts the source was told were stored are never among them. A
     meeting recorded in one stretch has one.
+
+    `refused_part` (story 33j) is set only when a later new part was refused in
+    a way waiting cannot clear: `captures` then holds the parts downloaded
+    before it, and this is one sentence naming the refused part's transcript id
+    and why, and any later new parts not asked for. `None` in every other case;
+    the manual adapter and `UnenrolledGraphTranscripts` never set it.
     """
 
     meeting_id: str
     captures: tuple[TranscriptCapture, ...]
+    refused_part: str | None = None
 
     def __post_init__(self) -> None:
+        if self.refused_part is not None and (
+            not isinstance(self.refused_part, str) or not self.refused_part.strip()
+        ):
+            raise ValueError(
+                "TranscriptCaptured.refused_part, when set, names the refused part; "
+                "it is never blank"
+            )
         if not isinstance(self.captures, tuple) or not all(
             isinstance(capture, TranscriptCapture) for capture in self.captures
         ):

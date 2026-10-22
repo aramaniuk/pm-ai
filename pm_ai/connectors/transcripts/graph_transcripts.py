@@ -29,7 +29,15 @@ meeting on that online meeting's listing is skipped; (2) a new one fitting two
 occurrences on the link is refused for both; (3) two that overlap, stored
 parts included (their instants read from the caller), are refused as
 duplicates; (4) a new one created before the newest stored part is refused;
-(5) otherwise every new part is downloaded, in time order, all or nothing.
+(5) otherwise every new part is downloaded, in time order. A part refused in
+a way waiting cannot clear (404, not UTF-8, attribution refused in both
+formats, a permission or any other rejection, an unreadable answer, the
+meeting expired) stops the downloads (story 33j): the parts before it are
+returned with one sentence naming it and the later new parts not asked for,
+which would have to be numbered after a part that is not stored. When the
+refused part is the first new one, the refusal alone is returned. A refusal
+waiting may clear (an empty body), a provider fault and an unclassified error
+keep all or nothing: nothing from that meeting is returned this run.
 `PLACEMENT_SLACK`, the window's widening, is the domain's (acquisition reads
 it too) and is re-exported here.
 
@@ -363,7 +371,9 @@ class _Run:
         fitting another occurrence on the same link refuses it; 3: two that
         overlap, stored parts included, refuse it as duplicates; 4: a new one
         created before the newest stored part refuses it; 5: otherwise every
-        new part is downloaded, in time order.
+        new part is downloaded, in time order, stopping at the first refused in
+        a way waiting cannot clear: the parts before it are returned with that
+        refusal named (story 33j), or the refusal alone when it is the first.
         """
         mid = meeting.meeting_id
         floor = self.since - LISTING_SLACK
@@ -465,15 +475,36 @@ class _Run:
                     retryable=False,
                 )
 
-        # 5 — every new part, in time order.
+        # 5 — every new part, in time order, up to the first refused for good.
+        ordered = [transcript for transcript, _, _ in sorted(placed, key=lambda item: item[1])]
         captures: list[TranscriptCapture] = []
-        for transcript, _, _ in sorted(placed, key=lambda item: item[1]):
+        for index, transcript in enumerate(ordered):
             downloaded = self._download(mid, online_id, transcript)
-            if not isinstance(downloaded, TranscriptCapture):
-                # All or nothing: a later part stored without an earlier one
-                # would leave the earlier one "earlier than a stored part".
+            if isinstance(downloaded, TranscriptCapture):
+                captures.append(downloaded)
+                continue
+            final = _final(downloaded)
+            if not captures or final is None:
+                # The first new part refused, or a refusal waiting may clear:
+                # the answer is the refusal alone, and the next run downloads
+                # every part again.
                 return downloaded
-            captures.append(downloaded)
+            # Story 33j: keep the parts before it. Nothing after it is asked
+            # for — it would be numbered after a part that is not stored.
+            later = ordered[index + 1 :]
+            sentence = final if final.endswith((".", "!", "?")) else f"{final}."
+            if transcript.transcript_id not in sentence:
+                sentence = f"transcript {transcript.transcript_id} was not downloaded: {sentence}"
+            if later:
+                sentence += (
+                    f" Later new part {_ids(later)} was not asked for, since it "
+                    f"would be numbered after a part that is not stored."
+                    if len(later) == 1
+                    else f" {len(later)} later new parts ({_ids(later)}) were not "
+                    f"asked for, since each would be numbered after a part that "
+                    f"is not stored."
+                )
+            return TranscriptCaptured(mid, tuple(captures), refused_part=sentence)
         return TranscriptCaptured(mid, tuple(captures))
 
     def _same_link(self, other: Meeting, join_url: str | None) -> bool:
@@ -811,6 +842,20 @@ def _instant(value: object) -> datetime | None:
         return parsed.astimezone(timezone.utc)
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def _final(outcome: TranscriptOutcome) -> str | None:
+    """The reason of a download's refusal waiting cannot clear, else `None` (33j).
+
+    A refusal that is not retryable, or Graph saying the meeting has expired
+    (an absence — the only one a download returns), keeps the parts before it. A retryable refusal or a skip
+    does not.
+    """
+    if isinstance(outcome, TranscriptAbsent):
+        return outcome.reason
+    if isinstance(outcome, TranscriptRefused) and not outcome.retryable:
+        return outcome.reason
+    return None
 
 
 def _says_expired(refused: GraphCallFailed) -> bool:

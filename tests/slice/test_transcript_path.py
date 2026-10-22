@@ -1534,6 +1534,61 @@ def test_a_new_part_after_exhausted_ingestion_resets_the_attempts_and_is_ingeste
     assert "UnreadableTranscript" in reason, "part 1 still fails, and is named"
 
 
+class _KeptBeforeARefusal:
+    """Story 33j: answers with the parts before a refused one, and names it."""
+
+    name = "graph"
+    requires_network = True
+
+    def __init__(self, *captures: TranscriptCapture, refused: str) -> None:
+        self.captures = captures
+        self.refused = refused
+
+    def acquire(self, meetings, *, since, stored=None):
+        return tuple(
+            TranscriptCaptured(m.meeting_id, self.captures, refused_part=self.refused)
+            for m in meetings
+            if m.meeting_id == self.captures[0].meeting_id
+        )
+
+
+def _graph_part(meeting: Meeting, transcript_id: str, text: str, *, created: int) -> TranscriptCapture:
+    return TranscriptCapture(
+        meeting_id=meeting.meeting_id,
+        transcript_id=transcript_id,
+        created=meeting.start + timedelta(minutes=created),
+        ended=meeting.start + timedelta(minutes=created + 5),
+        text=text,
+        attributed=True,
+        format=CaptureFormat.GRAPH,
+    )
+
+
+def test_a_part_kept_before_a_refused_one_after_exhausted_ingestion_resets_the_attempts(tmp_path):
+    """Story 33j row "Ingestion exhausted before": part 2 kept, T-3 refused."""
+    daemon, _ = _daemon(tmp_path)
+    meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
+    _store_part(daemon, meeting, 1, "no header, no timings, no speakers\n", created=1)
+    for _ in range(MAX_INGEST_ATTEMPTS):
+        _ingest(daemon)
+    assert daemon.storage.transcript_states(PERSONAL)["AAMk-one"].ingestion_exhausted
+    refused = "transcript T-3 was listed and its content answered 404: it is gone."
+    daemon.transcript_sources[INSTANCE] = _KeptBeforeARefusal(
+        _graph_part(meeting, "T-2", PART_2, created=20), refused=refused
+    )
+
+    report = run_harvest(daemon, INSTANCE).transcripts
+
+    assert report is not None
+    (entry,) = report.captured
+    assert entry.reason.endswith(f"Not stored: {refused}")
+    assert any("T-3" in r for r in report.refusals)
+    assert (PERSONAL, "AAMk-one") in report.awaiting_ingestion
+    parts = daemon.storage.transcript_parts(PERSONAL)["AAMk-one"]
+    assert [(p.part, p.transcript_id, p.ingested) for p in parts] == [(1, "T-1", False), (2, "T-2", True)]
+    assert daemon.storage.load_proposal("prp_AAMk-one_graph_p2_0").payload["when"]["raw"] == "Monday"
+
+
 def test_mixed_attribution_each_part_is_ingested_by_its_own(tmp_path, monkeypatch):
     daemon, _ = _daemon(tmp_path)
     meeting = _recorded(daemon, "AAMk-one", NOW - timedelta(days=1))
