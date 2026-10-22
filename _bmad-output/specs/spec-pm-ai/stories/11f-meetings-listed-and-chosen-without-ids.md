@@ -233,10 +233,7 @@ One JSON object, and nothing else, on standard output. It is written with `ensur
 - **One wording.** A pure function in `pm_ai/core` decides each meeting's states and next step from the rows, the capture names, the record and the clock. It returns a typed value (`ListedMeeting`, declared in `pm_ai/domain`). `pm_ai/app` does the reads and builds it, for the listing and, for one meeting, for the drop. `TranscriptDropped` carries it. One renderer in `pm_ai/core` turns it into words for the listing's text and the drop's line. The JSON is built from the same value. A test checks that the two wordings agree for the same meeting.
 - **No real data.** Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam Rivera`) and `example.com` handles. A Cyrillic title is invented in the test. No title, name or time from a real export is used.
 
-**Ask First:**
-1. **Choosing an existing meeting by title on `transcript drop`.** Andrei decided `--title <words> [--on <date>]` for both commands, but on `drop`, `--title` already means the meeting's title (`11e`): with it, the drop joins one same-day record or makes a new one, and never refuses for finding none. Recommended: keep `--title`'s meaning on `drop`, and add `--on <date>` there as the selector. With `--on`, the drop joins exactly one existing meeting whose title matches the words on that date, or is refused with the candidates, and never makes a new record. Without `--on`, the drop behaves as `11e` built it. Alternatives:
-   - (b) `--title` on `drop` becomes a selector as on `summarize`. That withdraws `11e`'s title option and its title-on-the-same-day join.
-   - (c) no title selection on `drop`; Tab completion and `--meeting` only.
+**Ask First:** Nothing. Ask First 1 was answered by Andrei on 2026-10-22 with (a): on `transcript drop`, `--title` keeps `11e`'s meaning (the meeting's title), and `--on <date>` is the selector — with `--on`, the drop joins exactly one existing meeting of that day (by `--title` when given) or is refused listing the candidates, and never makes a new record. On `transcript summarize`, `--title <words> [--on <date>]` selects, as decided.
 
 **Never:** No transcript text, summary text, action item or attendee in the listing or in either JSON form. No model call in the listing or in completion. No write of any kind by the listing or by completion, and no summary row offered or changed by them. No `people` scope read or offered. No meeting chosen by "latest" or by a row number. No summarize acting on a meeting that `--title` matched ambiguously. No replaced summary without `--again`. No master key, keychain or daemon needed by the listing at a terminal. No change to `transcript summarize`'s other checks, its refusals or `--by`.
 
@@ -398,6 +395,7 @@ Anchors checked against `origin/main` at `82c2edb` (2026-10-22).
     - title words are folded with `normalised_title` (NFKC, case-folded), not NFC, so that `--title`, completion and AD-33's one-record rule compare titles the same way;
     - a missing `projects.toml` is no projects, as `_enrolled_projects` reads it, and is not named as unreadable; a malformed one is named.
   - **Found in revision:** every summarize command pm-ai prints (`7d`'s dashboard line, the "asks again" sentences, `doctor`'s probe) must add `--again` when a summary is held, or the guard would refuse the command it printed. Tasks added for those sites and for `7d`'s Change Log.
+- **2026-10-22, Ask First answered and spec approved (Andrei):** (a) — `drop` keeps `--title` as the meeting's title and gains `--on <date>` as the selector (join exactly one existing meeting of that day, or refuse with the candidates; never mint). Andrei approved the spec for build the same day.
 
 ## Design Notes
 
