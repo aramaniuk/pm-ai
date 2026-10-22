@@ -15,7 +15,8 @@ Local-first AI PM assistant — daemon, CLI, Telegram bridge, connectors, MCP sk
 ## Running and verifying
 
 - Always `uv run <cmd>`. `pytest` is not on PATH, system Python is 3.12 against a `>=3.14,<3.15` requirement, and `python-preference = "only-managed"` is set — sqlite-vec needs `enable_load_extension`, which is absent from stock macOS CPython.
-- Run `uv run pytest` before claiming done — it takes about a minute (65 s measured 2026-09-25), and nothing else runs it: no CI, no pre-commit hook.
+- Run `uv run pytest` before claiming done — it takes about 6–7 minutes (6 min 31 s for 6,676 tests, measured 2026-10-21 on arm64), so run it in the background; nothing else runs it: no CI, no pre-commit hook.
+- `uv` must be the arm64 build (`~/.local/bin/uv`, ahead of `/usr/local/bin` on PATH). The Intel Homebrew `uv` installs `x86_64` Pythons that run under Rosetta: the suite still passes, but the local-model benchmark's numbers are meaningless and 7a's Ask First stops on it.
 - Python is 3.14 exactly: `.python-version` selects it and `requires-python = ">=3.14,<3.15"` refuses anything else. The prompt-injection filter's recorded fingerprint includes the Unicode tables Python ships (16.0.0 in 3.14, 15.1.0 in 3.13), so on another version `test_the_rule_fingerprint_matches_its_version` fails. If it fails that way, the fix is the interpreter — do not follow the test's advice to record a new rule version. Moving to 3.15 is its own slice: new Unicode data is a new rule, so the rates are re-measured first.
 - Runtime deps are an extra, not defaults. `uv sync --extra runtime` before touching anything importing anthropic, fastapi, telegram, or sqlite-vec.
 - The test suite needs the runtime extra from story 4e on: without it `tests/conftest.py` fails collection naming `uv sync --extra runtime` rather than skipping the API tests.
