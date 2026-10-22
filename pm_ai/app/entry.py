@@ -63,9 +63,10 @@ import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from pm_ai.app.daemon import serve as serve_daemon
 from pm_ai.app.prompts import DAEMON_LOG_NAME, DAEMON_LOGGER
@@ -105,11 +106,19 @@ from pm_ai.core.config import Config, ConfigRefused, load_config, read_daemon_po
 from pm_ai.core.frontier_key import FRONTIER_KEY_PROBE, frontier_key_probe
 from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
 from pm_ai.app.members import MemberDesk
+from pm_ai.app.meeting_listing import MeetingLister
+from pm_ai.core.meeting_listing import zone_of
+from pm_ai.domain.meeting_listing import ListingRefused, summarize_command
 from pm_ai.core.goal_register import ARTIFACT as GOALS_ARTIFACT
-from pm_ai.core.goal_register import GOALS_SCOPE, parse_goals
+from pm_ai.core.goal_register import GOALS_SCOPE, GoalRegister, parse_goals
 from pm_ai.domain.health import GRAPH_SYSTEM, EnrolmentReading
 from pm_ai.core.project_registry import ProjectEntry, parse_registry
-from pm_ai.core.meeting_records import MEETINGS, parse_record
+from pm_ai.core.meeting_records import (
+    MEETINGS,
+    is_record_name,
+    parse_record,
+    record_digest_suffix,
+)
 from pm_ai.core.member_updates import parse_ledger
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.member_ledgers import (
@@ -248,23 +257,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 probe_connectors=None,
                 daemon_log=_daemon_log(),
             )
-        keychain = MacOSKeychainAdapter()
         if not parsed.composes:
             # Story 4t: `goal list` and `goal show` read `strategic_goals.md`
             # by its path and compose nothing, so a broken `config.toml`, an
             # unreadable registry or an empty keychain does not stop them. The
             # reader is over storage that knows no project; the file is
-            # personal and not sealed, so no key is asked for.
+            # personal and not sealed, so no key is asked for. It is built at
+            # its first use (story 11f), so `transcript list` — on this path
+            # too — builds no keychain adapter and no store writer.
             return dispatch(
                 parsed,
                 daemon=None,
                 diagnose=lambda: Report(()),
                 probe_connectors=None,
-                goal_reader=GoalReader(application_storage(keychain)),
+                goal_reader=_FirstUseGoalReader(),
                 # Story 7c: `frontier key` composes nothing either; its key goes
                 # to the running daemon over the loopback API, never anywhere else.
                 frontier_key=_loopback(),
+                # Story 11f: `transcript list` reads by path; nothing is written.
+                meeting_list=_meeting_lister(),
             )
+        keychain = MacOSKeychainAdapter()
         composed = _compose(keychain, parsed.target)
         daemon, failure = composed.daemon, composed.failure
         return dispatch(
@@ -348,7 +361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             transcript_drop=(
                 None
                 if daemon is None
-                else functools.partial(drop_transcript, daemon)
+                else functools.partial(drop_transcript, daemon, reachable=_daemon_answers)
             ),
             # `7e`'s `member` commands, over this process's own writer: `member
             # name` asks at this terminal and appends to `aliases.md` from here.
@@ -391,6 +404,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         traceback.print_exc()
         return EXIT_UNEXPECTED
+
+
+class _FirstUseGoalReader:
+    """`GoalReader` over the application scope's storage, built at its first use (11f).
+
+    `goal list` and `goal show` read through it; a command on the same path
+    that never reads goals (`transcript list`, `frontier key`) builds no
+    keychain adapter and no store for it.
+    """
+
+    def __init__(self) -> None:
+        self._reader: GoalReader | None = None
+
+    def _built(self) -> GoalReader:
+        if self._reader is None:
+            self._reader = GoalReader(application_storage(MacOSKeychainAdapter()))
+        return self._reader
+
+    @property
+    def path(self) -> Path:
+        return self._built().path
+
+    def read(self) -> GoalRegister:
+        return self._built().read()
 
 
 def _through_the_daemon(arguments: Sequence[str], options: Mapping[str, str]) -> int:
@@ -564,6 +601,9 @@ DAEMON_BOUNDS: Mapping[tuple[str, ...], Callable[[Daemon], float]] = {
     ("config", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
     # Story 4t: a read of one local file and a print, `config show`'s shape.
     ("goal", "list"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    # Story 11f: reads of local files and the operational store by path, and a
+    # print — `config show`'s shape, answered inline.
+    ("transcript", "list"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
     ("goal", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
     # Story 7e: reads of two local files and the operational store, and at most
     # one append — `config show`'s shape. `member name` is `TERMINAL_BOUND`.
@@ -1710,10 +1750,28 @@ def _matches_probe(composed: _Composition) -> Probe | None:
             MATCHES_PROBE,
             Health.WARNING,
             detail,
-            "a meeting's issue numbers were still linked; `pm-ai transcript summarize "
-            "--scope <scope> --meeting <id>` summarises it again, which asks again.",
+            f"a meeting's issue numbers were still linked; "
+            f"`{_resummarize(paths, given_up[0])}` summarises it again, which asks again"
+            + (" (and likewise for each meeting named)." if len(given_up) > 1 else "."),
         )
     return Probe(MATCHES_PROBE, Health.OK, detail)
+
+
+def _resummarize(paths: Any, row: MatchState) -> str:
+    """The summarize command for a given-up meeting; `--again` when its record holds a
+    summary, read from the record by path (story 11f). Unknown reads as none."""
+    held = False
+    try:
+        folder = Path(paths.resolve(row.scope, MEETINGS))
+        suffix = record_digest_suffix(row.meeting_id)
+        for entry in folder.iterdir():
+            if is_record_name(entry.name) and entry.name.endswith(suffix):
+                record = parse_record(entry.read_text(encoding="utf-8"), source=entry.name)
+                held = record.summary is not None
+                break
+    except (OSError, UnicodeDecodeError, ValueError):
+        held = False
+    return summarize_command(str(row.scope), row.meeting_id, held=held)
 
 
 INGESTION_PROBE = "transcript ingestion"
@@ -1783,6 +1841,20 @@ def _daemon_log() -> DaemonLog:
     )
 
 
+def _daemon_answers() -> bool:
+    """Whether a daemon answers on the loopback port: the prompt's own check (11f).
+
+    The token file and the port are read and a connection opened and closed;
+    no keychain is asked for and nothing is sent.
+    """
+    return _loopback().reachable() is None
+
+
+def _meeting_lister() -> MeetingLister:
+    """`transcript list`'s reader at a terminal, from paths alone (story 11f)."""
+    return MeetingLister(reachable=_daemon_answers, now=lambda: datetime.now(timezone.utc))
+
+
 def _completion() -> Completion:
     """The prompt's completion over three local files, read by path (story 4u).
 
@@ -1799,6 +1871,8 @@ def _completion() -> Completion:
             goal_ids=_goal_ids,
             members=_member_names,
             meetings=_meeting_ids,
+            droppable=_droppable,
+            summarizable=_summarizable,
             updates=_awaiting_updates,
         )
     )
@@ -1838,20 +1912,64 @@ def _member_names(project: str) -> tuple[str, ...]:
         return ()
 
 
-def _meeting_ids(project: str) -> tuple[str, ...]:
-    """The line's project's recorded meeting ids, newest day first, read by path (7e)."""
+MeetingChoice = tuple[str, datetime, str, bool]
+"""A meeting completion offers: its id, its start in the display zone, its title,
+and whether its record holds a summary (said only for `summarize`)."""
+
+
+def _scope_of(scope: str) -> tuple[ScopePaths, DataScope] | None:
+    """The resolver and the scope a line's `--scope` names: personal or an enrolled project."""
     try:
-        located = _project_scope(project)
+        parsed = DataScope.parse(scope)
+    except ValueError:
+        return None
+    if parsed.kind is ScopeKind.PERSONAL:
+        return ScopePaths.production(), parsed
+    if parsed.kind is ScopeKind.PROJECT and parsed.project_id is not None:
+        return _project_scope(parsed.project_id)
+    return None
+
+
+def _display_zone() -> tzinfo:
+    """`display_timezone` from `config.toml` by its path; UTC when unset or unreadable."""
+    try:
+        path = ScopePaths.production().resolve(APPLICATION, CONFIG_ARTIFACT)
+        name = load_config(_read_or_none(path)).display_timezone
+    except (OSError, ValueError):
+        return timezone.utc
+    return zone_of(name) or timezone.utc
+
+
+def _meeting_ids(scope: str) -> tuple[MeetingChoice, ...]:
+    """The line's scope's recorded meetings, most recent first (7e, 11f).
+
+    Read by path, each record parsed; the start in `display_timezone`.
+    `member name --meeting` (7e) offers them all, as before.
+    """
+    return _recorded(scope, started_only=False)
+
+
+def _droppable(scope: str) -> tuple[MeetingChoice, ...]:
+    """`drop --meeting`'s meetings: the recorded ones that have started (story 11f)."""
+    return _recorded(scope, started_only=True)
+
+
+def _recorded(scope: str, *, started_only: bool) -> tuple[MeetingChoice, ...]:
+    """The scope's recorded meetings by path, most recent first; `started_only` drops the rest."""
+    try:
+        located = _scope_of(scope)
         if located is None:
             return ()
-        paths, scope = located
-        directory = Path(paths.resolve(scope, MEETINGS))
+        paths, parsed = located
+        directory = Path(paths.resolve(parsed, MEETINGS))
         if not directory.is_dir():
             return ()
         names = sorted(directory.iterdir(), reverse=True)
     except _READER_FAULTS:
         return ()
-    found: list[str] = []
+    zone = _display_zone()
+    now = datetime.now(timezone.utc)
+    found: dict[str, MeetingChoice] = {}
     for entry in names:
         if not is_collection_member(entry.name) or not entry.name.endswith(".md"):
             continue
@@ -1859,9 +1977,36 @@ def _meeting_ids(project: str) -> tuple[str, ...]:
             record = parse_record(entry.read_text(encoding="utf-8"), source=str(entry))
         except (OSError, UnicodeDecodeError, ValueError):
             continue
-        if record.meeting.meeting_id not in found:
-            found.append(record.meeting.meeting_id)
-    return tuple(found)
+        meeting = record.meeting
+        if (started_only and meeting.start > now) or meeting.meeting_id in found:
+            continue
+        found[meeting.meeting_id] = (
+            meeting.meeting_id, meeting.start.astimezone(zone), meeting.title, False
+        )
+    return tuple(sorted(found.values(), key=lambda choice: choice[1], reverse=True))
+
+
+def _summarizable(scope: str) -> tuple[MeetingChoice, ...]:
+    """The line's scope's meetings whose transcript is ingested and kept (story 11f).
+
+    The listing's own reading code, so completion offers what `transcript list`
+    would offer to summarize.
+    """
+    try:
+        if _scope_of(scope) is None:
+            return ()
+        zone = _display_zone()
+        return tuple(
+            (meeting_id, start.astimezone(zone), title, held)
+            for meeting_id, start, title, held in _meeting_lister_offline().summarizable(scope)
+        )
+    except (*_READER_FAULTS, ListingRefused):
+        return ()
+
+
+def _meeting_lister_offline() -> MeetingLister:
+    """The listing's reader for completion: it never reaches the daemon (4u)."""
+    return MeetingLister(reachable=lambda: False, now=lambda: datetime.now(timezone.utc))
 
 
 def _awaiting_updates(project: str) -> tuple[str, ...]:

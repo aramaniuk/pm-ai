@@ -2095,9 +2095,10 @@ def test_7d_afternoon_render_lists_the_summary_after_the_schedule():
         "  - unassigned: book the room",
         "  - Bo: update the plan",
     ]
+    # Story 11f: the record holds a summary, so the command carries `--again`.
     assert lines[4] == (
         "  - meeting `mtg_a`; to ask for a summary: "
-        "`pm-ai transcript summarize --scope personal --meeting mtg_a`"
+        "`pm-ai transcript summarize --scope personal --meeting mtg_a --again`"
     )
     # No new heading: CAP-9's four stay exactly four.
     assert list(sections(text)) == list(HEADINGS)

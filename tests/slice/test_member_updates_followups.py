@@ -269,7 +269,22 @@ def test_the_doctor_probe_waiting_ok_old_not_offered_and_given_up_warning(tmp_pa
     probe = entry._matches_probe(composed)  # type: ignore[arg-type]
     assert probe.health is Health.WARNING
     assert "given up after 3 failed calls" in probe.detail and "meeting mtg_c" in probe.detail
-    assert "`pm-ai transcript summarize --scope <scope> --meeting <id>`" in probe.remediation
+    # Story 11f: the command is the meeting's own, with `--again` exactly when its
+    # record holds a summary, read from the record.
+    assert (
+        "`pm-ai transcript summarize --scope project:alpha --meeting mtg_c`"
+        in probe.remediation
+    )
+    _with_summary(
+        daemon,
+        Meeting(meeting_id="mtg_c", title="Release sync", start=MONDAY, duration_minutes=30,
+                attendees=(), scope=PROJECT),
+    )
+    probe = entry._matches_probe(composed)  # type: ignore[arg-type]
+    assert (
+        "`pm-ai transcript summarize --scope project:alpha --meeting mtg_c --again`"
+        in probe.remediation
+    )
 
 
 def test_doctor_reports_a_given_up_match_at_warning(tmp_path, monkeypatch):

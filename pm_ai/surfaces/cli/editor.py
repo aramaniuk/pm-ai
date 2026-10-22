@@ -123,6 +123,7 @@ class _Completer(Completer):
                 candidate.text,
                 start_position=candidate.start - len(before),
                 display=candidate.display,
+                display_meta=candidate.meta or None,
             )
 
 

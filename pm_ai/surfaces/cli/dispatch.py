@@ -45,9 +45,8 @@ import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, Protocol, TextIO, runtime_checkable
 
 from pm_ai.core.cadence import CYCLE, FIRST_RETRY, START_SPREAD
@@ -81,7 +80,27 @@ from pm_ai.core.meeting_records import (
     MeetingNotFound,
     parse_attendees,
 )
+from pm_ai.core.meeting_listing import (
+    listing_json,
+    listing_text,
+    meeting_json,
+    next_json,
+    next_words,
+    summary_json,
+    summary_words,
+    when_shown,
+)
 from pm_ai.core.transcript_details import title_refusal
+from pm_ai.domain.meeting_listing import (
+    AGAIN_FLAG,
+    LIST_STATES,
+    LISTING_FORMAT,
+    ListedMeeting,
+    Listing,
+    ListingRefused,
+    ON_FOUND_BY,
+    PEOPLE_REFUSAL,
+)
 from pm_ai.core.transcripts import (
     MAX_DROP_MINUTES,
     MIN_DROP_MINUTES,
@@ -790,6 +809,14 @@ class TranscriptDropOutcome(Protocol):
         ...
     @property
     def notices(self) -> tuple[str, ...]: ...
+    @property
+    def listed(self) -> ListedMeeting | None:
+        """The meeting as `transcript list` shows it, read after the drop (story 11f)."""
+        ...
+    @property
+    def record_fields(self) -> tuple[DroppedFieldOutcome, ...] | None:
+        """A named or chosen drop's title, start and length, as the record holds them (11f)."""
+        ...
 
 
 class TranscriptDrop(Protocol):
@@ -816,7 +843,18 @@ class TranscriptDrop(Protocol):
         duration: int | None = None,
         attendees: tuple[Actor, ...] = (),
         dry_run: bool = False,
+        on: date | None = None,
     ) -> TranscriptDropOutcome | DropPreviewOutcome: ...
+
+
+class MeetingList(Protocol):
+    """`pm-ai transcript list`'s reader (story 11f): `pm_ai.app.meeting_listing.MeetingLister`.
+
+    Reads by path and composes nothing. `ListingRefused` for a scope it will
+    not read.
+    """
+
+    def list(self, *, scope: DataScope | None, state: str, limit: int | None) -> Listing: ...
 
 
 def _no_onboarding(path: str, alias: str | None) -> OnboardOutcome:
@@ -1023,6 +1061,10 @@ class Context:
     The loopback client's `hand_frontier_key`, bound by the composition root;
     `None` refuses the command naming `pm-ai daemon run`.
     """
+
+    meeting_list: MeetingList | None = None
+    """`pm-ai transcript list`'s reader (story 11f), built from paths; `None`
+    refuses the command as a wiring fault."""
 
     members: Members | None = None
     """`pm-ai member name|link|unmatched`'s reads and appends (story 7e).
@@ -3327,8 +3369,9 @@ rule refuses is a usage error."""
 DRY_RUN_FLAG = "dry-run"
 JSON_FLAG = "json"
 DROP_FLAGS = (DRY_RUN_FLAG, JSON_FLAG)
-"""`--dry-run` previews what a drop would store and writes nothing; `--json`,
-only with it, prints the preview as one JSON object (story 11e)."""
+"""`--dry-run` previews what a drop would store and writes nothing; `--json`
+prints the preview, or since story 11f a real drop's outcome, as one JSON
+object (story 11e)."""
 
 DROP_WORDS = ("transcript", "drop")
 
@@ -3433,6 +3476,28 @@ class _Given:
     start: datetime | None = None
     attendees: tuple[Actor, ...] | None = None
     duration: int | None = None
+    on: date | None = None
+
+
+ON_OPTION = "on"
+"""`--on <YYYY-MM-DD>` (story 11f): on `transcript drop`, join exactly one existing
+meeting of that day; on `transcript summarize`, keep `--title`'s matches to that day."""
+
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _on_day(typed: str) -> date | None:
+    """`--on`'s date, or `None` when it is not one `YYYY-MM-DD`."""
+    if not _DAY.match(typed):
+        return None
+    try:
+        return date.fromisoformat(typed)
+    except ValueError:
+        return None
+
+
+def _on_misread(typed: str) -> str:
+    return f"`--{ON_OPTION}` takes a date as YYYY-MM-DD, such as 2026-09-14; {typed!r} is not one."
 
 
 class _BadAnswer(Exception):
@@ -3472,13 +3537,30 @@ def _given(options: Mapping[str, str]) -> _Given:
         reason = _duration_refusal(minutes)
         if reason is not None:
             raise _BadAnswer(f"`--{DURATION_OPTION}`: {reason}")
-    if MEETING_ARGUMENT in options and any(name in options for name in DROP_ANSWERS):
-        named = _listed_words([f"`--{name}`" for name in DROP_ANSWERS if name in options])
+    if MEETING_ARGUMENT in options and any(
+        name in options for name in (*DROP_ANSWERS, ON_OPTION)
+    ):
+        named = _listed_words(
+            [f"`--{name}`" for name in (*DROP_ANSWERS, ON_OPTION) if name in options]
+        )
         raise _BadAnswer(
             f"`--{MEETING_ARGUMENT}` names the record to bind to, so {named} "
             f"cannot be given with it: they describe a meeting to match or make."
         )
+    on: date | None = None
+    if ON_OPTION in options:
+        on = _on_day(options[ON_OPTION].strip())
+        if on is None:
+            raise _BadAnswer(_on_misread(options[ON_OPTION]))
+        describing = [name for name in (START_OPTION, ATTENDEES_OPTION, DURATION_OPTION) if name in options]
+        if describing:
+            named = _listed_words([f"`--{name}`" for name in describing])
+            raise _BadAnswer(
+                f"`--{ON_OPTION}` joins an existing meeting of that day and never makes "
+                f"one, so {named} cannot be given with it: they describe a meeting to make."
+            )
     return _Given(
+        on=on,
         title=title,
         start=None if start is None else datetime.fromisoformat(start).astimezone(timezone.utc),
         attendees=None if attendees is None else parse_attendees(attendees),
@@ -3606,15 +3688,8 @@ def _read_drop(path: Path, note: str = "") -> _DropRead:
 
 
 def _when(start: datetime, zone: str) -> str:
-    """A start in UTC, and in `display_timezone` when one is set."""
-    shown = start.astimezone(timezone.utc).isoformat()
-    if not zone:
-        return shown
-    try:
-        local = start.astimezone(ZoneInfo(zone))
-    except (ZoneInfoNotFoundError, ValueError):
-        return shown
-    return f"{shown} ({local.strftime('%Y-%m-%d %H:%M')} in {zone})"
+    """A start in UTC, and in `display_timezone` when one is set (`transcript list`'s too)."""
+    return when_shown(start, zone)
 
 
 def _from(source: str, estimated: bool) -> str:
@@ -3669,9 +3744,10 @@ def _closing_line(dropped: TranscriptDropOutcome) -> str:
             f"expired."
         )
     if dropped.bound_by == "matched":
-        found = (
-            "found by --start" if dropped.found_by == "start" else "found by title on the same day"
-        )
+        found = {
+            "start": "found by --start",
+            ON_FOUND_BY: f"found by --{ON_OPTION}",
+        }.get(dropped.found_by, "found by title on the same day")
         line += (
             f" It joined the existing meeting {dropped.title!r} "
             f"({dropped.meeting_id}), {found}."
@@ -3701,6 +3777,10 @@ def _closing_line(dropped: TranscriptDropOutcome) -> str:
     line += " " + _clauses_sentence([_participant_words(dropped.participants)])
     if dropped.from_docx:
         line += " The capture is the text taken from the .docx; the .docx itself is not kept."
+    listed = dropped.listed
+    if listed is not None:
+        # Story 11f: the summary's state and the next step, in the listing's words.
+        line += f" Now: {summary_words(listed)}; {next_words(listed)}."
     return line
 
 
@@ -3732,7 +3812,11 @@ def _preview_text(preview: DropPreviewOutcome) -> str:
         )
     )
     if preview.outcome == "join":
-        found = {"start": ", found by --start", "same day": ", found by title on the same day"}
+        found = {
+            "start": ", found by --start",
+            "same day": ", found by title on the same day",
+            ON_FOUND_BY: f", found by --{ON_OPTION}",
+        }
         lines.append(
             f"  outcome: join the existing meeting {preview.meeting_title!r} ({preview.meeting_id})"
             f"{found.get(preview.found_by, '')}"
@@ -3776,6 +3860,7 @@ def _preview_json(preview: DropPreviewOutcome) -> str:
         outcome = {"kind": "refused", "reason": preview.reason}
     return json.dumps(
         {
+            "format": LISTING_FORMAT,
             "title": _json_field(preview.title),
             "start": _json_field(preview.start, instant=True),
             "duration_minutes": _json_field(preview.duration),
@@ -3783,6 +3868,46 @@ def _preview_json(preview: DropPreviewOutcome) -> str:
                 {"name": name, "handle": handle} for name, handle in preview.participants
             ],
             "outcome": outcome,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _dropped_json(dropped: TranscriptDropOutcome) -> str:
+    """`transcript drop --json` on a real drop: one object (story 11f, amends 11e)."""
+    recorded = dropped.record_fields or (None, None, None)
+    # Each field on its own: the decided one, else the record's.
+    title, start, duration = (
+        decided if decided is not None else fallback
+        for decided, fallback in zip(
+            (dropped.title_field, dropped.start_field, dropped.duration), recorded
+        )
+    )
+
+    def shown(field: DroppedFieldOutcome | None, *, instant: bool = False) -> object:
+        return None if field is None else _json_field(field, instant=instant)
+
+    if dropped.bound_by == "minted":
+        outcome: dict[str, object] = {"kind": "new", "candidates": list(dropped.candidates)}
+    else:
+        outcome = {"kind": "join", "meeting_id": dropped.meeting_id, "title": dropped.title}
+    listed = dropped.listed
+    return json.dumps(
+        {
+            "format": LISTING_FORMAT,
+            "title": shown(title),
+            "start": shown(start, instant=True),
+            "duration_minutes": shown(duration),
+            "participants": [
+                {"name": name, "handle": handle} for name, handle in dropped.participants
+            ],
+            "outcome": outcome,
+            "meeting_id": dropped.meeting_id,
+            "staged": dropped.staged,
+            "left": dropped.left,
+            "summary": None if listed is None else summary_json(listed),
+            "next": None if listed is None else next_json(listed),
+            "notices": list(dropped.notices),
         },
         ensure_ascii=False,
     )
@@ -3830,11 +3955,6 @@ def _transcript_drop(context: Context) -> int:
             "no target scope reached `transcript drop`. That is a wiring fault in pm-ai."
         )
     dry_run = DRY_RUN_FLAG in context.flags
-    if JSON_FLAG in context.flags and not dry_run:
-        return _drop_misused(
-            f"`--{JSON_FLAG}` prints `--{DRY_RUN_FLAG}`'s preview as one object, so it "
-            f"is given only with `--{DRY_RUN_FLAG}`."
-        )
     try:
         given = _given(context.options)
     except _BadAnswer as bad:
@@ -3864,6 +3984,7 @@ def _transcript_drop(context: Context) -> int:
             duration=given.duration,
             attendees=given.attendees or (),
             dry_run=dry_run,
+            on=given.on,
         )
     except (UnreadableTranscript, NothingSaid) as refused:
         raise _file_refusal(refused) from refused
@@ -3894,7 +4015,7 @@ def _transcript_drop(context: Context) -> int:
     if isinstance(dropped, DropPreviewOutcome):
         _echo(_preview_json(dropped) if JSON_FLAG in context.flags else _preview_text(dropped))
         return EXIT_OK
-    _echo(_closing_line(dropped))
+    _echo(_dropped_json(dropped) if JSON_FLAG in context.flags else _closing_line(dropped))
     return EXIT_OK
 
 
@@ -4027,6 +4148,23 @@ def _summarize_target(options: Mapping[str, str]) -> DataScope:
         raise _Misread(
             f"`--{BY_OPTION}` takes {' or '.join(SUMMARY_MAKERS)}; `{by}` is neither."
         )
+    # Story 11f: a meeting is named by its id, or chosen by `--title [--on]`.
+    if ON_OPTION in options and TITLE_OPTION not in options and MEETING_ARGUMENT not in options:
+        raise _Misread(
+            f"`--{ON_OPTION}` narrows `--{TITLE_OPTION}` to one day, so it is given only "
+            f"with `--{TITLE_OPTION} <words>`."
+        )
+    if MEETING_ARGUMENT not in options and TITLE_OPTION not in options:
+        raise _Misread(
+            f"`transcript summarize` needs `--{MEETING_ARGUMENT} <id>`, or "
+            f"`--{TITLE_OPTION} <words>` naming exactly one meeting; `pm-ai transcript "
+            f"list` lists the meetings and their ids."
+        )
+    if ON_OPTION in options:
+        if _on_day(options[ON_OPTION].strip()) is None:
+            raise _Misread(_on_misread(options[ON_OPTION]))
+    if TITLE_OPTION in options and not options[TITLE_OPTION].strip():
+        raise _Misread(f"`--{TITLE_OPTION}` takes the words of a meeting's title.")
     return scope
 
 
@@ -4044,11 +4182,106 @@ class TranscriptSummarize(Protocol):
     binds it: typed at a terminal, the line is sent to the daemon instead.
     """
 
-    def __call__(self, *, scope: DataScope, meeting_id: str, by: str) -> SummaryRequestedOutcome: ...
+    def __call__(
+        self,
+        *,
+        scope: DataScope,
+        meeting_id: str | None,
+        by: str,
+        title: str | None = None,
+        on: date | None = None,
+        again: bool = False,
+    ) -> SummaryRequestedOutcome: ...
+
+
+# ── `pm-ai transcript list` (story 11f) ──────────────────────────────────────
+
+LIST_WORDS = ("transcript", "list")
+STATE_OPTION = "state"
+LIMIT_OPTION = "limit"
+LIST_LIMITS = (1, 200)
+DEFAULT_LIST_LIMIT = 20
+"""`--limit`: 1 to 200 meetings, 20 when not given."""
+
+
+def _list_limit(options: Mapping[str, str]) -> int:
+    typed = options.get(LIMIT_OPTION)
+    if typed is None:
+        return DEFAULT_LIST_LIMIT
+    low, high = LIST_LIMITS
+    word = typed.strip()
+    if word.isascii() and word.isdigit() and low <= int(word) <= high:
+        return int(word)
+    raise _Misread(f"`--{LIMIT_OPTION}` takes a whole number, {low} to {high}; {typed!r} is not one.")
+
+
+def _list_target(options: Mapping[str, str]) -> DataScope:
+    """Personal, as `dashboard`'s is without `--scope`; `_Misread` for a line it cannot read.
+
+    The target is personal whatever `--scope` names: the listing reads every
+    scope by path, so at the prompt a project enrolled since the daemon started
+    is listed as the terminal lists it.
+    """
+    requested = options.get(SCOPE_ARGUMENT)
+    if requested is not None and _scope(requested) is None:
+        raise _Misread(
+            f"`--{SCOPE_ARGUMENT} {requested}` is not a scope. Write `personal`, or "
+            f"`project:<id>` naming an enrolled project."
+        )
+    state = options.get(STATE_OPTION, LIST_STATES[0])
+    if state not in LIST_STATES:
+        raise _Misread(
+            f"`--{STATE_OPTION}` takes {_listed_words(LIST_STATES)}; `{state}` is none of them."
+        )
+    _list_limit(options)
+    return PERSONAL
+
+
+def _echo_replacing(text: str) -> None:
+    """`text` on this command's output, a character its encoding lacks replaced (11f)."""
+    chosen = _OUT.get() or sys.stdout
+    encoding = getattr(chosen, "encoding", None) or "utf-8"
+    try:
+        safe = text.encode(encoding, errors="replace").decode(encoding)
+    except LookupError:
+        safe = text
+    _echo(safe, end="")
+
+
+def _transcript_list(context: Context) -> int:
+    """`pm-ai transcript list [--scope <scope>] [--state <state>] [--limit <n>] [--json]` (11f).
+
+    The meetings that have a transcript, newest first, each with its
+    transcript's and summary's state and the next command, or why there is
+    none. Read by path: no daemon, master key or keychain, and nothing written.
+    """
+    requested = context.options.get(SCOPE_ARGUMENT)
+    scope = None if requested is None else _scope(requested)
+    if scope is not None and scope.kind not in _DROPPABLE_KINDS:
+        raise Refusal(PEOPLE_REFUSAL.format(scope=scope))
+    lister = context.meeting_list
+    if lister is None:
+        raise Refusal(
+            "no meeting reader was supplied to the CLI, so nothing was listed. That is "
+            "a wiring fault in pm-ai, not this machine's."
+        )
+    try:
+        listing = lister.list(
+            scope=scope,
+            state=context.options.get(STATE_OPTION, LIST_STATES[0]),
+            limit=_list_limit(context.options),
+        )
+    except ListingRefused as refused:
+        raise Refusal(str(refused)) from refused
+    if JSON_FLAG in context.flags:
+        _echo_replacing(listing_json(listing) + "\n")
+    else:
+        _echo_replacing(listing_text(listing))
+    return EXIT_OK
 
 
 def _transcript_summarize(context: Context) -> int:
-    """`pm-ai transcript summarize --scope <scope> --meeting <id> [--by local|claude]` (7b, 7c).
+    """`pm-ai transcript summarize --scope <scope> (--meeting <id> | --title <words> [--on <date>]) [--by local|claude] [--again]` (7b, 7c, 11f).
 
     Only the daemon summarises, by the local model or, with `--by claude`, by
     Claude (story 7c) — the one frontier call pm-ai makes, and only when asked.
@@ -4073,11 +4306,15 @@ def _transcript_summarize(context: Context) -> int:
             "line; start one with `pm-ai daemon run` and ask again. Nothing was "
             "sent."
         )
+    on_typed = context.options.get(ON_OPTION)
     try:
         requested = summarize(
             scope=scope,
-            meeting_id=context.options[MEETING_ARGUMENT],
+            meeting_id=context.options.get(MEETING_ARGUMENT),
             by=context.options.get(BY_OPTION, SUMMARY_MAKERS[0]),
+            title=context.options.get(TITLE_OPTION),
+            on=None if on_typed is None else _on_day(on_typed.strip()),
+            again=AGAIN_FLAG in context.flags,
         )
     except (SummaryRefused, MeetingNotFound, MalformedMeeting, ArtifactBusy) as refusal:
         message = refusal.args[0] if isinstance(refusal, KeyError) and refusal.args else refusal
@@ -4448,22 +4685,36 @@ TABLE: Mapping[str, Command] = {
                 "started in",
                 _transcript_drop,
                 takes=("file",),
-                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, *DROP_ANSWERS),
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, *DROP_ANSWERS, ON_OPTION),
                 flags=DROP_FLAGS,
                 requires=(SCOPE_ARGUMENT,),
                 target=_drop_target,
             ),
             # `7b`: a meeting's summary, decisions and action items, made by the
-            # local model in the daemon.
+            # local model in the daemon. `11f`: chosen by `--title [--on]`, and
+            # refused over a summary already held unless `--again`.
             "summarize": Command(
                 "ask the daemon's local model (or, with --by claude, Claude) for a "
-                "meeting's summary, decisions and action items; the daemon must be "
-                "running",
+                "meeting's summary, decisions and action items; name the meeting with "
+                "--meeting, or choose exactly one with --title [--on]; --again replaces "
+                "a summary already held; the daemon must be running",
                 _transcript_summarize,
-                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, BY_OPTION),
-                requires=(SCOPE_ARGUMENT, MEETING_ARGUMENT),
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, TITLE_OPTION, ON_OPTION, BY_OPTION),
+                flags=(AGAIN_FLAG,),
+                requires=(SCOPE_ARGUMENT,),
                 target=_summarize_target,
                 via_daemon=True,
+            ),
+            # `11f`: the meetings that have a transcript, read by path.
+            "list": Command(
+                "list the meetings that have a transcript, newest first, with each "
+                "one's transcript and summary state and the next command; reads files "
+                "only, within 1 second",
+                _transcript_list,
+                options=(SCOPE_ARGUMENT, STATE_OPTION, LIMIT_OPTION),
+                flags=(JSON_FLAG,),
+                composes=False,
+                target=_list_target,
             ),
         },
     ),
@@ -4809,6 +5060,7 @@ def dispatch(
     transcript_summarize: TranscriptSummarize | None = None,
     members: Members | None = None,
     frontier_key: FrontierKeyHand | None = None,
+    meeting_list: MeetingList | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -4844,6 +5096,7 @@ def dispatch(
             transcript_summarize=transcript_summarize,
             members=members,
             frontier_key=frontier_key,
+            meeting_list=meeting_list,
             serve=serve,
             unavailable=unavailable,
             undecided=undecided,
@@ -4877,6 +5130,7 @@ def _dispatch(
     transcript_summarize: TranscriptSummarize | None,
     members: Members | None,
     frontier_key: FrontierKeyHand | None,
+    meeting_list: MeetingList | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
     undecided: str | None,
@@ -4905,6 +5159,7 @@ def _dispatch(
         transcript_summarize=transcript_summarize,
         members=members,
         frontier_key=frontier_key,
+        meeting_list=meeting_list,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,

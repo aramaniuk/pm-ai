@@ -34,6 +34,14 @@ from pm_ai.connectors.registry import ConnectorRegistry
 from pm_ai.core.config import ACCEPTED_KEYS, Config, ConfigRefused, load_config
 from pm_ai.domain.health import EnrolmentReading, Health, Probe
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.meeting_listing import (
+    ListedMeeting,
+    ListedSummary,
+    ListedTranscript,
+    NextStep,
+    RecordReading,
+    WaitingKind,
+)
 from pm_ai.domain.scope_model import ScopeResolutionError
 from pm_ai.ports import (
     AES_KEY_BYTES,
@@ -787,7 +795,14 @@ def test_the_bound_the_cli_uses_is_cap35s_and_is_the_registrys_own(tmp_path):
 
 @pytest.mark.parametrize(
     "argv",
-    [["key", "enrol"], ["config", "show"], ["connector", "check"], ["connector", "sign-in"]],
+    [
+        ["key", "enrol"],
+        ["config", "show"],
+        ["connector", "check"],
+        ["connector", "sign-in"],
+        # Story 11f.
+        ["transcript", "list"],
+    ],
     ids=lambda argv: " ".join(argv),
 )
 def test_every_leaf_is_reachable_from_the_table(argv):
@@ -1165,6 +1180,9 @@ class _Dropped:
     zone: str = ""
     from_docx: bool = False
     notices: tuple[str, ...] = ()
+    # Story 11f: the meeting as `transcript list` shows it, read after the drop.
+    listed: ListedMeeting | None = None
+    record_fields: tuple | None = None
 
 
 @dataclasses.dataclass
@@ -1194,12 +1212,12 @@ class _Drop:
 
     def __call__(self, *, text, file_name, scope, meeting_id, from_docx=False,
                  modified=None, created=None, title=None, start=None, duration=None,
-                 attendees=(), dry_run=False):
+                 attendees=(), dry_run=False, on=None):
         self.calls.append(
             {"text": text, "file_name": file_name, "scope": scope, "meeting_id": meeting_id,
              "from_docx": from_docx, "modified": modified, "created": created,
              "title": title, "start": start, "duration": duration, "attendees": attendees,
-             "dry_run": dry_run}
+             "dry_run": dry_run, "on": on}
         )
         if self.raises is not None:
             raise self.raises
@@ -1498,11 +1516,73 @@ def test_the_options_are_handed_on_as_given(dropped_file):
     assert call["attendees"] == (Actor("email:ana@example.com"), Actor("email:bo@example.com"))
 
 
-def test_json_without_dry_run_is_a_usage_error_naming_dry_run(dropped_file, capsys):
-    drop = _Drop()
-    assert _drop([str(dropped_file), "--scope", "personal", "--json"], drop) == EXIT_USAGE
-    assert "--dry-run" in capsys.readouterr().err
-    assert drop.calls == []
+_LISTED = ListedMeeting(
+    scope="personal",
+    meeting_id="mtg_new",
+    record=RecordReading.READABLE,
+    transcript=ListedTranscript("ingested", None, True),
+    summary=ListedSummary(
+        "waiting", False, made_by="local", requested=False, reason="ingested",
+        at=DROP_START, offered_automatically=True, waiting=WaitingKind.HARVEST,
+    ),
+    next=NextStep(summarize=("transcript", "summarize", "--scope", "personal",
+                             "--meeting", "mtg_new")),
+    title="Weekly Sync",
+    start=DROP_START,
+    start_estimated=True,
+)
+
+
+def test_a_real_drops_json_prints_one_object(dropped_file, capsys):
+    """Story 11f (amends 11e): `--json` without `--dry-run` drops and prints one object."""
+    answer = _Dropped(
+        Path("/c.vtt"), "mtg_new", DataScope(ScopeKind.PERSONAL), "minted",
+        title_field=_Field("Weekly Sync", "file name"),
+        start_field=_Field(DROP_START, "file modification time", True),
+        duration=_Field(1, "last cue"),
+        candidates=("mtg_x",),
+        notices=("a notice",),
+        listed=_LISTED,
+    )
+    drop = _Drop(answer=answer)
+    assert _drop([str(dropped_file), "--scope", "personal", "--json"], drop) == EXIT_OK
+    found = json.loads(capsys.readouterr().out)
+    assert len(drop.calls) == 1 and drop.calls[0]["dry_run"] is False
+    assert found == {
+        "format": 1,
+        "title": {"value": "Weekly Sync", "source": "file name", "estimated": False},
+        "start": {"value": "2026-10-09T11:00:00+00:00", "source": "file modification time",
+                  "estimated": True},
+        "duration_minutes": {"value": 1, "source": "last cue", "estimated": False},
+        "participants": [{"name": "Andrei", "handle": None}],
+        "outcome": {"kind": "new", "candidates": ["mtg_x"]},
+        "meeting_id": "mtg_new",
+        "staged": 1,
+        "left": 0,
+        "summary": {
+            "state": "waiting", "held": False, "made_by": "local", "requested": False,
+            "model": None, "reason": "ingested", "at": "2026-10-09T11:00:00+00:00",
+            "offered_automatically": True,
+        },
+        "next": {
+            "summarize": ["transcript", "summarize", "--scope", "personal", "--meeting",
+                          "mtg_new"],
+            "resummarize": None, "drop": None, "why": None,
+        },
+        "notices": ["a notice"],
+    }
+
+
+def test_the_closing_line_ends_with_the_summary_state_and_the_next_step(dropped_file, capsys):
+    """Story 11f: the drop's line ends with the listing's words for this meeting."""
+    from pm_ai.core.meeting_listing import next_words, summary_words
+
+    answer = _Dropped(Path("/c.vtt"), "mtg_new", DataScope(ScopeKind.PERSONAL), "named",
+                      listed=_LISTED)
+    assert _drop([str(dropped_file), "--scope", "personal"], _Drop(answer=answer)) == EXIT_OK
+    out = capsys.readouterr().out.strip()
+    assert out.endswith(f"Now: {summary_words(_LISTED)}; {next_words(_LISTED)}.")
+    assert "summary waiting for the daemon's next harvest (local model)" in out
 
 
 _PREVIEW = _Preview(
@@ -1536,6 +1616,8 @@ def test_a_dry_run_with_json_prints_one_object(dropped_file, capsys):
     assert code == EXIT_OK
     found = json.loads(capsys.readouterr().out)
     assert found == {
+        # Story 11f: `format` added, an addition under the change rules.
+        "format": 1,
         "title": {"value": "Weekly Sync", "source": "file header", "estimated": False},
         "start": {"value": "2026-10-09T11:00:00+00:00", "source": "file header",
                   "estimated": True},

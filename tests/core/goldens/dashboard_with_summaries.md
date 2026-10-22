@@ -10,12 +10,12 @@ Meeting summaries recorded between 2026-09-08 12:30 and 2026-09-09 12:30 — in 
   - Ваня: send the deck (Friday)
   - unassigned: book the room
   - and 2 more open action items
-  - meeting `mtg_a`; to ask for a summary: `pm-ai transcript summarize --scope personal --meeting mtg_a`
+  - meeting `mtg_a`; to ask for a summary: `pm-ai transcript summarize --scope personal --meeting mtg_a --again`
 - **2026-09-08 15:00** Vendor call — summary waiting for Claude
   - meeting `mtg_b`; to ask for a summary: `pm-ai transcript summarize --scope personal --meeting mtg_b`
 - **09:00** Alpha planning (`project:alpha`) — The team planned the release. (made by Claude claude-sonnet-5-5, on request)
   - no open action item
-  - meeting `mtg_c`; to ask for a summary: `pm-ai transcript summarize --scope project:alpha --meeting mtg_c`
+  - meeting `mtg_c`; to ask for a summary: `pm-ai transcript summarize --scope project:alpha --meeting mtg_c --again`
 - and 1 earlier summary recorded in this window is not shown
 
 ## Proactive Enablement

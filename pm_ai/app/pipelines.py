@@ -263,6 +263,15 @@ from pm_ai.storage.service import (
 )
 from pm_ai.skills.registry import ExecutedButUnrecorded, Invocation
 from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL, EXIT_UNEXPECTED, RESTART_SENTENCE
+from pm_ai.app.meeting_listing import MeetingLister, listed_after_drop, resolve_title
+from pm_ai.core.meeting_listing import fold_shown, shown_title, title_matches, when_shown
+from pm_ai.core.meeting_listing import zone_of as named_zone
+from pm_ai.domain.meeting_listing import (
+    ON_FOUND_BY,
+    TITLE_CANDIDATES_SHOWN,
+    ListedMeeting,
+    summarize_command,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -1362,6 +1371,12 @@ class TranscriptDropped:
     zone: str = ""
     from_docx: bool = False
     notices: tuple[str, ...] = ()
+    listed: ListedMeeting | None = None
+    """The meeting as `transcript list` shows it, read after the drop committed
+    (story 11f); `None` when it could not be read."""
+    record_fields: tuple[DroppedField, DroppedField, DroppedField] | None = None
+    """A `--meeting` or `--on` drop's title, start and length as the record holds
+    them, for `--json` (story 11f); the other drops carry the decided fields."""
 
     @property
     def minted(self) -> bool:
@@ -1424,6 +1439,9 @@ class DropOptions:
     start: datetime | None = None
     duration: int | None = None
     attendees: tuple[Actor, ...] = ()
+    on: date | None = None
+    """`--on` (story 11f): join exactly one existing meeting of that day, by
+    `--title` when given, or refuse; never make one."""
 
 
 _HEADER_REFUSALS: tuple[type[BaseException], ...] = (
@@ -1657,6 +1675,8 @@ def drop_transcript(
     duration: int | None = None,
     attendees: tuple[Actor, ...] = (),
     dry_run: bool = False,
+    on: date | None = None,
+    reachable: Callable[[], bool] | None = None,
 ) -> TranscriptDropped | DropPreview:
     """`pm-ai transcript drop`, as the surface calls it: the drop, or with
     `dry_run` its preview (`preview_drop`), which writes nothing.
@@ -1664,6 +1684,8 @@ def drop_transcript(
     `modified` is the file's modification time, aware UTC — the daemon's
     clock when not given; `created` a `.docx`'s `dcterms:created`. The
     options are as the command line gave them, each `None` when not given.
+    `reachable` answers whether a daemon answers on the loopback port, for the
+    closing line's next step (story 11f); `None` is the daemon itself.
     """
     dropped = DropFile(
         text=text,
@@ -1673,11 +1695,99 @@ def drop_transcript(
         created=created,
     )
     options = DropOptions(
-        meeting_id=meeting_id, title=title, start=start, duration=duration, attendees=attendees
+        meeting_id=meeting_id,
+        title=title,
+        start=start,
+        duration=duration,
+        attendees=attendees,
+        on=on,
     )
     if dry_run:
         return preview_drop(daemon, dropped=dropped, scope=scope, options=options)
-    return drop_file(daemon, dropped=dropped, scope=scope, options=options)
+    dropped_now = drop_file(daemon, dropped=dropped, scope=scope, options=options)
+    try:
+        answers = True if reachable is None else bool(reachable())
+    except Exception:  # noqa: BLE001 — unknown reads as no daemon
+        answers = False
+    listed = listed_after_drop(
+        resolver=daemon.storage.paths,
+        scope=dropped_now.scope,
+        meeting_id=dropped_now.meeting_id,
+        zone=daemon.config.display_timezone,
+        local_model=bool(daemon.config.local_model),
+        reachable=answers,
+        now=daemon.clock(),
+    )
+    return replace(dropped_now, listed=listed)
+
+
+def _candidates_said(
+    candidates: Sequence[tuple[str, datetime | None, str]], zone: str
+) -> tuple[str, str]:
+    """Up to `TITLE_CANDIDATES_SHOWN` candidates as `id (start, title)`, and the rest counted.
+
+    One wording for `--title`'s and `--on`'s refusals: the start in UTC and in
+    `display_timezone` (the drop's form), the title folded and cut.
+    """
+    shown = "; ".join(
+        f"{meeting_id} ({when_shown(start, zone) if start is not None else 'no start'}, "
+        f"{shown_title(title)})"
+        for meeting_id, start, title in candidates[:TITLE_CANDIDATES_SHOWN]
+    )
+    left = len(candidates) - TITLE_CANDIDATES_SHOWN
+    return shown, (f"; and {left} more" if left > 0 else "")
+
+
+def _chosen_on(daemon: Daemon, *, scope: DataScope, on: date, title: str | None) -> Meeting:
+    """The one recorded meeting `--on` (and `--title`) names in `scope`, or `DropRefused` (11f).
+
+    The day is read in `display_timezone`, or UTC when unset or unknown here.
+    Only meetings that have started and hold no capture are candidates: the
+    rest could never take this drop. Never mints: no candidate, or more than
+    one, refuses naming them.
+    """
+    name = daemon.config.display_timezone
+    zone = named_zone(name) or timezone.utc
+    now = daemon.clock()
+    records = daemon.meetings.for_day(on, tz=zone, scope=scope)
+    named = [
+        record.meeting
+        for record in records
+        if title is None or title_matches(record.meeting.title, title)
+    ]
+    started = [meeting for meeting in named if meeting.start <= now]
+    open_: list[Meeting] = []
+    captured: list[Meeting] = []
+    for meeting in started:
+        stem = capture_stem(meeting.meeting_id, meeting.start)
+        names = daemon.storage.list_collection(scope=meeting.transcript_home, artifact=CAPTURES)
+        (captured if has_capture(names, stem) else open_).append(meeting)
+    titled = f" titled {fold_shown(title)!r}" if title is not None else ""
+    if not open_:
+        why = ""
+        if captured:
+            ids = ", ".join(meeting.meeting_id for meeting in captured)
+            why = (
+                f" ({ids} already {'has' if len(captured) == 1 else 'have'} a capture; a "
+                f"transcript is never amended or replaced)"
+            )
+        elif len(named) > len(started):
+            why = " (the meetings that day have not started yet)"
+        raise DropRefused(
+            f"no meeting{titled} recorded in {scope} on {on.isoformat()} can take this "
+            f"transcript{why}, so `--on` has nothing to join; drop without `--on` to make "
+            f"a new meeting. Nothing was written."
+        )
+    if len(open_) > 1:
+        shown, rest = _candidates_said(
+            [(meeting.meeting_id, meeting.start, meeting.title) for meeting in open_], name
+        )
+        raise DropRefused(
+            f"{len(open_)} meetings{titled} recorded in {scope} on {on.isoformat()} could "
+            f"take this transcript, so none was chosen: {shown}{rest}. Name one with "
+            f"`--title` or `--meeting <id>`. Nothing was written."
+        )
+    return open_[0]
 
 
 def preview_drop(
@@ -1692,6 +1802,25 @@ def preview_drop(
     already has a capture — are reported as the outcome `refused`, naming why.
     """
     zone = daemon.config.display_timezone
+    if options.on is not None and options.meeting_id is None:
+        try:
+            chosen = _chosen_on(daemon, scope=scope, on=options.on, title=options.title)
+        except DropRefused as refused:
+            utterances = drop_utterances(
+                dropped.text, name=dropped.name, from_docx=dropped.from_docx
+            )
+            names, unrecorded = _speakers(utterances)
+            aliases, notices = _drop_aliases(daemon)
+            unknown = DroppedField(None, SOURCE_UNKNOWN)
+            return DropPreview(
+                unknown, unknown, unknown,
+                _pairs(linked_participants(names, aliases, None)), "refused",
+                reason=str(refused), zone=zone, notices=(*unrecorded, *notices),
+            )
+        options = replace(options, meeting_id=chosen.meeting_id)
+        found_by = ON_FOUND_BY
+    else:
+        found_by = ""
     if options.meeting_id is not None:
         utterances = drop_utterances(dropped.text, name=dropped.name, from_docx=dropped.from_docx)
         names, unrecorded = _speakers(utterances)
@@ -1718,6 +1847,7 @@ def preview_drop(
             scope=scope,
             zone=zone,
             notices=notices,
+            found_by=found_by,
         )
     planned = _plan_drop(daemon, dropped=dropped, scope=scope, options=options)
     plan = planned.plan
@@ -1840,10 +1970,22 @@ def drop_file(
     candidates: tuple[str, ...] = ()
     found_by = ""
     day_unknown = False
+    record_fields: tuple[DroppedField, DroppedField, DroppedField] | None = None
     try:
-        if options.meeting_id is not None:
+        if options.on is not None and options.meeting_id is None:
+            # Story 11f: `--on` chooses one existing meeting of that day, or refuses.
+            utterances = drop_utterances(text, name=file_name, from_docx=from_docx)
+            meeting = _chosen_on(daemon, scope=scope, on=options.on, title=options.title)
+            bound_by, found_by = DROP_MATCHED, ON_FOUND_BY
+            names, unrecorded = _speakers(utterances)
+            aliases, notices = _drop_aliases(daemon)
+            notices = (*unrecorded, *notices)
+            linked = linked_participants(names, aliases, meeting.meeting_id)
+            record_fields = _record_fields(meeting)
+        elif options.meeting_id is not None:
             utterances = drop_utterances(text, name=file_name, from_docx=from_docx)
             meeting = bind_transcript(daemon, scope=scope, meeting_id=options.meeting_id)
+            record_fields = _record_fields(meeting)
             bound_by = DROP_NAMED
             names, unrecorded = _speakers(utterances)
             aliases, notices = _drop_aliases(daemon)
@@ -1956,6 +2098,17 @@ def drop_file(
         zone=daemon.config.display_timezone,
         from_docx=from_docx,
         notices=notices,
+        record_fields=record_fields,
+    )
+
+
+def _record_fields(meeting: Meeting) -> tuple[DroppedField, DroppedField, DroppedField]:
+    """The record's title, start and length, each from the calendar or the record."""
+    source = SOURCE_CALENDAR if meeting.calendar_event_ref is not None else SOURCE_RECORD
+    return (
+        DroppedField(meeting.title, source),
+        DroppedField(meeting.start, source),
+        DroppedField(meeting.duration_minutes, source),
     )
 
 
@@ -3330,6 +3483,8 @@ class SummaryOutcome:
 class _Prepared:
     meeting: Meeting
     prompt: SummaryPrompt
+    held: RecordedSummary | None = None
+    """The record's `## Summary` as `_prepare` read it (story 11f's guard)."""
 
 
 def _prepare(daemon: Daemon, scope: DataScope, meeting_id: str) -> _Prepared:
@@ -3342,7 +3497,8 @@ def _prepare(daemon: Daemon, scope: DataScope, meeting_id: str) -> _Prepared:
     whole-meeting reader.
     """
     try:
-        meeting = daemon.meetings.get(meeting_id, scope=scope).meeting
+        record = daemon.meetings.get(meeting_id, scope=scope)
+        meeting = record.meeting
     except MeetingNotFound:
         raise SummaryRefused(
             f"no meeting {meeting_id!r} is recorded in {scope}, so there is no "
@@ -3391,7 +3547,7 @@ def _prepare(daemon: Daemon, scope: DataScope, meeting_id: str) -> _Prepared:
     prompt = summary_prompt(
         meeting.title, utterances, name=f"meeting {meeting_id}'s transcript in {scope}"
     )
-    return _Prepared(meeting, prompt)
+    return _Prepared(meeting, prompt, record.summary)
 
 
 _UNAVAILABLE: tuple[type[BaseException], ...] = (NoLocalModel, LocalModelUnavailable)
@@ -3546,7 +3702,11 @@ def _settle_made(
 
 
 def _frontier_refused(
-    scope: DataScope, meeting_id: str, refused: BaseException | SummaryRule
+    scope: DataScope,
+    meeting_id: str,
+    refused: BaseException | SummaryRule,
+    *,
+    held: bool = False,
 ) -> str:
     """Why a frontier summary was not written: the row's reason, and the reply's."""
     if isinstance(refused, SummaryRule):
@@ -3560,7 +3720,7 @@ def _frontier_refused(
         why = f"Claude's summary was not written: {refused}"
     return (
         f"{why.rstrip('.')}. Meeting {meeting_id} was not summarised; "
-        f"`pm-ai transcript summarize --scope {scope} --meeting {meeting_id} --by claude` "
+        f"`{summarize_command(str(scope), meeting_id, held=held, by='claude')}` "
         f"asks again."
     )
 
@@ -3678,7 +3838,10 @@ def summary_steps(
                 calls.append(_measured(asked))
             judged_once = _judged(asked, labels)
             if isinstance(judged_once, (BaseException, SummaryRule)):
-                reason = _frontier_refused(scope, meeting_id, judged_once)
+                reason = _frontier_refused(
+                    scope, meeting_id, judged_once,
+                    held=_holds_summary(daemon, scope, meeting_id),
+                )
                 storage.settle_summary(
                     fence, state=SummaryStateKind.FAILED, reason=reason, made_by=maker
                 )
@@ -3709,7 +3872,10 @@ def summary_steps(
             if isinstance(judged, BaseException):
                 return _without_answer(storage, fence, judged, prepared, outcome, retried=True)
             if isinstance(judged, SummaryRule):
-                reason = _refused_twice(scope, meeting_id, rule, judged)
+                reason = _refused_twice(
+                    scope, meeting_id, rule, judged,
+                    held=_holds_summary(daemon, scope, meeting_id),
+                )
                 storage.settle_summary(fence, state=SummaryStateKind.FAILED, reason=reason)
                 return outcome(SummaryResult.FAILED, reason)
         answer = judged
@@ -3905,7 +4071,8 @@ def _failed_unexpectedly(
     reason = (
         f"meeting {meeting_id}'s summary could not be written: "
         f"{type(broken).__name__}, which pm-ai did not expect.{paid} It is not offered "
-        f"again automatically; {_ask_again(scope, meeting_id)}"
+        f"again automatically; "
+        f"{_ask_again(scope, meeting_id, held=_holds_summary(daemon, scope, meeting_id))}"
     )
     current = storage.summary_state(scope, meeting_id)
     held = (
@@ -4290,12 +4457,26 @@ _STOPS_THE_JOB: tuple[type[BaseException], ...] = (SummaryLeaseLost, *_LEFT_AS_I
 leaves the row as it was (story 7e)."""
 
 
-def _ask_again(scope: DataScope, meeting_id: str) -> str:
-    return f"`pm-ai transcript summarize --scope {scope} --meeting {meeting_id}` asks again."
+def _ask_again(scope: DataScope, meeting_id: str, *, held: bool = False) -> str:
+    """The command that asks again; `--again` when the record holds a summary (11f)."""
+    return f"`{summarize_command(str(scope), meeting_id, held=held)}` asks again."
+
+
+def _holds_summary(daemon: Daemon, scope: DataScope, meeting_id: str) -> bool:
+    """Whether the meeting's record holds a summary now; unknown reads as no (11f)."""
+    try:
+        return daemon.meetings.get(meeting_id, scope=scope).summary is not None
+    except Exception:  # noqa: BLE001 — a sentence's flag, never a failure
+        return False
 
 
 def _refused_twice(
-    scope: DataScope, meeting_id: str, first: SummaryRule, second: SummaryRule
+    scope: DataScope,
+    meeting_id: str,
+    first: SummaryRule,
+    second: SummaryRule,
+    *,
+    held: bool = False,
 ) -> str:
     """The failure's reason, from both refusals as they were."""
     if first is second is SummaryRule.OUTPUT_CAP:
@@ -4307,7 +4488,7 @@ def _refused_twice(
     return (
         f"the local model's answer was refused twice, so meeting {meeting_id} was "
         f"not summarised and is not offered again automatically: {broke}. "
-        f"{_ask_again(scope, meeting_id)}"
+        f"{_ask_again(scope, meeting_id, held=held)}"
     )
 
 
@@ -4669,15 +4850,56 @@ class SummaryRequested:
     meeting_id: str
     title: str
     maker: SummaryMaker = SummaryMaker.LOCAL
+    chosen: str = ""
+    """How the meeting was chosen, said first: by `--title`, or that `--meeting`
+    won over `--title` and `--on` (story 11f); empty for a plain `--meeting`."""
 
     @property
     def line(self) -> str:
         asked = "Claude" if self.maker is SummaryMaker.FRONTIER else "the local model"
-        return (
+        said = (
             f"the summary of meeting {self.meeting_id} ({self.title!r}) in "
             f"{self.scope} was asked of {asked}; any summary running for "
             f"it was stopped before its next write."
         )
+        if self.chosen:
+            # A sentence of its own after the choice, so it starts a sentence.
+            said = f"{self.chosen}{said[0].upper()}{said[1:]}"
+        return said
+
+
+def choose_meeting(
+    lister: MeetingLister, *, scope: DataScope, title: str, on: date | None
+) -> tuple[str, str]:
+    """The one meeting `--title` (and `--on`) names in `scope`: its id and how it was chosen.
+
+    Among the meetings `transcript list` lists there (story 11f). No match, or
+    more than one, is `SummaryRefused` naming why — the candidates, when there
+    are several — so a script never acts on a meeting it did not name.
+    """
+    zone, found = resolve_title(lister, scope=scope, title=title, on=on)
+    day = f" on {on.isoformat()}" if on is not None else ""
+    title = fold_shown(title)
+    if not found:
+        raise SummaryRefused(
+            f"no meeting listed in {scope}{day} has every word of `--title {title}` in "
+            f"its title, so nothing was asked; `pm-ai transcript list --scope {scope}` "
+            f"lists the meetings and their ids."
+        )
+    if len(found) > 1:
+        shown, rest = _candidates_said(
+            [(listed.meeting_id, listed.start, listed.title or "") for listed in found], zone
+        )
+        raise SummaryRefused(
+            f"{len(found)} meetings in {scope}{day} match `--title {title}`, so none was "
+            f"chosen and nothing was asked: {shown}{rest}. Name one with `--on "
+            f"<YYYY-MM-DD>` or `--meeting <id>`."
+        )
+    chosen = found[0]
+    return chosen.meeting_id, (
+        f"`--title {title}`{day} chose meeting {chosen.meeting_id} "
+        f"({shown_title(chosen.title)!r}). "
+    )
 
 
 def request_summary(
@@ -4688,8 +4910,15 @@ def request_summary(
     job: str,
     by: str = SummaryMaker.LOCAL.value,
     on_done: Callable[[SummaryOutcome | BaseException], None] | None = None,
+    again: bool = False,
+    chosen: str = "",
 ) -> SummaryRequested:
     """`transcript summarize`: checked, then started in the daemon (story 7b).
+
+    Story 11f: a meeting whose record already holds a summary is refused
+    unless `again` (`--again`), naming the summary held and whether a run
+    would be paid — before the row changes or any job starts. `chosen` says
+    how the meeting was chosen, for the acknowledgement.
 
     Refused by name before any model call: no daemon to run it, a meeting not
     recorded, a transcript not ingested (a failed part named), a capture
@@ -4712,11 +4941,14 @@ def request_summary(
     prepared: _Prepared | None
     try:
         prepared = _prepare(daemon, scope, meeting_id)
-        meeting = prepared.meeting
+        meeting, held = prepared.meeting, prepared.held
     except NothingSaid:
         # Settled by the job as "nothing said", with no call.
         prepared = None
-        meeting = daemon.meetings.get(meeting_id, scope=scope).meeting
+        record = daemon.meetings.get(meeting_id, scope=scope)
+        meeting, held = record.meeting, record.summary
+    if not again:
+        _refuse_a_resummary(scope, meeting, held, maker)
     fence = daemon.storage.request_summary(
         scope,
         meeting_id,
@@ -4738,7 +4970,35 @@ def request_summary(
         on_done=on_done,
         maker=maker,
     )
-    return SummaryRequested(scope, meeting_id, meeting.title, maker)
+    return SummaryRequested(scope, meeting_id, meeting.title, maker, chosen)
+
+
+def _refuse_a_resummary(
+    scope: DataScope, meeting: Meeting, held: RecordedSummary | None, maker: SummaryMaker
+) -> None:
+    """`SummaryRefused` when the record already holds a summary (story 11f).
+
+    Names who made the summary held and on which date, `--again`, and whether
+    the run asked for would be paid. `held` is the record's `## Summary`, as
+    `_prepare` read it.
+    """
+    if held is None:
+        return
+    who = "Claude" if held.made_by is SummaryMaker.FRONTIER else "the local model"
+    how = "on request" if held.requested else "automatically"
+    by = "claude" if maker is SummaryMaker.FRONTIER else None
+    command = summarize_command(str(scope), meeting.meeting_id, held=True, by=by)
+    cost = (
+        "with --by claude that is a paid Claude call"
+        if maker is SummaryMaker.FRONTIER
+        else "the local model costs nothing"
+    )
+    raise SummaryRefused(
+        f"meeting {meeting.meeting_id} ({shown_title(meeting.title)!r}) in {scope} already "
+        f"holds a summary, made by {who} {fold_shown(held.model)}, {how}, on "
+        f"{held.made_on.isoformat()}, so it was not replaced and nothing was asked. To "
+        f"replace it, add --again: `{command}`; {cost}."
+    )
 
 
 def summary_closing(outcome: SummaryOutcome | BaseException) -> tuple[str, int]:

@@ -541,6 +541,10 @@ def test_the_routing_reads_the_command_table():
             words = [name] if leaf_name is None else [name, leaf_name]
             words += [f"<{argument}>" for argument in leaf.takes]
             words += [part for option in leaf.requires for part in (f"--{option}", "personal")]
+            if (name, leaf_name) == ("transcript", "summarize"):
+                # Story 11f: a meeting is named by `--meeting` or chosen by
+                # `--title`, so neither is in `requires`; one of them is given.
+                words += ["--meeting", "mtg_a"]
             terminal = tuple(words[:2]) in TERMINAL_BOUND or tuple(words[:1]) in TERMINAL_BOUND
             assert repl.runs_here(words) == (terminal or leaf.target is None), words
 
