@@ -64,6 +64,7 @@ from pm_ai.app.concurrency import (
 from pm_ai.app.goals import GoalReader
 from pm_ai.app.members import MemberDesk
 from pm_ai.app.meeting_listing import MeetingLister
+from pm_ai.app.proposals import ProposalDesk
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.domain.meeting_summaries import SummaryRefused
 from pm_ai.app.pipelines import (
@@ -1131,12 +1132,40 @@ class RequestPath:
             # `transcript list` (story 11f): the terminal's own reader, by path,
             # so the prompt prints what the terminal prints with a daemon running.
             meeting_list=self._lister(fresh),
+            # Story 13a: the queue read by path as the terminal reads it; each
+            # change one claimed step handed to the writer, `from the prompt`.
+            proposals=self._proposals(fresh, job),
             unbuilt_connectors=fresh.unbuilt,
             out=out,
             err=err,
             terminal=False,
         )
         return out.getvalue() + err.getvalue(), code
+
+    def _proposals(self, fresh: Daemon, job: str | None) -> ProposalDesk:
+        """The proposal engine in the daemon (story 13a): its writes handed to the writer.
+
+        Each change waits at most `WRITER_START_WAIT_SECONDS` for the writer
+        thread to start it, inside `approve`, `reject` and `edit`'s 2-second
+        bound; past that it is refused as busy, nothing written.
+        """
+
+        def hand(work: Callable[[], Any], label: str) -> Any:
+            result = self.writer.call(
+                work, label=label, job=job, start_within=WRITER_START_WAIT_SECONDS
+            )
+            self.notes.finished(job, label)
+            return result
+
+        paths = fresh.storage.paths
+        return ProposalDesk(
+            now=fresh.clock,
+            paths=paths if isinstance(paths, ScopePaths) else None,
+            storage=handed_daemon(fresh, hand=hand).storage,
+            via="prompt",
+            types=fresh.proposal_types,
+            reachable=lambda: True,
+        )
 
     def _lister(self, fresh: Daemon) -> MeetingLister:
         """`transcript list`'s reader in the daemon: this daemon answers (story 11f).

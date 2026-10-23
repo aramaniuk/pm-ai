@@ -39,6 +39,7 @@ import builtins
 import contextvars
 import getpass
 import json
+import shlex
 import re
 import stat
 import sys
@@ -106,6 +107,21 @@ from pm_ai.core.transcripts import (
     MIN_DROP_MINUTES,
 )
 from pm_ai.core.member_updates import MemberRefused, NamePlan
+from pm_ai.core.proposal_cards import (
+    LIST_STATES as PROPOSAL_STATES,
+    Card,
+    ProposalListing,
+    ProposalMisused,
+    ProposalOutcome,
+    ProposalRefused,
+    card_text,
+    listing_json as proposal_listing_json,
+    listing_text as proposal_listing_text,
+    outcome_json,
+    outcome_text,
+    refusal_json,
+    refusal_text,
+)
 from pm_ai.domain.meetings import AmbiguousMeeting
 from pm_ai.domain.meeting_summaries import SummaryRefused
 from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
@@ -784,6 +800,10 @@ class TranscriptDropOutcome(Protocol):
     @property
     def left(self) -> int: ...
     @property
+    def dropped(self) -> int:
+        """New extractions dropped over a proposal the PM acted on (story 13a)."""
+        ...
+    @property
     def title_field(self) -> DroppedFieldOutcome | None: ...
     @property
     def start_field(self) -> DroppedFieldOutcome | None: ...
@@ -1065,6 +1085,11 @@ class Context:
     meeting_list: MeetingList | None = None
     """`pm-ai transcript list`'s reader (story 11f), built from paths; `None`
     refuses the command as a wiring fault."""
+
+    proposals: ProposalDeskPort | None = None
+    """`pm-ai proposal …`'s engine (story 13a): `pm_ai.app.proposals.ProposalDesk`,
+    over this process's own writer at a terminal and the daemon's handed writer
+    for a line the daemon runs. `None` refuses the commands as a wiring fault."""
 
     members: Members | None = None
     """`pm-ai member name|link|unmatched`'s reads and appends (story 7e).
@@ -3743,6 +3768,16 @@ def _closing_line(dropped: TranscriptDropOutcome) -> str:
             f" {dropped.left} left as they were, already approved, rejected or "
             f"expired."
         )
+    extractions_dropped = getattr(dropped, "dropped", 0)
+    if isinstance(extractions_dropped, int) and extractions_dropped:
+        # Story 13a: `11b`'s ids are positional, so a re-ingestion can put a
+        # new extraction where the PM already acted; it is dropped, and said.
+        line += (
+            f" {extractions_dropped} new "
+            f"{'extraction was' if extractions_dropped == 1 else 'extractions were'} "
+            f"dropped: the proposal at the same position was one you had already "
+            f"approved, rejected or replaced by an edit."
+        )
     if dropped.bound_by == "matched":
         found = {
             "start": "found by --start",
@@ -4515,6 +4550,416 @@ def _member_unmatched(context: Context) -> int:
     return EXIT_OK
 
 
+# ── `pm-ai proposal` (story 13a) ─────────────────────────────────────────────
+
+PROPOSAL_ARGUMENT = "id"
+IF_VERSION_OPTION = "if-version"
+TYPE_OPTION = "type"
+WHAT_OPTION = "what"
+OWNER_OPTION = "owner"
+DUE_OPTION = "due"
+APPROVE_FLAG = "approve"
+EDIT_FIELDS = (WHAT_OPTION, OWNER_OPTION, DUE_OPTION)
+"""The fields `proposal edit` takes; which a type lets a person edit is the type's."""
+
+REVIEW_KEYS = "[a]pprove [e]dit [r]eject [s]kip [q]uit"
+
+
+class ProposalDeskPort(Protocol):
+    """The proposal engine the queue's commands reach: `pm_ai.app.proposals.ProposalDesk`.
+
+    Each refusal is a `ProposalRefused` (exit 3) and each usage error a
+    `ProposalMisused` (exit 2), both from `pm_ai.core.proposal_cards`.
+    """
+
+    def listing(
+        self,
+        *,
+        scope: DataScope | None = None,
+        meeting_id: str | None = None,
+        title: str | None = None,
+        on: date | None = None,
+        type_name: str | None = None,
+        state: str = "staged",
+        limit: int = 20,
+    ) -> ProposalListing: ...
+
+    def show(self, proposal_id: str, *, scope: DataScope | None = None) -> ProposalOutcome: ...
+
+    def approve(
+        self, proposal_id: str, *, scope: DataScope | None = None, if_version: int | None = None
+    ) -> ProposalOutcome: ...
+
+    def reject(
+        self, proposal_id: str, *, scope: DataScope | None = None, if_version: int | None = None
+    ) -> ProposalOutcome: ...
+
+    def edit(
+        self,
+        proposal_id: str,
+        *,
+        changes: Mapping[str, str],
+        approve: bool = False,
+        scope: DataScope | None = None,
+        if_version: int | None = None,
+    ) -> ProposalOutcome: ...
+
+    def preview_edit(
+        self, proposal_id: str, *, changes: Mapping[str, str], scope: DataScope | None = None
+    ) -> ProposalOutcome: ...
+
+    def waiting(
+        self,
+        *,
+        scope: DataScope | None = None,
+        meeting_id: str | None = None,
+        title: str | None = None,
+        on: date | None = None,
+    ) -> ProposalListing: ...
+
+
+def _proposal_target(options: Mapping[str, str]) -> DataScope:
+    """Personal, as `transcript list`'s is; `_Misread` for a line the queue cannot read (13a).
+
+    The scope a proposal is in is checked by the engine, which reads every
+    enrolled project by path, so the daemon this composes acts in personal.
+    """
+    requested = options.get(SCOPE_ARGUMENT)
+    if requested is not None and _scope(requested) is None:
+        raise _Misread(
+            f"`--{SCOPE_ARGUMENT} {requested}` is not a scope. Write `personal`, or "
+            f"`project:<id>` naming an enrolled project."
+        )
+    state = options.get(STATE_OPTION)
+    if state is not None and state not in PROPOSAL_STATES:
+        raise _Misread(
+            f"`--{STATE_OPTION}` takes {_listed_words(PROPOSAL_STATES)}; `{state}` is none of them."
+        )
+    typed = options.get(LIMIT_OPTION)
+    if typed is not None:
+        _list_limit(options)
+    version = options.get(IF_VERSION_OPTION)
+    if version is not None and not (version.isascii() and version.isdigit() and int(version) >= 1):
+        raise _Misread(f"`--{IF_VERSION_OPTION}` takes a version number, 1 or more; {version!r} is not one.")
+    if MEETING_ARGUMENT in options and TITLE_OPTION in options:
+        raise _Misread(
+            f"name a meeting with `--{MEETING_ARGUMENT} <id>` or choose one with "
+            f"`--{TITLE_OPTION} <words>`, not both."
+        )
+    if ON_OPTION in options:
+        if TITLE_OPTION not in options:
+            raise _Misread(
+                f"`--{ON_OPTION}` narrows `--{TITLE_OPTION}` to one day, so it is given only "
+                f"with `--{TITLE_OPTION} <words>`."
+            )
+        if _on_day(options[ON_OPTION].strip()) is None:
+            raise _Misread(_on_misread(options[ON_OPTION]))
+    if TITLE_OPTION in options and not options[TITLE_OPTION].strip():
+        raise _Misread(f"`--{TITLE_OPTION}` takes the words of a meeting's title.")
+    return PERSONAL
+
+
+def _proposal_desk(context: Context) -> ProposalDeskPort:
+    if context.proposals is None:
+        raise Refusal(
+            "no proposal engine was supplied to the CLI, so nothing was read or changed. "
+            "That is a wiring fault in pm-ai, not this machine's."
+        )
+    return context.proposals
+
+
+def _proposal_scope(context: Context) -> DataScope | None:
+    requested = context.options.get(SCOPE_ARGUMENT)
+    return None if requested is None else _scope(requested)
+
+
+def _proposal_on(context: Context) -> date | None:
+    typed = context.options.get(ON_OPTION)
+    return None if typed is None else _on_day(typed.strip())
+
+
+def _if_version(context: Context) -> int | None:
+    typed = context.options.get(IF_VERSION_OPTION)
+    return None if typed is None else int(typed)
+
+
+def _proposal_misused(verb: str, sentence: str) -> int:
+    """A `proposal` command line pm-ai cannot act on: the usage error, exit 2."""
+    leaf = TABLE["proposal"].leaves[verb]
+    _echo(
+        f"pm-ai: {sentence}\n\nusage: pm-ai proposal {_spelled(verb, leaf)}",
+        file=sys.stderr,
+    )
+    return EXIT_USAGE
+
+
+def _proposal_answered(
+    context: Context, verb: str, answer: Callable[[], ProposalOutcome | ProposalListing]
+) -> int:
+    """Run one queue command and print what it answered: text, or one JSON object."""
+    as_json = JSON_FLAG in context.flags
+    try:
+        found = answer()
+    except ProposalMisused as misused:
+        return _proposal_misused(verb, str(misused))
+    except ProposalRefused as refused:
+        if as_json:
+            _echo_replacing(json.dumps(refusal_json(refused), ensure_ascii=False) + "\n")
+            return EXIT_REFUSAL
+        raise Refusal(refusal_text(refused)) from refused
+    if isinstance(found, ProposalListing):
+        if as_json:
+            _echo_replacing(json.dumps(proposal_listing_json(found), ensure_ascii=False) + "\n")
+        else:
+            _echo_replacing(proposal_listing_text(found))
+        return EXIT_OK
+    if as_json:
+        _echo_replacing(json.dumps(outcome_json(found), ensure_ascii=False) + "\n")
+    else:
+        _echo_replacing(outcome_text(found))
+    return EXIT_OK
+
+
+def _proposal_list(context: Context) -> int:
+    """`pm-ai proposal list [--scope …] [--meeting <id> | --title <words> [--on <date>]] [--type <name>] [--state …] [--limit <n>] [--json]` (13a)."""
+    desk = _proposal_desk(context)
+    options = context.options
+    return _proposal_answered(
+        context,
+        "list",
+        lambda: desk.listing(
+            scope=_proposal_scope(context),
+            meeting_id=options.get(MEETING_ARGUMENT),
+            title=options.get(TITLE_OPTION),
+            on=_proposal_on(context),
+            type_name=options.get(TYPE_OPTION),
+            state=options.get(STATE_OPTION, PROPOSAL_STATES[0]),
+            limit=_list_limit(options),
+        ),
+    )
+
+
+def _proposal_show(context: Context) -> int:
+    """`pm-ai proposal show <id> [--scope …] [--json]`: one card, in any state (13a)."""
+    desk = _proposal_desk(context)
+    return _proposal_answered(
+        context, "show", lambda: desk.show(context.arguments[0], scope=_proposal_scope(context))
+    )
+
+
+def _proposal_approve(context: Context) -> int:
+    """`pm-ai proposal approve <id> [--scope …] [--if-version <n>] [--json]` (13a)."""
+    desk = _proposal_desk(context)
+    return _proposal_answered(
+        context,
+        "approve",
+        lambda: desk.approve(
+            context.arguments[0], scope=_proposal_scope(context), if_version=_if_version(context)
+        ),
+    )
+
+
+def _proposal_reject(context: Context) -> int:
+    """`pm-ai proposal reject <id> [--scope …] [--if-version <n>] [--json]` (13a)."""
+    desk = _proposal_desk(context)
+    return _proposal_answered(
+        context,
+        "reject",
+        lambda: desk.reject(
+            context.arguments[0], scope=_proposal_scope(context), if_version=_if_version(context)
+        ),
+    )
+
+
+def _proposal_edit(context: Context) -> int:
+    """`pm-ai proposal edit <id> [--what …] [--owner …] [--due …] [--approve] [--scope …] [--if-version <n>] [--json]` (13a)."""
+    desk = _proposal_desk(context)
+    changes = {name: context.options[name] for name in EDIT_FIELDS if name in context.options}
+    if not changes:
+        return _proposal_misused(
+            "edit",
+            f"`proposal edit` needs at least one of {_spelled_options(EDIT_FIELDS)}; "
+            f"`--owner \"\"` and `--due \"\"` clear the field.",
+        )
+    return _proposal_answered(
+        context,
+        "edit",
+        lambda: desk.edit(
+            context.arguments[0],
+            changes=changes,
+            approve=APPROVE_FLAG in context.flags,
+            scope=_proposal_scope(context),
+            if_version=_if_version(context),
+        ),
+    )
+
+
+class _ReviewEnded(Exception):
+    """Quit, Ctrl-C or end of input: the walk ends with the counts so far."""
+
+
+def _review_line(prompt: str) -> str:
+    """One answer; an answer that is not text in this terminal's encoding is asked again.
+
+    Never read as an empty answer, which `approve it? [Y/n]` would take as yes.
+    """
+    while True:
+        try:
+            return input(prompt).strip()
+        except UnicodeDecodeError:
+            _echo(f"  {_NOT_TEXT}")
+        except (EOFError, KeyboardInterrupt) as ended:
+            _echo("")
+            raise _ReviewEnded from ended
+
+
+def _review_counts(counts: Mapping[str, int]) -> str:
+    said = [
+        f"{counts[key]} {words}"
+        for key, words in (
+            ("approved", "approved"),
+            ("rejected", "rejected"),
+            ("edited", "edited"),
+            ("edited_and_approved", "edited and approved"),
+            ("already", "already decided elsewhere"),
+            ("unchanged", "left unchanged"),
+            ("skipped", "skipped"),
+        )
+        if counts.get(key)
+    ]
+    return ", ".join(said) if said else "nothing reviewed"
+
+
+def _proposal_review(context: Context) -> int:
+    """`pm-ai proposal review [--scope …] [--meeting <id> | --title <words> [--on <date>]]` (13a).
+
+    Walks the waiting proposals in `list`'s order, one card at a time, and
+    asks: `[a]pprove [e]dit [r]eject [s]kip [q]uit`. Each answer is one change
+    checked against the version its card showed. Quitting, Ctrl-C and end of
+    input end the walk with the counts so far, exit 0.
+    """
+    if not _stdin_is_terminal():
+        raise Refusal(
+            "`proposal review` asks at a terminal, and stdin is not one here. Nothing was "
+            "changed. `pm-ai proposal list --json` lists the waiting proposals, and "
+            "`pm-ai proposal approve`, `reject` and `edit` act on one by its id."
+        )
+    desk = _proposal_desk(context)
+    scope = _proposal_scope(context)
+    meeting_id = context.options.get(MEETING_ARGUMENT)
+    try:
+        walk = desk.waiting(
+            scope=scope,
+            meeting_id=meeting_id,
+            title=context.options.get(TITLE_OPTION),
+            on=_proposal_on(context),
+        )
+    except ProposalRefused as refused:
+        raise Refusal(refusal_text(refused)) from refused
+    cards = walk.cards
+    if not cards:
+        # Every printed command carries `--scope`: one per scope looked at.
+        _echo("Nothing is waiting for you here.")
+        for each in walk.scopes:
+            _echo(f"  to list the rest: pm-ai proposal list --scope {each} --state all")
+        return EXIT_OK
+    counts: dict[str, int] = {}
+    walked: list[str] = []
+    try:
+        for card in cards:
+            if card.scope not in walked:
+                walked.append(card.scope)
+            _review_one(desk, card, counts)
+    except _ReviewEnded:
+        pass
+    _echo(f"{_review_counts(counts)}.")
+    if walk.more:
+        _echo(
+            f"{walk.more} more {'is' if walk.more == 1 else 'are'} waiting beyond the "
+            f"{len(cards)} walked; run the walk again to continue:"
+        )
+        for words in walk.reviews:
+            _echo(f"  pm-ai {shlex.join(words)}")
+    for each in walked:
+        _echo(f"next: pm-ai proposal list --scope {each}")
+    return EXIT_OK
+
+
+def _review_one(desk: ProposalDeskPort, card: Card, counts: dict[str, int]) -> None:
+    """One card: shown, asked, answered by one change. A conflict shows the card again."""
+    current = card
+    while True:
+        _echo(card_text(current), end="")
+        answer = _review_line(f"{REVIEW_KEYS}: ").lower()[:1]
+        scope = DataScope.parse(current.scope)
+        try:
+            if answer == "q":
+                raise _ReviewEnded
+            if answer == "s":
+                counts["skipped"] = counts.get("skipped", 0) + 1
+                return
+            if answer == "a":
+                done = desk.approve(current.proposal_id, scope=scope, if_version=current.version)
+            elif answer == "r":
+                done = desk.reject(current.proposal_id, scope=scope, if_version=current.version)
+            elif answer == "e":
+                edited = _review_edit(desk, current, scope)
+                if edited is None:
+                    continue
+                done = edited
+            else:
+                _echo(f"  answer with one of {REVIEW_KEYS}.")
+                continue
+        except ProposalRefused as refused:
+            _echo(f"  {refused.reason}")
+            if refused.card is None or refused.card.state != "staged":
+                return
+            current = refused.card
+            continue
+        except ProposalMisused as misused:
+            _echo(f"  {misused}")
+            continue
+        _echo(f"  {done.sentence}")
+        counts[done.outcome] = counts.get(done.outcome, 0) + 1
+        return
+
+
+def _review_edit(
+    desk: ProposalDeskPort, card: Card, scope: DataScope
+) -> ProposalOutcome | None:
+    """Ask each editable field, show the replacement, ask to approve it; `None` to ask again."""
+    action = card.action("edit")
+    if action is None or not action.available:
+        reason = None if action is None else action.reason
+        _echo(f"  {reason or 'nothing here may be edited'}.")
+        return None
+    editable = [name for name in EDIT_FIELDS if name in card.fields]
+    changes: dict[str, str] = {}
+    for name in editable:
+        shown = card.fields.get(name) or ""
+        typed = _review_line(f"  {name} [{shown}] (Enter keeps{', - clears' if name != WHAT_OPTION else ''}): ")
+        if not typed:
+            continue
+        changes[name] = "" if typed == "-" and name != WHAT_OPTION else typed
+    if not changes:
+        _echo("  nothing changed.")
+        return None
+    preview = desk.preview_edit(card.proposal_id, changes=changes, scope=scope)
+    if preview.card.fields == card.fields:
+        _echo("  those are the values it already holds; nothing was written.")
+        return None
+    _echo(card_text(preview.card), end="")
+    agree = _review_line("  approve it? [Y/n]: ").lower()
+    return desk.edit(
+        card.proposal_id,
+        changes=changes,
+        approve=agree in ("", "y", "yes"),
+        scope=scope,
+        if_version=card.version,
+    )
+
+
+
 TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
     {
         ("goal", "set"),
@@ -4530,6 +4975,8 @@ TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
         ("logs",),
         # Story 7e: replacing a label's member is confirmed at the terminal.
         ("member", "name"),
+        # Story 13a: the walk asks at the terminal, one card at a time.
+        ("proposal", "review"),
     }
 )
 """The commands that need this terminal: they ask questions, read a secret, or
@@ -4750,6 +5197,65 @@ TABLE: Mapping[str, Command] = {
                 options=(SCOPE_ARGUMENT,),
                 requires=(SCOPE_ARGUMENT,),
                 target=_member_target,
+            ),
+        },
+    ),
+    # `13a`: the approval queue — one group for every proposal type.
+    "proposal": Command(
+        "staged proposals waiting for your decision: list, show, approve, reject, edit, review",
+        leaves={
+            "list": Command(
+                "list proposals, waiting ones by default, by meeting newest first, each as "
+                "a card with its exact commands; reads files only, within 1 second",
+                _proposal_list,
+                options=(
+                    SCOPE_ARGUMENT, MEETING_ARGUMENT, TITLE_OPTION, ON_OPTION, TYPE_OPTION,
+                    STATE_OPTION, LIMIT_OPTION,
+                ),
+                flags=(JSON_FLAG,),
+                composes=False,
+                target=_proposal_target,
+            ),
+            "show": Command(
+                "show one proposal's card, in any state, with where it came from",
+                _proposal_show,
+                takes=(PROPOSAL_ARGUMENT,),
+                options=(SCOPE_ARGUMENT,),
+                flags=(JSON_FLAG,),
+                composes=False,
+                target=_proposal_target,
+            ),
+            "approve": Command(
+                "approve one proposal; --if-version acts only on the version you saw",
+                _proposal_approve,
+                takes=(PROPOSAL_ARGUMENT,),
+                options=(SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(JSON_FLAG,),
+                target=_proposal_target,
+            ),
+            "reject": Command(
+                "reject one proposal; --if-version acts only on the version you saw",
+                _proposal_reject,
+                takes=(PROPOSAL_ARGUMENT,),
+                options=(SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(JSON_FLAG,),
+                target=_proposal_target,
+            ),
+            "edit": Command(
+                "replace one proposal with an edited one (--what, --owner, --due; \"\" clears "
+                "--owner or --due); --approve approves the replacement too",
+                _proposal_edit,
+                takes=(PROPOSAL_ARGUMENT,),
+                options=(SCOPE_ARGUMENT, IF_VERSION_OPTION, *EDIT_FIELDS),
+                flags=(APPROVE_FLAG, JSON_FLAG),
+                target=_proposal_target,
+            ),
+            "review": Command(
+                "walk the waiting proposals one card at a time: approve, edit, reject, "
+                "skip or quit; needs a terminal",
+                _proposal_review,
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, TITLE_OPTION, ON_OPTION),
+                target=_proposal_target,
             ),
         },
     ),
@@ -5061,6 +5567,7 @@ def dispatch(
     members: Members | None = None,
     frontier_key: FrontierKeyHand | None = None,
     meeting_list: MeetingList | None = None,
+    proposals: ProposalDeskPort | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -5097,6 +5604,7 @@ def dispatch(
             members=members,
             frontier_key=frontier_key,
             meeting_list=meeting_list,
+            proposals=proposals,
             serve=serve,
             unavailable=unavailable,
             undecided=undecided,
@@ -5131,6 +5639,7 @@ def _dispatch(
     members: Members | None,
     frontier_key: FrontierKeyHand | None,
     meeting_list: MeetingList | None,
+    proposals: ProposalDeskPort | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
     undecided: str | None,
@@ -5160,6 +5669,7 @@ def _dispatch(
         members=members,
         frontier_key=frontier_key,
         meeting_list=meeting_list,
+        proposals=proposals,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,

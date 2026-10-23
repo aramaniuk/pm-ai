@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from datetime import timedelta
 
 import pytest
 
@@ -200,7 +201,7 @@ def test_ad13_features_cannot_implement_their_own_proposal_expiry():
             f"AD-13: proposal type {name!r} defines its own expire(); expiry belongs "
             "to the scheduler so every surface behaves identically."
         )
-        assert spec.ttl is None or spec.ttl > 0
+        assert spec.ttl is None or spec.ttl > timedelta(0)
 
 
 def test_ad6_markdown_is_never_encrypted():

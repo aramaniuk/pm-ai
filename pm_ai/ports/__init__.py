@@ -30,7 +30,7 @@ from pm_ai.domain.meeting_summaries import SummaryFence, SummaryState
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.member_ledgers import MatchFence
 from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow
-from pm_ai.domain.proposals import OpenActionItems
+from pm_ai.domain.proposals import OpenActionItems, TypeRule
 from pm_ai.domain.renders import RenderRecord
 from pm_ai.domain.sanitize import Sanitized
 from pm_ai.domain.task_classes import TaskClass
@@ -846,11 +846,15 @@ class StoragePort(Protocol):
         self, *, since: datetime, until: datetime
     ) -> tuple[DataScope, ...]:
         """The project scopes with a summary row last written in `(since, until]`."""
-    def open_action_items(self, prefix: str, *, at: datetime) -> OpenActionItems:
-        """One meeting's `action_item` proposals still `staged` and unexpired at `at`,
-        and the count of staged bodies that could not be read.
+    def open_action_items(
+        self, prefix: str, *, at: datetime, rules: Mapping[str, TypeRule] | None = None
+    ) -> OpenActionItems:
+        """One meeting's `action_item` proposals waiting or approved at `at`, replacements
+        included, the count of bodies that could not be read, and the count that
+        expired without review and have no replacement (7d, 13a).
 
-        `prefix` is `action_item_prefix(scope, meeting_id)`, which carries the scope."""
+        `prefix` is `action_item_prefix(scope, meeting_id)`, which carries the scope;
+        `rules` are the registered types' windows."""
     def was_executed(self, idempotency_key: str) -> bool: ...
     def append_event_log(self, entry: EventEntry, *, scope: DataScope) -> None: ...
     # Reads, added with story 2h. The port declared only writes, so an accessor

@@ -57,12 +57,20 @@ from pm_ai.domain.meeting_listing import (
 )
 from pm_ai.domain.storage_tiers import CAPTURES, OPERATIONAL_DB
 from pm_ai.platform.paths import ScopePaths
+from pm_ai.app.scope_reads import (
+    Resolver as _Resolver,
+    ScopeView as _ScopeView,
+    read_display_config as _config,
+    read_or_none as _read_or_none,
+    scope_view as _view,
+)
 from pm_ai.storage.service import (
     MeetingRows,
     MeetingRowsUnreadable,
     is_collection_member,
     meeting_rows_at,
 )
+from pm_ai.app.proposal_reads import waiting_by_meeting
 
 __all__ = [
     "MeetingLister",
@@ -77,70 +85,8 @@ OPERATIONAL_SOURCE = "operational.db"
 APPLICATION = DataScope(ScopeKind.APPLICATION)
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 
-_DIGEST_TAIL = len(record_digest_suffix("x"))
-"""`-<sha256>.md`: the tail of a record's name its id owns."""
-
 _LISTABLE = frozenset({ScopeKind.PERSONAL, ScopeKind.PROJECT})
 
-
-
-class _Resolver(Protocol):
-    def resolve(self, scope: DataScope, artifact: str, *, create: bool = False) -> Path: ...
-
-
-@dataclass
-class _ScopeView:
-    """One scope's `meetings/` and `transcripts/` names, listed once."""
-
-    scope: str
-    meetings_dir: Path
-    by_digest: dict[str, list[str]] = field(default_factory=dict)
-    names: list[str] = field(default_factory=list)
-    captures: list[str] = field(default_factory=list)
-    parsed: dict[str, MeetingRecord | str] = field(default_factory=dict)
-
-    def record_name(self, meeting_id: str) -> str | None:
-        found = self.by_digest.get(record_digest_suffix(meeting_id))
-        return found[0] if found else None
-
-    def record(self, name: str) -> MeetingRecord | str:
-        """The parsed record, or why it could not be read; parsed once."""
-        if name not in self.parsed:
-            path = self.meetings_dir / name
-            try:
-                self.parsed[name] = parse_record(path.read_text(encoding="utf-8"), source=name)
-            except FileNotFoundError:
-                self.parsed[name] = "its record file is gone"
-            except (OSError, UnicodeDecodeError, ValueError) as unreadable:
-                self.parsed[name] = f"its record could not be read: {unreadable}"
-        return self.parsed[name]
-
-    def has_capture(self, stem: str) -> bool:
-        at = bisect.bisect_left(self.captures, stem)
-        return at < len(self.captures) and self.captures[at].startswith(stem)
-
-
-def _view(resolver: _Resolver, scope: DataScope, *, root: Path | None) -> _ScopeView | str:
-    """The scope's names, or why its folder or records cannot be read."""
-    if root is not None and not root.is_dir():
-        return f"its folder {root} is missing or is not a folder"
-    try:
-        meetings = Path(resolver.resolve(scope, MEETINGS))
-        captures = Path(resolver.resolve(scope, CAPTURES))
-        view = _ScopeView(str(scope), meetings)
-        if meetings.is_dir():
-            for name in sorted((entry.name for entry in meetings.iterdir()), reverse=True):
-                if not is_collection_member(name) or not is_record_name(name):
-                    continue
-                view.names.append(name)
-                view.by_digest.setdefault(name[-_DIGEST_TAIL:], []).append(name)
-        if captures.is_dir():
-            view.captures = sorted(
-                entry.name for entry in captures.iterdir() if is_collection_member(entry.name)
-            )
-    except (OSError, ValueError) as unreadable:
-        return f"its meetings could not be listed: {unreadable}"
-    return view
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +107,8 @@ class _Reading:
     reachable: bool
     now: datetime
     zone_note: str = ""
+    waiting: Mapping[tuple[str, str], int] = field(default_factory=dict)
+    """Story 13a: proposals waiting for review, per `(scope, meeting_id)`."""
 
     def decide(self, view: _ScopeView, candidate: _Candidate) -> ListedMeeting:
         scope, name = candidate.scope, candidate.name
@@ -206,6 +154,7 @@ class _Reading:
             "local_model": self.local_model,
             "daemon_reachable": self.reachable,
             "now": self.now,
+            "waiting": self.waiting.get(key, 0),
         }
 
     def pre_filter(self, state: str, view: _ScopeView, candidate: _Candidate) -> bool | None:
@@ -335,7 +284,11 @@ class MeetingLister:
             reachable = bool(self.reachable())
         except Exception:  # noqa: BLE001 — unknown reads as not reachable
             reachable = False
-        return _Reading(rows, zone, local, reachable, self.now(), note), fault
+        now = self.now()
+        return (
+            _Reading(rows, zone, local, reachable, now, note, waiting_by_meeting(resolver, now=now)),
+            fault,
+        )
 
     def summarizable(self, scope: str) -> tuple[tuple[str, datetime, str, bool], ...]:
         """Completion's `summarize --meeting`: ingested and kept, newest first (story 11f).
@@ -352,23 +305,6 @@ class MeetingLister:
             and listed.transcript.state == "ingested"
             and listed.transcript.kept
         )
-
-
-def _config(resolver: ScopePaths) -> tuple[str, bool, str]:
-    """`display_timezone`, whether `local_model` is set, and why UTC is used if it is."""
-    try:
-        raw = _read_or_none(resolver.resolve(APPLICATION, CONFIG_FILE))
-        config = load_config(raw)
-    except (OSError, ValueError):
-        return "", False, "config.toml could not be read, so no display_timezone is used"
-    return config.display_timezone, bool(config.local_model), ""
-
-
-def _read_or_none(path: Path) -> bytes | None:
-    try:
-        return path.read_bytes()
-    except FileNotFoundError:
-        return None
 
 
 def _candidates(reading: _Reading, views: Mapping[str, _ScopeView]) -> list[_Candidate]:
@@ -500,7 +436,10 @@ def listed_after_drop(
         view = _view(resolver, scope, root=None)
         if isinstance(view, str):
             return None
-        reading = _Reading(rows, zone, local_model, reachable, now)
+        waiting = (
+            waiting_by_meeting(resolver, now=now) if isinstance(resolver, ScopePaths) else {}
+        )
+        reading = _Reading(rows, zone, local_model, reachable, now, waiting=waiting)
         return reading.decide(
             view, _Candidate(str(scope), meeting_id, view.record_name(meeting_id))
         )

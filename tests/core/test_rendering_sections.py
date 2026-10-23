@@ -2141,7 +2141,10 @@ def test_7d_many_items_show_five_and_count_the_rest():
     items = tuple(DigestItem(f"task {n}") for n in range(5))
     body = time_critical(with_digests(digest(items=items, hidden=3)))
     assert body.count("  - unassigned: task") == 5
-    assert "  - and 3 more open action items" in body
+    assert (
+        "  - and 3 more open action items: `pm-ai proposal list --scope personal "
+        "--meeting mtg_a --state open`"
+    ) in body
 
 
 def test_7d_waiting_and_failed_with_no_summary_say_so():
@@ -2331,8 +2334,18 @@ def test_7d_the_render_with_summaries_matches_its_golden_file():
     regenerated deliberately."""
     shown = (
         digest(
-            items=(DigestItem("send the deck", "Ваня", "Friday"), DigestItem("book the room")),
+            # Story 13a: a waiting item with its window's end, an approved one,
+            # the overflow, the expired count and the review line.
+            items=(
+                DigestItem(
+                    "send the deck", "Ваня", "Friday",
+                    review_by=datetime(2026, 9, 23, 7, 0, tzinfo=timezone.utc),
+                ),
+                DigestItem("book the room", approved=True),
+            ),
             hidden=2,
+            expired=1,
+            waiting=3,
         ),
         digest(
             "mtg_b", title="Vendor call", state=SummaryStateKind.WAITING, summary=None,

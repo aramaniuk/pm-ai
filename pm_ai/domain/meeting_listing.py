@@ -35,6 +35,7 @@ __all__ = [
     "Unreadable",
     "WaitingKind",
     "drop_words",
+    "review_words",
     "summarize_command",
     "summarize_words",
 ]
@@ -148,6 +149,8 @@ class NextStep:
     drop: tuple[str, ...] | None = None
     why: str | None = None
     needs_daemon: bool = False
+    review: tuple[str, ...] | None = None
+    """Story 13a: `proposal review`'s words, when the meeting has proposals waiting."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +227,11 @@ def summarize_command(
 ) -> str:
     """`summarize_words` as the line a person types: `pm-ai transcript summarize …`."""
     return "pm-ai " + " ".join(summarize_words(scope, meeting_id, held=held, by=by))
+
+
+def review_words(scope: str, meeting_id: str) -> tuple[str, ...]:
+    """`proposal review`'s words for one meeting's waiting proposals (story 13a)."""
+    return ("proposal", "review", "--scope", scope, "--meeting", meeting_id)
 
 
 def drop_words(scope: str, meeting_id: str) -> tuple[str, ...]:

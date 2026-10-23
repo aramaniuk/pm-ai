@@ -7,9 +7,11 @@
 Meeting summaries recorded between 2026-09-08 12:30 and 2026-09-09 12:30 — in the last 24 hours (no earlier render recorded), quoted from the meeting records:
 
 - **09:00** Release sync — The team planned the release. (made by the local model qwen3:8b, automatically)
-  - Ваня: send the deck (Friday)
-  - unassigned: book the room
-  - and 2 more open action items
+  - Ваня: send the deck (Friday), to review by 2026-09-23
+  - unassigned: book the room, approved
+  - and 2 more open action items: `pm-ai proposal list --scope personal --meeting mtg_a --state open`
+  - 1 action item expired without review: `pm-ai proposal list --scope personal --meeting mtg_a --state expired`
+  - to review: `pm-ai proposal review --scope personal --meeting mtg_a`
   - meeting `mtg_a`; to ask for a summary: `pm-ai transcript summarize --scope personal --meeting mtg_a --again`
 - **2026-09-08 15:00** Vendor call — summary waiting for Claude
   - meeting `mtg_b`; to ask for a summary: `pm-ai transcript summarize --scope personal --meeting mtg_b`

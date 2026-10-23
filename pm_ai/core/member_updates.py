@@ -56,7 +56,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, tzinfo
 from enum import Enum
 from types import MappingProxyType
@@ -99,6 +99,7 @@ __all__ = [
     "UpdateLine",
     "Verdict",
     "Withdrawn",
+    "ItemDecision",
     "candidates_of",
     "classification_prompt",
     "cut_at_word",
@@ -1057,6 +1058,45 @@ def _order(line: UpdateLine) -> tuple[float, str, str, str]:
     return (-line.start.timestamp(), line.meeting, line.kind.value, line.update)
 
 
+@dataclass(frozen=True, slots=True)
+class ItemDecision:
+    """The PM's decision on one action item, joined in when the page renders (13a).
+
+    `hidden` for an item, or its newest replacement, that was rejected; the
+    replacement's `what`, `owner` and `due` when an edit replaced it. Keyed by
+    the root id `7b` minted, which is what the ledger's lines record.
+    """
+
+    hidden: bool = False
+    replaced: bool = False
+    what: str | None = None
+    owner: str | None = None
+    due: str | None = None
+
+
+def _decided(
+    lines: Iterable[UpdateLine], decisions: Mapping[str, ItemDecision]
+) -> list[UpdateLine]:
+    """The ledger's lines with the PM's decisions applied: rejected hidden, edits shown."""
+    kept: list[UpdateLine] = []
+    for line in lines:
+        decision = decisions.get(line.item) if line.kind is ItemKind.ACTION else None
+        if decision is None:
+            kept.append(line)
+            continue
+        if decision.hidden:
+            continue
+        if decision.replaced and decision.what:
+            line = replace(
+                line,
+                text=decision.what,
+                owner=decision.owner or None,
+                due=decision.due or None,
+            )
+        kept.append(line)
+    return kept
+
+
 def issue_notes_for(
     ledger: Ledger | BaseException,
     aliases: AliasTable | BaseException,
@@ -1066,6 +1106,8 @@ def issue_notes_for(
     tz: tzinfo,
     scope: ProjectScope,
     placed: Callable[[IssueNotes], frozenset[int]],
+    decisions: Mapping[str, ItemDecision] | BaseException | None = None,
+    decisions_unreadable: int = 0,
 ) -> IssueNotes:
     """The rows under each issue, and the closing lines, for one render.
 
@@ -1118,11 +1160,31 @@ def issue_notes_for(
             if (issue := issues.get(line.issue)) is not None and issue.confidential
         )
     floor = now - UPDATE_WINDOW
+    # Story 13a: the PM's decisions are read when the page renders, never
+    # appended to the ledger. Unreadable, the lines show as recorded.
+    if isinstance(decisions, BaseException):
+        closing.append(
+            _sentence(
+                "Your decisions on the action items could not be read, so the meeting "
+                f"updates are shown as recorded: {_reason(decisions)}"
+            )
+        )
+        decisions = None
+    elif decisions_unreadable:
+        n = decisions_unreadable
+        closing.append(
+            f"{n} of the meetings' {'proposal' if n == 1 else 'proposals'} could not be "
+            f"read, so {'its' if n == 1 else 'their'} decision is not applied and those "
+            f"meeting updates are shown as recorded."
+        )
     updates = sorted(
-        (
-            line
-            for line in ledger.live.values()
-            if ledger.shown(line) and line.start >= floor
+        _decided(
+            (
+                line
+                for line in ledger.live.values()
+                if ledger.shown(line) and line.start >= floor
+            ),
+            decisions or {},
         ),
         key=_order,
     )

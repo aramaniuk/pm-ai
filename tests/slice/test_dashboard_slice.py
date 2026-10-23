@@ -2303,8 +2303,13 @@ def test_7d_meetings_are_chosen_by_when_the_summary_was_recorded(tmp_path):
     assert "No meeting summary was recorded between" in later
 
 
-def test_7d_open_items_exclude_approved_expired_and_pattern_promises(tmp_path):
-    """Matrix "Approved or expired" and "Pattern promise": none listed."""
+def test_7d_open_items_show_approved_and_exclude_expired_and_pattern_promises(tmp_path):
+    """Matrix "Approved or expired" and "Pattern promise".
+
+    Story 13a: an approved item is shown as approved, after the waiting ones;
+    an expired one is counted, not listed. Its fixture is staged 15 days ago,
+    since an item staged 8 days ago is still waiting under the 14-day window.
+    """
     built = daemon(tmp_path)
     kept = SummaryActionItem("ship the build", "Ана", "Friday")
     approved = SummaryActionItem("approved one")
@@ -2312,7 +2317,7 @@ def test_7d_open_items_exclude_approved_expired_and_pattern_promises(tmp_path):
     _summarized(built, "mtg_a", items=(kept,))
     _stage_item(built, PERSONAL, "mtg_a", approved, state=ProposalState.APPROVED)
     _stage_item(
-        built, PERSONAL, "mtg_a", expired, created=NOW - timedelta(days=8),
+        built, PERSONAL, "mtg_a", expired, created=NOW - timedelta(days=15),
         ttl=timedelta(days=7),
     )
     # An `11b` pattern promise for the same meeting: another type, another id.
@@ -2328,8 +2333,15 @@ def test_7d_open_items_exclude_approved_expired_and_pattern_promises(tmp_path):
         )
     )
     body = _page(built)["Time-Critical Activities"]
-    assert "  - Ана: ship the build (Friday)" in body
-    for absent in ("approved one", "expired one", "send the notes"):
+    lines = body.split("\n")
+    waiting = lines.index("  - Ана: ship the build (Friday), to review by 2026-09-23")
+    assert lines.index("  - unassigned: approved one, approved") == waiting + 1
+    assert (
+        "  - 1 action item expired without review: `pm-ai proposal list --scope personal "
+        "--meeting mtg_a --state expired`"
+    ) in lines
+    assert "  - to review: `pm-ai proposal review --scope personal --meeting mtg_a`" in lines
+    for absent in ("expired one", "send the notes"):
         assert absent not in body
 
 
@@ -2340,9 +2352,12 @@ def test_7d_eight_open_items_show_five_and_count_three(tmp_path):
     _summarized(built, "mtg_a", items=items)
     body = _page(built)["Time-Critical Activities"]
     assert [line for line in body.split("\n") if line.startswith("  - unassigned: ")] == [
-        f"  - unassigned: task {n}" for n in range(5)
+        f"  - unassigned: task {n}, to review by 2026-09-23" for n in range(5)
     ]
-    assert "  - and 3 more open action items" in body
+    assert (
+        "  - and 3 more open action items: `pm-ai proposal list --scope personal "
+        "--meeting mtg_a --state open`"
+    ) in body
 
 
 def test_7d_a_project_owner_shows_only_once_resolved_to_a_member(tmp_path):
@@ -2751,8 +2766,12 @@ def test_7d_an_item_on_a_confidential_issue_never_shows_its_text(tmp_path):
     body = sections(page)["Time-Critical Activities"].split("\n")
     # The rows Team Activity shows: one under #142, two under #143 (its cap).
     assert "  - 3 open action items shown under #142, #143 in Team Activity" in body
-    assert body.count("  - Ana: an action item on a confidential issue (Friday)") == 1
-    assert body.count("  - Ana: an action item on a confidential issue") == 1  # the old one
+    assert body.count(
+        "  - Ana: an action item on a confidential issue (Friday), to review by 2026-09-23"
+    ) == 1
+    assert body.count(
+        "  - Ana: an action item on a confidential issue, to review by 2026-09-23"
+    ) == 1  # the old one
     personal = _page(built)["Time-Critical Activities"]
     assert "  - Ana: secret placed task (Thursday)" in personal
 

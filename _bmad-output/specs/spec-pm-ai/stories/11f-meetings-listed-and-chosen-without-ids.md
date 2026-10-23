@@ -414,6 +414,7 @@ Anchors checked against `origin/main` at `82c2edb` (2026-10-22).
   - **Completion** shows each meeting's start in `display_timezone` and its title beside the id (`Candidate.meta`, prompt_toolkit's `display_meta`). `Readers` gains `summarizable` beside `meetings`.
   - **The drop's real `--json`** is written with `ensure_ascii=False`, as the dry run's is; only the listing's is ASCII.
   - **An unreadable store and an unparseable record:** with no store to give the id, the record's file name stands in for `meeting_id`.
+- **2026-10-22, amended by `13a`:** `transcript list --json` and `transcript drop --json` gain `next.review`, naming `pm-ai proposal review --scope <scope> --meeting <id>` when the meeting has items waiting, and the text forms print it.
 
 ## Design Notes
 

@@ -33,13 +33,21 @@ from pm_ai.core.goal_register import DOMAIN_SPELLINGS, HORIZON_SPELLINGS
 from pm_ai.core.meeting_listing import shown_title, title_words
 from pm_ai.domain.meeting_listing import LIST_STATES
 from pm_ai.surfaces.cli.logs import LEVELS as LOG_LEVELS
+from pm_ai.core.proposal_cards import LIST_STATES as PROPOSAL_STATES
+from pm_ai.core.proposals import TODAYS_TYPES
 from pm_ai.surfaces.cli.dispatch import (
+    DUE_OPTION,
     GOAL_OPTIONS,
+    IF_VERSION_OPTION,
     LIMIT_OPTION,
     MEETING_ARGUMENT,
     ON_OPTION,
+    OWNER_OPTION,
+    PROPOSAL_ARGUMENT,
     SCOPE_ARGUMENT,
     STATE_OPTION,
+    TYPE_OPTION,
+    WHAT_OPTION,
     SUMMARY_MAKERS,
     SUPPORTED_SYSTEMS,
     TABLE,
@@ -59,6 +67,9 @@ __all__ = [
     "source_of",
     "split_line",
 ]
+
+PROPOSAL_TYPES = tuple(each.name for each in TODAYS_TYPES)
+"""`proposal list --type`'s offers: the types pm-ai registers today (13a)."""
 
 HELP_WORDS = ("help", "-h", "--help")
 """The words that ask for every command (`dispatch._HELP_FLAGS`)."""
@@ -88,6 +99,16 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
         (("transcript", "list"), LIMIT_OPTION),
         # Story 7e: a speaker label as said in a meeting, typed by the PM.
         (("member", "name"), "label"),
+        # Story 13a: a count, a date, a version and the PM's own words.
+        (("proposal", "list"), LIMIT_OPTION),
+        (("proposal", "list"), ON_OPTION),
+        (("proposal", "review"), ON_OPTION),
+        (("proposal", "approve"), IF_VERSION_OPTION),
+        (("proposal", "reject"), IF_VERSION_OPTION),
+        (("proposal", "edit"), IF_VERSION_OPTION),
+        (("proposal", "edit"), WHAT_OPTION),
+        (("proposal", "edit"), OWNER_OPTION),
+        (("proposal", "edit"), DUE_OPTION),
     }
 )
 """`(command, name)` pairs whose value is free text, offered nothing."""
@@ -115,6 +136,9 @@ SUMMARIZABLE = "summarizable meetings"
 DROPPABLE = "started meetings"
 LIST_STATE_NAMES = "list states"
 UPDATE_IDS = "update ids"
+PROPOSAL_IDS = "proposal ids"
+PROPOSAL_STATE_NAMES = "proposal states"
+PROPOSAL_TYPE_NAMES = "proposal types"
 
 MEETING_CANDIDATES = 100
 """At most this many meetings are offered for one Tab, after filtering (11f)."""
@@ -149,6 +173,17 @@ _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("transcript", "summarize"), MEETING_ARGUMENT): SUMMARIZABLE,
     (("transcript", "drop"), MEETING_ARGUMENT): DROPPABLE,
     (("transcript", "list"), STATE_OPTION): LIST_STATE_NAMES,
+    # Story 13a: a proposal chosen by its owner, text and meeting, its id
+    # inserted — only those the verb can act on; the listing's six states and
+    # the registered types; a meeting of the line's scope.
+    (("proposal", "show"), PROPOSAL_ARGUMENT): PROPOSAL_IDS,
+    (("proposal", "approve"), PROPOSAL_ARGUMENT): PROPOSAL_IDS,
+    (("proposal", "reject"), PROPOSAL_ARGUMENT): PROPOSAL_IDS,
+    (("proposal", "edit"), PROPOSAL_ARGUMENT): PROPOSAL_IDS,
+    (("proposal", "list"), STATE_OPTION): PROPOSAL_STATE_NAMES,
+    (("proposal", "list"), TYPE_OPTION): PROPOSAL_TYPE_NAMES,
+    (("proposal", "list"), MEETING_ARGUMENT): MEETING_IDS,
+    (("proposal", "review"), MEETING_ARGUMENT): MEETING_IDS,
 }
 """Names whose value depends on the command declaring them."""
 
@@ -178,6 +213,18 @@ def _no_values() -> Sequence[str]:
 
 
 def _no_project_values(project: str) -> Sequence[str]:
+    return ()
+
+
+ProposalChoice = tuple[str, str, str, datetime | None]
+"""A proposal completion may offer (story 13a): its id, `owner: what`, its
+meeting's title, and the meeting's start (in the display zone), or `None`."""
+
+PROPOSAL_CANDIDATES = 100
+"""At most this many proposals are offered for one Tab (13a)."""
+
+
+def _no_proposals(verb: str) -> Sequence[ProposalChoice]:
     return ()
 
 
@@ -219,6 +266,11 @@ class Readers:
     the listing's summarize check — newest first. `operational.db` is read
     read-only, the exception 4u's readers grant to `7e`."""
     updates: Callable[[str], Sequence[str]] = _no_project_values
+    proposals: Callable[[str], Sequence[ProposalChoice]] = _no_proposals
+    """Story 13a, by verb (`show`, `approve`, `reject`, `edit`): the proposals
+    that verb can act on, newest meeting first, at most 100. Never one whose
+    scope cannot be told or whose body cannot be read. `operational.db` is read
+    read-only, by path, as `summarizable` reads it."""
 
 
 # ── Splitting a line that may still be open ─────────────────────────────────
@@ -457,6 +509,7 @@ class Completion:
     _goals: _Cached = field(init=False)
     _scoped: dict[tuple[str, str], _Cached] = field(init=False)
     _meetings: dict[tuple[str, str], _CachedMeetings] = field(init=False)
+    _proposals: dict[str, _CachedProposals] = field(init=False)
 
     def __post_init__(self) -> None:
         self._projects = _Cached(self.readers.projects)
@@ -464,6 +517,7 @@ class Completion:
         self._goals = _Cached(self.readers.goal_ids)
         self._scoped = {}
         self._meetings = {}
+        self._proposals = {}
 
     def forget(self) -> None:
         """Read every file again at the next Tab that needs it (a command ran)."""
@@ -476,6 +530,8 @@ class Completion:
             cached.forget()
         for meetings in self._meetings.values():
             meetings.forget()
+        for proposals in self._proposals.values():
+            proposals.forget()
 
     # ── Tab ──────────────────────────────────────────────────────────────
 
@@ -506,6 +562,17 @@ class Completion:
         scope = _named_scope(words)
         project = scope.removeprefix("project:") if scope and scope.startswith("project:") else None
         entry = reading.entry
+
+        def proposals_for(name: str, typed: str) -> list[Candidate] | None:
+            if source_of_or_none(reading.command, name) != PROPOSAL_IDS:
+                return None
+            verb = reading.command[1]
+            if verb not in self._proposals:
+                read = self.readers.proposals
+                self._proposals[verb] = _CachedProposals(lambda: read(verb))
+            return _proposal_candidates(
+                self._proposals[verb].get(), typed, split.start, split.quote
+            )
 
         def meetings_for(name: str, typed: str, prefix: str = "") -> list[Candidate] | None:
             chosen = self._meeting_choices(reading.command, name, scope)
@@ -540,6 +607,9 @@ class Completion:
             return offered(self._unused(entry, reading.given))
         if reading.positionals < len(positional):
             name = positional[reading.positionals]
+            chosen = proposals_for(name, current)
+            if chosen is not None:
+                return chosen
             return offered(self._values(reading.command, name, current, project))
         if not current:
             return offered(self._unused(entry, reading.given))
@@ -574,6 +644,10 @@ class Completion:
             return SUMMARY_MAKERS
         if source == LIST_STATE_NAMES:
             return LIST_STATES
+        if source == PROPOSAL_STATE_NAMES:
+            return PROPOSAL_STATES
+        if source == PROPOSAL_TYPE_NAMES:
+            return PROPOSAL_TYPES
         if source == PATHS:
             return _paths(partial)
         readers = {
@@ -646,6 +720,74 @@ class Completion:
         if not entry.leaves:
             return f"{first}  —  {entry.summary}; no subcommand is implemented yet"
         return f"{first} {{{', '.join(entry.leaves)}}}  —  {entry.summary}"
+
+
+def source_of_or_none(command: tuple[str, ...], name: str) -> str | None:
+    try:
+        return source_of(command, name)
+    except LookupError:
+        return None
+
+
+@dataclass(slots=True)
+class _CachedProposals:
+    """`_Cached` for proposals: (id, owner and what, title, start) (13a)."""
+
+    read: Callable[[], Sequence[ProposalChoice]]
+    values: tuple[ProposalChoice, ...] | None = None
+
+    def get(self) -> tuple[ProposalChoice, ...]:
+        if self.values is None:
+            try:
+                self.values = tuple(
+                    value
+                    for value in self.read()
+                    if isinstance(value, tuple)
+                    and len(value) == 4
+                    and isinstance(value[0], str)
+                    and isinstance(value[1], str)
+                    and isinstance(value[2], str)
+                    and (value[3] is None or isinstance(value[3], datetime))
+                )
+            except Exception:  # noqa: BLE001 — a reader that fails offers nothing
+                self.values = ()
+        return self.values
+
+    def forget(self) -> None:
+        self.values = None
+
+
+def _proposal_candidates(
+    choices: Sequence[ProposalChoice], typed: str, start: int, quote: str | None
+) -> list[Candidate]:
+    """The proposals whose id starts with `typed`, or a word of whose text or title does.
+
+    Folded as `--title` folds; at most `PROPOSAL_CANDIDATES`, each inserting its
+    id and showing `owner: what` and its meeting's title and start (13a).
+    """
+    folded = title_words(typed)
+    found: list[Candidate] = []
+    for proposal_id, said, title, when in choices:
+        if typed and not proposal_id.startswith(typed):
+            words = (*title_words(said), *title_words(title))
+            if not folded or not all(
+                any(word.startswith(part) for word in words) for part in folded
+            ):
+                continue
+        meeting = shown_title(title) if title else ""
+        if when is not None:
+            meeting = f"{when.strftime('%Y-%m-%d %H:%M')} {meeting}".rstrip()
+        found.append(
+            Candidate(
+                _quoted(proposal_id, quote),
+                start,
+                proposal_id,
+                meta=f"{said}  {meeting}".rstrip(),
+            )
+        )
+        if len(found) >= PROPOSAL_CANDIDATES:
+            break
+    return found
 
 
 def _named_scope(words: Sequence[str]) -> str | None:

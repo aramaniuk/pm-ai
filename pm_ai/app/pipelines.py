@@ -140,6 +140,8 @@ from pm_ai.core.member_updates import (
     ProjectScope,
     candidates_of,
     classification_prompt,
+    ItemDecision,
+    ItemKind,
     issue_notes_for,
     judge_classification,
     lines_to_append,
@@ -168,7 +170,7 @@ from pm_ai.domain.events import (
 )
 from pm_ai.domain.handles import NO_PERSON
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
-from pm_ai.domain.lifecycle import ProposalState
+from pm_ai.domain.lifecycle import DEFAULT_PROPOSAL_TTL, ProposalState
 from pm_ai.domain.meeting_summaries import (
     ACTION_ITEM,
     ModelAnswerRefused,
@@ -191,7 +193,7 @@ from pm_ai.domain.meetings import (
     is_same_day_candidate,
 )
 from pm_ai.domain.model_calls import ModelAnswer, ModelSide, ScopeFlow, ScopeFlowRefused
-from pm_ai.domain.proposals import Proposal
+from pm_ai.domain.proposals import Proposal, replacement_id, replacement_number, root_of
 from pm_ai.domain.renders import (
     DigestItem,
     DigestMaker,
@@ -258,6 +260,7 @@ from pm_ai.storage.service import (
     OperationalStoreBusy,
     OperationalStoreUnavailable,
     ProposalNotFound,
+    ProposalsUnreadable,
     SchemaVersionChanged,
     StorageService,
 )
@@ -1127,6 +1130,9 @@ class TranscriptIngestion:
     notices: tuple[str, ...] = ()
     """Sentences for the run's refusals: what went wrong beside the ingestion
     itself — a summary that could not be offered again (story 7b)."""
+    dropped: tuple[str, ...] = ()
+    """Story 13a: ids in `left` where a new extraction differed from the row the
+    PM acted on at the same position, so the new extraction was dropped."""
 
 
 def bind_transcript(
@@ -1203,6 +1209,11 @@ def run_transcript_ingestion(
     failures: list[str] = []
     unrecorded: list[str] = []
     left: list[str] = []
+    dropped: list[str] = []
+    # Story 13a: the review window starts when pm-ai stages a proposal, never
+    # at the meeting's start; `created_at` stays the meeting's, which the id
+    # and the citation rely on.
+    staged_at = daemon.clock()
     for index, extraction in enumerate(extractions):
         command = extraction.value
         if (
@@ -1230,11 +1241,18 @@ def run_transcript_ingestion(
             cites=extraction.cites,  # AD-33 — the meeting, never the transcript
             created_at=meeting.start,
             state=ProposalState.STAGED,
+            ttl=daemon.proposal_types.rule(extraction.kind).ttl
+            if extraction.kind in daemon.proposal_types
+            else DEFAULT_PROPOSAL_TTL,
+            staged_at=staged_at,
+            scope=str(meeting.scope),
         )
         if daemon.storage.stage_unless_acted(proposal):
             staged.append(proposal)
         else:
             left.append(proposal.proposal_id)
+            if _dropped_over(daemon, proposal):
+                dropped.append(proposal.proposal_id)
     return TranscriptIngestion(
         executed=tuple(executed),
         staged=tuple(staged),
@@ -1243,7 +1261,34 @@ def run_transcript_ingestion(
         unrecorded=tuple(unrecorded),
         left=tuple(left),
         notices=notices,
+        dropped=tuple(dropped),
     )
+
+
+def _dropped_over(daemon: Daemon, proposal: Proposal) -> bool:
+    """Whether `proposal` was dropped over a row the PM acted on that says something else (13a).
+
+    `11b`'s ids are positional, so a re-ingestion that shifts the extractions
+    can put a different one where the PM already acted: it is dropped, and the
+    drop's closing line counts it. Acted on is approved, rejected, or replaced
+    by the PM's edit — never a row that only expired, which nobody acted on.
+    The row is read after `stage_unless_acted` left it; a row it left is not
+    written, so the read sees what the decision was made against.
+    """
+    try:
+        held = daemon.storage.load_proposal(proposal.proposal_id)
+    except Exception:  # noqa: BLE001 — a count for a sentence, never a failure
+        return False
+    if held.state in (ProposalState.APPROVED, ProposalState.REJECTED):
+        acted = True
+    elif held.state is ProposalState.SUPERSEDED:
+        try:
+            acted = daemon.storage.load_proposal(replacement_id(held.proposal_id, 0)) is not None
+        except Exception:  # noqa: BLE001 — no replacement: superseded by a re-stage
+            acted = False
+    else:
+        acted = False
+    return acted and (held.summary, held.payload) != (proposal.summary, proposal.payload)
 
 
 def _proposal_id(meeting: Meeting, transcript: Transcript, index: int) -> str:
@@ -1377,6 +1422,9 @@ class TranscriptDropped:
     record_fields: tuple[DroppedField, DroppedField, DroppedField] | None = None
     """A `--meeting` or `--on` drop's title, start and length as the record holds
     them, for `--json` (story 11f); the other drops carry the decided fields."""
+    dropped: int = 0
+    """Story 13a: new extractions dropped because the proposal at the same
+    position (`11b`'s ids are positional) was one the PM had acted on."""
 
     @property
     def minted(self) -> bool:
@@ -2088,6 +2136,7 @@ def drop_file(
         start=meeting.start,
         staged=len(outcome.staged),
         left=len(outcome.left),
+        dropped=len(outcome.dropped),
         title_field=title_field,
         start_field=start_field,
         duration=duration,
@@ -2645,24 +2694,39 @@ def _meeting_digest(
     try:
         record = daemon.meetings.get(row.meeting_id, scope=row.scope)
         open_items = daemon.storage.open_action_items(
-            action_item_prefix(row.scope, row.meeting_id), at=now
+            action_item_prefix(row.scope, row.meeting_id),
+            at=now,
+            rules=daemon.proposal_types.rules(),
         )
         recorded = record.summary
-        # In the record's order, the summary's own items first; any other open
-        # item (an earlier summary's, still staged) after them by id.
+        rule = daemon.proposal_types.rule(ACTION_ITEM)
+        # Story 13a: waiting items first, then approved ones, each in the
+        # record's order with a PM's replacement in its root's place; any
+        # other open item (an earlier summary's) after them, by id.
         order: dict[str, int] = {}
         if recorded is not None:
             for index, item in enumerate(recorded.answer.action_items):
                 order.setdefault(action_item_id(row.scope, row.meeting_id, item), index)
         ordered = sorted(
             open_items.items,
-            key=lambda p: (order.get(p.proposal_id, len(order)), p.proposal_id),
+            key=lambda p: (
+                p.state is ProposalState.APPROVED,
+                order.get(root_of(p.proposal_id), len(order)),
+                root_of(p.proposal_id),
+                p.proposal_id,
+            ),
         )
         items: list[DigestItem] = []
         placed: set[int] = set()
         placed_count = 0
+        waiting = 0
         for proposal in ordered:
-            under = shown_elsewhere.get(proposal.proposal_id)
+            # Story 13a: placement and withholding go by the root id `7b` minted.
+            root = root_of(proposal.proposal_id)
+            approved = proposal.state is ProposalState.APPROVED
+            if not approved:
+                waiting += 1
+            under = shown_elsewhere.get(root)
             if under:
                 placed.update(under)
                 placed_count += 1
@@ -2671,13 +2735,15 @@ def _meeting_digest(
             # Andrei, 2026-10-20: an item on a confidential issue never shows
             # its text on a project page; the owner and due date stay.
             # With `7e`'s links unread, every item's (fail closed).
-            hidden_text = withhold_all or proposal.proposal_id in confidential
+            hidden_text = withhold_all or root in confidential
             items.append(
                 DigestItem(
                     what="" if hidden_text else _payload_text(payload, "what") or proposal.summary,
                     owner=owner_of(_payload_text(payload, "owner"), row.meeting_id),
                     due=_payload_text(payload, "due"),
                     confidential=hidden_text,
+                    approved=approved,
+                    review_by=None if approved else proposal.expires_under(rule),
                 )
             )
         maker = (
@@ -2701,6 +2767,8 @@ def _meeting_digest(
             placed=tuple(sorted(placed)),
             placed_count=placed_count,
             unreadable_items=open_items.unreadable,
+            expired=open_items.expired,
+            waiting=waiting,
         )
     except _DIGEST_REFUSALS as refused:
         return DigestUnreadable(row.scope, row.meeting_id, row.at, _refusal_text(refused))
@@ -2999,6 +3067,10 @@ def _issue_notes(
         ledger = parse_ledger(daemon.storage.read_member_updates(scope=scope))
     except (OSError, DecryptionFailed) as unreadable:
         ledger = unreadable
+    decisions: Mapping[str, ItemDecision] | BaseException | None = None
+    unread = 0
+    if not isinstance(ledger, BaseException):
+        decisions, unread = _item_decisions(daemon, ledger)
     return issue_notes_for(
         ledger,
         aliases,
@@ -3009,7 +3081,55 @@ def _issue_notes(
         placed=lambda notes: placed_issue_numbers(
             work, entries, now=now, since=since, issue_notes=notes
         ),
+        decisions=decisions,
+        decisions_unreadable=unread,
     )
+
+
+def _item_decisions(
+    daemon: Daemon, ledger: Ledger
+) -> tuple[Mapping[str, ItemDecision] | BaseException, int]:
+    """Each action item's decision, read in one read-only query by meeting (story 13a).
+
+    A line whose item, or whose newest replacement, is `rejected` is hidden;
+    one replaced by an edit shows the newest replacement's values. With them,
+    how many of the meetings' proposal bodies could not be read: the page says
+    so, since the lines those would decide are shown as recorded.
+    """
+    items = {line.item for line in ledger.live.values() if line.kind is ItemKind.ACTION}
+    if not items:
+        return {}, 0
+    meetings = sorted({line.meeting for line in ledger.live.values() if line.item in items})
+    try:
+        found = daemon.storage.proposals_of_meetings(meetings)
+    except (sqlite3.Error, OSError, ValueError, ProposalsUnreadable) as unreadable:
+        return unreadable, 0
+    by_root: dict[str, list[Proposal]] = {}
+    for proposal in found.proposals:
+        root = root_of(proposal.proposal_id)
+        if root in items and proposal.type == ACTION_ITEM:
+            by_root.setdefault(root, []).append(proposal)
+    decisions: dict[str, ItemDecision] = {}
+    for root, proposals in by_root.items():
+        own = next((p for p in proposals if p.proposal_id == root), None)
+        replacements = sorted(
+            (p for p in proposals if p.proposal_id != root),
+            key=lambda p: replacement_number(p.proposal_id) or 0,
+        )
+        newest = replacements[-1] if replacements else None
+        if (own is not None and own.state is ProposalState.REJECTED) or (
+            newest is not None and newest.state is ProposalState.REJECTED
+        ):
+            decisions[root] = ItemDecision(hidden=True)
+        elif newest is not None:
+            payload = newest.payload if isinstance(newest.payload, Mapping) else {}
+            decisions[root] = ItemDecision(
+                replaced=True,
+                what=_payload_text(payload, "what") or newest.summary,
+                owner=_payload_text(payload, "owner"),
+                due=_payload_text(payload, "due"),
+            )
+    return decisions, found.unreadable
 
 
 def _blocked_by_a_directory(
@@ -3958,6 +4078,7 @@ def _written(
             (action_item_id(scope, meeting_id, item), item) for item in answer.action_items
         )
         cites = SourceRef.parse(f"meeting:{meeting_id}")
+        rules = daemon.proposal_types.rules()
         staged = storage.stage_summary_items(
             tuple(
                 Proposal(
@@ -3969,11 +4090,16 @@ def _written(
                     cites=cites,  # AD-33 — the meeting
                     created_at=now,
                     state=ProposalState.STAGED,
+                    # Story 13a: the registered window, from the staging instant.
+                    ttl=daemon.proposal_types.rule(ACTION_ITEM).ttl,
+                    staged_at=now,
+                    scope=str(scope),
                 )
                 for proposal_id, item in items
             ),
             prefix=action_item_prefix(scope, meeting_id),
             fence=lease,
+            rules=rules,
         )
         made = "Claude" if maker is SummaryMaker.FRONTIER else "the local model"
         reason = (
@@ -3983,6 +4109,12 @@ def _written(
             + (f", {len(staged.superseded)} superseded" if staged.superseded else "")
             + "."
         )
+        if staged.staged:
+            # Story 13a: the next step, when the meeting has items waiting.
+            reason += (
+                f" To review them: pm-ai proposal review --scope {scope} --meeting "
+                f"{meeting_id}"
+            )
         return _Written(
             lease,
             model_name,

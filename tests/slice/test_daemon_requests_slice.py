@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from pm_ai.app.daemon import NO_KEY_ENROLLED
+from pm_ai.storage.service import SCHEMA_VERSION
 from test_daemon_slice import announced_lines
 
 
@@ -268,7 +269,7 @@ def test_a_keychain_that_cannot_be_read_refuses_the_start_and_nothing_listens(ho
 def test_a_store_moved_past_the_daemons_version_stops_it_with_exit_3_naming_the_version(running):
     home, process = running
     with sqlite3.connect(home.store) as db:
-        db.execute("UPDATE schema_version SET version = 2")
+        db.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION + 1,))
     status, headers, _ = home.request("POST", "/v1/prompt", {"line": "dashboard"})
     assert status == 503 and headers.get("retry-after") == "1"
     try:
@@ -278,7 +279,7 @@ def test_a_store_moved_past_the_daemons_version_stops_it_with_exit_3_naming_the_
         out, err = process.communicate()
         pytest.fail(f"the daemon did not stop on the mismatch: {err}")
     assert process.returncode == 3, (out, err)
-    assert "schema version 2" in err
+    assert f"schema version {SCHEMA_VERSION + 1}" in err
     with sqlite3.connect(home.store) as db:
         assert db.execute("SELECT count(*) FROM requests").fetchone()[0] == 0, "nothing written"
     lines = [
@@ -286,7 +287,7 @@ def test_a_store_moved_past_the_daemons_version_stops_it_with_exit_3_naming_the_
         for path in sorted((home.application / "logs").iterdir())
         for line in path.read_text().splitlines()
     ]
-    assert any(line.get("event") == "schema-version-mismatch" and line.get("found") == 2 for line in lines)
+    assert any(line.get("event") == "schema-version-mismatch" and line.get("found") == SCHEMA_VERSION + 1 for line in lines)
 
 
 # ── Review fixes: the stream's wiring, the stop, the console ─────────────────
