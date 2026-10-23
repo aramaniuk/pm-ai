@@ -177,8 +177,8 @@ The `Proposal` entity (AD-13) exists in `pm_ai/domain/proposals.py`, but the par
   - `--meeting <id>` without `--scope`, for a meeting with records in more than one scope, is refused (exit 3), listing the scopes;
   - `--title <words> [--on <date>]` without `--scope` searches personal and every enrolled project through `11f`'s `resolve_title` (`meeting_listing.py:460`). It chooses exactly one meeting across them, or is refused with the candidates;
   - every command pm-ai prints includes `--scope`.
-- **`proposal list [--scope …] [--meeting <id> | --title <words> [--on <date>]] [--type <name>] [--state staged|approved|rejected|expired|superseded|all] [--limit 1..200] [--json]`.**
-  - `--state` defaults to `staged`, the proposals waiting for the PM. `staged` means staged and within its window. `expired` includes staged proposals past their window that the sweep has not moved yet. `all` includes `executing` and `executed`.
+- **`proposal list [--scope …] [--meeting <id> | --title <words> [--on <date>]] [--type <name>] [--state staged|approved|open|rejected|expired|superseded|all] [--limit 1..200] [--json]`.**
+  - `--state` defaults to `staged`, the proposals waiting for the PM. `staged` means staged and within its window. `open` is waiting or approved, the dashboard's meaning of an open action item (Andrei, 2026-10-23). `expired` includes staged proposals past their window that the sweep has not moved yet. `all` includes `executing` and `executed`.
   - Without `--scope`, it covers personal and every enrolled project. A project that cannot be read is named on one line, and the others are still listed.
   - **Order:**
     - by meeting, newest start first;
@@ -253,7 +253,7 @@ The `Proposal` entity (AD-13) exists in `pm_ai/domain/proposals.py`, but the par
   3. a replacement in its root's place, with its edited values.
 
   Rejected and superseded items are not shown.
-- **At most 5 items** (`MAX_DIGEST_ITEMS`). Approved items are dropped before waiting ones. The overflow line gives the count and names `pm-ai proposal list --scope <scope> --meeting <id>`.
+- **At most 5 items** (`MAX_DIGEST_ITEMS`). Approved items are dropped before waiting ones. The overflow line gives the count and names `pm-ai proposal list --scope <scope> --meeting <id> --state open`, which lists every open item, the hidden ones included (Andrei, 2026-10-23).
 - **After the items:**
   - a line counting the items that expired without review and have no replacement, naming `pm-ai proposal list --scope <scope> --meeting <id> --state expired`;
   - when anything is waiting, a line naming `pm-ai proposal review --scope <scope> --meeting <id>`.
@@ -366,10 +366,11 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
 | Review without a terminal | stdin not a TTY | refused, naming `proposal list --json` and the verbs | exit 3 |
 | Refusal in JSON | `approve <expired id> --json` | `{"outcome": "refused", "reason", "state": "expired", …}` on standard output | exit 3 |
 | Completion | `pm-ai> proposal approve cache<Tab>` | offers the waiting item whose `what` has a word starting "cache", showing its owner, text and meeting | N/A |
-| Dashboard order and cap | 4 waiting and 3 approved items | the 4 waiting, then 1 approved; "2 more: `pm-ai proposal list --scope … --meeting …`" | N/A |
+| Dashboard order and cap | 4 waiting and 3 approved items | the 4 waiting, then 1 approved; "2 more: `pm-ai proposal list --scope … --meeting … --state open`", which lists all 7 | N/A |
+| Open items | `proposal list --state open` with 2 waiting, 1 approved and 1 rejected item | the 2 waiting and the approved one; not the rejected one | exit 0 |
 | Confidential edit | an edited item linked to a confidential issue; and again with the GitLab record unreadable | "an action item on a confidential issue" both times | N/A |
 | People | `--scope people:example` | refused (AD-4) | exit 3 |
-| Bad state | `--state done` | usage error naming the six words | exit 2 |
+| Bad state | `--state done` | usage error naming the seven words | exit 2 |
 | Not found | `proposal show prp_nope` | refused: no proposal under that id | exit 3 |
 | Old row, no change time | a row staged before 13a, then approved elsewhere | "already approved" without a "when" or "from where" clause | exit 0 |
 | Large store | 5,000 proposals across 300 meetings | `proposal list` within 1 second, measured | exit 0 |
@@ -485,6 +486,7 @@ Anchors checked against `origin/main` at `8a29acd`.
   - **The repeat check** compares a new item only with items that stay live after the re-summary (replacements, approved items, and staged roots the summary produces again), so a re-summary that only changes an item's case or spacing does not lose it.
   - **The drop's closing line** counts extractions dropped over a row the PM approved, rejected or replaced by an edit; an expired row is left, not counted.
   - **Deferred** (`deferred-work.md`, story-13a section): the dashboard's overflow command lists staged items only (needs Andrei's decision), and the readers' and sweep's handling of approved executor-type rows (for 13b).
+- **2026-10-23, `--state open` (Andrei's decision): frozen block edited (recorded here).** `proposal list --state` gains `open`, waiting or approved, the dashboard's own meaning of an open action item, and the dashboard's overflow line names `--state open`. Before, the line named `proposal list` with its default `--state staged`, while the cap drops approved items first, so the command did not list the items the line counted (found by the review and confirmed by the coordinating session's manual check: a real 7-item summary, one approved and one edited). Edited: the `list` synopsis and its `--state` bullet, the dashboard's cap bullet, matrix rows "Dashboard order and cap" and "Bad state" (seven words), and a new row "Open items".
 
 ## Design Notes
 
