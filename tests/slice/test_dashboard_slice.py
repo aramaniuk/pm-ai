@@ -2356,7 +2356,7 @@ def test_7d_eight_open_items_show_five_and_count_three(tmp_path):
     ]
     assert (
         "  - and 3 more open action items: `pm-ai proposal list --scope personal "
-        "--meeting mtg_a`"
+        "--meeting mtg_a --state open`"
     ) in body
 
 

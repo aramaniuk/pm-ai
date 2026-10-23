@@ -370,8 +370,12 @@ OUTCOMES = (
     "already",
 )
 
-LIST_STATES = ("staged", "approved", "rejected", "expired", "superseded", "all")
-"""What `proposal list --state` takes; `staged` (waiting for the PM) is the default."""
+LIST_STATES = ("staged", "approved", "open", "rejected", "expired", "superseded", "all")
+"""What `proposal list --state` takes; `staged` (waiting for the PM) is the default.
+
+`open` is waiting or approved, the dashboard's own meaning of an open action
+item, so its overflow line lists exactly what it counted (Andrei, 2026-10-23).
+"""
 
 VIA_WORDS = {
     "terminal": "from the terminal",

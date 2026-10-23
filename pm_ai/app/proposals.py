@@ -1077,6 +1077,8 @@ def _in_order(scopes: Sequence[str] | Iterator[str]) -> list[str]:
 def _passes(seen: ProposalState, state: str) -> bool:
     if state == "all":
         return True
+    if state == "open":
+        return seen in (ProposalState.STAGED, ProposalState.APPROVED)
     return seen.value == state
 
 

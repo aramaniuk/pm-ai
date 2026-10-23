@@ -2143,7 +2143,7 @@ def test_7d_many_items_show_five_and_count_the_rest():
     assert body.count("  - unassigned: task") == 5
     assert (
         "  - and 3 more open action items: `pm-ai proposal list --scope personal "
-        "--meeting mtg_a`"
+        "--meeting mtg_a --state open`"
     ) in body
 
 

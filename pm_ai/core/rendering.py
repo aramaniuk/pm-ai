@@ -996,7 +996,8 @@ def _digest_lines(
     if digest.hidden:
         n = digest.hidden
         lines.append(
-            f"  - and {n} more open action {'item' if n == 1 else 'items'}: `{listing}`"
+            f"  - and {n} more open action {'item' if n == 1 else 'items'}: "
+            f"`{listing} --state open`"
         )
     if digest.placed_count:
         n = digest.placed_count

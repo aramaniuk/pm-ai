@@ -1003,12 +1003,29 @@ def test_a_people_scope_is_refused(machine):
     assert code == EXIT_REFUSAL and "AD-4" in err
 
 
-def test_a_bad_state_is_a_usage_error_naming_the_six_words(machine):
+def test_a_bad_state_is_a_usage_error_naming_the_seven_words(machine):
     """Matrix "Bad state"."""
     code, _, err = machine.run("proposal", "list", "--state", "done")
     assert code == EXIT_USAGE
-    for word in ("staged", "approved", "rejected", "expired", "superseded", "all"):
+    for word in ("staged", "approved", "open", "rejected", "expired", "superseded", "all"):
         assert word in err
+
+
+def test_the_open_state_lists_waiting_and_approved_items_only(machine):
+    """Matrix "Open items" (Andrei, 2026-10-23): waiting or approved, nothing else."""
+    meeting = machine.meeting()
+    items = tuple((f"task {n}", None, None) for n in range(4))
+    machine.summarize(meeting, items)
+    ids = [machine.item_id(meeting, n, items) for n in range(4)]
+    machine.run("proposal", "approve", ids[1])
+    machine.run("proposal", "reject", ids[2])
+    code, listing = machine.json("proposal", "list", "--state", "open")
+    assert code == EXIT_OK
+    assert {card["proposal_id"]: card["state"] for card in listing["proposals"]} == {
+        ids[0]: "staged",
+        ids[1]: "approved",
+        ids[3]: "staged",
+    }
 
 
 def test_an_unknown_id_is_refused(machine):
@@ -1109,6 +1126,12 @@ def test_completion_offers_a_waiting_item_by_a_word_of_its_text(summarised):
     assert TITLE in offered[0].meta
 
 
+def test_completion_offers_the_open_state(machine):
+    """`--state` completes from the seven words, `open` among them."""
+    completion = Completion(Readers())
+    assert [c.display for c in completion.complete("proposal list --state o")] == ["open"]
+
+
 def test_the_dashboard_lists_waiting_then_approved_capped_at_five(machine):
     """Matrix "Dashboard order and cap"."""
     meeting = machine.meeting()
@@ -1125,10 +1148,13 @@ def test_the_dashboard_lists_waiting_then_approved_capped_at_five(machine):
         "  - unassigned: task 6, to review by 2026-11-04",
         "  - unassigned: task 1, approved",
     ]
-    assert (
-        "  - and 2 more open action items: `pm-ai proposal list --scope personal --meeting mtg_a`"
-        in lines
-    )
+    overflow = "pm-ai proposal list --scope personal --meeting mtg_a --state open"
+    assert f"  - and 2 more open action items: `{overflow}`" in lines
+    # The overflow command lists every open item, the 2 the page left out included.
+    code, listing = machine.json(*overflow.split()[1:])
+    assert code == EXIT_OK
+    listed = {card["proposal_id"] for card in listing["proposals"]}
+    assert listed == {machine.item_id(meeting, n, items) for n in range(7)}
 
 
 def test_the_prompt_prints_what_the_terminal_prints(summarised):
