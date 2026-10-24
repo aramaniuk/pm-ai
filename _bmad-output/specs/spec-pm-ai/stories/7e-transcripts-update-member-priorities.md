@@ -144,6 +144,7 @@ context:
   5. Ollama not answering is not a title-match attempt, as for `7b`; the wording was corrected.
   6. `member link`'s usage line shows `--scope` (cosmetic).
 - **2026-10-22, amended by `13a`:** Team Activity joins the PM's proposal decisions in at read time. A line whose item (or newest replacement) is rejected is hidden, and an edited one shows the replacement's `what`, `owner` and `due` under the same issue. If the proposals cannot be read, the page says so in one line. `member_updates.md` is never written by a decision, so update ids and `member link` are unchanged.
+- **2026-10-24, amended by `15a`:** `resolve_due` is now `due_dates.resolve(...).date`, the one resolver the commitment ledger also uses, and `_WEEKDAYS`, `_MONTHS` and `_LEADING` moved with it. Team Activity works out the meeting's day by the ledger's rule, from each meeting's `start_estimated_from`: no date beside the words for a start from `file-modified` or an unknown source, and "(meeting day estimated)" after an estimated day's date. Newly resolved: today, end of day, tomorrow, the day after tomorrow, in N days or weeks, end of the week, end of the month, `this <weekday>`, `в эту пятницу`, `3-го января`, a day, month and year, and ISO and dotted numeric dates. Newly unresolved: a date without a year more than 300 days ahead.
 
 ## Design Notes
 
