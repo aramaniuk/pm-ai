@@ -14,7 +14,7 @@ Companion to `SPEC.md`, cited by the kernel's Success signal. Targets are **prov
 | **SM-6** | Deep inquiry & meeting preparation accuracy — multi-source telemetry, pre-meeting status validations, and drift queries validated by the PM without manual re-queries | ≥90% | CAP-23, CAP-24, CAP-25, CAP-32, CAP-33, CAP-34 |
 | **SM-7** | Spoken anchor & in-meeting command execution precision — anchors (including fuzzy-recovered) and direct verbal commands parsed and executed without manual correction | ≥95% | CAP-1, CAP-5, CAP-6, CAP-7, CAP-36 |
 | **SM-8** | Implicit update approval accuracy — implicit updates staged in approval cards accepted by the PM without complete rejection | ≥80% | CAP-6, CAP-34 |
-| **SM-9** | Closed-loop commitment verification precision — accuracy of automated status transitions to `[FULFILLED]` versus manual override | ≥90% | CAP-33, CAP-34 |
+| **SM-9** | Closed-loop commitment verification precision — accuracy of automated status transitions to `[FULFILLED]` versus manual override (the PM's own `fulfilled`, `altered` and `broken` marks, counted from their own ledger lines; `withdrawn` marks excluded, 2026-10-24) | ≥90% | CAP-33, CAP-34 |
 
 **SM-5 is a signal, not a pass/fail condition.** A breach is a prompt to investigate; it never triggers degradation.
 

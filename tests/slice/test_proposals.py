@@ -418,13 +418,19 @@ def test_reject_hides_the_item_from_the_dashboard(summarised):
     assert "send the cache TTL numbers" not in machine.page()
 
 
-def test_an_approved_action_item_can_be_rejected(summarised):
-    """Matrix "Reject an approved action item"."""
+def test_an_approved_action_item_is_not_rejected(summarised):
+    """Matrix "Reject an approved action item", as story 15a changed it.
+
+    13a let the PM reject an approved action item; since 15a approval writes
+    its commitment, so the reject is refused and points to `proposal edit`.
+    """
     machine, meeting = summarised
     item = machine.item_id(meeting)
     machine.run("proposal", "approve", item)
-    code, _, _ = machine.run("proposal", "reject", item)
-    assert code == EXIT_OK and machine.load(item).state is ProposalState.REJECTED
+    code, out, err = machine.run("proposal", "reject", item)
+    assert code == EXIT_REFUSAL and machine.load(item).state is ProposalState.APPROVED
+    assert "is a commitment now, so it is not rejected" in out + err
+    assert f"pm-ai proposal edit {item} --scope personal" in out + err
 
 
 def test_an_old_row_already_approved_drops_the_when_and_where(summarised):
@@ -443,7 +449,10 @@ def test_an_old_row_already_approved_drops_the_when_and_where(summarised):
     db.close()
     code, out, _ = machine.run("proposal", "approve", item)
     assert code == EXIT_OK
-    assert f"{item}: already approved; nothing changed." in out
+    # Since 15a the already-approved sentence also says the commitment cannot
+    # be recorded: the row records no approval instant (the catch-up skips it too).
+    assert f"{item}: already approved; it could not be recorded as a commitment" in out
+    assert "pm-ai cannot record it." in out
 
 
 # ── The window ───────────────────────────────────────────────────────────────
@@ -1215,7 +1224,10 @@ def test_show_list_and_the_verbs_keep_the_full_card(summarised):
             assert marker in out
         assert f"pm-ai proposal approve {item} --scope personal --if-version 1" in out
     code, out, _ = machine.run("proposal", "approve", second)
-    assert code == EXIT_OK and f"pm-ai proposal reject {second} --scope personal" in out
+    # Story 15a: an approved action item is a commitment, so its card prints no
+    # reject command.
+    assert code == EXIT_OK and f"pm-ai proposal reject {second} --scope personal" not in out
+    assert f"pm-ai proposal edit {second} --scope personal" in out
 
 
 def test_json_objects_keep_their_commands(summarised):
@@ -1231,7 +1243,10 @@ def test_json_objects_keep_their_commands(summarised):
     assert edited["outcome"] == "edited" and _command(edited["proposal"], "approve")
     _, approved = machine.json("proposal", "approve", second)
     assert approved["outcome"] == "approved"
-    assert approved["proposal"]["actions"]["reject"]["command"][:3] == ["proposal", "reject", second]
+    # Story 15a: `reject` is unavailable on an approved action item, with its reason.
+    assert approved["proposal"]["actions"]["reject"]["available"] is False
+    assert approved["proposal"]["actions"]["reject"]["command"] is None
+    assert approved["proposal"]["actions"]["edit"]["command"][:3] == ["proposal", "edit", second]
     _, rejected = machine.json("proposal", "reject", third)
     assert rejected["outcome"] == "rejected" and "actions" in rejected["proposal"]
 

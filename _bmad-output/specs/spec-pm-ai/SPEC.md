@@ -48,7 +48,7 @@ An engineering PM's judgement is spent on retrieval: reconstructing what a team 
 
 - **CAP-6** (FR-06)
   - **intent:** Extract both explicit directives and implicit team discussion from a transcript, executing the first and staging the second for approval.
-  - **success:** An implicit cache-TTL discussion produces an Interactive Approval Card proposing the WI-108 update with parsed assignee and priority and `[Approve]`/`[Edit]` controls, and writes a `[STAGED_APPROVAL]` entry to `commitments_log.md` that posts nothing until approved.
+  - **success:** An implicit cache-TTL discussion produces an Interactive Approval Card proposing the WI-108 update with parsed assignee and priority and `[Approve]`/`[Edit]` controls, staged as a proposal whose state is `[STAGED_APPROVAL]`, which posts nothing and writes nothing to `commitments_log.md` until approved; approval writes one `[PENDING]` entry to the meeting's scope's `commitments_log.md` (2026-10-24, Andrei, 15a).
 
 - **CAP-7** (FR-07)
   - **intent:** Answer to the persona name in-meeting, fact-check what was claimed against project documentation, and dispatch spoken research requests asynchronously.

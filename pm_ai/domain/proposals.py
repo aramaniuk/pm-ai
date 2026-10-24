@@ -18,6 +18,7 @@ store enforces.
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
@@ -26,6 +27,8 @@ from pm_ai.domain.lifecycle import DEFAULT_PROPOSAL_TTL, ProposalState
 
 __all__ = [
     "CHANGED_VIA",
+    "IMPLICIT_COMMITMENT",
+    "SPEAKER_LIMIT",
     "IllegalTransition",
     "OpenActionItems",
     "PastWindow",
@@ -34,6 +37,7 @@ __all__ = [
     "TypeRule",
     "VersionConflict",
     "allowed",
+    "as_compared",
     "check_change",
     "fold_typed",
     "meeting_of",
@@ -68,6 +72,12 @@ class IllegalTransition(RuntimeError):
     """A change the domain's table does not allow (13a), such as `staged → executed`."""
 
 
+IMPLICIT_COMMITMENT = "implicit_commitment"
+"""The type `11b` stages a spoken promise under; `pm_ai.core` names it from here (15a)."""
+
+SPEAKER_LIMIT = 80
+"""A typed owner's or a promise speaker's most characters: one number for both (13a, 15a)."""
+
 CHANGED_VIA = ("terminal", "prompt", "sweep", "summary", "ingestion", "telegram")
 """Where a change came from: a proposal body's `changed_via` (13a; story 5 adds `telegram`)."""
 
@@ -76,15 +86,17 @@ CHANGED_VIA = ("terminal", "prompt", "sweep", "summary", "ingestion", "telegram"
 class TypeRule:
     """What the change rules need to know of a proposal's registered type (13a).
 
-    `ttl` is the registered review window; `has_executor` decides the edges
-    out of `approved`. `known` is false for a type no registration names: its
-    only allowed change is `staged → rejected`, and its window is its stored
-    one.
+    `ttl` is the registered review window; `has_executor` and
+    `records_commitment` decide the edges out of `approved`. `known` is false
+    for a type no registration names: its only allowed change is `staged →
+    rejected`, and its window is its stored one.
     """
 
     ttl: timedelta
     has_executor: bool = False
     known: bool = True
+    records_commitment: bool = False
+    """Its approval records a commitment (story 15a): once approved, it is not rejected."""
 
 
 UNKNOWN_TYPE = TypeRule(ttl=timedelta(0), known=False)
@@ -110,9 +122,10 @@ def allowed(source: ProposalState, to: ProposalState, rule: TypeRule | None) -> 
 
     `staged → approved | rejected | expired | superseded`; `approved →
     superseded` for every type; `approved → rejected` for a type with no
-    executor; `approved → executing | expired` for a type with one;
-    `executing → executed`. An unknown type (`rule` `None` or not `known`)
-    may only move `staged → rejected`.
+    executor whose approval records no commitment (15a); `approved →
+    executing | expired` for a type with one; `executing → executed`. An
+    unknown type (`rule` `None` or not `known`) may only move `staged →
+    rejected`.
     """
     if rule is None or not rule.known:
         return source is ProposalState.STAGED and to is ProposalState.REJECTED
@@ -121,7 +134,7 @@ def allowed(source: ProposalState, to: ProposalState, rule: TypeRule | None) -> 
             return True
         if rule.has_executor:
             return to in (ProposalState.EXECUTING, ProposalState.EXPIRED)
-        return to is ProposalState.REJECTED
+        return to is ProposalState.REJECTED and not rule.records_commitment
     return to in _EDGES.get(source, frozenset())
 
 
@@ -164,6 +177,24 @@ def repeat_key(what: object, owner: object) -> tuple[str, str]:
         fold_typed(what if isinstance(what, str) else "").casefold(),
         fold_typed(owner if isinstance(owner, str) else "").casefold(),
     )
+
+
+def as_compared(kind: str, stored: object, new: object) -> object:
+    """`new` as compared with a `stored` payload of type `kind` (story 15a).
+
+    A spoken promise staged before 15a stores no `speaker`. A re-ingestion of
+    the same transcript, which now carries one, compares as equal when the
+    rest is equal: no rewrite, no version bump, nothing counted as dropped.
+    """
+    if (
+        kind == IMPLICIT_COMMITMENT
+        and isinstance(stored, Mapping)
+        and isinstance(new, Mapping)
+        and "speaker" not in stored
+        and "speaker" in new
+    ):
+        return {key: value for key, value in new.items() if key != "speaker"}
+    return new
 
 
 def meeting_of(cites: SourceRef) -> str | None:

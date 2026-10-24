@@ -128,14 +128,121 @@ def test_ad27_connectors_only_emit_core_declared_event_types(tmp_path):
         )
 
 
-def test_ad28_project_ledger_rejects_personal_commitments():
-    """AD-28 — ADVERSARIAL. A coaching undertaking must never reach a git-committed ledger."""
-    commitments = mod("pm_ai.core.commitments")
-    storage = mod("pm_ai.storage.ledger")
+def _approved_item(scope, meeting_id: str, *, what: str = "send the cache TTL numbers"):
+    """An `action_item` approved through `proposal approve`, as `7b` stages one."""
+    from datetime import datetime, timedelta, timezone
 
-    coaching = commitments.CoachingCommitment(description="Delegate the auth refactor")
-    with pytest.raises(storage.ScopeViolation):
-        storage.append_to_project_ledger(project="alpha", entry=coaching)
+    from pm_ai.domain.identity import SourceRef
+    from pm_ai.domain.lifecycle import ProposalState
+    from pm_ai.domain.proposals import Proposal
+
+    at = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+    return Proposal(
+        proposal_id=f"prp_{meeting_id}_ai_0123456789ab",
+        type="action_item",
+        summary=what,
+        payload={"what": what, "owner": "Sam Rivera", "due": "by Thursday"},
+        target=None,
+        cites=SourceRef.parse(f"meeting:{meeting_id}"),
+        created_at=at,
+        state=ProposalState.APPROVED,
+        version=2,
+        ttl=timedelta(days=14),
+        staged_at=at,
+        scope=str(scope),
+        changed_at=at,
+        changed_via="terminal",
+    )
+
+
+class _NoRecords:
+    """A meeting-record reader that finds nothing: the line is written without a day."""
+
+    def get(self, meeting_id, *, scope):
+        raise LookupError(meeting_id)
+
+
+def test_ad28_commitment_ledgers_refuse_people_and_keep_their_own_scope(tmp_path):
+    """AD-28 — ADVERSARIAL, as amended 2026-10-24 (story 15a).
+
+    The rule was "the project ledger accepts no personal entity", which assumed
+    the project ledger was the only one. The amendment gives purely personal
+    meetings a ledger of their own, so the rule is now: a commitment is kept in
+    the scope that owns its meeting, never in a `people` scope, and never in
+    the other scope's ledger.
+    """
+    mod("pm_ai.core.commitment_log")
+    from datetime import datetime, timezone
+
+    from pm_ai.app.commitments import CommitmentRecorder
+    from pm_ai.app.wiring import registered_proposal_types
+    from pm_ai.domain.commitments import COMMITMENTS_LOG, NotACommitmentScope
+    from pm_ai.domain.identity import DataScope, ScopeKind
+
+    daemon = _daemon(tmp_path)
+    storage = daemon.storage
+    people = DataScope(ScopeKind.PEOPLE, person_id="example")
+    personal = DataScope(ScopeKind.PERSONAL)
+    project = DataScope(ScopeKind.PROJECT, "alpha")
+    with pytest.raises(NotACommitmentScope, match="people:example"):
+        storage.append_commitments(["- entry=cml_000000000000 commitment=x kind=pending"], scope=people, after=0)
+    with pytest.raises(NotACommitmentScope):
+        storage.read_commitments(scope=people)
+    assert not list(tmp_path.rglob(COMMITMENTS_LOG)), "a refused scope still wrote a ledger"
+
+    recorder = CommitmentRecorder(
+        storage=storage,
+        meetings=_NoRecords(),
+        types=registered_proposal_types(),
+        now=lambda: datetime(2026, 10, 19, 12, 1, tzinfo=timezone.utc),
+    )
+    mine = _approved_item(personal, "mtg_personal")
+    theirs = _approved_item(project, "mtg_project", what="book the review room")
+    assert recorder.record(mine, personal).recorded
+    assert recorder.record(theirs, project).recorded
+    personal_text = storage.read_commitments(scope=personal).decode()
+    project_text = storage.read_commitments(scope=project).decode()
+    assert mine.proposal_id in personal_text and theirs.proposal_id not in personal_text
+    assert theirs.proposal_id in project_text and mine.proposal_id not in project_text
+
+
+def test_ad28_a_coaching_commitment_never_reaches_a_commitment_ledger():
+    """AD-28 — ADVERSARIAL, as amended 2026-10-24 (story 15a).
+
+    `CommitmentLog.append` accepts only `CommitmentLine` values, which only
+    `render_line` builds from a `Commitment` or a mark. A coaching undertaking
+    — a stand-in here, since `CoachingCommitment` is not built yet — is refused
+    for the personal and the project scope, and the store is never called.
+    """
+    log_module = mod("pm_ai.core.commitment_log")
+    from dataclasses import dataclass
+
+    from pm_ai.domain.commitments import NotACommitmentLine
+    from pm_ai.domain.identity import DataScope, ScopeKind
+
+    @dataclass(frozen=True)
+    class CoachingUndertaking:
+        description: str = "Delegate the auth refactor"
+
+    class Store:
+        called: list[str] = []
+
+        def append_commitments(self, *args, **kwargs):
+            self.called.append("append")
+            return 0
+
+        def read_commitments(self, *args, **kwargs):
+            self.called.append("read")
+            return b""
+
+    store = Store()
+    log = log_module.CommitmentLog(store)
+    for scope in (DataScope(ScopeKind.PERSONAL), DataScope(ScopeKind.PROJECT, "alpha")):
+        with pytest.raises(NotACommitmentLine):
+            log.append([CoachingUndertaking()], scope=scope, after=0)
+    assert store.called == [], "the store was called for a line that is not a commitment's"
+    with pytest.raises(NotACommitmentLine):
+        log_module.render_line(CoachingUndertaking())
 
 
 def test_ad29_sanitization_leaves_the_raw_payload_intact():
@@ -628,15 +735,32 @@ def test_ad33_source_refs_never_point_at_a_transcript():
 def test_ad33_ledger_entries_are_self_contained():
     """AD-33 — a derived record never depends on its source artifact surviving.
 
-    This is what makes NFR-09's 30-day purge purely operational.
+    This is what makes NFR-09's 30-day purge purely operational. Since story
+    15a the commitment ledger starts at approval, not at extraction: the entry
+    is the `pending` line an approved promise writes, built from the proposal
+    and its meeting record alone.
     """
-    commitments = mod("pm_ai.core.commitments")
-    entry = commitments.from_extraction(_sample_extraction())
-    for field in ("commitment_id", "speaker", "assignee", "description", "due_date", "source_ref"):
-        assert getattr(entry, field, None) is not None, f"AD-33: {field} must be captured at extraction."
-    assert entry.renders_without(transcript=None), (
-        "AD-33: the entry must be actionable with the transcript purged."
+    commitment_log = mod("pm_ai.core.commitment_log")
+    from datetime import datetime, timezone
+
+    proposal, record = _sample_approved_promise()
+    entry = commitment_log.from_approved(proposal, record=record, zone=None)
+    for name in ("commitment_id", "what", "speaker", "cites", "meeting_id", "title", "start", "day", "due"):
+        assert getattr(entry, name, None) is not None, f"AD-33: {name} must be captured at approval."
+    assert entry.cites.meeting == "meeting:mtg_ad33" and entry.cites.person == "Sam Rivera", (
+        "AD-33: a spoken promise cites its meeting and its speaker, a name as said."
     )
+    line = commitment_log.render_line(
+        commitment_log.Pending(
+            entry, via="terminal", written="approval", at=datetime(2026, 10, 19, 12, 5, tzinfo=timezone.utc)
+        )
+    )
+    # Read back from the line alone: no transcript, no record, no store.
+    read = commitment_log.fold(commitment_log.parse_ledger((line.text + "\n").encode()))
+    again = read.commitments[entry.commitment_id]
+    assert (again.what, again.speaker, again.meeting_id, again.title, again.day, again.due) == (
+        entry.what, entry.speaker, entry.meeting_id, entry.title, entry.day, entry.due
+    ), "AD-33: the entry must be actionable with the transcript purged."
 
 
 def test_ad23_transcript_without_a_meeting_is_rejected():
@@ -646,9 +770,48 @@ def test_ad23_transcript_without_a_meeting_is_rejected():
         transcripts.ingest(payload="...", meeting=None)
 
 
-def _sample_extraction():
-    """Placeholder until the extraction fixture exists in Phase 1."""
-    pytest.skip("extraction fixture not implemented yet (Phase 1)")
+def _sample_approved_promise():
+    """An `11b`-shaped spoken promise, approved, with its speaker stored, in the
+    personal scope, and its meeting record under `11d`'s fixture names (15a)."""
+    from datetime import datetime, timedelta, timezone
+
+    from pm_ai.core.meeting_records import MeetingRecord
+    from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
+    from pm_ai.domain.lifecycle import ProposalState
+    from pm_ai.domain.meetings import Meeting
+    from pm_ai.domain.proposals import Proposal
+
+    start = datetime(2026, 10, 19, 10, 0, tzinfo=timezone.utc)
+    approved = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+    proposal = Proposal(
+        proposal_id="prp_mtg_ad33_manual_0",
+        type="implicit_commitment",
+        summary="I'll send the numbers by Friday",
+        payload={
+            "what": {"raw": "send the numbers", "for_model": "send the numbers"},
+            "when": {"raw": "Friday", "for_model": "Friday"},
+            "speaker": {"raw": "Sam Rivera", "for_model": "Sam Rivera"},
+        },
+        target=None,
+        cites=SourceRef.parse("meeting:mtg_ad33"),
+        created_at=start,
+        state=ProposalState.APPROVED,
+        version=2,
+        ttl=timedelta(days=14),
+        staged_at=start,
+        scope="personal",
+        changed_at=approved,
+        changed_via="terminal",
+    )
+    meeting = Meeting(
+        meeting_id="mtg_ad33",
+        title="Example Weekly Sync-up",
+        start=start,
+        duration_minutes=30,
+        attendees=(Actor("email:alex@example.com"),),
+        scope=DataScope(ScopeKind.PERSONAL),
+    )
+    return proposal, MeetingRecord(meeting=meeting)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

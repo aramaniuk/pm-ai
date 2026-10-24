@@ -295,7 +295,24 @@ def test_an_unparseable_answer_is_refused(answer):
         ("30 February", date(2026, 1, 5), None),
         ("soon", date(2026, 10, 12), None),
         ("next sprint", date(2026, 10, 12), None),
-        ("3 Jan 2027", date(2026, 12, 28), None),
+        # Story 15a: one resolver with the commitment ledger. A day, month and
+        # year now resolves, and so do the forms below.
+        ("3 Jan 2027", date(2026, 12, 28), date(2027, 1, 3)),
+        ("today", date(2026, 10, 12), date(2026, 10, 12)),
+        ("end of day", date(2026, 10, 12), date(2026, 10, 12)),
+        ("tomorrow", date(2026, 10, 12), date(2026, 10, 13)),
+        ("the day after tomorrow", date(2026, 10, 12), date(2026, 10, 14)),
+        ("in 3 days", date(2026, 10, 12), date(2026, 10, 15)),
+        ("in two weeks", date(2026, 10, 12), date(2026, 10, 26)),
+        ("end of the week", date(2026, 10, 12), date(2026, 10, 16)),
+        ("end of the month", date(2026, 10, 12), date(2026, 10, 31)),
+        ("this Friday", date(2026, 10, 12), date(2026, 10, 16)),
+        ("в эту пятницу", date(2026, 10, 12), date(2026, 10, 16)),
+        ("3-го января", date(2026, 12, 28), date(2027, 1, 3)),
+        ("2026-10-30", date(2026, 10, 12), date(2026, 10, 30)),
+        ("30.10", date(2026, 10, 12), date(2026, 10, 30)),
+        # Newly unresolved: a date without a year more than 300 days ahead.
+        ("3 Jan", date(2027, 1, 4), None),
         (None, date(2026, 10, 12), None),
     ],
 )
@@ -773,3 +790,29 @@ def test_issue_notes_mark_the_links_unread_when_the_ledger_cannot_be_read():
     notes = notes_for(PermissionError("member_updates.md"), work(issue(41, ANA)))
     assert notes.links_unread is True
     assert notes_for(parse_ledger(None), work(issue(41, ANA))).links_unread is False
+
+
+def test_a_machine_zone_start_resolves_its_due_on_the_machines_day():
+    """Story 15a: Team Activity takes the ledger's day rule; `display_timezone` unset."""
+    from zoneinfo import ZoneInfo
+
+    sunday_late = datetime(2026, 10, 11, 22, 30, tzinfo=UTC)
+    text = write(
+        Link(action("prp_mz", "fix #142", "Ana Ivanova", "tomorrow"), 142, LinkKind.NUMBER),
+        meeting_value=meeting("mtg_mz", start=sunday_late),
+    )
+    answer = work(issue(142, ANA))
+    notes = issue_notes_for(
+        parse_ledger(text),
+        parse_aliases(None),
+        answer,
+        now=NOW,
+        tz=UTC,
+        scope=PROJECT,
+        placed=lambda found: placed_issue_numbers(answer, (), now=NOW, since=SINCE, issue_notes=found),
+        estimated_from={"mtg_mz": "header-machine-zone"},
+        machine_zone=ZoneInfo("Europe/Istanbul"),
+    )
+    rows = "\n".join(notes.rows[142])
+    # Monday 12 Oct in Istanbul, so "tomorrow" is the 13th, not the UTC Sunday's 12th.
+    assert "tomorrow (2026-10-13) (meeting day estimated)" in rows

@@ -2,7 +2,7 @@
 title: 'approved items become commitments, in the meeting''s own ledger'
 type: 'feature'
 created: '2026-10-24'
-status: 'draft'
+status: 'done'
 baseline_commit: 'b6f8f62'
 review_loop_iteration: 1
 context:
@@ -230,16 +230,16 @@ Today nothing records one:
 
   | Field | Limit |
   | --- | --- |
-  | `what` | 200 characters (`WHAT_LIMIT`) |
+  | `what` | 200 characters (`WHAT_LIMIT`); a spoken promise's longer `what` is cut at a word and marked `what_cut=yes` (Andrei, 2026-10-24) |
   | `owner`, `speaker` | 80 (`OWNER_LIMIT`) |
   | `due_said` | 40 (`DUE_LIMIT`) |
   | `note` | 200 |
   | `title` | 200, cut at a word and marked `title_cut=yes` |
   | `meeting`, `proposal`, `replaces`, `commitment` | the ids pm-ai mints |
 
-  A stored value over its limit, which only a hand edit of the store can make, is not cut: the line is not written, with reason `too_long` (below).
+  A stored value over its limit, which only a hand edit of the store can make, is not cut: the line is not written, with reason `too_long` (below). A spoken promise's `what` is the one exception (Andrei, 2026-10-24): `11b`'s pattern does not bound it, so it is cut at a word to at most 200 characters and the line says `what_cut=yes`. The full text stays in the proposal body, and a promise is never refused as `too_long` for its length.
 - **The kinds 15a writes:**
-  - `- entry=… commitment=<root> kind=pending proposal=<proposal id> type=action_item|implicit_commitment meeting=<id> [title=<title> [title_cut=yes] start=<instant>] [day=<YYYY-MM-DD> [day_from=<source>]] what=<text> [owner=<name>] [speaker=<name>] [due_said=<words>] due=<YYYY-MM-DD>|unresolved|none occurred=<instant> via=<where approved> written=approval|catch_up at=<instant>`
+  - `- entry=… commitment=<root> kind=pending proposal=<proposal id> type=action_item|implicit_commitment meeting=<id> [title=<title> [title_cut=yes] start=<instant>] [day=<YYYY-MM-DD> [day_from=<source>]] what=<text> [what_cut=yes] [owner=<name>] [speaker=<name>] [due_said=<words>] due=<YYYY-MM-DD>|unresolved|none occurred=<instant> via=<where approved> written=approval|catch_up at=<instant>`
 
     Its identity is `(commitment, "pending")`.
   - `- entry=… commitment=<root> kind=revised proposal=<replacement id> replaces=<proposal of the newest value line> what=<text> [owner=<name>] [due_said=<words> due=<YYYY-MM-DD>|unresolved|none] occurred=<instant> via=<where edited> written=approval|catch_up at=<instant>`
@@ -276,9 +276,9 @@ Today nothing records one:
   - **the due** comes from the newest by `(occurred, entry)` of the `pending` line, `revised` lines that carry a due, and `due_set` lines;
   - **the state** comes from the state lines (`marked`, `verdict`), taken in `(occurred, entry)` order:
     - a `marked` line applies only when `can_mark` allows it from the state and source in force, and otherwise it is counted as refused;
-    - a `verdict` line applies only while no `marked` line has applied.
+    - a `verdict` line applies unless the state in force comes from a PM mark other than `altered`. After `altered` the commitment is still tracked, so telemetry judges it again (Andrei, 2026-10-24).
 
-    So the state is the newest `marked` line that applied, else the newest `verdict`, mapped to its `CommitmentState`, else `PENDING`. A file-order change never changes the result (AD-35).
+    So the state is the last of these lines that applied, mapped to its `CommitmentState`, else `PENDING`. A file-order change never changes the result (AD-35).
 - **The PM's marks, and the states they are allowed from** (Andrei, 2026-10-24; `MARKABLE` and `can_mark` in `domain/commitments.py`):
 
   | State in force (source) | `fulfilled` | `altered` | `broken` | `withdrawn` |
@@ -292,7 +292,7 @@ Today nothing records one:
   | `BROKEN` (PM) | yes | yes | already: nothing written | yes |
   | `WITHDRAWN` (PM) | yes | yes | yes | already: nothing written |
 
-  - The PM's mark outranks telemetry, and a later `verdict` never changes it.
+  - The PM's mark outranks telemetry, and a later `verdict` never changes it, except after an `altered` mark (Andrei, 2026-10-24).
   - `ALTERED` is not terminal: the commitment is still tracked, under the due in force.
   - `FULFILLED`, `BROKEN` and `WITHDRAWN` are terminal for telemetry (AD-14). Only the PM's mark moves a commitment out of them.
 
@@ -341,7 +341,7 @@ Today nothing records one:
   - `unresolved` reads `with no due date worked out from "next sprint"`, and `none` reads `with no due date said`;
   - a repeated approve that wrote the line: `<id>: already approved, <when>, from <where>; now recorded as a commitment, due …`;
   - not written: `<id> approved; it could not be recorded as a commitment yet (<reason text>). Run the same command again, or pm-ai records it when the daemon next starts.` After an `edit` or `review` whose replacement was approved, the command named is `pm-ai proposal approve <replacement id> --scope <scope>`. The approval stands, and the exit code is 0;
-  - a reason that will not change by trying again (`too_long`, `scope_refused`) ends with `pm-ai cannot record it.` instead.
+  - a reason that will not change by trying again (`too_long`, `scope_refused`, `no_approval_time`) ends with `pm-ai cannot record it.` instead.
 - **JSON:** the approve and edit objects gain `"commitment"` (`format` stays 1, since it is an added field):
 
   ```
@@ -368,7 +368,8 @@ Today nothing records one:
     - `ledger_unreadable`: the ledger could not be read;
     - `ledger_malformed`: a malformed line names this root;
     - `too_long`: a stored value is over its field limit;
-    - `scope_refused`: `NotACommitmentScope`.
+    - `scope_refused`: `NotACommitmentScope`;
+    - `no_approval_time`: the store records no instant for the approval (an approved row with no `changed_at`), so no `occurred` can be written (Andrei, 2026-10-24).
 
     A meeting record that cannot be read is not a reason: the line is written without title, start and day, and `day` is `null`.
 
@@ -492,6 +493,7 @@ Tests use `11d`'s fixture names and `example.com` handles. No real meeting, name
 | Project git refuses | the project no longer excludes `memory/` | approved; `reason.code: "git_not_excluded"` | exit 0 |
 | Edit-approve fails to record | `edit --approve` and the append fails | approved; the sentence names `pm-ai proposal approve <root>_e1 --scope …` | exit 0 |
 | Field over its limit | a stored `what` of 300 characters (hand edit of the store) | approved; `reason.code: "too_long"`, "pm-ai cannot record it."; the catch-up counts it and never retries | exit 0 |
+| Long promise | a spoken promise whose `what` is over 300 characters | `pending` line with `what` cut at a word to at most 200 characters and `what_cut=yes`; `recorded: true`; the proposal body keeps the full text; the catch-up counts no `too_long` | exit 0 |
 | Long title | a meeting title of 500 characters | `title` cut at a word to at most 200 characters, `title_cut=yes` | exit 0 |
 | Spoken promise | promise "send the numbers" by "Friday", said by `Sam Rivera` | `pending` line with `speaker="Sam Rivera"`, no `owner`, due the Friday after the meeting; card "said by Sam Rivera: send the numbers, by Friday" | exit 0 |
 | Old promise row | a promise staged before 15a, then approved | line without `speaker` or `owner` | exit 0 |
@@ -555,6 +557,7 @@ Tests use `11d`'s fixture names and `example.com` handles. No real meeting, name
 | Mark not allowed | `marked state=altered` after a PM-marked `fulfilled` | not applied; counted as refused; state stays `FULFILLED` | N/A |
 | Withdrawn | `marked state=withdrawn` after `pending` | `WITHDRAWN`; never counted as broken | N/A |
 | Mark outranks a verdict | `marked state=broken`, then a later `verdict state=fulfilled` | still `BROKEN` | N/A |
+| Verdict after altered | `marked state=altered`, then a later `verdict state=fulfilled` | `FULFILLED`, source telemetry; after a PM `fulfilled`, `broken` or `withdrawn` mark a verdict still changes nothing | N/A |
 | Large project ledger | 5,000 lines, project scope, one `LedgerChanged` | `approve` within 2 s at the prompt, git check included | exit 0 |
 | Hostile text | a `what` holding a newline and a quote | one line, quoted and escaped; reads back equal | N/A |
 
@@ -598,21 +601,21 @@ Anchors checked against `origin/main` at `b6f8f62`.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] **The entity.** `pm_ai/domain/commitments.py`, and `WITHDRAWN` in `lifecycle.py`.
-- [ ] **The resolver.** `pm_ai/core/due_dates.py`, with the tables moved from `member_updates.py`. `member_updates.resolve_due` calls it. Team Activity's day follows the same rule, with each meeting's `start_estimated_from` passed in from `pipelines.py:3074`.
-- [ ] **The lines and the accessor.** `pm_ai/core/commitment_log.py`: `CommitmentLine`, `render_line`, `parse_ledger` (per-line decoding, the counts), `fold`, `from_approved`, and `CommitmentLog`.
-- [ ] **The personal ledger.** The `File` in `PERSONAL_TREE`'s `memory/`.
-- [ ] **The store.** `read_commitments`, `append_commitments` and `NotACommitmentScope`, plus the port and the wiring tables.
-- [ ] **No rejection after approval.** `TypeRule.records_commitment` and `allowed`; `commitment=True` on two types, copied by `ProposalType.rule`; the card; the refusal; completion.
-- [ ] **The recorder.** `pm_ai/app/commitments.py`, `record` and `catch_up`, built in the composition root and called from `_change`, `_already` and `_edit`. Its outcome goes in the sentences and the JSON `commitment`.
-- [ ] **The catch-up at start.** `daemon.py`: `app.state.pm_ai_commitments`, and the one-shot task in `_lifespan`.
-- [ ] **The promise's speaker.** `Promise.payload` gains `speaker` (raw and cleaned), filled at `11b`'s staging. The card reads "said by". Old payloads compare as equal, in `stage_unless_acted` and `_dropped_over`.
-- [ ] **New tests.**
+- [x] **The entity.** `pm_ai/domain/commitments.py`, and `WITHDRAWN` in `lifecycle.py`.
+- [x] **The resolver.** `pm_ai/core/due_dates.py`, with the tables moved from `member_updates.py`. `member_updates.resolve_due` calls it. Team Activity's day follows the same rule, with each meeting's `start_estimated_from` passed in from `pipelines.py:3074`.
+- [x] **The lines and the accessor.** `pm_ai/core/commitment_log.py`: `CommitmentLine`, `render_line`, `parse_ledger` (per-line decoding, the counts), `fold`, `from_approved`, and `CommitmentLog`.
+- [x] **The personal ledger.** The `File` in `PERSONAL_TREE`'s `memory/`.
+- [x] **The store.** `read_commitments`, `append_commitments` and `NotACommitmentScope`, plus the port and the wiring tables.
+- [x] **No rejection after approval.** `TypeRule.records_commitment` and `allowed`; `commitment=True` on two types, copied by `ProposalType.rule`; the card; the refusal; completion.
+- [x] **The recorder.** `pm_ai/app/commitments.py`, `record` and `catch_up`, built in the composition root and called from `_change`, `_already` and `_edit`. Its outcome goes in the sentences and the JSON `commitment`.
+- [x] **The catch-up at start.** `daemon.py`: `app.state.pm_ai_commitments`, and the one-shot task in `_lifespan`.
+- [x] **The promise's speaker.** `Promise.payload` gains `speaker` (raw and cleaned), filled at `11b`'s staging. The card reads "said by". Old payloads compare as equal, in `stage_unless_acted` and `_dropped_over`.
+- [x] **New tests.**
   - `tests/core/test_due_dates.py`: every form in both languages, every refused form, N bounds, numeric tokens, time-like tokens, 29 Feb, 300 days, empty words.
   - `tests/core/test_commitment_log.py`: render and parse round trips; field limits; fold orders (values by replacement number, due, state); duplicates, conflicts, orphans, malformed lines including invalid UTF-8; a torn tail; every cell of the mark table, including refused marks.
   - `tests/domain/test_commitments.py`, or beside the proposal domain tests: `allowed(APPROVED, REJECTED, rule with records_commitment)` is false, and `ProposalType.rule` copies the flag.
   - `tests/slice/test_commitments.py`: one test per matrix row; `change_proposal` raising `IllegalTransition` with the row unchanged; two processes approving one id; the timed project-scope approval; the catch-up through `_lifespan`, idempotent, including a NULL-scope row; the re-ingestion of an old promise; one Team Activity assertion for a newly resolved form.
-- [ ] **Existing tests that change.**
+- [x] **Existing tests that change.**
   - `test_domain_invariants.py`: AD-33 on its fixture; AD-28 split into two tests.
   - `tests/conftest.py`: `EXPECTED_SKIPS` 8 → 6, with its delta line.
   - `test_proposals.py:421` (the refusal), `:1216` (no printed reject command for the approved item) and `:1234` (`reject` unavailable in JSON).
@@ -620,7 +623,7 @@ Anchors checked against `origin/main` at `b6f8f62`.
   - `test_member_updates.py:281-303`: the `"3 Jan 2027"` row now resolves, plus rows for each newly resolved form and for 300 days ahead.
   - `test_paths.py` and `test_encryption_policy.py`: the personal `commitments_log.md`.
   - `test_capture_guard.py:517`: the project ledger's guard reached through `append_commitments`.
-- [ ] **The contract.** Apply the amendments in Design Notes, in this order:
+- [x] **The contract.** Apply the amendments in Design Notes, in this order:
   1. `prd.md` through bmad-prd;
   2. then bmad-spec re-derives `SPEC.md` and its companions (`glossary.md`, `scope-model.md`, `derivation-services.md`, `success-metrics.md`);
   3. then `ARCHITECTURE-SPINE.md` through the architecture skill.
@@ -687,6 +690,20 @@ Anchors checked against `origin/main` at `b6f8f62`.
   - **Tests named:** `test_transcript_path.py:652-655`, `test_proposals.py:1216`, and the timed project-scope approval with the git check and one retry.
   - **Amendments completed:** AD-28's Prevents and Rule lead-in, AD-33, AD-14's state list, PRD lines 65-67, 96, 267 and 766, exact sentences for `derivation-services.md:99` and `scope-model.md` §B, SM-9's withdrawn exclusion, and the order the three skills apply them in.
 - **2026-10-24, approved for build (Andrei),** after the readiness check, the three-lens review and his eleven decisions.
+- **2026-10-24, built.** The amendments were committed first (PRD v0.16.1 through bmad-prd, the SPEC and its companions through bmad-spec, the spine through the architecture skill; each applied as checked exact-text replacements). Three review layers ran (blind hunter, edge-case hunter, verification gap), and 21 findings were fixed in the build. `EXPECTED_SKIPS` is 6. Choices the spec left open, now recorded:
+  - **A reason code the spec does not list: `no_approval_time`,** permanent. It covers an approved row with no `changed_at`, for which no `occurred` exists. 13a's old-row approve test now expects that sentence instead of "nothing changed".
+  - **`recorded` is false whenever this command failed to write a line it needed,** a `revised` line included, so `reason` is null exactly when `recorded` is true.
+  - **Sentences after an edit:** "It is recorded as a commitment, due …" for a new `pending` line, and "Its commitment now holds the edited values, due …" for a `revised` line.
+  - **Reading:** blank lines and lines starting `#` are skipped without being counted; unknown keys on a line are tolerated; a leading byte-order mark is dropped; a date value must be `YYYY-MM-DD` exactly. A line from a proposal with no `changed_via` gets `via=unknown`.
+  - **The catch-up isolates each scope.** A failure in one scope is logged on that scope's line, and the next start tries again; later scopes still run.
+  - **`daemon.attach_background()`** now sets every `pm_ai_*` state the serve path needs, so a test drives the real wiring. The machine zone reader moved to `pm_ai.platform.environment.machine_zone()`, and `SPEAKER_LIMIT` (80) lives in `domain/proposals.py`, with `OWNER_LIMIT` defined from it.
+  - **A `ProposalDesk` built without a recorder** (tests, completion) builds one over its store and reads `display_timezone` from `config.toml`.
+  - **Deferred** (`deferred-work.md`, story-15a section), all needing Andrei's decision: a promise's `what` over 200 characters can never be recorded; verdicts after a PM `altered` mark (for story 16); and the added `no_approval_time` code.
+  - **Not run:** the two manual scratch-home checks.
+- **2026-10-24, the three review findings decided (Andrei, all as recommended): frozen block edited (recorded here).**
+  1. **A spoken promise's long `what` is cut, never refused.** Over 200 characters, it is cut at a word on its line and marked `what_cut=yes`; the full text stays in the proposal body. Edited: the limits table and its paragraph, the `pending` line format, and a new matrix row "Long promise".
+  2. **Verdicts apply after an `altered` mark.** The commitment is still tracked, so telemetry judges it again; a PM `fulfilled`, `broken` or `withdrawn` mark still blocks every later verdict. Edited: the fold's state rule, "the PM's mark outranks telemetry", and a new matrix row "Verdict after altered".
+  3. **`no_approval_time` is kept,** as a permanent reason. Edited: the JSON reason codes, and the list of reasons that end "pm-ai cannot record it.".
 
 ## Design Notes
 
@@ -769,3 +786,108 @@ Anchors checked against `origin/main` at `b6f8f62`.
 **Manual checks:**
 - In a scratch home (`HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1`), drop and summarise the recorded fixture into personal. Approve one item, and `edit --due "до пятницы" --approve` another. Expected: the scratch `~/.manager-ai/memory/commitments_log.md` holds two `pending` lines, each with `day`, the second with `proposal=<root>_e1` and the Friday's date. `proposal reject` on the first is refused, naming `proposal edit`.
 - In the same scratch home, approve one more item with the daemon stopped, then start the daemon, stop it and start it again. Expected: the third line appears once, with `written=catch_up`.
+
+## Suggested Review Order
+
+**Recording on approval**
+
+- Entry point: one root, a pending line if none, a revised line for a newer replacement.
+  [`commitments.py:134`](../../../../pm_ai/app/commitments.py#L134)
+
+- The desk records after the committed change, never inside its claimed step.
+  [`proposals.py:713`](../../../../pm_ai/app/proposals.py#L713)
+
+- The repeated approve repairs only that root.
+  [`proposals.py:847`](../../../../pm_ai/app/proposals.py#L847)
+
+- An edit of an approved item writes a revised line.
+  [`proposals.py:992`](../../../../pm_ai/app/proposals.py#L992)
+
+**The ledger: lines, parse, fold**
+
+- A pending line from the live approved proposal and its meeting record.
+  [`commitment_log.py:421`](../../../../pm_ai/core/commitment_log.py#L421)
+
+- One encoding; entry ids from each line's identity.
+  [`commitment_log.py:239`](../../../../pm_ai/core/commitment_log.py#L239)
+
+- Per-line decoding; bad lines counted, never fatal; torn tail dropped.
+  [`commitment_log.py:668`](../../../../pm_ai/core/commitment_log.py#L668)
+
+- Values by replacement number, due and state by occurred; marks checked.
+  [`commitment_log.py:732`](../../../../pm_ai/core/commitment_log.py#L732)
+
+- The accessor over the store; it holds no path.
+  [`commitment_log.py:841`](../../../../pm_ai/core/commitment_log.py#L841)
+
+**The store**
+
+- Compare-and-append by size; a people scope refused before any read.
+  [`service.py:4418`](../../../../pm_ai/storage/service.py#L4418)
+
+- The personal ledger: Tier 1, not gitignored.
+  [`scope_model.py:577`](../../../../pm_ai/domain/scope_model.py#L577)
+
+**Due dates**
+
+- Pure resolver, English and Russian, no model and no clock.
+  [`due_dates.py:295`](../../../../pm_ai/core/due_dates.py#L295)
+
+- The meeting's day, and when it is estimated.
+  [`due_dates.py:310`](../../../../pm_ai/core/due_dates.py#L310)
+
+- Team Activity now calls the same resolver.
+  [`member_updates.py:474`](../../../../pm_ai/core/member_updates.py#L474)
+
+**No rejection after approval**
+
+- The domain edge, which the store's conditional update enforces.
+  [`proposals.py:137`](../../../../pm_ai/domain/proposals.py#L137)
+
+- The card's reject is unavailable, with its reason.
+  [`proposal_cards.py:278`](../../../../pm_ai/core/proposal_cards.py#L278)
+
+- The refusal names `proposal edit`, and no command that does not exist.
+  [`proposals.py:822`](../../../../pm_ai/app/proposals.py#L822)
+
+**The catch-up at daemon start**
+
+- Ledger read first, rows placed by scope, re-checked in the claimed step.
+  [`commitments.py:307`](../../../../pm_ai/app/commitments.py#L307)
+
+- The serve path's state, with the catch-up beside the sweep.
+  [`daemon.py:1023`](../../../../pm_ai/app/daemon.py#L1023)
+
+**Entity and states**
+
+- The mark table, split by source.
+  [`commitments.py:138`](../../../../pm_ai/domain/commitments.py#L138)
+
+- `WITHDRAWN`: terminal, and never a proposal state.
+  [`lifecycle.py:58`](../../../../pm_ai/domain/lifecycle.py#L58)
+
+- The promise's speaker, cleaned and limited.
+  [`extraction.py:113`](../../../../pm_ai/core/extraction.py#L113)
+
+**Tests**
+
+- One test per matrix row.
+  [`test_commitments.py:195`](../../../../tests/slice/test_commitments.py#L195)
+
+- The catch-up through the real `_lifespan`.
+  [`test_commitments.py:893`](../../../../tests/slice/test_commitments.py#L893)
+
+- The timed project approval over 5,000 lines.
+  [`test_commitments.py:1232`](../../../../tests/slice/test_commitments.py#L1232)
+
+- Every form, in both languages.
+  [`test_due_dates.py:63`](../../../../tests/core/test_due_dates.py#L63)
+
+- Every cell of the mark table.
+  [`test_commitment_log.py:417`](../../../../tests/core/test_commitment_log.py#L417)
+
+- AD-28 split in two; AD-33 on its fixture.
+  [`test_domain_invariants.py:165`](../../../../tests/architecture/test_domain_invariants.py#L165)
+
+- The skip ratchet, 8 → 6.
+  [`conftest.py:192`](../../../../tests/conftest.py#L192)

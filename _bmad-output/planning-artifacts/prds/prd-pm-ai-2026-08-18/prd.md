@@ -1,8 +1,8 @@
 ## **title: Local-First AI PM Assistant (pm-ai)**
 
-version: 0.16.0  
+version: 0.16.1  
 created: 2026-08-16  
-updated: 2026-10-16  
+updated: 2026-10-24  
 status: draft
 
 # **PRD: Local-First AI PM Assistant (pm-ai)**
@@ -64,6 +64,7 @@ B. SOVEREIGN PERSONAL PM SCOPE (\~/.manager-ai/)
 │   ├── daily\_dashboard.md              \# Manager Strategic Focus Morning Briefing (FR-09)  
 │   ├── strategic\_goals.md              \# 3-Tier Goals (Project, Team, Personal Career Goals)  
 │   ├── coaching\_1on1\_history.md        \# Socratic 1:1 logs, meta-feedback & growth notes (FR-12)  
+│   ├── commitments\_log.md            \# Commitments from purely personal meetings (FR-34), written on approval (2026-10-24)  
 │   └── event\_log/                    \# Personal-scope audit trail & decision log (FR-10, FR-27)  
 │  
 ├── skills/                             \# PERSONAL CONCIERGE & CAREER SKILLS  
@@ -93,7 +94,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 │   │   └── engineering\_specs.md        \# Architecture & code guidelines  
 │   ├── memory/                         \# MACHINE-LOCAL (gitignored as one directory rule)  
 │   │   ├── daily\_dashboard.md          \# Project Alpha Daily Team Dashboard — MACHINE-LOCAL (gitignored)  
-│   │   ├── commitments\_log.md          \# Spoken commitments & promise tracking ledger (FR-34) — MACHINE-LOCAL (gitignored)  
+│   │   ├── commitments\_log.md          \# Spoken commitments & promise tracking ledger (FR-34), written on approval — MACHINE-LOCAL (gitignored)  
 │   │   ├── meetings/                   \# Meeting SUMMARIES \- citation root for every extracted  
 │   │   │                               \# fact (FR-03 man-hour cost, attendees, duration).  
 │   │   │                               \# MACHINE-LOCAL (gitignored). A commitment in this scope may only cite  
@@ -264,7 +265,7 @@ C. ISOLATED PROJECT SCOPES (\<project-repository-root\>/.project-ai/)
 > * **Contextual Web & Literature Engine (FR-17):** The background ingestion and situational matching of external industry RSS feeds and HTTP web pages against live project bottlenecks, team dynamics, and career goals.  
 > * **Meeting ROI Metric:** A post-meeting mindfulness calculation (attendees × duration\_hours × blended\_hourly\_rate, where the blended rate is a single PM-configured figure in \~/.pm-ai/config.toml) displayed as an informative metric within post-meeting summary header blocks to foster team cost awareness.  
 > * **Verbal Commitment Sync:** The automatic extraction of spoken meeting promises and staging of timestamped comments attached to target GitLab Work Items or Jira tickets.  
-> * **Meeting Commitment Ledger & Closed-Loop Lifecycle:** The persistent accountability mechanism (recorded as structured Markdown entries in .project-ai/memory/commitments\_log.md and indexed in commitment\_index.db, Tier 3 and disposable) that captures extracted spoken promises, assigned owners, target deadlines, target Work Items, lifecycle statuses (\[STAGED\_APPROVAL\], \[PENDING\], \[FULFILLED\], \[ALTERED\], \[BROKEN\], \[UNKNOWN\], \[ERROR\] — the last three never collapsed into one another, FR-34.2), and continuously cross-references incoming Git commits, PR review latencies, and ticket state updates to verify real-world execution.  
+> * **Meeting Commitment Ledger & Closed-Loop Lifecycle:** The persistent accountability mechanism (recorded as structured Markdown entries in the commitments\_log.md of the scope that owns the meeting — a project's, or the personal scope's — written when the PM approves, and indexed in commitment\_index.db, Tier 3 and disposable) that captures extracted spoken promises, assigned owners, target deadlines, target Work Items, lifecycle statuses (\[STAGED\_APPROVAL\] — the proposal's state, never a ledger entry — then \[PENDING\], \[WITHDRAWN\], \[FULFILLED\], \[ALTERED\], \[BROKEN\], \[UNKNOWN\], \[ERROR\] — the last three never collapsed into one another, FR-34.2), and continuously cross-references incoming Git commits, PR review latencies, and ticket state updates to verify real-world execution.  
 > * **Spoken Anchor Protocol & Fuzzy Recovery:** A structured speaking convention used to identify target Work Item numbers, coupled with an automated fuzzy search recovery mechanism (\>85% confidence threshold) for phonetic or transcript speech recognition errors.  
 > * **Explicit In-Meeting Command:** A direct spoken directive during a meeting explicitly addressing the assistant by name (e.g., *"pm-ai, update WI-226..."*) that serves as explicit authorization for immediate downstream execution via authorized MCP tools without requiring staged confirmation cards.  
 > * **Implicit Discussion Extraction:** Information, context, decisions, or ticket updates derived from general team meeting conversations where pm-ai was not explicitly invoked.  
@@ -652,17 +653,18 @@ Retrieve active and historical commitments from the persistent Meeting Commitmen
 
 #### **FR-34: Spoken Commitment Persistence, Closed-Loop Verification & Ledger**
 
-Extract, persist, and maintain the lifecycle of all spoken meeting commitments and promises in local persistent storage (.project-ai/memory/commitments\_log.md and indexed in commitment\_index.db, Tier 3 and disposable) using closed-loop execution tracking.
+Extract, persist, and maintain the lifecycle of all spoken meeting commitments and promises in local persistent storage (the commitments\_log.md of the scope that owns the meeting — a project's, or the personal scope's — and indexed in commitment\_index.db, Tier 3 and disposable) using closed-loop execution tracking.
 
-> 1. **Extraction & Initial Staging:** Upon processing meeting transcripts (FR-03, FR-06), extracted commitments are appended to .project-ai/memory/commitments\_log.md as structured Markdown entries and indexed in commitment\_index.db (Tier 3, disposable). Each entry records: commitment\_id, timestamp, speaker, target\_assignee, description, target\_work\_item, due\_date, and initial status (\[STAGED\_APPROVAL\] or \[PENDING\]).  
+> 1. **Extraction & Initial Staging:** Commitments extracted from a meeting (FR-03, FR-06) are staged as proposals while they wait for the PM; \[STAGED\_APPROVAL\] is the proposal's state and is never a ledger entry. When the PM approves one, one structured Markdown entry is appended to the commitments\_log.md of the scope that owns the meeting and indexed in commitment\_index.db (Tier 3, disposable). Each entry records: commitment\_id (the approved proposal's id), the approval time, the speaker of a spoken promise or the owner of an action item, as names (linked to a person only through an exact saved alias, when read), the description, the meeting's day (marked when estimated), the due as said and the date worked out from it against that day or `unresolved`, the meeting it cites, and status \[PENDING\]; the target work item is joined when the commitment is verified.  
 > 2. **Closed-Loop Verification & Lifecycle Transitions:** Automatically evaluate and update commitment status based on real-world cross-platform execution telemetry or direct PM triage. **Only externally-authored telemetry is admissible as evidence**: activity pm-ai itself produced — a comment it posted, a Work Item it edited — must never count toward fulfilment, or the system verifies its own writes and reports success it manufactured. Every event carries an authorship marker of external, pm-ai, or unknown; unknown is not admissible.  
-   * \[STAGED\_APPROVAL\]: Spoken implicit commitment awaiting PM approval via Telegram/CLI card. Upon PM approval, transitions to \[PENDING\].  
+   * \[STAGED\_APPROVAL\]: the proposal's state while a spoken commitment waits for the PM's approval on a Telegram/CLI card; nothing is in the ledger yet. Approval writes the commitment at \[PENDING\].  
    * \[PENDING\]: Active commitment awaiting fulfillment before specified due date.  
    * \[FULFILLED\]: Telemetry confirms matching deliverable completed (e.g., merged MR, closed Work Item/Jira ticket) on or before due date with verified commit SHA / ticket closure metadata.  
-   * \[ALTERED\]: Scope or due date updated in a subsequent meeting transcript or via direct PM edit.  
+   * \[ALTERED\]: Scope or due date updated in a subsequent meeting transcript or by the PM's own mark.  
    * \[BROKEN\]: Target due date passed, the harvest window is **covered** — pm-ai looked — and no admissible evidence was found.  
    * \[UNKNOWN\]: Target due date passed but **no harvest attempt spanned the window** — for example the machine was asleep, so nothing was tried. Temporary and self-resolving: it means pm-ai has not yet had a complete look, and it becomes \[FULFILLED\] or \[BROKEN\] once coverage catches up. Absence of data is not evidence of a broken promise, so this case never resolves to \[BROKEN\].  
    * \[ERROR\]: Target due date passed and a contributing connector instance **attempted the window and failed** — an expired token, a revoked consent, a moved repository, a broken configuration. Not self-resolving: waiting never clears it, so it is surfaced with the failing instance named, in pm-ai doctor and the briefing, until a human acts. \[ERROR\] outranks \[UNKNOWN\] when both apply — an instance that is actively failing is the actionable fact; one that merely did not run is not.  
+   * \[WITHDRAWN\]: the PM's own mark for an approval made by mistake; terminal, and never counted as a broken promise. **The PM's own mark.** The PM may mark a commitment fulfilled, altered, broken or withdrawn himself; the mark is his, recorded under his handle, needs no telemetry evidence, outranks a telemetry verdict — except that his altered mark keeps the commitment tracked, so a later telemetry verdict still applies; his fulfilled, broken and withdrawn marks outrank verdicts \[2026-10-24, Andrei, 15a\] — and is counted apart from telemetry (SM-9's manual override). **No date, never overdue:** a due that names no single date is kept as said and recorded as unresolved, and such a commitment is never overdue until the PM sets a date; a date worked out from an estimated meeting day never alone makes a commitment late.  
    * The three overdue verdicts are never collapsed into one another, and **neither \[UNKNOWN\] nor \[ERROR\] may trigger a pre-meeting inquiry (FR-26) to the person who made the promise**: pm-ai's own blindness is never someone else's accountability, and an inquiry cannot be recalled. The alert goes privately to the PM, naming the instrument rather than the promise-owner.  
    * **Coverage is a receipt.** A harvest window counts as covered only for a request that reached the provider and was answered, timed by pm-ai's own clock either side of the request — never a span computed from the clock alone. An empty answer is a receipt: asking and being told nothing is there is having looked. There is no coverage when the request failed, when nothing returned had a readable time, when everything returned was rejected as unreadable, or when this machine's clock stepped backwards during the request.  
 > 3. **Proactive Proactive Milestone Warning Prompts:** If unfulfilled dependencies or overdue commitments risk breaching upcoming project delivery milestones, the system triggers a private Socratic prompt (FR-12) to the PM during morning briefings or 1:1 planning sessions before delivery milestones are breached.  
@@ -670,7 +672,7 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
 
 **Consequences (testable):**
 
-> * Approved spoken commitment creates a valid, structured Markdown entry in .project-ai/memory/commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].  
+> * Approved spoken commitment creates a valid, structured Markdown entry in the meeting's scope's commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].  
 > * When telemetry detects a merged MR referencing the target Work Item of a \[PENDING\] commitment, system automatically updates commitment status to \[FULFILLED\] and appends the commit SHA verification reference.  
 > * An overdue \[PENDING\] commitment whose connector instance attempted the window and failed resolves to \[ERROR\], names that instance in pm-ai doctor and the next briefing, and sends no inquiry to the promise-owner; the same window with no attempt at all resolves to \[UNKNOWN\] and clears by itself once a covered harvest arrives.  
 > * An overdue \[PENDING\] commitment that blocks a milestone triggers a private Socratic alert card to the PM at least 48 hours prior to milestone target date.
@@ -763,7 +765,7 @@ Refine which stored material is worth surfacing, so recall improves with use rat
 |  \- strategic\_goals.md                    \- conventions.md                     |  
 |  \- coaching\_1on1\_history.md              \- engineering\_specs.md               |  
 |  \- article\_sources.md                    \- daily\_dashboard.md                 |  
-|  \- daily\_dashboard.md                    \- commitments\_log.md (FR-34 Ledger) |  
+|  \- daily\_dashboard.md, commitments\_log.md \- commitments\_log.md (FR-34 Ledger) |  
 |  \- event\_log/ (Unified Telemetry)      \- event\_log/ (Unified Telemetry)   |  
 |                                          \- member\_updates.md (FR-32)          |  
 |                                                                               |  
@@ -957,6 +959,8 @@ Waves, named in the later entries, are the batches stories are built in; see the
   8. *Private file modes (2026-10-16; NFR-08):* Files pm-ai keeps in \~/.pm-ai/ and \~/.manager-ai/ and in a project's machine-local folders are 0600 in 0700 directories, existing ones tightened at each daemon start; a project's shared parts keep the default.
 
   The §6 topology's frontier box is left as drawn; NFR-13 and §11 carry the added frontier use.
+
+> * **2026-10-24 (Story 15a \- v0.16.1):** *The ledger starts at approval (2026-10-24, Andrei; FR-34, FR-06, Glossary):* \[STAGED\_APPROVAL\] is a proposal state, never a ledger entry; personal meetings keep a personal ledger; the PM's own marks — fulfilled, altered, broken, withdrawn — are recorded under his handle and counted apart from telemetry, withdrawn never as broken; a due is resolved to a date against the meeting's day or recorded as unresolved, and an estimated day never alone makes a promise late.
 
 > * **2026-08-20 (No Self-Generated Code \- v0.14.2):** The last open component of the self-improvement framework — *"tests modular Python/Bash skills in a local sandbox"* — is resolved: **no code generation, and the sandbox work is deprioritised.**
 

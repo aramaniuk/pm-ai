@@ -55,10 +55,20 @@ class CommitmentState(Enum):
     BROKEN = "broken"
     UNKNOWN = "unknown"  # overdue, no coverage, and nothing tried to harvest
     ERROR = "error"  # overdue, no coverage, because harvesting FAILED
+    WITHDRAWN = "withdrawn"
+    """The PM's own mark for an approval made by mistake (story 15a).
+
+    Terminal, so telemetry never evaluates it, and a verdict: a claim about the
+    world. Never counted as broken, and never returned by `evaluate_commitment`.
+    """
 
     @property
     def is_terminal(self) -> bool:
-        return self in {CommitmentState.FULFILLED, CommitmentState.BROKEN}
+        return self in {
+            CommitmentState.FULFILLED,
+            CommitmentState.BROKEN,
+            CommitmentState.WITHDRAWN,
+        }
 
     @property
     def is_verdict(self) -> bool:

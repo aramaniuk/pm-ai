@@ -64,6 +64,7 @@ from pm_ai.app.concurrency import (
 from pm_ai.app.goals import GoalReader
 from pm_ai.app.members import MemberDesk
 from pm_ai.app.meeting_listing import MeetingLister
+from pm_ai.app.commitments import recorder_for
 from pm_ai.app.proposals import ProposalDesk
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.domain.meeting_summaries import SummaryRefused
@@ -1158,13 +1159,23 @@ class RequestPath:
             return result
 
         paths = fresh.storage.paths
+        handed = handed_daemon(fresh, hand=hand)
         return ProposalDesk(
             now=fresh.clock,
             paths=paths if isinstance(paths, ScopePaths) else None,
-            storage=handed_daemon(fresh, hand=hand).storage,
+            storage=handed.storage,
             via="prompt",
             types=fresh.proposal_types,
             reachable=lambda: True,
+            # Story 15a: the commitment's line is its own claimed step, handed
+            # to the writer after the approval's; its reads stay on the worker.
+            commitments=recorder_for(
+                handed.storage,
+                handed.meetings,
+                types=fresh.proposal_types,
+                now=fresh.clock,
+                display_timezone=fresh.config.display_timezone,
+            ),
         )
 
     def _lister(self, fresh: Daemon) -> MeetingLister:

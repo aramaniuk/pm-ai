@@ -109,6 +109,7 @@ The application scope holds none, because it owns no meetings. **All three are e
 │   ├── daily_dashboard.md             # Manager Strategic Focus morning briefing
 │   ├── strategic_goals.md             # 3-tier goals (Project, Team, Personal career)
 │   ├── coaching_1on1_history.md       # Socratic 1:1 logs, meta-feedback & growth notes
+│   ├── commitments_log.md             # Commitments from purely personal meetings, written on approval (2026-10-24, 15a)
 │   └── event_log/                     # Personal-scope audit trail & decision log
 │
 ├── skills/                            # PERSONAL CONCIERGE & CAREER SKILLS
