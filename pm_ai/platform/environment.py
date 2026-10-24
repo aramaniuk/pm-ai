@@ -24,6 +24,7 @@ AD-26, and a static rule keeps it here.
 from __future__ import annotations
 
 import os
+from datetime import datetime, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "TRUTHY",
     "encryption_disabled",
     "local_zone_name",
+    "machine_zone",
     "raw_toggle",
     "set_variables",
 ]
@@ -75,6 +77,30 @@ def set_variables(names: tuple[str, ...]) -> dict[str, str]:
     environment is still read here alone.
     """
     return {name: os.environ[name] for name in names if name in os.environ}
+
+
+def machine_zone() -> tzinfo | None:
+    """The machine's own zone, read when `display_timezone` is unset (Andrei, 2026-10-21).
+
+    The IANA zone `/etc/localtime` links to, so a clock change is honoured;
+    otherwise the offset in force now; `None` when neither can be read. The
+    one reader for the drop's header times (11e) and the commitment ledger's
+    and Team Activity's meeting day (15a), so they cannot disagree.
+    """
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        target = ""
+    _, marker, name = target.partition("zoneinfo/")
+    if marker and name:
+        try:
+            return ZoneInfo(name)
+        except (ValueError, ZoneInfoNotFoundError):
+            pass
+    try:
+        return datetime.now().astimezone().tzinfo
+    except (OSError, ValueError):
+        return None
 
 
 def local_zone_name() -> str | None:

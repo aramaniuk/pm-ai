@@ -50,6 +50,8 @@ MATRIX = [
     (PERSONAL, "coaching_1on1_history.md", None, False),
     (PERSONAL, "strategic_goals.md", None, False),
     (PROJECT, "commitments_log.md", None, False),
+    # Story 15a: the personal ledger is plaintext Markdown too (AD-6, AD-28).
+    (PERSONAL, "commitments_log.md", None, False),
     (APPLICATION, "vector_index/", "index.bin", False),
     (APPLICATION, "event_index.db", None, False),
     (APPLICATION, "commitment_index.db", None, False),

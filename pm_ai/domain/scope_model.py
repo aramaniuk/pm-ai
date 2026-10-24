@@ -567,6 +567,14 @@ PERSONAL_TREE: tuple[LayoutNode, ...] = (
             File("strategic_goals.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Socratic 1:1 logs & growth notes.
             File("coaching_1on1_history.md", Tier.TRUTH, encrypted=False, gitignored=False),
+            # Story 15a (Andrei, 2026-10-24, amends AD-28): the commitments of
+            # purely personal meetings, written on approval. The flags of its
+            # siblings `meetings/` and `event_log/`: plaintext Markdown (AD-6),
+            # Tier 1 and so backed up, not gitignored — the personal scope may
+            # be the PM's own private repository — and `0600` like every
+            # personal file. One basename, one tier: the project's is TRUTH too
+            # (AD-44). Append-only by its basename (`storage_tiers`).
+            File("commitments_log.md", Tier.TRUTH, encrypted=False, gitignored=False),
             # Personal-scope audit trail; dated segments.
             Collection("event_log", Tier.TRUTH, encrypted=False, gitignored=False),
             # DIVERGENCE, kept: `ARCHITECTURE-SPINE.md:683` names

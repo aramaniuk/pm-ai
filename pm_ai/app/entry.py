@@ -107,6 +107,7 @@ from pm_ai.core.frontier_key import FRONTIER_KEY_PROBE, frontier_key_probe
 from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
 from pm_ai.app.members import MemberDesk
 from pm_ai.app.meeting_listing import MeetingLister
+from pm_ai.app.commitments import recorder_for
 from pm_ai.app.proposals import (
     PROPOSAL_WRITE_BOUND_SECONDS,
     ProposalDesk,
@@ -1890,6 +1891,14 @@ def _proposal_desk(daemon: Daemon) -> ProposalDesk:
         via="terminal",
         types=daemon.proposal_types,
         reachable=_daemon_answers,
+        # Story 15a: an approval writes its commitment's line after it.
+        commitments=recorder_for(
+            daemon.storage,
+            daemon.meetings,
+            types=daemon.proposal_types,
+            now=daemon.clock,
+            display_timezone=daemon.config.display_timezone,
+        ),
     )
 
 

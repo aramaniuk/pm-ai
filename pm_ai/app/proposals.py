@@ -30,10 +30,15 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 
+from pm_ai.app.commitments import CommitmentRecorder, recorder_for
 from pm_ai.app.concurrency import WRITER_START_WAIT_SECONDS, WriterBusy
 from pm_ai.app.meeting_listing import MeetingLister, resolve_title
 from pm_ai.app.proposal_reads import ProposalWorld, open_world, seen_state
+from pm_ai.app.scope_reads import read_display_config
 from pm_ai.app.wiring import REGISTRY_ARTIFACT, registered_proposal_types
+from pm_ai.core.commitment_log import Recording
+from pm_ai.core.due_dates import due_words
+from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.core.meeting_summary import action_item_id
 from pm_ai.core.proposal_cards import (
     LIST_STATES,
@@ -45,6 +50,7 @@ from pm_ai.core.proposal_cards import (
     ProposalOutcome,
     ProposalRefused,
     build_card,
+    command_line,
     day_words,
     via_words,
 )
@@ -57,6 +63,7 @@ from pm_ai.core.proposals import (
     SUMMARY_LIMIT,
     edited_values,
 )
+from pm_ai.domain.commitments import LineKind
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meeting_listing import RecordReading
@@ -143,6 +150,9 @@ class ProposalDesk:
     via: str = "terminal"
     types: ProposalTypes = field(default_factory=lambda: registered_proposal_types())
     reachable: Callable[[], bool] = lambda: False
+    commitments: CommitmentRecorder | None = None
+    """What records an approved item's commitment (story 15a), built in the
+    composition root; when `None`, one is built over `storage` as it is needed."""
 
     # ── reading ──────────────────────────────────────────────────────────
 
@@ -624,7 +634,13 @@ class ProposalDesk:
             )
         if verb == "reject":
             if seen is ProposalState.APPROVED:
-                return proposal_type is not None and not proposal_type.rule.has_executor
+                # Story 15a: an approved item whose type records a commitment
+                # is not rejected.
+                return (
+                    proposal_type is not None
+                    and not proposal_type.rule.has_executor
+                    and not proposal_type.rule.records_commitment
+                )
             return True
         if verb == "edit":
             return proposal_type is not None and bool(proposal_type.editable)
@@ -708,6 +724,12 @@ class ProposalDesk:
         verb = "approved" if to is ProposalState.APPROVED else "rejected"
         if body.state is to:
             return self._already(body, located.scope, world, rows, verb)
+        if (
+            to is ProposalState.REJECTED
+            and body.state is ProposalState.APPROVED
+            and rule.records_commitment
+        ):
+            raise self._not_rejected(body, located.scope, world, rows)
         if to is ProposalState.APPROVED and body.seen_state(rule, world.now) is ProposalState.STAGED:
             self._refuse_approval(proposal_id, body, self._card(body, located.scope, world, rows), world)
         expected = body.version if if_version is None else if_version
@@ -750,13 +772,77 @@ class ProposalDesk:
                 expected, retried = current.version, True
                 continue
             break
+        # Story 15a: the approval is committed; its commitment's line follows,
+        # in its own claimed step, never inside the proposal's.
+        recording = (
+            self._record(moved, located.scope, world, repair=False)
+            if to is ProposalState.APPROVED
+            else None
+        )
         world = self.world()
         rows = self._rows_around(world, proposal_id)
         card = self._card(moved, located.scope, world, rows)
         sentence = f"{proposal_id} {verb}."
         if to is ProposalState.APPROVED and proposal_type is not None:
-            sentence = f"{proposal_id} approved: you agreed to it; nothing is carried out."
-        return ProposalOutcome(verb, card, sentence, next=self._next(moved, located.scope, world, rows))
+            sentence = _approved_sentence(proposal_id, recording, rerun=None)
+        return ProposalOutcome(
+            verb,
+            card,
+            sentence,
+            next=self._next(moved, located.scope, world, rows),
+            commitment=recording,
+        )
+
+    def _recorder(self, world: ProposalWorld) -> CommitmentRecorder | None:
+        """The composition root's recorder, else one over this desk's writer (15a)."""
+        if self.commitments is not None:
+            return self.commitments
+        if self.storage is None:
+            return None
+        zone_name, _, _ = read_display_config(world.resolver)
+        return recorder_for(
+            self.storage,
+            MeetingRecords(self.storage),  # type: ignore[arg-type]
+            types=self.types,
+            now=self.now,
+            display_timezone=zone_name,
+        )
+
+    def _record(
+        self, proposal: Proposal, scope: DataScope, world: ProposalWorld, *, repair: bool
+    ) -> Recording | None:
+        """The commitment of an approved `proposal`, recorded after its change (15a)."""
+        if not self.rule(proposal.type).records_commitment:
+            return None
+        recorder = self._recorder(world)
+        if recorder is None:
+            return None
+        return recorder.record(proposal, scope, repair=repair)
+
+    def _not_rejected(
+        self,
+        body: Proposal,
+        scope: DataScope,
+        world: ProposalWorld,
+        rows: Sequence[ProposalIndexRow],
+    ) -> ProposalRefused:
+        """The refusal of `reject` on an approved item that is a commitment now (15a)."""
+        card = self._card(body, scope, world, rows)
+        when = (
+            ""
+            if body.changed_at is None
+            else f" on {day_words(body.changed_at, world.zone, world.now)}"
+        )
+        return ProposalRefused(
+            f"{body.proposal_id} was approved{when} and is a commitment now, so it is not "
+            f"rejected; nothing was changed. To correct what was agreed, edit it: pm-ai "
+            f'proposal edit {body.proposal_id} --scope {scope} --what "…". Marking a '
+            f"commitment withdrawn, altered or broken is not available yet.",
+            state=ProposalState.APPROVED.value,
+            changed_at=body.changed_at,
+            changed_via=body.changed_via,
+            card=card,
+        )
 
     def _already(
         self,
@@ -766,6 +852,13 @@ class ProposalDesk:
         rows: Sequence[ProposalIndexRow],
         verb: str,
     ) -> ProposalOutcome:
+        # Story 15a: an approve that finds the item approved writes its
+        # commitment's line if an earlier approval left it unwritten.
+        recording = (
+            self._record(current, scope, world, repair=True)
+            if verb == "approved" and current.state is ProposalState.APPROVED
+            else None
+        )
         card = self._card(current, scope, world, rows)
         clauses = [f"already {verb}"]
         if current.changed_at is not None:
@@ -773,11 +866,19 @@ class ProposalDesk:
         where = via_words(current.changed_via)
         if where is not None:
             clauses.append(where)
+        head = f"{current.proposal_id}: " + ", ".join(clauses)
+        if recording is not None and recording.wrote is not None:
+            sentence = f"{head}; now recorded as a commitment, {_due(recording)}."
+        elif recording is not None and not recording.recorded:
+            sentence = f"{head}; {_unrecorded(recording, rerun=None)}"
+        else:
+            sentence = f"{head}; nothing changed."
         return ProposalOutcome(
             "already",
             card,
-            f"{current.proposal_id}: " + ", ".join(clauses) + "; nothing changed.",
+            sentence,
             next=self._next(current, scope, world, rows),
+            commitment=recording,
         )
 
     def _moved(
@@ -1015,6 +1116,13 @@ class ProposalDesk:
                 expected, retried = now_body.version, True
                 continue
             break
+        # Story 15a: an approved replacement — by `--approve`, or because an
+        # approved item was edited — records its commitment's line.
+        recording = (
+            self._record(edited.new, located.scope, world, repair=False)
+            if edited.new.state is ProposalState.APPROVED
+            else None
+        )
         world = self.world()
         rows = self._rows_around(world, proposal_id)
         new_card = self._card(edited.new, located.scope, world, rows)
@@ -1030,13 +1138,58 @@ class ProposalDesk:
             sentence = f"{proposal_id} replaced by {edited.new.proposal_id}" + (
                 ", approved." if approve else "."
             )
+        if recording is not None:
+            rerun = ("proposal", "approve", edited.new.proposal_id, "--scope", str(located.scope))
+            sentence += " " + _edited_commitment(edited.new.proposal_id, recording, rerun=rerun)
         return ProposalOutcome(
             outcome,
             new_card,
             sentence,
             replaced=old_card,
             next=self._next(edited.new, located.scope, world, rows),
+            commitment=recording,
         )
+
+
+def _due(recording: Recording) -> str:
+    return due_words(recording.due, day=recording.day)
+
+
+def _unrecorded(recording: Recording, *, rerun: tuple[str, ...] | None) -> str:
+    """`it could not be recorded as a commitment yet (…)`, and what to do (15a)."""
+    reason = recording.reason
+    text = "" if reason is None else f" ({reason.text})"
+    if reason is not None and reason.permanent:
+        return f"it could not be recorded as a commitment{text}. pm-ai cannot record it."
+    again = "Run the same command again" if rerun is None else f"Run `{command_line(rerun)}`"
+    return (
+        f"it could not be recorded as a commitment yet{text}. {again}, or pm-ai records it "
+        f"when the daemon next starts."
+    )
+
+
+def _approved_sentence(
+    proposal_id: str, recording: Recording | None, *, rerun: tuple[str, ...] | None
+) -> str:
+    """What an approval says (story 15a)."""
+    if recording is None:
+        return f"{proposal_id} approved: you agreed to it; nothing is carried out."
+    if recording.recorded:
+        return (
+            f"{proposal_id} approved: you agreed to it, and it is recorded as a commitment, "
+            f"{_due(recording)}."
+        )
+    return f"{proposal_id} approved; {_unrecorded(recording, rerun=rerun)}"
+
+
+def _edited_commitment(replacement: str, recording: Recording, *, rerun: tuple[str, ...]) -> str:
+    """The sentence an approved replacement adds about its commitment (story 15a)."""
+    if not recording.recorded:
+        found = _unrecorded(recording, rerun=rerun)
+        return found[0].upper() + found[1:]
+    if recording.wrote is LineKind.REVISED:
+        return f"Its commitment now holds the edited values, {_due(recording)}."
+    return f"It is recorded as a commitment, {_due(recording)}."
 
 
 def _live_in_chain(proposal_id: str, rows: Sequence[ProposalIndexRow]) -> str | None:

@@ -27,6 +27,8 @@ from pm_ai.domain.identity import SourceRef, TargetRef
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meeting_summaries import ACTION_ITEM, DUE_LIMIT, WHAT_LIMIT
 from pm_ai.domain.proposals import (
+    IMPLICIT_COMMITMENT,
+    SPEAKER_LIMIT,
     IllegalTransition,
     PastWindow,
     Proposal,
@@ -44,6 +46,7 @@ from pm_ai.domain.proposals import (
 
 __all__ = [
     "ACTION_ITEM_TYPE",
+    "IMPLICIT_COMMITMENT",
     "Approval",
     "ApprovalKind",
     "DuplicateType",
@@ -81,14 +84,14 @@ REVIEW_WINDOW_DAYS = 14
 PROPOSAL_TTL = timedelta(days=REVIEW_WINDOW_DAYS)
 """The review window of every type that waits for review today (Andrei, 2026-10-22)."""
 
-OWNER_LIMIT = 80
-"""A typed owner's most characters: `7b` sets none for a speaker label (13a)."""
+OWNER_LIMIT = SPEAKER_LIMIT
+"""A typed owner's most characters: `7b` sets none for a speaker label (13a). The
+same number as a promise speaker's (`SPEAKER_LIMIT`, 15a)."""
 
 SUMMARY_LIMIT = 80
 """A replacement's `summary`: the first 80 characters of its `what`, as `7b` makes it."""
 
 EXPLICIT_COMMAND = "explicit_command"
-IMPLICIT_COMMITMENT = "implicit_commitment"
 
 
 class DuplicateType(ValueError):
@@ -134,10 +137,16 @@ class ProposalType:
     approval: Approval
     card: Callable[[Mapping[str, str | None]], tuple[str, ...]]
     """The field values (`values`) rendered to the card's field lines."""
+    commitment: bool = False
+    """Its approval records a commitment (story 15a); copied into `TypeRule.records_commitment`."""
 
     @property
     def rule(self) -> TypeRule:
-        return TypeRule(ttl=self.ttl, has_executor=self.approval.kind is ApprovalKind.EXECUTOR)
+        return TypeRule(
+            ttl=self.ttl,
+            has_executor=self.approval.kind is ApprovalKind.EXECUTOR,
+            records_commitment=self.commitment,
+        )
 
     @property
     def editable(self) -> tuple[str, ...]:
@@ -260,7 +269,9 @@ def _action_item_card(values: Mapping[str, str | None]) -> tuple[str, ...]:
 
 
 def _promise_card(values: Mapping[str, str | None]) -> tuple[str, ...]:
-    line = f"promised: {values.get('what') or '(no text recorded)'}"
+    speaker = values.get("speaker")
+    head = f"said by {speaker}" if speaker else "promised"
+    line = f"{head}: {values.get('what') or '(no text recorded)'}"
     if values.get("when"):
         line += f", by {values['when']}"
     return (line,)
@@ -284,15 +295,18 @@ ACTION_ITEM_TYPE = ProposalType(
     ttl=PROPOSAL_TTL,
     approval=Approval(ApprovalKind.AGREED),
     card=_action_item_card,
+    commitment=True,
 )
 
 IMPLICIT_COMMITMENT_TYPE = ProposalType(
     name=IMPLICIT_COMMITMENT,
     label="Spoken promise",
-    fields=(FieldSpec("what", required=True), FieldSpec("when")),
+    # `speaker` since story 15a: who said "I'll …", a name, never a handle.
+    fields=(FieldSpec("what", required=True), FieldSpec("when"), FieldSpec("speaker", limit=OWNER_LIMIT)),
     ttl=PROPOSAL_TTL,
     approval=Approval(ApprovalKind.AGREED),
     card=_promise_card,
+    commitment=True,
 )
 
 EXPLICIT_COMMAND_TYPE = ProposalType(

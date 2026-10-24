@@ -653,6 +653,8 @@ def test_a_promise_stages_with_no_target_and_loads_back_with_none(tmp_path):
     assert proposal.payload == {
         "what": {"raw": "send the deck", "for_model": "send the deck"},
         "when": {"raw": "Friday", "for_model": "Friday"},
+        # Story 15a: who said it, the label raw and cleaned — a name, never a handle.
+        "speaker": {"raw": "Alex", "for_model": "Alex"},
     }
     loaded = daemon.storage.load_proposal(proposal.proposal_id)
     assert loaded.target is None and loaded.payload == proposal.payload

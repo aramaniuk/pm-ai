@@ -493,9 +493,9 @@ def test_a_non_excluded_artifact_in_a_repository_is_unaffected(tmp_path):
 # actually reached by in production, because they do NOT share a call site:
 # `event_log/` enters at `_writable_dir` (`service.py:860`), `meetings/` and
 # `daily_dashboard.md` at `write_artifact` (`:1123`), and `commitments_log.md`
-# at the `assert_writable` pre-flight (`:1213`) — it is append-only, so
-# `write_artifact` refuses it before the guard and no append path for it exists
-# yet. Proving `event_log/` alone would have proven one of three call sites, and
+# at `append_commitments` since story 15a — it is append-only, so
+# `write_artifact` refuses it before the guard, and until 15a it was reached by
+# the `assert_writable` pre-flight. Proving `event_log/` alone would have proven one of three call sites, and
 # `write_artifact`'s was reached by no refusal row in this file at all: replacing
 # its guard call with `pass` left the whole suite green.
 
@@ -515,7 +515,11 @@ def _write_dashboard(fixture: Fixture) -> None:
 
 
 def _preflight_commitments(fixture: Fixture) -> None:
-    fixture.storage.assert_writable(scope=PROJECT, artifact="commitments_log.md")
+    # Story 15a: the ledger's append path exists, so the guard is reached
+    # through it rather than through the `assert_writable` pre-flight.
+    fixture.storage.append_commitments(
+        ["- entry=cml_000000000000 commitment=prp_x kind=pending"], scope=PROJECT, after=0
+    )
 
 
 MACHINE_LOCAL = [

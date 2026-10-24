@@ -802,6 +802,18 @@ class StoragePort(Protocol):
         `23g` and `7e` read nothing else of it. A plain read. Refuses a scope
         that is not a project (`ValueError`), as `record_project_work` does.
         """
+    # Story 15a: the commitment ledgers, personal and each project's, read
+    # whole and appended to only if they have not grown since.
+    def read_commitments(self, *, scope: DataScope) -> bytes:
+        """`scope`'s `commitments_log.md`, `b""` when absent. Refuses a scope that is
+        neither personal nor a project (`NotACommitmentScope`)."""
+    def append_commitments(self, lines: Sequence[str], *, scope: DataScope, after: int) -> int:
+        """Append `lines` to `scope`'s ledger in one write, if it is still `after` bytes.
+
+        A project's ledger only once git confirms it is excluded (AD-43).
+        `LedgerChanged` when it grew; `NotACommitmentScope` for a scope that
+        keeps none. Returns the new size.
+        """
     # Story 7e: the two append-only ledgers, each read whole and appended to
     # only if it has not grown since (`LedgerChanged`).
     def read_member_updates(self, *, scope: DataScope) -> bytes:

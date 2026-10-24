@@ -19,7 +19,6 @@ on the write path, which therefore carries no second copy of anything.
 from __future__ import annotations
 
 import errno
-import os
 import logging
 import secrets
 import sqlite3
@@ -30,12 +29,14 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from concurrent.futures import CancelledError
 from concurrent.futures import TimeoutError as FutureTimeout
 
 from pm_ai.app.concurrency import ModelJobAbandoned, WriterStopped
+from pm_ai.core.meeting_listing import zone_of as named_zone_of
+from pm_ai.platform.environment import machine_zone
 from pm_ai.app.wiring import (
     CONFIG_ARTIFACT,
     GIT_QUESTION_SECONDS,
@@ -132,6 +133,7 @@ from pm_ai.core.aliases import AliasTable, parse_aliases
 from pm_ai.core.member_updates import (
     CLASSIFICATION_INSTRUCTIONS,
     CLASSIFICATION_SHAPE,
+    UPDATE_WINDOW,
     Candidate,
     ClassificationRefused,
     Ledger,
@@ -193,7 +195,13 @@ from pm_ai.domain.meetings import (
     is_same_day_candidate,
 )
 from pm_ai.domain.model_calls import ModelAnswer, ModelSide, ScopeFlow, ScopeFlowRefused
-from pm_ai.domain.proposals import Proposal, replacement_id, replacement_number, root_of
+from pm_ai.domain.proposals import (
+    Proposal,
+    as_compared,
+    replacement_id,
+    replacement_number,
+    root_of,
+)
 from pm_ai.domain.renders import (
     DigestItem,
     DigestMaker,
@@ -1288,7 +1296,10 @@ def _dropped_over(daemon: Daemon, proposal: Proposal) -> bool:
             acted = False
     else:
         acted = False
-    return acted and (held.summary, held.payload) != (proposal.summary, proposal.payload)
+    return acted and (held.summary, held.payload) != (
+        proposal.summary,
+        as_compared(held.type, held.payload, proposal.payload),
+    )
 
 
 def _proposal_id(meeting: Meeting, transcript: Transcript, index: int) -> str:
@@ -1575,23 +1586,9 @@ def _same_day_rivals(meetings: Sequence[Meeting], zone: tzinfo | None) -> frozen
 def _machine_zone() -> tzinfo | None:
     """The machine's own zone, read when `display_timezone` is unset (Andrei, 2026-10-21).
 
-    The IANA zone `/etc/localtime` links to, so a clock change is honoured;
-    otherwise the offset in force now; `None` when neither can be read.
+    `pm_ai.platform.environment.machine_zone`, the one reader (story 15a).
     """
-    try:
-        target = os.readlink("/etc/localtime")
-    except OSError:
-        target = ""
-    _, marker, name = target.partition("zoneinfo/")
-    if marker and name:
-        try:
-            return ZoneInfo(name)
-        except (ValueError, ZoneInfoNotFoundError):
-            pass
-    try:
-        return datetime.now().astimezone().tzinfo
-    except (OSError, ValueError):
-        return None
+    return machine_zone()
 
 
 def _zone(daemon: Daemon) -> tzinfo | None:
@@ -3069,8 +3066,10 @@ def _issue_notes(
         ledger = unreadable
     decisions: Mapping[str, ItemDecision] | BaseException | None = None
     unread = 0
+    estimated: dict[str, str | None] = {}
     if not isinstance(ledger, BaseException):
         decisions, unread = _item_decisions(daemon, ledger)
+        estimated = _estimated_from(daemon, ledger, scope=scope, now=now)
     return issue_notes_for(
         ledger,
         aliases,
@@ -3083,7 +3082,30 @@ def _issue_notes(
         ),
         decisions=decisions,
         decisions_unreadable=unread,
+        estimated_from=estimated,
+        # As `recorder_for` decides it, so Team Activity and the ledger pick one day.
+        machine_zone=None if named_zone_of(daemon.config.display_timezone) is not None else _machine_zone(),
     )
+
+
+def _estimated_from(
+    daemon: Daemon, ledger: Ledger, *, scope: DataScope, now: datetime
+) -> dict[str, str | None]:
+    """Each recent meeting's `start_estimated_from`, as its record gives it (story 15a).
+
+    Team Activity works a due's date out by the commitment ledger's day rule,
+    so it needs where each meeting's start came from. A record that cannot be
+    read gives nothing, and its lines show as before.
+    """
+    floor = now - UPDATE_WINDOW
+    meetings = sorted({line.meeting for line in ledger.live.values() if line.start >= floor})
+    found: dict[str, str | None] = {}
+    for meeting_id in meetings:
+        try:
+            found[meeting_id] = daemon.meetings.get(meeting_id, scope=scope).meeting.start_estimated_from
+        except Exception:  # noqa: BLE001 — an unreadable record leaves its lines as they were
+            continue
+    return found
 
 
 def _item_decisions(

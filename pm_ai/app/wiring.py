@@ -148,6 +148,7 @@ from pm_ai.domain.health import (
     UnbuiltConnector,
 )
 from pm_ai.domain.identity import DataScope, ScopeKind
+from pm_ai.domain.commitments import COMMITMENTS_LOG
 from pm_ai.domain.member_ledgers import MEMBER_UPDATES
 from pm_ai.domain.task_classes import TaskClass
 from pm_ai.core.frontier_key import held_frontier_key
@@ -4146,6 +4147,8 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     # Story 7e: the project's meeting updates, appended under the summary's
     # lease or a title-match retry's row, and that row.
     "append_member_updates": ("append the meeting's member updates", _named(MEMBER_UPDATES)),
+    # Story 15a: a commitment ledger's lines; a project's asks `git` first.
+    "append_commitments": ("append to the commitments ledger", _named(COMMITMENTS_LOG)),
     # Asks no `git`: the alias table's only home is the application scope,
     # outside every working tree, as `disclosure.md`'s is.
     "append_alias": ("append to the alias table", _asks_none),
@@ -4198,6 +4201,7 @@ PLAIN_READS: frozenset[str] = frozenset(
         "proposals_of_meetings",  # its own read-only connection (story 13a)
         "match_records",  # its own read-only connection (story 7e)
         "read_member_updates",  # a file read (story 7e)
+        "read_commitments",  # a file read (story 15a)
         "read_aliases",  # a file read (story 7e)
         "last_render",  # its own read-only connection
         "ask_git_exclusion",  # `git`'s answer, uncached: a bounded step

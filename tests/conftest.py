@@ -186,7 +186,10 @@ _require_runtime_extra()
 # 11 → 8, story 13a: `pm_ai.core.proposals` exists, so the three proposal items
 # in `test_domain_invariants.py` — types never define expiry, two surfaces
 # approving, an expired proposal never executing — run instead of skipping.
-EXPECTED_SKIPS = 8
+# 8 → 6, story 15a: `test_ad33_ledger_entries_are_self_contained` runs on a
+# fixture; `test_ad28_…`, split by the AD-28 amendment, runs as two tests.
+# `test_ad35_…` and `test_ad36_…` still skip on `pm_ai.core.commitments`, story 16's.
+EXPECTED_SKIPS = 6
 
 _VERDICT = pytest.StashKey[str]()
 

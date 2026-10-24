@@ -100,6 +100,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from pm_ai.app.commitments import CommitmentCatchUp
 from pm_ai.app.concurrency import IOPool, ModelPool, WriterThread
 from pm_ai.app.prompts import (
     DAEMON_LOG_NAME,
@@ -633,17 +634,7 @@ def _serve_locked(
             job_events=requests.job_events,
             frontier_key=requests.frontier_key,
         )
-        app.state.pm_ai_requests = requests
-        # The scheduled harvests (story 9a): attached in `_lifespan`, on this
-        # loop; an unfinished one is marked by the shutdown's own step.
-        app.state.pm_ai_timers = HarvestTimers(requests=requests, now=daemon.clock)
-        # The 07:00 render of every dashboard scope (story 9b), attached after
-        # the harvests'; a render still before its claimed step is marked by
-        # the shutdown's own step too.
-        app.state.pm_ai_renders = RenderTimers(requests=requests, now=daemon.clock)
-        # Story 13a: the expiry sweep of staged proposals (AD-13), at start and
-        # every 15 minutes after.
-        app.state.pm_ai_sweep = ProposalSweep(requests=requests, now=daemon.clock)
+        attach_background(app.state, requests, now=daemon.clock)
         server = _server_class(uvicorn)(
             uvicorn.Config(
                 app,
@@ -1029,6 +1020,28 @@ def status_body(
     }
 
 
+def attach_background(state: Any, requests: RequestPath, *, now: Callable[[], datetime]) -> None:
+    """What `_lifespan` starts, set on the application's `state` by the serve path.
+
+    Extracted from `_serve_locked` (story 15a) so a test drives the same
+    wiring the daemon serves with.
+    """
+    state.pm_ai_requests = requests
+    # The scheduled harvests (story 9a): attached in `_lifespan`, on this
+    # loop; an unfinished one is marked by the shutdown's own step.
+    state.pm_ai_timers = HarvestTimers(requests=requests, now=now)
+    # The 07:00 render of every dashboard scope (story 9b), attached after
+    # the harvests'; a render still before its claimed step is marked by
+    # the shutdown's own step too.
+    state.pm_ai_renders = RenderTimers(requests=requests, now=now)
+    # Story 13a: the expiry sweep of staged proposals (AD-13), at start and
+    # every 15 minutes after.
+    state.pm_ai_sweep = ProposalSweep(requests=requests, now=now)
+    # Story 15a: once at each start, the commitment lines approvals left
+    # unwritten — items approved before 15a among them.
+    state.pm_ai_commitments = CommitmentCatchUp(requests=requests, now=now)
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(app: Any) -> AsyncIterator[None]:
     """Where background work attaches when the application starts serving.
@@ -1055,6 +1068,12 @@ async def _lifespan(app: Any) -> AsyncIterator[None]:
     sweep: ProposalSweep | None = getattr(app.state, "pm_ai_sweep", None)
     if sweep is not None:
         timers.append(asyncio.create_task(sweep.run(), name="pm-ai-proposal-sweep"))
+    # Story 15a: a one-shot task, after the sweep; it never stops the start.
+    commitments: CommitmentCatchUp | None = getattr(app.state, "pm_ai_commitments", None)
+    if commitments is not None:
+        timers.append(
+            asyncio.create_task(commitments.run(), name="pm-ai-commitment-catch-up")
+        )
     try:
         yield
     finally:

@@ -78,6 +78,7 @@ from pm_ai.domain.proposals import (
     TypeRule,
     VersionConflict,
     allowed,
+    as_compared,
     repeat_key,
     replacement_id,
     replacement_number,
@@ -96,6 +97,7 @@ from pm_ai.domain.meeting_summaries import (
     SummaryStateKind,
 )
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
+from pm_ai.domain.commitments import COMMITMENTS_LOG, NotACommitmentScope
 from pm_ai.domain.member_ledgers import (
     ALIAS_SCOPE,
     ALIAS_TABLE,
@@ -2324,6 +2326,16 @@ def _require_project(scope: DataScope, *, doing: str) -> None:
         )
 
 
+def _require_commitment_scope(scope: DataScope, *, doing: str) -> None:
+    """`NotACommitmentScope`, naming `scope`, unless it is personal or a project (15a)."""
+    if not isinstance(scope, DataScope) or scope.kind not in (ScopeKind.PERSONAL, ScopeKind.PROJECT):
+        raise NotACommitmentScope(
+            f"refused to {doing} {COMMITMENTS_LOG} for {scope}: commitments are kept in "
+            f"the scope that owns their meeting — personal or a project — and never in a "
+            f"people or the application scope (AD-4, AD-28). Nothing was read or written."
+        )
+
+
 def _ledger_text(lines: Sequence[str], *, ledger: str) -> str:
     """`lines` as one write: each one record, newline-terminated (AD-47)."""
     out: list[str] = []
@@ -4388,6 +4400,45 @@ class StorageService:
                 named=f"{scope}'s {MEMBER_UPDATES}",
             )
 
+    # ── Story 15a: the commitment ledgers ────────────────────────────────────
+
+    def read_commitments(self, *, scope: DataScope) -> bytes:
+        """`scope`'s `commitments_log.md` as stored; `b""` when there is none (15a).
+
+        A plain read. Refuses, naming it, a scope that is neither personal nor
+        a project (`NotACommitmentScope`, AD-4, AD-28), before anything is read.
+        """
+        _require_commitment_scope(scope, doing="read")
+        target = Path(self._paths.resolve(scope, COMMITMENTS_LOG))
+        try:
+            return self._read(target)
+        except FileNotFoundError:
+            return b""
+
+    def append_commitments(self, lines: Sequence[str], *, scope: DataScope, after: int) -> int:
+        """Append `lines` to `scope`'s `commitments_log.md` in one write (story 15a).
+
+        One claimed step, one compare-and-append by size, one write. Refused,
+        with nothing read or written: a scope that is neither personal nor a
+        project (`NotACommitmentScope`, naming it). Refused, with nothing
+        written: a project ledger git does not confirm is excluded (AD-43) —
+        the personal one is not gitignored, so git is not asked; a ledger
+        that is no longer `after` bytes long (`LedgerChanged`), which the
+        caller reads again. Each line is one record. Returns the new size.
+        """
+        _require_commitment_scope(scope, doing="write")
+        text = _ledger_text(lines, ledger=COMMITMENTS_LOG)
+        self._assert_git_excludes(scope, COMMITMENTS_LOG)
+        target = self._prepared(scope, COMMITMENTS_LOG)
+        with self._claimed_unless_held(scope, COMMITMENTS_LOG):
+            return self._compare_and_append(
+                target,
+                text,
+                after=after,
+                declared_mode=restricted_mode(scope.kind, COMMITMENTS_LOG),
+                named=f"{scope}'s {COMMITMENTS_LOG}",
+            )
+
     @contextlib.contextmanager
     def _claimed_unless_held(self, scope: DataScope, artifact: str) -> Iterator[None]:
         """`exclusive`'s claim around a compare-and-append, unless this thread holds it.
@@ -6347,7 +6398,7 @@ class StorageService:
         if current.state is ProposalState.SUPERSEDED:
             return RestageOutcome.KEPT_SUPERSEDED
         same = _as_values(current.summary, current.payload) == _as_values(
-            proposal.summary, proposal.payload
+            proposal.summary, as_compared(current.type, current.payload, proposal.payload)
         )
         if current.state is not ProposalState.STAGED:
             acted = current.state in (ProposalState.APPROVED, ProposalState.REJECTED)

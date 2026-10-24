@@ -62,6 +62,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from pm_ai.core.aliases import AliasTable, normalise
+from pm_ai.core.due_dates import meeting_day, resolve
 from pm_ai.core.meeting_summary import digest
 from pm_ai.core.rendering import code, cut_at_word, escape, fold_breaks
 from pm_ai.core.team_activity import ACTIVE, IssueNotes, bare_references
@@ -466,91 +467,16 @@ def judge_classification(
 
 # ── Due dates ────────────────────────────────────────────────────────────────
 
-_WEEKDAYS: Mapping[str, int] = {
-    **{name: day for day, name in enumerate(
-        ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-    )},
-    **{name: day for day, name in enumerate(
-        ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-    )},
-    **{name: day for day, name in enumerate(
-        ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
-    )},
-    # The Russian cases a due is said in: «до среды», «к пятнице», «в субботу».
-    "понедельника": 0, "понедельнику": 0,
-    "вторника": 1, "вторнику": 1,
-    "среды": 2, "среде": 2, "среду": 2,
-    "четверга": 3, "четвергу": 3,
-    "пятницы": 4, "пятнице": 4, "пятницу": 4,
-    "субботы": 5, "субботе": 5, "субботу": 5,
-    "воскресенья": 6, "воскресенью": 6,
-}
 
-_MONTHS: Mapping[str, int] = {
-    **{name: number for number, name in enumerate(
-        ("january", "february", "march", "april", "may", "june", "july",
-         "august", "september", "october", "november", "december"), start=1
-    )},
-    **{name: number for number, name in enumerate(
-        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"),
-        start=1,
-    )},
-    "sept": 9,
-    **{name: number for number, name in enumerate(
-        ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
-         "августа", "сентября", "октября", "ноября", "декабря"), start=1
-    )},
-}
-
-_LEADING = frozenset(
-    {"by", "on", "until", "till", "before", "due", "до", "к", "ко", "в", "во", "на"}
-)
-_PUNCTUATION = re.compile(r"[.,;:!?()]+")
-_ORDINAL = re.compile(r"^([0-9]+)(?:st|nd|rd|th)$")
-"""`3rd Jan`, `Jan 3rd`: an English ordinal suffix on the day is dropped."""
-
-
-def _words(said: str) -> list[str]:
-    words = _PUNCTUATION.sub(" ", normalise(said)).split()
-    while words and words[0] in _LEADING:
-        words.pop(0)
-    return words
-
-
-def resolve_due(said: str | None, meeting_day: date) -> date | None:
+def resolve_due(said: str | None, day: date | None) -> date | None:
     """The date a due said in the meeting names, only when it names one unambiguously.
 
-    Against the meeting's day in the display zone. A weekday alone (`by
-    Thursday`, `до четверга`) is its next occurrence after the meeting day,
-    and the meeting's own weekday is ambiguous, so it is no date. A day and a
-    month without a year (`3 Jan`, `January 3`, `3 января`) is the next one on
-    or after the meeting day. Anything else (`soon`, `next sprint`, a year
-    given) keeps the words and no date.
+    Since story 15a, `pm_ai.core.due_dates.resolve`'s date: one resolver for
+    Team Activity and the commitment ledger, so the two never show different
+    dates for one promise. `None` for no words, words that name no one date,
+    or no meeting day.
     """
-    if said is None:
-        return None
-    words = _words(said)
-    if len(words) == 1 and words[0] in _WEEKDAYS:
-        target = _WEEKDAYS[words[0]]
-        if target == meeting_day.weekday():
-            return None
-        return meeting_day + timedelta(days=(target - meeting_day.weekday()) % 7)
-    if len(words) == 2:
-        first, second = (_ORDINAL.sub(r"\1", word) for word in words)
-        if second in _MONTHS and (day := _small_int(first)) is not None:
-            month = _MONTHS[second]
-        elif first in _MONTHS and (day := _small_int(second)) is not None:
-            month = _MONTHS[first]
-        else:
-            return None
-        for year in (meeting_day.year, meeting_day.year + 1):
-            try:
-                candidate = date(year, month, day)
-            except (ValueError, OverflowError):
-                continue
-            if candidate >= meeting_day:
-                return candidate
-    return None
+    return resolve(said, day).date
 
 
 # ── The ledger's lines ───────────────────────────────────────────────────────
@@ -1031,6 +957,8 @@ def _row(
     ledger: Ledger,
     owner: Person | None,
     tz: tzinfo,
+    estimated_from: Mapping[str, str | None] | None = None,
+    machine_zone: tzinfo | None = None,
 ) -> str:
     day = _local_day(line.start, tz)
     marker = "said in the meeting" if ledger.certain(line) else "model-matched"
@@ -1048,9 +976,19 @@ def _row(
     row = f"{head} — {who}: {_shown(line.text)}"
     if line.due is not None:
         row += f"; due as said in the meeting: {_shown(line.due)}"
-        resolved = resolve_due(line.due, day)
+        # Story 15a: the ledger's day rule — no date for a start from a file's
+        # modification time or an unknown source, and an estimated day said so.
+        source = (estimated_from or {}).get(line.meeting)
+        due_day = meeting_day(
+            line.start,
+            source,
+            zone=tz if machine_zone is None else None,
+            machine_zone=machine_zone,
+        )
+        resolved = resolve_due(line.due, due_day)
         if resolved is not None:
-            row += f" ({resolved.isoformat()})"
+            estimated = " (meeting day estimated)" if source is not None else ""
+            row += f" ({resolved.isoformat()}){estimated}"
     return f"{row} ({marker})"
 
 
@@ -1108,6 +1046,8 @@ def issue_notes_for(
     placed: Callable[[IssueNotes], frozenset[int]],
     decisions: Mapping[str, ItemDecision] | BaseException | None = None,
     decisions_unreadable: int = 0,
+    estimated_from: Mapping[str, str | None] | None = None,
+    machine_zone: tzinfo | None = None,
 ) -> IssueNotes:
     """The rows under each issue, and the closing lines, for one render.
 
@@ -1118,6 +1058,13 @@ def issue_notes_for(
     — asked of `placed`, `23g`'s placed-issues function over these rows — and
     the speaker labels no member matched; and say when members were not read.
     An unreadable ledger or alias table is stated, never a failed render.
+
+    `estimated_from` is each meeting's `start_estimated_from` as its record
+    gives it, by meeting id (story 15a): a due's date is worked out by the
+    ledger's day rule, so a meeting whose start came from a file's
+    modification time, or from a source pm-ai does not know, shows no date,
+    and an estimated day says so. `machine_zone` is given only when
+    `display_timezone` is unset, for a start read in the machine's zone.
     """
     closing: list[str] = []
     if isinstance(aliases, BaseException):
@@ -1211,7 +1158,15 @@ def issue_notes_for(
         if issue is None:
             continue
         shown = [
-            _row(line, issue, ledger=ledger, owner=owners.get(line.update), tz=tz)
+            _row(
+                line,
+                issue,
+                ledger=ledger,
+                owner=owners.get(line.update),
+                tz=tz,
+                estimated_from=estimated_from,
+                machine_zone=machine_zone,
+            )
             for line in lines[:MAX_ROWS_PER_ISSUE]
         ]
         more = len(lines) - MAX_ROWS_PER_ISSUE

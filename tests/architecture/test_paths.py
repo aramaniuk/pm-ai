@@ -187,6 +187,9 @@ RESOLUTION_TABLE: dict[tuple[ScopeKind, str], str] = {
         "/home/pm/.manager-ai/memory/strategic_goals.md",
     (ScopeKind.PERSONAL, "coaching_1on1_history.md"):
         "/home/pm/.manager-ai/memory/coaching_1on1_history.md",
+    # Story 15a (AD-28 amended): a personal meeting's commitments, on approval.
+    (ScopeKind.PERSONAL, "commitments_log.md"):
+        "/home/pm/.manager-ai/memory/commitments_log.md",
     (ScopeKind.PERSONAL, "event_log/"):
         "/home/pm/.manager-ai/memory/event_log",
     (ScopeKind.PERSONAL, "meetings/"):

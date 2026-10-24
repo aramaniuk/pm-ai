@@ -16,12 +16,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
 
+from pm_ai.core.commitment_log import Recording, recording_json
 from pm_ai.core.proposals import ApprovalKind, ProposalType
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.proposals import Proposal, TypeRule, UNKNOWN_TYPE, fold_typed
 
 __all__ = [
     "CARD_FORMAT",
+    "COMMITMENT_NOT_REJECTED",
     "Card",
     "CardAction",
     "CardContext",
@@ -53,6 +55,9 @@ STATE_WORDS = {
 """The state in plain words, as a card's heading says it."""
 
 ACTIONS = ("approve", "edit", "reject", "show")
+
+COMMITMENT_NOT_REJECTED = "approved, so it is a commitment now; edit it to correct what was agreed"
+"""Why an approved item whose type records a commitment offers no `reject` (15a)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,7 +273,10 @@ def _actions(
     if seen is ProposalState.APPROVED:
         approve = unavailable("approve", "already approved")
         edit = CardAction("edit", True, None, edit_words) if editable else unavailable("edit", no_edit)
-        if proposal_type is not None and not proposal_type.rule.has_executor:
+        if proposal_type is not None and proposal_type.rule.records_commitment:
+            # Story 15a: approval wrote the commitment, so it is not rejected.
+            reject = unavailable("reject", COMMITMENT_NOT_REJECTED)
+        elif proposal_type is not None and not proposal_type.rule.has_executor:
             reject = CardAction("reject", True, None, reject_words)
         else:
             reject = unavailable("reject", "an approved change is not rejected once approved")
@@ -441,6 +449,8 @@ class ProposalOutcome:
     sentence: str
     replaced: Card | None = None
     next: tuple[str, ...] | None = None
+    commitment: Recording | None = None
+    """What an approval did about its commitment (story 15a); `None` for none."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,6 +502,7 @@ def outcome_json(answer: ProposalOutcome) -> dict[str, object]:
         "proposal": card_json(answer.card),
         "replaced": None if answer.replaced is None else card_json(answer.replaced),
         "next": None if answer.next is None else list(answer.next),
+        "commitment": recording_json(answer.commitment),
     }
 
 

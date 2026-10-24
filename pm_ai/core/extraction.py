@@ -37,6 +37,7 @@ from pm_ai.core.sanitize import Sanitized, sanitize
 from pm_ai.domain.handles import NEVER_A_PERSON, PersonHandle
 from pm_ai.domain.identity import MalformedReference, SourceRef, TargetRef
 from pm_ai.domain.meetings import Meeting
+from pm_ai.domain.proposals import SPEAKER_LIMIT, fold_typed
 from pm_ai.domain.transcripts import Transcript
 
 __all__ = [
@@ -109,13 +110,27 @@ class Promise:
 
     what: Sanitized
     when: Sanitized
+    speaker: Sanitized | None = None
+    """Who made the promise (story 15a): the transcript's label, raw and cleaned —
+    a name, never a handle (AD-34)."""
 
     def payload(self) -> dict[str, object]:
-        """What a staged proposal stores: every text field, original and cleaned."""
-        return {
+        """What a staged proposal stores: every text field, original and cleaned.
+
+        `speaker` since story 15a: its `for_model` is the label through the
+        same `sanitize` as `what`, line breaks and control and format
+        characters folded. A cleaned label over 80 characters is not stored,
+        since a shortened name is a different name.
+        """
+        stored: dict[str, object] = {
             "what": {"raw": self.what.raw, "for_model": self.what.for_model},
             "when": {"raw": self.when.raw, "for_model": self.when.for_model},
         }
+        if self.speaker is not None:
+            cleaned = fold_typed(self.speaker.for_model)
+            if cleaned and len(cleaned) <= SPEAKER_LIMIT:
+                stored["speaker"] = {"raw": self.speaker.raw, "for_model": cleaned}
+        return stored
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +243,10 @@ def extract(
                 speaker_handle=u.speaker_handle,
                 cites=meeting.source_ref,
                 said=said,
-                value=Promise(what=sanitize(p["what"]), when=sanitize(p["when"])),
+                value=Promise(
+                    what=sanitize(p["what"]),
+                    when=sanitize(p["when"]),
+                    speaker=sanitize(u.speaker_handle) if u.speaker_handle else None,
+                ),
             ))
     return out
