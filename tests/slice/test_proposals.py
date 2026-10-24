@@ -1080,8 +1080,10 @@ def test_review_ended_by_end_of_input_keeps_what_was_answered(summarised, monkey
 
 
 def test_review_shows_the_current_card_after_a_conflict(summarised, monkeypatch):
-    """Matrix "Review conflict": the item expires while its card is open."""
+    """Matrix "Review conflict", and 13d's "Expiry inside review": the item expires
+    while its card is open; the sentence, no command line, and the walk moves on."""
     machine, meeting = summarised
+    ids = [machine.item_id(meeting, n) for n in range(3)]
 
     def later(prompt=""):
         machine.clock = NOW + timedelta(days=15)
@@ -1092,13 +1094,146 @@ def test_review_shows_the_current_card_after_a_conflict(summarised, monkeypatch)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers)(prompt))
     code, out, _ = machine.run("proposal", "review", "--scope", "personal")
     assert code == EXIT_OK and "expired on Wed 4 Nov, not reviewed" in out
+    _assert_compact(_card_lines(out, ids), ids)
+    assert out.index("expired on Wed 4 Nov") < out.index("  Alex Morgan: book the review room")
 
 
 def test_review_without_a_terminal_is_refused(summarised):
-    """Matrix "Review without a terminal"."""
+    """Matrix "Review without a terminal", and 13d's "No terminal": today's message."""
     machine, _ = summarised
-    code, _, err = machine.run("proposal", "review")
-    assert code == EXIT_REFUSAL and "proposal list --json" in err
+    code, out, err = machine.run("proposal", "review")
+    assert code == EXIT_REFUSAL and out == ""
+    assert "`proposal review` asks at a terminal, and stdin is not one here." in err
+    assert "pm-ai proposal list --json" in err and "`reject` and `edit`" in err
+
+
+# ── Compact cards in the review walk (13d) ───────────────────────────────────
+
+COMMAND_LINES = ("  approve:", "  edit:", "  reject:", "  replaces ", "  staged again as ")
+ORIGIN = f"  from {TITLE}, Wed 21 Oct 10:00, personal"
+
+
+def _card_lines(out: str, ids: list[str]) -> list[str]:
+    """The walk's printed lines less the engine's sentences, which begin with an id
+    (an answer's outcome, a conflict's refusal) and are not part of a card."""
+    return [
+        line for line in out.splitlines()
+        if not any(line.startswith(f"  {each} ") for each in ids)
+    ]
+
+
+def _assert_compact(lines: list[str], ids: list[str]) -> None:
+    for line in lines:
+        assert "--if-version" not in line and "unavailable:" not in line
+        assert not line.startswith(COMMAND_LINES), line
+        assert not any(each in line for each in ids), line
+
+
+def test_review_cards_are_compact(summarised, monkeypatch):
+    """13d matrix "Interactive review": item, owner, text, due, origin; no commands."""
+    machine, meeting = summarised
+    ids = [machine.item_id(meeting, n) for n in range(3)]
+    code, out, _ = _review(machine, monkeypatch, "s", "s", "s")
+    assert code == EXIT_OK
+    _assert_compact(out.splitlines(), ids)
+    assert out.splitlines() == [
+        "Action item, waiting for you until Wed 4 Nov",
+        "  Sam Rivera: send the cache TTL numbers (Thursday)",
+        ORIGIN,
+        "Action item, waiting for you until Wed 4 Nov",
+        "  Alex Morgan: book the review room",
+        ORIGIN,
+        "Action item, waiting for you until Wed 4 Nov",
+        "  unassigned: draft the release notes (Friday)",
+        ORIGIN,
+        "3 skipped.",
+        "next: pm-ai proposal list --scope personal",
+    ]
+
+
+def test_review_shows_the_replacement_compact(summarised, monkeypatch):
+    """13d matrix "Edit inside review": the replacement's card is compact too,
+    printed before "approve it? [Y/n]"."""
+    machine, meeting = summarised
+    first = machine.item_id(meeting)
+    ids = [first, f"{first}_e1", *(machine.item_id(meeting, n) for n in (1, 2))]
+    printed: list[str] = []
+    monkeypatch.setattr(cli, "_stdin_is_terminal", lambda: True)
+    queue = ["e", "", "", "Monday", "n", "q"]
+
+    def typed(prompt=""):
+        printed.append(f"PROMPT {prompt.strip()}")
+        return queue.pop(0)
+
+    monkeypatch.setattr("builtins.input", typed)
+    real_echo = cli._echo
+
+    def echoed(text="", **kwargs):
+        printed.append(str(text))
+        real_echo(text, **kwargs)
+
+    monkeypatch.setattr(cli, "_echo", echoed)
+    code, out, _ = machine.run("proposal", "review", "--title", "weekly")
+    assert code == EXIT_OK
+    _assert_compact(_card_lines(out, ids), ids)
+    assert out.count(ORIGIN) == 3
+    preview = "Action item, waiting for you until Wed 4 Nov\n  Sam Rivera: send the cache TTL numbers (Monday)\n" + ORIGIN + "\n"
+    assert printed[printed.index("PROMPT approve it? [Y/n]:") - 1] == preview
+    assert machine.load(f"{first}_e1").state is ProposalState.STAGED
+
+
+def test_review_shows_the_current_card_compact_after_a_conflict(summarised, monkeypatch):
+    """13d matrix "Conflict inside review": the refusal's sentence, then the card compact."""
+    machine, meeting = summarised
+    item = machine.item_id(meeting)
+    ids = [machine.item_id(meeting, n) for n in range(3)]
+
+    def moved(prompt=""):
+        proposal = machine.load(item)
+        machine.storage.restage_proposal(_replace(proposal, payload={**proposal.payload, "due": "Monday"}))
+        return "a"
+
+    monkeypatch.setattr(cli, "_stdin_is_terminal", lambda: True)
+    answers = iter([moved, lambda prompt="": "q"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers)(prompt))
+    code, out, _ = machine.run("proposal", "review", "--scope", "personal")
+    assert code == EXIT_OK
+    sentence = out.index("changed since version 1 was shown")
+    assert out.index("(Thursday)") < sentence < out.index("  Sam Rivera: send the cache TTL numbers (Monday)")
+    _assert_compact(_card_lines(out, ids), ids)
+    assert machine.load(item).state is ProposalState.STAGED
+
+
+def test_show_list_and_the_verbs_keep_the_full_card(summarised):
+    """13d matrix "`show` and `list`": the commands, as in 13a; the verbs' text too."""
+    machine, meeting = summarised
+    item, second = machine.item_id(meeting), machine.item_id(meeting, 1)
+    for words in (("proposal", "show", item), ("proposal", "list")):
+        code, out, _ = machine.run(*words)
+        assert code == EXIT_OK
+        for marker in ("  approve:", "  edit:", "  reject:"):
+            assert marker in out
+        assert f"pm-ai proposal approve {item} --scope personal --if-version 1" in out
+    code, out, _ = machine.run("proposal", "approve", second)
+    assert code == EXIT_OK and f"pm-ai proposal reject {second} --scope personal" in out
+
+
+def test_json_objects_keep_their_commands(summarised):
+    """13d matrix "`--json`": the same objects, the actions' commands included."""
+    machine, meeting = summarised
+    item, second, third = (machine.item_id(meeting, n) for n in range(3))
+    _, listing = machine.json("proposal", "list")
+    _, shown = machine.json("proposal", "show", item)
+    for card in (*listing["proposals"], shown["proposal"]):
+        for action in ("approve", "edit", "reject"):
+            assert "--if-version" in _command(card, action)
+    _, edited = machine.json("proposal", "edit", item, "--due", "Monday")
+    assert edited["outcome"] == "edited" and _command(edited["proposal"], "approve")
+    _, approved = machine.json("proposal", "approve", second)
+    assert approved["outcome"] == "approved"
+    assert approved["proposal"]["actions"]["reject"]["command"][:3] == ["proposal", "reject", second]
+    _, rejected = machine.json("proposal", "reject", third)
+    assert rejected["outcome"] == "rejected" and "actions" in rejected["proposal"]
 
 
 def test_a_refusal_in_json_is_one_object_on_standard_output(summarised):

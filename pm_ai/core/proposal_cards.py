@@ -294,11 +294,25 @@ def _actions(
     )
 
 
-def card_text(card: Card) -> str:
-    """The text card: heading, field lines, origin, what it replaced, the commands."""
+def card_text(card: Card, *, compact: bool = False) -> str:
+    """The text card: heading, field lines, origin, what it replaced, the commands.
+
+    `compact=True` is for the interactive review walk only (13d): the heading,
+    the field lines and the origin, which are the full form's first lines,
+    without the `replaces`, `staged again as` and action lines. `show`, `list`,
+    the verbs' outcomes and `refusal_text` print the full form.
+    """
     lines = [card.heading]
     lines += [f"  {line}" for line in card.field_lines]
     lines.append(f"  {card.origin}")
+    if not compact:
+        lines += _detail_lines(card)
+    return "\n".join(lines) + "\n"
+
+
+def _detail_lines(card: Card) -> list[str]:
+    """The full form's lines after the origin: what it replaced, then the commands."""
+    lines: list[str] = []
     if card.replaces:
         lines.append(f"  replaces {card.replaces}")
     if card.replaced_by and card.state != ProposalState.SUPERSEDED.value:
@@ -312,7 +326,7 @@ def card_text(card: Card) -> str:
             lines.append(f"  {name} {command_line(action.command)}")
         elif waiting and action.reason:
             lines.append(f"  {name} unavailable: {action.reason}")
-    return "\n".join(lines) + "\n"
+    return lines
 
 
 def instant_json(at: datetime | None) -> str | None:
