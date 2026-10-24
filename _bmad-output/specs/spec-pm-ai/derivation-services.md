@@ -96,7 +96,7 @@ run(ctx)  -> JobResult                  one task, no orchestration
 
 Trigger kind and job identity are independent — the same job runs the same way whichever woke it. That is what makes kind 3 safe: a requested job that finds its inputs unchanged does no work, because staleness is decided by comparing the stored per-entry MD5 against the file, not by trusting whoever asked.
 
-**The dependency graph is derived, never configured.** One job's `outputs()` intersecting another's `inputs()` *is* the edge. Transcript processing outputs `commitments_log.md`; commitment indexing inputs it; the chain follows without anybody writing it down twice. That is the same principle the scope model already uses — tier and exclusion sets derived from node declarations rather than maintained beside them — and it fails the same way if abandoned: two structures that can disagree.
+**The dependency graph is derived, never configured.** One job's `outputs()` intersecting another's `inputs()` *is* the edge. Approving a commitment writes `commitments_log.md` (`15a`, a request rather than a job); commitment indexing inputs it; the chain follows without anybody writing it down twice. That is the same principle the scope model already uses — tier and exclusion sets derived from node declarations rather than maintained beside them — and it fails the same way if abandoned: two structures that can disagree.
 
 A job never enqueues its successor. It declares what it produced; the task manager decides what that makes stale.
 
@@ -105,7 +105,7 @@ A job never enqueues its successor. It declares what it produced; the task manag
 | job | inputs | outputs | trigger |
 | --- | --- | --- | --- |
 | **Harvest** | connector instance + cursor | normalized events → `event_log/` | schedule (240m ±15, per AD-9) |
-| **Transcript processing** | a capture in `transcripts/` | meeting summary → `meetings/`, decisions → `event_log/`, commitments → `commitments_log.md`, staged proposals, meeting updates → a project's `member_updates.md` | filesystem event in `transcripts/` |
+| **Transcript processing** | a capture in `transcripts/` | meeting summary → `meetings/`, decisions → `event_log/`, staged proposals, meeting updates → a project's `member_updates.md` | filesystem event in `transcripts/` |
 | **Commitment indexing** | `commitments_log.md` | `commitment_index.db` | filesystem event on that file |
 | **Search indexing** | `rules/`, `event_log/`, `meetings/` | `event_index.db` | filesystem event under any of them |
 | **Embedding** | `event_log/`, `meetings/`, `coaching_1on1_history.md` | `vector_index/` | filesystem event under any of them |
@@ -114,7 +114,7 @@ A job never enqueues its successor. It declares what it produced; the task manag
 
 **Wave 3 runs transcript processing before the task manager exists** (2026-10-16, stories 7b and 7e). Until story 10a, the daemon offers a meeting for summary from its harvest — at most 3 per harvest, one job per scope and meeting, the summary state row in `operational.db` saying what is waiting — and a hand-dropped transcript waits for the next harvest. The outputs are the ones in the row above; `member_updates.md` exists only in a project scope and is append-only, and the alias table (`aliases.md`) is written by the PM's `pm-ai member name`, never by a job.
 
-The chain the design must support, end to end: a meeting ends → the Graph adapter fetches and validates the transcript → the capture lands in `transcripts/` → transcript processing runs → `commitments_log.md` gains entries → commitment indexing runs → the index is current. Each step is one job with one responsibility, and no step names the next.
+The chain the design must support, end to end: a meeting ends → the Graph adapter fetches and validates the transcript → the capture lands in `transcripts/` → transcript processing runs → proposals are staged → the PM approves → `commitments_log.md` gains an entry → commitment indexing runs → the index is current. Each step is one job with one responsibility, and no step names the next.
 
 ## Shared resource accessors
 
@@ -122,7 +122,7 @@ Rule 3, made concrete. Each is a class with a narrow interface over one Tier-1 r
 
 | accessor | resource | used by |
 | --- | --- | --- |
-| `CommitmentLog` | `commitments_log.md` | transcript processing (append), indexing (read), the lifecycle job (append transitions) |
+| `CommitmentLog` | `commitments_log.md` | the approval and its catch-up (append, `15a`), the PM's marks (append, `15c`), the lifecycle job (append verdicts, story 16), indexing (read) |
 | `EventLog` | `event_log/` segments | harvest, transcript processing, every audit write |
 | `MeetingRecords` | `meetings/` | transcript processing (write), search indexing (read) |
 

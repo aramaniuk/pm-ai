@@ -7,7 +7,7 @@ paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pip
 scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, connectors, MCP skills, storage'
 status: final
 created: '2026-08-18'
-updated: 2026-10-16
+updated: 2026-10-24
 binds: [FR-01..FR-40, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
 sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.14.2']
 companions: ['SOLUTION-DESIGN.md']
@@ -308,13 +308,13 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** five divergent approval mechanisms with five card formats and five answers to "what if he never approves"
 - **Rule:** The core defines a single `Proposal`: id, type, summary, payload, target executor, expiry, version, status (`staged → approved → executing → executed`, or `→ rejected | expired | superseded`). `executing` is a real state, not a transient — it is the CAS latch AD-37 uses to make expiry and execution mutually exclusive. An edit **supersedes** rather than mutating in place, per AD-5. One card renderer serves both surfaces (Telegram inline keyboard, CLI approval queue). Features never build approval flows; they **register a proposal type** with a payload schema and either an executor callback or what approval means (`13a`) `[2026-10-22, Andrei, 13a]`. No external mutation derived from implicit extraction may execute without an approved Proposal. **Expiry is owned by the scheduler, not by features**: a registered type may override the default TTL (7 days) but never implements its own expiry sweep, and an expired proposal never executes.
 
-  `[2026-10-22, Andrei, 13a]` The allowed transitions are a table in `domain`, and any other is refused: `staged → approved | rejected | expired | superseded`; `approved → superseded` for every type; `approved → rejected` for a type with no executor; `approved → executing | expired` for a type with an executor; `executing → executed`. A proposal of a type with no executor stays `approved` and never enters `executing`. A proposal waits for review from the instant pm-ai staged it, for the longer of its stored and its type's registered time to live, and a staged proposal past that is expired to every reader and refused by every change, whether or not the sweep has reached it. An edit inserts a replacement in the superseded proposal's state, in the same step; editing an expired proposal stages a replacement, at most one live one, and leaves the expired one as it is. A re-stage keeps the staging instant and the time to live, and moves the version up only when the summary or payload changes.
+  `[2026-10-22, Andrei, 13a]` The allowed transitions are a table in `domain`, and any other is refused: `staged → approved | rejected | expired | superseded`; `approved → superseded` for every type; `approved → rejected` for a type with no executor whose approval records no commitment `[2026-10-24, Andrei, 15a]`; `approved → executing | expired` for a type with an executor; `executing → executed`. A proposal of a type with no executor stays `approved` and never enters `executing`. A proposal waits for review from the instant pm-ai staged it, for the longer of its stored and its type's registered time to live, and a staged proposal past that is expired to every reader and refused by every change, whether or not the sweep has reached it. An edit inserts a replacement in the superseded proposal's state, in the same step; editing an expired proposal stages a replacement, at most one live one, and leaves the expired one as it is. A re-stage keeps the staging instant and the time to live, and moves the version up only when the summary or payload changes.
 
 ### AD-14 — Commitment lifecycle is a domain state machine, distinct from Proposal `[revised 2026-10-22]`
 
 - **Binds:** FR-33, FR-34
 - **Prevents:** conflating approval status with real-world fulfillment status in one overloaded field
-- **Rule:** `PENDING → FULFILLED | ALTERED | BROKEN | UNKNOWN` is a domain state machine driven by execution telemetry (commits, MR merges, ticket closures). Approving a proposal produces a commitment in `PENDING` `[2026-10-22, Andrei, 13a]` — recorded by story 15, keyed by the proposal's id; until then approval records only the proposal's state; approval status is a *Proposal* state (AD-13) and the two lifecycles never share a status field — their member names are disjoint, asserted at import.
+- **Rule:** `PENDING → FULFILLED | ALTERED | BROKEN | UNKNOWN | ERROR | WITHDRAWN` is a domain state machine driven by execution telemetry (commits, MR merges, ticket closures). Approving a proposal produces a commitment in `PENDING` `[2026-10-22, Andrei, 13a]` `[2026-10-24, Andrei, 15a]` — one `pending` line appended to the `commitments_log.md` of the scope that owns the meeting when the PM approves, never while the proposal waits (`STAGED_APPROVAL` is a proposal state and is never written to a ledger), keyed by the proposal's root id, so an edit's replacement revises the same commitment; the approval is committed first and the line follows, and a missing line is written later, never twice; the line stores the meeting's day the due was resolved against, and a due resolved on an estimated day is marked estimated and never alone makes a commitment late; once approved, such a proposal is no longer rejected, and the commitment changes only through its own lines — the PM's mark (`fulfilled`, `altered`, `broken`, `withdrawn`), a due or owner he sets, or a telemetry verdict, and a verdict never replaces the PM's mark; `WITHDRAWN`, an approval the PM says was a mistake, is terminal and is never counted as broken; approval status is a *Proposal* state (AD-13) and the two lifecycles never share a status field — their member names are disjoint, asserted at import.
 
   **`UNKNOWN` is where an overdue commitment lands when the window has no harvest coverage** (AD-35). Only `FULFILLED` and `BROKEN` are terminal. Without this state the machine has no way to say "I cannot see", and a sleeping laptop reads as a broken promise.
 
@@ -443,19 +443,19 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   **The two vocabularies bind differently, and the difference is enforced** `[2026-09-23]`. A self-action type is *refused* from the payload registry and binds a set of required — not exhaustive — field names instead. A self-action is pm-ai's own record of something it did, so there is no provider payload to pin; the guard exists because one registry serving both vocabularies would let a connector declare a member only pm-ai may write.
 
-### AD-28 — Commitments belong to project scope; coaching commitments are a separate entity
+### AD-28 — Commitments belong to the scope that owns their meeting; coaching commitments are a separate entity
 
-- **Binds:** FR-16, FR-34, AD-4, AD-25
-- **Prevents:** a 1:1 coaching undertaking being written into the project ledger, where it belongs to the wrong subject and — while the project scope was committed in full — was published to a repository `[motive restated 2026-09-03]` — and, symmetrically, a report's career goal being filed as either
-- **Rule:** Three distinct entities, three scopes, no shared storage and no shared code path:
+- **Binds:** FR-16, FR-34, AD-4, AD-25, `15a`
+- **Prevents:** a 1:1 coaching undertaking being written into a commitment ledger, or a commitment into a ledger of the wrong scope `[2026-10-24, 15a]`, where it belongs to the wrong subject and — while the project scope was committed in full — was published to a repository `[motive restated 2026-09-03]` — and, symmetrically, a report's career goal being filed as either
+- **Rule:** Three distinct entities, no shared storage and no shared code path; a `Commitment` is kept in the scope that owns its meeting `[2026-10-24, Andrei, 15a]`:
 
   | Entity | What it is | Scope |
   | --- | --- | --- |
-  | `Commitment` | a team-facing promise, verified against execution telemetry (AD-14, AD-36) | project — `.project-ai/memory/commitments_log.md` |
+  | `Commitment` | a team-facing promise, verified against execution telemetry (AD-14, AD-36) | the meeting's scope: project — `.project-ai/memory/commitments_log.md`, or personal — `~/.manager-ai/memory/commitments_log.md` `[2026-10-24, Andrei, 15a]`; never `people` (AD-4) |
   | `CoachingCommitment` | the PM's own undertaking from a Socratic 1:1 (UJ-1) | personal |
   | `CareerGoal` | a direct report's goal agreed in a team 1:1 (UJ-4), HR-syncable on approval | people (AD-4) |
 
-  The project-scope ledger has no code path that accepts a personal or people entity. `CareerGoal` is not a `Commitment`: it is not verified against commit telemetry, and treating it as one would file a performance objective in the project's ledger, where it belongs to neither the right subject nor the right sharing rules.
+  Neither commitment ledger has a code path that accepts a `CoachingCommitment` or a `people`-scope entity — the accessor takes only lines built from a `Commitment` — and a commitment is written only to its own meeting's scope: a personal meeting's never to a project's ledger, a project meeting's never to the personal one `[2026-10-24, Andrei, 15a]`. `CareerGoal` is not a `Commitment`: it is not verified against commit telemetry, and treating it as one would file a performance objective in the project's ledger, where it belongs to neither the right subject nor the right sharing rules.
 
 ### AD-29 `[revised 2026-09-23]` — Sanitization is non-destructive to the stored record
 
@@ -506,7 +506,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** every surfaced fact, FR-03, FR-25, FR-32, FR-33, FR-34, NFR-09, AD-29, `7b`, `7e`
 - **Prevents:** provenance pointing at a derived artifact that has its own lifecycle — so a transcript purge silently empties every citation that depended on it, and the drift auditor reports **clean** against sources that no longer exist
-- **Rule:** `source_ref` points at the **most upstream durable referent** — the thing that happened — never at a derived capture of it. A transcript is a derivative of a meeting, so meeting-derived facts cite `meeting:<id>` plus speaker, with an optional time offset used only for tracing. Commit SHAs, MR URLs, ticket anchors, and message IDs already satisfy this.
+- **Rule:** `source_ref` points at the **most upstream durable referent** — the thing that happened — never at a derived capture of it. A transcript is a derivative of a meeting, so meeting-derived facts cite `meeting:<id>` plus speaker, with an optional time offset used only for tracing. `[2026-10-24, Andrei, 15a]` A commitment from a spoken promise cites its meeting and its speaker, a name as said; one from a summary's action item cites its meeting and its owner, since the summary records who owns an item, not who said it. Commit SHAs, MR URLs, ticket anchors, and message IDs already satisfy this.
 
   **`Meeting` is a first-class Tier-1 record**: id, calendar event reference, title, start, duration, attendees, **scope**, plus the provider's tentative flag and its iCal uid. **It holds no transcript pointer and no processing status** `[revised 2026-09-23]`: the transcript's home is *derived* from the meeting's scope and id, which is the stronger form of this AD's own self-containment rule — there is no pointer to go stale. **Some fields are deliberately non-durable**: the tentative flag and the uid ride in memory and reach no file, and a future meeting is not persisted at all, because a calendar row that has not happened yet is a plan rather than a record. The stored record has two owners — a machine-written region and a human-written `## Notes` that no writer may touch. It is also where FR-03's Man-Hour Cost inputs live, so FR-03, FR-32, and UJ-8 key off one entity rather than three ad-hoc lookups.
 
@@ -555,7 +555,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 - **Binds:** FR-06, FR-28, FR-33, FR-34, AD-1 class M
 - **Prevents:** the closed loop closing on itself — FR-06's executor posts a comment to WI-108, FR-34's verifier later reads WI-108 activity as fulfilment evidence, and the system marks a commitment `FULFILLED` on telemetry it manufactured. Nothing crashes; the ledger simply becomes confidently wrong in the direction that looks like success
-- **Rule:** Every event carries `authored_by ∈ {external, pm_ai, unknown}`. **Only `external` is admissible as evidence.** A transition to `FULFILLED` requires evidence authored by someone other than pm-ai; self-authored activity may be displayed for context but never counted.
+- **Rule:** Every event carries `authored_by ∈ {external, pm_ai, unknown}`. **Only `external` is admissible as evidence.** A transition to `FULFILLED` requires evidence authored by someone other than pm-ai; self-authored activity may be displayed for context but never counted. `[2026-10-24, Andrei, 15a]` The PM's own mark of a commitment as fulfilled, altered, broken or withdrawn is not evidence and needs none: it is his decision, recorded as a line of its own kind under his handle, counted apart from telemetry verdicts (SM-9's manual override; `withdrawn` excluded from every broken-promise rate), never produced by pm-ai and never read as telemetry having verified anything.
 
   **`unknown` is a required third value, not a convenience.** A two-valued enum has to default, and defaulting to `external` fails *open* — an event nobody could attribute would count as proof a promise was kept. Unattributed events therefore resolve to `unknown`, which is never evidence. `Provenance.UNKNOWN` is the envelope default, so an adapter that forgets to attribute fails closed rather than silently vouching.
 
@@ -569,9 +569,9 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
 ### AD-37 — Every shared-entity transition is a compare-and-swap `[NEW]` `[revised 2026-10-14, 2026-10-16, 2026-10-19, 2026-10-22]`
 
-- **Binds:** AD-13, AD-14, AD-20, all surfaces, `7b`, `7c`, `13a`
+- **Binds:** AD-13, AD-14, AD-20, all surfaces, `7b`, `7c`, `13a`, `15a`
 - **Prevents:** a summary that loses a race having already overwritten the record and the staged items before its version check fails `[2026-10-16]`; approving the same proposal from Telegram and the CLI and creating two HR goals; and the expiry sweeper racing the job worker so that an eleven-day-old approved change posts after expiry, despite AD-13 stating that expired proposals never execute
-- **Rule:** Proposal and Commitment transitions are versioned compare-and-swap: read version → attempt transition with the expected version → on conflict, **reload and re-evaluate**, never blind-retry. Terminal states are terminal, and a worker re-checks state **at execution time**, not only at enqueue time.
+- **Rule:** Proposal and Commitment transitions are versioned compare-and-swap: read version → attempt transition with the expected version → on conflict, **reload and re-evaluate**, never blind-retry. Terminal states are terminal, and a worker re-checks state **at execution time**, not only at enqueue time. `[2026-10-24, 15a]` A commitment's lines are appended by compare-and-append: the writer folds the ledger, leaves out every line whose entry id is already there, and appends with the size it read checked in its claimed step; a ledger that grew is read again, never appended to blindly.
 
   Expiry and execution are mutually exclusive by construction: the sweeper CASes `staged → expired`, the worker CASes `approved → executing`, and whichever loses observes the winner and stops. `[2026-10-22, Andrei, 13a]` Approval and rejection check expiry inside their own claimed step. A version only moves up, so a version a surface displayed matches only what it displayed. A lost compare-and-swap that finds the row already in the requested state is reported as done, not as a conflict. Mutations targeting the same external entity serialize through a per-target lock keyed by `target_ref`, so two approved changes to one work item cannot interleave.
 
@@ -1097,7 +1097,7 @@ pm_ai/
 | Telemetry radar, connector lifecycle (FR-02, FR-35) | `connectors/` + scheduler | AD-9, AD-10, AD-11, AD-12 |
 | Transcript ingestion & meeting pipeline (FR-01, FR-03, FR-05, FR-08) | `core/extraction` + `TranscriptSourcePort` | AD-12, AD-19, AD-23 |
 | Dual-authorization extraction & approvals (FR-06, FR-21, FR-31) | `core/proposals` + surfaces | AD-13, AD-1 |
-| Commitment ledger & closed-loop verification (FR-33, FR-34) | `core/commitments` + storage | AD-3, AD-5, AD-14, AD-34, AD-35, AD-36, AD-37 |
+| Commitment ledger & closed-loop verification (FR-33, FR-34) | `domain/commitments`, `core/commitment_log` (the ledger, `15a`), `core/due_dates`, `core/commitments` (the verifier, story 16) + storage | AD-3, AD-5, AD-14, AD-34, AD-35, AD-36, AD-37 |
 | Continuous self-improvement loop (FR-10, FR-14, FR-15, FR-20, UJ-1) | `core/coaching` + `domain/selfimprovement` + application ledger | **AD-42**, AD-13, AD-5, AD-18, AD-36, AD-38 |
 | Micro-decision alignment engine (FR-11, FR-09, FR-13, UJ-9) | `core/goal_register` + `core/rendering` + `domain/goals` | **AD-41**, AD-27, AD-34, AD-38, AD-40 |
 | Coaching, briefings, anti-burnout (FR-09, FR-12, FR-14..FR-17) | `core/coaching`, `core/alignment` | AD-15, AD-17, AD-25, AD-28, AD-41 |
