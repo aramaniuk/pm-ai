@@ -4889,7 +4889,7 @@ def _review_one(desk: ProposalDeskPort, card: Card, counts: dict[str, int]) -> N
     """One card: shown, asked, answered by one change. A conflict shows the card again."""
     current = card
     while True:
-        _echo(card_text(current), end="")
+        _echo(card_text(current, compact=True), end="")
         answer = _review_line(f"{REVIEW_KEYS}: ").lower()[:1]
         scope = DataScope.parse(current.scope)
         try:
@@ -4948,7 +4948,7 @@ def _review_edit(
     if preview.card.fields == card.fields:
         _echo("  those are the values it already holds; nothing was written.")
         return None
-    _echo(card_text(preview.card), end="")
+    _echo(card_text(preview.card, compact=True), end="")
     agree = _review_line("  approve it? [Y/n]: ").lower()
     return desk.edit(
         card.proposal_id,
