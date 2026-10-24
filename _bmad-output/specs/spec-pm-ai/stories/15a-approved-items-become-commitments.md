@@ -686,6 +686,7 @@ Anchors checked against `origin/main` at `b6f8f62`.
   - **Re-ingestion.** An old promise payload without `speaker` compares as equal, so there is no version bump or false "dropped" count, and a slice test covers it.
   - **Tests named:** `test_transcript_path.py:652-655`, `test_proposals.py:1216`, and the timed project-scope approval with the git check and one retry.
   - **Amendments completed:** AD-28's Prevents and Rule lead-in, AD-33, AD-14's state list, PRD lines 65-67, 96, 267 and 766, exact sentences for `derivation-services.md:99` and `scope-model.md` §B, SM-9's withdrawn exclusion, and the order the three skills apply them in.
+- **2026-10-24, approved for build (Andrei),** after the readiness check, the three-lens review and his eleven decisions.
 
 ## Design Notes
 
