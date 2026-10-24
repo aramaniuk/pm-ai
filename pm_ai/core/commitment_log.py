@@ -261,6 +261,8 @@ def render_line(record: Record) -> CommitmentLine:
             if c.day_from is not None:
                 parts.append(f"day_from={render_value(c.day_from, where='an estimate source')}")
         parts.append(f"what={_bounded('what', c.what, WHAT_LIMIT)}")
+        if c.what_cut:
+            parts.append("what_cut=yes")
         if c.owner is not None:
             parts.append(f"owner={_bounded('owner', c.owner, OWNER_LIMIT)}")
         if c.speaker is not None:
@@ -402,15 +404,20 @@ def preview_due(
     return day, day_from, resolve(said, day, estimated=day_from is not None)
 
 
-def _cut_title(title: str) -> tuple[str, bool]:
-    """The title folded to one line, cut at a word to at most `TITLE_LIMIT`."""
-    folded = fold_typed(title)
-    if len(folded) <= TITLE_LIMIT:
+def _cut_at_word(text: str, limit: int) -> tuple[str, bool]:
+    """`text` folded to one line, cut at a word to at most `limit` characters."""
+    folded = fold_typed(text)
+    if len(folded) <= limit:
         return folded, False
-    cut = folded[:TITLE_LIMIT]
-    if folded[TITLE_LIMIT] != " " and " " in cut:
+    cut = folded[:limit]
+    if folded[limit] != " " and " " in cut:
         cut = cut[: cut.rindex(" ")]
     return cut.rstrip(), True
+
+
+def _cut_title(title: str) -> tuple[str, bool]:
+    """The title folded to one line, cut at a word to at most `TITLE_LIMIT`."""
+    return _cut_at_word(title, TITLE_LIMIT)
 
 
 def _check(name: str, value: str | None, limit: int) -> None:
@@ -436,6 +443,12 @@ def from_approved(
     if proposal.changed_at is None:
         raise NoApprovalInstant(f"{proposal.proposal_id} records no approval instant.")
     what, owner, speaker, said = _values(proposal)
+    what_cut = False
+    if proposal.type == IMPLICIT_COMMITMENT and len(what) > WHAT_LIMIT:
+        # A spoken promise is never refused for its length (Andrei,
+        # 2026-10-24): `11b`'s pattern bounds nothing, so its `what` is cut
+        # at a word and marked; the full text stays in the proposal body.
+        what, what_cut = _cut_at_word(what, WHAT_LIMIT)
     _check("what", what, WHAT_LIMIT)
     _check("owner", owner, OWNER_LIMIT)
     _check("speaker", speaker, OWNER_LIMIT)
@@ -471,6 +484,7 @@ def from_approved(
             person=speaker if proposal.type == IMPLICIT_COMMITMENT else owner,
         ),
         title_cut=title_cut,
+        what_cut=what_cut,
     )
 
 
@@ -736,9 +750,12 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
     line by `(replacement number, occurred, entry)`; the owner from the newest
     by `(occurred, entry)` of that line and any `owner_set`; the due from the
     newest by `(occurred, entry)` of the `pending` line, `revised` lines that
-    carry one, and `due_set` lines; the state from the `marked` lines that
-    `can_mark` allows, else the newest `verdict`, else `PENDING`. A line for a
-    commitment with no `pending` line is an orphan.
+    carry one, and `due_set` lines; the state from the `marked` and `verdict`
+    lines by `(occurred, entry)`: a `marked` line where `can_mark` allows it,
+    a `verdict` unless the state in force is the PM's own mark other than
+    `altered` (after `altered` the commitment is still tracked, Andrei,
+    2026-10-24); else `PENDING`. A line for a commitment with no `pending`
+    line is an orphan.
     """
     groups: dict[str, list[_Read]] = {}
     for line in parsed.lines:
@@ -777,7 +794,6 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
         else:
             due = _due_of(due_line.fields, estimated=estimated)
         state, source = CommitmentState.PENDING, StateSource.NONE
-        marked_applied = False
         for line in sorted(
             (line for line in lines if line.kind in (LineKind.MARKED, LineKind.VERDICT)),
             key=lambda line: (line.occurred, line.entry),
@@ -785,10 +801,10 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
             if line.kind is LineKind.MARKED:
                 mark = Mark(line.fields["state"])
                 if can_mark(state, source, mark):
-                    state, source, marked_applied = mark.state, StateSource.PM, True
+                    state, source = mark.state, StateSource.PM
                 else:
                     refused += 1
-            elif not marked_applied:
+            elif source is not StateSource.PM or state is CommitmentState.ALTERED:
                 state, source = CommitmentState(line.fields["state"]), StateSource.TELEMETRY
         speaker = _optional(fields, "speaker")
         owner = _optional(owner_line.fields, "owner")
@@ -815,6 +831,7 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
                 person=speaker if kind == IMPLICIT_COMMITMENT else owner,
             ),
             title_cut=fields.get("title_cut") == "yes",
+            what_cut=newest.fields.get("what_cut") == "yes",
         )
         heads[root] = Head(
             proposal=newest.fields["proposal"],

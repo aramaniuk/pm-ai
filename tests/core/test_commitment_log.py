@@ -200,6 +200,40 @@ def test_a_spoken_promise_records_its_speaker_and_no_owner():
     assert held.cites == Cites("meeting:mtg_a", "Sam Rivera")
 
 
+def test_a_long_promise_is_cut_at_a_word_and_marked_never_refused():
+    """Matrix "Long promise" (Andrei, 2026-10-24): never `too_long`."""
+    what = " ".join(["send the cache TTL numbers"] * 12)
+    assert len(what) > 300
+    promise = replace(
+        _item(),
+        type="implicit_commitment",
+        payload={
+            "what": {"raw": what, "for_model": what},
+            "when": {"raw": "Friday", "for_model": "Friday"},
+            "speaker": {"raw": "Sam Rivera", "for_model": "Sam Rivera"},
+        },
+    )
+    line = _pending(promise)
+    assert " what_cut=yes " in line.text
+    held = _read(line).commitments[ROOT]
+    assert len(held.what) <= 200 and held.what_cut
+    assert what.startswith(held.what) and what[len(held.what)] == " "
+    assert promise.payload["what"]["for_model"] == what, "the proposal body keeps the full text"
+
+
+def test_a_promise_within_its_limit_is_not_marked_cut():
+    promise = replace(
+        _item(),
+        type="implicit_commitment",
+        payload={
+            "what": {"raw": "w" * 200, "for_model": "w" * 200},
+            "when": {"raw": "Friday", "for_model": "Friday"},
+        },
+    )
+    line = _pending(promise)
+    assert "what_cut" not in line.text and not _read(line).commitments[ROOT].what_cut
+
+
 def test_only_render_line_builds_a_line():
     with pytest.raises(NotACommitmentLine):
         CommitmentLine("cml_000000000000", ROOT, LineKind.PENDING, "- entry=…")
@@ -396,6 +430,31 @@ def test_a_verdict_applies_while_no_mark_has():
     # The PM confirms telemetry's verdict with his own mark.
     held = _read(_pending(), _verdict("broken", 5), _mark("broken", 9)).commitments[ROOT]
     assert held.state is CommitmentState.BROKEN and held.state_source is StateSource.PM
+
+
+def test_a_verdict_applies_after_an_altered_mark():
+    """Matrix "Verdict after altered" (Andrei, 2026-10-24): still tracked."""
+    held = _read(_pending(), _mark("altered", 5), _verdict("fulfilled", 10)).commitments[ROOT]
+    assert held.state is CommitmentState.FULFILLED and held.state_source is StateSource.TELEMETRY
+    # Telemetry keeps judging it: a later verdict replaces an earlier one.
+    held = _read(
+        _pending(), _mark("altered", 5), _verdict("unknown", 10), _verdict("broken", 15)
+    ).commitments[ROOT]
+    assert held.state is CommitmentState.BROKEN and held.state_source is StateSource.TELEMETRY
+    # A verdict that comes before the altered mark is replaced by it.
+    held = _read(_pending(), _verdict("broken", 5), _mark("altered", 10)).commitments[ROOT]
+    assert held.state is CommitmentState.ALTERED and held.state_source is StateSource.PM
+
+
+@pytest.mark.parametrize("mark", ["fulfilled", "broken", "withdrawn"])
+def test_every_other_mark_still_blocks_a_later_verdict(mark):
+    for verdict in ("fulfilled", "broken", "unknown", "error"):
+        held = _read(_pending(), _mark(mark, 5), _verdict(verdict, 10)).commitments[ROOT]
+        assert held.state is CommitmentState(mark) and held.state_source is StateSource.PM
+    # Marked again altered after one of them, telemetry judges it again.
+    if mark != "fulfilled":  # the table refuses `altered` after a PM `fulfilled`
+        held = _read(_pending(), _mark(mark, 5), _mark("altered", 8), _verdict("fulfilled", 10)).commitments[ROOT]
+        assert held.state is CommitmentState.FULFILLED and held.state_source is StateSource.TELEMETRY
 
 
 _Y, _A, _R = MarkAnswer.YES, MarkAnswer.ALREADY, MarkAnswer.REFUSED

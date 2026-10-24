@@ -473,6 +473,20 @@ def test_a_spoken_promise_records_who_said_it_and_no_owner(machine):
     assert "owner" not in line and line["due_said"] == "Friday" and line["due"] == "2026-10-23"
 
 
+def test_a_long_spoken_promise_is_cut_and_recorded(machine):
+    """Matrix "Long promise" (Andrei, 2026-10-24): cut at a word, never `too_long`."""
+    meeting = _put(machine, _meeting("mtg_l"))
+    what = " ".join(["send the cache TTL numbers"] * 12)
+    promise = _promise(machine, meeting, f"I'll {what} by Friday")
+    code, found = machine.json("proposal", "approve", promise.proposal_id)
+    assert code == EXIT_OK
+    assert found["commitment"]["recorded"] is True and found["commitment"]["reason"] is None
+    (line,) = _lines(machine)
+    assert line["what_cut"] == "yes" and len(line["what"]) <= 200 and what.startswith(line["what"])
+    assert machine.load(promise.proposal_id).payload["what"]["for_model"] == what
+    assert _catch_up(machine).scopes["personal"].too_long == 0
+
+
 def _old_promise(machine: Machine, meeting: Meeting) -> str:
     """A promise staged before 15a: its payload holds no speaker."""
     promise = _promise(machine, meeting, "I'll send the numbers by Friday")

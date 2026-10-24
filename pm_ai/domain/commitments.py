@@ -154,6 +154,8 @@ MARKABLE: Mapping[tuple[CommitmentState, StateSource], Mapping[Mark, MarkAnswer]
 
 The PM's mark outranks telemetry; `FULFILLED`, `BROKEN` and `WITHDRAWN` are
 terminal for telemetry, and only his mark moves a commitment out of them.
+After his `altered` mark the commitment is still tracked, so a later verdict
+applies (Andrei, 2026-10-24).
 """
 
 
@@ -252,3 +254,6 @@ class Commitment:
     approved_at: datetime
     cites: Cites
     title_cut: bool = False
+    what_cut: bool = False
+    """A spoken promise's `what` over `WHAT_LIMIT`, cut at a word on its line
+    (Andrei, 2026-10-24); the full text stays in the proposal body."""
