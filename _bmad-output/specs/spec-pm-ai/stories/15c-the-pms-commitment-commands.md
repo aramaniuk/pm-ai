@@ -63,11 +63,17 @@ context:
   - `commitment due <id> (<words> | --clear) [--scope …] [--if-version <version>] [--json]`
   - `commitment owner <id> (<name> | --clear) [--scope …] [--if-version <version>] [--json]`
   - `commitment review [--scope …] [--meeting <id> | --title <words> [--on <date>]]`
-- **`<id>` is the commitment id**, the proposal's root id. A replacement id `<root>_e<n>`, as `proposal show` prints it, is accepted and means its root. Without `--scope`, the id is looked up in personal and every enrolled project.
+- **`<id>` is the commitment id**, the proposal's root id. A replacement id `<root>_e<n>`, as `proposal show` prints it, is accepted and means its root only when the proposal store or the ledger knows that id; any other `_e<n>` is `not_found`. Without `--scope`, the id is looked up in personal and every enrolled project.
+- **Finding the commitment, in this order:**
+  1. **A root that a malformed line names** (`ledger.malformed_roots`) is refused as `malformed` before anything is decided from the state in force, whether or not a readable `pending` line exists for it.
+  2. **Found in more than one ledger** (only a hand copy makes this): `show` prints one card naming both scopes, flagged `ambiguous`. Every verb refuses (exit 3, `ambiguous`), saying the same id is in both ledgers and that one line must be removed by hand.
+  3. **Not found while a ledger looked at could not be read:** refused as `ledger_unreadable`, naming that scope, never `not_found`, because the commitment may be in it.
+  4. **Not found, and the proposal store holds the id approved** (its `pending` line not yet written: 15a's catch-up has not run, or the approval's write failed): `not_found`. The reason says the approval is not recorded in the ledger yet and names the repair: `pm-ai proposal approve <id> --scope <scope>` writes it, and so does the next daemon start.
+  5. **Not found, and the proposal is waiting, rejected, expired, or of a type that records no commitment:** `not_found`, naming `pm-ai proposal show <id> --scope …`.
+  6. **Otherwise** `not_found`, naming `pm-ai commitment list`.
 - **Scopes,** as in 13a:
   - `people:` and the application scope are refused (exit 3, `scope_refused`); no `people` ledger exists (AD-4, AD-28);
   - a `project:` that is not enrolled is refused (exit 3, `not_enrolled`), naming the enrolled projects;
-  - an id found in more than one ledger, which only a hand copy can make, is refused (exit 3, `ambiguous`), naming the scopes;
   - every command pm-ai prints carries `--scope`.
 - **Asks nothing.** Every command except `review` asks no question. `review` is the walk the PM chose to start.
 - **Choosing without an id:**
@@ -78,39 +84,57 @@ context:
 
 ### What each change writes (the line kinds 15a defines)
 
-- **`done`, `broken`, `withdrawn`:** one `marked` line with `state=fulfilled`, `broken` or `withdrawn`, `by=pm`, `handle` when `pm_identity()` gives one (the lowest in sort order when it gives several), the `note` when given, `occurred` and `at` the moment of the command, and `via` the surface (`terminal` or `prompt`; story 5 adds `telegram`).
+- **`done`, `broken`, `withdrawn`:** one `marked` line with `state=fulfilled`, `broken` or `withdrawn`, `by=pm`, `handle` when `pm_identity()` gives one (the lowest in sort order when it gives several), the `note` when given, `occurred` (below) and `at` the moment of the append, and `via` the surface.
+  - **`via`** is `prompt` whenever the command was typed at the prompt, whichever process runs it (the daemon, or the prompt's own for `review`), and `terminal` otherwise. Story 5 adds `telegram`.
+  - **When the PM's handle cannot be read** (`read_pm_identity`, `wiring.py:3532`, fails or lists the rows as unusable), the mark is still written, without `handle`, and the outcome says so in one sentence ("recorded without your handle: the connector rows could not be read"). In JSON, `"handle_recorded": false`.
   - Before writing, `mark_answer` is asked of the state and source in force.
     - **`yes`:** the line is written. From a telemetry state, the sentence says the mark confirms or overrides it.
-    - **`already`** (the PM's own mark of that state is in force): nothing is written, outcome `already`, exit 0. The sentence names when and from where; a `--note` given is not recorded, and the sentence says so.
+    - **`already`** (the PM's own mark of that state is in force): nothing is written, outcome `already`, exit 0. The sentence names when and from where. A `--note` given is not recorded; the sentence says so, and JSON has `"note_recorded": false`.
     - **`refused`:** exit 3, `mark_refused`, with the reason from the table ("you marked it done on <date>, so it is not altered or withdrawn; mark it broken if it was not done after all").
-- **`altered`:** the PM says what was agreed has changed. In this order:
-  1. **One append** holding the `marked state=altered` line (with `--note`), plus an `owner_set` line when `--owner` differs from the owner in force, plus a `due_set` line when `--due` is given and differs from the due in force. The lines share one `occurred`.
-  2. **Then, when `--what` is given, 13a's edit of the commitment's live approved proposal** (`proposal_id` in the fold) with that wording only, as `proposal edit` does. The recorder writes its `revised` line (15a). The state stays `ALTERED`: a `revised` line never changes the state.
-  - **The mark comes first** because it is the PM's decision and the one line that must not be lost. If the edit then fails, the outcome says the mark is recorded and the wording is not, and gives the exact `pm-ai proposal edit <proposal> --scope … --what "…"` to run (exit 3, `edit_refused`, carrying 13a's reason).
+- **`altered`:** the PM says what was agreed has changed.
+  - **Every input is checked before anything is written:** the note's length, a non-empty `--what`, `--what` on a promise, and that `--due` resolves. An `--due` that names no date is refused (exit 3, `due_unresolved`) with nothing written, the mark included.
+  - **A second `altered` is always written.** `MARKABLE` answers `yes` for `altered` from `(ALTERED, PM)` (`domain/commitments.py:141`), never `already`, so a later renegotiation with a new note, due, owner or wording is recorded as its own mark. Step 2 of the writer's steps (below) does not apply to `altered`.
+  - **Then, in this order:**
+    1. **One append** holding the `marked state=altered` line (with `--note`), plus an `owner_set` line when `--owner` differs from the owner in force, plus a `due_set` line when `--due` differs from the due in force by the rule `due` uses. The lines share one `occurred`.
+    2. **Then, when `--what` is given and differs from the wording in force, 13a's edit of the commitment's live approved proposal** (`proposal_id` in the fold) with that wording only, as `proposal edit` does. The recorder writes its `revised` line (15a). The state stays `ALTERED`: a `revised` line never changes the state. A `--what` equal to the wording in force starts no edit, and `edited` is `null`, so 13a's `unchanged` never becomes `edit_refused`.
+  - **The mark comes first** because it is the PM's decision and the one line that must not be lost. When the edit then fails, the command exits 3 with `edit_refused` and 13a's reason. The refusal object carries `"wrote"` (the kinds already appended) and `"next"` (the exact `pm-ai proposal edit <proposal> --scope … --what "…"` words), and the text says the mark is recorded and the wording is not.
+  - **The bound.** Before starting the edit, the desk checks what is left of `COMMITMENT_WRITE_BOUND_SECONDS`. When less than 13a's edit needs is left (the 1-second busy wait plus one claimed step), the edit is not started, and the outcome is the same `edit_refused` with the reason "out of time", `wrote` and `next`.
+  - **The version returned** by `altered --what` is the commitment's version after the `revised` line, so `done --if-version <that>` acts.
   - **`--what` is for an action item only.** A spoken promise's words are what was said, and 13a gives `implicit_commitment` no editable field. `altered --what` on a promise is refused (exit 3, `what_not_editable`): "a spoken promise keeps the words that were said; record how it changed with --note". Nothing is written.
   - `--owner ""` and `--due ""` clear the field, as 13a's edit does. `altered` with no option is valid: the mark alone, or with its note.
 - **`due`:** one `due_set` line. `--clear` writes `due=none`.
-  - **The words are resolved against today**, the PM's day in `display_timezone` (else the machine's zone), by `due_dates.resolve(words, today)`. The PM is setting the date now, so "Friday" means the coming Friday. `today`'s day is never estimated.
-  - **An ISO date (`YYYY-MM-DD`) is taken as typed**, including one already past, because a typed date is explicit. The sentence adds "(already past)".
-  - **Words that name no one date** are refused (exit 3, `due_unresolved`), naming the forms that resolve (15a's table) and the ISO form. `due_set` has no `unresolved` value.
-  - The same date as the due in force writes nothing: outcome `unchanged`, exit 0.
-- **`owner`:** one `owner_set` line. `--clear` writes it with no `owner`. The name is the PM's typed text, folded to one line (`fold_typed`), at most 80 characters (`OWNER_LIMIT`, exit 2 over it). It is a name, never a handle (AD-34), and not linked here. The same owner as the one in force writes nothing: `unchanged`.
+  - **Words that are empty or only spaces** are a usage error (exit 2): they would otherwise read as nothing said and clear the due silently.
+  - **A date with its year written, in any form 15a's resolver accepts** (`2026-10-20`, `20.10.2026`, `20 Oct 2026`, `20 октября 2026`), is taken as typed, including one already past, because a typed date is explicit. This is read before `due_dates.resolve`, which refuses a date before its day (`_said_year`, `due_dates.py:208-212`, used for ISO at `:251-253`). A past date's sentence adds "(already past)". The same rule applies to `altered --due` and to `review`'s `u` and `a`.
+  - **Other words are resolved against today**, the PM's day in `display_timezone` (else the machine's zone), by `due_dates.resolve(words, today)`. The PM is setting the date now, so "Friday" means the coming Friday. `today`'s day is never estimated.
+  - **Words that name no one date** are refused (exit 3, `due_unresolved`), naming the forms that resolve (15a's table) and the year-written forms. `due_set` has no `unresolved` value.
+  - **`unchanged`** (nothing written, exit 0) only when the due in force has that date, is not estimated, and was set by the PM. The same date over an estimated due, or over one worked out from what was said, is written: it becomes exact and "set by you". `--clear` when the due in force is already `none` is `unchanged`.
+  - **The due as said is kept.** After a `due_set`, the card and JSON still show `due.said` from the value lines ("by next sprint"), beside the PM's date.
+- **`owner`:** one `owner_set` line. `--clear` writes it with no `owner`.
+  - The name is the PM's typed text, NFC-normalised and folded to one line (`fold_typed`). The 80-character limit (`OWNER_LIMIT`) is counted after folding (exit 2 over it), and a name empty after folding is exit 2.
+  - **A name that reads as a handle or an address** (`reads_as_handle`, `domain/handles.py`) is refused (exit 3, `owner_is_handle`): an owner is a name, never a handle (AD-34). It is not linked here.
+  - **`unchanged`** when the owner in force equals it after the same normalisation; `--clear` with no owner in force is `unchanged`.
 - **The note** is the PM's typed text, folded to one line, at most 200 characters (`NOTE_LIMIT`, exit 2 over it). Typed text is trusted as his own and is not passed through the prompt-injection filter (13a).
 - **No change writes to `operational.db`,** except `altered --what` through 13a's edit. A commitment's state is never a proposal state (AD-14): `proposal show` of an item marked done still says `approved`.
 
 ### Every change is a compare-and-append (AD-37)
 
-- **A commitment's version is the `entry` id of its newest line in file order.** The ledger is append-only, so any line appended for a commitment becomes its newest, and the version changes. A line of another commitment leaves it unchanged. Cards and JSON carry it as `version` (`cml_` plus 12 hex characters).
-- **`--if-version <version>`** on `done`, `altered`, `broken`, `withdrawn`, `due` and `owner` acts only if the commitment is still at that version. A wrapper passes the version from the card it displayed, and `review` always does.
+- **A commitment's version is the `entry` id of its newest line in file order.** The ledger is append-only, so any line appended for a commitment becomes its newest, and the version changes. A line of another commitment leaves it unchanged. Entry ids are hashes, not counters, so a version is compared only for equality, never as larger or smaller. Cards and JSON carry it as `version` (`cml_` plus 12 hex characters).
+- **`--if-version <version>`** on `done`, `altered`, `broken`, `withdrawn`, `due` and `owner` acts only if the commitment is still at that version. A wrapper passes the version from the card it displayed, and `review` always does. A value that is not `cml_` plus 12 lower-case hex characters is a usage error (exit 2), not `changed`.
 - **The writer's steps,** in `CommitmentDesk` (`pm_ai/app/commitments.py`):
   1. read and fold the scope's ledger through `CommitmentLog.read`;
-  2. **"already" before the version**, as in 13a: if the state asked for is in force by the PM's own mark, answer `already` (exit 0) whatever the version;
-  3. if `--if-version` is given and differs, refuse (exit 3, `changed`), with the current card and one sentence saying what changed ("marked broken on <date>, from the prompt");
+  2. **"already" and "unchanged" before the version**, as in 13a: when the mark asked for is the PM's own mark in force (`mark_answer` says `already`), or the due or owner asked for is already in force by the `unchanged` rules above, answer `already` or `unchanged` (exit 0) whatever the version. This never applies to `altered`;
+  3. if `--if-version` is given and differs, refuse (exit 3, `changed`), with the current card and one sentence built from the kind of the commitment's newest line: "marked <state> on <date>, from <via>" (`marked`); "its due was set to <date> on <date>" (`due_set`); "its owner was set to <name>" or "its owner was cleared" (`owner_set`); "its wording was edited on <date>" (`revised`); "telemetry recorded it <state> on <date>" (`verdict`); "it was recorded as a commitment on <date>" (`pending`);
   4. decide the lines from the state in force (`mark_answer`) and the values in force;
-  5. leave out any line whose `entry` is already in the ledger;
-  6. append with `after` set to the size read.
-- **On `LedgerChanged`,** read again and go back to step 2. The version check is against the commitment's own version, so a line another commitment gained does not refuse the change. At most `ATTEMPTS` (3) reads, then `busy`. Nothing is appended blindly.
-- **Two surfaces at once:** the terminal and the prompt both mark one commitment `done`. One append wins. The other reads again, finds the PM's `fulfilled` in force, and answers `already`, exit 0. One line is written. `done` from one surface and `withdrawn` from the other: one wins, and the other is refused (`mark_refused`, or `changed` with `--if-version`).
+  5. **`occurred`** for the new lines is the later of the clock's now and the newest `occurred` among the commitment's lines plus one microsecond. A retried mark therefore always sorts after the line it lost to, so `broken` retried after a competing `done` ends `BROKEN`, as the PM asked last;
+  6. leave out any line whose `entry` is already in the ledger;
+  7. append with `after` set to the size read.
+- **On `LedgerChanged`,** read again and go back to step 2, recomputing `occurred`. The version check is against the commitment's own version, so a line another commitment gained does not refuse the change. At most `ATTEMPTS` (3) reads, then `busy`. Nothing is appended blindly.
+- **An append that raised after its bytes reached the file** is found on the re-read: when the ledger already holds this call's own entry id, the change is reported as made, and nothing is written twice.
+- **Busy at once.** `ArtifactBusy`, `WriterBusy`, `WriterStopped`, `OperationalStoreUnavailable` and `ClaimReentered` answer `busy` without another attempt, as 15a's recorder does (`app/commitments.py:172-221`). `ATTEMPTS` counts `LedgerChanged` only. A busy answer comes within `COMMITMENT_WRITE_BOUND_SECONDS`.
+- **Two surfaces at once:**
+  - both mark one commitment `done`: one append wins. The other meets `LedgerChanged`, reads again, finds the PM's `fulfilled` in force, and answers `already`, exit 0. One line is written;
+  - `done` lands first, then `withdrawn`: `withdrawn` from `(FULFILLED, PM)` is refused (`mark_refused`, or `changed` with `--if-version`);
+  - `withdrawn` lands first, then `done`: `done` from `(WITHDRAWN, PM)` is allowed (`MARKABLE`), so it is written and the state is `FULFILLED`, unless `--if-version` was given, which refuses it as `changed`.
 
 ### Reading the ledger: what the fold adds
 
@@ -120,9 +144,11 @@ context:
   - `due_by_pm` and `owner_by_pm`: whether the due or the owner in force came from his `due_set` or `owner_set`;
   - `changed_at`: the newest `occurred` among its lines.
 - **One fix to 15a's fold, for the owner.** Today the owner is the newest of the newest value line and any `owner_set` line (`commitment_log.py:782-783`). A `revised` line always carries the proposal's owner, so a `proposal edit --what` after `commitment owner` brings back the old owner without anyone asking for it.
-  - **From 15c, the owner comes from** the newest by `(occurred, entry)` of: the `pending` line, each `revised` line whose owner differs from the value line before it (in 15a's value order), and `owner_set` lines.
+  - **From 15c, the owner comes from** the newest by `(occurred, entry)` of: the `pending` line, each `revised` line that changed the owner, and `owner_set` lines. Order decides here, never file order (AD-35).
+  - **"Changed the owner"** compares each `revised` line with the value line before it in 15a's value order `(replacement number, occurred, entry)`: `_optional(previous, "owner") != _optional(line, "owner")`, with no owner counted as a value. A `revised` line that clears the owner counts, and so does a `proposal edit --owner` that sets it back to an earlier name.
   - This mirrors 15a's rule for the due, which a `revised` line carries only when it changed. The line format does not change, so no line written before 15c reads differently, except in this case.
-- **Bad lines,** counted by 15a (malformed, orphans, duplicates, conflicts, and marks the table refused), are shown by `list`, one line per scope, as 15a promised. They never fail the command. An id named only by a malformed line is refused by the verbs (exit 3, `malformed`): "a line of commitments_log.md that names it does not parse; fix or remove that line".
+  - **Tested:** `commitment owner` then a `proposal edit --what` keeps the PM's owner; `commitment owner` then a `proposal edit --owner` gives the edit's owner; an `--owner` edit made before `commitment owner` but whose `revised` line 15a's catch-up writes only afterwards keeps the edit's earlier `occurred`, so the PM's later owner stands; and a file-order swap gives the same owner.
+- **Bad lines,** counted by 15a (malformed, orphans, duplicates, conflicts, and marks the table refused), are shown by `list`, one line per scope, as 15a promised. They never fail the command. A root a malformed line names is refused as `malformed`, as above.
 
 ### `commitment list`
 
@@ -132,7 +158,7 @@ context:
   - `broken`, `withdrawn`;
   - `all`.
 - **Order:**
-  - **open ones by due:** a resolved date first, earliest first; then `unresolved`; then `none`. Ties are broken by the meeting's start, newest first, then the commitment id;
+  - **open ones by due:** a resolved date first, earliest first; then `unresolved`; then `none`. Ties are broken by the meeting's start, newest first, with a commitment whose line has no start after those that have one, then the commitment id. The key is `(due rank, due date or date.max, 0 if a start else 1, minus the start's timestamp or 0, commitment id)`, so no missing value is ever compared with a date;
   - **closed ones** (`done`, `broken`, `withdrawn`) by `changed_at`, newest first;
   - **`all`:** the open ones in due order, then the closed ones by `changed_at`.
 - **Past due is shown, not acted on.** A card says "past due" after its date only when:
@@ -143,7 +169,7 @@ context:
 
   An estimated date is shown with "(meeting day estimated)" and is never called past due. `unresolved` and `none` are never past due. Story 16 owns what happens to a past-due commitment. Nothing here sends, marks or asks.
 - **`--limit`** defaults to 20, at most 200, and the number left out is stated.
-- **Scopes.** Without `--scope`, personal and every enrolled project. A ledger that cannot be read is named on one line, and the others are still listed. `--meeting` and `--title`/`--on` choose one meeting exactly as 13a's listing does (ambiguity refused across scopes, exit 3).
+- **Scopes.** Without `--scope`, personal and every enrolled project. A ledger that cannot be read is named on one line, and the others are still listed (exit 0). With `--scope X` and X's ledger unreadable, `list` is refused (exit 3, `ledger_unreadable`), because nothing could be listed. `--meeting` and `--title`/`--on` choose one meeting exactly as 13a's listing does (ambiguity refused across scopes, exit 3).
 - **The text form:** one card per commitment, then the bad-line counts per scope when there are any, then the exact next command: `pm-ai commitment review` with the same filters when anything is open, and otherwise the filter that would show more. An empty listing is one sentence naming the filter and the scopes looked at.
 - **It reads each ledger once.** The title and start come from the `pending` line, so no meeting record is read. A timed test lists over a 5,000-line personal ledger and a 5,000-line project ledger within 1 second.
 
@@ -175,16 +201,18 @@ context:
 ### The JSON (`--json`, `format: 1`)
 
 - **One object on standard output and nothing else.** Exit codes are as in the text form. A field may be added later without changing `format`; removing or renaming one changes it.
-- **`list`:** `{"format": 1, "state": string, "scopes": [string], "unreadable": [{"scope", "reason"}], "ledgers": [{"scope", "malformed", "orphans", "duplicates", "conflicts", "refused"}], "more": int, "next": {"review": [words]|null, "more": [words]|null}, "commitments": [card, …]}`.
-- **`show` and every verb:** `{"format": 1, "outcome": string, "commitment": card, "wrote": [kind, …], "edited": {"proposal_id": string}|null, "next": [words]|null}`.
+- **`list`:** `{"format": 1, "state": string, "scopes": [string], "unreadable": [{"scope", "reason"}], "ledgers": [{"scope", "malformed", "orphans", "duplicates", "conflicts", "refused"}], "counts": {"by_state": {state: int}, "by_source": {"none": int, "pm": int, "telemetry": int}}, "more": int, "next": {"review": [words]|null, "more": [words]|null}, "commitments": [card, …]}`. `counts` counts the commitments that match the filters before `--limit`, by state and by the source of the state.
+- **`show` and every verb:** `{"format": 1, "outcome": string, "commitment": card, "wrote": [kind, …], "edited": {"proposal_id": string}|null, "note_recorded": boolean, "handle_recorded": boolean|null, "next": [words]|null}`.
   - `outcome` is one of `shown`, `marked`, `already`, `due_set`, `owner_set`, `altered`, `unchanged`;
   - `wrote` lists the line kinds this command appended (`marked`, `due_set`, `owner_set`), empty when it wrote none;
+  - `note_recorded` is false when a `--note` was given and not written (`already`), and also false when none was given; `handle_recorded` is `null` when no line was written;
   - `edited` names the replacement `altered --what` made;
   - `next` is the next open commitment of the same meeting (`commitment show …`), else `commitment list --scope …`.
 - **A card:**
 
   ```
-  {"commitment_id", "version", "scope", "type", "proposal_id",
+  {"commitment_id", "version", "scope", "also_in": [string],   // other ledgers holding the same id; [] normally
+   "type", "proposal_id",
    "state", "state_source",               // a CommitmentState value; "none" | "pm" | "telemetry"
    "what", "what_cut", "owner", "owner_by_pm", "speaker",
    "due": {"said", "value", "date", "estimated", "by_pm"},
@@ -197,22 +225,24 @@ context:
   ```
 
   Instants are ISO 8601 UTC. `due.value` is a date, `unresolved` or `none`, as in 15a's `commitment` object. The action names are `done`, `altered`, `broken`, `withdrawn`, `due`, `owner` and `show`.
-- **A refusal (exit 3):** `{"format": 1, "outcome": "refused", "code": string, "reason": string, "commitment": card|null}` on standard output. A usage error (exit 2) stays a message on standard error, as for every command.
+- **A refusal (exit 3):** `{"format": 1, "outcome": "refused", "code": string, "reason": string, "commitment": card|null, "wrote": [kind, …], "next": [words]|null}` on standard output. `wrote` is empty except after `edit_refused`; `next` is the exact command that repairs or continues, when there is one (the `proposal approve` or `proposal show` of `not_found`, the `proposal edit` of `edit_refused`, `commitment list` otherwise), else `null`. A usage error (exit 2) stays a message on standard error, as for every command.
 - **The refusal codes:**
-  - `not_found`: no commitment with that id in the scopes looked at. When a proposal has that id but is not a commitment (waiting, rejected, or a type that records none), the reason names `pm-ai proposal show <id> --scope …`;
-  - `ambiguous`, `scope_refused`, `not_enrolled`;
-  - `ledger_unreadable`: the ledger could not be read;
-  - `malformed`: only a malformed line names the id;
+  - `not_found`: no commitment with that id in the scopes looked at; the reason follows the finding order above (an approval not yet recorded, a proposal that is not a commitment, or nothing);
+  - `ambiguous`: the id is in two ledgers;
+  - `scope_refused`, `not_enrolled`;
+  - `ledger_unreadable`: a ledger looked at could not be read, named;
+  - `malformed`: a malformed line names the id;
+  - `owner_is_handle`: the owner typed reads as a handle or an address;
   - `mark_refused`: the mark table refuses it from the state in force;
   - `changed`: `--if-version` no longer matches;
   - `due_unresolved`: the words name no one date;
   - `what_not_editable`: `altered --what` on a spoken promise;
-  - `edit_refused`: `altered --what`'s edit was refused (13a's reason), after the mark was written;
+  - `edit_refused`: `altered --what`'s edit was refused (13a's reason) or not started for lack of time, after the mark was written;
   - `busy`, `git_not_excluded`, `disk`: 15a's meanings, for the append;
   - `no_terminal`: `review` without a terminal.
 - **Exit codes:**
   - **0:** changed, `already`, `unchanged`, shown, or listed, an empty listing included;
-  - **2:** usage: an unknown `--state`, a limit outside 1 to 200, `due` or `owner` with both a value and `--clear` or with neither, an empty `--what`, a value over its limit;
+  - **2:** usage: an unknown `--state`, a limit outside 1 to 200, `due` or `owner` with both a value and `--clear` or with neither, due words that are empty or only spaces, an owner empty after folding, an empty `--what`, a value over its limit, an `--if-version` that is not `cml_` plus 12 hex characters;
   - **3:** every refusal above.
 
 ### `commitment review`
@@ -222,10 +252,14 @@ context:
   - `d` writes the mark at once.
   - `b` and `w` ask "note (Enter for none)", then write.
   - `a` asks, with the current value shown: the wording (an action item only), the owner and the due (Enter keeps, `-` clears), then the note. Then it writes, as `altered` does.
-  - `u` asks for the due (words or `YYYY-MM-DD`, `-` clears). Words that name no date are asked again with the reason.
-  - `o` asks for the owner (`-` clears).
+  - `u` asks for the due (words, or a date with its year, `-` clears), by `due`'s rules. Words that name no date are asked again with the reason.
+  - `o` asks for the owner (`-` clears), by `owner`'s rules.
+  - **Enter alone** at `u` or `o` keeps the value: nothing is written, and the card counts as skipped.
+  - **A value the command line would refuse as usage** (a note or owner over its limit, empty due words) is asked again with the limit or the reason stated. The walk never exits 2.
 - **Each answer is one change,** checked against the version its card showed. On a conflict, the current card is shown again with one sentence saying what changed.
-- **The end:** one line counts what was marked done, altered, broken or withdrawn, the dues and owners set, and what was skipped, then the next step. Quitting, Ctrl-C and end of input end the walk the same way: the counts so far, exit 0. Every answered change is complete.
+- **The ledger is read again before each card.** A commitment that is no longer open (marked from elsewhere since the walk began) is skipped with one sentence ("<what>: marked done from the prompt meanwhile; skipped") and counted as such.
+- **Nothing open:** the empty-listing sentence of `list` and its next step, exit 0.
+- **The end:** one line counts what was marked done, altered, broken or withdrawn, the dues and owners set, and what was skipped, then the next step. Quitting, Ctrl-C and end of input end the walk the same way: the counts so far, exit 0. Every answered change is complete. Ctrl-C or end of input inside a sub-question (a note, the due, the owner, `a`'s questions) abandons that change: nothing of it is written, and it is not counted.
 - **Without a terminal** (stdin not a TTY), it is refused (exit 3, `no_terminal`), naming `commitment list --json` and the verbs.
 
 ### Where it runs (AD-21)
@@ -250,20 +284,26 @@ context:
 
   At most 100 are offered, in `list`'s order. Each inserts the id and shows `owner: what` (or `said by …`), the meeting's title and the due. Typed text matches the start of the id or of any word of `what`, the owner, the speaker or the title, ignoring case, as `13a` does (`completion.py:566`).
 - **`owner`'s name** completes from the owners and speakers already in that scope's ledger, the commitment's own speaker first.
-- **`--state`** completes from the five words. **`--meeting`** completes from meeting ids, as `proposal list` does.
+- **`--state`** completes from the five words. **`--meeting`** completes from meeting ids, as `proposal list` does: `_BY_COMMAND` (`completion.py:155`) gains `(("commitment", "list"), MEETING_ARGUMENT)` and `(("commitment", "review"), MEETING_ARGUMENT)` → `MEETING_IDS`. Without those rows, `meeting` is free text (`FREE_TEXT_NAMES`) and would silently offer nothing.
 - **The reader** reads the ledgers by path with `parse_ledger` and `fold`: no `StorageService`, no master key, keychain or daemon, and nothing offered on failure. So there is still one parser of the file (`derivation-services.md` rule 3).
 
 ### The reject refusal names the commands (amends 15a's refusal)
 
-- **`proposal reject` on an approved item that is a commitment** (`proposals.py:822`, `_not_rejected`) still refuses, exit 3, with the row and the ledger unchanged. Its text becomes: `<id> was approved on <date> and is a commitment now, so it is not rejected; nothing was changed. If approving it was a mistake: pm-ai commitment withdrawn <root> --scope <scope>. If what was agreed has changed: pm-ai commitment altered <root> --scope <scope> --note "…". To correct what was recorded: pm-ai proposal edit <id> --scope <scope> --what "…".`
-- **In JSON,** 13a's refusal object gains `"commitment": {"commitment_id": <root>, "scope": <scope>, "show": [words]}`. A wrapper runs `show` for the card and its actions. `format` stays 1.
+- **`proposal reject` on an approved item that is a commitment** (`proposals.py:822`, `_not_rejected`) still refuses, exit 3, with the row and the ledger unchanged. Its text becomes: `<id> was approved on <date> and is a commitment now, so it is not rejected; nothing was changed.`, then:
+  - `If approving it was a mistake: pm-ai commitment withdrawn <root> --scope <scope>.`, only when `mark_answer` gives `yes` for `withdrawn` from the state in force;
+  - `If what was agreed has changed: pm-ai commitment altered <root> --scope <scope> --note "…".`, only when it gives `yes` for `altered`;
+  - `To correct what was recorded: pm-ai proposal edit <id> --scope <scope> --what "…".`, always.
+
+  The sentences are built from one read of the ledger and `mark_answer`, so a commitment the PM already marked done is never told to mark it withdrawn. **When the ledger holds no line for the root** (the approval's write failed and nothing has repaired it), the first two sentences are replaced by `It is not recorded in the ledger yet: pm-ai proposal approve <id> --scope <scope> records it.` **When the ledger cannot be read,** both mark sentences are given, unchecked, after `the ledger could not be read, so these may be refused:`.
+- **In JSON,** 13a's refusal object gains `"commitment": {"commitment_id": <root>, "scope": <scope>, "recorded": boolean|null, "show": [words]|null, "commands": {name: [words]}}`, with `commands` holding exactly the commands the text offers (`withdrawn`, `altered`, `edit`, or `approve` for the repair), `recorded` null when the ledger could not be read, and `show` null when the root is not in the ledger. `format` stays 1.
 - **The approved card's `reject` reason** (`COMMITMENT_NOT_REJECTED`, `proposal_cards.py:59`) becomes: "approved, so it is a commitment now; mark it withdrawn if approving it was a mistake, or edit it to correct what was agreed".
 
 ### What the dashboard shows (Ask First 1 decides; the recommendation is written here)
 
 - **15d owns the surfaces.** 15c changes the pages only so that a commitment the PM closed stops looking open:
-  - **the dashboard's meeting digest** (`pipelines.py:2674`, `_meeting_digest`) leaves out an approved action item whose commitment is `fulfilled`, `broken` or `withdrawn`, as it leaves out a rejected one. `_digests_over` (`:2774`) reads each scope's ledger once per render through `CommitmentLog.read`. A ledger that cannot be read shows the items as today. Showing a closed item as approved is harmless, so this fails open;
-  - **Team Activity** (`_item_decisions`, `pipelines.py:3111`) hides a `withdrawn` item, as it hides a rejected one (`ItemDecision(hidden=True)`, `:3145`). A done or broken item stays, because a line there is a note of what the meeting said.
+  - **the dashboard's meeting digest** (`pipelines.py:2674`, `_meeting_digest`) leaves out an approved action item whose commitment is `fulfilled` (by the PM or by telemetry), `broken` or `withdrawn`, as it leaves out a rejected one. An `altered` one is still shown. The lookup is by `root_of(proposal_id)`, so an edited item's replacement finds its root's commitment. `_digests_over` (`:2774`) reads each personal or project scope's ledger once per render through `CommitmentLog.read`, and no other scope's;
+  - **Team Activity** (`_item_decisions`, `pipelines.py:3111`) hides a `withdrawn` item, as it hides a rejected one (`ItemDecision(hidden=True)`, `:3145`), looked up by the root. A done or broken item stays, because a line there is a note of what the meeting said;
+  - **both fail open:** a ledger that cannot be read, or a scope refused with `NotACommitmentScope`, shows the items as today, and the page says nothing more. Showing a closed item as approved is harmless.
 - **Unchanged until 15d:** the owner and due the pages show (the proposal's), the morning brief beyond what the digest gives it, the cards' lack of a commitment state, and the overflow line naming `proposal list --state open`.
 
 ### The readers of the ledger after 15c
@@ -277,10 +317,11 @@ context:
 - **`EXPECTED_SKIPS` stays 6** (`tests/conftest.py:192`). No skipping test depends on 15c: `test_ad35_sweeper_will_not_declare_broken_without_coverage` and `test_ad36_self_authored_events_are_excluded_from_evidence` still skip on `pm_ai.core.commitments`, which is story 16's. 15c creates no module of that name.
 - **New, passing in 15c** (`tests/architecture/test_domain_invariants.py`):
   - `test_ad37_two_surfaces_marking_one_commitment_record_one_mark`: two `CommitmentDesk`s over one store mark one commitment `done`; one `marked` line, and the second answers `already`;
-  - `test_ad37_a_stale_version_never_appends`: `--if-version` with the version before another mark refuses with `changed`, and the ledger's size is unchanged;
-  - `test_ad14_only_three_commitment_states_are_terminal`: `CommitmentState.is_terminal` is exactly `FULFILLED`, `BROKEN` and `WITHDRAWN`, as the AD-14 amendment says.
+  - `test_ad37_a_stale_version_never_appends`: `--if-version` with the version before another mark refuses with `changed`, and the ledger's size is unchanged.
+
+  The two-surfaces test forces the interleave: B reads, A appends, then B appends. It asserts that B met `LedgerChanged` exactly once, read again, answered `already`, and that the ledger holds exactly one `marked` line. AD-14's terminal set needs no new test: `tests/domain/test_commitment_rules.py:47` already asserts `WITHDRAWN.is_terminal`.
 - **Unchanged and still passing:** `test_ad14_proposal_and_commitment_lifecycles_stay_distinct` (`:283`), both AD-28 tests (`:165`, `:209`), and `test_ad33_ledger_entries_are_self_contained` (`:735`).
-- **Command tables:** `test_every_command_the_daemon_runs_declares_its_bound` (`tests/slice/test_line_requests_hardening.py:95`) covers the new entries in `DAEMON_BOUNDS` and `TERMINAL_BOUND`, and the completion test over `TABLE` covers every new name's source.
+- **Command tables:** `test_every_command_the_daemon_runs_declares_its_bound` (`tests/slice/test_line_requests_hardening.py:95`) covers the new entries in `DAEMON_BOUNDS` and `TERMINAL_BOUND`, and the completion test over `TABLE` covers every new name's source. A new slice test asserts the values: `DAEMON_BOUNDS` gives `CONFIG_SHOW_BOUND_SECONDS` for `commitment list` and `show` and `COMMITMENT_WRITE_BOUND_SECONDS` for the six writes, `COMMITMENT_WRITE_BOUND_SECONDS == 2.0`, and each command's help names its seconds.
 - **`.importlinter` is unchanged:** `core/commitment_cards.py` imports `domain` and `core`, `app/commitments.py` is in `app`, and the CLI reaches the desk through a port protocol in `surfaces/cli/dispatch.py`, as `ProposalDeskPort` (`:4568`) does.
 
 ### No real data
@@ -347,41 +388,80 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
 | Altered alone | `altered --note "scope cut to the API only"` | one `marked state=altered` line with the note; state `ALTERED` | exit 0 |
 | Altered with due and owner | `altered --due friday --owner "Alex Morgan"` on 25 Oct (a Sunday) | one append: `marked altered`, `due_set due=2026-10-30`, `owner_set owner="Alex Morgan"`, one `occurred` | exit 0 |
 | Altered with wording | action item, `altered --what "send the numbers for the API only"` | the mark appended first; then 13a's edit makes `<root>_e1` approved and the recorder writes a `revised` line; `edited.proposal_id` set; state stays `ALTERED` | exit 0 |
-| Altered wording, edit fails | the edit is refused after the mark | mark kept; `edit_refused` with 13a's reason and the exact `proposal edit` command | exit 3 |
+| Altered wording, edit fails | the edit is refused after the mark | mark kept; `edit_refused` with 13a's reason; `wrote: ["marked"]`; `next` is the exact `proposal edit` words; the text says the mark is recorded | exit 3 |
 | Altered wording on a promise | `altered --what …` on a spoken promise | `what_not_editable`; nothing written | exit 3 |
-| Altered again | `altered` twice | two `marked state=altered` lines | exit 0 |
+| Altered again | `altered --note "a"`, then `altered --note "b"` | two `marked state=altered` lines (`MARKABLE` allows altered from altered); never `already` | exit 0 |
+| Altered, unresolved due | `altered --due "next sprint" --note "x"` | `due_unresolved`; nothing written, the mark included | exit 3 |
+| Altered, past due date | `altered --due "20 Oct 2026"` on 25 Oct | `due_set due=2026-10-20`; "(already past)" | exit 0 |
+| Altered, same wording | `altered --what` with the wording in force | the mark written; no edit; `edited: null` | exit 0 |
+| Altered, out of time | the mark's append leaves too little of the 2 s for the edit | mark kept; `edit_refused` "out of time"; `wrote: ["marked"]`; `next` is the `proposal edit` words | exit 3 |
+| Altered wording, version | `altered --what …`, then `done --if-version <the returned version>` | the returned version is after the `revised` line; `done` written | exit 0 |
 | Due words | `due <id> friday` on Sun 25 Oct | `due_set due=2026-10-30`; the card says "set by you"; never estimated | exit 0 |
 | Due ISO in the past | `due <id> 2026-10-20` on 25 Oct | written; "(already past)" | exit 0 |
+| Due past, other forms | `due <id> "20.10.2026"`, `due <id> "20 Oct 2026"` on 25 Oct | each written as 20 Oct; "(already past)" | exit 0 |
 | Due unresolved | `due <id> "next sprint"` | `due_unresolved`, naming the forms; nothing written | exit 3 |
+| Due blank | `due <id> "  "` | usage error | exit 2 |
 | Due cleared | `due <id> --clear` | `due_set due=none` | exit 0 |
-| Due the same | the date already in force | `unchanged`; nothing written | exit 0 |
+| Due cleared twice | `due <id> --clear` with no due in force | `unchanged` | exit 0 |
+| Due the same, set by the PM | the PM's exact date already in force | `unchanged`; nothing written | exit 0 |
+| Due the same, estimated | the date in force is the same but estimated, or worked out from what was said | `due_set` written; now exact and "set by you"; `due.said` still shown | exit 0 |
 | Due both | `due <id> friday --clear` | usage error | exit 2 |
 | Owner of a promise | `owner <id> "Sam Rivera"` on a promise with no owner | `owner_set owner="Sam Rivera"`; the card reads "said by …, owner Sam Rivera" | exit 0 |
-| Owner over its limit | 81 characters | usage error | exit 2 |
+| Owner over its limit | 81 characters after folding | usage error | exit 2 |
+| Owner blank | only spaces or line breaks | usage error | exit 2 |
+| Owner is a handle | `owner <id> alex@example.com` | `owner_is_handle`; nothing written | exit 3 |
+| Owner the same | the same name in another Unicode form (NFC) | `unchanged` | exit 0 |
 | Owner kept after an edit | `owner <id> "Alex Morgan"`, then `proposal edit <id> --what "…"` (owner unchanged in the proposal) | owner stays Alex Morgan (the fold fix) | exit 0 |
 | Owner changed by an edit | then `proposal edit <id>_e1 --owner "Sam Rivera"` | owner becomes Sam Rivera | exit 0 |
 | Stale version | `done --if-version <old>` after another mark | `changed`, with the current card and what changed; ledger size unchanged | exit 3 |
 | Already beats the version | `done --if-version <old>` when the PM's done is in force | `already` | exit 0 |
-| Other commitment moved | another commitment gains a line between read and append | `LedgerChanged`; read again; its own version unchanged, so written | exit 0 |
-| Two surfaces | terminal and prompt `done` at once | one `marked` line; one `marked`, one `already` | both exit 0 |
-| Busy | the claim is held past its wait three times | `busy` | exit 3 |
+| Other commitment moved | `done A --if-version <A's version>`; B gains a line between A's read and append | `LedgerChanged`; read again; A's version unchanged, so written; a fold unit test shows B's line leaves `details[A].version` unchanged | exit 0 |
+| Two surfaces | terminal and prompt `done` at once, B's append forced after A's | one `marked` line; B met `LedgerChanged` once and answered `already` | both exit 0 |
+| Done, then withdrawn | `done` lands, then `withdrawn` from the other surface | `withdrawn` refused, `mark_refused` | exit 3 |
+| Withdrawn, then done | `withdrawn` lands, then `done` from the other surface without `--if-version` | `done` written; state `FULFILLED` | exit 0 |
+| Retry sorts last | `broken` meets `LedgerChanged` from a `done` whose `occurred` is later than the clock | the retried `broken` gets the `done`'s `occurred` plus 1 µs; state `BROKEN` | exit 0 |
+| Append raised after writing | the append raises after its bytes reached the file | the re-read finds this call's entry id; reported as made; one line | exit 0 |
+| Busy | the claim is held past its wait | `busy` at once, within 2 s; no further attempt | exit 3 |
+| Ledger kept changing | `LedgerChanged` three times | `busy` | exit 3 |
+| Bad version | `done --if-version 42` | usage error | exit 2 |
+| No handle readable | the `connectors/` rows cannot be read | mark written without `handle`; "recorded without your handle"; `handle_recorded: false` | exit 0 |
+| Prompt via | `commitment done` typed at the prompt | `via=prompt` | exit 0 |
 | Project git refuses | the project no longer excludes `memory/` | `git_not_excluded`; nothing written | exit 3 |
 | People scope | `--scope people:example` | `scope_refused` | exit 3 |
 | Not enrolled | `--scope project:gone` | `not_enrolled`, naming the enrolled projects | exit 3 |
-| Malformed only | the id appears only in a malformed line | `malformed`, saying to fix or remove that line | exit 3 |
+| Malformed | a malformed line names the root, with or without a readable `pending` line | `malformed`, saying to fix or remove that line; nothing decided from the state | exit 3 |
+| Unknown replacement id | `show <root>_e9`, unknown to the store and the ledger | `not_found` | exit 3 |
+| Not found, ledger unreadable | the id is in no readable ledger and one project's ledger cannot be read | `ledger_unreadable`, naming that project | exit 3 |
+| List one unreadable scope | `list --scope project:alpha`, its ledger unreadable | `ledger_unreadable` | exit 3 |
+| Approved, not recorded | an approved action item whose `pending` line was never written | `not_found`; "not recorded in the ledger yet"; `next` is `pm-ai proposal approve <id> --scope …` | exit 3 |
+| Same id in two ledgers | a hand-copied `pending` line in personal and a project | `show`: one card, `also_in` naming the other scope; verbs: `ambiguous`, saying why | 0 / 3 |
+| No start on the line | an open commitment whose `pending` line has no `start`, tied on due with one that has | listed after it; no error | exit 0 |
 | Review | `review` at a terminal, three open | compact cards (no command lines, no `--if-version`, no id); `d`, `u` with "friday", `s`; "1 marked done, 1 due set, 1 skipped." and `next:` lines | exit 0 |
 | Review unresolved due | `u` then "next sprint" | asked again with the reason | continues |
+| Review past date | `u` then "2026-10-20" on 25 Oct | written; "(already past)" | continues |
+| Review Enter at due | `u` then Enter | nothing written; counted as skipped | continues |
+| Review long note | `b`, then a 300-character note | asked again, stating the 200-character limit | continues |
+| Review Ctrl-C in a question | `a`, then Ctrl-C at the note | nothing of that change written or counted; the counts so far | exit 0 |
+| Review nothing open | `review` with no open commitment | the empty-listing sentence and its next step | exit 0 |
+| Review closed meanwhile | the next card's commitment was marked done from the prompt | skipped with one sentence | continues |
 | Review conflict | the commitment gains a mark from the prompt while its card is open | the sentence, then the current card again | continues |
 | Review without a terminal | stdin not a TTY | `no_terminal`, naming `commitment list --json` and the verbs | exit 3 |
 | Prompt bounds | `commitment list`, `commitment done` typed at the prompt | inline through the daemon, within 1 s and 2 s | exit 0 |
 | Prompt review | `commitment review` typed at the prompt | runs in the prompt's process | as at a terminal |
 | Completion | `commitment done <Tab>` with one done and two open | the two open ones offered, with `owner: what`, title and due | N/A |
 | Completion owner | `commitment owner <id> <Tab>` on a promise said by Sam Rivera | "Sam Rivera" first, then other names in the ledger | N/A |
-| Reject refusal | `proposal reject <id>` of an approved action item | exit 3; the text names `commitment withdrawn`, `commitment altered` and `proposal edit`; JSON `commitment.show` words | exit 3 |
+| Completion meeting | `commitment list --meeting <Tab>` | meeting ids offered, as for `proposal list` | N/A |
+| Reject refusal | `proposal reject <id>` of an open approved action item | exit 3; the text names `commitment withdrawn`, `commitment altered` and `proposal edit`; JSON `commitment.commands` holds the three | exit 3 |
+| Reject after done | the same, after `commitment done` | `withdrawn` and `altered` not offered; `proposal edit` still named | exit 3 |
+| Reject, ledger write failed | approve while the ledger's append fails (`recorded: false`), then `proposal reject` | refused; "not recorded in the ledger yet: pm-ai proposal approve <id> --scope … records it"; `commitment.recorded: false` | exit 3 |
 | Approved card | `proposal show <id> --json` | `actions.reject.available: false`, the new reason | exit 0 |
-| Dashboard, done item (Ask First 1, A) | an approved action item marked done | not shown under its meeting; a waiting one still shown | N/A |
+| Dashboard, closed items (Ask First 1, A) | approved action items marked done, broken and withdrawn, one fulfilled by a hand-written telemetry `verdict` | none shown under the meeting; a waiting one still shown | N/A |
+| Dashboard, altered | an approved action item marked altered | still shown, as approved | N/A |
+| Dashboard, edited item | an approved item edited (`<root>_e1`), then marked done | not shown: looked up by its root | N/A |
 | Dashboard, ledger unreadable | the ledger cannot be read | items shown as today | N/A |
 | Team Activity, withdrawn (A) | a withdrawn action item linked to an issue | hidden, as a rejected one | N/A |
+| Team Activity, done and broken | items marked done and broken | still shown | N/A |
+| Team Activity, ledger unreadable | the project's ledger cannot be read | every line shown as today | N/A |
 | Timed listing | 5,000-line personal and project ledgers | `list` within 1 s | N/A |
 | Timed mark | 5,000-line project ledger, git check, one `LedgerChanged` | within 2 s | N/A |
 
@@ -394,7 +474,7 @@ Anchors checked against `origin/main` at `689122a`.
 - `pm_ai/domain/commitments.py:75` `LineKind`; `:100` `Mark`; `:113` `MarkAnswer`; `:138` `MARKABLE`; `:162` `mark_answer`; `:170` `can_mark`; `:176` `Due`; `:227` `Commitment`
 - `pm_ai/domain/lifecycle.py:49` `CommitmentState`, `:66` `is_terminal` (`FULFILLED`, `BROKEN`, `WITHDRAWN`)
 - `pm_ai/core/commitment_log.py:94` `NOTE_LIMIT`; `:174` `Marked`; `:187` `DueSet`; `:199` `OwnerSet`; `:239` `render_line`; `:568` `CommitmentLedger` (gains `details`); `:682` `parse_ledger`; `:746` `fold`, `:782-783` the owner lines (the fix); `:858` `CommitmentLog`; `:894` `REASONS`
-- `pm_ai/core/due_dates.py:295` `resolve`
+- `pm_ai/core/due_dates.py:208-212` `_said_year`, `:251-253` its ISO use; `:295` `resolve`
 - `pm_ai/core/proposals.py:286` `ACTION_ITEM_TYPE` (`what`, `owner`, `due` editable); `:299` `IMPLICIT_COMMITMENT_TYPE` (no editable field)
 - `pm_ai/core/proposal_cards.py:59` `COMMITMENT_NOT_REJECTED`
 - `pm_ai/app/commitments.py:82` `ATTEMPTS`; `:102` `CommitmentRecorder`; `:134` `record`; `:236` `recorder_for` (the desk is built beside it)
@@ -402,18 +482,18 @@ Anchors checked against `origin/main` at `689122a`.
 - `pm_ai/app/meeting_listing.py:396` `resolve_title`
 - `pm_ai/app/entry.py:606` `DAEMON_BOUNDS`; `:1874` `_proposal_choices` (the commitment reader goes beside it)
 - `pm_ai/app/prompts.py:1146` `_proposals`, the daemon's desk with handed writes
-- `pm_ai/app/wiring.py:3530` `read_pm_identity`; `:4151` `append_commitments` in `HANDED_CALLS`; `:4204` `read_commitments` in `PLAIN_READS`
+- `pm_ai/app/wiring.py:3532` `read_pm_identity`; `:4151` `append_commitments` in `HANDED_CALLS`; `:4204` `read_commitments` in `PLAIN_READS`
 - `pm_ai/app/pipelines.py:2674` `_meeting_digest`; `:2774` `_digests_over`; `:3111` `_item_decisions`, `:3145` a hidden item
 - `pm_ai/core/member_updates.py:1000` `ItemDecision`
 - `pm_ai/surfaces/cli/dispatch.py:4565` `REVIEW_KEYS`; `:4568` `ProposalDeskPort`; `:4833` `_proposal_review`; `:4888` `_review_one`; `:4963` `TERMINAL_BOUND`; `:5001` `TABLE`, `:5204` its `proposal` group
 - `pm_ai/surfaces/cli/completion.py:139` `PROPOSAL_IDS`; `:155` `_BY_COMMAND`; `:566` `proposals_for`
 - `tests/architecture/test_domain_invariants.py:165`, `:209` AD-28; `:283` AD-14; `:735` AD-33; `:899` AD-35; `:913` AD-36; `:944` AD-37
 - `tests/conftest.py:192` `EXPECTED_SKIPS = 6`
-- `tests/slice/test_commitments.py:625`, `:637`, `:662` the reject refusal, its JSON and the card's reason (15a's assertions, which change); `tests/slice/test_proposals.py:432`
+- `tests/slice/test_commitments.py:626` (the refusal text), `:637` (the JSON assertion), `:662` (the card's reason): 15a's assertions, which change; `tests/slice/test_proposals.py:432-433`, which still passes
 - `tests/slice/test_line_requests_hardening.py:95` every command declares its bound
 - `ARCHITECTURE-SPINE.md:313-319` AD-14; `:371-379` AD-21; `:570-574` AD-37
-- `prd.md:673-678` FR-34's consequences
-- `derivation-services.md:125` the `CommitmentLog` row
+- `prd.md:673-678` FR-34's consequences; `:963` the 15a Decisions Log entry
+- `derivation-services.md:121` the accessors' I/O rule; `:125` the `CommitmentLog` row
 
 ## Tasks & Acceptance
 
@@ -430,8 +510,8 @@ Anchors checked against `origin/main` at `689122a`.
   - `tests/core/test_commitment_log.py`: `details`, the owner rule, the version.
   - `tests/core/test_commitment_cards.py` (new): every heading word, past-due rules, the compact form's lines are the full form's first lines, availability from `mark_answer`.
   - `tests/slice/test_commitment_commands.py` (new): one test per matrix row; the two timed tests; the prompt's routing; completion.
-  - `tests/architecture/test_domain_invariants.py`: the three new tests.
-  - `tests/slice/test_commitments.py:625`, `:637`, `:662` and `tests/slice/test_proposals.py:432`: the new refusal text, its JSON and the card's reason.
+  - `tests/architecture/test_domain_invariants.py`: the two new AD-37 tests.
+  - **Tests the refusal change breaks,** in `tests/slice/test_commitments.py`: `:626` asserts the old "To correct what was agreed, edit it" sentence (replaced by the new text); `:637` asserts `"pm-ai commitment" not in` the JSON (inverted to assert the `commitment.commands` words, and the test renamed to say the refusal names the commitment commands); `:662` asserts the old card reason (the new `COMMITMENT_NOT_REJECTED`). `tests/slice/test_proposals.py:432-433` asserts only "is a commitment now, so it is not rejected" and passes unchanged.
 - [ ] **The contract.** Apply the amendments in Design Notes, in this order: `prd.md` through bmad-prd; then bmad-spec re-derives `derivation-services.md`; then `ARCHITECTURE-SPINE.md` through the architecture skill.
 
 **Acceptance Criteria:**
@@ -446,6 +526,56 @@ Anchors checked against `origin/main` at `689122a`.
 ## Spec Change Log
 
 - **2026-10-25, created** after a readiness check (Design Notes), from story 15's entry, 15a's decisions for 15c, and Andrei's standing rules (the CLI is an API layer; ask nothing in the normal path; compact cards in interactive walks; accuracy matched to how critical a field is; plain language). One Ask First question open.
+- **2026-10-25, review (three lenses: adversarial, edge-case, verification gap), fixes decided by the coordinating session: frozen block edited (recorded here).** Four behaviour questions are with Andrei and not changed: the pages before 15d, `review`'s `d` key, `due` and `owner` on a closed commitment, and "friday" typed on a Friday.
+  - **Concurrency and version:**
+    - a retried line's `occurred` is the later of now and the newest line's plus 1 µs;
+    - an append that raised after writing is found by its own entry id;
+    - the race sentence follows `MARKABLE`: withdrawn then done is written, done then withdrawn refused;
+    - versions are compared for equality only;
+    - `already` and `unchanged` come before the version for due and owner too, never for `altered`, and a second `altered` is always written;
+    - a malformed `--if-version` is exit 2;
+    - the `changed` sentence is built for every line kind;
+    - busy answers at once, and `ATTEMPTS` counts `LedgerChanged` only.
+  - **Due:**
+    - the same date over an estimated or said due is written as the PM's;
+    - a past date with its year, in any accepted form, is taken as typed before the resolver;
+    - blank words are exit 2;
+    - `due.said` is kept after a `due_set`.
+  - **Altered:**
+    - every input is checked before any append;
+    - the same wording starts no edit;
+    - `edit_refused` carries `wrote` and `next`, including when the bound is too short for the edit;
+    - the returned version follows the `revised` line.
+  - **Owner:**
+    - NFC and folding before the limit and the comparison;
+    - blank is exit 2, and a handle or address is refused (`owner_is_handle`);
+    - the fold fix orders by `occurred` and counts a cleared owner as a change.
+  - **Ids:**
+    - `_e<n>` only when known;
+    - `malformed` checked first;
+    - `ledger_unreadable` over `not_found` when a ledger could not be read, and `list --scope` of an unreadable ledger is exit 3;
+    - an approval not yet in the ledger names its repair;
+    - a hand-copied id shows one card with `also_in` and refuses verbs as `ambiguous`;
+    - a mark without a readable handle is still written and says so;
+    - `via=prompt` for every prompt line.
+  - **The reject refusal** offers only the marks `mark_answer` allows, and the repair when the root is not in the ledger.
+  - **JSON:** `next` and `wrote` on every refusal, `note_recorded` and `handle_recorded` on verbs, and `counts` on `list`.
+  - **List and review:**
+    - the sort key handles a missing start;
+    - `review` re-reads before each card, handles an empty walk, and abandons a change on Ctrl-C inside a question;
+    - Enter keeps a value, and an over-limit value is asked again.
+  - **Pages:** lookup by root, personal and project ledgers only, fail open; matrix rows for broken, withdrawn, telemetry-fulfilled and altered items, and for Team Activity.
+  - **Tests and anchors:**
+    - the two-surfaces test forces the interleave;
+    - the other-commitment row uses `--if-version`;
+    - completion's meeting rows are added;
+    - a bounds-values test is added;
+    - the AD-14 terminal test is dropped, since `tests/domain/test_commitment_rules.py:47` covers it;
+    - the broken assertions are named;
+    - `read_pm_identity` is at `wiring.py:3532`;
+    - `derivation-services.md:121` gets a stated exception;
+    - the PRD Decisions Log entry is anchored at `:963`;
+    - AD-37's amendment says equality, already, and the timing of a re-decided line, and qualifies "Terminal states are terminal".
 
 ## Design Notes
 
@@ -491,10 +621,11 @@ Anchors checked against `origin/main` at `689122a`.
 
 *PRD (`prd.md`), through bmad-prd (v0.16.1 → v0.16.2):*
 - **FR-34 consequences** (`:675`): after "> * Approved spoken commitment creates a valid, structured Markdown entry in the meeting's scope's commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].", add: "> * The PM keeps his commitments from the CLI (2026-10-25, 15c): `pm-ai commitment list` (open ones by default, soonest due first; a date is shown as past only when it was worked out exactly, never on an estimated meeting day), `commitment show <id>`, `commitment done|altered|broken|withdrawn <id>` (his own marks), `commitment due <id> <when>` and `commitment owner <id> <name>`, and `commitment review`, which walks the open ones; each change is a line appended to the meeting's scope's commitments\_log.md under his handle, never a rewrite, and acts only on the version he saw when he names one."
-- **Decisions Log:** "*The PM's commitment commands (2026-10-25, Andrei; FR-34):* `pm-ai commitment` lists, shows, marks (done, altered, broken, withdrawn) and corrects (due, owner) commitments, and walks the open ones; every change is an appended line checked against the version the PM saw; a past date is shown only when it was worked out exactly; the reject refusal names these commands."
+- **Decisions Log** (`:963`): after the "> * **2026-10-24 (Story 15a \- v0.16.1):**" entry, add "> * **2026-10-25 (Story 15c \- v0.16.2):** *The PM's commitment commands (2026-10-25, Andrei; FR-34):* `pm-ai commitment` lists, shows, marks (done, altered, broken, withdrawn) and corrects (due, owner) commitments, and walks the open ones; every change is an appended line checked against the version the PM saw; a past date is shown only when it was worked out exactly; the reject refusal names these commands."
 
 *SPEC companions, re-derived by bmad-spec:*
-- **`derivation-services.md:125`:** the `CommitmentLog` row's users become "the approval and its catch-up (append, `15a`), the PM's marks, the due and owner he sets (append, `15c`), `commitment list`, `show` and `review` and the dashboard digest (read, `15c`), the lifecycle job (append verdicts, story 16), indexing (read); completion and the terminal's `list` and `show` read the file by path with the same parser (`15c`)".
+- **`derivation-services.md:125`:** the `CommitmentLog` row's users become "the approval and its catch-up (append, `15a`), the PM's marks, the due and owner he sets (append, `15c`), `commitment list`, `show` and `review`, the dashboard digest and Team Activity (read, `15c`), the lifecycle job (append verdicts, story 16), indexing (read)".
+- **`derivation-services.md:121`** (accessors perform "I/O through `StorageService`"): after that sentence, add "One stated exception reads and never writes: completion, and `commitment list` and `show` at a terminal, read `commitments_log.md` by path, because 4u's completion readers touch no `StorageService`, and parse it with the same `parse_ledger` and `fold` the accessor uses, so the file still has one parser (`15c`)."
 - `SPEC.md` itself is unchanged: CAP-34's intent and success already cover a PM-kept ledger, and no capability is added.
 
 *Spine (`ARCHITECTURE-SPINE.md`), through the architecture skill:*
@@ -509,12 +640,13 @@ Anchors checked against `origin/main` at `689122a`.
 - **AD-37** (`:570-574`):
   - in the heading, add `2026-10-25` to the revision list;
   - **Binds:** add `15c`;
-  - after "a ledger that grew is read again, never appended to blindly.", add: "`[2026-10-25, 15c]` A commitment's version is the entry id of its newest line in the file; a surface that displays a commitment carries that version, and a change it sends acts only while the commitment is still at it, while a line another commitment gains never refuses it; a change that finds the PM's same mark already in force is reported as done, not as a conflict."
+  - replace "Terminal states are terminal, and a worker re-checks state **at execution time**" with "Terminal states are terminal — for a commitment, only the PM's own mark moves it out of one (AD-14) `[2026-10-25, 15c]` — and a worker re-checks state **at execution time**";
+  - after "a ledger that grew is read again, never appended to blindly.", add: "`[2026-10-25, 15c]` A commitment's version is the entry id of its newest line in the file: it changes with every line appended for that commitment, never with another commitment's, and is compared only for equality, since entry ids are hashes and do not move up as a proposal's version does. A surface that displays a commitment carries that version, and a change it sends acts only while the commitment is still at it; a change that finds the PM's same mark, due or owner already in force is answered as already made, not as a conflict; a writer that loses the append reads again and decides again, and the lines it then writes are timed after the newest line it found."
 
 ## Verification
 
 **Commands:**
-- `uv run pytest tests/core/test_commitment_log.py tests/core/test_commitment_cards.py tests/slice/test_commitment_commands.py tests/slice/test_commitments.py tests/slice/test_proposals.py tests/slice/test_line_requests_hardening.py tests/surfaces/test_cli_completion.py tests/architecture -q` -- expected: every matrix row passes; the three new architecture tests pass
+- `uv run pytest tests/core/test_commitment_log.py tests/core/test_commitment_cards.py tests/slice/test_commitment_commands.py tests/slice/test_commitments.py tests/slice/test_proposals.py tests/slice/test_line_requests_hardening.py tests/surfaces/test_cli_completion.py tests/architecture -q` -- expected: every matrix row passes; the two new AD-37 tests pass
 - `uv run pytest -q` (in the background, about 7 minutes) -- expected: all pass; 6 skipped
 - `uv run mypy` -- expected: no errors
 - `uv run lint-imports` -- expected: all contracts kept
