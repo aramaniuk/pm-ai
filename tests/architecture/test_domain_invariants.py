@@ -951,6 +951,86 @@ def test_ad37_concurrent_approval_from_two_surfaces_yields_one_execution():
     assert first.version > p.version
 
 
+def _one_commitment(tmp):
+    """A wired daemon whose personal ledger holds one open commitment (story 15c)."""
+    from datetime import date, datetime, timezone
+
+    log = mod("pm_ai.core.commitment_log")
+    d = mod("pm_ai.domain.commitments")
+    lifecycle = mod("pm_ai.domain.lifecycle")
+    identity = mod("pm_ai.domain.identity")
+    daemon = _daemon(tmp)
+    at = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+    root = "prp_4a0a339b0c6d_mtg_a_ai_1e97a541b3ff"
+    commitment = d.Commitment(
+        commitment_id=root, proposal_id=root, type="action_item", meeting_id="mtg_a",
+        title="Example Weekly Sync-up", start=at, day=date(2026, 10, 19), day_from=None,
+        what="send the cache TTL numbers", owner="Sam Rivera", speaker=None,
+        due=d.Due("by Thursday", "2026-10-22"), state=lifecycle.CommitmentState.PENDING,
+        state_source=d.StateSource.NONE, approved_at=at, cites=d.Cites("meeting:mtg_a", "Sam Rivera"),
+    )
+    personal = identity.DataScope(identity.ScopeKind.PERSONAL)
+    line = log.render_line(log.Pending(commitment, via="terminal", written="approval", at=at))
+    log.CommitmentLog(daemon.storage).append([line], scope=personal, after=0)
+    return daemon, root, personal, at
+
+
+class _AppendsFirst:
+    """The store, with another surface's append run just before this one's (B reads, A appends)."""
+
+    def __init__(self, storage, first):
+        self._storage, self.first, self.changed, self.calls = storage, first, 0, 0
+
+    def __getattr__(self, name):
+        return getattr(self._storage, name)
+
+    def append_commitments(self, lines, *, scope, after):
+        self.calls += 1
+        if self.calls == 1:
+            self.first()
+        try:
+            return self._storage.append_commitments(lines, scope=scope, after=after)
+        except mod("pm_ai.ports").LedgerChanged:
+            self.changed += 1
+            raise
+
+
+def test_ad37_two_surfaces_marking_one_commitment_record_one_mark(tmp_path):
+    """AD-37 (15c) — the terminal and the prompt mark one commitment done at once: one line."""
+    from datetime import timedelta as delta, timezone
+
+    desks = mod("pm_ai.app.commitments")
+    log = mod("pm_ai.core.commitment_log")
+    daemon, root, personal, at = _one_commitment(tmp_path)
+    now = lambda: at + delta(hours=1)  # noqa: E731
+    a = desks.CommitmentDesk(now=now, paths=daemon.storage.paths, storage=daemon.storage, via="prompt", zone=timezone.utc)
+    store = _AppendsFirst(daemon.storage, lambda: a.mark("done", root))
+    b = desks.CommitmentDesk(now=now, paths=daemon.storage.paths, storage=store, zone=timezone.utc)
+    answer = b.mark("done", root)
+    assert answer.outcome == "already" and store.changed == 1
+    parsed = log.parse_ledger(daemon.storage.read_commitments(scope=personal))
+    assert sum(1 for line in parsed.lines if line.kind.value == "marked") == 1
+
+
+def test_ad37_a_stale_version_never_appends(tmp_path):
+    """AD-37 (15c) — `--if-version` from before another mark refuses `changed`, size unchanged."""
+    from datetime import timedelta as delta, timezone
+
+    desks = mod("pm_ai.app.commitments")
+    cards = mod("pm_ai.core.commitment_cards")
+    daemon, root, personal, at = _one_commitment(tmp_path)
+    desk = desks.CommitmentDesk(
+        now=lambda: at + delta(hours=1), paths=daemon.storage.paths, storage=daemon.storage, zone=timezone.utc
+    )
+    shown = desk.show(root).card.version
+    desk.mark("broken", root)
+    size = len(daemon.storage.read_commitments(scope=personal))
+    with pytest.raises(cards.CommitmentRefused) as refused:
+        desk.mark("done", root, if_version=shown)
+    assert refused.value.code == "changed"
+    assert len(daemon.storage.read_commitments(scope=personal)) == size
+
+
 def test_ad37_expired_proposals_cannot_execute():
     """AD-37 — the sweeper and the worker race; the loser must observe and stop."""
     proposals = mod("pm_ai.core.proposals")

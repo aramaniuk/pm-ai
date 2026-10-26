@@ -1,8 +1,8 @@
 ## **title: Local-First AI PM Assistant (pm-ai)**
 
-version: 0.16.1  
+version: 0.16.2  
 created: 2026-08-16  
-updated: 2026-10-24  
+updated: 2026-10-26  
 status: draft
 
 # **PRD: Local-First AI PM Assistant (pm-ai)**
@@ -673,6 +673,7 @@ Extract, persist, and maintain the lifecycle of all spoken meeting commitments a
 **Consequences (testable):**
 
 > * Approved spoken commitment creates a valid, structured Markdown entry in the meeting's scope's commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].  
+> * The PM keeps his commitments from the CLI (2026-10-25, 15c): `pm-ai commitment list` (open ones by default, soonest due first; a date is shown as past only when it was worked out exactly, never on an estimated meeting day), `commitment show <id>`, `commitment done|altered|broken|withdrawn <id>` (his own marks), `commitment due <id> <when>` and `commitment owner <id> <name>` on an open commitment, `commitment undo <id>`, which takes back his own done mark within 4 hours while nothing has followed it (2026-10-26, Andrei), and `commitment review`, which walks the open ones; each change is a line appended to the meeting's scope's commitments\_log.md under his handle, never a rewrite, and acts only on the version he saw when he names one.  
 > * When telemetry detects a merged MR referencing the target Work Item of a \[PENDING\] commitment, system automatically updates commitment status to \[FULFILLED\] and appends the commit SHA verification reference.  
 > * An overdue \[PENDING\] commitment whose connector instance attempted the window and failed resolves to \[ERROR\], names that instance in pm-ai doctor and the next briefing, and sends no inquiry to the promise-owner; the same window with no attempt at all resolves to \[UNKNOWN\] and clears by itself once a covered harvest arrives.  
 > * An overdue \[PENDING\] commitment that blocks a milestone triggers a private Socratic alert card to the PM at least 48 hours prior to milestone target date.
@@ -961,6 +962,8 @@ Waves, named in the later entries, are the batches stories are built in; see the
   The §6 topology's frontier box is left as drawn; NFR-13 and §11 carry the added frontier use.
 
 > * **2026-10-24 (Story 15a \- v0.16.1):** *The ledger starts at approval (2026-10-24, Andrei; FR-34, FR-06, Glossary):* \[STAGED\_APPROVAL\] is a proposal state, never a ledger entry; personal meetings keep a personal ledger; the PM's own marks — fulfilled, altered, broken, withdrawn — are recorded under his handle and counted apart from telemetry, withdrawn never as broken; a due is resolved to a date against the meeting's day or recorded as unresolved, and an estimated day never alone makes a promise late.
+
+> * **2026-10-25 (Story 15c \- v0.16.2):** *The PM's commitment commands (2026-10-25, Andrei; FR-34):* `pm-ai commitment` lists, shows, marks (done, altered, broken, withdrawn) and corrects (due, owner) commitments, and walks the open ones; every change is an appended line checked against the version the PM saw; a past date is shown only when it was worked out exactly; the reject refusal names these commands. *Undo, and the PM's typed dues (2026-10-26, Andrei; FR-34):* his own done mark, the one mark given by a single keypress, can be undone within 4 hours while nothing has followed it, returning the commitment to its state before; due and owner change only on an open commitment; a weekday he types on that same weekday means next week's, and the end of the week typed from Friday to Sunday means next week's Friday.
 
 > * **2026-08-20 (No Self-Generated Code \- v0.14.2):** The last open component of the self-improvement framework — *"tests modular Python/Bash skills in a local sandbox"* — is resolved: **no code generation, and the sandbox work is deprioritised.**
 

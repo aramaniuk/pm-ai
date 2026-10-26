@@ -18,6 +18,7 @@ from __future__ import annotations
 import calendar
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from pm_ai.core.aliases import normalise
@@ -25,10 +26,17 @@ from pm_ai.domain.commitments import Due
 from pm_ai.domain.meetings import ESTIMATE_SOURCES
 
 __all__ = [
+    "DueForm",
     "FAR_AHEAD_DAYS",
+    "FORM_DATED",
+    "FORM_END_OF_WEEK",
+    "FORM_OTHER",
+    "FORM_THIS_WEEKDAY",
+    "FORM_WEEKDAY",
     "MAX_DAYS",
     "MONTHS",
     "WEEKDAYS",
+    "due_form",
     "due_words",
     "meeting_day",
     "resolve",
@@ -160,7 +168,7 @@ def _relative(words: list[str], day: date) -> date | None | bool:
     if joined in ("day after tomorrow", "послезавтра"):
         return day + timedelta(days=2)
     bare = " ".join(_without_this(words))
-    if bare in ("end of week", "end of the week", "eow", "конца недели", "концу недели"):
+    if bare in _END_OF_WEEK:
         if day.weekday() >= 4:
             # A Saturday or Sunday has no Friday in its week ahead, and a
             # Friday's own follows the same-weekday rule.
@@ -271,6 +279,68 @@ def _numeric(words: list[str], day: date) -> date | None | bool:
         return _next_on_or_after(int(month_text), int(number_text), day)
     found = _calendar_date(int(year_text), int(month_text), int(number_text))
     return _said_year(found, day)
+
+
+FORM_WEEKDAY = "weekday"
+FORM_THIS_WEEKDAY = "this_weekday"
+FORM_END_OF_WEEK = "end_of_week"
+FORM_DATED = "dated"
+FORM_OTHER = "other"
+
+_END_OF_WEEK = frozenset({"end of week", "end of the week", "eow", "конца недели", "концу недели"})
+
+
+@dataclass(frozen=True, slots=True)
+class DueForm:
+    """What form a due's words take, read from `resolve`'s own tables (story 15c).
+
+    `kind` is `weekday` (a plain weekday: `friday`, `к пятнице`), `this_weekday`
+    (`this friday`, `в эту пятницу`), `end_of_week` (any of 15a's forms),
+    `dated` (a date with its year written: `2026-10-20`, `20.10.2026`,
+    `20 Oct 2026`, `20 октября 2026`), or `other`. `weekday` is the weekday's
+    number, Monday 0, for the two weekday kinds.
+    """
+
+    kind: str
+    weekday: int | None = None
+
+
+def _year_written(words: list[str]) -> bool:
+    """Whether the words are a date with its year written, in a form `resolve` reads."""
+    if len(words) == 2 and words[1] in _YEAR_WORDS:
+        words = words[:1]
+    if len(words) == 1:
+        word = words[0]
+        if _ISO.fullmatch(word):
+            return True
+        dotted = _NUMERIC.match(word)
+        return dotted is not None and dotted.group("year") is not None
+    named = words[:-1] if words and words[-1] in _YEAR_WORDS and len(words) >= 3 else words
+    if len(named) != 3 or _YEAR.match(named[2]) is None:
+        return False
+    first, second = named[0], named[1]
+    return (second in MONTHS and _day_number(first) is not None) or (
+        first in MONTHS and _day_number(second) is not None
+    )
+
+
+def due_form(said: str) -> DueForm:
+    """The form of `said`, named from the same tables `resolve` reads (story 15c).
+
+    Pure. `resolve` and every result it gives are unchanged: the desk reads
+    this to apply the PM's own rules for words he types (the same weekday,
+    the end of the week from Friday on, a date with its year written).
+    """
+    words = _tokens(said)
+    if len(words) == 1 and words[0] in WEEKDAYS:
+        return DueForm(FORM_WEEKDAY, WEEKDAYS[words[0]])
+    if len(words) == 2 and words[0] in _THIS and words[1] in WEEKDAYS:
+        return DueForm(FORM_THIS_WEEKDAY, WEEKDAYS[words[1]])
+    if " ".join(_without_this(words)) in _END_OF_WEEK:
+        return DueForm(FORM_END_OF_WEEK)
+    if _year_written(words):
+        return DueForm(FORM_DATED)
+    return DueForm(FORM_OTHER)
 
 
 def resolve_date(said: str | None, day: date | None) -> date | None:

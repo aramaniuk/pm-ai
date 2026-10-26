@@ -282,3 +282,53 @@ def test_the_unresolved_and_none_sentences():
 @pytest.mark.parametrize("odd", ["2026-W43-5", "2026-296", "20261030"])
 def test_only_year_month_day_is_an_iso_date(odd):
     assert resolve_date(odd, MONDAY) is None
+
+
+# ── Story 15c: the form of the words, for the PM's own rules ─────────────────
+
+from pm_ai.core.due_dates import (  # noqa: E402
+    FORM_DATED,
+    FORM_END_OF_WEEK,
+    FORM_OTHER,
+    FORM_THIS_WEEKDAY,
+    FORM_WEEKDAY,
+    due_form,
+)
+
+
+@pytest.mark.parametrize(
+    ("words", "kind", "weekday"),
+    [
+        ("friday", FORM_WEEKDAY, 4),
+        ("Fri", FORM_WEEKDAY, 4),
+        ("пятница", FORM_WEEKDAY, 4),
+        ("в пятницу", FORM_WEEKDAY, 4),
+        ("к пятнице", FORM_WEEKDAY, 4),
+        ("до пятницы", FORM_WEEKDAY, 4),
+        ("this friday", FORM_THIS_WEEKDAY, 4),
+        ("в эту пятницу", FORM_THIS_WEEKDAY, 4),
+        ("end of week", FORM_END_OF_WEEK, None),
+        ("EOW", FORM_END_OF_WEEK, None),
+        ("end of this week", FORM_END_OF_WEEK, None),
+        ("до конца недели", FORM_END_OF_WEEK, None),
+        ("2026-10-20", FORM_DATED, None),
+        ("20.10.2026", FORM_DATED, None),
+        ("20.10.2026г.", FORM_DATED, None),
+        ("20 Oct 2026", FORM_DATED, None),
+        ("October 20 2026", FORM_DATED, None),
+        ("20 октября 2026", FORM_DATED, None),
+        ("20 октября 2026 года", FORM_DATED, None),
+        ("20 Oct", FORM_OTHER, None),
+        ("next sprint", FORM_OTHER, None),
+        ("tomorrow", FORM_OTHER, None),
+    ],
+)
+def test_the_form_of_the_words_is_named(words, kind, weekday):
+    form = due_form(words)
+    assert form.kind == kind and form.weekday == weekday
+
+
+def test_resolve_still_leaves_a_meetings_own_weekday_unresolved():
+    """Matrix "Extraction unchanged": "by Friday" said on Fri 30 Oct stays unresolved."""
+    assert resolve("by Friday", date(2026, 10, 30)).value == "unresolved"
+    assert resolve("end of week", date(2026, 10, 30)).value == "unresolved"

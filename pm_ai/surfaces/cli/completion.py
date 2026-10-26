@@ -33,9 +33,14 @@ from pm_ai.core.goal_register import DOMAIN_SPELLINGS, HORIZON_SPELLINGS
 from pm_ai.core.meeting_listing import shown_title, title_words
 from pm_ai.domain.meeting_listing import LIST_STATES
 from pm_ai.surfaces.cli.logs import LEVELS as LOG_LEVELS
+from pm_ai.core.commitment_cards import LIST_STATES as COMMITMENT_STATES
 from pm_ai.core.proposal_cards import LIST_STATES as PROPOSAL_STATES
 from pm_ai.core.proposals import TODAYS_TYPES
 from pm_ai.surfaces.cli.dispatch import (
+    COMMITMENT_ARGUMENT,
+    NAME_ARGUMENT,
+    NOTE_OPTION,
+    WHEN_ARGUMENT,
     DUE_OPTION,
     GOAL_OPTIONS,
     IF_VERSION_OPTION,
@@ -109,6 +114,25 @@ FREE_TEXT: frozenset[tuple[tuple[str, ...], str]] = frozenset(
         (("proposal", "edit"), WHAT_OPTION),
         (("proposal", "edit"), OWNER_OPTION),
         (("proposal", "edit"), DUE_OPTION),
+        # Story 15c: a count, a date, a version, a due's words and the PM's own words.
+        (("commitment", "list"), LIMIT_OPTION),
+        (("commitment", "list"), ON_OPTION),
+        (("commitment", "review"), ON_OPTION),
+        (("commitment", "done"), IF_VERSION_OPTION),
+        (("commitment", "altered"), IF_VERSION_OPTION),
+        (("commitment", "broken"), IF_VERSION_OPTION),
+        (("commitment", "withdrawn"), IF_VERSION_OPTION),
+        (("commitment", "due"), IF_VERSION_OPTION),
+        (("commitment", "owner"), IF_VERSION_OPTION),
+        (("commitment", "undo"), IF_VERSION_OPTION),
+        (("commitment", "done"), NOTE_OPTION),
+        (("commitment", "altered"), NOTE_OPTION),
+        (("commitment", "broken"), NOTE_OPTION),
+        (("commitment", "withdrawn"), NOTE_OPTION),
+        (("commitment", "altered"), WHAT_OPTION),
+        (("commitment", "altered"), OWNER_OPTION),
+        (("commitment", "altered"), DUE_OPTION),
+        (("commitment", "due"), WHEN_ARGUMENT),
     }
 )
 """`(command, name)` pairs whose value is free text, offered nothing."""
@@ -139,6 +163,9 @@ UPDATE_IDS = "update ids"
 PROPOSAL_IDS = "proposal ids"
 PROPOSAL_STATE_NAMES = "proposal states"
 PROPOSAL_TYPE_NAMES = "proposal types"
+COMMITMENT_IDS = "commitment ids"
+COMMITMENT_STATE_NAMES = "commitment states"
+COMMITMENT_OWNERS = "commitment owners"
 
 MEETING_CANDIDATES = 100
 """At most this many meetings are offered for one Tab, after filtering (11f)."""
@@ -184,6 +211,17 @@ _BY_COMMAND: Mapping[tuple[tuple[str, ...], str], str] = {
     (("proposal", "list"), TYPE_OPTION): PROPOSAL_TYPE_NAMES,
     (("proposal", "list"), MEETING_ARGUMENT): MEETING_IDS,
     (("proposal", "review"), MEETING_ARGUMENT): MEETING_IDS,
+    # Story 15c: a commitment chosen by its owner, text, meeting and due, its id
+    # inserted — only those the verb can act on; the listing's five states; an
+    # owner from the names already in the ledger; a meeting of the line's scope.
+    **{
+        (("commitment", verb), COMMITMENT_ARGUMENT): COMMITMENT_IDS
+        for verb in ("show", "done", "altered", "broken", "withdrawn", "due", "owner", "undo")
+    },
+    (("commitment", "owner"), NAME_ARGUMENT): COMMITMENT_OWNERS,
+    (("commitment", "list"), STATE_OPTION): COMMITMENT_STATE_NAMES,
+    (("commitment", "list"), MEETING_ARGUMENT): MEETING_IDS,
+    (("commitment", "review"), MEETING_ARGUMENT): MEETING_IDS,
 }
 """Names whose value depends on the command declaring them."""
 
@@ -225,6 +263,22 @@ PROPOSAL_CANDIDATES = 100
 
 
 def _no_proposals(verb: str) -> Sequence[ProposalChoice]:
+    return ()
+
+
+CommitmentChoice = tuple[str, str, str, str]
+"""A commitment completion may offer (story 15c): its id, `owner: what` (or `said
+by …: what`), its meeting's title, and its due as the card says it."""
+
+COMMITMENT_CANDIDATES = 100
+"""At most this many commitments are offered for one Tab (15c)."""
+
+
+def _no_commitments(verb: str) -> Sequence[CommitmentChoice]:
+    return ()
+
+
+def _no_owners(commitment_id: str | None, scope: str | None) -> Sequence[str]:
     return ()
 
 
@@ -271,6 +325,13 @@ class Readers:
     that verb can act on, newest meeting first, at most 100. Never one whose
     scope cannot be told or whose body cannot be read. `operational.db` is read
     read-only, by path, as `summarizable` reads it."""
+    commitments: Callable[[str], Sequence[CommitmentChoice]] = _no_commitments
+    """Story 15c, by verb: the commitments that verb can act on, in `list`'s
+    order, at most 100. Each ledger is read by path with `parse_ledger` and
+    `fold`; a ledger that cannot be read offers nothing."""
+    commitment_owners: Callable[[str | None, str | None], Sequence[str]] = _no_owners
+    """Story 15c, by commitment id and `--scope` (or `None`): the owners and
+    speakers already in that scope's ledger, the commitment's own speaker first."""
 
 
 # ── Splitting a line that may still be open ─────────────────────────────────
@@ -448,6 +509,8 @@ class _Reading:
     awaiting: str | None
     ended: bool = False
     """A bare `--` came before: every later word is positional (`dispatch`)."""
+    positional_words: tuple[str, ...] = ()
+    """The finished positional words, in order (15c: `commitment owner <id> <name>`)."""
 
 
 def _reading(words: Sequence[str]) -> _Reading | None:
@@ -478,6 +541,7 @@ def _reading(words: Sequence[str]) -> _Reading | None:
     given: set[str] = set()
     awaiting: str | None = None
     ended = False
+    kept: list[str] = []
     for word in rest:
         if awaiting is not None:
             if word.startswith("--"):
@@ -487,6 +551,7 @@ def _reading(words: Sequence[str]) -> _Reading | None:
                 continue
         if ended or not word.startswith("--"):
             positionals += 1
+            kept.append(word)
             continue
         if word == "--":
             ended = True
@@ -496,7 +561,7 @@ def _reading(words: Sequence[str]) -> _Reading | None:
         if name in entry.flags or assigned:
             continue
         awaiting = name
-    return _Reading(command, entry, positionals, frozenset(given), awaiting, ended)
+    return _Reading(command, entry, positionals, frozenset(given), awaiting, ended, tuple(kept))
 
 
 @dataclass
@@ -510,6 +575,8 @@ class Completion:
     _scoped: dict[tuple[str, str], _Cached] = field(init=False)
     _meetings: dict[tuple[str, str], _CachedMeetings] = field(init=False)
     _proposals: dict[str, _CachedProposals] = field(init=False)
+    _commitments: dict[str, _CachedCommitments] = field(init=False)
+    _owners: dict[tuple[str | None, str | None], _Cached] = field(init=False)
 
     def __post_init__(self) -> None:
         self._projects = _Cached(self.readers.projects)
@@ -518,6 +585,8 @@ class Completion:
         self._scoped = {}
         self._meetings = {}
         self._proposals = {}
+        self._commitments = {}
+        self._owners = {}
 
     def forget(self) -> None:
         """Read every file again at the next Tab that needs it (a command ran)."""
@@ -532,6 +601,10 @@ class Completion:
             meetings.forget()
         for proposals in self._proposals.values():
             proposals.forget()
+        for commitments in self._commitments.values():
+            commitments.forget()
+        for owners in self._owners.values():
+            owners.forget()
 
     # ── Tab ──────────────────────────────────────────────────────────────
 
@@ -563,7 +636,29 @@ class Completion:
         project = scope.removeprefix("project:") if scope and scope.startswith("project:") else None
         entry = reading.entry
 
+        def commitments_for(name: str, typed: str) -> list[Candidate] | None:
+            source = source_of_or_none(reading.command, name)
+            if source == COMMITMENT_IDS:
+                verb = reading.command[1]
+                if verb not in self._commitments:
+                    read = self.readers.commitments
+                    self._commitments[verb] = _CachedCommitments(lambda: read(verb))
+                return _commitment_candidates(
+                    self._commitments[verb].get(), typed, split.start, split.quote
+                )
+            if source == COMMITMENT_OWNERS:
+                named = reading.positional_words[0] if reading.positional_words else None
+                key = (named, scope)
+                if key not in self._owners:
+                    owners = self.readers.commitment_owners
+                    self._owners[key] = _Cached(lambda: owners(named, scope))
+                return offered(self._owners[key].get())
+            return None
+
         def proposals_for(name: str, typed: str) -> list[Candidate] | None:
+            chosen = commitments_for(name, typed)
+            if chosen is not None:
+                return chosen
             if source_of_or_none(reading.command, name) != PROPOSAL_IDS:
                 return None
             verb = reading.command[1]
@@ -644,6 +739,8 @@ class Completion:
             return SUMMARY_MAKERS
         if source == LIST_STATE_NAMES:
             return LIST_STATES
+        if source == COMMITMENT_STATE_NAMES:
+            return COMMITMENT_STATES
         if source == PROPOSAL_STATE_NAMES:
             return PROPOSAL_STATES
         if source == PROPOSAL_TYPE_NAMES:
@@ -786,6 +883,56 @@ def _proposal_candidates(
             )
         )
         if len(found) >= PROPOSAL_CANDIDATES:
+            break
+    return found
+
+
+@dataclass(slots=True)
+class _CachedCommitments:
+    """`_Cached` for commitments: (id, owner and what, title, due) (15c)."""
+
+    read: Callable[[], Sequence[CommitmentChoice]]
+    values: tuple[CommitmentChoice, ...] | None = None
+
+    def get(self) -> tuple[CommitmentChoice, ...]:
+        if self.values is None:
+            try:
+                self.values = tuple(
+                    value
+                    for value in self.read()
+                    if isinstance(value, tuple)
+                    and len(value) == 4
+                    and all(isinstance(part, str) for part in value)
+                )
+            except Exception:  # noqa: BLE001 — a reader that fails offers nothing
+                self.values = ()
+        return self.values
+
+    def forget(self) -> None:
+        self.values = None
+
+
+def _commitment_candidates(
+    choices: Sequence[CommitmentChoice], typed: str, start: int, quote: str | None
+) -> list[Candidate]:
+    """The commitments whose id starts with `typed`, or a word of whose text or title does.
+
+    Folded as `--title` folds, as 13a's proposals are matched; at most
+    `COMMITMENT_CANDIDATES`, each inserting its id and showing `owner: what`,
+    its meeting's title and its due (15c).
+    """
+    folded = title_words(typed)
+    found: list[Candidate] = []
+    for commitment_id, said, title, due in choices:
+        if typed and not commitment_id.startswith(typed):
+            words = (*title_words(said), *title_words(title))
+            if not folded or not all(
+                any(word.startswith(part) for word in words) for part in folded
+            ):
+                continue
+        meta = "  ".join(part for part in (said, shown_title(title) if title else "", due) if part)
+        found.append(Candidate(_quoted(commitment_id, quote), start, commitment_id, meta=meta))
+        if len(found) >= COMMITMENT_CANDIDATES:
             break
     return found
 

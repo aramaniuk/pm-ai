@@ -569,3 +569,166 @@ def test_a_whitespace_only_edited_due_is_nothing_said():
     revised = revised_from(_item(f"{ROOT}_e1", due="   "), held, Head(ROOT, 0, None),
                            via="terminal", written="approval", at=APPROVED)
     assert revised.due is None
+
+
+# ── Story 15c: what the fold adds, the owner rule, and undo ──────────────────
+
+from pm_ai.core.commitment_log import Undone  # noqa: E402
+from pm_ai.domain.commitments import UNDO_WINDOW  # noqa: E402
+
+
+def _owner_set(name: str | None, minutes: int) -> CommitmentLine:
+    at = APPROVED + timedelta(minutes=minutes)
+    return render_line(OwnerSet(ROOT, name, occurred=at, via="terminal", at=at))
+
+
+def _revised_owner(n: int, minutes: int, owner: str | None, *, what: str = "send the cache TTL numbers") -> CommitmentLine:
+    at = APPROVED + timedelta(minutes=minutes)
+    replaces = ROOT if n == 1 else f"{ROOT}_e{n - 1}"
+    return render_line(Revised(ROOT, f"{ROOT}_e{n}", replaces, what, owner, None,
+                               occurred=at, via="terminal", written="approval", at=at))
+
+
+def _undone(mark: CommitmentLine, minutes: float, root: str = ROOT) -> CommitmentLine:
+    at = APPROVED + timedelta(minutes=minutes)
+    return render_line(Undone(root, mark.entry, occurred=at, via="terminal", at=at))
+
+
+def test_the_version_is_the_newest_line_in_file_order():
+    pending, done = _pending(), _mark("fulfilled", 5)
+    ledger = _read(pending, done)
+    assert ledger.details[ROOT].version == done.entry
+    assert ledger.details[ROOT].newest.kind is LineKind.MARKED
+    assert _read(pending).details[ROOT].version == pending.entry
+
+
+def test_another_commitments_line_leaves_the_version_unchanged():
+    """Matrix "Other commitment moved": a fold unit test."""
+    other = "prp_4a0a339b0c6d_mtg_a_ai_0000000000aa"
+    pending = _pending()
+    other_pending = _pending(_item(other))
+    before = _read(pending, other_pending).details[ROOT].version
+    after = _read(pending, other_pending, _mark("broken", 9, root=other)).details[ROOT].version
+    assert before == after == pending.entry
+
+
+def test_details_carry_the_mark_in_force_and_the_sources():
+    at = APPROVED + timedelta(minutes=3)
+    marked = render_line(Marked(ROOT, Mark.ALTERED, occurred=at, via="prompt", at=at, note="scope cut"))
+    due_set = render_line(DueSet(ROOT, date(2026, 11, 2), occurred=at + timedelta(minutes=1),
+                                 via="terminal", at=at))
+    ledger = _read(_pending(), marked, due_set, _owner_set("Alex Morgan", 6))
+    details = ledger.details[ROOT]
+    assert details.mark is not None and details.mark.mark is Mark.ALTERED
+    assert details.mark.note == "scope cut" and details.mark.via == "prompt"
+    assert details.due_by_pm and details.owner_by_pm
+    assert details.changed_at == APPROVED + timedelta(minutes=6)
+    # The due as said is kept beside the PM's date.
+    assert details.due_said == "by Thursday"
+    assert ledger.commitments[ROOT].due == Due(None, "2026-11-02")
+
+
+def test_an_owner_the_pm_set_survives_an_edit_of_the_wording():
+    """Matrix "Owner kept after an edit": the fold fix."""
+    ledger = _read(_pending(), _owner_set("Alex Morgan", 2), _revised_owner(1, 5, "Sam Rivera", what="new words"))
+    assert ledger.commitments[ROOT].owner == "Alex Morgan"
+    assert ledger.commitments[ROOT].what == "new words"
+    assert ledger.details[ROOT].owner_by_pm
+
+
+def test_an_edit_of_the_owner_after_the_pms_owner_gives_the_edits():
+    """Matrix "Owner changed by an edit"."""
+    ledger = _read(
+        _pending(_item(owner=None)), _owner_set("Alex Morgan", 2),
+        _revised_owner(1, 5, None, what="new words"),
+        _revised_owner(2, 7, "Sam Rivera", what="new words"),
+    )
+    assert ledger.commitments[ROOT].owner == "Sam Rivera"
+    assert not ledger.details[ROOT].owner_by_pm
+
+
+def test_an_owner_edit_caught_up_later_keeps_its_earlier_occurred():
+    """An `--owner` edit made before `commitment owner`, its line written only afterwards."""
+    lines = [_pending(_item(owner=None)), _owner_set("Alex Morgan", 10), _revised_owner(1, 5, "Sam Rivera")]
+    ledger = _read(*lines)
+    assert ledger.commitments[ROOT].owner == "Alex Morgan"
+    # A file-order swap gives the same owner (AD-35).
+    assert _read(*reversed(lines)).commitments[ROOT].owner == "Alex Morgan"
+
+
+def test_a_revised_line_that_clears_the_owner_counts_as_a_change():
+    ledger = _read(_pending(), _owner_set("Alex Morgan", 2), _revised_owner(1, 5, None))
+    assert ledger.commitments[ROOT].owner is None
+
+
+def test_an_undone_line_reads_back_as_written():
+    done = _mark("fulfilled", 5)
+    line = _undone(done, 6)
+    (parsed,) = [each for each in parse_ledger((line.text + "\n").encode()).lines]
+    assert parsed.kind is LineKind.UNDONE and parsed.fields["undone_entry"] == done.entry
+    assert line.entry == entry_id((ROOT, "undone", done.entry))
+    assert "kind=undone" in line.text and "by=pm" in line.text
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "undone_entry=cml_nothex000000",
+        "by=telemetry",
+    ],
+)
+def test_an_undone_line_with_a_bad_field_is_malformed(bad):
+    done = _mark("fulfilled", 5)
+    text = _undone(done, 6).text
+    key = bad.split("=")[0]
+    import re as _re
+
+    text = _re.sub(rf"{key}=\S+", bad, text)
+    assert _read(_pending(), done, text).malformed == 1
+
+
+def test_undo_inside_the_window_returns_the_state_before():
+    """Matrix "Undo inside the window": back to `PENDING`."""
+    done = _mark("fulfilled", 0)
+    ledger = _read(_pending(), done, _undone(done, 239))
+    assert ledger.commitments[ROOT].state is CommitmentState.PENDING
+    assert ledger.details[ROOT].mark is None and ledger.details[ROOT].undone == done.entry
+    assert ledger.refused == 0
+
+
+def test_undo_back_to_altered():
+    """Matrix "Undo back to altered"."""
+    altered, done = _mark("altered", 1), _mark("fulfilled", 2)
+    ledger = _read(_pending(), altered, done, _undone(done, 3))
+    assert ledger.commitments[ROOT].state is CommitmentState.ALTERED
+    assert ledger.details[ROOT].mark is not None and ledger.details[ROOT].mark.mark is Mark.ALTERED
+
+
+def test_undo_after_the_window_is_refused_and_the_mark_stands():
+    """Matrix "Undo line read back": more than 4 h after the mark."""
+    done = _mark("fulfilled", 0)
+    late = UNDO_WINDOW.total_seconds() / 60 + 1
+    ledger = _read(_pending(), done, _undone(done, late))
+    assert ledger.commitments[ROOT].state is CommitmentState.FULFILLED and ledger.refused == 1
+
+
+def test_undo_with_a_line_between_is_refused_and_the_mark_stands():
+    """Matrix "Undo line read back": a line between the mark and the undo."""
+    done = _mark("fulfilled", 0)
+    lines = [_pending(), done, _owner_set("Alex Morgan", 1), _undone(done, 2)]
+    ledger = _read(*lines)
+    assert ledger.commitments[ROOT].state is CommitmentState.FULFILLED and ledger.refused == 1
+    swapped = _read(*reversed(lines))
+    assert swapped.commitments == ledger.commitments and swapped.refused == 1
+
+
+def test_undo_of_a_mark_other_than_done_is_refused():
+    broken = _mark("broken", 0)
+    ledger = _read(_pending(), broken, _undone(broken, 1))
+    assert ledger.commitments[ROOT].state is CommitmentState.BROKEN and ledger.refused == 1
+
+
+def test_undo_folds_the_same_in_any_file_order():
+    done = _mark("fulfilled", 0)
+    lines = [_pending(), done, _undone(done, 1)]
+    assert _read(*lines).commitments == _read(*reversed(lines)).commitments

@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import datetime as _dt
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 from types import MappingProxyType
 
@@ -41,7 +41,9 @@ __all__ = [
     "NotACommitmentLine",
     "NotACommitmentScope",
     "StateSource",
+    "UNDO_WINDOW",
     "can_mark",
+    "mark_answer",
 ]
 
 COMMITMENTS_LOG = "commitments_log.md"
@@ -52,6 +54,10 @@ DUE_UNRESOLVED = "unresolved"
 
 DUE_NONE = "none"
 """Nothing was said."""
+
+UNDO_WINDOW = timedelta(hours=4)
+"""How long the PM's own done mark can be undone, from its `occurred` (Andrei,
+2026-10-26, story 15c): "Allow undo for the next 4 hours"."""
 
 
 class NotACommitmentScope(ValueError):
@@ -87,6 +93,10 @@ class LineKind(Enum):
     """An owner the PM set or cleared (15c)."""
     VERDICT = "verdict"
     """Reserved for story 16's telemetry verdicts; 15a reads only its `state`."""
+    UNDONE = "undone"
+    """The PM's undo of his own done mark, within `UNDO_WINDOW` and while no
+    later line follows it (story 15c). A kind of its own, so no reader that
+    missed a field takes it for one more done mark."""
 
 
 class StateSource(Enum):

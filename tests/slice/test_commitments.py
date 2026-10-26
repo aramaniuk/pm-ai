@@ -623,18 +623,26 @@ def test_rejecting_an_approved_item_is_refused(machine):
     assert code == EXIT_REFUSAL
     said = out + err
     assert f"{ids[0]} was approved on Wed 21 Oct and is a commitment now, so it is not rejected; nothing was changed." in said
-    assert f'To correct what was agreed, edit it: pm-ai proposal edit {ids[0]} --scope personal --what "…".' in said
+    # Story 15c: the refusal names the commitment commands that exist.
+    assert f"If approving it was a mistake: pm-ai commitment withdrawn {ids[0]} --scope personal." in said
+    assert f"If what was agreed has changed: pm-ai commitment altered {ids[0]} --scope personal --note" in said
+    assert f"To correct what was recorded: pm-ai proposal edit {ids[0]} --scope personal --what" in said
     assert machine.load(ids[0]) == before_row and _text(machine) == before_ledger
 
 
-def test_rejecting_in_json_names_no_command_that_does_not_exist(machine):
-    """Matrix "Reject in JSON"."""
+def test_rejecting_in_json_names_the_commitment_commands(machine):
+    """Matrix "Reject in JSON" (15a), amended by 15c: `commitment.commands` holds the three."""
     _, ids = _summarised(machine)
     machine.run("proposal", "approve", ids[0])
     code, found = machine.json("proposal", "reject", ids[0])
     assert code == EXIT_REFUSAL and found["outcome"] == "refused" and found["state"] == "approved"
     assert found["proposal"]["actions"]["edit"]["command"][:3] == ["proposal", "edit", ids[0]]
-    assert "pm-ai commitment" not in json.dumps(found) and "commitment list" not in json.dumps(found)
+    commitment = found["commitment"]
+    assert commitment["commitment_id"] == ids[0] and commitment["recorded"] is True
+    assert commitment["commands"]["withdrawn"] == ["commitment", "withdrawn", ids[0], "--scope", "personal"]
+    assert commitment["commands"]["altered"][:3] == ["commitment", "altered", ids[0]]
+    assert commitment["commands"]["edit"][:3] == ["proposal", "edit", ids[0]]
+    assert set(commitment["commands"]) == {"withdrawn", "altered", "edit"}
 
 
 def test_the_store_refuses_rejecting_an_approved_item(machine):
@@ -659,7 +667,10 @@ def test_an_approved_card_offers_edit_and_no_reject(machine):
     reject, edit = found["proposal"]["actions"]["reject"], found["proposal"]["actions"]["edit"]
     assert reject == {
         "available": False,
-        "reason": "approved, so it is a commitment now; edit it to correct what was agreed",
+        "reason": (
+            "approved, so it is a commitment now; mark it withdrawn if approving it was a "
+            "mistake, or edit it to correct what was agreed"
+        ),
         "command": None,
     }
     assert edit["available"] is True

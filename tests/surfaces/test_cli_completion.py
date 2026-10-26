@@ -405,6 +405,10 @@ def test_no_tab_reaches_the_daemon_or_opens_a_store(tmp_path, monkeypatch):
         "transcript summarize --scope personal --meeting week",
         "transcript drop x.vtt --scope personal --meeting ",
         "transcript list --state ",
+        # Story 15c: commitments chosen at Tab, each ledger read by path.
+        "commitment done ",
+        "commitment owner prp_x ",
+        "commitment list --state ",
     ):
         completion.complete(line)
         completion.hint(line)

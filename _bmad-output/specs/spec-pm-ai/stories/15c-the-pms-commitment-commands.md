@@ -2,7 +2,7 @@
 title: 'the PM''s commitment commands'
 type: 'feature'
 created: '2026-10-25'
-status: 'draft'
+status: 'done'
 baseline_commit: '689122a'
 review_loop_iteration: 0
 context:
@@ -103,7 +103,7 @@ context:
   - **The bound.** Before starting the edit, the desk checks what is left of `COMMITMENT_WRITE_BOUND_SECONDS`. When less than 13a's edit needs is left (the 1-second busy wait plus one claimed step), the edit is not started, and the outcome is the same `edit_refused` with the reason "out of time", `wrote` and `next`.
   - **The version returned** by `altered --what` is the commitment's version after the `revised` line, so `done --if-version <that>` acts.
   - **`--what` is for an action item only.** A spoken promise's words are what was said, and 13a gives `implicit_commitment` no editable field. `altered --what` on a promise is refused (exit 3, `what_not_editable`): "a spoken promise keeps the words that were said; record how it changed with --note". Nothing is written.
-  - `--owner ""` and `--due ""` clear the field, as 13a's edit does. `altered` with no option is valid: the mark alone, or with its note.
+  - `--owner ""` and `--due ""` clear the field, as 13a's edit does. A `--due` of only spaces is a usage error (exit 2), as `due` refuses it (Andrei, 2026-10-26). `altered` with no option is valid: the mark alone, or with its note.
 - **`due` and `owner` act on an open commitment only** (Andrei, 2026-10-26). On a `fulfilled`, `broken` or `withdrawn` one they are refused (exit 3, `commitment_closed`), before the version check, with nothing written. The reason names the state and when, and the way to reopen it that `mark_answer` allows: `pm-ai commitment altered <id> --scope … --due "…"` from `broken` or `withdrawn`, `pm-ai commitment undo <id> --scope …` while a done mark's window is open, and otherwise none ("you marked it done on <date>; it is closed"). `altered --due` and `--owner` on a broken or withdrawn commitment are allowed, because the `altered` mark reopens it.
 - **`due`:** one `due_set` line. `--clear` writes `due=none`.
   - **Words that are empty or only spaces** are a usage error (exit 2): they would otherwise read as nothing said and clear the due silently.
@@ -563,23 +563,23 @@ Anchors checked against `origin/main` at `689122a`.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] **The fold.** `core/commitment_log.py`: `Details` and `CommitmentLedger.details` (version, mark in force, `due_by_pm`, `owner_by_pm`, `changed_at`); the owner rule fixed. Tests first, including the "owner kept after an edit" row.
-- [ ] **Undo.** `domain/commitments.py`: `UNDO_WINDOW` and `LineKind.UNDONE`; `core/commitment_log.py`: the `Undone` record, its rendering and parsing, and the fold dropping the undone mark by the three conditions. Tests first: every undo row of the matrix, and file-order swaps.
-- [ ] **PM-typed dues.** `core/due_dates.py`: a pure helper naming the form of the words, with `resolve` unchanged; `app/commitments.py`: the same-weekday and end-of-week rule for the PM's words, and the year-written past date.
-- [ ] **The card.** `pm_ai/core/commitment_cards.py`: `Card`, `build_card`, `card_text(card, *, compact=False)`, `card_json`, `listing_text`, `listing_json`, `outcome_text`, `refusal_text`.
-- [ ] **The desk.** `pm_ai/app/commitments.py`: `CommitmentDesk` with `listing`, `show`, `mark`, `altered`, `set_due`, `set_owner`, `open_walk` and `choices`, the compare-and-append loop, `COMMITMENT_WRITE_BOUND_SECONDS`, the PM's handle through `read_pm_identity`; built in the composition root and, in the daemon, with handed writes.
-- [ ] **The CLI.** `surfaces/cli/dispatch.py`: the `commitment` group in `TABLE`, `CommitmentDeskPort`, the handlers, and the `review` walk with compact cards; `review` in `TERMINAL_BOUND`.
-- [ ] **Where it runs.** `entry.py`: `DAEMON_BOUNDS` entries; the by-path readers for `list`, `show` and completion.
-- [ ] **Completion.** `completion.py`: `COMMITMENT_IDS`, `COMMITMENT_STATE_NAMES`, `COMMITMENT_OWNERS`, and their `_BY_COMMAND` rows.
-- [ ] **The reject refusal.** `app/proposals.py:_not_rejected`, its JSON `commitment` field, and `COMMITMENT_NOT_REJECTED`.
-- [ ] **The pages:** `_meeting_digest`, `_digests_over`, `_item_decisions`.
-- [ ] **Tests.**
+- [x] **The fold.** `core/commitment_log.py`: `Details` and `CommitmentLedger.details` (version, mark in force, `due_by_pm`, `owner_by_pm`, `changed_at`); the owner rule fixed. Tests first, including the "owner kept after an edit" row.
+- [x] **Undo.** `domain/commitments.py`: `UNDO_WINDOW` and `LineKind.UNDONE`; `core/commitment_log.py`: the `Undone` record, its rendering and parsing, and the fold dropping the undone mark by the three conditions. Tests first: every undo row of the matrix, and file-order swaps.
+- [x] **PM-typed dues.** `core/due_dates.py`: a pure helper naming the form of the words, with `resolve` unchanged; `app/commitments.py`: the same-weekday and end-of-week rule for the PM's words, and the year-written past date.
+- [x] **The card.** `pm_ai/core/commitment_cards.py`: `Card`, `build_card`, `card_text(card, *, compact=False)`, `card_json`, `listing_text`, `listing_json`, `outcome_text`, `refusal_text`.
+- [x] **The desk.** `pm_ai/app/commitments.py`: `CommitmentDesk` with `listing`, `show`, `mark`, `altered`, `set_due`, `set_owner`, `open_walk` and `choices`, the compare-and-append loop, `COMMITMENT_WRITE_BOUND_SECONDS`, the PM's handle through `read_pm_identity`; built in the composition root and, in the daemon, with handed writes.
+- [x] **The CLI.** `surfaces/cli/dispatch.py`: the `commitment` group in `TABLE`, `CommitmentDeskPort`, the handlers, and the `review` walk with compact cards; `review` in `TERMINAL_BOUND`.
+- [x] **Where it runs.** `entry.py`: `DAEMON_BOUNDS` entries; the by-path readers for `list`, `show` and completion.
+- [x] **Completion.** `completion.py`: `COMMITMENT_IDS`, `COMMITMENT_STATE_NAMES`, `COMMITMENT_OWNERS`, and their `_BY_COMMAND` rows.
+- [x] **The reject refusal.** `app/proposals.py:_not_rejected`, its JSON `commitment` field, and `COMMITMENT_NOT_REJECTED`.
+- [x] **The pages:** `_meeting_digest`, `_digests_over`, `_item_decisions`.
+- [x] **Tests.**
   - `tests/core/test_commitment_log.py`: `details`, the owner rule, the version.
   - `tests/core/test_commitment_cards.py` (new): every heading word, past-due rules, the compact form's lines are the full form's first lines, availability from `mark_answer`.
   - `tests/slice/test_commitment_commands.py` (new): one test per matrix row; the two timed tests; the prompt's routing; completion.
   - `tests/architecture/test_domain_invariants.py`: the two new AD-37 tests.
   - **Tests the refusal change breaks,** in `tests/slice/test_commitments.py`: `:626` asserts the old "To correct what was agreed, edit it" sentence (replaced by the new text); `:637` asserts `"pm-ai commitment" not in` the JSON (inverted to assert the `commitment.commands` words, and the test renamed to say the refusal names the commitment commands); `:662` asserts the old card reason (the new `COMMITMENT_NOT_REJECTED`). `tests/slice/test_proposals.py:432-433` asserts only "is a commitment now, so it is not rejected" and passes unchanged.
-- [ ] **The contract.** Apply the amendments in Design Notes, in this order: `prd.md` through bmad-prd; then bmad-spec re-derives `derivation-services.md`; then `ARCHITECTURE-SPINE.md` through the architecture skill.
+- [x] **The contract.** Apply the amendments in Design Notes, in this order: `prd.md` through bmad-prd; then bmad-spec re-derives `derivation-services.md`; then `ARCHITECTURE-SPINE.md` through the architecture skill.
 
 **Acceptance Criteria:**
 - Given three open personal fixture commitments, when `pm-ai commitment list` runs, then they are listed soonest due first, and only an exact past date is called past due.
@@ -660,6 +660,18 @@ Anchors checked against `origin/main` at `689122a`.
 
      It is a rule in the desk for the PM's typed words. `due_dates` gains only a pure form-naming helper, and `resolve`, 15a's extraction dues and Team Activity are unchanged. Matrix rows added, including one showing that a meeting's own "by Friday" stays unresolved.
 - **2026-10-26, approved for build (Andrei),** after the readiness check, the three-lens review and his four decisions.
+- **2026-10-26, built** (frozen block unchanged). Amendments applied first (PRD v0.16.2, `derivation-services.md`, AD-14, AD-21, AD-37). Choices the spec left open, made in the build:
+  - an address (`alex@example.com`) is refused as `owner_is_handle` by a check in the desk beside `reads_as_handle`, which matches only `<system>:…` handles;
+  - the PM's handle: when any connector row is unusable, the mark is written without `handle` and says so; with no connector rows at all, no handle and no sentence;
+  - `--meeting` or `--title` choosing several meetings is `ambiguous`, choosing none `not_found`, from a `kind` on 13a's new `MeetingChoiceRefused`;
+  - `undo --if-version <the done's version>` after a later line is `undo_superseded`, not `changed`, so `review`'s `z` reads as specified;
+  - `altered --due "  "` clears the due, as `--due ""` does (13a's edit folds it to empty);
+  - the `changed` sentence for an `undone` line: "your done mark was undone on <date>";
+  - every 13a refusal object gains `"commitment"`, `null` except on the reject refusal;
+  - `review` walks every open commitment, with no limit; `list` keeps 1 to 200;
+  - the time left for `altered --what`'s edit is taken as 1.1 s (the 1-second busy wait plus one 100 ms step), an estimate, not a measurement.
+- **2026-10-26, review (three lenses: blind, edge case, verification gap):** 26 patches applied (the due shown from the commitment, not the heading; a refused `z` keeps its card; review `a` after `edit_refused`; re-read and disk failures never claim "nothing was written" unchecked; meeting choice by a code; narrowed exception sets; the walk's cap removed; tests for Team Activity through `_issue_notes`, prompt completion, the prompt's `via`, meeting filters, `--state all`, the unreadable-ledger reject, codes listed). Two findings deferred to `deferred-work.md` (the JSON commands' `"…"` placeholders; undo's file order beside the fold's sort order).
+- **2026-10-26, after the build (Andrei):** `altered --due` of only spaces is a usage error, as `due` refuses it; `--due ""` still clears. The build had cleared it, as 13a's edit does.
 
 ## Design Notes
 
@@ -739,3 +751,75 @@ Anchors checked against `origin/main` at `689122a`.
 **Manual checks:**
 - In a scratch home (`HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1`), drop and summarise the recorded fixture into personal and approve two items. Then `pm-ai commitment list`, `commitment done <first>`, `commitment due <second> friday`, and `commitment list --state all --json`. Expected: the first is done, the second shows the Friday "set by you", and the scratch `~/.manager-ai/memory/commitments_log.md` gains one `marked` and one `due_set` line.
 - In the same home, run `pm-ai commitment review` at a terminal. Expected: compact cards with no command lines, and the closing counts.
+
+## Suggested Review Order
+
+**The writer: compare-and-append**
+
+- Entry point: the desk every surface calls; one loop decides, times and appends lines.
+  [`commitments.py:816`](../../../../pm_ai/app/commitments.py#L816)
+
+- The loop: already/unchanged before the version, `occurred` after the newest, re-read on `LedgerChanged`.
+  [`commitments.py:1300`](../../../../pm_ai/app/commitments.py#L1300)
+
+- `altered`: inputs checked first, the mark appended, then 13a's edit within the bound.
+  [`commitments.py:1491`](../../../../pm_ai/app/commitments.py#L1491)
+
+- `undo`: the PM's done mark, newest line, within `UNDO_WINDOW`.
+  [`commitments.py:1785`](../../../../pm_ai/app/commitments.py#L1785)
+
+- The PM's typed dues: same weekday and end of week, a rule in the desk only.
+  [`commitments.py:714`](../../../../pm_ai/app/commitments.py#L714)
+
+**The fold**
+
+- `Details`: version, mark in force, sources of due and owner, `changed_at`.
+  [`commitment_log.py:625`](../../../../pm_ai/core/commitment_log.py#L625)
+
+- The `undone` rule's three conditions, by `(occurred, entry)`, the same in any file order.
+  [`commitment_log.py:851`](../../../../pm_ai/core/commitment_log.py#L851)
+
+- The owner fix: `pending`, owner-changing `revised` and `owner_set`, by order, not file position.
+  [`commitment_log.py:904`](../../../../pm_ai/core/commitment_log.py#L904)
+
+- The new line kind's window constant.
+  [`domain/commitments.py:58`](../../../../pm_ai/domain/commitments.py#L58)
+
+**The card and the CLI**
+
+- One renderer; availability decided here from `mark_answer`.
+  [`commitment_cards.py:426`](../../../../pm_ai/core/commitment_cards.py#L426)
+
+- The `commitment` group in `TABLE`.
+  [`dispatch.py:5862`](../../../../pm_ai/surfaces/cli/dispatch.py#L5862)
+
+- The review walk: compact cards, one change per key, `z` after `d`.
+  [`dispatch.py:5373`](../../../../pm_ai/surfaces/cli/dispatch.py#L5373)
+
+- Prompt bounds; `typed_at_the_prompt` gives `via=prompt`.
+  [`entry.py:638`](../../../../pm_ai/app/entry.py#L638)
+
+- The daemon's desk with handed writes, sharing the request's proposal desk.
+  [`prompts.py:1187`](../../../../pm_ai/app/prompts.py#L1187)
+
+**Neighbours changed by 15c**
+
+- The reject refusal names only the marks the table allows.
+  [`proposals.py:865`](../../../../pm_ai/app/proposals.py#L865)
+
+- The digest and Team Activity read each ledger once and fail open.
+  [`pipelines.py:2827`](../../../../pm_ai/app/pipelines.py#L2827)
+
+- Completion sources for ids, states and owners.
+  [`completion.py:166`](../../../../pm_ai/surfaces/cli/completion.py#L166)
+
+- The pure form-naming helper; `resolve` unchanged.
+  [`due_dates.py:327`](../../../../pm_ai/core/due_dates.py#L327)
+
+**Tests**
+
+- The matrix rows, the timed tests, routing and completion.
+  [`test_commitment_commands.py`](../../../../tests/slice/test_commitment_commands.py#L1)
+
+- The two AD-37 invariants.
+  [`test_domain_invariants.py`](../../../../tests/architecture/test_domain_invariants.py#L1)

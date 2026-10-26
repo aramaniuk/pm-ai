@@ -122,6 +122,24 @@ from pm_ai.core.proposal_cards import (
     refusal_json,
     refusal_text,
 )
+from pm_ai.core.commitment_cards import (
+    LIST_STATES as COMMITMENT_STATES,
+    Card as CommitmentCard,
+    CommitmentListing,
+    CommitmentMisused,
+    CommitmentOutcome,
+    CommitmentRefused,
+    card_text as commitment_card_text,
+    listing_json as commitment_listing_json,
+    listing_text as commitment_listing_text,
+    outcome_json as commitment_outcome_json,
+    outcome_text as commitment_outcome_text,
+    refusal_json as commitment_refusal_json,
+    refusal_text as commitment_refusal_text,
+    valid_version,
+)
+from pm_ai.core.commitment_log import NOTE_LIMIT as COMMITMENT_NOTE_LIMIT
+from pm_ai.core.proposals import IMPLICIT_COMMITMENT
 from pm_ai.domain.meetings import AmbiguousMeeting
 from pm_ai.domain.meeting_summaries import SummaryRefused
 from pm_ai.domain.storage_tiers import UnprotectedCaptureDir
@@ -1090,6 +1108,12 @@ class Context:
     """`pm-ai proposal …`'s engine (story 13a): `pm_ai.app.proposals.ProposalDesk`,
     over this process's own writer at a terminal and the daemon's handed writer
     for a line the daemon runs. `None` refuses the commands as a wiring fault."""
+
+    commitments: CommitmentDeskPort | None = None
+    """`pm-ai commitment …`'s desk (story 15c): `pm_ai.app.commitments.CommitmentDesk`,
+    reading the ledgers by path for `list` and `show` at a terminal, over this
+    process's own writer for a change, and the daemon's handed writer for a
+    line the daemon runs. `None` refuses the commands as a wiring fault."""
 
     members: Members | None = None
     """`pm-ai member name|link|unmatched`'s reads and appends (story 7e).
@@ -4959,6 +4983,579 @@ def _review_edit(
     )
 
 
+# ── `pm-ai commitment` (story 15c) ───────────────────────────────────────────
+
+COMMITMENT_ARGUMENT = "id"
+WHEN_ARGUMENT = "when"
+NAME_ARGUMENT = "name"
+NOTE_OPTION = "note"
+CLEAR_FLAG = "clear"
+COMMITMENT_REVIEW_KEYS = "[d]one [a]ltered [b]roken [w]ithdrawn d[u]e [o]wner [s]kip [q]uit"
+UNDO_KEY = "[z] undo that done"
+_REVIEW_MARKS = {"d": "done", "b": "broken", "w": "withdrawn"}
+_REVIEW_ACTIONS = {**_REVIEW_MARKS, "a": "altered", "u": "due", "o": "owner"}
+"""Each `review` key and the card action it answers with."""
+
+
+class CommitmentDeskPort(Protocol):
+    """The PM's commitment commands: `pm_ai.app.commitments.CommitmentDesk` (15c).
+
+    Each refusal is a `CommitmentRefused` (exit 3) and each usage error a
+    `CommitmentMisused` (exit 2), both from `pm_ai.core.commitment_cards`.
+    """
+
+    def listing(
+        self,
+        *,
+        scope: DataScope | None = None,
+        meeting_id: str | None = None,
+        title: str | None = None,
+        on: date | None = None,
+        state: str = "open",
+        limit: int = 20,
+    ) -> CommitmentListing: ...
+
+    def walk(
+        self,
+        *,
+        scope: DataScope | None = None,
+        meeting_id: str | None = None,
+        title: str | None = None,
+        on: date | None = None,
+    ) -> CommitmentListing: ...
+
+    def current(self, commitment_id: str, scope: DataScope) -> CommitmentCard: ...
+
+    def show(self, commitment_id: str, *, scope: DataScope | None = None) -> CommitmentOutcome: ...
+
+    def mark(
+        self,
+        verb: str,
+        commitment_id: str,
+        *,
+        note: str | None = None,
+        scope: DataScope | None = None,
+        if_version: str | None = None,
+    ) -> CommitmentOutcome: ...
+
+    def altered(
+        self,
+        commitment_id: str,
+        *,
+        what: str | None = None,
+        owner: str | None = None,
+        due: str | None = None,
+        note: str | None = None,
+        scope: DataScope | None = None,
+        if_version: str | None = None,
+    ) -> CommitmentOutcome: ...
+
+    def set_due(
+        self,
+        commitment_id: str,
+        *,
+        words: str | None = None,
+        clear: bool = False,
+        scope: DataScope | None = None,
+        if_version: str | None = None,
+    ) -> CommitmentOutcome: ...
+
+    def set_owner(
+        self,
+        commitment_id: str,
+        *,
+        name: str | None = None,
+        clear: bool = False,
+        scope: DataScope | None = None,
+        if_version: str | None = None,
+    ) -> CommitmentOutcome: ...
+
+    def undo(
+        self, commitment_id: str, *, scope: DataScope | None = None, if_version: str | None = None
+    ) -> CommitmentOutcome: ...
+
+
+def _commitment_target(options: Mapping[str, str]) -> DataScope:
+    """Personal, as `proposal`'s is; `_Misread` for a line the commands cannot read (15c).
+
+    The scope a commitment is in is found by the desk, which reads every
+    enrolled project's ledger, so the daemon this composes acts in personal.
+    """
+    requested = options.get(SCOPE_ARGUMENT)
+    if requested is not None and _scope(requested) is None:
+        raise _Misread(
+            f"`--{SCOPE_ARGUMENT} {requested}` is not a scope. Write `personal`, or "
+            f"`project:<id>` naming an enrolled project."
+        )
+    state = options.get(STATE_OPTION)
+    if state is not None and state not in COMMITMENT_STATES:
+        raise _Misread(
+            f"`--{STATE_OPTION}` takes {_listed_words(COMMITMENT_STATES)}; `{state}` is none of them."
+        )
+    if options.get(LIMIT_OPTION) is not None:
+        _list_limit(options)
+    version = options.get(IF_VERSION_OPTION)
+    if version is not None and not valid_version(version):
+        raise _Misread(
+            f"`--{IF_VERSION_OPTION}` takes a commitment's version, `cml_` and 12 lower-case "
+            f"hex characters, as its card shows it; {version!r} is not one."
+        )
+    if MEETING_ARGUMENT in options and TITLE_OPTION in options:
+        raise _Misread(
+            f"name a meeting with `--{MEETING_ARGUMENT} <id>` or choose one with "
+            f"`--{TITLE_OPTION} <words>`, not both."
+        )
+    if ON_OPTION in options:
+        if TITLE_OPTION not in options:
+            raise _Misread(
+                f"`--{ON_OPTION}` narrows `--{TITLE_OPTION}` to one day, so it is given only "
+                f"with `--{TITLE_OPTION} <words>`."
+            )
+        if _on_day(options[ON_OPTION].strip()) is None:
+            raise _Misread(_on_misread(options[ON_OPTION]))
+    if TITLE_OPTION in options and not options[TITLE_OPTION].strip():
+        raise _Misread(f"`--{TITLE_OPTION}` takes the words of a meeting's title.")
+    return PERSONAL
+
+
+def _commitment_desk(context: Context) -> CommitmentDeskPort:
+    if context.commitments is None:
+        raise Refusal(
+            "no commitment desk was supplied to the CLI, so nothing was read or changed. "
+            "That is a wiring fault in pm-ai, not this machine's."
+        )
+    return context.commitments
+
+
+def _commitment_version(context: Context) -> str | None:
+    return context.options.get(IF_VERSION_OPTION)
+
+
+def _commitment_misused(verb: str, sentence: str) -> int:
+    leaf = TABLE["commitment"].leaves[verb]
+    _echo(
+        f"pm-ai: {sentence}\n\nusage: pm-ai commitment {_spelled(verb, leaf)}",
+        file=sys.stderr,
+    )
+    return EXIT_USAGE
+
+
+def _commitment_answered(
+    context: Context, verb: str, answer: Callable[[], CommitmentOutcome | CommitmentListing]
+) -> int:
+    """Run one commitment command and print what it answered: text, or one JSON object."""
+    as_json = JSON_FLAG in context.flags
+    try:
+        found = answer()
+    except CommitmentMisused as misused:
+        return _commitment_misused(verb, str(misused))
+    except CommitmentRefused as refused:
+        if as_json:
+            _echo_replacing(json.dumps(commitment_refusal_json(refused), ensure_ascii=False) + "\n")
+            return EXIT_REFUSAL
+        raise Refusal(commitment_refusal_text(refused)) from refused
+    if isinstance(found, CommitmentListing):
+        if as_json:
+            _echo_replacing(json.dumps(commitment_listing_json(found), ensure_ascii=False) + "\n")
+        else:
+            _echo_replacing(commitment_listing_text(found))
+        return EXIT_OK
+    if as_json:
+        _echo_replacing(json.dumps(commitment_outcome_json(found), ensure_ascii=False) + "\n")
+    else:
+        _echo_replacing(commitment_outcome_text(found))
+    return EXIT_OK
+
+
+def _commitment_list(context: Context) -> int:
+    """`pm-ai commitment list [--scope …] [--meeting <id> | --title <words> [--on <date>]] [--state …] [--limit <n>] [--json]` (15c)."""
+    desk = _commitment_desk(context)
+    options = context.options
+    return _commitment_answered(
+        context,
+        "list",
+        lambda: desk.listing(
+            scope=_proposal_scope(context),
+            meeting_id=options.get(MEETING_ARGUMENT),
+            title=options.get(TITLE_OPTION),
+            on=_proposal_on(context),
+            state=options.get(STATE_OPTION, COMMITMENT_STATES[0]),
+            limit=_list_limit(options),
+        ),
+    )
+
+
+def _commitment_show(context: Context) -> int:
+    """`pm-ai commitment show <id> [--scope …] [--json]` (15c)."""
+    desk = _commitment_desk(context)
+    return _commitment_answered(
+        context, "show", lambda: desk.show(context.arguments[0], scope=_proposal_scope(context))
+    )
+
+
+def _commitment_mark(verb: str) -> Callable[[Context], int]:
+    """`pm-ai commitment done|broken|withdrawn <id> [--note <text>] [--scope …] [--if-version <v>] [--json]` (15c)."""
+
+    def run(context: Context) -> int:
+        desk = _commitment_desk(context)
+        return _commitment_answered(
+            context,
+            verb,
+            lambda: desk.mark(
+                verb,
+                context.arguments[0],
+                note=context.options.get(NOTE_OPTION),
+                scope=_proposal_scope(context),
+                if_version=_commitment_version(context),
+            ),
+        )
+
+    return run
+
+
+def _commitment_altered(context: Context) -> int:
+    """`pm-ai commitment altered <id> [--what …] [--owner …] [--due …] [--note …] …` (15c)."""
+    desk = _commitment_desk(context)
+    options = context.options
+    return _commitment_answered(
+        context,
+        "altered",
+        lambda: desk.altered(
+            context.arguments[0],
+            what=options.get(WHAT_OPTION),
+            owner=options.get(OWNER_OPTION),
+            due=options.get(DUE_OPTION),
+            note=options.get(NOTE_OPTION),
+            scope=_proposal_scope(context),
+            if_version=_commitment_version(context),
+        ),
+    )
+
+
+def _commitment_due(context: Context) -> int:
+    """`pm-ai commitment due <id> (<words> | --clear) [--scope …] [--if-version <v>] [--json]` (15c)."""
+    desk = _commitment_desk(context)
+    words = context.arguments[1] if len(context.arguments) > 1 else None
+    return _commitment_answered(
+        context,
+        "due",
+        lambda: desk.set_due(
+            context.arguments[0],
+            words=words,
+            clear=CLEAR_FLAG in context.flags,
+            scope=_proposal_scope(context),
+            if_version=_commitment_version(context),
+        ),
+    )
+
+
+def _commitment_owner(context: Context) -> int:
+    """`pm-ai commitment owner <id> (<name> | --clear) [--scope …] [--if-version <v>] [--json]` (15c)."""
+    desk = _commitment_desk(context)
+    name = context.arguments[1] if len(context.arguments) > 1 else None
+    return _commitment_answered(
+        context,
+        "owner",
+        lambda: desk.set_owner(
+            context.arguments[0],
+            name=name,
+            clear=CLEAR_FLAG in context.flags,
+            scope=_proposal_scope(context),
+            if_version=_commitment_version(context),
+        ),
+    )
+
+
+def _commitment_undo(context: Context) -> int:
+    """`pm-ai commitment undo <id> [--scope …] [--if-version <v>] [--json]` (15c)."""
+    desk = _commitment_desk(context)
+    return _commitment_answered(
+        context,
+        "undo",
+        lambda: desk.undo(
+            context.arguments[0],
+            scope=_proposal_scope(context),
+            if_version=_commitment_version(context),
+        ),
+    )
+
+
+_WALK_COUNTS = (
+    ("done", "marked done"),
+    ("altered", "altered"),
+    ("broken", "marked broken"),
+    ("withdrawn", "marked withdrawn"),
+    ("undone", "undone"),
+    ("due", "due set"),
+    ("owner", "owner set"),
+    ("skipped", "skipped"),
+)
+
+
+def _walk_counts(counts: Mapping[str, int]) -> str:
+    said = [f"{counts[key]} {words}" for key, words in _WALK_COUNTS if counts.get(key)]
+    return ", ".join(said) if said else "nothing reviewed"
+
+
+@dataclass
+class _LastDone:
+    """The most recent `d` of this walk: what `z` undoes, by the version `d` wrote."""
+
+    commitment_id: str
+    scope: DataScope
+    version: str
+
+
+def _commitment_review(context: Context) -> int:
+    """`pm-ai commitment review [--scope …] [--meeting <id> | --title <words> [--on <date>]]` (15c).
+
+    Walks the open commitments in `list`'s order, one compact card at a time,
+    each answer one change checked against the version its card showed. The
+    ledger is read again before each card. Quitting, Ctrl-C and end of input
+    end the walk with the counts so far, exit 0.
+    """
+    if not _stdin_is_terminal():
+        raise Refusal(
+            "`commitment review` asks at a terminal, and stdin is not one here (no_terminal). "
+            "Nothing was changed. `pm-ai commitment list --json` lists the commitments, and "
+            "`pm-ai commitment done`, `altered`, `broken`, `withdrawn`, `due`, `owner` and "
+            "`undo` act on one by its id."
+        )
+    desk = _commitment_desk(context)
+    try:
+        walk = desk.walk(
+            scope=_proposal_scope(context),
+            meeting_id=context.options.get(MEETING_ARGUMENT),
+            title=context.options.get(TITLE_OPTION),
+            on=_proposal_on(context),
+        )
+    except CommitmentRefused as refused:
+        raise Refusal(commitment_refusal_text(refused)) from refused
+    if not walk.cards:
+        _echo_replacing(commitment_listing_text(walk))
+        return EXIT_OK
+    counts: dict[str, int] = {}
+    walked: list[str] = []
+    last: list[_LastDone] = []
+    try:
+        for card in walk.cards:
+            if card.scope not in walked:
+                walked.append(card.scope)
+            scope = DataScope.parse(card.scope)
+            try:
+                current = desk.current(card.commitment_id, scope)
+            except CommitmentRefused as refused:
+                _echo(f"  {refused.reason}")
+                counts["skipped"] = counts.get("skipped", 0) + 1
+                continue
+            if not current.is_open:
+                _echo(f"  {current.field_line}: {current.changed} meanwhile; skipped")
+                counts["skipped"] = counts.get("skipped", 0) + 1
+                continue
+            _commitment_walk_one(desk, current, counts, last)
+    except _ReviewEnded:
+        pass
+    _echo(f"{_walk_counts(counts)}.")
+    if walk.more:
+        _echo(
+            f"{walk.more} more {'is' if walk.more == 1 else 'are'} open beyond the "
+            f"{len(walk.cards)} walked; run the walk again to continue."
+        )
+    for each in walked:
+        _echo(f"next: pm-ai commitment list --scope {each}")
+    return EXIT_OK
+
+
+def _count(counts: dict[str, int], key: str, by: int = 1) -> None:
+    counts[key] = counts.get(key, 0) + by
+
+
+def _commitment_walk_one(
+    desk: CommitmentDeskPort,
+    card: CommitmentCard,
+    counts: dict[str, int],
+    last: list[_LastDone],
+) -> None:
+    """One card: shown compact, asked, answered by one change. A conflict shows it again."""
+    current = card
+    while True:
+        _echo(commitment_card_text(current, compact=True), end="")
+        keys = COMMITMENT_REVIEW_KEYS + (f" {UNDO_KEY}" if last else "")
+        answer = _review_line(f"{keys}: ").lower()[:1]
+        scope = DataScope.parse(current.scope)
+        root = current.commitment_id
+        try:
+            if answer == "q":
+                raise _ReviewEnded
+            if answer == "s":
+                _count(counts, "skipped")
+                return
+            if answer == "z":
+                if not last:
+                    _echo("  nothing to undo in this walk.")
+                    continue
+                done = last[-1]
+                # `z` is offered once per `d`: refused or not, it is not offered again.
+                last.clear()
+                try:
+                    undone = desk.undo(done.commitment_id, scope=done.scope, if_version=done.version)
+                except CommitmentRefused as refused:
+                    # The card it was on is asked again; the earlier card is not.
+                    _echo(f"  {refused.reason}")
+                    continue
+                _count(counts, "done", -1)
+                _count(counts, "undone")
+                _echo(f"  {undone.sentence}")
+                if done.commitment_id == root:
+                    current = undone.card
+                continue
+            name = _REVIEW_ACTIONS.get(answer)
+            if name is None:
+                _echo(f"  answer with one of {keys}.")
+                continue
+            action = current.action(name)
+            if action is None or not action.available:
+                reason = None if action is None else action.reason
+                _echo(f"  {name} is unavailable: {reason or 'not here'}.")
+                continue
+            if answer == "d":
+                marked = desk.mark("done", root, scope=scope, if_version=current.version)
+                if marked.outcome == "marked":
+                    _count(counts, "done")
+                    last[:] = [_LastDone(root, scope, marked.card.version)]
+                    until = marked.undo_shown
+                    _echo(
+                        f"  marked done; [z] undoes it until {until}"
+                        if until
+                        else f"  {marked.sentence}"
+                    )
+                else:
+                    _echo(f"  {marked.sentence}")
+                return
+            if answer in ("b", "w"):
+                note = _walk_note()
+                verb = _REVIEW_MARKS[answer]
+                marked = desk.mark(verb, root, note=note, scope=scope, if_version=current.version)
+                if marked.outcome == "marked":
+                    _count(counts, verb)
+                _echo(f"  {marked.sentence}")
+                return
+            if answer == "a":
+                try:
+                    altered = _walk_altered(desk, current, scope)
+                except CommitmentRefused as refused:
+                    if not refused.wrote:
+                        raise
+                    # `edit_refused` after the mark was written: the change is made in part.
+                    _count(counts, "altered")
+                    _echo(f"  {refused.reason}")
+                    if refused.next is not None:
+                        _echo(f"  next: pm-ai {shlex.join(refused.next)}")
+                    return
+                _count(counts, "altered")
+                _echo(f"  {altered.sentence}")
+                return
+            if answer == "u":
+                changed = _walk_due(desk, current, scope)
+            else:
+                changed = _walk_owner(desk, current, scope)
+            if changed is None:
+                _count(counts, "skipped")
+                return
+            if changed.outcome in ("due_set", "owner_set"):
+                _count(counts, "due" if answer == "u" else "owner")
+            _echo(f"  {changed.sentence}")
+            return
+        except CommitmentRefused as refused:
+            _echo(f"  {refused.reason}")
+            if refused.card is None or not refused.card.is_open:
+                # Nothing was written, and the card is no longer open: skipped.
+                _count(counts, "skipped")
+                return
+            current = refused.card
+            continue
+        except CommitmentMisused as misused:
+            _echo(f"  {misused}")
+            continue
+
+
+def _walk_note() -> str | None:
+    """`note (Enter for none)`, asked again while it is over its limit."""
+    while True:
+        typed = _review_line("  note (Enter for none): ")
+        if not typed:
+            return None
+        if len(" ".join(typed.split())) > COMMITMENT_NOTE_LIMIT:
+            _echo(f"  a note is at most {COMMITMENT_NOTE_LIMIT} characters; write it shorter.")
+            continue
+        return typed
+
+
+def _walk_due(
+    desk: CommitmentDeskPort, card: CommitmentCard, scope: DataScope
+) -> CommitmentOutcome | None:
+    """`u`: the due, by `due`'s rules; Enter keeps it (`None`), words naming no date asked again."""
+    while True:
+        typed = _review_line("  due (words, or a date with its year; - clears; Enter keeps): ")
+        if not typed:
+            return None
+        try:
+            if typed == "-":
+                return desk.set_due(card.commitment_id, clear=True, scope=scope, if_version=card.version)
+            return desk.set_due(card.commitment_id, words=typed, scope=scope, if_version=card.version)
+        except CommitmentRefused as refused:
+            if refused.code != "due_unresolved":
+                raise
+            _echo(f"  {refused.reason.removesuffix(' Nothing was written.')}")
+        except CommitmentMisused as misused:
+            _echo(f"  {misused}")
+
+
+def _walk_owner(
+    desk: CommitmentDeskPort, card: CommitmentCard, scope: DataScope
+) -> CommitmentOutcome | None:
+    """`o`: the owner, by `owner`'s rules; Enter keeps it (`None`), a refused name asked again."""
+    shown = card.commitment.owner or ""
+    while True:
+        typed = _review_line(f"  owner [{shown}] (- clears; Enter keeps): ")
+        if not typed:
+            return None
+        try:
+            if typed == "-":
+                return desk.set_owner(card.commitment_id, clear=True, scope=scope, if_version=card.version)
+            return desk.set_owner(card.commitment_id, name=typed, scope=scope, if_version=card.version)
+        except CommitmentRefused as refused:
+            if refused.code != "owner_is_handle":
+                raise
+            _echo(f"  {refused.reason.removesuffix(' Nothing was written.')}")
+        except CommitmentMisused as misused:
+            _echo(f"  {misused}")
+
+
+def _walk_altered(
+    desk: CommitmentDeskPort, card: CommitmentCard, scope: DataScope
+) -> CommitmentOutcome:
+    """`a`: the wording (an action item only), the owner and the due, then the note."""
+    commitment = card.commitment
+    what: str | None = None
+    if commitment.type != IMPLICIT_COMMITMENT:
+        typed = _review_line(f"  wording [{commitment.what}] (Enter keeps): ")
+        what = typed or None
+    typed = _review_line(f"  owner [{commitment.owner or ''}] (Enter keeps, - clears): ")
+    owner = None if not typed else ("" if typed == "-" else typed)
+    typed = _review_line(f"  due [{card.due_words}] (Enter keeps, - clears): ")
+    due = None if not typed else ("" if typed == "-" else typed)
+    note = _walk_note()
+    return desk.altered(
+        card.commitment_id,
+        what=what,
+        owner=owner,
+        due=due,
+        note=note,
+        scope=scope,
+        if_version=card.version,
+    )
+
 
 TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
     {
@@ -4977,6 +5574,8 @@ TERMINAL_BOUND: frozenset[tuple[str, ...]] = frozenset(
         ("member", "name"),
         # Story 13a: the walk asks at the terminal, one card at a time.
         ("proposal", "review"),
+        # Story 15c: the commitments' walk asks at the terminal too.
+        ("commitment", "review"),
     }
 )
 """The commands that need this terminal: they ask questions, read a secret, or
@@ -5256,6 +5855,102 @@ TABLE: Mapping[str, Command] = {
                 _proposal_review,
                 options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, TITLE_OPTION, ON_OPTION),
                 target=_proposal_target,
+            ),
+        },
+    ),
+    # `15c`: the PM's commitments — what approved items became (15a).
+    "commitment": Command(
+        "your commitments: list, show, mark done, altered, broken or withdrawn, set the due "
+        "or owner, undo a done mark, review",
+        leaves={
+            "list": Command(
+                "list commitments, open ones by default, soonest due first, each as a card with "
+                "its exact commands; at a terminal it reads the ledger files, at the prompt "
+                "through the daemon, within 1 second",
+                _commitment_list,
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, TITLE_OPTION, ON_OPTION, STATE_OPTION, LIMIT_OPTION),
+                flags=(JSON_FLAG,),
+                composes=False,
+                target=_commitment_target,
+            ),
+            "show": Command(
+                "show one commitment's card, in any state; at a terminal it reads the ledger "
+                "files, at the prompt through the daemon, within 1 second",
+                _commitment_show,
+                takes=(COMMITMENT_ARGUMENT,),
+                options=(SCOPE_ARGUMENT,),
+                flags=(JSON_FLAG,),
+                composes=False,
+                target=_commitment_target,
+            ),
+            "done": Command(
+                "mark one commitment done, under your handle; --if-version acts only on the "
+                "version you saw; within 2 seconds",
+                _commitment_mark("done"),
+                takes=(COMMITMENT_ARGUMENT,),
+                options=(NOTE_OPTION, SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(JSON_FLAG,),
+                target=_commitment_target,
+            ),
+            "altered": Command(
+                "mark that what was agreed has changed: --what (an action item's wording), "
+                "--owner, --due (\"\" clears either), --note; within 2 seconds",
+                _commitment_altered,
+                takes=(COMMITMENT_ARGUMENT,),
+                options=(WHAT_OPTION, OWNER_OPTION, DUE_OPTION, NOTE_OPTION, SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(JSON_FLAG,),
+                target=_commitment_target,
+            ),
+            "broken": Command(
+                "mark one commitment broken: it was not done; within 2 seconds",
+                _commitment_mark("broken"),
+                takes=(COMMITMENT_ARGUMENT,),
+                options=(NOTE_OPTION, SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(JSON_FLAG,),
+                target=_commitment_target,
+            ),
+            "withdrawn": Command(
+                "mark one commitment withdrawn: approving it was a mistake; within 2 seconds",
+                _commitment_mark("withdrawn"),
+                takes=(COMMITMENT_ARGUMENT,),
+                options=(NOTE_OPTION, SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(JSON_FLAG,),
+                target=_commitment_target,
+            ),
+            "due": Command(
+                "set an open commitment's due date from your words (\"friday\", "
+                "\"2026-11-06\"), or --clear it; within 2 seconds",
+                _commitment_due,
+                takes=(COMMITMENT_ARGUMENT,),
+                optional=(WHEN_ARGUMENT,),
+                options=(SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(CLEAR_FLAG, JSON_FLAG),
+                target=_commitment_target,
+            ),
+            "owner": Command(
+                "set an open commitment's owner, a name, or --clear it; within 2 seconds",
+                _commitment_owner,
+                takes=(COMMITMENT_ARGUMENT,),
+                optional=(NAME_ARGUMENT,),
+                options=(SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(CLEAR_FLAG, JSON_FLAG),
+                target=_commitment_target,
+            ),
+            "undo": Command(
+                "undo your own done mark within 4 hours, while nothing has followed it; "
+                "within 2 seconds",
+                _commitment_undo,
+                takes=(COMMITMENT_ARGUMENT,),
+                options=(SCOPE_ARGUMENT, IF_VERSION_OPTION),
+                flags=(JSON_FLAG,),
+                target=_commitment_target,
+            ),
+            "review": Command(
+                "walk the open commitments one card at a time: done, altered, broken, "
+                "withdrawn, due, owner, skip or quit; needs a terminal",
+                _commitment_review,
+                options=(SCOPE_ARGUMENT, MEETING_ARGUMENT, TITLE_OPTION, ON_OPTION),
+                target=_commitment_target,
             ),
         },
     ),
@@ -5568,6 +6263,7 @@ def dispatch(
     frontier_key: FrontierKeyHand | None = None,
     meeting_list: MeetingList | None = None,
     proposals: ProposalDeskPort | None = None,
+    commitments: CommitmentDeskPort | None = None,
     serve: Callable[[], int] | None = None,
     unavailable: str | None = None,
     undecided: str | None = None,
@@ -5605,6 +6301,7 @@ def dispatch(
             frontier_key=frontier_key,
             meeting_list=meeting_list,
             proposals=proposals,
+            commitments=commitments,
             serve=serve,
             unavailable=unavailable,
             undecided=undecided,
@@ -5640,6 +6337,7 @@ def _dispatch(
     frontier_key: FrontierKeyHand | None,
     meeting_list: MeetingList | None,
     proposals: ProposalDeskPort | None,
+    commitments: CommitmentDeskPort | None,
     serve: Callable[[], int] | None,
     unavailable: str | None,
     undecided: str | None,
@@ -5670,6 +6368,7 @@ def _dispatch(
         frontier_key=frontier_key,
         meeting_list=meeting_list,
         proposals=proposals,
+        commitments=commitments,
         serve=serve,
         unavailable=unavailable,
         undecided=undecided,

@@ -704,6 +704,7 @@ Anchors checked against `origin/main` at `b6f8f62`.
   1. **A spoken promise's long `what` is cut, never refused.** Over 200 characters, it is cut at a word on its line and marked `what_cut=yes`; the full text stays in the proposal body. Edited: the limits table and its paragraph, the `pending` line format, and a new matrix row "Long promise".
   2. **Verdicts apply after an `altered` mark.** The commitment is still tracked, so telemetry judges it again; a PM `fulfilled`, `broken` or `withdrawn` mark still blocks every later verdict. Edited: the fold's state rule, "the PM's mark outranks telemetry", and a new matrix row "Verdict after altered".
   3. **`no_approval_time` is kept,** as a permanent reason. Edited: the JSON reason codes, and the list of reasons that end "pm-ai cannot record it.".
+- **2026-10-26, amended by `15c`:** the fold takes the owner from the newest by `(occurred, entry)` of the `pending` line, each `revised` line that changed the owner, and `owner_set` lines, so a `proposal edit --what` no longer brings back an owner the PM replaced; `CommitmentLedger` gains `details` (version, the PM's mark in force, where the due and owner came from); a new line kind, `undone`, takes back the PM's own done mark within 4 hours. The reject refusal and the card's reason name the commitment commands.
 
 ## Design Notes
 
