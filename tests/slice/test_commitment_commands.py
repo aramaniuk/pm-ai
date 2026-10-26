@@ -1725,6 +1725,15 @@ def test_altered_clears_owner_and_due_through_the_parser(machine):
     assert found["commitment"]["owner"] is None and found["commitment"]["due"]["value"] == "none"
 
 
+def test_altered_due_of_only_spaces_is_a_usage_error(machine):
+    """Andrei, 2026-10-26: `--due "  "` is refused as `due` refuses it, nothing written."""
+    ids = _approved(machine)
+    before = _ledger_path(machine, PERSONAL).read_text(encoding="utf-8")
+    code, _, _ = _run(machine, "commitment", "altered", ids[0], "--due", "   ")
+    assert code == EXIT_USAGE
+    assert _ledger_path(machine, PERSONAL).read_text(encoding="utf-8") == before
+
+
 def test_every_code_and_outcome_the_desk_says_is_listed():
     """Finding 24: the refusal codes and the outcomes are the spec's lists."""
     import re as _re

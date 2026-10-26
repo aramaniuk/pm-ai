@@ -103,7 +103,7 @@ context:
   - **The bound.** Before starting the edit, the desk checks what is left of `COMMITMENT_WRITE_BOUND_SECONDS`. When less than 13a's edit needs is left (the 1-second busy wait plus one claimed step), the edit is not started, and the outcome is the same `edit_refused` with the reason "out of time", `wrote` and `next`.
   - **The version returned** by `altered --what` is the commitment's version after the `revised` line, so `done --if-version <that>` acts.
   - **`--what` is for an action item only.** A spoken promise's words are what was said, and 13a gives `implicit_commitment` no editable field. `altered --what` on a promise is refused (exit 3, `what_not_editable`): "a spoken promise keeps the words that were said; record how it changed with --note". Nothing is written.
-  - `--owner ""` and `--due ""` clear the field, as 13a's edit does. `altered` with no option is valid: the mark alone, or with its note.
+  - `--owner ""` and `--due ""` clear the field, as 13a's edit does. A `--due` of only spaces is a usage error (exit 2), as `due` refuses it (Andrei, 2026-10-26). `altered` with no option is valid: the mark alone, or with its note.
 - **`due` and `owner` act on an open commitment only** (Andrei, 2026-10-26). On a `fulfilled`, `broken` or `withdrawn` one they are refused (exit 3, `commitment_closed`), before the version check, with nothing written. The reason names the state and when, and the way to reopen it that `mark_answer` allows: `pm-ai commitment altered <id> --scope … --due "…"` from `broken` or `withdrawn`, `pm-ai commitment undo <id> --scope …` while a done mark's window is open, and otherwise none ("you marked it done on <date>; it is closed"). `altered --due` and `--owner` on a broken or withdrawn commitment are allowed, because the `altered` mark reopens it.
 - **`due`:** one `due_set` line. `--clear` writes `due=none`.
   - **Words that are empty or only spaces** are a usage error (exit 2): they would otherwise read as nothing said and clear the due silently.
@@ -671,6 +671,7 @@ Anchors checked against `origin/main` at `689122a`.
   - `review` walks every open commitment, with no limit; `list` keeps 1 to 200;
   - the time left for `altered --what`'s edit is taken as 1.1 s (the 1-second busy wait plus one 100 ms step), an estimate, not a measurement.
 - **2026-10-26, review (three lenses: blind, edge case, verification gap):** 26 patches applied (the due shown from the commitment, not the heading; a refused `z` keeps its card; review `a` after `edit_refused`; re-read and disk failures never claim "nothing was written" unchecked; meeting choice by a code; narrowed exception sets; the walk's cap removed; tests for Team Activity through `_issue_notes`, prompt completion, the prompt's `via`, meeting filters, `--state all`, the unreadable-ledger reject, codes listed). Two findings deferred to `deferred-work.md` (the JSON commands' `"…"` placeholders; undo's file order beside the fold's sort order).
+- **2026-10-26, after the build (Andrei):** `altered --due` of only spaces is a usage error, as `due` refuses it; `--due ""` still clears. The build had cleared it, as 13a's edit does.
 
 ## Design Notes
 

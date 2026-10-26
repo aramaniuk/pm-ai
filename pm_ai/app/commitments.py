@@ -1516,6 +1516,12 @@ class CommitmentDesk:
                 raise CommitmentMisused("`--what` takes the new wording; it cannot be empty.")
             if len(wording) > WHAT_LIMIT:
                 raise CommitmentMisused(f"`--what` is at most {WHAT_LIMIT} characters.")
+        if due is not None and due and not due.strip():
+            # Andrei, 2026-10-26: only spaces is refused, as `due` refuses it;
+            # `--due ""` still clears the due.
+            raise CommitmentMisused(
+                "`--due` is only spaces; write when it is due, or `--due \"\"` to clear it."
+            )
         new_owner: str | None = None
         if owner is not None:
             new_owner = _owner(owner, allow_clear=True)
@@ -1535,7 +1541,7 @@ class CommitmentDesk:
             due_date: date | None = None
             clearing_due = False
             if due is not None:
-                if not due.strip():
+                if not due:
                     clearing_due = True
                 else:
                     due_date = pm_due(due, today)
