@@ -658,6 +658,7 @@ Anchors checked against `origin/main` at `689122a`.
      - `this <weekday>` on that weekday stays unresolved;
      - the output shows the resolved date.
 
+- **2026-10-26, approved for build (Andrei),** after the readiness check, the three-lens review and his four decisions.
      It is a rule in the desk for the PM's typed words. `due_dates` gains only a pure form-naming helper, and `resolve`, 15a's extraction dues and Team Activity are unchanged. Matrix rows added, including one showing that a meeting's own "by Friday" stays unresolved.
 
 ## Design Notes
