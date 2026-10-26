@@ -1663,3 +1663,12 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/15a-approved-items-become-commitments.md`
   summary: **DECIDED 2026-10-24 (Andrei): kept, as recommended,** and listed in the spec's JSON reason codes. Was: Needs Andrei's decision (low stakes; kept as built). The build adds a reason code the spec does not list: `no_approval_time`, permanent ("pm-ai cannot record it"). It covers an approved row with no `changed_at` (13a's "old row, no change time"), for which no `occurred` can be written. Because of it, 13a's old-row approve test now expects "already approved; it could not be recorded as a commitment … pm-ai cannot record it." instead of "nothing changed".
   evidence: Build note. The catch-up already counts such rows with no line, as the spec says. The approve path needed a reason, and none of the seven listed codes is true for this case. **Recommendation:** keep it, and add it to the spec's reason list when 15c's spec is written.
+
+## Surfaced by the story-15c review (2026-10-26)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/15c-the-pms-commitment-commands.md`
+  summary: For 15d or a wrapper story. The card's actions and the reject refusal's `commitment.commands` carry the spec's literal `"…"` placeholders (`--note "…"`, `--what "…"`, `due <id> "…"`), and the JSON does not mark which word is a placeholder, so a wrapper that runs a command from JSON as given would record "…" as the note, due or owner.
+  evidence: Blind-hunter review. The text card's placeholders are the frozen spec's; the JSON shape (`command: [words]`) is too. A wrapper needs either a placeholder marker or the command without its value argument. Not changed in 15c because both forms are frozen.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/15c-the-pms-commitment-commands.md`
+  summary: `undo` decides "nothing has followed the mark" by file order (the mark is the newest line, so the version is its entry, as the spec says), while the fold's `undone` rule uses `(occurred, entry)` order. A line appended after the done mark but carrying an earlier `occurred` (15a's catch-up writing an old edit's `revised` line) makes `undo` refuse `undo_superseded` although the fold would apply the undo.
+  evidence: Blind-hunter review. The desk is the stricter of the two, so it never writes an `undone` line the fold would refuse; the cost is a refused undo in a rare catch-up race. Both rules are as the frozen spec states them.
