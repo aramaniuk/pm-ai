@@ -25,7 +25,8 @@ context:
 **Approach:** One command group, `pm-ai commitment`, built like 13a's `pm-ai proposal`:
 - **See:** `list` and `show`, open commitments by default, soonest due first. A date is marked past due only when it was worked out exactly, never on an estimated meeting day.
 - **Mark:** `done`, `altered`, `broken` and `withdrawn` write the PM's own mark under his handle, by 15a's mark table.
-- **Correct:** `due` and `owner` set the date and the owner without marking anything.
+- **Undo a done mark:** `undo` reopens the PM's own done mark within 4 hours, while nothing has followed it (Andrei, 2026-10-26).
+- **Correct:** `due` and `owner` set the date and the owner of an open commitment without marking anything.
 - **Walk:** `review` goes through the open commitments one compact card at a time.
 - **Safe from two places at once:** every change is a compare-and-append on the ledger, and `--if-version` acts only on the version the PM saw.
 - **The reject refusal** now names the commands that exist.
@@ -53,7 +54,7 @@ context:
 
 ### The command group: `pm-ai commitment`
 
-- **Why this shape.** `commitment` is FR-34's and AD-14's word, singular like every group. The verbs that mark are the words the PM says about the commitment: "done", "altered", "broken", "withdrawn". They are the words story 15's entry already names, and each maps to one `marked` state. `due` and `owner` are corrections, not marks. `review` is the walk. 13a's `proposal edit` stays the way to correct what was recorded about an action item.
+- **Why this shape.** `commitment` is FR-34's and AD-14's word, singular like every group. The verbs that mark are the words the PM says about the commitment: "done", "altered", "broken", "withdrawn". They are the words story 15's entry already names, and each maps to one `marked` state. `due` and `owner` are corrections, not marks. `undo` takes back a done mark made by mistake. `review` is the walk. 13a's `proposal edit` stays the way to correct what was recorded about an action item.
 - **The commands:**
   - `commitment list [--scope …] [--meeting <id> | --title <words> [--on <date>]] [--state open|done|broken|withdrawn|all] [--limit 1..200] [--json]`
   - `commitment show <id> [--scope …] [--json]`
@@ -62,6 +63,7 @@ context:
   - `commitment broken <id> [--note <text>] …` and `commitment withdrawn <id> [--note <text>] …`, with the same options as `done`
   - `commitment due <id> (<words> | --clear) [--scope …] [--if-version <version>] [--json]`
   - `commitment owner <id> (<name> | --clear) [--scope …] [--if-version <version>] [--json]`
+  - `commitment undo <id> [--scope …] [--if-version <version>] [--json]`
   - `commitment review [--scope …] [--meeting <id> | --title <words> [--on <date>]]`
 - **`<id>` is the commitment id**, the proposal's root id. A replacement id `<root>_e<n>`, as `proposal show` prints it, is accepted and means its root only when the proposal store or the ledger knows that id; any other `_e<n>` is `not_found`. Without `--scope`, the id is looked up in personal and every enrolled project.
 - **Finding the commitment, in this order:**
@@ -102,10 +104,17 @@ context:
   - **The version returned** by `altered --what` is the commitment's version after the `revised` line, so `done --if-version <that>` acts.
   - **`--what` is for an action item only.** A spoken promise's words are what was said, and 13a gives `implicit_commitment` no editable field. `altered --what` on a promise is refused (exit 3, `what_not_editable`): "a spoken promise keeps the words that were said; record how it changed with --note". Nothing is written.
   - `--owner ""` and `--due ""` clear the field, as 13a's edit does. `altered` with no option is valid: the mark alone, or with its note.
+- **`due` and `owner` act on an open commitment only** (Andrei, 2026-10-26). On a `fulfilled`, `broken` or `withdrawn` one they are refused (exit 3, `commitment_closed`), before the version check, with nothing written. The reason names the state and when, and the way to reopen it that `mark_answer` allows: `pm-ai commitment altered <id> --scope … --due "…"` from `broken` or `withdrawn`, `pm-ai commitment undo <id> --scope …` while a done mark's window is open, and otherwise none ("you marked it done on <date>; it is closed"). `altered --due` and `--owner` on a broken or withdrawn commitment are allowed, because the `altered` mark reopens it.
 - **`due`:** one `due_set` line. `--clear` writes `due=none`.
   - **Words that are empty or only spaces** are a usage error (exit 2): they would otherwise read as nothing said and clear the due silently.
   - **A date with its year written, in any form 15a's resolver accepts** (`2026-10-20`, `20.10.2026`, `20 Oct 2026`, `20 октября 2026`), is taken as typed, including one already past, because a typed date is explicit. This is read before `due_dates.resolve`, which refuses a date before its day (`_said_year`, `due_dates.py:208-212`, used for ISO at `:251-253`). A past date's sentence adds "(already past)". The same rule applies to `altered --due` and to `review`'s `u` and `a`.
   - **Other words are resolved against today**, the PM's day in `display_timezone` (else the machine's zone), by `due_dates.resolve(words, today)`. The PM is setting the date now, so "Friday" means the coming Friday. `today`'s day is never estimated.
+  - **Today's own weekday, and the end of the week from Friday on** (Andrei, 2026-10-26). For the PM's typed words only:
+    - a plain weekday that is today's weekday ("friday" typed on a Friday, `пятница`, `в пятницу`, `к пятнице`, `до пятницы`) means that weekday next week, 7 days out;
+    - "end of the week" in any of 15a's forms (`end of week`, `EOW`, `до конца недели`, …), typed on a Friday, Saturday or Sunday, means next week's Friday. From Monday to Thursday it is this week's Friday, as the resolver gives;
+    - `this <weekday>` and `в эту <weekday>` on that same weekday stay unresolved (`due_unresolved`): "this Friday" said on a Friday may mean today. The reason names the date form.
+
+    15a's resolver leaves these cases unresolved for what a meeting said, and must keep doing so. So this is a rule in the desk (`pm_ai/app/commitments.py`), not in `due_dates`. `due_dates` gains only a pure helper that names the form of the words (a weekday and which one, `this <weekday>`, the end of the week, or other), from the same tables, so the desk reads no second word list. `due_dates.resolve` and every 15a and `7e` result are unchanged. The output always shows the resolved date ("due Fri 6 Nov").
   - **Words that name no one date** are refused (exit 3, `due_unresolved`), naming the forms that resolve (15a's table) and the year-written forms. `due_set` has no `unresolved` value.
   - **`unchanged`** (nothing written, exit 0) only when the due in force has that date, is not estimated, and was set by the PM. The same date over an estimated due, or over one worked out from what was said, is written: it becomes exact and "set by you". `--clear` when the due in force is already `none` is `unchanged`.
   - **The due as said is kept.** After a `due_set`, the card and JSON still show `due.said` from the value lines ("by next sprint"), beside the PM's date.
@@ -116,10 +125,45 @@ context:
 - **The note** is the PM's typed text, folded to one line, at most 200 characters (`NOTE_LIMIT`, exit 2 over it). Typed text is trusted as his own and is not passed through the prompt-injection filter (13a).
 - **No change writes to `operational.db`,** except `altered --what` through 13a's edit. A commitment's state is never a proposal state (AD-14): `proposal show` of an item marked done still says `approved`.
 
+### Undoing a done mark (Andrei, 2026-10-26)
+
+- **Why.** In `review`, `d` is one keypress with no confirmation, so a slip marks the wrong commitment done. Andrei: "Allow undo for the next 4 hours". `d` stays one keypress.
+- **Only the PM's own `fulfilled` mark can be undone.** `broken` and `withdrawn` are not covered: in `review`, `b` and `w` already ask for a note, so they are not one-keypress accidents, and on the command line each is typed out. A slip there is corrected by a later mark, as the table allows.
+- **The window:** `UNDO_WINDOW = timedelta(hours=4)`, one named constant in `domain/commitments.py`, measured from the mark's `occurred` to the clock's now.
+- **The line: a new kind, `undone`,** rather than a `marked` line with an extra field. 15a's reader keeps unknown keys, so a `marked state=fulfilled undone_entry=…` line would read as one more done mark to any reader that missed the field. A kind of its own cannot be misread:
+  - `- entry=… commitment=<root> kind=undone undone_entry=<the mark's entry> by=pm [handle=…] occurred=<instant> via=<surface> at=<instant>`;
+  - its identity is `(commitment, "undone", undone_entry)`, so one mark is undone at most once;
+  - `LineKind` gains `UNDONE`, and the parser requires `undone_entry` (a `cml_` id), `by=pm`, `via` and `at`.
+- **The fold drops the undone mark.** An `undone` line applies only when all of these hold. Otherwise it is counted as refused, and nothing changes.
+  - it names a `marked state=fulfilled by=pm` line of the same commitment;
+  - its `occurred` is within `UNDO_WINDOW` of that mark's;
+  - no other line of the commitment sorts between the two by `(occurred, entry)`.
+
+  When it applies, the mark is left out of the state's fold, so the state is the one before the mark (`PENDING`, `ALTERED`, a telemetry state, or an earlier PM mark). The fold stays deterministic (AD-35). SM-9's manual-override count leaves out an undone mark and its `undone` line.
+- **`commitment undo <id>`** writes the `undone` line when:
+  1. the state in force is `FULFILLED` from the PM's own mark;
+  2. that mark is the commitment's newest line, so the commitment's version is the mark's entry id;
+  3. and the clock is within `UNDO_WINDOW` of the mark's `occurred`.
+
+  It follows the writer's steps (compare-and-append, `--if-version`, re-read on `LedgerChanged`).
+- **Its answers:**
+  - **written:** outcome `undone`, "<id>: your done mark of <time> is undone; it is <state> again";
+  - **`already`** (exit 0): the newest line is already an `undone` of the newest done mark;
+  - **`undo_expired`** (exit 3): more than 4 hours since the mark, "marked done at <time>, more than 4 hours ago; mark it broken if it was not done";
+  - **`undo_superseded`** (exit 3): a later line follows the mark, naming that line's kind as `changed` does;
+  - **`nothing_to_undo`** (exit 3): the state in force is not the PM's own done mark. This covers a telemetry `FULFILLED` ("telemetry recorded it done; pm-ai undoes only your own done mark"), an open commitment, and a broken or withdrawn one.
+- **Offered while the window is open:**
+  - the card's `undo` action is available, with "until <time>";
+  - after `done`, the text prints `undo until <time>: pm-ai commitment undo <id> --scope … --if-version <version>` first among its next steps;
+  - the verb JSON carries `"undo": {"command": [words], "until": instant} | null`.
+
+  Outside the window, the action is unavailable, with the reason.
+- **In `review`:** the `z` key (below). This is the smallest form: one verb, one card action and one key.
+
 ### Every change is a compare-and-append (AD-37)
 
 - **A commitment's version is the `entry` id of its newest line in file order.** The ledger is append-only, so any line appended for a commitment becomes its newest, and the version changes. A line of another commitment leaves it unchanged. Entry ids are hashes, not counters, so a version is compared only for equality, never as larger or smaller. Cards and JSON carry it as `version` (`cml_` plus 12 hex characters).
-- **`--if-version <version>`** on `done`, `altered`, `broken`, `withdrawn`, `due` and `owner` acts only if the commitment is still at that version. A wrapper passes the version from the card it displayed, and `review` always does. A value that is not `cml_` plus 12 lower-case hex characters is a usage error (exit 2), not `changed`.
+- **`--if-version <version>`** on `done`, `altered`, `broken`, `withdrawn`, `due`, `owner` and `undo` acts only if the commitment is still at that version. A wrapper passes the version from the card it displayed, and `review` always does. A value that is not `cml_` plus 12 lower-case hex characters is a usage error (exit 2), not `changed`.
 - **The writer's steps,** in `CommitmentDesk` (`pm_ai/app/commitments.py`):
   1. read and fold the scope's ledger through `CommitmentLog.read`;
   2. **"already" and "unchanged" before the version**, as in 13a: when the mark asked for is the PM's own mark in force (`mark_answer` says `already`), or the due or owner asked for is already in force by the `unchanged` rules above, answer `already` or `unchanged` (exit 0) whatever the version. This never applies to `altered`;
@@ -203,7 +247,7 @@ context:
 - **One object on standard output and nothing else.** Exit codes are as in the text form. A field may be added later without changing `format`; removing or renaming one changes it.
 - **`list`:** `{"format": 1, "state": string, "scopes": [string], "unreadable": [{"scope", "reason"}], "ledgers": [{"scope", "malformed", "orphans", "duplicates", "conflicts", "refused"}], "counts": {"by_state": {state: int}, "by_source": {"none": int, "pm": int, "telemetry": int}}, "more": int, "next": {"review": [words]|null, "more": [words]|null}, "commitments": [card, …]}`. `counts` counts the commitments that match the filters before `--limit`, by state and by the source of the state.
 - **`show` and every verb:** `{"format": 1, "outcome": string, "commitment": card, "wrote": [kind, …], "edited": {"proposal_id": string}|null, "note_recorded": boolean, "handle_recorded": boolean|null, "next": [words]|null}`.
-  - `outcome` is one of `shown`, `marked`, `already`, `due_set`, `owner_set`, `altered`, `unchanged`;
+  - `outcome` is one of `shown`, `marked`, `already`, `due_set`, `owner_set`, `altered`, `undone`, `unchanged`;
   - `wrote` lists the line kinds this command appended (`marked`, `due_set`, `owner_set`), empty when it wrote none;
   - `note_recorded` is false when a `--note` was given and not written (`already`), and also false when none was given; `handle_recorded` is `null` when no line was written;
   - `edited` names the replacement `altered --what` made;
@@ -224,7 +268,7 @@ context:
    "actions": {name: {"available", "reason", "command": [words] | null}}}
   ```
 
-  Instants are ISO 8601 UTC. `due.value` is a date, `unresolved` or `none`, as in 15a's `commitment` object. The action names are `done`, `altered`, `broken`, `withdrawn`, `due`, `owner` and `show`.
+  Instants are ISO 8601 UTC. `due.value` is a date, `unresolved` or `none`, as in 15a's `commitment` object. The action names are `done`, `altered`, `broken`, `withdrawn`, `due`, `owner`, `undo` and `show`. On a closed commitment `due` and `owner` are unavailable, with the reason.
 - **A refusal (exit 3):** `{"format": 1, "outcome": "refused", "code": string, "reason": string, "commitment": card|null, "wrote": [kind, …], "next": [words]|null}` on standard output. `wrote` is empty except after `edit_refused`; `next` is the exact command that repairs or continues, when there is one (the `proposal approve` or `proposal show` of `not_found`, the `proposal edit` of `edit_refused`, `commitment list` otherwise), else `null`. A usage error (exit 2) stays a message on standard error, as for every command.
 - **The refusal codes:**
   - `not_found`: no commitment with that id in the scopes looked at; the reason follows the finding order above (an approval not yet recorded, a proposal that is not a commitment, or nothing);
@@ -239,6 +283,8 @@ context:
   - `what_not_editable`: `altered --what` on a spoken promise;
   - `edit_refused`: `altered --what`'s edit was refused (13a's reason) or not started for lack of time, after the mark was written;
   - `busy`, `git_not_excluded`, `disk`: 15a's meanings, for the append;
+  - `commitment_closed`: `due` or `owner` on a done, broken or withdrawn commitment;
+  - `undo_expired`, `undo_superseded`, `nothing_to_undo`: `undo` refused (above);
   - `no_terminal`: `review` without a terminal.
 - **Exit codes:**
   - **0:** changed, `already`, `unchanged`, shown, or listed, an empty listing included;
@@ -248,8 +294,9 @@ context:
 ### `commitment review`
 
 - **Walks the open commitments in `list`'s order,** with `list`'s filters, one compact card at a time.
-- **The keys:** `[d]one [a]ltered [b]roken [w]ithdrawn d[u]e [o]wner [s]kip [q]uit`. A key whose action is unavailable is refused with its reason, and the card is asked again.
-  - `d` writes the mark at once.
+- **The keys:** `[d]one [a]ltered [b]roken [w]ithdrawn d[u]e [o]wner [s]kip [q]uit`, plus `[z] undo that done` after a `d` (below). A key whose action is unavailable is refused with its reason, and the card is asked again. On a closed commitment `u` and `o` are unavailable (Andrei, 2026-10-26).
+  - `d` writes the mark at once: one keypress, no confirmation (Andrei, 2026-10-26). The sentence after it names the undo: "marked done; [z] undoes it until <time>".
+  - `z`, offered from the card after a `d` until the walk ends or 4 hours pass, undoes the most recent `d` of this walk by `undo`'s rules, checked against the version that `d` wrote. A later line on that commitment refuses it as `undo_superseded`, said in one sentence. The walk then goes on with the card it was on.
   - `b` and `w` ask "note (Enter for none)", then write.
   - `a` asks, with the current value shown: the wording (an action item only), the owner and the due (Enter keeps, `-` clears), then the note. Then it writes, as `altered` does.
   - `u` asks for the due (words, or a date with its year, `-` clears), by `due`'s rules. Words that name no date are asked again with the reason.
@@ -259,7 +306,7 @@ context:
 - **Each answer is one change,** checked against the version its card showed. On a conflict, the current card is shown again with one sentence saying what changed.
 - **The ledger is read again before each card.** A commitment that is no longer open (marked from elsewhere since the walk began) is skipped with one sentence ("<what>: marked done from the prompt meanwhile; skipped") and counted as such.
 - **Nothing open:** the empty-listing sentence of `list` and its next step, exit 0.
-- **The end:** one line counts what was marked done, altered, broken or withdrawn, the dues and owners set, and what was skipped, then the next step. Quitting, Ctrl-C and end of input end the walk the same way: the counts so far, exit 0. Every answered change is complete. Ctrl-C or end of input inside a sub-question (a note, the due, the owner, `a`'s questions) abandons that change: nothing of it is written, and it is not counted.
+- **The end:** one line counts what was marked done, altered, broken or withdrawn, what was undone (a `d` undone by `z` counts as undone, not done), the dues and owners set, and what was skipped, then the next step. Quitting, Ctrl-C and end of input end the walk the same way: the counts so far, exit 0. Every answered change is complete. Ctrl-C or end of input inside a sub-question (a note, the due, the owner, `a`'s questions) abandons that change: nothing of it is written, and it is not counted.
 - **Without a terminal** (stdin not a TTY), it is refused (exit 3, `no_terminal`), naming `commitment list --json` and the verbs.
 
 ### Where it runs (AD-21)
@@ -269,7 +316,7 @@ context:
   - the verbs are composed as `proposal approve` is: the store, its claimed step with a 1-second busy wait, the git check for a project ledger (AD-43), and the `connectors/` rows for the PM's handle, which are not encrypted. No master key.
 - **At the prompt:**
   - `list` and `show` join `DAEMON_BOUNDS` (`entry.py:606`) with `CONFIG_SHOW_BOUND_SECONDS`, 1 second;
-  - `done`, `altered`, `broken`, `withdrawn`, `due` and `owner` join it with `COMMITMENT_WRITE_BOUND_SECONDS = 2.0`, declared in `pm_ai/app/commitments.py`. `altered --what` includes 13a's edit within the same 2 seconds;
+  - `done`, `altered`, `broken`, `withdrawn`, `due`, `owner` and `undo` join it with `COMMITMENT_WRITE_BOUND_SECONDS = 2.0`, declared in `pm_ai/app/commitments.py`. `altered --what` includes 13a's edit within the same 2 seconds;
   - inline through the daemon, printing exactly what the terminal prints. The daemon's desk hands its appends to the writer thread, as `prompts.py:1146` does for proposals.
 - **`commitment review`** joins `TERMINAL_BOUND` (`dispatch.py:4963`), so at the prompt it runs in the prompt's own process.
 - **Each command's help names its bound** where it has one.
@@ -279,7 +326,8 @@ context:
 
 - **`<id>`** completes from the commitments the verb can act on:
   - for `done`, `altered`, `broken` and `withdrawn`, those whose `mark_answer` is `yes`;
-  - for `due` and `owner`, the open ones;
+  - for `due` and `owner`, the open ones only;
+  - for `undo`, those whose undo is available now (the PM's done mark is the newest line, within 4 hours);
   - for `show`, any.
 
   At most 100 are offered, in `list`'s order. Each inserts the id and shows `owner: what` (or `said by …`), the meeting's title and the due. Typed text matches the start of the id or of any word of `what`, the owner, the speaker or the title, ignoring case, as `13a` does (`completion.py:566`).
@@ -298,7 +346,7 @@ context:
 - **In JSON,** 13a's refusal object gains `"commitment": {"commitment_id": <root>, "scope": <scope>, "recorded": boolean|null, "show": [words]|null, "commands": {name: [words]}}`, with `commands` holding exactly the commands the text offers (`withdrawn`, `altered`, `edit`, or `approve` for the repair), `recorded` null when the ledger could not be read, and `show` null when the root is not in the ledger. `format` stays 1.
 - **The approved card's `reject` reason** (`COMMITMENT_NOT_REJECTED`, `proposal_cards.py:59`) becomes: "approved, so it is a commitment now; mark it withdrawn if approving it was a mistake, or edit it to correct what was agreed".
 
-### What the dashboard shows (Ask First 1 decides; the recommendation is written here)
+### What the dashboard shows (Andrei, 2026-10-26: option A)
 
 - **15d owns the surfaces.** 15c changes the pages only so that a commitment the PM closed stops looking open:
   - **the dashboard's meeting digest** (`pipelines.py:2674`, `_meeting_digest`) leaves out an approved action item whose commitment is `fulfilled` (by the PM or by telemetry), `broken` or `withdrawn`, as it leaves out a rejected one. An `altered` one is still shown. The lookup is by `root_of(proposal_id)`, so an edited item's replacement finds its root's commitment. `_digests_over` (`:2774`) reads each personal or project scope's ledger once per render through `CommitmentLog.read`, and no other scope's;
@@ -321,19 +369,14 @@ context:
 
   The two-surfaces test forces the interleave: B reads, A appends, then B appends. It asserts that B met `LedgerChanged` exactly once, read again, answered `already`, and that the ledger holds exactly one `marked` line. AD-14's terminal set needs no new test: `tests/domain/test_commitment_rules.py:47` already asserts `WITHDRAWN.is_terminal`.
 - **Unchanged and still passing:** `test_ad14_proposal_and_commitment_lifecycles_stay_distinct` (`:283`), both AD-28 tests (`:165`, `:209`), and `test_ad33_ledger_entries_are_self_contained` (`:735`).
-- **Command tables:** `test_every_command_the_daemon_runs_declares_its_bound` (`tests/slice/test_line_requests_hardening.py:95`) covers the new entries in `DAEMON_BOUNDS` and `TERMINAL_BOUND`, and the completion test over `TABLE` covers every new name's source. A new slice test asserts the values: `DAEMON_BOUNDS` gives `CONFIG_SHOW_BOUND_SECONDS` for `commitment list` and `show` and `COMMITMENT_WRITE_BOUND_SECONDS` for the six writes, `COMMITMENT_WRITE_BOUND_SECONDS == 2.0`, and each command's help names its seconds.
+- **Command tables:** `test_every_command_the_daemon_runs_declares_its_bound` (`tests/slice/test_line_requests_hardening.py:95`) covers the new entries in `DAEMON_BOUNDS` and `TERMINAL_BOUND`, and the completion test over `TABLE` covers every new name's source. A new slice test asserts the values: `DAEMON_BOUNDS` gives `CONFIG_SHOW_BOUND_SECONDS` for `commitment list` and `show` and `COMMITMENT_WRITE_BOUND_SECONDS` for the seven writes, `COMMITMENT_WRITE_BOUND_SECONDS == 2.0`, and each command's help names its seconds.
 - **`.importlinter` is unchanged:** `core/commitment_cards.py` imports `domain` and `core`, `app/commitments.py` is in `app`, and the CLI reaches the desk through a port protocol in `surfaces/cli/dispatch.py`, as `ProposalDeskPort` (`:4568`) does.
 
 ### No real data
 
 Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam Rivera`) and `example.com` handles. Nothing reads the PM's own `~/.pm-ai` or `~/.manager-ai`.
 
-**Ask First:**
-
-1. **What the pages show in 15c.** 15a gave the surfaces to 15d, but a commitment the PM marks done keeps showing as "approved" on the dashboard until 15d lands.
-   - **A (recommended):** the dashboard digest leaves out done, broken and withdrawn items, and Team Activity hides withdrawn ones, as each hides a rejected item. Nothing else on the pages changes until 15d. This is what the spec above says.
-   - **B:** A, and approved items on the dashboard also show the commitment's owner, due and state now. That moves most of 15d's dashboard work into 15c.
-   - **C:** nothing changes on the pages until 15d. A done item keeps showing as approved, and a withdrawn one stays on Team Activity.
+**Ask First:** none open. The one question, what the pages show before 15d, was decided by Andrei on 2026-10-26 (option A, above).
 
 **Never:**
 
@@ -341,7 +384,8 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
   - no line rewritten or removed, and no whole-file write;
   - no append without the size read checked in the claimed step, and no blind retry;
   - no mark the table refuses, and no second line for a mark already in force;
-  - no line of a kind 15a does not define, and no `verdict` line;
+  - no line of a kind 15a does not define other than `undone`, and no `verdict` line;
+  - no undo of a broken, withdrawn or telemetry mark, and none after `UNDO_WINDOW` or after a later line;
   - no `unresolved` or estimated `due_set`.
 - **People:**
   - no handle written as an owner, and no name guessed, fuzzy-matched or linked;
@@ -359,7 +403,7 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
   - no command, refusal or JSON naming a command that does not exist;
   - no master key, keychain or model call;
   - no `people` scope read, listed or offered.
-- **Scope of this slice:** no index (15b), no page change beyond Ask First 1's answer (15d), no telemetry (16), and no module named `pm_ai.core.commitments`.
+- **Scope of this slice:** no index (15b), no page change beyond the digest and Team Activity rules above (15d), no telemetry (16), and no module named `pm_ai.core.commitments`.
 - **No read of the PM's real store** in a test or a manual check.
 
 ## I/O & Edge-Case Matrix
@@ -411,6 +455,27 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
 | Owner blank | only spaces or line breaks | usage error | exit 2 |
 | Owner is a handle | `owner <id> alex@example.com` | `owner_is_handle`; nothing written | exit 3 |
 | Owner the same | the same name in another Unicode form (NFC) | `unchanged` | exit 0 |
+| Undo inside the window | `done` at 10:00, `undo` at 13:59 | one `undone` line naming the mark; state back to the one before (`PENDING`); outcome `undone` | exit 0 |
+| Undo back to altered | `altered`, then `done`, then `undo` within 4 h | state `ALTERED` again | exit 0 |
+| Undo after 4 h | `done` at 10:00, `undo` at 14:01 | `undo_expired`; nothing written | exit 3 |
+| Undo after another line | `done`, then `due_set` from the prompt, then `undo` | `undo_superseded`, naming the due set; nothing written | exit 3 |
+| Undo of a telemetry mark | a hand-written `verdict state=fulfilled`, then `undo` | `nothing_to_undo`, "telemetry recorded it done" | exit 3 |
+| Undo of broken | marked broken, then `undo` | `nothing_to_undo` | exit 3 |
+| Undo twice | `undo` again after it was written | `already` | exit 0 |
+| Undo by version | `undo --if-version <the done's version>`; and with an older version | written; the older one refused `changed` | 0 / 3 |
+| Undo offered | `done <id> --json` | `undo.command` with `--if-version`, `undo.until` 4 h after the mark; the card's `undo` action available; after 4 h unavailable with its reason | exit 0 |
+| Undo line read back | an `undone` line naming a mark more than 4 h older, or one with a line between | counted as refused; the mark stands (AD-35) | N/A |
+| Undo from review | `d` on card 1, then `z` on card 2 | card 1's done mark undone; the closing counts say "1 undone", not "1 marked done"; the walk goes on with card 2 | continues |
+| Due on a closed commitment | `due <id> friday` on a commitment marked done | `commitment_closed`, naming the state and `commitment undo` while the window is open; nothing written | exit 3 |
+| Owner on a closed commitment | `owner <id> "Alex Morgan"` on a withdrawn one | `commitment_closed`, naming `commitment altered … --owner` to reopen it | exit 3 |
+| Closed card | `show <id> --json` of a broken commitment | `actions.due` and `actions.owner` unavailable, with the reason; completion does not offer it for `due` or `owner` | exit 0 |
+| Altered reopens with a due | `altered --due friday` on a broken commitment | written; state `ALTERED`, due the coming Friday | exit 0 |
+| Friday on a Friday | `due <id> friday` on Fri 30 Oct; also `в пятницу` | `due_set due=2026-11-06`; "due Fri 6 Nov" | exit 0 |
+| Friday on a Thursday | `due <id> friday` on Thu 29 Oct | `due=2026-10-30` | exit 0 |
+| End of week from Friday on | `due <id> "end of week"` on Fri 30 Oct, Sat 31 Oct and Sun 1 Nov; also `до конца недели` | each `due=2026-11-06`, shown as "due Fri 6 Nov" | exit 0 |
+| End of week midweek | `due <id> EOW` on Wed 28 Oct | `due=2026-10-30` | exit 0 |
+| This Friday on a Friday | `due <id> "this friday"` on Fri 30 Oct | `due_unresolved`, naming the date form | exit 3 |
+| Extraction unchanged | a meeting on Fri 30 Oct whose action item says "by Friday" | still `due=unresolved` on its `pending` line (15a) | N/A |
 | Owner kept after an edit | `owner <id> "Alex Morgan"`, then `proposal edit <id> --what "…"` (owner unchanged in the proposal) | owner stays Alex Morgan (the fold fix) | exit 0 |
 | Owner changed by an edit | then `proposal edit <id>_e1 --owner "Sam Rivera"` | owner becomes Sam Rivera | exit 0 |
 | Stale version | `done --if-version <old>` after another mark | `changed`, with the current card and what changed; ledger size unchanged | exit 3 |
@@ -455,11 +520,11 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
 | Reject after done | the same, after `commitment done` | `withdrawn` and `altered` not offered; `proposal edit` still named | exit 3 |
 | Reject, ledger write failed | approve while the ledger's append fails (`recorded: false`), then `proposal reject` | refused; "not recorded in the ledger yet: pm-ai proposal approve <id> --scope … records it"; `commitment.recorded: false` | exit 3 |
 | Approved card | `proposal show <id> --json` | `actions.reject.available: false`, the new reason | exit 0 |
-| Dashboard, closed items (Ask First 1, A) | approved action items marked done, broken and withdrawn, one fulfilled by a hand-written telemetry `verdict` | none shown under the meeting; a waiting one still shown | N/A |
+| Dashboard, closed items | approved action items marked done, broken and withdrawn, one fulfilled by a hand-written telemetry `verdict` | none shown under the meeting; a waiting one still shown | N/A |
 | Dashboard, altered | an approved action item marked altered | still shown, as approved | N/A |
 | Dashboard, edited item | an approved item edited (`<root>_e1`), then marked done | not shown: looked up by its root | N/A |
 | Dashboard, ledger unreadable | the ledger cannot be read | items shown as today | N/A |
-| Team Activity, withdrawn (A) | a withdrawn action item linked to an issue | hidden, as a rejected one | N/A |
+| Team Activity, withdrawn | a withdrawn action item linked to an issue | hidden, as a rejected one | N/A |
 | Team Activity, done and broken | items marked done and broken | still shown | N/A |
 | Team Activity, ledger unreadable | the project's ledger cannot be read | every line shown as today | N/A |
 | Timed listing | 5,000-line personal and project ledgers | `list` within 1 s | N/A |
@@ -499,13 +564,15 @@ Anchors checked against `origin/main` at `689122a`.
 
 **Execution:**
 - [ ] **The fold.** `core/commitment_log.py`: `Details` and `CommitmentLedger.details` (version, mark in force, `due_by_pm`, `owner_by_pm`, `changed_at`); the owner rule fixed. Tests first, including the "owner kept after an edit" row.
+- [ ] **Undo.** `domain/commitments.py`: `UNDO_WINDOW` and `LineKind.UNDONE`; `core/commitment_log.py`: the `Undone` record, its rendering and parsing, and the fold dropping the undone mark by the three conditions. Tests first: every undo row of the matrix, and file-order swaps.
+- [ ] **PM-typed dues.** `core/due_dates.py`: a pure helper naming the form of the words, with `resolve` unchanged; `app/commitments.py`: the same-weekday and end-of-week rule for the PM's words, and the year-written past date.
 - [ ] **The card.** `pm_ai/core/commitment_cards.py`: `Card`, `build_card`, `card_text(card, *, compact=False)`, `card_json`, `listing_text`, `listing_json`, `outcome_text`, `refusal_text`.
 - [ ] **The desk.** `pm_ai/app/commitments.py`: `CommitmentDesk` with `listing`, `show`, `mark`, `altered`, `set_due`, `set_owner`, `open_walk` and `choices`, the compare-and-append loop, `COMMITMENT_WRITE_BOUND_SECONDS`, the PM's handle through `read_pm_identity`; built in the composition root and, in the daemon, with handed writes.
 - [ ] **The CLI.** `surfaces/cli/dispatch.py`: the `commitment` group in `TABLE`, `CommitmentDeskPort`, the handlers, and the `review` walk with compact cards; `review` in `TERMINAL_BOUND`.
 - [ ] **Where it runs.** `entry.py`: `DAEMON_BOUNDS` entries; the by-path readers for `list`, `show` and completion.
 - [ ] **Completion.** `completion.py`: `COMMITMENT_IDS`, `COMMITMENT_STATE_NAMES`, `COMMITMENT_OWNERS`, and their `_BY_COMMAND` rows.
 - [ ] **The reject refusal.** `app/proposals.py:_not_rejected`, its JSON `commitment` field, and `COMMITMENT_NOT_REJECTED`.
-- [ ] **The pages** (as Ask First 1 is answered): `_meeting_digest`, `_digests_over`, `_item_decisions`.
+- [ ] **The pages:** `_meeting_digest`, `_digests_over`, `_item_decisions`.
 - [ ] **Tests.**
   - `tests/core/test_commitment_log.py`: `details`, the owner rule, the version.
   - `tests/core/test_commitment_cards.py` (new): every heading word, past-due rules, the compact form's lines are the full form's first lines, availability from `mark_answer`.
@@ -576,6 +643,22 @@ Anchors checked against `origin/main` at `689122a`.
     - `derivation-services.md:121` gets a stated exception;
     - the PRD Decisions Log entry is anchored at `:963`;
     - AD-37's amendment says equality, already, and the timing of a re-decided line, and qualifies "Terminal states are terminal".
+- **2026-10-26, Andrei's four answers: DECIDED 2026-10-26 (Andrei), frozen block edited (recorded here).**
+  1. **The pages before 15d: option A.** The digest leaves out commitments marked done, broken or withdrawn; Team Activity hides withdrawn ones, while done and broken stay; altered items are still shown. The Ask First is closed.
+  2. **Review's `d` key: "Allow undo for the next 4 hours".** `d` stays one keypress with no confirmation. A new verb, `commitment undo <id>`, writes a new line kind, `undone` (chosen over a `marked` line with an extra field, which a reader that missed the field would take as another done mark). The fold drops the undone mark, so the commitment returns to its state before it.
+     - The window is `UNDO_WINDOW` (4 hours), one constant, from the mark's `occurred`.
+     - It covers the PM's own done mark only, while it is still the newest line. `b` and `w` ask for a note, so they are no one-keypress accident.
+     - It is refused as `undo_expired`, `undo_superseded` or `nothing_to_undo` (a telemetry, broken or withdrawn state).
+     - It is offered by the card's `undo` action and the first next step while the window is open, and by `review`'s `z` key after a `d`.
+     - AD-14, AD-37 and the PRD's consequence and Decisions Log are amended. Matrix rows added.
+  3. **`due` and `owner` on a closed commitment are refused** (`commitment_closed`), naming the way to reopen it that the table allows. The card offers neither action on a closed commitment, and completion offers open ones only. `altered --due` and `--owner` still reopen a broken or withdrawn one.
+  4. **The same weekday, typed by the PM:**
+     - "friday" typed on a Friday means next week's Friday, 7 days out;
+     - "end of week" typed from Friday to Sunday means next week's Friday;
+     - `this <weekday>` on that weekday stays unresolved;
+     - the output shows the resolved date.
+
+     It is a rule in the desk for the PM's typed words. `due_dates` gains only a pure form-naming helper, and `resolve`, 15a's extraction dues and Team Activity are unchanged. Matrix rows added, including one showing that a meeting's own "by Friday" stays unresolved.
 
 ## Design Notes
 
@@ -616,12 +699,13 @@ Anchors checked against `origin/main` at `689122a`.
 - Until 15d, the pages show the proposal's owner and due, not the PM's `owner_set` or `due_set`.
 - A spoken promise's wording cannot be changed, only noted.
 - A typed past date is accepted as typed.
+- A mistaken `broken` or `withdrawn`, or a done mark found after 4 hours, is not undone: it is corrected by a later mark, as the table allows.
 
 **Amendments this depends on.** Applied with the build, in this order: the PRD through bmad-prd, then bmad-spec re-derives the SPEC companion, then the spine through the architecture skill. The sentences are exact.
 
 *PRD (`prd.md`), through bmad-prd (v0.16.1 → v0.16.2):*
-- **FR-34 consequences** (`:675`): after "> * Approved spoken commitment creates a valid, structured Markdown entry in the meeting's scope's commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].", add: "> * The PM keeps his commitments from the CLI (2026-10-25, 15c): `pm-ai commitment list` (open ones by default, soonest due first; a date is shown as past only when it was worked out exactly, never on an estimated meeting day), `commitment show <id>`, `commitment done|altered|broken|withdrawn <id>` (his own marks), `commitment due <id> <when>` and `commitment owner <id> <name>`, and `commitment review`, which walks the open ones; each change is a line appended to the meeting's scope's commitments\_log.md under his handle, never a rewrite, and acts only on the version he saw when he names one."
-- **Decisions Log** (`:963`): after the "> * **2026-10-24 (Story 15a \- v0.16.1):**" entry, add "> * **2026-10-25 (Story 15c \- v0.16.2):** *The PM's commitment commands (2026-10-25, Andrei; FR-34):* `pm-ai commitment` lists, shows, marks (done, altered, broken, withdrawn) and corrects (due, owner) commitments, and walks the open ones; every change is an appended line checked against the version the PM saw; a past date is shown only when it was worked out exactly; the reject refusal names these commands."
+- **FR-34 consequences** (`:675`): after "> * Approved spoken commitment creates a valid, structured Markdown entry in the meeting's scope's commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].", add: "> * The PM keeps his commitments from the CLI (2026-10-25, 15c): `pm-ai commitment list` (open ones by default, soonest due first; a date is shown as past only when it was worked out exactly, never on an estimated meeting day), `commitment show <id>`, `commitment done|altered|broken|withdrawn <id>` (his own marks), `commitment due <id> <when>` and `commitment owner <id> <name>` on an open commitment, `commitment undo <id>`, which takes back his own done mark within 4 hours while nothing has followed it (2026-10-26, Andrei), and `commitment review`, which walks the open ones; each change is a line appended to the meeting's scope's commitments\_log.md under his handle, never a rewrite, and acts only on the version he saw when he names one."
+- **Decisions Log** (`:963`): after the "> * **2026-10-24 (Story 15a \- v0.16.1):**" entry, add "> * **2026-10-25 (Story 15c \- v0.16.2):** *The PM's commitment commands (2026-10-25, Andrei; FR-34):* `pm-ai commitment` lists, shows, marks (done, altered, broken, withdrawn) and corrects (due, owner) commitments, and walks the open ones; every change is an appended line checked against the version the PM saw; a past date is shown only when it was worked out exactly; the reject refusal names these commands. *Undo, and the PM's typed dues (2026-10-26, Andrei; FR-34):* his own done mark, the one mark given by a single keypress, can be undone within 4 hours while nothing has followed it, returning the commitment to its state before; due and owner change only on an open commitment; a weekday he types on that same weekday means next week's, and the end of the week typed from Friday to Sunday means next week's Friday."
 
 *SPEC companions, re-derived by bmad-spec:*
 - **`derivation-services.md:125`:** the `CommitmentLog` row's users become "the approval and its catch-up (append, `15a`), the PM's marks, the due and owner he sets (append, `15c`), `commitment list`, `show` and `review`, the dashboard digest and Team Activity (read, `15c`), the lifecycle job (append verdicts, story 16), indexing (read)".
@@ -632,15 +716,15 @@ Anchors checked against `origin/main` at `689122a`.
 - **AD-14** (`:313-319`):
   - in the heading, `[revised 2026-10-22]` becomes `[revised 2026-10-22, 2026-10-25]`;
   - **Binds:** "FR-33, FR-34" becomes "FR-33, FR-34, `15a`, `15c`";
-  - replace "Only `FULFILLED` and `BROKEN` are terminal." with "Only `FULFILLED`, `BROKEN` and `WITHDRAWN` are terminal, and only the PM's own mark moves a commitment out of one `[2026-10-25, 15c]`."
+  - replace "Only `FULFILLED` and `BROKEN` are terminal." with "Only `FULFILLED`, `BROKEN` and `WITHDRAWN` are terminal, and only the PM's own mark moves a commitment out of one `[2026-10-25, 15c]`; the one other way out is his undo of his own `fulfilled` mark, within 4 hours of that mark and while no later line of the commitment follows it, which returns the commitment to the state before the mark and is recorded as a line of its own `[2026-10-26, Andrei, 15c]`."
 - **AD-21** (`:371-379`):
   - in the heading, add `2026-10-25` to the revision list;
   - **Binds:** add `15c`;
-  - after "and `proposal review` (`13a`), in `TERMINAL_BOUND`", add ", and `[2026-10-25, 15c]` `commitment list` and `commitment show` (`15c`), daemon-routed at the prompt in `DAEMON_BOUNDS`, inline, under 1 second, `commitment done`, `commitment altered`, `commitment broken`, `commitment withdrawn`, `commitment due` and `commitment owner` (`15c`), the same, under 2 seconds, and `commitment review` (`15c`), in `TERMINAL_BOUND`".
+  - after "and `proposal review` (`13a`), in `TERMINAL_BOUND`", add ", and `[2026-10-25, 15c]` `commitment list` and `commitment show` (`15c`), daemon-routed at the prompt in `DAEMON_BOUNDS`, inline, under 1 second, `commitment done`, `commitment altered`, `commitment broken`, `commitment withdrawn`, `commitment due`, `commitment owner` and `[2026-10-26, Andrei, 15c]` `commitment undo` (`15c`), the same, under 2 seconds, and `commitment review` (`15c`), in `TERMINAL_BOUND`".
 - **AD-37** (`:570-574`):
   - in the heading, add `2026-10-25` to the revision list;
   - **Binds:** add `15c`;
-  - replace "Terminal states are terminal, and a worker re-checks state **at execution time**" with "Terminal states are terminal — for a commitment, only the PM's own mark moves it out of one (AD-14) `[2026-10-25, 15c]` — and a worker re-checks state **at execution time**";
+  - replace "Terminal states are terminal, and a worker re-checks state **at execution time**" with "Terminal states are terminal — for a commitment, only the PM's own mark moves it out of one, or his undo of his own done mark within 4 hours while nothing has followed it (AD-14) `[2026-10-25, 2026-10-26, Andrei, 15c]` — and a worker re-checks state **at execution time**";
   - after "a ledger that grew is read again, never appended to blindly.", add: "`[2026-10-25, 15c]` A commitment's version is the entry id of its newest line in the file: it changes with every line appended for that commitment, never with another commitment's, and is compared only for equality, since entry ids are hashes and do not move up as a proposal's version does. A surface that displays a commitment carries that version, and a change it sends acts only while the commitment is still at it; a change that finds the PM's same mark, due or owner already in force is answered as already made, not as a conflict; a writer that loses the append reads again and decides again, and the lines it then writes are timed after the newest line it found."
 
 ## Verification
