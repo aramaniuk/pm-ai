@@ -56,8 +56,11 @@ STATE_WORDS = {
 
 ACTIONS = ("approve", "edit", "reject", "show")
 
-COMMITMENT_NOT_REJECTED = "approved, so it is a commitment now; edit it to correct what was agreed"
-"""Why an approved item whose type records a commitment offers no `reject` (15a)."""
+COMMITMENT_NOT_REJECTED = (
+    "approved, so it is a commitment now; mark it withdrawn if approving it was a mistake, "
+    "or edit it to correct what was agreed"
+)
+"""Why an approved item whose type records a commitment offers no `reject` (15a, 15c)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +433,7 @@ class ProposalRefused(Exception):
         changed_via: str | None = None,
         replaced_by: str | None = None,
         card: Card | None = None,
+        commitment: Mapping[str, object] | None = None,
     ) -> None:
         super().__init__(reason)
         self.reason = reason
@@ -438,6 +442,9 @@ class ProposalRefused(Exception):
         self.changed_via = changed_via
         self.replaced_by = replaced_by
         self.card = card
+        self.commitment = commitment
+        """15c: the reject refusal's commitment — its id, scope, whether it is
+        recorded, and the commands the text offers."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +491,7 @@ def refusal_json(refused: ProposalRefused) -> dict[str, object]:
         "changed_via": refused.changed_via,
         "replaced_by": refused.replaced_by,
         "proposal": None if refused.card is None else card_json(refused.card),
+        "commitment": None if refused.commitment is None else dict(refused.commitment),
     }
 
 

@@ -30,7 +30,12 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 
-from pm_ai.app.commitments import CommitmentRecorder, recorder_for
+from pm_ai.app.commitments import (
+    LEDGER_READ_FAILURES,
+    CommitmentRecorder,
+    read_ledger,
+    recorder_for,
+)
 from pm_ai.app.concurrency import WRITER_START_WAIT_SECONDS, WriterBusy
 from pm_ai.app.meeting_listing import MeetingLister, resolve_title
 from pm_ai.app.proposal_reads import ProposalWorld, open_world, seen_state
@@ -63,7 +68,7 @@ from pm_ai.core.proposals import (
     SUMMARY_LIMIT,
     edited_values,
 )
-from pm_ai.domain.commitments import LineKind
+from pm_ai.domain.commitments import LineKind, Mark, MarkAnswer, mark_answer
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.lifecycle import ProposalState
 from pm_ai.domain.meeting_listing import RecordReading
@@ -92,6 +97,8 @@ from pm_ai.storage.service import (
 __all__ = [
     "DEFAULT_LIMIT",
     "LIMITS",
+    "MeetingChoiceRefused",
+    "choose_meeting",
     "PROPOSAL_WRITE_BOUND_SECONDS",
     "ProposalDesk",
     "TERMINAL_WRITE_WAIT_SECONDS",
@@ -123,6 +130,39 @@ def build_registry(*extra: ProposalType) -> ProposalTypes:
     for each in extra:
         registry.register(each)
     return registry
+
+
+class MeetingChoiceRefused(ProposalRefused):
+    """`--meeting` or `--title [--on]` named no one meeting (11f, 13a; 15c's code).
+
+    `kind` is `ambiguous` (the meeting has records in several scopes, or
+    several meetings match the title) or `not_found` (no meeting matches), so
+    a caller maps it to its own code without reading the sentence.
+    """
+
+    def __init__(self, kind: str, reason: str) -> None:
+        super().__init__(reason)
+        self.kind = kind
+
+
+def choose_meeting(
+    world: ProposalWorld,
+    scope: DataScope | None,
+    meeting_id: str | None,
+    title: str | None,
+    on: date | None,
+    *,
+    now: Callable[[], datetime],
+    paths: ScopePaths | None,
+    reachable: Callable[[], bool],
+) -> tuple[DataScope, str] | None:
+    """The one meeting `--meeting` or `--title [--on]` names, as `proposal list` chooses it.
+
+    `MeetingChoiceRefused` when it names none or several. Story 15c's
+    `commitment list` and `review` choose a meeting by the same rule.
+    """
+    desk = ProposalDesk(now=now, paths=paths, reachable=reachable)
+    return desk._chosen_meeting(world, scope, meeting_id, title, on)
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,7 +548,8 @@ class ProposalDesk:
                 return scope, meeting_id
             holding = [each for each in world.scopes if world.holds(each, meeting_id)]
             if len(holding) > 1:
-                raise ProposalRefused(
+                raise MeetingChoiceRefused(
+                    "ambiguous",
                     f"meeting {meeting_id} has records in "
                     f"{', '.join(str(each) for each in holding)}; give `--scope` to say "
                     f"which. Nothing was read."
@@ -525,7 +566,8 @@ class ProposalDesk:
                 continue
             found += [(each, listed) for listed in matches if listed.record is RecordReading.READABLE]
         if not found:
-            raise ProposalRefused(
+            raise MeetingChoiceRefused(
+                "not_found",
                 f"no meeting{'' if scope is None else f' in {scope}'} has a title matching "
                 f"{title!r}{'' if on is None else f' on {on.isoformat()}'}; `pm-ai transcript "
                 f"list` lists the meetings."
@@ -540,7 +582,8 @@ class ProposalDesk:
                 )
                 for each, listed in found[:10]
             )
-            raise ProposalRefused(
+            raise MeetingChoiceRefused(
+                "ambiguous",
                 f"{len(found)} meetings match {title!r}: {named}. Give `--scope`, `--on` "
                 f"or `--meeting` to choose one. Nothing was read."
             )
@@ -826,22 +869,76 @@ class ProposalDesk:
         world: ProposalWorld,
         rows: Sequence[ProposalIndexRow],
     ) -> ProposalRefused:
-        """The refusal of `reject` on an approved item that is a commitment now (15a)."""
+        """The refusal of `reject` on an approved item that is a commitment now (15a, 15c).
+
+        It names the commitment commands `mark_answer` allows from the state in
+        force, read once from the ledger: `withdrawn` and `altered`, then `proposal
+        edit` always. With no line in the ledger for the root, the repair instead;
+        with the ledger unreadable, both marks, unchecked.
+        """
         card = self._card(body, scope, world, rows)
         when = (
             ""
             if body.changed_at is None
             else f" on {day_words(body.changed_at, world.zone, world.now)}"
         )
+        pid = body.proposal_id
+        root = root_of(pid)
+        scope_words = ("--scope", str(scope))
+        withdrawn = ("commitment", "withdrawn", root, *scope_words)
+        altered = ("commitment", "altered", root, *scope_words, "--note", "…")
+        edit = ("proposal", "edit", pid, *scope_words, "--what", "…")
+        approve = ("proposal", "approve", pid, *scope_words)
+        sentences = [
+            f"{pid} was approved{when} and is a commitment now, so it is not rejected; "
+            f"nothing was changed."
+        ]
+        commands: dict[str, list[str]] = {}
+        recorded: bool | None
+        held = None
+        details = None
+        try:
+            ledger = read_ledger(self.storage, world.resolver, scope)
+        except LEDGER_READ_FAILURES:  # an unreadable ledger offers both marks, unchecked
+            recorded = None
+            sentences.append("The ledger could not be read, so these may be refused:")
+            sentences.append(f"If approving it was a mistake: {command_line(withdrawn)}.")
+            sentences.append(f"If what was agreed has changed: {command_line(altered)}.")
+            commands["withdrawn"] = list(withdrawn)
+            commands["altered"] = list(altered)
+        else:
+            held = ledger.commitments.get(root)
+            details = ledger.details.get(root)
+            recorded = held is not None
+            if held is None:
+                sentences.append(
+                    f"It is not recorded in the ledger yet: {command_line(approve)} records it."
+                )
+                commands["approve"] = list(approve)
+            else:
+                if mark_answer(held.state, held.state_source, Mark.WITHDRAWN) is MarkAnswer.YES:
+                    sentences.append(f"If approving it was a mistake: {command_line(withdrawn)}.")
+                    commands["withdrawn"] = list(withdrawn)
+                if mark_answer(held.state, held.state_source, Mark.ALTERED) is MarkAnswer.YES:
+                    sentences.append(f"If what was agreed has changed: {command_line(altered)}.")
+                    commands["altered"] = list(altered)
+        sentences.append(f"To correct what was recorded: {command_line(edit)}.")
+        commands["edit"] = list(edit)
         return ProposalRefused(
-            f"{body.proposal_id} was approved{when} and is a commitment now, so it is not "
-            f"rejected; nothing was changed. To correct what was agreed, edit it: pm-ai "
-            f'proposal edit {body.proposal_id} --scope {scope} --what "…". Marking a '
-            f"commitment withdrawn, altered or broken is not available yet.",
+            " ".join(sentences),
             state=ProposalState.APPROVED.value,
             changed_at=body.changed_at,
             changed_via=body.changed_via,
             card=card,
+            commitment={
+                "commitment_id": root,
+                "scope": str(scope),
+                "recorded": recorded,
+                "show": None
+                if held is None or details is None
+                else ["commitment", "show", root, *scope_words],
+                "commands": commands,
+            },
         )
 
     def _already(

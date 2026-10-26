@@ -64,8 +64,9 @@ from pm_ai.app.concurrency import (
 from pm_ai.app.goals import GoalReader
 from pm_ai.app.members import MemberDesk
 from pm_ai.app.meeting_listing import MeetingLister
-from pm_ai.app.commitments import recorder_for
+from pm_ai.app.commitments import CommitmentDesk, recorder_for
 from pm_ai.app.proposals import ProposalDesk
+from pm_ai.core.meeting_listing import zone_of
 from pm_ai.platform.paths import ScopePaths
 from pm_ai.domain.meeting_summaries import SummaryRefused
 from pm_ai.app.pipelines import (
@@ -1111,6 +1112,7 @@ class RequestPath:
         except ConfigRefused as refused:
             return f"pm-ai: {refused}\n", EXIT_REFUSAL
         hand = self._hand_for(job)
+        proposals = self._proposals(fresh, job)
         code = dispatch(
             parsed,
             daemon=fresh,
@@ -1135,7 +1137,11 @@ class RequestPath:
             meeting_list=self._lister(fresh),
             # Story 13a: the queue read by path as the terminal reads it; each
             # change one claimed step handed to the writer, `from the prompt`.
-            proposals=self._proposals(fresh, job),
+            proposals=proposals,
+            # Story 15c: the ledgers read through the store; each append handed
+            # to the writer, `via=prompt`; `altered --what` edits through the
+            # request's one proposal desk.
+            commitments=self._commitments(fresh, proposals),
             unbuilt_connectors=fresh.unbuilt,
             out=out,
             err=err,
@@ -1176,6 +1182,25 @@ class RequestPath:
                 now=fresh.clock,
                 display_timezone=fresh.config.display_timezone,
             ),
+        )
+
+    def _commitments(self, fresh: Daemon, proposals: ProposalDesk) -> CommitmentDesk:
+        """The commitment desk in the daemon (story 15c): its appends handed to the writer.
+
+        Over the request's own proposal desk, whose writes are handed as
+        `_proposals` hands them; `altered --what`'s edit goes through it, within
+        the 2-second bound.
+        """
+        paths = fresh.storage.paths
+        return CommitmentDesk(
+            now=fresh.clock,
+            paths=paths if isinstance(paths, ScopePaths) else None,
+            storage=proposals.storage,
+            via="prompt",
+            types=fresh.proposal_types,
+            reachable=lambda: True,
+            zone=zone_of(fresh.config.display_timezone),
+            proposals=proposals,
         )
 
     def _lister(self, fresh: Daemon) -> MeetingLister:

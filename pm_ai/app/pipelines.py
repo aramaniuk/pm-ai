@@ -172,7 +172,9 @@ from pm_ai.domain.events import (
 )
 from pm_ai.domain.handles import NO_PERSON
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
-from pm_ai.domain.lifecycle import DEFAULT_PROPOSAL_TTL, ProposalState
+from pm_ai.domain.lifecycle import DEFAULT_PROPOSAL_TTL, CommitmentState, ProposalState
+from pm_ai.core.commitment_log import CommitmentLedger, CommitmentLog
+from pm_ai.domain.commitments import NotACommitmentScope
 from pm_ai.domain.meeting_summaries import (
     ACTION_ITEM,
     ModelAnswerRefused,
@@ -2680,13 +2682,16 @@ def _meeting_digest(
     shown_elsewhere: Mapping[str, tuple[int, ...]],
     confidential: frozenset[str] = frozenset(),
     withhold_all: bool = False,
+    closed: frozenset[str] = frozenset(),
 ) -> MeetingDigest | DigestUnreadable:
     """One row's meeting: its record read by id, its open items, its maker.
 
     Reads only — the record, then the meeting's open action items. A record
     that cannot be read, or a value in it that cannot be shown, is named, so
     the other meetings still show; one item whose stored body cannot be read
-    is counted on its meeting.
+    is counted on its meeting. `closed` are the roots whose commitment the PM
+    or telemetry closed (fulfilled, broken, withdrawn): an approved item among
+    them is left out, as a rejected one is (story 15c).
     """
     try:
         record = daemon.meetings.get(row.meeting_id, scope=row.scope)
@@ -2721,6 +2726,9 @@ def _meeting_digest(
             # Story 13a: placement and withholding go by the root id `7b` minted.
             root = root_of(proposal.proposal_id)
             approved = proposal.state is ProposalState.APPROVED
+            if approved and root in closed:
+                # Story 15c: a commitment the PM closed stops looking open.
+                continue
             if not approved:
                 waiting += 1
             under = shown_elsewhere.get(root)
@@ -2781,8 +2789,21 @@ def _digests_over(
     confidential: frozenset[str] = frozenset(),
     withhold_all: bool = False,
 ) -> tuple[tuple[MeetingDigest | DigestUnreadable, ...], int]:
-    """The `MAX_MEETING_DIGESTS` most recently recorded rows read, and how many more."""
+    """The `MAX_MEETING_DIGESTS` most recently recorded rows read, and how many more.
+
+    Each personal or project scope's commitment ledger is read once per
+    render (story 15c), so an approved item whose commitment is closed is left
+    out; a ledger that cannot be read leaves the items as they are.
+    """
     ordered = sorted(rows, key=lambda r: (-r.at.timestamp(), str(r.scope), r.meeting_id))
+    closed_by_scope: dict[str, frozenset[str]] = {}
+
+    def closed_in(scope: DataScope) -> frozenset[str]:
+        key = str(scope)
+        if key not in closed_by_scope:
+            closed_by_scope[key] = _closed_commitments(daemon, scope)
+        return closed_by_scope[key]
+
     shown = tuple(
         _meeting_digest(
             daemon,
@@ -2792,10 +2813,40 @@ def _digests_over(
             shown_elsewhere=shown_elsewhere,
             confidential=confidential,
             withhold_all=withhold_all,
+            closed=closed_in(row.scope),
         )
         for row in ordered[:MAX_MEETING_DIGESTS]
     )
     return shown, max(0, len(ordered) - MAX_MEETING_DIGESTS)
+
+
+_LEDGER_READ_FAILURES = (OSError, DecryptionFailed, UnicodeError, ScopeResolutionError, NotACommitmentScope)
+"""What reading a commitment ledger may meet that is not a defect in pm-ai (15c)."""
+
+
+def _commitment_ledger(daemon: Daemon, scope: DataScope) -> CommitmentLedger | None:
+    """`scope`'s commitment ledger through `CommitmentLog.read`, or `None` (fail open, 15c).
+
+    Only a personal or project scope keeps one; a ledger that cannot be read,
+    or a scope refused as `NotACommitmentScope`, is `None`, and the page shows
+    its items as it did before 15c.
+    """
+    if scope.kind not in (ScopeKind.PERSONAL, ScopeKind.PROJECT):
+        return None
+    try:
+        return CommitmentLog(daemon.storage).read(scope)
+    except _LEDGER_READ_FAILURES:  # showing a closed item as approved is harmless
+        return None
+
+
+def _closed_commitments(daemon: Daemon, scope: DataScope) -> frozenset[str]:
+    """The roots whose commitment is `fulfilled` (PM or telemetry), `broken` or `withdrawn`."""
+    ledger = _commitment_ledger(daemon, scope)
+    if ledger is None:
+        return frozenset()
+    return frozenset(
+        root for root, commitment in ledger.commitments.items() if commitment.state.is_terminal
+    )
 
 
 def _as_said(label: str | None, meeting: str) -> str | None:
@@ -3068,7 +3119,7 @@ def _issue_notes(
     unread = 0
     estimated: dict[str, str | None] = {}
     if not isinstance(ledger, BaseException):
-        decisions, unread = _item_decisions(daemon, ledger)
+        decisions, unread = _item_decisions(daemon, ledger, scope=scope)
         estimated = _estimated_from(daemon, ledger, scope=scope, now=now)
     return issue_notes_for(
         ledger,
@@ -3109,14 +3160,17 @@ def _estimated_from(
 
 
 def _item_decisions(
-    daemon: Daemon, ledger: Ledger
+    daemon: Daemon, ledger: Ledger, *, scope: DataScope | None = None
 ) -> tuple[Mapping[str, ItemDecision] | BaseException, int]:
     """Each action item's decision, read in one read-only query by meeting (story 13a).
 
     A line whose item, or whose newest replacement, is `rejected` is hidden;
     one replaced by an edit shows the newest replacement's values. With them,
     how many of the meetings' proposal bodies could not be read: the page says
-    so, since the lines those would decide are shown as recorded.
+    so, since the lines those would decide are shown as recorded. Story 15c:
+    an item whose commitment is `withdrawn` in `scope`'s ledger is hidden too,
+    looked up by its root; done and broken ones stay. A ledger that cannot be
+    read hides nothing.
     """
     items = {line.item for line in ledger.live.values() if line.kind is ItemKind.ACTION}
     if not items:
@@ -3132,7 +3186,20 @@ def _item_decisions(
         if root in items and proposal.type == ACTION_ITEM:
             by_root.setdefault(root, []).append(proposal)
     decisions: dict[str, ItemDecision] = {}
+    commitments = None if scope is None else _commitment_ledger(daemon, scope)
+    withdrawn = (
+        frozenset()
+        if commitments is None
+        else frozenset(
+            root
+            for root, commitment in commitments.commitments.items()
+            if commitment.state is CommitmentState.WITHDRAWN
+        )
+    )
     for root, proposals in by_root.items():
+        if root in withdrawn:
+            decisions[root] = ItemDecision(hidden=True)
+            continue
         own = next((p for p in proposals if p.proposal_id == root), None)
         replacements = sorted(
             (p for p in proposals if p.proposal_id != root),

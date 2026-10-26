@@ -32,12 +32,13 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from types import MappingProxyType
 
 from pm_ai.core.due_dates import meeting_day, resolve
 from pm_ai.core.proposals import IMPLICIT_COMMITMENT, IMPLICIT_COMMITMENT_TYPE, OWNER_LIMIT
 from pm_ai.domain.commitments import (
+    UNDO_WINDOW,
     Cites,
     Commitment,
     DUE_NONE,
@@ -61,10 +62,13 @@ __all__ = [
     "CommitmentLedger",
     "CommitmentLine",
     "CommitmentLog",
+    "Details",
     "DueSet",
     "Head",
+    "MarkInForce",
     "Marked",
     "NOTE_LIMIT",
+    "NewestLine",
     "NoApprovalInstant",
     "OwnerSet",
     "Pending",
@@ -74,6 +78,7 @@ __all__ = [
     "Revised",
     "TITLE_LIMIT",
     "TooLong",
+    "Undone",
     "day_of",
     "entry_id",
     "fold",
@@ -207,7 +212,24 @@ class OwnerSet:
     handle: str | None = None
 
 
-Record = Pending | Revised | Marked | DueSet | OwnerSet
+@dataclass(frozen=True, slots=True)
+class Undone:
+    """The PM's undo of his own done mark (story 15c, Andrei 2026-10-26).
+
+    `undone_entry` is the `entry` of the `marked state=fulfilled` line it
+    undoes. Its identity is `(commitment, "undone", undone_entry)`, so one mark
+    is undone at most once.
+    """
+
+    commitment: str
+    undone_entry: str
+    occurred: datetime
+    via: str
+    at: datetime
+    handle: str | None = None
+
+
+Record = Pending | Revised | Marked | DueSet | OwnerSet | Undone
 
 
 def entry_id(identity: Sequence[str]) -> str:
@@ -342,6 +364,20 @@ def render_line(record: Record) -> CommitmentLine:
             f"at={_instant(record.at)}",
         ]
         return _line(entry, record.commitment, LineKind.OWNER_SET, parts)
+    if isinstance(record, Undone):
+        if not _ENTRY.fullmatch(record.undone_entry):
+            raise ValueError("an undone line names a mark's entry: `cml_` and 12 hex characters")
+        entry = entry_id((record.commitment, LineKind.UNDONE.value, record.undone_entry))
+        parts = _head(entry, record.commitment, LineKind.UNDONE)
+        parts += [f"undone_entry={record.undone_entry}", "by=pm"]
+        if record.handle is not None:
+            parts.append(f"handle={render_value(record.handle, where='a person handle')}")
+        parts += [
+            f"occurred={_instant(record.occurred)}",
+            f"via={render_value(record.via, where='a surface')}",
+            f"at={_instant(record.at)}",
+        ]
+        return _line(entry, record.commitment, LineKind.UNDONE, parts)
     raise NotACommitmentLine(
         f"{type(record).__name__} is not a commitment or a mark, so no commitment line is "
         f"built from it (AD-28)."
@@ -565,18 +601,75 @@ class Head:
 
 
 @dataclass(frozen=True, slots=True)
+class MarkInForce:
+    """The PM's own mark the state comes from (story 15c)."""
+
+    mark: Mark
+    entry: str
+    occurred: datetime
+    via: str
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NewestLine:
+    """A commitment's newest line in file order: what its version names (15c)."""
+
+    entry: str
+    kind: LineKind
+    fields: Mapping[str, str]
+    occurred: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Details:
+    """What 15c's commands need of one commitment besides its values (story 15c).
+
+    `version` is the `entry` of its newest line in file order: any line
+    appended for it changes it, a line of another commitment never does, and
+    it is compared only for equality (entry ids are hashes, not counters).
+    `mark` is the PM's own mark the state comes from, or `None`; `due_by_pm`
+    and `owner_by_pm` say whether the due and the owner in force came from
+    his `due_set` or `owner_set`; `changed_at` is the newest `occurred` among
+    its lines; `due_said` the due as said from the value lines, kept beside
+    a date the PM set. `undone` is the mark entry an applied `undone` line
+    undid when that line is the newest, with the mark's `occurred` in
+    `undone_mark_at`. `proposals` are the proposal ids its value lines name.
+    """
+
+    version: str
+    newest: NewestLine
+    mark: MarkInForce | None
+    due_by_pm: bool
+    owner_by_pm: bool
+    changed_at: datetime
+    due_said: str | None = None
+    undone: str | None = None
+    undone_mark_at: datetime | None = None
+    """The `occurred` of the done mark that was undone — not the undo's own time."""
+    proposals: frozenset[str] = frozenset()
+    state_at: datetime | None = None
+    """The `occurred` of the line the state in force came from; `None` for `PENDING`."""
+    done_marks: frozenset[str] = frozenset()
+    """The entries of the PM's `marked state=fulfilled` lines: a version a surface
+    showed after its done mark, which `undo` checks against."""
+
+
+@dataclass(frozen=True, slots=True)
 class CommitmentLedger:
     """The ledger folded (story 15a): the commitments by id, and what was ignored.
 
     `malformed`, `orphans`, `duplicates`, `conflicts` and `refused` (marks the
-    table did not allow) count lines that never fail the read. `malformed_roots`
-    are the roots a malformed line names, for which no `pending` line is
-    written until the PM fixes or removes it. `size` is the bytes read, the
-    `after` of the next append.
+    table did not allow, and `undone` lines that did not apply) count lines
+    that never fail the read. `malformed_roots` are the roots a malformed line
+    names, for which no `pending` line is written until the PM fixes or
+    removes it. `size` is the bytes read, the `after` of the next append.
+    `details` is 15c's per-commitment version, mark in force and sources.
     """
 
     commitments: Mapping[str, Commitment] = field(default_factory=lambda: MappingProxyType({}))
     heads: Mapping[str, Head] = field(default_factory=lambda: MappingProxyType({}))
+    details: Mapping[str, Details] = field(default_factory=lambda: MappingProxyType({}))
     entries: frozenset[str] = frozenset()
     malformed: int = 0
     orphans: int = 0
@@ -594,6 +687,7 @@ _REQUIRED: Mapping[LineKind, frozenset[str]] = {
     LineKind.DUE_SET: frozenset({"due", "by", "via", "at"}),
     LineKind.OWNER_SET: frozenset({"by", "via", "at"}),
     LineKind.VERDICT: frozenset({"state"}),
+    LineKind.UNDONE: frozenset({"undone_entry", "by", "via", "at"}),
 }
 
 
@@ -676,6 +770,9 @@ def _parse(line: str) -> _Read | None:
             return None
     elif kind is LineKind.VERDICT and found["state"] not in _VERDICT_STATES:
         return None
+    elif kind is LineKind.UNDONE:
+        if found["by"] != "pm" or not _ENTRY.fullmatch(found["undone_entry"]):
+            return None
     return _Read(found["entry"], found["commitment"], kind, MappingProxyType(found), occurred, line)
 
 
@@ -743,44 +840,102 @@ def _due_of(fields: Mapping[str, str], *, estimated: bool) -> Due:
     return Due(said, value, estimated)
 
 
+def _order(line: _Read) -> tuple[datetime, str]:
+    return (line.occurred, line.entry)
+
+
+def _value_order(line: _Read) -> tuple[int, datetime, str]:
+    return (_number(line.fields["proposal"]), line.occurred, line.entry)
+
+
+def _undone_marks(lines: Sequence[_Read]) -> tuple[set[str], int]:
+    """The done marks the `undone` lines undo, and how many `undone` lines did not apply (15c).
+
+    An `undone` line applies only when it names a `marked state=fulfilled
+    by=pm` line of the same commitment, its `occurred` is within
+    `UNDO_WINDOW` of that mark's, and no other line of the commitment sorts
+    between the two by `(occurred, entry)`. The fold stays deterministic
+    (AD-35): every condition is read off the lines' own fields.
+    """
+    by_entry = {line.entry: line for line in lines}
+    dropped: set[str] = set()
+    refused = 0
+    for undo in (line for line in lines if line.kind is LineKind.UNDONE):
+        mark = by_entry.get(undo.fields["undone_entry"])
+        applies = (
+            mark is not None
+            and mark.kind is LineKind.MARKED
+            and mark.fields.get("state") == Mark.FULFILLED.value
+            and mark.fields.get("by") == "pm"
+            and timedelta(0) <= undo.occurred - mark.occurred <= UNDO_WINDOW
+            and not any(
+                _order(mark) < _order(other) < _order(undo)
+                for other in lines
+                if other.entry not in (mark.entry, undo.entry)
+            )
+        )
+        if applies and mark is not None:
+            dropped.add(mark.entry)
+        else:
+            refused += 1
+    return dropped, refused
+
+
+def _owner_line(pending: _Read, values: Sequence[_Read], lines: Sequence[_Read]) -> _Read:
+    """The line the owner in force comes from (story 15c's fix to 15a's fold).
+
+    The newest by `(occurred, entry)` of the `pending` line, each `revised`
+    line that changed the owner — compared with the value line before it in
+    value order, no owner counted as a value — and the `owner_set` lines. A
+    `revised` line always carries the proposal's owner, so one that did not
+    change it never brings back an owner the PM replaced.
+    """
+    ordered = sorted(values, key=_value_order)
+    candidates = [pending]
+    for previous, line in zip(ordered, ordered[1:]):
+        if line.kind is LineKind.REVISED and _optional(previous.fields, "owner") != _optional(
+            line.fields, "owner"
+        ):
+            candidates.append(line)
+    candidates += [line for line in lines if line.kind is LineKind.OWNER_SET]
+    return max(candidates, key=_order)
+
+
 def fold(parsed: ParsedLedger) -> CommitmentLedger:
     """Each commitment from its lines, in an order of their own fields (AD-35, 15a).
 
-    Values (`proposal`, `what`, `owner`) from the newest `pending` or `revised`
-    line by `(replacement number, occurred, entry)`; the owner from the newest
-    by `(occurred, entry)` of that line and any `owner_set`; the due from the
+    Values (`proposal`, `what`) from the newest `pending` or `revised` line
+    by `(replacement number, occurred, entry)`; the owner from the newest by
+    `(occurred, entry)` of the `pending` line, each `revised` line that
+    changed the owner, and the `owner_set` lines (15c); the due from the
     newest by `(occurred, entry)` of the `pending` line, `revised` lines that
     carry one, and `due_set` lines; the state from the `marked` and `verdict`
-    lines by `(occurred, entry)`: a `marked` line where `can_mark` allows it,
-    a `verdict` unless the state in force is the PM's own mark other than
-    `altered` (after `altered` the commitment is still tracked, Andrei,
-    2026-10-24); else `PENDING`. A line for a commitment with no `pending`
-    line is an orphan.
+    lines by `(occurred, entry)`: a `marked` line where `can_mark` allows it
+    and no applied `undone` line undid it (15c), a `verdict` unless the state
+    in force is the PM's own mark other than `altered` (after `altered` the
+    commitment is still tracked, Andrei, 2026-10-24); else `PENDING`. A line
+    for a commitment with no `pending` line is an orphan.
     """
     groups: dict[str, list[_Read]] = {}
     for line in parsed.lines:
         groups.setdefault(line.commitment, []).append(line)
     commitments: dict[str, Commitment] = {}
     heads: dict[str, Head] = {}
+    details: dict[str, Details] = {}
     orphans = refused = 0
     for root, lines in groups.items():
         pendings = [line for line in lines if line.kind is LineKind.PENDING]
         if not pendings:
             orphans += len(lines)
             continue
-        pending = min(pendings, key=lambda line: (line.occurred, line.entry))
+        pending = min(pendings, key=_order)
         fields = pending.fields
         estimated = "day_from" in fields
         values = [line for line in lines if line.kind in (LineKind.PENDING, LineKind.REVISED)]
-        newest = max(
-            values, key=lambda line: (_number(line.fields["proposal"]), line.occurred, line.entry)
-        )
+        newest = max(values, key=_value_order)
         said_lines = [line for line in values if line.kind is LineKind.PENDING or "due" in line.fields]
-        said_in_force = max(
-            said_lines, key=lambda line: (_number(line.fields["proposal"]), line.occurred, line.entry)
-        )
-        owner_lines = [newest, *(line for line in lines if line.kind is LineKind.OWNER_SET)]
-        owner_line = max(owner_lines, key=lambda line: (line.occurred, line.entry))
+        said_in_force = max(said_lines, key=_value_order)
+        owner_line = _owner_line(pending, values, lines)
         due_lines = [
             line
             for line in lines
@@ -788,24 +943,61 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
             or (line.kind is LineKind.REVISED and "due" in line.fields)
             or line.kind is LineKind.DUE_SET
         ]
-        due_line = max(due_lines, key=lambda line: (line.occurred, line.entry))
+        due_line = max(due_lines, key=_order)
         if due_line.kind is LineKind.DUE_SET:
             due = Due(None, due_line.fields["due"])
         else:
             due = _due_of(due_line.fields, estimated=estimated)
+        dropped, not_applied = _undone_marks(lines)
+        refused += not_applied
         state, source = CommitmentState.PENDING, StateSource.NONE
+        in_force: MarkInForce | None = None
+        state_at: datetime | None = None
         for line in sorted(
             (line for line in lines if line.kind in (LineKind.MARKED, LineKind.VERDICT)),
-            key=lambda line: (line.occurred, line.entry),
+            key=_order,
         ):
+            if line.entry in dropped:
+                # Story 15c: the PM undid this done mark; the state is the one before it.
+                continue
             if line.kind is LineKind.MARKED:
                 mark = Mark(line.fields["state"])
                 if can_mark(state, source, mark):
                     state, source = mark.state, StateSource.PM
+                    in_force = MarkInForce(
+                        mark, line.entry, line.occurred, line.fields["via"], _optional(line.fields, "note")
+                    )
+                    state_at = line.occurred
                 else:
                     refused += 1
             elif source is not StateSource.PM or state is CommitmentState.ALTERED:
                 state, source = CommitmentState(line.fields["state"]), StateSource.TELEMETRY
+                in_force = None
+                state_at = line.occurred
+        last = lines[-1]
+        undone_mark: str | None = None
+        undone_mark_at: datetime | None = None
+        if last.kind is LineKind.UNDONE and last.fields["undone_entry"] in dropped:
+            undone_mark = last.fields["undone_entry"]
+            undone_mark_at = next(line.occurred for line in lines if line.entry == undone_mark)
+        details[root] = Details(
+            version=last.entry,
+            newest=NewestLine(last.entry, last.kind, last.fields, last.occurred),
+            mark=in_force,
+            due_by_pm=due_line.kind is LineKind.DUE_SET,
+            owner_by_pm=owner_line.kind is LineKind.OWNER_SET,
+            changed_at=max(line.occurred for line in lines),
+            due_said=_optional(said_in_force.fields, "due_said"),
+            undone=undone_mark,
+            undone_mark_at=undone_mark_at,
+            proposals=frozenset(line.fields["proposal"] for line in values),
+            state_at=state_at,
+            done_marks=frozenset(
+                line.entry
+                for line in lines
+                if line.kind is LineKind.MARKED and line.fields["state"] == Mark.FULFILLED.value
+            ),
+        )
         speaker = _optional(fields, "speaker")
         owner = _optional(owner_line.fields, "owner")
         meeting_id = _optional(fields, "meeting")
@@ -841,6 +1033,7 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
     return CommitmentLedger(
         commitments=MappingProxyType(commitments),
         heads=MappingProxyType(heads),
+        details=MappingProxyType(details),
         entries=frozenset(line.entry for line in parsed.lines),
         malformed=parsed.malformed,
         orphans=orphans,
@@ -869,7 +1062,16 @@ class CommitmentLog:
 
     def read(self, scope: DataScope) -> CommitmentLedger:
         """The scope's ledger folded. `NotACommitmentScope` for a scope that keeps none."""
-        return fold(parse_ledger(self._storage.read_commitments(scope=scope)))
+        return self.read_with_bytes(scope)[0]
+
+    def read_with_bytes(self, scope: DataScope) -> tuple[CommitmentLedger, bytes]:
+        """The scope's ledger folded, and the bytes it was folded from (15c).
+
+        15c's desk keeps the bytes so that, when an append succeeded and the
+        read after it fails, it can fold what it read plus what it appended.
+        """
+        data = self._storage.read_commitments(scope=scope)
+        return fold(parse_ledger(data)), data
 
     def append(self, lines: Sequence[CommitmentLine], *, scope: DataScope, after: int) -> int:
         """Append `lines` in one write if the ledger is still `after` bytes; the new size.

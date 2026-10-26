@@ -56,6 +56,7 @@ caller. What the exception does *not* relax is
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import shlex
 import sqlite3
@@ -98,6 +99,7 @@ from pm_ai.app.wiring import (
     local_model,
     local_model_check,
     read_connector_rows,
+    registered_proposal_types,
     sort_connector_rows,
     warn_if_encryption_disabled,
 )
@@ -107,7 +109,13 @@ from pm_ai.core.frontier_key import FRONTIER_KEY_PROBE, frontier_key_probe
 from pm_ai.app.goals import GoalBook, GoalChanged, GoalDeleted, GoalReader, GoalWritten
 from pm_ai.app.members import MemberDesk
 from pm_ai.app.meeting_listing import MeetingLister
-from pm_ai.app.commitments import recorder_for
+from pm_ai.app.commitments import (
+    COMMITMENT_WRITE_BOUND_SECONDS,
+    CommitmentDesk,
+    commitment_choices,
+    commitment_owners,
+    recorder_for,
+)
 from pm_ai.app.proposals import (
     PROPOSAL_WRITE_BOUND_SECONDS,
     ProposalDesk,
@@ -210,6 +218,24 @@ CONFIG_ARTIFACT = "config.toml"
 APPLICATION = DataScope(ScopeKind.APPLICATION)
 
 
+_AT_THE_PROMPT: contextvars.ContextVar[bool] = contextvars.ContextVar("pm_ai_at_the_prompt", default=False)
+"""Whether the command running in this process was typed at the prompt (story 15c).
+
+A command the prompt runs in its own process (`TERMINAL_BOUND`, such as
+`commitment review`) records `via=prompt` on the lines it writes, as one the
+daemon runs does: the PM typed it at the prompt, whichever process runs it.
+"""
+
+
+def typed_at_the_prompt(argv: Sequence[str]) -> int:
+    """`main` for a line the prompt runs in its own process: its changes are `via=prompt` (15c)."""
+    token = _AT_THE_PROMPT.set(True)
+    try:
+        return main(argv)
+    finally:
+        _AT_THE_PROMPT.reset(token)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Build what can be built, dispatch `argv`, and return an exit code.
 
@@ -237,7 +263,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # Story 4u: completion's readers, built from paths and read at the
             # first Tab that needs them, never here.
             return repl.run(
-                main, line_editing=True, client=_loopback(), completion=_completion()
+                typed_at_the_prompt, line_editing=True, client=_loopback(), completion=_completion()
             )
         # Parsed first, and once (story 4m, AD-11): the command's target decides
         # where the daemon acts, so it has to be known before anything about
@@ -285,6 +311,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # Story 13a: `proposal list` and `proposal show` read by path,
                 # on read-only connections; this desk has no writer.
                 proposals=_proposal_reader(),
+                # Story 15c: `commitment list` and `commitment show` read each
+                # ledger by path; no master key, keychain or store.
+                commitments=_commitment_reader(),
             )
         keychain = MacOSKeychainAdapter()
         composed = _compose(keychain, parsed.target)
@@ -379,6 +408,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             # process's own writer, as `member link` writes: one claimed step
             # each, a 1-second busy wait, no master key asked for.
             proposals=None if daemon is None else _proposal_desk(daemon),
+            # Story 15c: the PM's marks, dues and owners over this process's
+            # own writer, as `proposal approve` writes; no master key.
+            commitments=None if daemon is None else _commitment_desk(daemon),
             # `4e`'s `daemon run`, bound to the daemon this process composed —
             # composed once, here, and never again per request.
             serve=_serve(keychain, composed),
@@ -630,6 +662,18 @@ DAEMON_BOUNDS: Mapping[tuple[str, ...], Callable[[Daemon], float]] = {
     ("proposal", "approve"): lambda daemon: PROPOSAL_WRITE_BOUND_SECONDS,
     ("proposal", "reject"): lambda daemon: PROPOSAL_WRITE_BOUND_SECONDS,
     ("proposal", "edit"): lambda daemon: PROPOSAL_WRITE_BOUND_SECONDS,
+    # Story 15c: the ledgers read by path or through the store, inline —
+    # `config show`'s shape; each change one append, inline, within 2 seconds,
+    # `altered --what`'s edit included. `commitment review` is `TERMINAL_BOUND`.
+    ("commitment", "list"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    ("commitment", "show"): lambda daemon: CONFIG_SHOW_BOUND_SECONDS,
+    ("commitment", "done"): lambda daemon: COMMITMENT_WRITE_BOUND_SECONDS,
+    ("commitment", "altered"): lambda daemon: COMMITMENT_WRITE_BOUND_SECONDS,
+    ("commitment", "broken"): lambda daemon: COMMITMENT_WRITE_BOUND_SECONDS,
+    ("commitment", "withdrawn"): lambda daemon: COMMITMENT_WRITE_BOUND_SECONDS,
+    ("commitment", "due"): lambda daemon: COMMITMENT_WRITE_BOUND_SECONDS,
+    ("commitment", "owner"): lambda daemon: COMMITMENT_WRITE_BOUND_SECONDS,
+    ("commitment", "undo"): lambda daemon: COMMITMENT_WRITE_BOUND_SECONDS,
     ("daemon", "run"): lambda daemon: DAEMON_RUN_BOUND_SECONDS,
 }
 """Every command the daemon runs, with its declared bound (AD-21, story 4r).
@@ -1902,6 +1946,46 @@ def _proposal_desk(daemon: Daemon) -> ProposalDesk:
     )
 
 
+def _commitment_choices(verb: str) -> tuple[tuple[str, str, str, str], ...]:
+    """Completion's `commitment <verb> <id>`: each ledger read by path (story 15c)."""
+    return commitment_choices(verb, now=datetime.now(timezone.utc))
+
+
+def _commitment_owner_names(commitment_id: str | None, scope: str | None) -> tuple[str, ...]:
+    """Completion's `commitment owner <id> <name>`: names already in the ledger (15c)."""
+    return commitment_owners(commitment_id, scope, now=datetime.now(timezone.utc))
+
+
+def _commitment_reader() -> CommitmentDesk:
+    """`commitment list` and `commitment show` at a terminal: by path, no writer (15c)."""
+    return CommitmentDesk(
+        now=lambda: datetime.now(timezone.utc),
+        reachable=_daemon_answers,
+        types=registered_proposal_types(),
+    )
+
+
+def _commitment_desk(daemon: Daemon) -> CommitmentDesk:
+    """The commitment desk over this process's composed writer (15c).
+
+    `via` is `terminal`, or `prompt` when the prompt runs the line in its own
+    process (`commitment review`).
+    """
+    paths = daemon.storage.paths
+    resolved = paths if isinstance(paths, ScopePaths) else None
+    via = "prompt" if _AT_THE_PROMPT.get() else "terminal"
+    return CommitmentDesk(
+        now=daemon.clock,
+        paths=resolved,
+        storage=daemon.storage,
+        via=via,
+        types=daemon.proposal_types,
+        reachable=_daemon_answers,
+        zone=zone_of(daemon.config.display_timezone),
+        proposals=replace(_proposal_desk(daemon), via=via),
+    )
+
+
 def _meeting_lister() -> MeetingLister:
     """`transcript list`'s reader at a terminal, from paths alone (story 11f)."""
     return MeetingLister(reachable=_daemon_answers, now=lambda: datetime.now(timezone.utc))
@@ -1923,6 +2007,8 @@ def _completion() -> Completion:
             goal_ids=_goal_ids,
             members=_member_names,
             proposals=_proposal_choices,
+            commitments=_commitment_choices,
+            commitment_owners=_commitment_owner_names,
             meetings=_meeting_ids,
             droppable=_droppable,
             summarizable=_summarizable,
