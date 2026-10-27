@@ -415,6 +415,7 @@ Anchors checked against `origin/main` at `7a097a7`.
   - **Tests:** the AD-3 test checks a non-empty snapshot, the removed files, a whole rebuild, another day and zone, and the field set; the fold test writes its expected values per named case; the checksum test uses a store that changes between reads; the drop guard ties the key to the path; the no-ledger-write test checks the claim and a concurrent mark; a wiring slice test through `attach_background` and `_lifespan`; the single-MD5 test is an AST scan.
   - **Anchors:** `derivation-services.md:127`'s amendment anchored on its unique phrase.
 - **2026-10-27, Ask First answered: DECIDED 2026-10-27 (Andrei), frozen block edited (recorded here).** Option A: only the serving daemon derives the index; an append a terminal process makes is indexed at the daemon's next append to that scope or at its next start. The Ask First is closed, the option markers are plain statements, the B and C replacement list is reduced to one line saying they were not chosen, and the FR-34 amendment stays as named.
+- **2026-10-27, approved for build (Andrei),** after the three-lens review and his answers.
 
 ## Design Notes
 
