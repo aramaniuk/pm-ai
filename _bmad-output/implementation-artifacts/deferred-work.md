@@ -1692,3 +1692,21 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/15d-commitments-on-the-pages.md`
   summary: On a project page, the "approved items not yet recorded" note finds approved rows through the project's summarised meetings, since `proposal_index_at` has no scope filter; a spoken promise from a project meeting with no summary row is not counted there (the personal page's catch-up read is unchanged).
   evidence: Blind-hunter review (AD-25: a project render read every scope's approved proposals). Narrowing by meeting keeps the read to project data without reshaping `storage/service.py`, which story 15b is changing in parallel. A scope filter on `proposal_index_at` would close it.
+
+## Surfaced by the story-7f review (2026-10-27)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: A match word that ends in a digit also matches a longer number: `ORB-53` occurs in `ORB-533` and `2026-11-1` in `2026-11-12`, since the frozen rule asks only that a word start a word.
+  evidence: Blind and edge-case reviews. Harmless while references name whole ids; **recommendation:** a word ending in a digit must not be followed by a digit, decided in a spec change since the rule is frozen.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: Folding does not map dash variants (U+2010–U+2015, U+2212, the non-breaking hyphen U+2011) to `-`, so a model writing `ORB‑512` with one of them misses an item it found.
+  evidence: Blind review. The frozen fold names case, `ё` and whitespace only; NFC was added. **Recommendation:** map those dashes to `-` in the same spec change.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: Word groups cannot tell a ruled-out proposal restated as adopted ("we rewrite the frontend in Svelte") from the correct decision; both pair with D6.
+  evidence: Blind review. An admitted limit of matching without a model (Decision 1); the returned text is in the private run file, so such a pairing can be read there.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: The owner tie-break leans rather than guarantees: each reference item tries the actions naming its owner first, but augmenting paths do not maximise owner-correct pairs among all maximum matchings.
+  evidence: Blind review. The spec prescribes augmenting paths; a weighted assignment would guarantee it. Differs only when several returned actions match one reference action with different owners.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: An interrupted or crashed run writes no run file: results are held in memory and written once at the end, so local-model time spent before the stop cannot be rescored.
+  evidence: Blind and edge-case reviews. Ctrl-C now stops cleanly (exit 130, `.work/` removed). Writing each meeting as it finishes would keep a partial run; not needed while a baseline takes minutes.

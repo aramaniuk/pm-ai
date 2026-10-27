@@ -2,7 +2,8 @@
 title: 'A reference set scores meeting summaries'
 type: 'feature'
 created: '2026-10-27'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '1a25781b5c1dc9d1ef7df70c96a97d14c72663fe'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/stories/7b-a-transcript-yields-summary-decisions-and-actions.md'
@@ -94,11 +95,11 @@ match = [["dark mode"]]
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `benchmarks/reference_scoring.py` -- new, standard library only: folder and name checks, reference loading and validation, folding, maximum matching, rows, totals, run-file format, compare -- testable without a model or `pm_ai`.
-- [ ] `benchmarks/score_summaries.py` -- new runner: `--references DIR`, `--model` (default `qwen3:8b`), `--setting`, `--repeat`, `--rescore RUN`, `--compare OLD NEW`; per-meeting guard, logging to the private log, request recorder, daemon check, `.work/` lifecycle.
-- [ ] `benchmarks/meeting_summary.py` -- extract the shared setup with an injectable model.
-- [ ] `benchmarks/fixtures/mixed_ru_en.reference.toml` -- new fictional reference with `transcript = "m01.vtt"`; tests and the manual check copy it and `mixed_ru_en.vtt` into a `0700` folder as `m01.reference.toml` and `m01.vtt`, since the repo's own fixtures folder is refused by design.
-- [ ] `tests/benchmarks/test_reference_scoring.py` -- loads modules by file path; every matrix row; the matching rules; a case where greedy file order pairs fewer items than maximum matching; word-start and short-word rules; a canned model returning `waiting`, `failed` and a valid answer; a marker string placed in answers, references and an exception message never reaching stdout or stderr.
+- [x] `benchmarks/reference_scoring.py` -- new, standard library only: folder and name checks, reference loading and validation, folding, maximum matching, rows, totals, run-file format, compare -- testable without a model or `pm_ai`.
+- [x] `benchmarks/score_summaries.py` -- new runner: `--references DIR`, `--model` (default `qwen3:8b`), `--setting`, `--repeat`, `--rescore RUN`, `--compare OLD NEW`; per-meeting guard, logging to the private log, request recorder, daemon check, `.work/` lifecycle.
+- [x] `benchmarks/meeting_summary.py` -- extract the shared setup with an injectable model.
+- [x] `benchmarks/fixtures/mixed_ru_en.reference.toml` -- new fictional reference with `transcript = "m01.vtt"`; tests and the manual check copy it and `mixed_ru_en.vtt` into a `0700` folder as `m01.reference.toml` and `m01.vtt`, since the repo's own fixtures folder is refused by design.
+- [x] `tests/benchmarks/test_reference_scoring.py` -- loads modules by file path; every matrix row; the matching rules; a case where greedy file order pairs fewer items than maximum matching; word-start and short-word rules; a canned model returning `waiting`, `failed` and a valid answer; a marker string placed in answers, references and an exception message never reaching stdout or stderr.
 
 **Acceptance Criteria:**
 - Given the fictional reference and a canned answer returning D1 as a decision and A1 both as an action with the wrong owner and as a decision, when scored, then D1 is paired, A1's owner is wrong, and one decision is counted as restating an action.
@@ -118,6 +119,8 @@ No questions are open.
 ## Spec Change Log
 
 - **2026-10-27, approved for build (Andrei),** after the four-lens review and his answers (spec PR #132).
+- **2026-10-27, built.** Choices the frozen block left open: a reference's `transcript` must be `<its stem>.vtt` or `.txt`; with `--repeat N` the per-meeting rows and the totals pool every repeat (each repeat's scores stay in the run file), and `--compare` compares counts per summary made and the rates, after a `setup` row saying whether the model, settings and requests sent were the same; run files are named by UTC time to the microsecond; the setup is `prepare()` in `meeting_summary.py`, the model built by wiring's `local_model(config)` so a window setting reaches it as in the daemon, and the recorder wraps `ollama._default_transport`.
+- **2026-10-27, review fixes** (blind, edge-case and verification-gap reviews): folding applies Unicode NFC first; a tie between returned actions leans to the one naming an accepted owner (candidates ordered, still augmenting paths); a summary that raised records time, calls and tokens as not measured (`null`), and an unreadable process list records `daemon_running: null`; refused by name, exit 2: a folder with no reference, a transcript that is not UTF-8, a symlinked `runs/` or `.work/`, a `--setting` value that is not text, a number or true/false, no local adapter (runtime extra missing), a run file out of shape; the folder check compares by file identity, so other letter case on APFS is still inside the repository; totals carry wall time and tokens; Ctrl-C stops with exit 130 and no run file. Deferred: 5 lines in `deferred-work.md`.
 
 ## Design Notes
 
