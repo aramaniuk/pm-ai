@@ -25,3 +25,15 @@ def idempotency_key(job_type: str, target_ref: str, payload: dict) -> str:
         f"{job_type}\x00{target_ref}\x00{canonical_payload(payload)}".encode()
     ).hexdigest()
     return f"idem_{digest[:32]}"
+
+
+def source_md5(data: bytes) -> str:
+    """The checksum a derived row stores of the source it came from (AD-46, story 15b).
+
+    32 lower-case hex characters over the raw bytes as stored, with no
+    normalisation of any kind: a CRLF file and its LF copy differ. Change
+    detection only, never integrity or authenticity — hence
+    `usedforsecurity=False`. The only MD5 in `pm_ai`: story 18's index and
+    10a's boot reconciliation call this one.
+    """
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()

@@ -471,6 +471,40 @@ def test_the_operational_store_and_sqlites_own_files_are_private(machine):
     assert _mode(store.parent) == 0o700
 
 
+def test_the_commitment_index_and_its_sqlite_files_are_private(machine):
+    """Story 15b: `commitment_index.db`, its `-wal` and `-shm`, with a connection open."""
+    import sqlite3
+
+    from commitment_index_fixtures import commitment, ledger, pending
+    from pm_ai.core.commitment_index import derive
+    from pm_ai.domain.commitments import COMMITMENTS_LOG
+
+    with _umask(ORDINARY):
+        daemon = machine.daemon(projects={})
+        try:
+            ledger_path = daemon.storage.paths.resolve(PERSONAL, COMMITMENTS_LOG, create=True)
+            ledger_path.write_bytes(ledger(pending(commitment("prp_one"))))
+            derive(daemon.storage, PERSONAL)
+            index = machine.application / "private" / "commitment_index.db"
+            held = sqlite3.connect(index)
+            try:
+                held.execute("SELECT COUNT(*) FROM commitments").fetchone()
+                sidecars = [index.with_name(index.name + suffix) for suffix in ("-wal", "-shm")]
+                assert all(path.exists() for path in sidecars), "the index is not in WAL mode"
+                modes = {path.name: _mode(path) for path in (index, *sidecars)}
+            finally:
+                held.close()
+        finally:
+            _close(daemon)
+
+    assert modes == {
+        "commitment_index.db": 0o600,
+        "commitment_index.db-wal": 0o600,
+        "commitment_index.db-shm": 0o600,
+    }
+    assert _mode(index.parent) == 0o700
+
+
 def test_the_diagnostic_log_is_private_and_stays_so_across_a_rollover(machine):
     """Row "Diagnostic log": rotation stays by rename (4w), every new file 0600."""
     with _umask(ORDINARY):
