@@ -16,7 +16,7 @@ context:
 
 **Approach:** A hand-run script summarises every transcript in a private reference folder through 7b's own path, compares the returned decisions and action items with the reference items Andrei corrected, and prints counts and rates only. Matching is by word groups written in each reference item — no model judges the match. The repo carries the scorer, its tests and one fictional reference; the real references never enter it.
 
-**Drafting the references:** Andrei chose on 2026-10-27 — "I copy, draft; you correct" — that Claude drafts the reference items from the real transcripts, as a one-off outside the disclosure ledger. How the transcripts reach the folder is not this slice's concern; the script only reads the folder it is given.
+**Drafting the references:** Andrei chose on 2026-10-27 — "I copy, draft; you correct" — that Claude drafts the reference items from the real transcripts, as a one-off outside the disclosure ledger. How the transcripts reach the folder is not this slice's concern (a read-only exception in the home guard, its own PR); the script only reads the folder it is given.
 
 ## Boundaries & Constraints
 
@@ -32,7 +32,7 @@ context:
 - **A running pm-ai daemon** (found in the process list, never by opening anything under `~/.pm-ai`) is warned about and recorded as `daemon_running: true`; the run continues.
 - Totals pool items across meetings (each reference item weighs the same); per-meeting rows are printed too.
 
-**Ask First:** Nothing beyond the questions below.
+**Ask First:** Nothing; the decisions are below.
 
 **Never:** a model or Claude in the matching; a pass/fail threshold inside the script; copying or reading real meetings from the real home; the columns 7h's new fields need; changing 7b's pipeline or `local_model.py`'s key.
 
@@ -106,12 +106,14 @@ match = [["dark mode"]]
 - Given a run file, when `--rescore` runs, then no model is constructed and the new file carries the original summary sha and the current scorer sha.
 - Given `--setting` with an unknown key, then the run is refused with exit 2 before any model call.
 
-## Questions for Andrei
+## Decisions
 
-1. **Matching by word groups, no model.** Recommended: yes. A model judge would be irreproducible and put a second model's opinion in the score.
-2. **Returned items' text kept in the private run file** (`0600`, in the `0700` folder) so misses can be read. Recommended: yes; without it a miss cannot be told from a gap in the reference.
-3. **7h adds its own columns** — items dropped, re-attributed, quote found word-for-word in the transcript — since those fields do not exist before 7h. Recommended: yes.
-4. **No pass/fail threshold yet.** The threshold is decided after the measured spread of the `--repeat 2` baseline; until then each slice's run is compared with the previous one (`--compare`) and you decide. Recommended: yes.
+1. **Matching by word groups, no model** (Andrei, 2026-10-27). A model judge would be irreproducible and put a second model's opinion in the score.
+2. **Returned items' text is kept in the private run file** (`0600`, in the `0700` folder) so misses can be read (Andrei, 2026-10-27).
+3. **7h adds its own columns** — items dropped, re-attributed, quote found word-for-word in the transcript — since those fields do not exist before 7h (orchestrator, 2026-10-27).
+4. **No pass/fail threshold yet.** It is decided after the measured spread of the `--repeat 2` baseline; until then each slice's run is compared with the previous one (`--compare`) and Andrei decides (orchestrator, 2026-10-27).
+
+No questions are open.
 
 ## Design Notes
 
