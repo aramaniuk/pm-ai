@@ -1672,3 +1672,12 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/15c-the-pms-commitment-commands.md`
   summary: `undo` decides "nothing has followed the mark" by file order (the mark is the newest line, so the version is its entry, as the spec says), while the fold's `undone` rule uses `(occurred, entry)` order. A line appended after the done mark but carrying an earlier `occurred` (15a's catch-up writing an old edit's `revised` line) makes `undo` refuse `undo_superseded` although the fold would apply the undo.
   evidence: Blind-hunter review. The desk is the stricter of the two, so it never writes an `undone` line the fold would refuse; the cost is a refused undo in a rare catch-up race. Both rules are as the frozen spec states them.
+
+## Surfaced by the story-15d review (2026-10-27)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/15d-commitments-on-the-pages.md`
+  summary: Needs Andrei's decision. On a project page, a commitment naming an issue number the readable GitLab record does not hold is withheld as "confidentiality unknown" (the frozen rule), but no sentence says why: 7d's confidentiality sentence assumes the record cannot be read, and its links sentence is about `member_updates.md`. The line itself says "an action item whose text is withheld".
+  evidence: Edge-case review, confirmed in the build. The spec says "when anything is withheld, 7d's existing sentences saying why are printed once", and neither existing sentence is true for a readable record missing the number, so no words were invented. **Recommendation:** one new sentence, e.g. "Some issue numbers named in a commitment are not in the project's GitLab record, so their text is withheld."
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/15d-commitments-on-the-pages.md`
+  summary: On a project page, the "approved items not yet recorded" note finds approved rows through the project's summarised meetings, since `proposal_index_at` has no scope filter; a spoken promise from a project meeting with no summary row is not counted there (the personal page's catch-up read is unchanged).
+  evidence: Blind-hunter review (AD-25: a project render read every scope's approved proposals). Narrowing by meeting keeps the read to project data without reshaping `storage/service.py`, which story 15b is changing in parallel. A scope filter on `proposal_index_at` would close it.
