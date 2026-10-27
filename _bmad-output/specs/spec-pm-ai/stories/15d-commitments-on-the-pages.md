@@ -459,6 +459,7 @@ Anchors checked against `origin/main` at `7a097a7`.
   - **Tests and anchors:** the broken tests listed with new expectations; matrix rows added; `_proposal_reader` at `entry.py:1923`, `Details` at `commitment_log.py:625`; AD-25's heading text; the order key's reason.
 
 - **2026-10-27, Andrei's four answers: DECIDED 2026-10-27 (Andrei), frozen block edited (recorded here).** (1) Placement A: the block and the per-meeting count line. (2) Spoken promises A: both pages, withheld on a project page by the confidential rules. (3) Proposal cards A: they show the commitment's state (recommended, not objected to). (4) No broken and no past due on a project page's Team Activity, done and altered only; broken and past due on the personal page only, so the project block omits `, past due` (`PROJECT_PAGE_PAST_DUE = False`) and its closed line the broken count. `TEAM_ROW_STATES = {done, altered}`, `TEAM_ROW_PAST_DUE = False`. Ask First closed; matrix rows updated and two added.
+- **2026-10-27, approved for build (Andrei),** after the three-lens review and his answers.
 
 ## Design Notes
 
