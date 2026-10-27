@@ -143,7 +143,7 @@ _PM_AI_KEYCHAIN = re.compile(r"(?:^|\s)(?:\S*/)?pm-ai\s+(?:setup|key\s+enrol)\b"
 def check_command(command: str, cwd: Path, home: Path | None = None) -> None:
     """Bash: keychain commands, the real home, skipped gates, pushes to main."""
     home_path = (home or Path.home()).resolve()
-    for segment in _SEGMENT_SPLIT.split(command):
+    for segment in _SEGMENT_SPLIT.split(_without_heredoc_bodies(command)):
         seg = segment.strip()
         if not seg:
             continue
@@ -164,6 +164,25 @@ def check_command(command: str, cwd: Path, home: Path | None = None) -> None:
         except ValueError:
             tokens = seg.split()
         _check_git(tokens, cwd)
+
+
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+
+
+def _without_heredoc_bodies(command: str) -> str:
+    """Drop heredoc bodies: they are text on stdin (a PR body, a commit
+    message that names ~/.pm-ai), not commands. A script fed to an
+    interpreter this way is not checked; the guard is a floor, not a sandbox."""
+    out: list[str] = []
+    ends: list[str] = []
+    for line in command.split("\n"):
+        if ends:
+            if line.strip() == ends[0]:
+                ends.pop(0)
+            continue
+        out.append(line)
+        ends.extend(m.group(2) for m in _HEREDOC.finditer(line))
+    return "\n".join(out)
 
 
 def _check_git(tokens: list[str], cwd: Path) -> None:

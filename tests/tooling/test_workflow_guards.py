@@ -111,6 +111,7 @@ def test_the_real_pm_ai_home_is_refused_and_a_throwaway_one_allowed(tmp_path):
         "git push origin +claude/feat-x",
         "git push origin main",
         "git push origin HEAD:main",
+        "cat <<'EOF' > notes.md\ntext\nEOF\ncat ~/.pm-ai/config.toml",
     ],
 )
 def test_refused_commands(tmp_path, command):
@@ -127,6 +128,8 @@ def test_refused_commands(tmp_path, command):
         "git push -u origin claude/feat-16a-main-thing",
         "git commit -m 'note -n'",
         "uv run pytest -q",
+        "gh pr create --body-file - <<'EOF'\nnever touches ~/.pm-ai or `pm-ai setup`\nEOF",
+        "git commit -F - <<EOF\nthe real ~/.manager-ai stays untouched\nEOF\n",
     ],
 )
 def test_allowed_commands(tmp_path, command):
