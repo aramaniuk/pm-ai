@@ -732,3 +732,60 @@ def test_undo_folds_the_same_in_any_file_order():
     done = _mark("fulfilled", 0)
     lines = [_pending(), done, _undone(done, 1)]
     assert _read(*lines).commitments == _read(*reversed(lines)).commitments
+
+
+# ── Story 15d: when a commitment closed ──────────────────────────────────────
+
+
+def _at(minutes: float) -> datetime:
+    return APPROVED + timedelta(minutes=minutes)
+
+
+def test_an_open_commitment_has_no_closed_at():
+    assert _read(_pending()).details[ROOT].closed_at is None
+    assert _read(_pending(), _mark("altered", 1)).details[ROOT].closed_at is None
+
+
+def test_closed_at_is_the_first_line_of_the_terminal_run():
+    assert _read(_pending(), _mark("fulfilled", 5)).details[ROOT].closed_at == _at(5)
+    assert _read(_pending(), _mark("withdrawn", 5)).details[ROOT].closed_at == _at(5)
+
+
+def test_a_second_verdict_does_not_move_closed_at():
+    ledger = _read(_pending(), _verdict("fulfilled", 5), _verdict("fulfilled", 9))
+    assert ledger.details[ROOT].closed_at == _at(5)
+
+
+def test_the_pms_mark_confirming_telemetry_does_not_move_closed_at():
+    ledger = _read(_pending(), _verdict("fulfilled", 5), _mark("fulfilled", 9))
+    assert ledger.commitments[ROOT].state_source is StateSource.PM
+    assert ledger.details[ROOT].closed_at == _at(5)
+
+
+def test_broken_after_done_keeps_the_run_unbroken():
+    ledger = _read(_pending(), _mark("fulfilled", 5), _mark("broken", 9))
+    assert ledger.details[ROOT].closed_at == _at(5)
+
+
+def test_reopening_ends_the_run_and_a_later_closure_starts_another():
+    ledger = _read(_pending(), _mark("broken", 5), _mark("altered", 7), _mark("fulfilled", 9))
+    assert ledger.details[ROOT].closed_at == _at(9)
+    reopened = _read(_pending(), _mark("broken", 5), _mark("altered", 7))
+    assert reopened.details[ROOT].closed_at is None
+
+
+def test_an_undone_done_mark_is_no_closure():
+    done = _mark("fulfilled", 5)
+    ledger = _read(_pending(), done, _undone(done, 6))
+    assert ledger.commitments[ROOT].state is CommitmentState.PENDING
+    assert ledger.details[ROOT].closed_at is None
+
+
+@pytest.mark.parametrize(
+    "order",
+    [(0, 1, 2), (2, 1, 0), (1, 0, 2), (2, 0, 1)],
+)
+def test_closed_at_is_the_same_in_any_file_order(order):
+    lines = [_pending(), _verdict("fulfilled", 5), _mark("fulfilled", 9)]
+    ledger = _read(*(lines[n] for n in order))
+    assert ledger.details[ROOT].closed_at == _at(5)

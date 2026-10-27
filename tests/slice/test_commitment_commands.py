@@ -716,7 +716,11 @@ def test_due_and_owner_on_a_closed_commitment_are_refused(machine):
     _run(machine, "commitment", "withdrawn", ids[1])
     code, found = _json(machine, "commitment", "owner", ids[1], "Alex Morgan")
     assert code == EXIT_REFUSAL and found["code"] == "commitment_closed"
-    assert "pm-ai commitment altered" in found["reason"] and "--owner" in found["reason"]
+    # Story 15d: the reason is prose; the card's `reopen` carries the command.
+    assert "the reopen command reopens it with an owner" in found["reason"]
+    reopen = found["commitment"]["actions"]["owner"]["reopen"]
+    assert reopen["command"][:2] == ["commitment", "altered"] and reopen["command"][-2:] == ["--owner", "<name>"]
+    assert reopen["fill"] == [{"index": len(reopen["command"]) - 1, "name": "name", "required": True}]
 
 
 def test_the_pms_owner_survives_a_proposal_edit(machine):
@@ -1199,8 +1203,13 @@ def test_the_dashboard_leaves_out_closed_commitments(machine):
     page = machine.page()
     for what in ("send the cache numbers", "book the room", "draft the notes", "collect the feedback forms"):
         assert what not in page
-    assert "plan the demo" in page  # altered: still shown, as approved
-    assert "check the budget" in page  # waiting
+    # Story 15d: every recorded approved item leaves the meeting; one line counts them.
+    lines = page.split("\n")
+    assert not any(line.startswith("  - ") and ", approved" in line for line in lines)
+    assert any(line.startswith("  - 5 commitments from this meeting, 1 open: ") for line in lines)
+    altered = [line for line in lines if line.startswith("- **") and "plan the demo" in line]
+    assert len(altered) == 1 and " — altered on " in altered[0]
+    assert "  - Sam Rivera: check the budget" in page  # waiting
 
 
 def test_a_telemetry_done_leaves_the_item_out_of_the_dashboard(machine):
@@ -1216,7 +1225,12 @@ def test_the_dashboard_fails_open_on_an_unreadable_ledger(machine, monkeypatch):
     ids = _approved(machine)
     _run(machine, "commitment", "done", ids[0])
     monkeypatch.setattr(type(machine.storage), "read_commitments", lambda self, *, scope: (_ for _ in ()).throw(OSError(5, "x")))
-    assert ITEMS[0][0] in machine.page()
+    page = machine.page()
+    assert f"  - Sam Rivera: {ITEMS[0][0]} (by Thursday), approved" in page
+    # Story 15d: the note names the scope and the exception's type, no text.
+    assert "The commitments of `personal` could not be read (OSError), so they are not listed" in page
+    assert "`pm-ai commitment list --scope personal`" in page
+    assert "No open commitment" not in page
 
 
 def test_team_activity_hides_a_withdrawn_item(machine):
@@ -1237,10 +1251,16 @@ def test_team_activity_hides_a_withdrawn_item(machine):
     class Ledger:
         live = {n: Line(each) for n, each in enumerate(ids)}
 
-    decisions, _ = _item_decisions(machine.daemon, Ledger(), scope=ALPHA)  # type: ignore[arg-type]
+    from pm_ai.core.commitment_log import CommitmentLog
+
+    decisions, _, _ = _item_decisions(
+        machine.daemon, Ledger(), scope=ALPHA, commitments=CommitmentLog(machine.storage).read(ALPHA)  # type: ignore[arg-type]
+    )
     assert decisions[ids[0]].hidden is True
-    assert ids[1] not in decisions and ids[2] not in decisions
-    unread, _ = _item_decisions(machine.daemon, Ledger())  # type: ignore[arg-type]
+    # Story 15d: done shows its state; broken is not shown on a project page.
+    assert decisions[ids[1]].commitment.row_state.startswith("commitment done on ")
+    assert decisions[ids[2]].commitment.row_state == ""
+    unread, _, _ = _item_decisions(machine.daemon, Ledger(), scope=ALPHA, commitments=None)  # type: ignore[arg-type]
     assert ids[0] not in unread
 
 
@@ -1348,11 +1368,8 @@ def test_team_activity_shows_every_line_when_the_ledger_cannot_be_read(machine, 
     class Ledger:
         live = {n: Line(each) for n, each in enumerate(ids)}
 
-    def unreadable(self, *, scope):
-        raise OSError(5, "unreadable for the test")
-
-    monkeypatch.setattr(type(machine.storage), "read_commitments", unreadable)
-    decisions, _ = _item_decisions(machine.daemon, Ledger(), scope=ALPHA)  # type: ignore[arg-type]
+    # Story 15d: the render's one read failed, so no ledger is handed in.
+    decisions, _, _ = _item_decisions(machine.daemon, Ledger(), scope=ALPHA, commitments=None)  # type: ignore[arg-type]
     assert ids[0] not in decisions
 
 
@@ -1371,7 +1388,8 @@ def test_reject_of_an_open_item_in_text_and_json(machine):
     code, found = machine.json("proposal", "reject", ids[0])
     assert set(found["commitment"]["commands"]) == {"withdrawn", "altered", "edit"}
     assert found["commitment"]["show"] == ["commitment", "show", ids[0], "--scope", "personal"]
-    for words in found["commitment"]["commands"].values():
+    for each in found["commitment"]["commands"].values():
+        words = each["command"]
         assert words[1] in TABLE[words[0]].leaves
 
 

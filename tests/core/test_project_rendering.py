@@ -262,6 +262,8 @@ def test_the_signature_accepts_no_goal_register():
         "work",
         "issue_notes",
         "digests",
+        # Story 15d: the project's own commitments, its type refusing any other scope.
+        "commitments",
     ]
     # Story 7d: the project-only digests, after `23g`'s `issue_notes` — a type
     # whose constructor refuses any other scope's digest.

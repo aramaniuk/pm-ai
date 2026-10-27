@@ -653,6 +653,11 @@ class Details:
     done_marks: frozenset[str] = frozenset()
     """The entries of the PM's `marked state=fulfilled` lines: a version a surface
     showed after its done mark, which `undo` checks against."""
+    closed_at: datetime | None = None
+    """Story 15d: the `occurred` of the first line, in fold order, of the run of
+    lines since which the state has been terminal without a break; `None` while
+    it is open. A second verdict, or the PM's mark confirming telemetry's, does
+    not move it, so a closure is counted in one window only."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -901,6 +906,21 @@ def _owner_line(pending: _Read, values: Sequence[_Read], lines: Sequence[_Read])
     return max(candidates, key=_order)
 
 
+def _closed_since(
+    closed_at: datetime | None, before: CommitmentState, after: CommitmentState, at: datetime
+) -> datetime | None:
+    """Story 15d: when the run of terminal states began, after one applied line.
+
+    A line that leaves the state terminal keeps the run's start; one that
+    makes it terminal from open starts it; one that reopens it ends it.
+    """
+    if not after.is_terminal:
+        return None
+    if before.is_terminal and closed_at is not None:
+        return closed_at
+    return at
+
+
 def fold(parsed: ParsedLedger) -> CommitmentLedger:
     """Each commitment from its lines, in an order of their own fields (AD-35, 15a).
 
@@ -953,6 +973,7 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
         state, source = CommitmentState.PENDING, StateSource.NONE
         in_force: MarkInForce | None = None
         state_at: datetime | None = None
+        closed_at: datetime | None = None
         for line in sorted(
             (line for line in lines if line.kind in (LineKind.MARKED, LineKind.VERDICT)),
             key=_order,
@@ -963,6 +984,7 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
             if line.kind is LineKind.MARKED:
                 mark = Mark(line.fields["state"])
                 if can_mark(state, source, mark):
+                    closed_at = _closed_since(closed_at, state, mark.state, line.occurred)
                     state, source = mark.state, StateSource.PM
                     in_force = MarkInForce(
                         mark, line.entry, line.occurred, line.fields["via"], _optional(line.fields, "note")
@@ -971,7 +993,9 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
                 else:
                     refused += 1
             elif source is not StateSource.PM or state is CommitmentState.ALTERED:
-                state, source = CommitmentState(line.fields["state"]), StateSource.TELEMETRY
+                verdict = CommitmentState(line.fields["state"])
+                closed_at = _closed_since(closed_at, state, verdict, line.occurred)
+                state, source = verdict, StateSource.TELEMETRY
                 in_force = None
                 state_at = line.occurred
         last = lines[-1]
@@ -997,6 +1021,7 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
                 for line in lines
                 if line.kind is LineKind.MARKED and line.fields["state"] == Mark.FULFILLED.value
             ),
+            closed_at=closed_at,
         )
         speaker = _optional(fields, "speaker")
         owner = _optional(owner_line.fields, "owner")

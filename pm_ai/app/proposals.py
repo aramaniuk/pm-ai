@@ -26,6 +26,7 @@ or offered, and refused by every verb.
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
@@ -41,15 +42,18 @@ from pm_ai.app.meeting_listing import MeetingLister, resolve_title
 from pm_ai.app.proposal_reads import ProposalWorld, open_world, seen_state
 from pm_ai.app.scope_reads import read_display_config
 from pm_ai.app.wiring import REGISTRY_ARTIFACT, registered_proposal_types
-from pm_ai.core.commitment_log import Recording
+from pm_ai.core.commitment_log import CommitmentLedger, Recording
 from pm_ai.core.due_dates import due_words
 from pm_ai.core.meeting_records import MeetingRecords
 from pm_ai.core.meeting_summary import action_item_id
+from pm_ai.core.commitment_cards import is_placeholder, placeholder_words, proposal_commitment
 from pm_ai.core.proposal_cards import (
     LIST_STATES,
     Card,
     CardContext,
     CardMeeting,
+    Fill,
+    fill_json,
     ProposalListing,
     ProposalMisused,
     ProposalOutcome,
@@ -113,6 +117,11 @@ daemon's writer thread and 100 ms of SQLite's busy wait, with room to spare."""
 TERMINAL_WRITE_WAIT_SECONDS = 1.0
 """Their busy wait at a terminal: 1 s, not the standard library's 5, so they too
 answer within 2 seconds."""
+
+PROPOSAL_READ_BOUND_SECONDS = 1.0
+"""Story 15d: `proposal list` and `show` read the commitment ledgers within their
+1-second bound at the prompt (`CONFIG_SHOW_BOUND_SECONDS`); a scope not reached
+in time is said to be not read, and the command still answers."""
 
 LIMITS = (1, 200)
 DEFAULT_LIMIT = 20
@@ -193,6 +202,9 @@ class ProposalDesk:
     commitments: CommitmentRecorder | None = None
     """What records an approved item's commitment (story 15a), built in the
     composition root; when `None`, one is built over `storage` as it is needed."""
+    monotonic: Callable[[], float] = time.monotonic
+    read_bound: float = PROPOSAL_READ_BOUND_SECONDS
+    """Story 15d: how long `list` and `show` read ledgers for the cards' commitment lines."""
 
     # ── reading ──────────────────────────────────────────────────────────
 
@@ -371,6 +383,7 @@ class ProposalDesk:
         low, high = LIMITS
         if not low <= limit <= high:
             raise ProposalMisused(f"`--limit` takes a whole number, {low} to {high}.")
+        started = self.monotonic()
         world = self.world()
         scope = self._checked_scope(scope, world)
         chosen = self._chosen_meeting(world, scope, meeting_id, title, on)
@@ -427,6 +440,7 @@ class ProposalDesk:
                 unreadable += 1
                 continue
             cards.append(self._card(body, each.scope, world, rows))
+        cards = self._with_commitments(cards, world, started)
         filters = _filter_words(scope, meeting_id, title, on, chosen is not None)
         # Story 13a: every printed command carries `--scope` — one per scope
         # involved, the newest meeting's scope first.
@@ -593,10 +607,48 @@ class ProposalDesk:
     # ── show, the walk and completion ────────────────────────────────────
 
     def show(self, proposal_id: str, *, scope: DataScope | None = None) -> ProposalOutcome:
+        started = self.monotonic()
         world = self.world()
         located, body, rows = self._locate(proposal_id, scope, world)
         card = self._card(body, located.scope, world, rows)
+        (card,) = self._with_commitments([card], world, started)
         return ProposalOutcome("shown", card, f"{proposal_id} is {card.heading.split(', ', 1)[-1]}.")
+
+    def _with_commitments(
+        self, cards: Sequence[Card], world: ProposalWorld, started: float
+    ) -> list[Card]:
+        """Story 15d: each approved commitment-type card with its commitment's line.
+
+        Each listed scope's ledger is read once, through `read_ledger` (the
+        store when this desk holds one, by path at a terminal). A scope not
+        reached within `read_bound` of `started` is not read, and its cards
+        say so; the command still answers.
+        """
+        ledgers: dict[str, CommitmentLedger | str] = {}
+        shown: list[Card] = []
+        for card in cards:
+            if card.state != ProposalState.APPROVED.value or not self.rule(card.type).records_commitment:
+                shown.append(card)
+                continue
+            key = card.scope
+            if key not in ledgers:
+                if self.monotonic() - started >= self.read_bound:
+                    ledgers[key] = "not read within the bound"
+                else:
+                    try:
+                        ledgers[key] = read_ledger(self.storage, world.resolver, DataScope.parse(key))
+                    except LEDGER_READ_FAILURES as failed:
+                        ledgers[key] = f"the ledger could not be read ({type(failed).__name__})"
+            found = proposal_commitment(
+                root_of(card.proposal_id),
+                card.proposal_id,
+                key,
+                ledgers[key],
+                now=world.now,
+                zone=world.zone,
+            )
+            shown.append(replace(card, commitment=found))
+        return shown
 
     def waiting(
         self,
@@ -886,14 +938,22 @@ class ProposalDesk:
         root = root_of(pid)
         scope_words = ("--scope", str(scope))
         withdrawn = ("commitment", "withdrawn", root, *scope_words)
-        altered = ("commitment", "altered", root, *scope_words, "--note", "…")
-        edit = ("proposal", "edit", pid, *scope_words, "--what", "…")
+        altered = ("commitment", "altered", root, *scope_words, "--note", "<note>")
+        edit = ("proposal", "edit", pid, *scope_words, "--what", "<what>")
         approve = ("proposal", "approve", pid, *scope_words)
+        # Story 15d: each command with where its placeholder is, for a wrapper to fill.
+        fills: dict[tuple[str, ...], list[dict[str, object]]] = {
+            altered: fill_json((Fill(len(altered) - 1, "note", False),)),
+            edit: fill_json((Fill(len(edit) - 1, "what", True),)),
+        }
         sentences = [
             f"{pid} was approved{when} and is a commitment now, so it is not rejected; "
             f"nothing was changed."
         ]
-        commands: dict[str, list[str]] = {}
+        commands: dict[str, dict[str, object]] = {}
+
+        def filled(words: tuple[str, ...]) -> dict[str, object]:
+            return {"command": list(words), "fill": fills.get(words, [])}
         recorded: bool | None
         held = None
         details = None
@@ -904,8 +964,8 @@ class ProposalDesk:
             sentences.append("The ledger could not be read, so these may be refused:")
             sentences.append(f"If approving it was a mistake: {command_line(withdrawn)}.")
             sentences.append(f"If what was agreed has changed: {command_line(altered)}.")
-            commands["withdrawn"] = list(withdrawn)
-            commands["altered"] = list(altered)
+            commands["withdrawn"] = filled(withdrawn)
+            commands["altered"] = filled(altered)
         else:
             held = ledger.commitments.get(root)
             details = ledger.details.get(root)
@@ -914,16 +974,16 @@ class ProposalDesk:
                 sentences.append(
                     f"It is not recorded in the ledger yet: {command_line(approve)} records it."
                 )
-                commands["approve"] = list(approve)
+                commands["approve"] = filled(approve)
             else:
                 if mark_answer(held.state, held.state_source, Mark.WITHDRAWN) is MarkAnswer.YES:
                     sentences.append(f"If approving it was a mistake: {command_line(withdrawn)}.")
-                    commands["withdrawn"] = list(withdrawn)
+                    commands["withdrawn"] = filled(withdrawn)
                 if mark_answer(held.state, held.state_source, Mark.ALTERED) is MarkAnswer.YES:
                     sentences.append(f"If what was agreed has changed: {command_line(altered)}.")
-                    commands["altered"] = list(altered)
+                    commands["altered"] = filled(altered)
         sentences.append(f"To correct what was recorded: {command_line(edit)}.")
-        commands["edit"] = list(edit)
+        commands["edit"] = filled(edit)
         return ProposalRefused(
             " ".join(sentences),
             state=ProposalState.APPROVED.value,
@@ -1096,6 +1156,11 @@ class ProposalDesk:
         *,
         write: bool,
     ) -> ProposalOutcome:
+        for name in ("what", "owner", "due"):
+            value = changes.get(name)
+            if value is not None and is_placeholder(value):
+                # Story 15d: a wrapper that left a placeholder writes nothing.
+                raise ProposalMisused(f"`{value}` is a placeholder: {placeholder_words(name)}.")
         world = self.world()
         located, body, rows = self._locate(proposal_id, scope, world)
         proposal_type = self.types.get(body.type)

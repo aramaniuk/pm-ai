@@ -1734,8 +1734,10 @@ def test_a_day_of_only_an_all_day_marker_never_says_it_has_ended(tmp_path):
     built = daemon(tmp_path, _DayCalendar("graph:contoso", live=(marker,)))
     run_dashboard(built, now=seven)
     body = sections(written(built))["Time-Critical Activities"]
-    schedule, summaries = body.split("\n\n")
+    schedule, commitments, summaries = body.split("\n\n")
     assert schedule == "- **all day** Public holiday — 2 attendees"
+    # Story 15d: the block of open commitments, between the day and the summaries.
+    assert commitments == "No open commitment in personal or project:alpha."
     assert "has ended" not in body and "have ended" not in body
     # Story 7d: the summaries' window follows the schedule, stated when empty.
     assert summaries.startswith("No meeting summary was recorded between")
@@ -2315,7 +2317,7 @@ def test_7d_open_items_show_approved_and_exclude_expired_and_pattern_promises(tm
     approved = SummaryActionItem("approved one")
     expired = SummaryActionItem("expired one")
     _summarized(built, "mtg_a", items=(kept,))
-    _stage_item(built, PERSONAL, "mtg_a", approved, state=ProposalState.APPROVED)
+    approved_id = _stage_item(built, PERSONAL, "mtg_a", approved, state=ProposalState.APPROVED)
     _stage_item(
         built, PERSONAL, "mtg_a", expired, created=NOW - timedelta(days=15),
         ttl=timedelta(days=7),
@@ -2335,7 +2337,11 @@ def test_7d_open_items_show_approved_and_exclude_expired_and_pattern_promises(tm
     body = _page(built)["Time-Critical Activities"]
     lines = body.split("\n")
     waiting = lines.index("  - Ана: ship the build (Friday), to review by 2026-09-23")
-    assert lines.index("  - unassigned: approved one, approved") == waiting + 1
+    # Story 15d: staged approved with no ledger line, so not yet recorded.
+    assert lines.index(
+        f"  - unassigned: approved one, approved, not yet recorded as a commitment: "
+        f"`pm-ai proposal approve {approved_id} --scope personal`"
+    ) == waiting + 1
     assert (
         "  - 1 action item expired without review: `pm-ai proposal list --scope personal "
         "--meeting mtg_a --state expired`"
@@ -2354,9 +2360,10 @@ def test_7d_eight_open_items_show_five_and_count_three(tmp_path):
     assert [line for line in body.split("\n") if line.startswith("  - unassigned: ")] == [
         f"  - unassigned: task {n}, to review by 2026-09-23" for n in range(5)
     ]
+    # Story 15d: every hidden item is waiting, so the overflow names `staged`.
     assert (
         "  - and 3 more open action items: `pm-ai proposal list --scope personal "
-        "--meeting mtg_a --state open`"
+        "--meeting mtg_a --state staged`"
     ) in body
 
 

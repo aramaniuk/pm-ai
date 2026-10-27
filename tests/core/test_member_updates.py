@@ -816,3 +816,112 @@ def test_a_machine_zone_start_resolves_its_due_on_the_machines_day():
     rows = "\n".join(notes.rows[142])
     # Monday 12 Oct in Istanbul, so "tomorrow" is the 13th, not the UTC Sunday's 12th.
     assert "tomorrow (2026-10-13) (meeting day estimated)" in rows
+
+
+# ── Story 15d: a recorded approved item's row shows its commitment ───────────
+
+from pm_ai.core.member_updates import ItemCommitment, ItemDecision  # noqa: E402
+
+
+def _rows_with(decisions, *, owner="Ana Ivanova", due="by Friday", confidential=False, failure=None):
+    text = write(Link(action("prp_c1", "fix #142", owner, due), 142, LinkKind.NUMBER))
+    answer = work(
+        issue(142, ANA, title=CONFIDENTIAL_ISSUE_TITLE, confidential=True) if confidential else issue(142, ANA)
+    )
+    notes = issue_notes_for(
+        parse_ledger(text),
+        parse_aliases(None),
+        answer,
+        now=NOW,
+        tz=UTC,
+        scope=PROJECT,
+        placed=lambda found: placed_issue_numbers(answer, (), now=NOW, since=SINCE, issue_notes=found),
+        decisions=decisions,
+        decisions_failure=failure,
+    )
+    return "\n".join(notes.rows.get(142, ())), notes
+
+
+def test_a_done_commitment_ends_its_row_with_its_state():
+    """Matrix "Team Activity, done"."""
+    rows, _ = _rows_with(
+        {"prp_c1": ItemDecision(commitment=ItemCommitment("Ana Ivanova", "(Fri 16 Oct)", "commitment done on Mon 26 Oct"))}
+    )
+    assert rows.endswith("; commitment done on Mon 26 Oct")
+    assert "due as said in the meeting: by Friday (Fri 16 Oct)" in rows
+    assert "action for Ana Ivanova" in rows
+
+
+def test_the_pms_owner_and_due_show_on_the_row():
+    """Matrix "Team Activity, PM's owner", "PM's due"."""
+    rows, _ = _rows_with(
+        {"prp_c1": ItemDecision(commitment=ItemCommitment("Ivan Petrov", "(set by you: Fri 30 Oct)", ""))},
+        owner="Sam",
+    )
+    assert "action for Ivan Petrov" in rows
+    assert "due as said in the meeting: by Friday (set by you: Fri 30 Oct)" in rows
+    assert "commitment" not in rows.split("(said in the meeting)")[-1]
+
+
+def test_a_due_with_nothing_said_stands_alone():
+    rows, _ = _rows_with(
+        {"prp_c1": ItemDecision(commitment=ItemCommitment("Ana Ivanova", "due set by you: Fri 30 Oct", ""))},
+        due=None,
+    )
+    assert "; due set by you: Fri 30 Oct (said in the meeting)" in rows
+    cleared, _ = _rows_with(
+        {"prp_c1": ItemDecision(commitment=ItemCommitment("Ana Ivanova", "due cleared by you", ""))}
+    )
+    assert "due as said in the meeting: by Friday; due cleared by you" in cleared
+
+
+def test_a_commitment_with_no_owner_is_unassigned():
+    rows, _ = _rows_with({"prp_c1": ItemDecision(commitment=ItemCommitment(None, "", ""))})
+    assert "action, unassigned" in rows
+
+
+def test_a_confidential_row_shows_no_commitment():
+    """Matrix "Team Activity, confidential": kind, meeting and marker only."""
+    rows, _ = _rows_with(
+        {"prp_c1": ItemDecision(commitment=ItemCommitment("Ana Ivanova", "(Fri 16 Oct)", "commitment done on Mon 26 Oct"))},
+        confidential=True,
+    )
+    assert rows.endswith("— action (said in the meeting)")
+    assert "done" not in rows and "Ana" not in rows
+
+
+def test_a_waiting_items_row_is_unchanged():
+    rows, _ = _rows_with({})
+    assert "due as said in the meeting: by Friday (2026-10-16)" in rows
+
+
+def test_the_proposals_failure_is_stated_beside_the_ledgers_join():
+    """Matrix "Team Activity, proposals unreadable": withdrawn still hidden, the sentence printed."""
+    rows, notes = _rows_with({"prp_c1": ItemDecision(hidden=True)}, failure=OSError("x"))
+    assert rows == ""
+    assert any("Your decisions on the action items could not be read" in line for line in notes.closing)
+
+
+def test_no_meeting_skips_the_meeting_scoped_alias_rows():
+    """Matrix "No meeting id, alias"."""
+    people = people_of(work(issue(142, ANA)))
+    table = parse_aliases(
+        (render_alias_row(AliasRow(normalise("Sam"), "Sam", ANA.handle, "mtg_a", NOW)) + "\n").encode()
+    )
+    assert resolve_label("Sam", "mtg_a", aliases=table, people=people).handle == ANA.handle
+    assert resolve_label("Sam", None, aliases=table, people=people) is None
+    assert resolve_label("Ana Ivanova", None, aliases=table, people=people).handle == ANA.handle
+
+
+def test_a_row_with_no_said_due_prints_the_commitments_words_or_none():
+    """Review patch 5: never a bare "(Fri 30 Oct)" with no words said before it."""
+    rows, _ = _rows_with(
+        {"prp_c1": ItemDecision(commitment=ItemCommitment("Ana Ivanova", "(Fri 30 Oct)", "", said="by Friday"))},
+        due=None,
+    )
+    assert "; due as said in the meeting: by Friday (Fri 30 Oct) (said in the meeting)" in rows
+    bare, _ = _rows_with(
+        {"prp_c1": ItemDecision(commitment=ItemCommitment("Ana Ivanova", "(Fri 30 Oct)", ""))},
+        due=None,
+    )
+    assert "(Fri 30 Oct)" not in bare and "; (" not in bare

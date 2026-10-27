@@ -639,9 +639,12 @@ def test_rejecting_in_json_names_the_commitment_commands(machine):
     assert found["proposal"]["actions"]["edit"]["command"][:3] == ["proposal", "edit", ids[0]]
     commitment = found["commitment"]
     assert commitment["commitment_id"] == ids[0] and commitment["recorded"] is True
-    assert commitment["commands"]["withdrawn"] == ["commitment", "withdrawn", ids[0], "--scope", "personal"]
-    assert commitment["commands"]["altered"][:3] == ["commitment", "altered", ids[0]]
-    assert commitment["commands"]["edit"][:3] == ["proposal", "edit", ids[0]]
+    # Story 15d: each command is `{"command", "fill"}`.
+    assert commitment["commands"]["withdrawn"] == {
+        "command": ["commitment", "withdrawn", ids[0], "--scope", "personal"], "fill": [],
+    }
+    assert commitment["commands"]["altered"]["command"][:3] == ["commitment", "altered", ids[0]]
+    assert commitment["commands"]["edit"]["command"][:3] == ["proposal", "edit", ids[0]]
     assert set(commitment["commands"]) == {"withdrawn", "altered", "edit"}
 
 

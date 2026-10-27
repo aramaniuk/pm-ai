@@ -310,7 +310,16 @@ def test_approve_prints_the_approved_card_and_the_dashboard_shows_it(summarised)
     stored = machine.load(item)
     assert stored.state is ProposalState.APPROVED and stored.changed_via == "terminal"
     assert stored.version == 2
-    assert "  - Sam Rivera: send the cache TTL numbers (Thursday), approved" in machine.page()
+    # Story 15d: a block line, and one line under its meeting counting it.
+    page = machine.page()
+    assert "  - Sam Rivera: send the cache TTL numbers (Thursday), approved" not in page
+    assert "Sam Rivera: send the cache TTL numbers" in page
+    block = [line for line in page.split("\n") if line.startswith("- **") and "send the cache TTL numbers" in line]
+    assert len(block) == 1
+    assert (
+        "  - 1 commitment from this meeting, open: `pm-ai commitment list --scope personal "
+        f"--meeting {meeting.meeting_id} --state all`"
+    ) in page
 
 
 def test_approving_twice_is_already_approved(summarised):
@@ -1291,20 +1300,19 @@ def test_the_dashboard_lists_waiting_then_approved_capped_at_five(machine):
         machine.run("proposal", "approve", machine.item_id(meeting, n, items))
     lines = [line for line in machine.page().split("\n") if line.startswith("  - ")]
     shown = [line for line in lines if line.startswith("  - unassigned: task")]
+    # Story 15d: the recorded approved items leave the meeting for the block,
+    # so the 4 waiting ones are listed with no overflow, and one line counts them.
     assert shown == [
         "  - unassigned: task 0, to review by 2026-11-04",
         "  - unassigned: task 2, to review by 2026-11-04",
         "  - unassigned: task 4, to review by 2026-11-04",
         "  - unassigned: task 6, to review by 2026-11-04",
-        "  - unassigned: task 1, approved",
     ]
-    overflow = "pm-ai proposal list --scope personal --meeting mtg_a --state open"
-    assert f"  - and 2 more open action items: `{overflow}`" in lines
-    # The overflow command lists every open item, the 2 the page left out included.
-    code, listing = machine.json(*overflow.split()[1:])
-    assert code == EXIT_OK
-    listed = {card["proposal_id"] for card in listing["proposals"]}
-    assert listed == {machine.item_id(meeting, n, items) for n in range(7)}
+    assert not any(line.startswith("  - and ") for line in lines)
+    assert (
+        "  - 3 commitments from this meeting, all open: `pm-ai commitment list --scope personal "
+        "--meeting mtg_a --state all`"
+    ) in lines
 
 
 def test_the_prompt_prints_what_the_terminal_prints(summarised):

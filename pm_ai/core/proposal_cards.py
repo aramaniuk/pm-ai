@@ -26,7 +26,10 @@ __all__ = [
     "COMMITMENT_NOT_REJECTED",
     "Card",
     "CardAction",
+    "CardCommitment",
     "CardContext",
+    "Fill",
+    "FilledCommand",
     "CardMeeting",
     "UNKNOWN_TYPE_SENTENCE",
     "build_card",
@@ -91,12 +94,91 @@ class CardContext:
 
 
 @dataclass(frozen=True, slots=True)
+class Fill:
+    """One placeholder in a command a wrapper fills (story 15d).
+
+    `index` is its position in the command's words, counted from 0 in the
+    command as given. A required one is replaced by the PM's value; an
+    optional one is replaced, or removed together with the option word just
+    before it, which always precedes it. A wrapper applies removals from the
+    highest index down, so the indexes of the words before stay true.
+    """
+
+    index: int
+    name: str
+    """`note`, `when`, `name` or `what`."""
+    required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FilledCommand:
+    """A command and where its placeholders are: `{"command", "fill"}` (15d)."""
+
+    command: tuple[str, ...]
+    fill: tuple[Fill, ...] = ()
+
+
+def fill_json(fill: Sequence[Fill]) -> list[dict[str, object]]:
+    """The `fill` list as the JSON carries it (15d)."""
+    return [{"index": each.index, "name": each.name, "required": each.required} for each in fill]
+
+
+def filled_json(filled: FilledCommand | None) -> dict[str, object] | None:
+    """`{"command": [words], "fill": [...]}`, or `None` (15d)."""
+    if filled is None:
+        return None
+    return {"command": list(filled.command), "fill": fill_json(filled.fill)}
+
+
+@dataclass(frozen=True, slots=True)
 class CardAction:
     name: str
     available: bool
     reason: str | None = None
     command: tuple[str, ...] | None = None
     """The words after `pm-ai`, `--scope` and `--if-version` included."""
+    fill: tuple[Fill, ...] = ()
+    """Story 15d: where `command` holds a placeholder the PM's value replaces."""
+    reopen: FilledCommand | None = None
+    """Story 15d: on a closed commitment's `due` and `owner`, the command that reopens it."""
+
+
+@dataclass(frozen=True, slots=True)
+class CardCommitment:
+    """Story 15d: an approved item's commitment, as its proposal card shows it.
+
+    `line` is the full card's line after its origin. `recorded`, `state`,
+    `state_source` and `past_due` are `None` unless the ledger was read;
+    `reason` holds the not-read or malformed sentence; `show` the `commitment
+    show` words when it is recorded; `repair` the `proposal approve` words
+    when it is not.
+    """
+
+    commitment_id: str
+    line: str
+    recorded: bool | None = None
+    state: str | None = None
+    state_source: str | None = None
+    past_due: bool | None = None
+    reason: str | None = None
+    show: tuple[str, ...] | None = None
+    repair: tuple[str, ...] | None = None
+
+
+def commitment_json(found: CardCommitment | None) -> dict[str, object] | None:
+    """A proposal card's `commitment` object, or `None` (15d)."""
+    if found is None:
+        return None
+    return {
+        "commitment_id": found.commitment_id,
+        "recorded": found.recorded,
+        "state": found.state,
+        "state_source": found.state_source,
+        "past_due": found.past_due,
+        "reason": found.reason,
+        "show": None if found.show is None else list(found.show),
+        "repair": None if found.repair is None else list(found.repair),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +205,8 @@ class Card:
     may_repeat: str | None
     actions: tuple[CardAction, ...] = field(default=())
     known: bool = True
+    commitment: CardCommitment | None = None
+    """Story 15d: an approved item's commitment, on `proposal show` and `list` only."""
 
     def action(self, name: str) -> CardAction | None:
         return next((action for action in self.actions if action.name == name), None)
@@ -317,6 +401,8 @@ def card_text(card: Card, *, compact: bool = False) -> str:
     lines += [f"  {line}" for line in card.field_lines]
     lines.append(f"  {card.origin}")
     if not compact:
+        if card.commitment is not None:
+            lines.append(f"  {card.commitment.line}")
         lines += _detail_lines(card)
     return "\n".join(lines) + "\n"
 
@@ -380,6 +466,7 @@ def card_json(card: Card) -> dict[str, object]:
             }
             for action in card.actions
         },
+        "commitment": commitment_json(card.commitment),
     }
 
 

@@ -1031,6 +1031,71 @@ def test_ad37_a_stale_version_never_appends(tmp_path):
     assert len(daemon.storage.read_commitments(scope=personal)) == size
 
 
+def test_ad25_project_page_reads_only_its_own_commitment_ledger(tmp_path, monkeypatch):
+    """AD-25 (15d), Matrix "Project page scope" — a project render reads that project's ledger, and no other.
+
+    The store holds open commitments in the personal ledger and in another
+    project's; the render of `project:alpha` calls `read_commitments` for
+    `project:alpha` only, and none of the others' text reaches its page.
+    """
+    from dataclasses import replace
+    from datetime import date, datetime, timezone
+
+    config = mod("pm_ai.core.config")
+    log = mod("pm_ai.core.commitment_log")
+    d = mod("pm_ai.domain.commitments")
+    lifecycle = mod("pm_ai.domain.lifecycle")
+    identity = mod("pm_ai.domain.identity")
+    pipelines = mod("pm_ai.app.pipelines")
+    at = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+    daemon = mod("pm_ai.app.wiring").build(
+        tmp_path, "alpha", watched=["alpha", "beta"], now=lambda: at, config=config.Config(display_timezone="UTC")
+    )
+    daemon.connectors = {}
+    personal = identity.DataScope(identity.ScopeKind.PERSONAL)
+    alpha = identity.DataScope(identity.ScopeKind.PROJECT, "alpha")
+    beta = identity.DataScope(identity.ScopeKind.PROJECT, "beta")
+    base = d.Commitment(
+        commitment_id="prp_a", proposal_id="prp_a", type="action_item", meeting_id="mtg_a",
+        title="Example Weekly Sync-up", start=at, day=date(2026, 10, 19), day_from=None,
+        what="x", owner=None, speaker=None, due=d.Due(None, "none"),
+        state=lifecycle.CommitmentState.PENDING, state_source=d.StateSource.NONE,
+        approved_at=at, cites=d.Cites("meeting:mtg_a", None),
+    )
+    for scope, root, what in (
+        (personal, "prp_personal", "the personal promise"),
+        (beta, "prp_beta", "beta's own work"),
+        (alpha, "prp_alpha", "alpha's own work"),
+    ):
+        held = replace(base, commitment_id=root, proposal_id=root, what=what)
+        line = log.render_line(log.Pending(held, via="terminal", written="approval", at=at))
+        log.CommitmentLog(daemon.storage).append([line], scope=scope, after=0)
+    storage_type = type(daemon.storage)
+    original = storage_type.read_commitments
+    read: list[str] = []
+
+    def spy(self, *, scope):
+        read.append(str(scope))
+        return original(self, scope=scope)
+
+    monkeypatch.setattr(storage_type, "read_commitments", spy)
+    # Matrix "Project page scope": the store's approved rows are read narrowed
+    # to the project's own meetings, never every scope's.
+    index_at = pipelines.proposal_index_at
+    asked: list[object] = []
+
+    def narrowed(store, **filters):
+        asked.append(filters.get("meetings"))
+        return index_at(store, **filters)
+
+    monkeypatch.setattr(pipelines, "proposal_index_at", narrowed)
+    page = pipelines.prepare_dashboard(daemon, scope=alpha, now=at).decode("utf-8")
+    assert read == ["project:alpha"]
+    assert asked == [[]]  # no summary row in alpha: no meeting, so no row is read
+    assert "alpha's own work" in page
+    assert "the personal promise" not in page and "beta's own work" not in page
+
+
 def test_ad37_expired_proposals_cannot_execute():
     """AD-37 — the sweeper and the worker race; the loser must observe and stop."""
     proposals = mod("pm_ai.core.proposals")

@@ -34,9 +34,19 @@ from zoneinfo import ZoneInfo
 from concurrent.futures import CancelledError
 from concurrent.futures import TimeoutError as FutureTimeout
 
+from pm_ai.app.commitments import LEDGER_READ_FAILURES
 from pm_ai.app.concurrency import ModelJobAbandoned, WriterStopped
+from pm_ai.app.page_commitments import (
+    PageLedgers,
+    PageWords,
+    page_commitments,
+    page_scopes,
+    read_page_ledgers,
+)
+from pm_ai.app.proposal_reads import open_world
 from pm_ai.core.meeting_listing import zone_of as named_zone_of
 from pm_ai.platform.environment import machine_zone
+from pm_ai.platform.paths import ScopePaths
 from pm_ai.app.wiring import (
     CONFIG_ARTIFACT,
     GIT_QUESTION_SECONDS,
@@ -142,6 +152,7 @@ from pm_ai.core.member_updates import (
     ProjectScope,
     candidates_of,
     classification_prompt,
+    ItemCommitment,
     ItemDecision,
     ItemKind,
     issue_notes_for,
@@ -174,7 +185,8 @@ from pm_ai.domain.handles import NO_PERSON
 from pm_ai.domain.identity import Actor, DataScope, ScopeKind, SourceRef
 from pm_ai.domain.lifecycle import DEFAULT_PROPOSAL_TTL, CommitmentState, ProposalState
 from pm_ai.core.commitment_log import CommitmentLedger, CommitmentLog
-from pm_ai.domain.commitments import NotACommitmentScope
+from pm_ai.core.commitment_cards import team_row_words
+from pm_ai.domain.commitments import Commitment
 from pm_ai.domain.meeting_summaries import (
     ACTION_ITEM,
     ModelAnswerRefused,
@@ -273,6 +285,7 @@ from pm_ai.storage.service import (
     ProposalsUnreadable,
     SchemaVersionChanged,
     StorageService,
+    proposal_index_at,
 )
 from pm_ai.skills.registry import ExecutedButUnrecorded, Invocation
 from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL, EXIT_UNEXPECTED, RESTART_SENTENCE
@@ -2544,12 +2557,29 @@ def prepare_dashboard(
         unchecked=tuple((row.name, row.reason) for row in reading.unchecked),
     )
 
+    # Story 15d: each scope's commitment ledger, read once for this render and
+    # shared by the meeting lines, the block and Team Activity. The personal
+    # page reads personal and every enrolled project's; a project page its own
+    # only (AD-25). Never a `people` scope.
+    ledgers = read_page_ledgers(daemon.storage, page_scopes(scope, sorted(daemon.watched)))
+    approved = _approved_commitment_rows(
+        daemon, now=now, project=scope if scope.kind is ScopeKind.PROJECT else None
+    )
+
     if scope.kind is ScopeKind.PERSONAL:
         # Story 7d: the meetings whose summary was recorded in this window —
         # personal and every enrolled project's, read by id — and the month's
         # frontier spend. Reads only; no model is reached (AD-5, AD-17).
-        digests = personal_meeting_digests(daemon, since=since, now=now)
+        digests = personal_meeting_digests(daemon, since=since, now=now, ledgers=ledgers)
         spend = _month_spend(daemon, now=now)
+        block, _ = page_commitments(
+            ledgers,
+            now=now,
+            zone=zone,
+            since=since.since,
+            unrecorded=_unrecorded(approved, ledgers, digests.shown),
+            not_enrolled=_not_enrolled_with_commitments(approved, ledgers),
+        )
         # `read_artifact` answers `None` for an absent file, which `parse_goals`
         # is defined to read as "no file" — distinct from `b""`, a file the PM
         # created and has not filled in. The two need different sentences.
@@ -2566,6 +2596,7 @@ def prepare_dashboard(
             since=since,
             digests=digests,
             spend=spend,
+            commitments=block,
         )
     else:
         # A different function, not a flag. `render_project_dashboard` has no
@@ -2588,6 +2619,33 @@ def prepare_dashboard(
             since=since,
             zone=zone,
             aliases=aliases,
+            commitments=held if (held := ledgers.ledger(scope)) is not None else ledgers.failure(scope),
+        )
+        # Story 7d: this project's own summary rows, records and proposals,
+        # owners resolved by `7e`'s rule — nothing else.
+        project_digests = project_meeting_digests(
+            daemon,
+            scope=scope,
+            since=since,
+            now=now,
+            work=work,
+            aliases=aliases,
+            issue_notes=notes,
+            ledgers=ledgers,
+        )
+        # Story 15d: the project's open commitments, names resolved by the
+        # same rule, a confidential issue's text withheld, and nothing from
+        # any other scope (AD-25).
+        block, words = page_commitments(
+            ledgers,
+            now=now,
+            zone=zone,
+            since=since.since,
+            project=scope,
+            issue_notes=notes,
+            work=work,
+            name_of=_member_names(work, aliases),
+            unrecorded=_unrecorded(approved, ledgers, project_digests.shown),
         )
         document = render_project_dashboard(
             meetings,
@@ -2598,17 +2656,8 @@ def prepare_dashboard(
             since=since,
             work=work,
             issue_notes=notes,
-            # Story 7d: this project's own summary rows, records and
-            # proposals, owners resolved by `7e`'s rule — nothing else.
-            digests=project_meeting_digests(
-                daemon,
-                scope=scope,
-                since=since,
-                now=now,
-                work=work,
-                aliases=aliases,
-                issue_notes=notes,
-            ),
+            digests=_with_block_notes(project_digests, words, aliases=aliases, notes=notes),
+            commitments=block,
         )
     return document.encode("utf-8")
 
@@ -2682,16 +2731,25 @@ def _meeting_digest(
     shown_elsewhere: Mapping[str, tuple[int, ...]],
     confidential: frozenset[str] = frozenset(),
     withhold_all: bool = False,
-    closed: frozenset[str] = frozenset(),
+    ledger: CommitmentLedger | None = None,
+    shown_as: Mapping[str, Commitment] | None = None,
 ) -> MeetingDigest | DigestUnreadable:
     """One row's meeting: its record read by id, its open items, its maker.
 
     Reads only — the record, then the meeting's open action items. A record
     that cannot be read, or a value in it that cannot be shown, is named, so
     the other meetings still show; one item whose stored body cannot be read
-    is counted on its meeting. `closed` are the roots whose commitment the PM
-    or telemetry closed (fulfilled, broken, withdrawn): an approved item among
-    them is left out, as a rejected one is (story 15c).
+    is counted on its meeting.
+
+    Story 15d: `ledger` is the meeting's scope's commitment ledger as this
+    render read it, or `None` when it could not be read. An approved item the
+    ledger records is no longer listed here — it is in the block, or counted
+    closed — and one line counts the meeting's commitments; one not recorded
+    names its repair, and one a malformed line names says so. With no ledger,
+    approved items show as approved and no commitment line is printed.
+    `shown_as` holds, for a root a hand copy also puts in an earlier scope's
+    ledger, the copy the page shows: the meeting's line still counts it once,
+    in that copy's state.
     """
     try:
         record = daemon.meetings.get(row.meeting_id, scope=row.scope)
@@ -2726,9 +2784,18 @@ def _meeting_digest(
             # Story 13a: placement and withholding go by the root id `7b` minted.
             root = root_of(proposal.proposal_id)
             approved = proposal.state is ProposalState.APPROVED
-            if approved and root in closed:
-                # Story 15c: a commitment the PM closed stops looking open.
-                continue
+            unrecorded: str | None = None
+            malformed: str | None = None
+            if approved and ledger is not None:
+                if root in ledger.malformed_roots:
+                    malformed = root
+                elif root in ledger.commitments:
+                    # Story 15d: recorded, so in the block (open) or the closed count.
+                    continue
+                else:
+                    # The approval's write failed, or the catch-up has not run:
+                    # `approve` writes the line for the approved proposal's own id.
+                    unrecorded = proposal.proposal_id
             if not approved:
                 waiting += 1
             under = shown_elsewhere.get(root)
@@ -2749,8 +2816,20 @@ def _meeting_digest(
                     confidential=hidden_text,
                     approved=approved,
                     review_by=None if approved else proposal.expires_under(rule),
+                    unrecorded=unrecorded,
+                    malformed=malformed,
                 )
             )
+        held = (
+            []
+            if ledger is None
+            else [
+                (shown_as or {}).get(root, commitment)
+                for root, commitment in ledger.commitments.items()
+                if commitment.meeting_id == row.meeting_id
+                and root not in ledger.malformed_roots
+            ]
+        )
         maker = (
             None
             if recorded is None
@@ -2774,6 +2853,10 @@ def _meeting_digest(
             unreadable_items=open_items.unreadable,
             expired=open_items.expired,
             waiting=waiting,
+            commitments=len(held),
+            open_commitments=sum(1 for each in held if not each.state.is_terminal),
+            hidden_waiting_only=len(items) > MAX_DIGEST_ITEMS
+            and all(not item.approved for item in items[MAX_DIGEST_ITEMS:]),
         )
     except _DIGEST_REFUSALS as refused:
         return DigestUnreadable(row.scope, row.meeting_id, row.at, _refusal_text(refused))
@@ -2788,21 +2871,32 @@ def _digests_over(
     shown_elsewhere: Mapping[str, tuple[int, ...]],
     confidential: frozenset[str] = frozenset(),
     withhold_all: bool = False,
+    ledgers: PageLedgers | None = None,
 ) -> tuple[tuple[MeetingDigest | DigestUnreadable, ...], int]:
     """The `MAX_MEETING_DIGESTS` most recently recorded rows read, and how many more.
 
-    Each personal or project scope's commitment ledger is read once per
-    render (story 15c), so an approved item whose commitment is closed is left
-    out; a ledger that cannot be read leaves the items as they are.
+    Each meeting's scope's commitment ledger is the one this render read
+    (`ledgers`, story 15d); without it, each row's scope is read once here. A
+    ledger that cannot be read leaves the approved items listed as approved.
     """
     ordered = sorted(rows, key=lambda r: (-r.at.timestamp(), str(r.scope), r.meeting_id))
-    closed_by_scope: dict[str, frozenset[str]] = {}
+    if ledgers is None:
+        scopes = sorted({row.scope for row in rows}, key=lambda s: (s.kind is not ScopeKind.PERSONAL, str(s)))
+        ledgers = read_page_ledgers(
+            daemon.storage,
+            [each for each in scopes if each.kind in (ScopeKind.PERSONAL, ScopeKind.PROJECT)],
+        )
+    read = ledgers
 
-    def closed_in(scope: DataScope) -> frozenset[str]:
-        key = str(scope)
-        if key not in closed_by_scope:
-            closed_by_scope[key] = _closed_commitments(daemon, scope)
-        return closed_by_scope[key]
+    def shown_as(scope: DataScope, ledger: CommitmentLedger | None) -> dict[str, Commitment]:
+        if ledger is None:
+            return {}
+        found: dict[str, Commitment] = {}
+        for root in ledger.commitments:
+            first = read.ledger(DataScope.parse(read.first[root])) if read.is_copy(scope, root) else None
+            if first is not None:
+                found[root] = first.commitments[root]
+        return found
 
     shown = tuple(
         _meeting_digest(
@@ -2813,15 +2907,16 @@ def _digests_over(
             shown_elsewhere=shown_elsewhere,
             confidential=confidential,
             withhold_all=withhold_all,
-            closed=closed_in(row.scope),
+            ledger=read.ledger(row.scope),
+            shown_as=shown_as(row.scope, read.ledger(row.scope)),
         )
         for row in ordered[:MAX_MEETING_DIGESTS]
     )
     return shown, max(0, len(ordered) - MAX_MEETING_DIGESTS)
 
 
-_LEDGER_READ_FAILURES = (OSError, DecryptionFailed, UnicodeError, ScopeResolutionError, NotACommitmentScope)
-"""What reading a commitment ledger may meet that is not a defect in pm-ai (15c)."""
+_READ_HERE = object()
+"""Story 15d: no ledger was handed in, so the function reads the scope's itself."""
 
 
 def _commitment_ledger(daemon: Daemon, scope: DataScope) -> CommitmentLedger | None:
@@ -2835,17 +2930,146 @@ def _commitment_ledger(daemon: Daemon, scope: DataScope) -> CommitmentLedger | N
         return None
     try:
         return CommitmentLog(daemon.storage).read(scope)
-    except _LEDGER_READ_FAILURES:  # showing a closed item as approved is harmless
+    except LEDGER_READ_FAILURES:  # showing a closed item as approved is harmless
         return None
 
 
-def _closed_commitments(daemon: Daemon, scope: DataScope) -> frozenset[str]:
-    """The roots whose commitment is `fulfilled` (PM or telemetry), `broken` or `withdrawn`."""
-    ledger = _commitment_ledger(daemon, scope)
-    if ledger is None:
-        return frozenset()
-    return frozenset(
-        root for root, commitment in ledger.commitments.items() if commitment.state.is_terminal
+def _approved_commitment_rows(
+    daemon: Daemon, *, now: datetime, project: DataScope | None = None
+) -> tuple[tuple[DataScope, str, str | None], ...] | None:
+    """Story 15d: the store's approved commitment-type proposals, each placed in its scope.
+
+    The catch-up's read (`proposal_index_at(states=approved)`, placed by
+    `scope_of`): `(scope, proposal id, meeting id)`. On a project page the
+    read is narrowed to the rows citing that project's own meetings — those
+    its summary rows name, read for that scope only — and
+    only rows placed in the project are kept (AD-25). `None` when the store
+    cannot be read by path here, or a row cannot be placed: the notes built
+    from it are left out, never a failed render.
+    """
+    paths = getattr(daemon.storage, "paths", None)
+    if not isinstance(paths, ScopePaths):
+        return None
+    try:
+        meetings: list[str] | None = None
+        if project is not None:
+            ever = datetime.min.replace(tzinfo=timezone.utc)
+            # A plain read of that scope's summary rows only: the meetings
+            # its action items and spoken promises are staged from.
+            rows_of = daemon.storage.summaries_recorded_between(project, since=ever, until=now)
+            meetings = sorted({row.meeting_id for row in rows_of})
+        world = open_world(paths, now)
+        rows = proposal_index_at(world.store, states=[ProposalState.APPROVED.value], meetings=meetings)
+        placed: list[tuple[DataScope, str, str | None]] = []
+        for row in rows:
+            if row.type is None or not daemon.proposal_types.rule(row.type).records_commitment:
+                continue
+            found = world.scope_of(row)
+            if found is None or found.kind not in (ScopeKind.PERSONAL, ScopeKind.PROJECT):
+                continue
+            if project is not None and found != project:
+                continue
+            placed.append((found, row.proposal_id, row.meeting_id))
+    except (ProposalsUnreadable, OSError, ValueError, sqlite3.Error, OperationalStoreUnavailable, ScopeResolutionError):
+        return None
+    return tuple(placed)
+
+
+def _unrecorded(
+    approved: Sequence[tuple[DataScope, str, str | None]] | None,
+    ledgers: PageLedgers,
+    shown: Sequence[MeetingDigest | DigestUnreadable],
+) -> dict[str, list[str]]:
+    """Story 15d: each read scope's approved items not recorded, and not repaired on this page.
+
+    An item whose own line, with its `proposal approve` repair, is printed
+    under its meeting is said there; every other one — an older meeting's, a
+    spoken promise, one past the meeting's cap, one under an unreadable
+    record or shown under an issue — is counted in the scope's note.
+    """
+    if approved is None:
+        return {}
+    printed = {
+        item.unrecorded
+        for digest in shown
+        if isinstance(digest, MeetingDigest)
+        for item in digest.items
+        if item.unrecorded is not None
+    }
+    found: dict[str, list[str]] = {}
+    for scope, proposal_id, _ in sorted(approved, key=lambda each: (str(each[0]), each[1])):
+        ledger = ledgers.ledger(scope)
+        if ledger is None:
+            continue
+        root = root_of(proposal_id)
+        if root in ledger.commitments or root in ledger.malformed_roots:
+            continue
+        if proposal_id in printed:
+            continue
+        found.setdefault(str(scope), []).append(proposal_id)
+    return found
+
+
+def _not_enrolled_with_commitments(
+    approved: Sequence[tuple[DataScope, str, str | None]] | None, ledgers: PageLedgers
+) -> tuple[DataScope, ...]:
+    """Story 15d: projects no longer enrolled whose approved commitment-type items the store holds."""
+    if approved is None:
+        return ()
+    gone = {
+        scope
+        for scope, _, _ in approved
+        if scope.kind is ScopeKind.PROJECT and scope not in ledgers.order
+    }
+    return tuple(sorted(gone, key=str))
+
+
+def _member_names(work: WorkAnswer, aliases: AliasTable | BaseException) -> Callable[[str | None, str | None], str | None]:
+    """`7e`'s read-time rule as a page shows a name: a member, or `None` (story 15d).
+
+    With no meeting id on the line, the meeting-scoped alias rows are not
+    consulted: only the project-wide rows, then an exact name.
+    """
+    people = people_of(work)
+    table = aliases if isinstance(aliases, AliasTable) else AliasTable()
+
+    def member(label: str | None, meeting: str | None) -> str | None:
+        person = resolve_label(label, meeting, aliases=table, people=people)
+        if person is None:
+            return None
+        if person.name and person.name.strip():
+            return person.name
+        if person.username:
+            return f"@{person.username}"
+        return str(person.handle)
+
+    return member
+
+
+def _with_block_notes(
+    digests: ProjectMeetingDigests,
+    words: PageWords,
+    *,
+    aliases: AliasTable | BaseException,
+    notes: IssueNotes,
+) -> ProjectMeetingDigests:
+    """Story 15d: 7d's sentences printed once, when the block needs them too.
+
+    The alias table's sentence when the block showed a name to resolve; why
+    an issue's confidentiality cannot be told, or the links read, when the
+    block withheld a line's text for it.
+    """
+    aliases_unread = digests.aliases_unread
+    if words.names and aliases_unread is None and isinstance(aliases, BaseException):
+        aliases_unread = _refusal_text(aliases)
+    unknown = digests.confidentiality_unknown
+    if words.unknown and unknown is None and notes.confidentiality_unknown:
+        unknown = notes.confidentiality_unknown
+    return replace(
+        digests,
+        aliases_unread=aliases_unread,
+        confidentiality_unknown=unknown,
+        links_unread=digests.links_unread or words.links,
     )
 
 
@@ -2855,7 +3079,7 @@ def _as_said(label: str | None, meeting: str) -> str | None:
 
 
 def personal_meeting_digests(
-    daemon: Daemon, *, since: LookBack, now: datetime
+    daemon: Daemon, *, since: LookBack, now: datetime, ledgers: PageLedgers | None = None
 ) -> MeetingDigests:
     """The personal page's digests: personal meetings and each enrolled project's.
 
@@ -2882,7 +3106,7 @@ def personal_meeting_digests(
         unchecked = _refusal_text(refused)
         listed = ()
     shown, earlier = _digests_over(
-        daemon, rows, now=now, owner_of=_as_said, shown_elsewhere={}
+        daemon, rows, now=now, owner_of=_as_said, shown_elsewhere={}, ledgers=ledgers
     )
     return MeetingDigests(
         shown=shown,
@@ -2902,6 +3126,7 @@ def project_meeting_digests(
     work: WorkAnswer,
     aliases: AliasTable | BaseException,
     issue_notes: IssueNotes,
+    ledgers: PageLedgers | None = None,
 ) -> ProjectMeetingDigests:
     """One project's digests: its own rows, records and proposals, and nothing else.
 
@@ -2936,6 +3161,7 @@ def project_meeting_digests(
         shown_elsewhere=issue_notes.items,
         confidential=issue_notes.confidential,
         withhold_all=issue_notes.links_unread,
+        ledgers=ledgers if ledgers is not None else read_page_ledgers(daemon.storage, [scope]),
     )
     withheld = any(
         isinstance(d, MeetingDigest) and any(i.confidential for i in d.items) for d in shown
@@ -3103,12 +3329,16 @@ def _issue_notes(
     since: LookBack,
     zone: tzinfo,
     aliases: AliasTable | BaseException,
+    commitments: CommitmentLedger | BaseException | None | object = _READ_HERE,
 ) -> IssueNotes:
     """`7e`'s rows for Team Activity's slot, from the ledger and the alias table as they are now.
 
     Both plain reads, on the render's worker. An unreadable file is stated on
     the page, never a failed render. Which issues the page places is asked of
     `23g`'s own function over the same inputs the render is given.
+    `commitments` is the project's commitment ledger as this render read it
+    (story 15d: one read per scope per render), or why it could not be read;
+    left out, it is read here.
     """
     ledger: Ledger | BaseException
     try:
@@ -3117,9 +3347,17 @@ def _issue_notes(
         ledger = unreadable
     decisions: Mapping[str, ItemDecision] | BaseException | None = None
     unread = 0
+    failure: BaseException | None = None
     estimated: dict[str, str | None] = {}
     if not isinstance(ledger, BaseException):
-        decisions, unread = _item_decisions(daemon, ledger, scope=scope)
+        joined = (
+            _commitment_ledger(daemon, scope)
+            if commitments is _READ_HERE
+            else commitments if isinstance(commitments, CommitmentLedger) else None
+        )
+        decisions, unread, failure = _item_decisions(
+            daemon, ledger, commitments=joined, now=now, zone=zone
+        )
         estimated = _estimated_from(daemon, ledger, scope=scope, now=now)
     return issue_notes_for(
         ledger,
@@ -3133,6 +3371,7 @@ def _issue_notes(
         ),
         decisions=decisions,
         decisions_unreadable=unread,
+        decisions_failure=failure,
         estimated_from=estimated,
         # As `recorder_for` decides it, so Team Activity and the ledger pick one day.
         machine_zone=None if named_zone_of(daemon.config.display_timezone) is not None else _machine_zone(),
@@ -3160,45 +3399,77 @@ def _estimated_from(
 
 
 def _item_decisions(
-    daemon: Daemon, ledger: Ledger, *, scope: DataScope | None = None
-) -> tuple[Mapping[str, ItemDecision] | BaseException, int]:
+    daemon: Daemon,
+    ledger: Ledger,
+    *,
+    scope: DataScope | None = None,
+    commitments: CommitmentLedger | None | object = _READ_HERE,
+    now: datetime | None = None,
+    zone: tzinfo | None = None,
+) -> tuple[dict[str, ItemDecision], int, BaseException | None]:
     """Each action item's decision, read in one read-only query by meeting (story 13a).
 
     A line whose item, or whose newest replacement, is `rejected` is hidden;
     one replaced by an edit shows the newest replacement's values. With them,
     how many of the meetings' proposal bodies could not be read: the page says
     so, since the lines those would decide are shown as recorded. Story 15c:
-    an item whose commitment is `withdrawn` in `scope`'s ledger is hidden too,
-    looked up by its root; done and broken ones stay. A ledger that cannot be
-    read hides nothing.
+    an item whose commitment is `withdrawn` in the ledger is hidden too,
+    looked up by its root; done and broken ones stay. Story 15d: an approved
+    item recorded in the ledger carries its commitment (owner, due, state),
+    joined from the one ledger read and independently of the proposal read,
+    whose failure is the third value. No ledger hides nothing.
+    `commitments` is the folded ledger this render read, or `None` for none
+    (fail open); left out, it is read from `scope`'s ledger.
     """
+    if commitments is _READ_HERE:
+        commitments = None if scope is None else _commitment_ledger(daemon, scope)
+    if not isinstance(commitments, CommitmentLedger):
+        commitments = None
     items = {line.item for line in ledger.live.values() if line.kind is ItemKind.ACTION}
     if not items:
-        return {}, 0
+        return {}, 0, None
+    decisions: dict[str, ItemDecision] = {}
+    joined: dict[str, ItemCommitment] = {}
+    withdrawn: set[str] = set()
+    if commitments is not None:
+        at = now if now is not None else daemon.clock()
+        try:
+            shown_zone = zone if zone is not None else _display_zone(daemon)
+        except ConfigRefused:
+            shown_zone = timezone.utc
+        for root in items:
+            commitment = commitments.commitments.get(root)
+            if commitment is None or root in commitments.malformed_roots:
+                continue
+            if commitment.state is CommitmentState.WITHDRAWN:
+                withdrawn.add(root)
+                continue
+            row_due, row_state = team_row_words(
+                commitment, commitments.details[root], now=at, zone=shown_zone
+            )
+            details = commitments.details[root]
+            joined[root] = ItemCommitment(
+                owner=commitment.owner,
+                row_due=row_due,
+                row_state=row_state,
+                said=details.due_said if details.due_said is not None else commitment.due.said,
+            )
+    for root in withdrawn:
+        decisions[root] = ItemDecision(hidden=True)
+    for root, held in joined.items():
+        decisions[root] = ItemDecision(commitment=held)
     meetings = sorted({line.meeting for line in ledger.live.values() if line.item in items})
     try:
         found = daemon.storage.proposals_of_meetings(meetings)
     except (sqlite3.Error, OSError, ValueError, ProposalsUnreadable) as unreadable:
-        return unreadable, 0
+        return decisions, 0, unreadable
     by_root: dict[str, list[Proposal]] = {}
     for proposal in found.proposals:
         root = root_of(proposal.proposal_id)
         if root in items and proposal.type == ACTION_ITEM:
             by_root.setdefault(root, []).append(proposal)
-    decisions: dict[str, ItemDecision] = {}
-    commitments = None if scope is None else _commitment_ledger(daemon, scope)
-    withdrawn = (
-        frozenset()
-        if commitments is None
-        else frozenset(
-            root
-            for root, commitment in commitments.commitments.items()
-            if commitment.state is CommitmentState.WITHDRAWN
-        )
-    )
     for root, proposals in by_root.items():
         if root in withdrawn:
-            decisions[root] = ItemDecision(hidden=True)
             continue
         own = next((p for p in proposals if p.proposal_id == root), None)
         replacements = sorted(
@@ -3217,8 +3488,9 @@ def _item_decisions(
                 what=_payload_text(payload, "what") or newest.summary,
                 owner=_payload_text(payload, "owner"),
                 due=_payload_text(payload, "due"),
+                commitment=joined.get(root),
             )
-    return decisions, found.unreadable
+    return decisions, found.unreadable, None
 
 
 def _blocked_by_a_directory(

@@ -143,6 +143,11 @@ def test_the_dashboards_reads_never_name_the_model_or_the_router():
         pipelines._issue_notes,  # noqa: SLF001
         pipelines._read_aliases,  # noqa: SLF001
         pipelines._project_work,  # noqa: SLF001
+        # Story 15d: the commitment ledgers' one read and the block built from it.
+        pipelines._approved_commitment_rows,  # noqa: SLF001
+        pipelines._item_decisions,  # noqa: SLF001
+        pipelines.read_page_ledgers,
+        pipelines.page_commitments,
     ):
         source = inspect.getsource(function)
         assert "require_model" not in source, f"{function.__name__} names require_model"
