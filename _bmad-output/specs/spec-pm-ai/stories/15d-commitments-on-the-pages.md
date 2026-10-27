@@ -67,7 +67,7 @@ context:
 ### The block of open commitments
 
 - **Where:** in Time-Critical Activities, after the day's meetings and before the meeting summaries. No new heading: CAP-9's four sections stay four.
-- **What it lists:** the open commitments of the scopes read (both action items and spoken promises, subject to Ask First 2), whatever the meeting's age. Open is 15c's meaning: not `fulfilled`, `broken` or `withdrawn`, so `pending`, `altered`, and story 16's `unknown` and `error`.
+- **What it lists:** the open commitments of the scopes read (both action items and spoken promises, Andrei, 2026-10-27), whatever the meeting's age. Open is 15c's meaning: not `fulfilled`, `broken` or `withdrawn`, so `pending`, `altered`, and story 16's `unknown` and `error`.
 - **Left out of the lines:**
   - **on a project page, a commitment Team Activity shows under an issue** (its root is in `issue_notes.items`). One item is never shown twice on a page: 7d's rule for the digest, applied to the block. They are counted in one line after the others: `- 2 open commitments shown under #12, #14 in Team Activity`;
   - **a root in `malformed_roots`:** see "Ledger edge cases".
@@ -134,11 +134,10 @@ context:
 - **`said`:** the due as said, or `None`; `quote_said` is true exactly when a date was worked out from it (`due.date` is set and `due_by_pm` is false).
 - **Today's `_row` date words for a waiting item's line** (`member_updates.py:976-991`, ` (meeting day estimated)`) also move to `core/commitment_cards.py` as `said_due_words(day, estimated)`, so one module holds every such literal.
 - **An architecture check** (`tests/architecture/test_layering.py` or a new `test_page_words.py`): the source of `pm_ai/core/member_updates.py` and `pm_ai/core/rendering.py` contains none of `set by you`, `past due`, `meeting day estimated`, `could not check`, `by telemetry`.
-- **The project page and Ask First 4.** On a project page, Team Activity rows are grouped by member, so a row's state can read as a per-person record (AD-25). `TEAM_ROW_STATES`, one constant in `core/commitment_cards.py`, names the row states a project page prints, and `TEAM_ROW_PAST_DUE` whether it prints `, past due`:
-  - **if Andrei answers Q4 with A:** `TEAM_ROW_STATES = {done, altered}`, `TEAM_ROW_PAST_DUE = False`. A broken row and a past-due row show no state or past-due words. The block (ordered by due, never grouped by member) still says past due;
-  - **if B:** every state above, and past due.
-
-  Either way the constant decides, so the answer changes one line and the matrix rows marked "Q4".
+- **Broken and past due on a project page (Andrei, 2026-10-27).** Team Activity rows are grouped by member, so a row's "broken" or "past due" would read as a per-person failure record (AD-25). Broken and past due appear on the personal page only:
+  - **Team Activity rows** print the row states in `TEAM_ROW_STATES = frozenset({"done", "altered"})` and no `, past due` (`TEAM_ROW_PAST_DUE = False`), both constants in `core/commitment_cards.py`. A broken row, and a row past its date, show no state or past-due words; `unknown` and `error` rows show none either;
+  - **the project page's block** leaves `, past due` off `block_due` (`PROJECT_PAGE_PAST_DUE = False`), and its closed line leaves out the broken count. Order is unchanged, so a past date still sorts first;
+  - **the personal page** shows both, as above.
 
 ### Under each meeting (the digest, `7d` and `13a` amended)
 
@@ -162,7 +161,7 @@ context:
 - **An approved action item recorded in the ledger** keeps its row under its issue, and the row shows the commitment, not the proposal:
   - **the owner** is the commitment's owner (the PM's `owner_set` when he set one), resolved to a member by 7e's rule, as the row resolves the proposal's owner today; unresolved stays `action, unassigned`;
   - **the due:** `due as said in the meeting: <words>` as today, then `row_due`; with nothing said, `row_due` alone. The proposal's said due is no longer resolved a second time by `_row`;
-  - **the state:** `; <row_state>` when not empty, subject to `TEAM_ROW_STATES` (Ask First 4). Done lines stay, as 15c decided: a line is a note of what the meeting said.
+  - **the state:** `; <row_state>` when not empty, subject to `TEAM_ROW_STATES` (Andrei, 2026-10-27). Done lines stay, as 15c decided: a line is a note of what the meeting said.
 - **A row on a confidential issue** is unchanged: kind, meeting and marker only, no owner, due or state.
 - **A waiting item's row** is unchanged (its date words now from `said_due_words`).
 - **Joined at read time** from the one ledger read. `ItemDecision` gains `commitment: ItemCommitment | None` (owner, `row_due`, `row_state`), built from `page_parts`.
@@ -186,7 +185,7 @@ context:
 
 ### Closed in the window
 
-- **The line:** `- closed since <since>: 2 done (1 marked by you, 1 by telemetry), 1 broken (marked by you), 1 withdrawn (marked by you): ` then `` `pm-ai commitment list --scope <scope> --state all` `` for each scope with one, in page scope order, under the command cap. A state with 0 is left out. Each count names its source: `(marked by you)`, `(by telemetry)`, or both with their counts. Counts are over the whole page, never per person.
+- **The line:** `- closed since <since>: 2 done (1 marked by you, 1 by telemetry), 1 broken (marked by you), 1 withdrawn (marked by you): ` then `` `pm-ai commitment list --scope <scope> --state all` `` for each scope with one, in page scope order, under the command cap. A state with 0 is left out. Each count names its source: `(marked by you)`, `(by telemetry)`, or both with their counts. Counts are over the whole page, never per person. On a project page the broken count is left out (above).
 - **`<since>`** is the page's window start, Proactive Enablement's (`9b`), written as the digest heading writes it: `_local(since, tz=zone, now=now, dated=True)`, `2026-10-25 07:00`.
 - **When it closed (`closed_at`):** the `occurred` of the first line, in fold order `(occurred, entry)`, of the run of lines since which the state has been terminal without a break. A second telemetry verdict, or the PM's mark confirming telemetry's, does not move it, so a closure is counted in one window only. `Details` gains `closed_at: datetime | None`, set by the fold.
 - **Counted** when `since < closed_at <= now`. A `closed_at` after `now` (the clock stepped back) is counted as closed at `now`, so a closure is never lost from every page.
@@ -272,7 +271,7 @@ context:
 
 Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam Rivera`), `project:alpha`, and `example.com` handles. Nothing reads `~/.pm-ai` or `~/.manager-ai`.
 
-**Ask First:** four questions for Andrei, after Design Notes. The frozen block is written for the recommended answer of each; Q4's two answers are both written out (`TEAM_ROW_STATES`).
+**Ask First:** none open. The four questions were decided by Andrei on 2026-10-27 (Design Notes, "Decided").
 
 **Never:**
 
@@ -287,7 +286,8 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
 - **Scopes:**
   - no personal ledger read by a project render;
   - no `people` scope read;
-  - no per-member count, ranking or grouping on a project page.
+  - no per-member count, ranking or grouping on a project page;
+  - no broken or past-due words on a project page.
 - **Text:**
   - no more about a commitment on a confidential issue than Team Activity's row shows;
   - no withheld text's due as said, and no unresolved spoken name, on a project page;
@@ -358,8 +358,10 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
 | Alias unreadable | the alias table cannot be read; the block shows an owner | 7d's alias sentence printed | stated |
 | No meeting id, alias | a meeting-scoped alias row for the name, the line has no meeting id | not used; the project-wide row or an exact name | N/A |
 | Team Activity, done | an approved item under #142, marked done 26 Oct | the row ends "; commitment done on Mon 26 Oct" | N/A |
-| Team Activity, broken (Q4) | marked broken | Q4 A: no state words; Q4 B: "; commitment broken on …" | N/A |
-| Team Activity, past due (Q4) | due 22 Oct exact, open, today 25 Oct | Q4 A: no "past due"; Q4 B: ", past due" | N/A |
+| Team Activity, broken | marked broken | no state words on the row | N/A |
+| Team Activity, past due | due 22 Oct exact, open, today 25 Oct | no "past due" on the row | N/A |
+| Project block, past due | project page; open, due 22 Oct exact, today 25 Oct | "due Thu 22 Oct", first in order, no "past due"; the personal page says "past due" | N/A |
+| Project closed line | project page; 1 done and 1 broken in the window | "1 done (marked by you)"; no broken count; the personal page counts both | N/A |
 | Team Activity, PM's owner | `commitment owner <id> "Alex Morgan"`, a member | "action for Alex Morgan" | N/A |
 | Team Activity, PM's due | `commitment due <id> friday` | "(set by you: Fri 30 Oct)" | N/A |
 | Team Activity, estimated | due against an estimated day | "(Thu 22 Oct, meeting day estimated)", never past due | N/A |
@@ -408,7 +410,7 @@ Anchors checked against `origin/main` at `7a097a7`.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] **The words.** `core/commitment_cards.py`: `PageParts` and `page_parts`, `said_due_words`, `TEAM_ROW_STATES` and `TEAM_ROW_PAST_DUE`, `open_order` (moved from `app/commitments.py`, which then calls it), `PLACEHOLDERS`, `is_placeholder`. Tests first: every value of every field, past due, the order equal to 15c's on its matrix rows.
+- [ ] **The words.** `core/commitment_cards.py`: `PageParts` and `page_parts`, `said_due_words`, `TEAM_ROW_STATES`, `TEAM_ROW_PAST_DUE` and `PROJECT_PAGE_PAST_DUE`, `open_order` (moved from `app/commitments.py`, which then calls it), `PLACEHOLDERS`, `is_placeholder`. Tests first: every value of every field, past due, the order equal to 15c's on its matrix rows.
 - [ ] **The fold.** `core/commitment_log.py`: `Details.closed_at`. Tests: a second verdict, a confirming mark, an undone mark, file-order swaps.
 - [ ] **Placeholders.** `core/proposal_cards.py`: `Fill` and `CardAction.fill`, `reopen`; `build_card` and `closed_reason` with the placeholder words; `card_json` and the reject refusal (`app/proposals.py:889-890`) emitting `{command, fill}`. The value check in the commitment desk's inputs and `ProposalDesk.edit`, and in `review`'s questions (`surfaces/cli/dispatch.py`).
 - [ ] **The page values.** `domain/renders.py`: `PageCommitment`, `PageCommitments` (lines, under-issue count and iids, left out per scope, scopes with open ones, closed counts by state and source, notes); `MeetingDigest` gains `commitments`, `open_commitments`, `hidden_waiting_only`; `DigestItem` gains `unrecorded` and `malformed`.
@@ -419,14 +421,14 @@ Anchors checked against `origin/main` at `7a097a7`.
 - [ ] **Tests** (each matrix row, plus):
   - `tests/core/test_commitment_cards.py`: `page_parts`, `open_order`, `fill`, `is_placeholder`;
   - `tests/core/test_rendering_sections.py`, `test_project_rendering.py`: the block, the meeting lines, the notes. **The golden** `tests/core/goldens/dashboard_with_summaries.md` is unchanged: its test passes digests built directly with `approved=True` and no `commitments`, and the render with `commitments=None` is byte-identical. A new golden, `dashboard_with_commitments.md`, records the block, the meeting line and each note;
-  - `tests/core/test_member_updates.py`: rows with a commitment, both Q4 answers;
+  - `tests/core/test_member_updates.py`: rows with a commitment, broken and past due left off;
   - `tests/slice/test_dashboard_slice.py`: page rows, the one-read count (the same fixture asserted at 2 reads against `_item_decisions` as it is on 7a097a7, then 1), the timed render;
   - `tests/slice/test_commitment_commands.py` and `test_proposals.py`: placeholder and proposal card rows;
   - `tests/architecture`: the AD-25 test and the page-words check.
 - [ ] **Tests the change breaks, with the new expectations:**
   - `tests/slice/test_commitment_commands.py:1181` (`test_the_dashboard_leaves_out_closed_commitments`): every recorded approved item is absent from the meeting; the meeting line says "4 commitments from this meeting, 1 open"; the altered one is a block line; the waiting one is still listed;
   - `:1214` (`…fails_open_on_an_unreadable_ledger`): the items listed as approved, as today, and the page carries the note naming the scope and the type name;
-  - `:1222` (`test_team_activity_hides_a_withdrawn_item`): the calls at `:1240` and `:1243` pass the folded ledger (`commitments=CommitmentLog(machine.storage).read(ALPHA)`, and `commitments=None`); `:1241` still asserts `hidden`; `:1242` becomes: `decisions[ids[1]].commitment.row_state == "commitment done on …"`, and `decisions[ids[2]]`'s is the broken words (Q4 B) or `""` on a project page (Q4 A); `:1244` unchanged;
+  - `:1222` (`test_team_activity_hides_a_withdrawn_item`): the calls at `:1240` and `:1243` pass the folded ledger (`commitments=CommitmentLog(machine.storage).read(ALPHA)`, and `commitments=None`); `:1241` still asserts `hidden`; `:1242` becomes: `decisions[ids[1]].commitment.row_state == "commitment done on …"`, and `decisions[ids[2]].commitment.row_state == ""` (broken is not shown on a project page); `:1244` unchanged;
   - `:1336` (`…shows_every_line_when_the_ledger_cannot_be_read`): the stub at `:1351-1352` and the monkeypatch at `:1354` are dropped; the call at `:1355` passes `commitments=None`; `:1356` unchanged;
   - `tests/slice/test_proposals.py:303` (`test_approve_prints_the_approved_card_and_the_dashboard_shows_it`): the page shows the item as a block line and "1 commitment from this meeting, open", not "approved" under the meeting;
   - `tests/slice/test_proposals.py:1285` (`test_the_dashboard_lists_waiting_then_approved_capped_at_five`): the 4 waiting items are listed, no overflow line, and "3 commitments from this meeting, all open";
@@ -456,15 +458,17 @@ Anchors checked against `origin/main` at `7a097a7`.
   - **Bounds:** only the summed `CommitmentLog.read` calls are timed.
   - **Tests and anchors:** the broken tests listed with new expectations; matrix rows added; `_proposal_reader` at `entry.py:1923`, `Details` at `commitment_log.py:625`; AD-25's heading text; the order key's reason.
 
+- **2026-10-27, Andrei's four answers: DECIDED 2026-10-27 (Andrei), frozen block edited (recorded here).** (1) Placement A: the block and the per-meeting count line. (2) Spoken promises A: both pages, withheld on a project page by the confidential rules. (3) Proposal cards A: they show the commitment's state (recommended, not objected to). (4) No broken and no past due on a project page's Team Activity, done and altered only; broken and past due on the personal page only, so the project block omits `, past due` (`PROJECT_PAGE_PAST_DUE = False`) and its closed line the broken count. `TEAM_ROW_STATES = {done, altered}`, `TEAM_ROW_PAST_DUE = False`. Ask First closed; matrix rows updated and two added.
+
 ## Design Notes
 
 **Readiness check (2026-10-26, against `origin/main` at `7a097a7`).** Verdict: **ready; nothing blocks the spec.**
 - **Built as 15d needs:** `CommitmentLog.read` and `read_ledger`; `Details` with `due_by_pm`, `owner_by_pm` and the mark in force; `past_due` and the card's words as pure functions; 15c's order; `IssueNotes`; `resolve_label`; `spoken_numbers`; `proposal_index_at`.
 - **Found:**
   - **There is no separate morning brief.** FR-09 names `daily_dashboard.md` the Morning Briefing; story 23's slices build it.
-  - **The digest is bound to a window** of at most 7 days (`9b`), so commitments kept under their meetings alone would leave the page after a week (Ask First 1).
+  - **The digest is bound to a window** of at most 7 days (`9b`), so commitments kept under their meetings alone would leave the page after a week (decided: 1).
   - **15c reads a project's ledger twice per render.** 15d reads once.
-  - **`7d` deliberately lists no spoken promise** ("so one item found both ways is not shown twice"). Once approved, each is its own commitment (Ask First 2).
+  - **`7d` deliberately lists no spoken promise** ("so one item found both ways is not shown twice"). Once approved, each is its own commitment (decided: 2).
   - **The `"…"` placeholders are in four places,** not the two the deferral names: the card's `altered`, `due` and `owner` actions (`commitment_cards.py:448`, `:465`), `closed_reason`'s reopen command (`:416`), and the reject refusal (`proposals.py:889-890`). 13a's own `edit` action fills in the current values and has none.
   - **`_item_decisions` returns before the withdrawn hiding** when the proposal read fails (`pipelines.py:3181-3182`), so a withdrawn row shows then. 15d joins the ledger first.
   - **A not-enrolled project's commitments cannot be named with a command:** 15c refuses `commitment list --scope` for it. The note names the project only.
@@ -479,6 +483,12 @@ Anchors checked against `origin/main` at `7a097a7`.
 
 **Why placeholders are refused as values.** The `fill` list lets a wrapper do it right; refusing the words makes a wrapper that does it wrong write nothing instead of "<note>" in an append-only ledger, where it cannot be removed.
 
+**Decided (Andrei, 2026-10-27).** The Ask First is closed:
+1. **Placement: A.** One block of open commitments, from the ledgers, whatever the meeting's age, and a count line under each meeting; waiting items stay. Rejected: B, in place under each meeting only (window-bound), and C, both (each commitment twice).
+2. **Spoken promises: A.** Both pages list them; a project page withholds the text on a confidential issue. Rejected: personal page only, or neither.
+3. **Proposal cards: A.** `proposal show` and `list` of an approved item show the commitment's state and its `commitment show` command (recommended; Andrei did not object).
+4. **Team Activity on a project page:** no broken and no past due; done and altered only. Broken and past due appear on the personal page only, so the project page's block and closed line leave them out too.
+
 **Accepted limits:**
 - A commitment shows as of the render; a mark after it shows at the next render.
 - Only `#N`, `issue N`, `issue №N` and `задача N` are read as issue numbers (above).
@@ -489,7 +499,7 @@ Anchors checked against `origin/main` at `7a097a7`.
 
 *PRD (`prd.md`), through bmad-prd (v0.16.2 → v0.16.3):*
 - **FR-09 consequence** (`:428`): replace "followed by the meeting summaries recorded since the previous render with their open action items (2026-10-16)." with "followed by the open commitments of the page's scopes, soonest due first, a date shown as past only when the commitment is open and its date is not estimated (15c's rule) (2026-10-26, 15d), then the meeting summaries recorded since the previous render with the action items waiting for review and a count of each meeting's commitments (2026-10-16, 2026-10-26)."
-- **Decisions Log** (`:966`): after the "> * **2026-10-25 (Story 15c \- v0.16.2):**" entry, add "> * **2026-10-26 (Story 15d \- v0.16.3):** *Commitments on the pages (2026-10-26, Andrei; FR-09, FR-34):* each page lists its open commitments, read from the ledgers whatever the meeting's age, soonest due first, at most 10, with the commands to see and mark them and no id; an approved item leaves its meeting's list for that block, and waiting items stay proposals; Team Activity and the proposal cards show the commitment's owner, due and state; the state's source, the PM or telemetry, is always named; a project page shows a person only when resolved to a member, shows no more about a confidential issue than Team Activity does, and never reads the personal ledger; commands a wrapper fills carry placeholder words it can recognise, and the CLI refuses them as values."
+- **Decisions Log** (`:966`): after the "> * **2026-10-25 (Story 15c \- v0.16.2):**" entry, add "> * **2026-10-26 (Story 15d \- v0.16.3):** *Commitments on the pages (2026-10-26, Andrei; FR-09, FR-34):* each page lists its open commitments, read from the ledgers whatever the meeting's age, soonest due first, at most 10, with the commands to see and mark them and no id; an approved item leaves its meeting's list for that block, and waiting items stay proposals; Team Activity and the proposal cards show the commitment's owner, due and state; the state's source, the PM or telemetry, is always named; a project page shows a person only when resolved to a member, shows no more about a confidential issue than Team Activity does, shows broken and past due on the personal page only (2026-10-27, Andrei), and never reads the personal ledger; commands a wrapper fills carry placeholder words it can recognise, and the CLI refuses them as values."
 
 *SPEC companions, re-derived by bmad-spec:*
 - **`derivation-services.md:127`:** in the `CommitmentLog` row's users, replace "the dashboard digest and Team Activity (read, `15c`)" with "the dashboard digest and Team Activity (read, `15c`), each page's block of open commitments and the proposal cards (read, `15d`)".
@@ -498,24 +508,7 @@ Anchors checked against `origin/main` at `7a097a7`.
 
 *Spine (`ARCHITECTURE-SPINE.md`), through the architecture skill:*
 - **AD-25 heading** (`:405`): the revision bracket `[revised 2026-09-23]` becomes `[revised 2026-09-23, 2026-10-26]`, still in backticks, so the line reads: ``### AD-25 — Personal analytics are physically separated from project scope `[revised 2026-09-23, 2026-10-26]` ``.
-- **AD-25** (`:417`): after "and it never reads personal-scope or `people`-scope data.", add "`[2026-10-26, 15d]` A project page may list the project's open commitments, ordered by due and never grouped, counted or ranked by member, from that project's ledger only, and shows no more about a confidential issue than its Team Activity row does."
-
-## Ask First
-
-1. **Where commitments go on the page.** *Recommended: A.*
-   - **A.** A block of open commitments in Time-Critical Activities, from the ledgers, whatever the meeting's age; under each meeting, approved items give way to one count line. Waiting items stay. (This spec.)
-   - **B.** In place under each meeting only: each approved item's line shows its state, owner and due. No block. A commitment leaves the page when its meeting leaves the 7-day window.
-   - **C.** Both: the block, and each approved item kept under its meeting with its state. Each commitment shows twice.
-2. **Spoken promises on the pages.** *Recommended: A.*
-   - **A.** Both pages list approved promises in the block; a project page withholds them by the confidential rules. (This spec.)
-   - **B.** The personal page only; a project page lists action items only.
-   - **C.** Neither page, as `7d`: action items only.
-3. **Proposal cards in 15d.** *Recommended: A.*
-   - **A.** `proposal show` and `list` of an approved item carry the commitment's state and its `commitment show` command, as 15a promised. (This spec.)
-   - **B.** Leave the proposal cards as they are.
-4. **Broken and past due in a project page's Team Activity.** Rows there are grouped by member, so "broken" or "past due" on a row reads as a per-person failure record (AD-25). *Recommended (coordinating session): A.*
-   - **A.** On a project page, rows show done and altered only; broken and past due are left off the rows. The block, ordered by due, still says past due. (`TEAM_ROW_STATES = {done, altered}`, `TEAM_ROW_PAST_DUE = False`.)
-   - **B.** Rows show every state and past due.
+- **AD-25** (`:417`): after "and it never reads personal-scope or `people`-scope data.", add "`[2026-10-26, 15d]` A project page may list the project's open commitments, ordered by due and never grouped, counted or ranked by member, from that project's ledger only, shows no more about a confidential issue than its Team Activity row does, and shows no broken or past-due mark `[2026-10-27, Andrei, 15d]`."
 
 ## Verification
 
