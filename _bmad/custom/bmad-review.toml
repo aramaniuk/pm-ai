@@ -1,0 +1,17 @@
+# pm-ai team overrides for bmad-review: two project lenses.
+# Lens files are plain markdown so any executor (Claude Code, Antigravity) can
+# load them. See .agents/WORKFLOW.md §2.
+
+[[workflow.lenses]]
+code = "architecture"
+name = "Architecture (pm-ai)"
+applies_to = "any"
+when = "pm-ai slice specs and diffs that touch modules, ports, storage, egress, scopes, processes or scheduling."
+instruction = "Load `{project-root}/_bmad/custom/lenses/architecture.md` and follow it."
+
+[[workflow.lenses]]
+code = "privacy-scope"
+name = "Privacy & Scope (pm-ai)"
+applies_to = "any"
+when = "pm-ai slice specs and diffs that touch stored data, scopes, model calls, connectors, tokens, fixtures or PR text."
+instruction = "Load `{project-root}/_bmad/custom/lenses/privacy-scope.md` and follow it."
