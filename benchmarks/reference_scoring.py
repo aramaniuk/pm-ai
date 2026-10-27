@@ -438,10 +438,11 @@ MEASURED = ("wall_s", "prompt_tokens", "output_tokens")
 
 def measured_sum(repeats: Sequence[Mapping[str, Any]], key: str) -> float | None:
     """The sum over summaries that measured it; `None` when any did not (an exception)."""
-    values = [r.get(key) for r in repeats]
-    if not values or any(v is None for v in values):
+    values: list[float | None] = [r.get(key) for r in repeats]
+    measured = [v for v in values if v is not None]
+    if not values or len(measured) != len(values):
         return None
-    return round(sum(values), 1)
+    return round(sum(measured), 1)
 
 
 def totals(meetings: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
