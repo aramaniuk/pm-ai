@@ -143,6 +143,7 @@ _PM_AI_KEYCHAIN = re.compile(r"(?:^|\s)(?:\S*/)?pm-ai\s+(?:setup|key\s+enrol)\b"
 def check_command(command: str, cwd: Path, home: Path | None = None) -> None:
     """Bash: keychain commands, the real home, skipped gates, pushes to main."""
     home_path = (home or Path.home()).resolve()
+    read_refusal: str | None = None  # computed once, on the first segment naming the home
     for segment in _SEGMENT_SPLIT.split(_without_heredoc_bodies(command)):
         seg = segment.strip()
         if not seg:
@@ -150,13 +151,16 @@ def check_command(command: str, cwd: Path, home: Path | None = None) -> None:
         if _PM_AI_KEYCHAIN.search(seg):
             raise Refused("`pm-ai setup` and `pm-ai key enrol` write the login keychain; only Andrei runs them")
         sets_home = re.search(r"(?:^|\s)HOME=", seg) is not None
-        for name in PRIVATE_HOMES:
-            forms = [f"{home_path}/{name}", f"~/{name}"]
-            if not sets_home:
-                forms += [f"$HOME/{name}", f"${{HOME}}/{name}"]
-            hit = next((f for f in forms if re.search(re.escape(f) + r"(?![\w.-])", seg)), None)
-            if hit:
-                raise Refused(f"{hit} is the PM's real pm-ai home; use a throwaway HOME")
+        hit = _home_hit(seg, home_path, with_var=not sets_home)
+        if hit:
+            if read_refusal is None:
+                read_refusal = _home_read_refusal(command, home_path) or ""
+            if read_refusal:
+                raise Refused(
+                    f"{hit} is the PM's real pm-ai home; {read_refusal}. Only reads go there "
+                    "(ls, cat, head, tail, wc, stat, file, du, grep, find, and cp/rsync out to an absolute "
+                    "path outside the home and outside any git checkout); for anything else use a throwaway HOME"
+                )
         if "--no-verify" in seg:
             raise Refused("--no-verify skips a gate; if a hook blocks, stop and report")
         try:
@@ -183,6 +187,146 @@ def _without_heredoc_bodies(command: str) -> str:
         out.append(line)
         ends.extend(m.group(2) for m in _HEREDOC.finditer(line))
     return "\n".join(out)
+
+
+# --- reading the real home ----------------------------------------------------------
+#
+# Andrei's transcripts live in the real home; the orchestrator copies them out to
+# a private folder for the reference sets. A command may name the home only when
+# every stage that names it is a read and every copy lands outside the home and
+# outside any git checkout (the repo is public). Anything the rule cannot read
+# with certainty is refused.
+
+_READERS = frozenset({"ls", "cat", "head", "tail", "wc", "stat", "file", "du", "grep", "find", "cp", "rsync"})
+_FILTERS = frozenset({"head", "tail", "wc", "grep", "cut"})  # what a home read may pipe into
+_LIST_OPS = frozenset({";", "&&", "||", "&"})
+_FIND_WRITES = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"})
+_CP_FLAGS = re.compile(r"-[aRrpPLHfinvX]+")
+_RSYNC_FLAGS = re.compile(r"-[avrlptgoDhPnicuLH]+")
+_RSYNC_LONG = frozenset(
+    {"--archive", "--recursive", "--verbose", "--progress", "--dry-run", "--times", "--perms",
+     "--human-readable", "--itemize-changes", "--checksum", "--update", "--links", "--copy-links"}
+)  # fmt: skip
+_UNSAFE_DEST = re.compile(r"[$`*?\[\]{}]")
+
+
+def _home_hit(text: str, home_path: Path, with_var: bool = True) -> str | None:
+    for name in PRIVATE_HOMES:
+        forms = [f"{home_path}/{name}", f"~/{name}"]
+        if with_var:
+            forms += [f"$HOME/{name}", f"${{HOME}}/{name}"]
+        hit = next((f for f in forms if re.search(re.escape(f) + r"(?![\w.-])", text)), None)
+        if hit:
+            return hit
+    return None
+
+
+def _is_op(token: str) -> bool:
+    return bool(token) and all(c in "();<>|&" for c in token)
+
+
+def _split_on(tokens: list[str], ops: frozenset[str]) -> list[list[str]]:
+    parts: list[list[str]] = [[]]
+    for t in tokens:
+        if t in ops:
+            parts.append([])
+        else:
+            parts[-1].append(t)
+    return parts
+
+
+def _home_read_refusal(command: str, home_path: Path) -> str | None:
+    """Why `command` is not a plain read of the real home, or None when it is."""
+    if re.search(r"<<|\$\(|`|<\(|>\(", command):
+        return "heredocs and command or process substitution are not plain reads"
+    if re.search(r"\bHOME=", command):
+        return "the command changes HOME"
+    saw_home = False
+    for line in command.replace("\\\n", " ").split("\n"):
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            return "the command does not parse"
+        for pipeline in _split_on(tokens, _LIST_OPS):
+            stages = _split_on(pipeline, frozenset({"|"}))
+            named = [any(_home_hit(t, home_path) for t in s) for s in stages]
+            if not any(named):
+                continue
+            saw_home = True
+            for stage, names_home in zip(stages, named, strict=True):
+                reason = _stage_refusal(stage, names_home, home_path)
+                if reason:
+                    return reason
+    return None if saw_home else "the guard cannot tell how the command uses it"
+
+
+def _stage_refusal(tokens: list[str], names_home: bool, home_path: Path) -> str | None:
+    args: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t.isdigit() and i + 1 < len(tokens) and tokens[i + 1][:1] in "<>":
+            i += 1  # the fd number of a redirection, `2>`
+            continue
+        if _is_op(t):
+            target = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if not target or _is_op(target):
+                return f"`{t}` is not a plain read"
+            if t in (">", ">>", "&>", "&>>") and target != "/dev/null":
+                return "it redirects output to a file"
+            if t == ">&" and not target.isdigit():
+                return "it redirects output to a file"
+            if t not in ("<", ">", ">>", "&>", "&>>", ">&"):
+                return f"`{t}` is not a plain read"
+            i += 2
+            continue
+        args.append(t)
+        i += 1
+    if not args or "=" in args[0]:
+        return "it sets a variable" if args else "it has no command"
+    prog, rest = args[0], args[1:]
+    allowed = _READERS if names_home else _FILTERS
+    if prog not in allowed:
+        return f"`{prog}` is not a read command" if names_home else f"`{prog}` is not a plain filter after a home read"
+    if prog == "find" and _FIND_WRITES.intersection(rest):
+        return "find with -delete, -exec, -ok or -fprint is not a read"
+    if prog == "file" and any(a == "-C" or a.startswith("--compile") for a in rest):
+        return "`file -C` writes a file"
+    if prog in ("cp", "rsync"):
+        return _copy_refusal(prog, rest, home_path)
+    return None
+
+
+def _copy_refusal(prog: str, args: list[str], home_path: Path) -> str | None:
+    operands: list[str] = []
+    options_end = False
+    for a in args:
+        if options_end or not a.startswith("-") or a == "-":
+            operands.append(a)
+        elif a == "--":
+            options_end = True
+        elif not (_CP_FLAGS.fullmatch(a) if prog == "cp" else (_RSYNC_FLAGS.fullmatch(a) or a in _RSYNC_LONG)):
+            return f"`{prog} {a}` is not on the read-only option list"
+    if len(operands) < 2:
+        return f"`{prog}` needs a source and a destination"
+    if prog == "rsync" and any(":" in op for op in operands):
+        return "rsync to or from a remote host is not a local copy"
+    dest = operands[-1]
+    if dest == "~" or dest.startswith("~/"):
+        dest = str(home_path) + dest[1:]
+    if _UNSAFE_DEST.search(dest):
+        return "the copy destination has variables or patterns in it"
+    if not dest.startswith("/"):
+        return "the copy destination is not an absolute path"
+    target = Path(dest).resolve()
+    for private in real_home_dirs(home_path):
+        if target == private or private in target.parents:
+            return "the copy writes into the home"
+    if repo_of(target) is not None:
+        return "the copy destination is inside a git checkout, and the repo is public"
+    return None
 
 
 def _check_git(tokens: list[str], cwd: Path) -> None:

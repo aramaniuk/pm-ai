@@ -102,7 +102,7 @@ UNVERIFIED: <anything not run, or "none">
 3. **Guards**: `scripts/guards/guards.py` (standard library only; tests in `tests/tooling/`), wired as Claude Code hooks in `.claude/settings.json` (PreToolUse on Edit/Write/Bash, Stop) and as git hooks in `scripts/git-hooks/` (pre-commit: grant + leak check on staged lines; pre-push: no push to main, no non-fast-forward):
    - `grant` — refuses edits outside a granted worktree (`~/.claude/orchestrator/pm-ai/grants.json`, shape `{"<worktree folder>": {"slice": "16a", "branch": "claude/feat-16a-…", "granted": "YYYY-MM-DD"}}`); the main checkout is granted only for docs and planning work.
    - `derived` — refuses hand-edits to `SPEC.md`, its companions and `.memlog.md`.
-   - `home` — refuses `pm-ai setup`, `pm-ai key enrol`, and writes under `~/.pm-ai` / `~/.manager-ai`.
+   - `home` — refuses `pm-ai setup`, `pm-ai key enrol`, and any use of `~/.pm-ai` / `~/.manager-ai` but a plain read (`ls`, `cat`, `head`, `tail`, `wc`, `stat`, `file`, `du`, `grep`, `find` without `-exec`/`-delete`, piped only into `head`/`tail`/`wc`/`grep`/`cut`) or a `cp`/`rsync` out to an absolute path outside the home and outside any git checkout, so transcripts can be copied to a private folder.
    - `gate` — refuses `--no-verify`, force-push, pushes to `main`.
    - `quick-check` (end of a builder turn) — `lint-imports` present + mypy on touched packages; the full 7-minute suite stays a deliberate background step.
 4. **Orchestrator ledger** files under `~/.claude/orchestrator/pm-ai/`.
