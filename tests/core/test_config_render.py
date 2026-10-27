@@ -51,6 +51,7 @@ SET_VALUES: dict[str, object] = {
     "display_timezone": "Europe/Warsaw",
     "daemon_port": 9000,
     "local_model": "qwen3:8b",
+    "local_model_window": 16384,
 }
 
 KEYS = tuple(field.name for field in fields(Config))
@@ -610,3 +611,16 @@ def test_a_set_port_is_written_as_a_whole_number_and_reads_back_equal():
 
 def test_a_port_at_its_default_is_omitted():
     assert "daemon_port" not in render_config(Config(daemon_port=8747)).decode("utf-8")
+
+
+# ── Story 7g: the window renders as a whole number, and not at all by default ─
+
+
+def test_the_window_is_omitted_at_its_default_and_whole_when_lowered():
+    assert "local_model_window" not in _rendered_keys(Config())
+    rendered = render_config(Config(local_model_window=16384)).decode("utf-8")
+    assert "local_model_window = 16384\n" in rendered
+    assert "16384.0" not in rendered
+    assert load_config(render_config(Config(local_model_window=16384))) == Config(
+        local_model_window=16384
+    )

@@ -1224,7 +1224,8 @@ class ModelPort(Protocol):
     the frontier-eligible ones to the frontier adapter. The refusals
     a caller must catch about the port's transport are declared below, beside
     it (AD-49): `LocalModelUnavailable` (and `RemoteModelRefused`, one kind of
-    it), `NoLocalModel`, `PossiblyTruncated`, `OutputCapReached`, `ModelTimedOut`,
+    it), `NoLocalModel`, `PossiblyTruncated` (and `WindowReached`, one kind of it),
+    `OutputCapReached`, `ModelTimedOut`,
     and on the frontier side `FrontierRefused` and its kinds. `ScopeFlowRefused`
     is about the flow table, a rule `domain` owns, and lives beside it.
     """
@@ -1279,6 +1280,16 @@ class PossiblyTruncated(RuntimeError):
     server stopped for a reason other than `stop`, a token count is missing,
     or the server refused a prompt longer than the window. Names the counts or
     the field.
+    """
+
+
+class WindowReached(PossiblyTruncated):
+    """The prompt did not fit the local model's window, so nothing usable came back (story 7g).
+
+    The two cases where size is the cause: the server refused a prompt longer
+    than the window, or the prompt and answer together reached it. A kind of
+    `PossiblyTruncated`, so every handler of the one catches this; told apart
+    so the caller can name the `local_model_window` setting. Names the window.
     """
 
 
@@ -1428,6 +1439,9 @@ class ConfigPort(Protocol):
 
     @property
     def local_model(self) -> str: ...
+
+    @property
+    def local_model_window(self) -> int: ...
 
 
 class DaemonRefused(RuntimeError):

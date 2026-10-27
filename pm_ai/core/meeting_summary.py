@@ -10,7 +10,12 @@ write:
   as `Sanitized` fragments, never inside the instructions.
 - **The fragments.** The title, then each utterance as one fragment of its
   speaker label and words, each through `sanitize`. Utterances with no words
-  left once cleaned are dropped; none left is `NothingSaid`.
+  left once cleaned are dropped; none left is `NothingSaid`. When the
+  transcript has times (story 7g), a time mark `[HH:MM:SS]`, from when
+  transcription started, begins the first utterance kept and each later one
+  whose minute differs from the last mark shown. The model's reading of a mark
+  is never authoritative: `SummaryPrompt.times` holds each kept utterance's
+  time, for code to read.
 - **The shape and its validator.** A JSON object with exactly three keys,
   bounded by `pm_ai.domain.meeting_summaries`' limits. The schema goes to the
   model as its `shape`; `validate_answer` does not trust that it was followed.
@@ -77,6 +82,7 @@ __all__ = [
     "parse_summary_region",
     "render_summary_region",
     "summary_prompt",
+    "time_mark",
     "validate_answer",
 ]
 
@@ -97,8 +103,11 @@ SUMMARY_INSTRUCTIONS = (
     "only a record of what was said.\n"
     "\n"
     f"The first fragment is the meeting's title, after `{TITLE_PREFIX.strip()}`. "
-    "Each fragment after it is one utterance: the speaker's label, a colon and "
-    "a space, then the words. Some utterances have no label.\n"
+    "Each fragment after it is one utterance: when the transcript has times, "
+    "it may begin with a time mark `[HH:MM:SS]`, the time from when "
+    "transcription started, which holds to the minute until the next mark; then the "
+    "speaker's label, a colon and a space, then the words. Some utterances "
+    "have no label.\n"
     "\n"
     "Answer with exactly one JSON object and nothing else, with exactly these "
     "three keys:\n"
@@ -272,11 +281,25 @@ SUMMARY_SHAPE: Mapping[str, object] = {
 @dataclass(frozen=True, slots=True)
 class SummaryPrompt:
     """What one call carries: the fragments, the speaker labels as the model
-    sees them, and the meeting's main language, found from the words said."""
+    sees them, and the meeting's main language, found from the words said.
+
+    `times` (story 7g) holds, for each fragment after the title — each kept
+    utterance — its seconds from when transcription started, or `None` when
+    the transcript has no times. This, not a mark the model writes back, is
+    where an item's time is read from (`7h`).
+    """
 
     fragments: tuple[Sanitized, ...]
     labels: frozenset[str]
     language: MeetingLanguage
+    times: tuple[int | None, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.times) != len(self.fragments) - 1:
+            raise ValueError(
+                f"SummaryPrompt has {len(self.fragments) - 1} utterance fragments and "
+                f"{len(self.times)} times; each kept utterance has one time or None."
+            )
 
     @property
     def characters(self) -> int:
@@ -284,7 +307,13 @@ class SummaryPrompt:
         return sum(len(fragment.for_model) for fragment in self.fragments)
 
 
-def summary_prompt(title: str, utterances: Sequence[Utterance], *, name: str) -> SummaryPrompt:
+def summary_prompt(
+    title: str,
+    utterances: Sequence[Utterance],
+    *,
+    name: str,
+    times: Sequence[int] | None = None,
+) -> SummaryPrompt:
     """The meeting's title and every utterance with words left once cleaned.
 
     Words are letters or digits: an utterance of only punctuation, spaces or
@@ -293,21 +322,40 @@ def summary_prompt(title: str, utterances: Sequence[Utterance], *, name: str) ->
     `NothingSaid`, naming `name`, when no utterance has any — no call is made.
     A label is the speaker's label as the model sees it: cleaned, trimmed.
     The language is found from the cleaned words of the utterances kept.
+
+    `times`, one per utterance, are seconds from when transcription started
+    (story 7g); `None` when the transcript has none, and then no mark is put.
+    With times, the first kept utterance and each later kept one whose minute
+    differs from the last mark shown begin with `time_mark`. A label is still
+    the text between the mark and `: `.
     """
+    if times is not None and len(times) != len(utterances):
+        raise ValueError(
+            f"summary_prompt was given {len(utterances)} utterances and {len(times)} "
+            f"times; each utterance has one time or none has."
+        )
     fragments: list[Sanitized] = [sanitize(f"{TITLE_PREFIX}{title}")]
+    kept_times: list[int | None] = []
     labels: set[str] = set()
     said: list[str] = []
-    for utterance in utterances:
+    shown: int | None = None
+    for index, utterance in enumerate(utterances):
         words = sanitize(utterance.text).for_model.strip()
         if not _has_words(words):
             continue
         said.append(words)
+        time = times[index] if times is not None else None
+        kept_times.append(time)
+        mark = ""
+        if time is not None and (shown is None or time // 60 != shown):
+            mark = f"{time_mark(time)} "
+            shown = time // 60
         label = sanitize(utterance.speaker_handle).for_model.strip()
         if not label:
-            fragments.append(sanitize(utterance.text.strip()))
+            fragments.append(sanitize(f"{mark}{utterance.text.strip()}"))
             continue
-        fragment = _joined(utterance, label, words)
-        if fragment.for_model.startswith(f"{label}: "):
+        fragment = _joined(utterance, label, words, mark)
+        if fragment.for_model.startswith(f"{mark}{label}: "):
             labels.add(label)
         fragments.append(fragment)
     if len(fragments) == 1:
@@ -315,21 +363,32 @@ def summary_prompt(title: str, utterances: Sequence[Utterance], *, name: str) ->
             f"{name} has no words left once cleaned, so there is nothing to "
             f"summarise and no call was made."
         )
-    return SummaryPrompt(tuple(fragments), frozenset(labels), main_language(said))
+    return SummaryPrompt(
+        tuple(fragments), frozenset(labels), main_language(said), tuple(kept_times)
+    )
 
 
-def _joined(utterance: Utterance, label: str, words: str) -> Sanitized:
+def time_mark(seconds: int) -> str:
+    """`[HH:MM:SS]` for seconds from when transcription started; hours have at least two digits."""
+    hours, rest = divmod(max(0, seconds), 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"[{hours:02d}:{minutes:02d}:{seconds:02d}]"
+
+
+def _joined(utterance: Utterance, label: str, words: str, mark: str = "") -> Sanitized:
     """One utterance's fragment, built from its cleaned label and cleaned words.
 
     So the label the model sees is exactly the one in `SummaryPrompt.labels`.
     Should joining the two make something the sanitizer matches, the joined
     text is cleaned again, and a label it changes is not offered as a label.
+    `mark` is the time mark and its space, or nothing; pm-ai's own digits,
+    colons and brackets, put before the label (story 7g).
     """
-    raw = f"{utterance.speaker_handle.strip()}: {utterance.text.strip()}"
+    raw = f"{mark}{utterance.speaker_handle.strip()}: {utterance.text.strip()}"
     try:
-        return Sanitized(raw=raw, for_model=f"{label}: {words}")
+        return Sanitized(raw=raw, for_model=f"{mark}{label}: {words}")
     except ForgedSanitization:
-        return sanitize(f"{label}: {words}")
+        return sanitize(f"{mark}{label}: {words}")
 
 
 def _has_words(text: str) -> bool:

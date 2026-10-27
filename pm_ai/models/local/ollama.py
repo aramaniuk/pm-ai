@@ -30,14 +30,16 @@ and refuses by name a model whose answer names either, or whose tag is a cloud
 tag; the chat answer's own fields are checked again as a backstop.
 
 **Every request asks the same way:** `keep_alive: 0`, temperature 0, the fixed
-`SEED`, the window `NUM_CTX`, the output cap `NUM_PREDICT`, `truncate: false` (measured at build on Ollama
+`SEED`, the instance's `window` (`config.toml`'s `local_model_window`, story
+7g), the output cap `NUM_PREDICT`, `truncate: false` (measured at build on Ollama
 0.40.6: without it an over-long prompt is shortened silently to fit and the
 answer's counts stay below the window, so the count check below cannot see
 it; with it the server refuses the prompt with a 400), and `think: false` only
 for a model whose `/api/show` lists thinking among its capabilities. An answer
-is refused (`PossiblyTruncated`) when a token count is missing, when
-`done_reason` is not `stop`, or when its prompt and output tokens together
-reach the window; one that stops at the output cap is refused as
+is refused (`PossiblyTruncated`) when a token count is missing or when
+`done_reason` is not `stop`, and as `WindowReached` (a kind of it) when its
+prompt and output tokens together reach the window or the server refuses the
+prompt as too long for it; one that stops at the output cap is refused as
 `OutputCapReached`, with a warning in the log naming the model, the cap and
 the task class — never the text.
 
@@ -63,7 +65,9 @@ import httpx
 
 from pm_ai.domain.health import Health, Probe
 from pm_ai.domain.model_calls import (
+    DEFAULT_LOCAL_MODEL_WINDOW,
     LOCAL_MODEL_PROBE,
+    LOCAL_MODEL_WINDOWS,
     SERVER_LIMITS,
     START_OLLAMA,
     LocalModelPresence,
@@ -82,6 +86,7 @@ from pm_ai.ports import (
     OutputCapReached,
     PossiblyTruncated,
     RemoteModelRefused,
+    WindowReached,
 )
 
 __all__ = [
@@ -90,7 +95,6 @@ __all__ = [
     "CONNECT_TIMEOUT_SECONDS",
     "LOCAL_ONLY_CLASSES",
     "MODEL_CALL_DEADLINE_SECONDS",
-    "NUM_CTX",
     "NUM_PREDICT",
     "PRESENCE_TIMEOUT_SECONDS",
     "SEED",
@@ -104,14 +108,6 @@ ADDRESS = "127.0.0.1:11434"
 BASE_URL = f"http://{ADDRESS}"
 """The only address this adapter can reach. A constant, never a setting."""
 
-NUM_CTX = 16384
-"""The context window every request asks for (Andrei, 2026-10-19): a whole meeting in one call.
-
-The real-length recording measured 8,619 prompt tokens on `qwen3:8b`, which
-does not fit 8,192; 16,384 is the smallest power of two holding it and an
-answer. Ollama's runner peaked at 7.1–7.5 GB at this window (M3 Pro, 18 GB).
-"""
-
 NUM_PREDICT = 4096
 """The output cap every request sends (`num_predict`); raised from 2,048 by `7b`.
 
@@ -122,8 +118,17 @@ tokens. The shape's limits do not guarantee the largest valid answer fits
 (Andrei, 2026-10-20): an answer that reaches the cap is refused as
 `OutputCapReached`, asked for once more, then refused. An answer that does not end
 still stops here rather than holding the model pool's one slot to the
-deadline. The real-length recording's 8,619 prompt tokens plus the cap fit
-`NUM_CTX`, leaving 12,288 tokens for a prompt.
+deadline. With the cap, a prompt has 28,672 tokens at a window of 32,768 and
+12,288 at 16,384.
+
+The window itself is a setting (`local_model_window`, story 7g), passed to the
+adapter by the composition root. 16,384 was the window from `7a` (the
+real-length recording measured 8,619 prompt tokens on `qwen3:8b`); at the first
+end-to-end test 3 of 7 hour-long meetings did not fit it. Measured 2026-10-27
+on an 18 GB M3 Pro with `qwen3:8b` and a fictional transcript: at 32,768
+Ollama peaked at 9.4–9.7 GB (7.0 GB at 16,384), an 18,000-token prompt took
+116 s and a 27,000-token one 182 s against the 300-second deadline, and memory
+pressure reached warning.
 """
 
 _log = logging.getLogger(__name__)
@@ -359,13 +364,16 @@ class OllamaModel:
     Constructing it opens nothing: the client is built on the first request,
     so a short command that composes a daemon pays nothing for it. `close` —
     which the daemon's model pool calls at shutdown, running job or not —
-    breaks any connection in flight and refuses every later call.
+    breaks any connection in flight and refuses every later call. `window` is
+    the context window every request asks for and every size check compares
+    against: one of `LOCAL_MODEL_WINDOWS`, anything else refused.
     """
 
     def __init__(
         self,
         model: str,
         *,
+        window: int = DEFAULT_LOCAL_MODEL_WINDOW,
         deadline_seconds: float = MODEL_CALL_DEADLINE_SECONDS,
         transport: httpx.BaseTransport | None = None,
         backend: LoopbackBackend | None = None,
@@ -374,9 +382,19 @@ class OllamaModel:
         name = normalize_model_name(model)
         if not name:
             raise ValueError("OllamaModel needs a model name; an unset local_model wires none.")
+        if (
+            isinstance(window, bool)
+            or not isinstance(window, int)
+            or window not in LOCAL_MODEL_WINDOWS
+        ):
+            raise ValueError(
+                f"the local model's window is {LOCAL_MODEL_WINDOWS[0]} or "
+                f"{LOCAL_MODEL_WINDOWS[1]} tokens, not {window!r}."
+            )
         if deadline_seconds <= 0:
             raise ValueError(f"a deadline is a positive number of seconds, not {deadline_seconds!r}.")
         self._name = name
+        self._window = int(window)
         self._deadline = float(deadline_seconds)
         self._clock = clock
         self._backend = backend if backend is not None else LoopbackBackend()
@@ -389,6 +407,11 @@ class OllamaModel:
     def name(self) -> str:
         """The model's name, as compared: a name without a tag is `:latest`."""
         return self._name
+
+    @property
+    def window(self) -> int:
+        """The context window every request sends as `num_ctx` (story 7g)."""
+        return self._window
 
     @property
     def deadline_seconds(self) -> float:
@@ -460,7 +483,7 @@ class OllamaModel:
             "options": {
                 "temperature": 0,
                 "seed": SEED,
-                "num_ctx": NUM_CTX,
+                "num_ctx": self._window,
                 "num_predict": NUM_PREDICT,
             },
             "messages": [
@@ -562,8 +585,8 @@ class OllamaModel:
                 f"({_error_text(response)}). {_pull(self._name)}"
             )
         if status == 400 and CONTEXT_REFUSAL in _error_text(response).lower():
-            raise PossiblyTruncated(
-                f"the prompt does not fit {self._name}'s {NUM_CTX}-token window, and "
+            raise WindowReached(
+                f"the prompt does not fit {self._name}'s {self._window}-token window, and "
                 f"the server refused it rather than shorten it: {_error_text(response)}"
             )
         if status != 200:
@@ -598,13 +621,13 @@ class OllamaModel:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise PossiblyTruncated(
                     f"{self._name}'s answer carries no usable {field} ({value!r}), so "
-                    f"whether it reached the {NUM_CTX}-token window cannot be told; "
+                    f"whether it reached the {self._window}-token window cannot be told; "
                     f"discarded."
                 )
             counts[field] = value
         reason = body.get("done_reason")
         prompt, output = counts["prompt_eval_count"], counts["eval_count"]
-        if reason == "length" and output >= NUM_PREDICT and prompt + output < NUM_CTX:
+        if reason == "length" and output >= NUM_PREDICT and prompt + output < self._window:
             _log.warning(
                 "the local model %s reached its output cap of %d tokens (task "
                 "class %s); the answer was discarded",
@@ -617,16 +640,18 @@ class OllamaModel:
                 f"class {task_class.value}), so the answer may be cut short or never "
                 f"ended; discarded."
             )
+        # The window before the stop reason: an answer that reaches the window
+        # is a size refusal whatever reason the server gave (`length`, usually).
+        if prompt + output >= self._window:
+            raise WindowReached(
+                f"{self._name}'s prompt ({prompt} tokens) and answer ({output} tokens) "
+                f"together reach the {self._window}-token window, so either may be cut "
+                f"short; discarded."
+            )
         if reason != "stop":
             raise PossiblyTruncated(
                 f"{self._name} stopped for {reason!r}, not 'stop', so the answer may be "
                 f"cut short; discarded."
-            )
-        if prompt + output >= NUM_CTX:
-            raise PossiblyTruncated(
-                f"{self._name}'s prompt ({prompt} tokens) and answer ({output} tokens) "
-                f"together reach the {NUM_CTX}-token window, so either may be cut "
-                f"short; discarded."
             )
         message = body.get("message")
         text = message.get("content") if isinstance(message, dict) else None
@@ -674,6 +699,7 @@ def _warning(
 def local_model_presence(
     model: str,
     *,
+    window: int = DEFAULT_LOCAL_MODEL_WINDOW,
     transport: httpx.BaseTransport | None = None,
     timeout: float = PRESENCE_TIMEOUT_SECONDS,
 ) -> LocalModelPresence:
@@ -687,9 +713,14 @@ def local_model_presence(
     error, late or malformed (naming what came back), the model not pulled, a
     model that cannot complete, or one that runs elsewhere — each with its
     remedy. Never raises; carries no prompt text.
+
+    The ready line names `window`, the window the daemon's adapter uses (story
+    7g), and that a changed `local_model_window` takes effect at the next
+    daemon start; at 32,768 its advice says how to lower it. pm-ai does not
+    read the machine's memory, so the advice is the same on every machine.
     """
     try:
-        return _presence(model, transport=transport, timeout=timeout)
+        return _presence(model, window=window, transport=transport, timeout=timeout)
     except Exception as unexpected:  # noqa: BLE001 — a probe reports, never raises
         return _warning(
             f"the presence check failed unexpectedly ({type(unexpected).__name__}).",
@@ -698,7 +729,7 @@ def local_model_presence(
 
 
 def _presence(
-    model: str, *, transport: httpx.BaseTransport | None, timeout: float
+    model: str, *, window: int, transport: httpx.BaseTransport | None, timeout: float
 ) -> LocalModelPresence:
     name = normalize_model_name(model)
     if not name:
@@ -745,10 +776,22 @@ def _presence(
         Probe(
             LOCAL_MODEL_PROBE,
             Health.OK,
-            f"{name} is pulled and runs on this machine (Ollama on {ADDRESS}).",
-            SERVER_LIMITS,
+            f"{name} is pulled and runs on this machine (Ollama on {ADDRESS}), "
+            f"window {window:,} tokens; a changed local_model_window takes effect at "
+            f"the next daemon start.",
+            _window_advice(window),
         )
     )
+
+
+def _window_advice(window: int) -> str:
+    """The ready line's remedy: the server's limits, and at the larger window how to lower it."""
+    if window == max(LOCAL_MODEL_WINDOWS):
+        return (
+            f"{SERVER_LIMITS} To lower memory use, set local_model_window = "
+            f"{min(LOCAL_MODEL_WINDOWS)} in config.toml."
+        )
+    return SERVER_LIMITS
 
 
 def _ask(

@@ -57,10 +57,14 @@ sys.path.insert(0, str(REPO))
 
 from pm_ai.core.transcripts import read_transcript  # noqa: E402
 from pm_ai.domain.identity import DataScope, ScopeKind  # noqa: E402
-from pm_ai.domain.model_calls import ModelAnswer, ScopeFlow  # noqa: E402
+from pm_ai.domain.model_calls import (  # noqa: E402
+    DEFAULT_LOCAL_MODEL_WINDOW,
+    LOCAL_MODEL_WINDOWS,
+    ModelAnswer,
+    ScopeFlow,
+)
 from pm_ai.domain.sanitize import REDACTION, Sanitized, sanitize  # noqa: E402
 from pm_ai.domain.task_classes import TaskClass  # noqa: E402
-from pm_ai.models.local import ollama  # noqa: E402
 from pm_ai.models.local.ollama import BASE_URL, OllamaModel  # noqa: E402
 
 REDACTED = REPO / "tests" / "connectors" / "fixtures" / "graph" / "transcript_recorded.vtt"
@@ -385,8 +389,15 @@ def score(body: dict[str, Any], key: dict[str, Any]) -> tuple[dict[str, Any], li
 # ── Runs ─────────────────────────────────────────────────────────────────────
 
 
-def run_model(name: str, root: Path, key: dict[str, Any], log: list[str]) -> dict[str, Any]:
-    model = OllamaModel(name)
+def run_model(
+    name: str,
+    root: Path,
+    key: dict[str, Any],
+    log: list[str],
+    *,
+    window: int = DEFAULT_LOCAL_MODEL_WINDOW,
+) -> dict[str, Any]:
+    model = OllamaModel(name, window=window)
     timing, quality = fragments(REDACTED), fragments(AUTHORED)
     runs: list[dict[str, Any]] = []
     for loaded in (False, True):
@@ -480,9 +491,9 @@ def choose(summaries: list[dict[str, Any]]) -> str | None:
     return str(eligible[0]["model"])
 
 
-def private(name: str, path: Path) -> None:
+def private(name: str, path: Path, *, window: int = DEFAULT_LOCAL_MODEL_WINDOW) -> None:
     """A real transcript: counts and outcomes only, never a word of text."""
-    model = OllamaModel(name)
+    model = OllamaModel(name, window=window)
     parts = fragments(path)
     call = measured_call(model, "private", parts, [os.getpid()])
     body = validate(call.answer.text) if call.answer else None
@@ -505,7 +516,8 @@ def private(name: str, path: Path) -> None:
     model.close()
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The command line, built apart from `main` so a test can parse with it (story 7g)."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model", action="append", choices=CANDIDATES)
     parser.add_argument("--private", type=Path, help="a real transcript: counts only")
@@ -513,18 +525,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--num-ctx",
         type=int,
-        help="measure at this window instead of the adapter's NUM_CTX (the measurement "
-        "picks the constant: the smallest power of two holding the prompt and the answer)",
+        choices=LOCAL_MODEL_WINDOWS,
+        default=DEFAULT_LOCAL_MODEL_WINDOW,
+        help="the window to measure at: one of the two `local_model_window` takes "
+        f"(default {DEFAULT_LOCAL_MODEL_WINDOW})",
     )
     parser.add_argument("--load-worker", type=Path, help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     if args.load_worker:
         load_worker(args.load_worker)
         return 0
-    if args.num_ctx:
-        ollama.NUM_CTX = args.num_ctx
+    window: int = args.num_ctx
     facts = machine()
-    print(json.dumps({"machine": facts, "num_ctx": ollama.NUM_CTX}), flush=True)
+    print(json.dumps({"machine": facts, "num_ctx": window}), flush=True)
     if facts["python_arch"] == "x86_64" and facts["rosetta"] == "yes":
         print(
             "ASK FIRST: pm-ai's Python runs as x86_64 under Rosetta. Story 7a stops "
@@ -535,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
     models = args.model or list(CANDIDATES)
     if args.private:
         for name in models:
-            private(name, args.private)
+            private(name, args.private, window=window)
         return 0
     root = Path(tempfile.mkdtemp(prefix="pm-ai-bench-"))
     home = Path.home() / ".pm-ai"
@@ -545,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:
     key = tomllib.loads(KEY.read_text(encoding="utf-8"))
     unmatched: list[str] = []
     try:
-        results = [run_model(name, root, key, unmatched) for name in models]
+        results = [run_model(name, root, key, unmatched, window=window) for name in models]
     finally:
         shutil.rmtree(root, ignore_errors=True)
     summaries = [summary(r) for r in results]

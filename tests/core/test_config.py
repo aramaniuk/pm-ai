@@ -169,6 +169,7 @@ def test_the_accepted_set_is_the_dataclass():
         "display_timezone",
         "daemon_port",
         "local_model",
+        "local_model_window",
     }
 
 
@@ -418,6 +419,7 @@ ROUND_TRIP = {
     "display_timezone": (b'display_timezone = "Europe/Warsaw"\n', "Europe/Warsaw"),
     "daemon_port": (b"daemon_port = 9000\n", 9000),
     "local_model": (b'local_model = "qwen3:8b"\n', "qwen3:8b"),
+    "local_model_window": (b"local_model_window = 16384\n", 16384),
 }
 
 
@@ -491,3 +493,49 @@ def test_the_port_range_is_inclusive_at_both_ends(port: int):
 def test_the_class_refuses_what_the_file_may_not_say(port: object):
     with pytest.raises(ConfigRefused):
         Config(daemon_port=port)  # type: ignore[arg-type]
+
+
+# ── Story 7g: the local model's window ───────────────────────────────────────
+
+
+def test_the_window_defaults_to_32768_from_the_domain_constants():
+    """One copy of the two values: `pm_ai.domain.model_calls`, read here and by the adapter."""
+    from pm_ai.domain.model_calls import DEFAULT_LOCAL_MODEL_WINDOW, LOCAL_MODEL_WINDOWS
+
+    assert LOCAL_MODEL_WINDOWS == (16384, 32768)
+    assert DEFAULT_LOCAL_MODEL_WINDOW == 32768
+    assert Config().local_model_window == 32768
+    assert load_config(None).local_model_window == 32768
+    assert load_config(b'local_model = "qwen3:8b"\n').local_model_window == 32768
+
+
+def test_the_window_can_be_lowered_to_16384():
+    assert load_config(b"local_model_window = 16384\n").local_model_window == 16384
+    assert load_config(b"local_model_window = 32768\n").local_model_window == 32768
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"local_model_window = 8192\n",
+        b"local_model_window = 65536\n",
+        b"local_model_window = 32768.0\n",
+        b'local_model_window = "32768"\n',
+        b"local_model_window = true\n",
+        b"local_model_window = 0\n",
+        b"local_model_window = -16384\n",
+    ],
+)
+def test_any_other_window_in_the_file_is_refused_naming_both_values(raw):
+    with pytest.raises(ConfigRefused) as refused:
+        load_config(raw)
+    said = str(refused.value)
+    assert "local_model_window" in said and "16384" in said and "32768" in said
+
+
+@pytest.mark.parametrize("value", [8192, 32768.0, "32768", True, None])
+def test_any_other_window_constructed_directly_is_refused(value):
+    with pytest.raises(ConfigRefused) as refused:
+        Config(local_model_window=value)  # type: ignore[arg-type]
+    said = str(refused.value)
+    assert "16384" in said and "32768" in said

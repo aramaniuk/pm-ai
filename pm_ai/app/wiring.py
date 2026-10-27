@@ -153,6 +153,7 @@ from pm_ai.domain.member_ledgers import MEMBER_UPDATES
 from pm_ai.domain.task_classes import TaskClass
 from pm_ai.core.frontier_key import held_frontier_key
 from pm_ai.domain.model_calls import (
+    DEFAULT_LOCAL_MODEL_WINDOW,
     LOCAL_MODEL_PROBE,
     LocalModelPresence,
     ModelSide,
@@ -246,6 +247,11 @@ class LocalModel(ModelPort, Protocol):
     far enough to say so. The annotation must also resolve at run time, since
     `Daemon`'s field types are read (`get_type_hints`).
     """
+
+    @property
+    def window(self) -> int:
+        """The context window every request asks for (`local_model_window`, story 7g)."""
+        ...
 
     def close(self) -> None:
         """End any request in flight and refuse every later one."""
@@ -787,7 +793,9 @@ def local_model(config: Config | None) -> LocalModel | None:
     its first request. No transport is passed — the adapter's own, loopback
     only — so a test reaches a real Ollama only if it builds one itself.
     `None` too when the runtime extra is missing (the adapter needs `httpx`):
-    `doctor`'s `runtime packages` and `local model` lines say so.
+    `doctor`'s `runtime packages` and `local model` lines say so. The window
+    is `config.toml`'s `local_model_window` (story 7g): this is the one place
+    the setting reaches the adapter.
     """
     if config is None or not config.local_model:
         return None
@@ -795,7 +803,7 @@ def local_model(config: Config | None) -> LocalModel | None:
         from pm_ai.models.local.ollama import OllamaModel
     except ImportError:
         return None
-    return OllamaModel(config.local_model)
+    return OllamaModel(config.local_model, window=config.local_model_window)
 
 
 def require_model(daemon: Daemon) -> LocalModel:
@@ -809,13 +817,16 @@ def require_model(daemon: Daemon) -> LocalModel:
     return daemon.model
 
 
-def local_model_check(model: str) -> LocalModelPresence:
+def local_model_check(
+    model: str, *, window: int = DEFAULT_LOCAL_MODEL_WINDOW
+) -> LocalModelPresence:
     """The presence check `setup` and `doctor` make, through the composition root (7a).
 
     The adapter is imported here, not at module level, so a machine without the
     runtime extra still composes; there the check says the extra is missing.
     An unset model is answered before that, the same with or without the extra:
-    it is not a failure (Andrei, 2026-10-19).
+    it is not a failure (Andrei, 2026-10-19). `window` is `config.toml`'s
+    `local_model_window`, which the ready line names (story 7g).
     """
     if not normalize_model_name(model):
         return unset_local_model()
@@ -831,7 +842,7 @@ def local_model_check(model: str) -> LocalModelPresence:
                 "Run `uv sync --extra runtime`; the runtime packages line says what is missing.",
             )
         )
-    return local_model_presence(model)
+    return local_model_presence(model, window=window)
 
 
 def _transcript_sources(
@@ -1315,8 +1326,8 @@ def refreshed(
     `ConfigRefused`, which the line reports as the terminal would.
 
     The local model (`Daemon.model`) is kept, not rebuilt: a changed
-    `local_model` takes effect at the next daemon start (story 7a), like the
-    enrolled projects.
+    `local_model` or `local_model_window` takes effect at the next daemon start
+    (stories 7a, 7g), like the enrolled projects.
     """
     storage = daemon.storage
     config = load_config(

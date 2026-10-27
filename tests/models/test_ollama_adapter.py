@@ -7,6 +7,7 @@ with one that refuses, for anything that goes through wiring).
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import socket
@@ -25,7 +26,9 @@ from pm_ai.core.config import ConfigRefused, load_config
 from pm_ai.domain.health import Health
 from pm_ai.domain.identity import DataScope, ScopeKind
 from pm_ai.domain.model_calls import (
+    DEFAULT_LOCAL_MODEL_WINDOW,
     EXTERNAL,
+    LOCAL_MODEL_WINDOWS,
     ModelAnswer,
     ScopeFlow,
     ScopeFlowRefused,
@@ -38,7 +41,6 @@ from pm_ai.domain.task_classes import TaskClass
 from pm_ai.models.local import ollama
 from pm_ai.models.local.ollama import (
     ADDRESS,
-    NUM_CTX,
     NUM_PREDICT,
     SEED,
     NotALocalClass,
@@ -52,7 +54,11 @@ from pm_ai.ports import (
     OutputCapReached,
     PossiblyTruncated,
     RemoteModelRefused,
+    WindowReached,
 )
+
+NUM_CTX = DEFAULT_LOCAL_MODEL_WINDOW
+"""The window an adapter built without one runs at (story 7g: the setting's default)."""
 
 PERSONAL = DataScope(ScopeKind.PERSONAL)
 ALPHA = DataScope(ScopeKind.PROJECT, project_id="alpha")
@@ -446,16 +452,17 @@ def test_an_answer_that_may_be_cut_short_is_discarded_naming_why(overrides, name
 
 
 def test_the_window_holds_a_whole_meeting_and_the_cap_fits_beside_it():
-    """Andrei, 2026-10-19: 16,384, so the measured 8,619-token recording is one call."""
-    assert NUM_CTX == 16384
-    assert 8619 + NUM_PREDICT < NUM_CTX
+    """Andrei, 2026-10-27 (story 7g): 32,768 by default, 16,384 when lowered."""
+    assert NUM_CTX == 32768
+    assert LOCAL_MODEL_WINDOWS == (16384, 32768)
+    assert 8619 + NUM_PREDICT < min(LOCAL_MODEL_WINDOWS)
 
 
-def test_the_output_cap_is_7b_s_and_the_real_length_recording_still_fits():
-    """`7b` raised the cap to 4,096; the 8,619-token recording plus the cap fits the window."""
+def test_the_output_cap_is_7b_s_and_leaves_a_prompt_its_room_at_either_window():
+    """`7b` raised the cap to 4,096: 28,672 tokens of prompt at 32,768, 12,288 at 16,384."""
     assert NUM_PREDICT == 4096
-    assert 8619 + NUM_PREDICT <= NUM_CTX
-    assert NUM_CTX - NUM_PREDICT == 12288
+    assert 32768 - NUM_PREDICT == 28672
+    assert 16384 - NUM_PREDICT == 12288
 
 
 # ── Output cap reached ───────────────────────────────────────────────────────
@@ -1098,3 +1105,124 @@ def test_the_shutdown_closes_an_idle_model():
     pool.shutdown()
     with pytest.raises(LocalModelUnavailable, match="abandoned"):
         _call(model)
+
+
+# ── Story 7g: the window is the adapter's, from the setting ──────────────────
+
+
+@pytest.mark.parametrize("window", [16384, 32768])
+def test_every_request_sends_the_configured_window(window):
+    server = Server()
+    model = _model(server, window=window)
+    assert model.window == window
+    _call(model)
+    (chat,) = server.sent("/api/chat")
+    assert chat["options"]["num_ctx"] == window
+
+
+def test_an_adapter_built_without_a_window_runs_at_32768():
+    server = Server()
+    _call(_model(server))
+    (chat,) = server.sent("/api/chat")
+    assert chat["options"]["num_ctx"] == 32768
+
+
+@pytest.mark.parametrize("window", [8192, 65536, 0, 32768.0, "32768", True])
+def test_the_adapter_refuses_any_other_window(window):
+    with pytest.raises(ValueError) as refused:
+        OllamaModel("qwen3:8b", window=window)
+    assert "16384" in str(refused.value) and "32768" in str(refused.value)
+
+
+def test_the_module_has_no_window_constant():
+    assert not hasattr(ollama, "NUM_CTX")
+
+
+def test_the_wired_adapter_takes_the_window_from_config():
+    built = wiring.local_model(load_config(b'local_model = "qwen3"\nlocal_model_window = 16384\n'))
+    assert isinstance(built, OllamaModel) and built.window == 16384
+    built.close()
+    default = wiring.local_model(load_config(b'local_model = "qwen3"\n'))
+    assert isinstance(default, OllamaModel) and default.window == 32768
+    default.close()
+
+
+def test_a_20000_token_prompt_and_answer_is_accepted_at_the_default_window():
+    """Matrix "Fits at 32k only": one call at 32,768."""
+    server = Server(chat=_chat_body(prompt_eval_count=19_000, eval_count=1_000))
+    answer = _call(_model(server))
+    assert answer.prompt_tokens + answer.output_tokens == 20_000
+    (chat,) = server.sent("/api/chat")
+    assert chat["options"]["num_ctx"] == 32768
+
+
+def test_the_same_prompt_reaches_the_smaller_window_as_window_reached():
+    server = Server(chat=_chat_body(prompt_eval_count=16_000, eval_count=384))
+    with pytest.raises(WindowReached) as refused:
+        _call(_model(server, window=16384))
+    assert "16384-token window" in str(refused.value)
+
+
+@pytest.mark.parametrize("window", [16384, 32768])
+def test_the_server_s_too_long_refusal_is_window_reached_naming_the_window(window):
+    def too_long(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"capabilities": ["completion"]})
+        return httpx.Response(
+            400,
+            json={"error": "request (40000 tokens) exceeds the available context size "
+                  f"({window} tokens), try increasing it"},
+        )
+
+    with pytest.raises(WindowReached) as refused:
+        _call(OllamaModel("qwen3:8b", window=window, transport=httpx.MockTransport(too_long)))
+    assert f"{window}-token window" in str(refused.value)
+
+
+@pytest.mark.parametrize("done_reason", ["stop", "length"])
+def test_prompt_and_answer_reaching_the_window_is_window_reached(done_reason):
+    server = Server(
+        chat=_chat_body(done_reason=done_reason, prompt_eval_count=32_000, eval_count=768)
+    )
+    with pytest.raises(WindowReached) as refused:
+        _call(_model(server))
+    assert "32768-token window" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"eval_count": _DROP}, {"prompt_eval_count": _DROP}, {"done_reason": "length"}],
+)
+def test_the_other_cut_short_cases_are_not_window_reached(overrides):
+    """Matrix "Count missing": `PossiblyTruncated`, and no setting advice follows."""
+    server = Server(chat=_chat_body(**overrides))
+    with pytest.raises(PossiblyTruncated) as refused:
+        _call(_model(server, window=16384))
+    assert not isinstance(refused.value, WindowReached)
+
+
+def test_window_reached_is_a_kind_of_possibly_truncated():
+    assert issubclass(WindowReached, PossiblyTruncated)
+
+
+def test_the_ready_line_names_the_window_the_restart_and_how_to_lower_it():
+    """Matrix "Doctor": model ready, window 32,768."""
+    presence = local_model_presence("qwen3:8b", transport=Server().transport())
+    assert presence.probe.health is Health.OK
+    assert "window 32,768 tokens" in presence.probe.detail
+    assert "next daemon start" in presence.probe.detail
+    assert "local_model_window = 16384" in presence.probe.remediation
+    assert "OLLAMA_MAX_LOADED_MODELS=1" in presence.probe.remediation
+
+
+def test_the_ready_line_at_16384_names_it_and_gives_no_lowering_advice():
+    presence = local_model_presence("qwen3:8b", window=16384, transport=Server().transport())
+    assert "window 16,384 tokens" in presence.probe.detail
+    assert "local_model_window" not in presence.probe.remediation
+
+
+def test_the_ready_line_reads_no_memory():
+    """pm-ai does not read the machine's memory (orchestrator, 2026-10-27)."""
+    source = inspect.getsource(ollama)
+    for reader in ("psutil", "sysctl", "hw.memsize", "vm_stat", "os.sysconf"):
+        assert reader not in source

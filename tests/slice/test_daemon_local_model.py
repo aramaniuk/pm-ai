@@ -17,7 +17,7 @@ from test_line_answered_or_acknowledged import _NoKey
 from pm_ai.app import concurrency, entry
 from pm_ai.app import daemon as daemon_module
 from pm_ai.app.prompts import RequestPath
-from pm_ai.app.wiring import build
+from pm_ai.app.wiring import SealedRefreshTokenStore, build, refreshed
 from pm_ai.core.config import Config
 from pm_ai.domain.health import Report
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -162,3 +162,97 @@ def test_without_httpx_every_command_still_composes_and_the_line_says_why():
     )
     assert done.returncode == 0, done.stderr
     assert "composes without the runtime extra" in done.stdout
+
+
+# ── Story 7g: the window is a setting the composition root passes on ─────────
+
+
+@pytest.mark.parametrize(("written", "window"), [("", 32768), ("local_model_window = 16384\n", 16384)])
+def test_the_composed_adapter_runs_at_the_configured_window(home, written, window):
+    """Matrix rows "Unset" and "Lowered"."""
+    (home / ".pm-ai" / "config.toml").write_text(f'local_model = "qwen3:8b"\n{written}')
+    composed = entry._compose(Keychain(), APPLICATION)  # noqa: SLF001
+    assert composed.daemon is not None, composed.failure
+    assert isinstance(composed.daemon.model, OllamaModel)
+    assert composed.daemon.model.window == window
+
+
+@pytest.mark.parametrize("value", ["8192", "32768.0", '"32768"', "true"])
+def test_another_window_stops_composition_naming_both_values(home, value):
+    """Matrix row "Invalid": the daemon does not start."""
+    (home / ".pm-ai" / "config.toml").write_text(
+        f'local_model = "qwen3:8b"\nlocal_model_window = {value}\n'
+    )
+    composed = entry._compose(Keychain(), APPLICATION)  # noqa: SLF001
+    assert composed.daemon is None
+    assert "local_model_window" in str(composed.failure)
+    assert "16384" in str(composed.failure) and "32768" in str(composed.failure)
+
+
+def test_doctor_asks_the_presence_check_at_the_configured_window(home, monkeypatch):
+    """Matrix row "Doctor": the line is asked about the window config.toml names."""
+    from pm_ai.domain.model_calls import LocalModelPresence, unset_local_model
+
+    asked: list[tuple[str, int]] = []
+
+    def check(model: str, *, window: int) -> LocalModelPresence:
+        asked.append((model, window))
+        return unset_local_model()
+
+    monkeypatch.setattr(entry, "local_model_check", check)
+    (home / ".pm-ai" / "config.toml").write_text(
+        'local_model = "qwen3:8b"\nlocal_model_window = 16384\n'
+    )
+    composed = entry._compose(Keychain(), APPLICATION)  # noqa: SLF001
+    entry._local_model_probe(composed)  # noqa: SLF001
+    assert asked == [("qwen3:8b", 16384)]
+
+
+def test_config_show_marks_a_lowered_window_set(home, monkeypatch, capsys):
+    """Matrix row "Lowered": `config show` lists it, marked set."""
+    monkeypatch.setattr(entry, "MacOSKeychainAdapter", lambda: Keychain())
+    (home / ".pm-ai" / "config.toml").write_text("local_model_window = 16384\n")
+    assert entry.main(["config", "show"]) == 0
+    (row,) = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("local_model_window ")
+    ]
+    assert "16384" in row and "(set)" in row
+
+
+def test_a_window_changed_while_running_is_kept_until_restart(home):
+    """Matrix row "Changed while running": the daemon's adapter is built once, at start."""
+    (home / ".pm-ai" / "config.toml").write_text('local_model = "qwen3:8b"\n')
+    composed = entry._compose(Keychain(), APPLICATION)  # noqa: SLF001
+    assert composed.daemon is not None
+    model = composed.daemon.model
+    (home / ".pm-ai" / "config.toml").write_text(
+        'local_model = "qwen3:8b"\nlocal_model_window = 16384\n'
+    )
+    daemon = composed.daemon
+    fresh = refreshed(
+        daemon,
+        store_for=lambda instance, system: SealedRefreshTokenStore(
+            storage=daemon.storage, instance=instance, system=system
+        ),
+    )
+    assert fresh.config.local_model_window == 16384, "the line reads the file again"
+    assert fresh.model is model and model.window == 32768, "the adapter waits for a restart"
+
+
+@pytest.mark.parametrize(("written", "window"), [("", 32768), ("local_model_window = 16384\n", 16384)])
+def test_setup_asks_the_presence_check_at_the_window_the_file_names(home, monkeypatch, written, window):
+    """Setup never sets the window, so its check is at the file's (review of 7g)."""
+    from pm_ai.domain.model_calls import LocalModelPresence, unset_local_model
+
+    asked: list[tuple[str, int]] = []
+
+    def check(model: str, *, window: int) -> LocalModelPresence:
+        asked.append((model, window))
+        return unset_local_model()
+
+    monkeypatch.setattr(entry, "local_model_check", check)
+    if written:
+        (home / ".pm-ai" / "config.toml").write_text(written)
+    entry._FirstRun(Keychain()).local_model("qwen3:8b")  # noqa: SLF001
+    assert asked == [("qwen3:8b", window)]

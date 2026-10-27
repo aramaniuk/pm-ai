@@ -208,7 +208,13 @@ from pm_ai.domain.meetings import (
     Meeting,
     is_same_day_candidate,
 )
-from pm_ai.domain.model_calls import ModelAnswer, ModelSide, ScopeFlow, ScopeFlowRefused
+from pm_ai.domain.model_calls import (
+    LOCAL_MODEL_WINDOWS,
+    ModelAnswer,
+    ModelSide,
+    ScopeFlow,
+    ScopeFlowRefused,
+)
 from pm_ai.domain.proposals import (
     Proposal,
     as_compared,
@@ -275,6 +281,7 @@ from pm_ai.ports import (
     NoLocalModel,
     OutputCapReached,
     PossiblyTruncated,
+    WindowReached,
 )
 from pm_ai.storage.service import (
     GitExclusion,
@@ -4017,7 +4024,7 @@ def _prepare(daemon: Daemon, scope: DataScope, meeting_id: str) -> _Prepared:
             raw = daemon.storage.read_artifact(scope=scope, artifact=CAPTURES, name=name)
             if raw is not None:
                 captures[name] = raw.decode("utf-8")
-        utterances = meeting_utterances(meeting_id, meeting.start, parts=parts, captures=captures)
+        whole = meeting_utterances(meeting_id, meeting.start, parts=parts, captures=captures)
     except CaptureMissing as missing:
         raise SummaryRefused(f"{missing} Nothing was asked of the model.") from missing
     except (UnreadableTranscript, UnicodeDecodeError) as unreadable:
@@ -4025,8 +4032,19 @@ def _prepare(daemon: Daemon, scope: DataScope, meeting_id: str) -> _Prepared:
             f"meeting {meeting_id}'s transcript in {scope} could not be read: "
             f"{failure_reason(unreadable)}. Nothing was asked of the model."
         ) from unreadable
+    if whole.part_one_missing:
+        # Story 7g: times count from part 1's `created`, so without part 1
+        # there is no reference and no mark is put. No transcript text here.
+        _log.info(
+            "meeting %s: part 1 of its transcript is not stored, so its summary "
+            "prompt carries no time marks",
+            meeting_id,
+        )
     prompt = summary_prompt(
-        meeting.title, utterances, name=f"meeting {meeting_id}'s transcript in {scope}"
+        meeting.title,
+        whole.utterances,
+        name=f"meeting {meeting_id}'s transcript in {scope}",
+        times=whole.times,
     )
     return _Prepared(meeting, prompt, record.summary)
 
@@ -4343,7 +4361,10 @@ def summary_steps(
             calls.append(_measured(first))
         judged = _judged(first, labels)
         if isinstance(judged, BaseException):
-            return _without_answer(storage, fence, judged, prepared, outcome, retried=False)
+            return _without_answer(
+                storage, fence, judged, prepared, outcome, retried=False,
+                window=_window(daemon, judged),
+            )
         if isinstance(judged, SummaryRule):
             rule = judged
             second = yield from _call(daemon, scope, prepared, rule)
@@ -4351,7 +4372,10 @@ def summary_steps(
                 calls.append(_measured(second))
             judged = _judged(second, labels)
             if isinstance(judged, BaseException):
-                return _without_answer(storage, fence, judged, prepared, outcome, retried=True)
+                return _without_answer(
+                    storage, fence, judged, prepared, outcome, retried=True,
+                    window=_window(daemon, judged),
+                )
             if isinstance(judged, SummaryRule):
                 reason = _refused_twice(
                     scope, meeting_id, rule, judged,
@@ -5000,8 +5024,14 @@ def _without_answer(
     outcome: Callable[..., SummaryOutcome],
     *,
     retried: bool,
+    window: int | None,
 ) -> SummaryOutcome:
-    """The row's state when a call gave no answer to judge."""
+    """The row's state when a call gave no answer to judge.
+
+    `window` is the local adapter's (story 7g). Only for `WindowReached` at
+    the smaller window does the reason add that the larger one holds about
+    twice as much.
+    """
     meeting_id = fence.meeting_id
     if isinstance(refused, _UNAVAILABLE):
         reason = (
@@ -5029,12 +5059,34 @@ def _without_answer(
             f"meeting {meeting_id}'s transcript does not fit the local model's "
             f"window in one call, so it was not summarised and is not offered again "
             f"automatically; the prompt is {prepared.prompt.characters} characters of "
-            f"transcript besides the instructions: {refused} A frontier summary "
-            f"(story 7c) is the way to summarise it."
+            f"transcript besides the instructions: {refused}"
+            + _larger_window(refused, window)
+            + " A frontier summary (story 7c) is the way to summarise it."
         )
         storage.settle_summary(fence, state=SummaryStateKind.FAILED, reason=reason)
         return outcome(SummaryResult.FAILED, reason)
     raise refused
+
+
+def _window(daemon: Daemon, refused: BaseException) -> int | None:
+    """The local adapter's window when `refused` is a size refusal, else `None` (story 7g).
+
+    Read only for `WindowReached`, the one refusal whose reason names the setting.
+    """
+    if not isinstance(refused, WindowReached) or daemon.model is None:
+        return None
+    return daemon.model.window
+
+
+def _larger_window(refused: BaseException, window: int | None) -> str:
+    """The setting advice of a size refusal at the smaller window, or nothing (story 7g)."""
+    if not isinstance(refused, WindowReached) or window != min(LOCAL_MODEL_WINDOWS):
+        return ""
+    return (
+        f" The local model runs at {window} tokens: `local_model_window = "
+        f"{max(LOCAL_MODEL_WINDOWS)}` in config.toml holds about twice as much, "
+        f"from the next daemon start."
+    )
 
 
 class SummaryJobs:

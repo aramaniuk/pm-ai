@@ -33,6 +33,7 @@ import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import PurePath
 
 from pm_ai.core.meeting_records import (
@@ -62,6 +63,9 @@ from pm_ai.ports import TranscriptSourcePort
 __all__ = [
     "AmbiguousMeeting",
     "MeetingDetails",
+    "MeetingUtterances",
+    "ReadTranscript",
+    "TranscriptReader",
     "UnboundTranscript",
     "UnknownTranscriptSource",
     "UnreadableTranscript",
@@ -70,6 +74,7 @@ __all__ = [
     "carried_minutes",
     "drop_capture_format",
     "drop_utterances",
+    "drop_utterances_as",
     "failure_reason",
     "get_adapter",
     "has_turn_line",
@@ -80,8 +85,10 @@ __all__ = [
     "last_cue_end_minutes",
     "last_turn_seconds",
     "meeting_utterances",
+    "part_shift",
     "mint_meeting_id",
     "read_transcript",
+    "read_transcript_as",
     "register_adapter",
     "registered_adapters",
     "turn_header",
@@ -150,8 +157,41 @@ _TAG = re.compile(r"<[^>]*>")
 _SKIPPED_BLOCKS = ("NOTE", "STYLE", "REGION")
 
 
+class TranscriptReader(Enum):
+    """Which reader `read_transcript` chose for a text (story 7g)."""
+
+    WEBVTT = "webvtt"
+    """Cues with timings: each utterance's offset is its cue's start."""
+    TURNS = "turns"
+    """Speaker-and-time turns (story 11d): each utterance's offset is its turn's time."""
+    LINES = "lines"
+    """`Speaker: words` lines. The text has no clock: the offsets thirty seconds
+    apart are pm-ai's, not a time anyone said."""
+
+    @property
+    def timed(self) -> bool:
+        """Whether the offsets this reader gives are times the transcript states."""
+        return self is not TranscriptReader.LINES
+
+
+@dataclass(frozen=True, slots=True)
+class ReadTranscript:
+    """A transcript's utterances and the reader that read them (story 7g)."""
+
+    utterances: tuple[Utterance, ...]
+    reader: TranscriptReader
+
+
 def read_transcript(text: str, *, name: str) -> tuple[Utterance, ...]:
     """A transcript's utterances, by whichever reader its content selects.
+
+    `read_transcript_as`, without saying which reader it was.
+    """
+    return read_transcript_as(text, name=name).utterances
+
+
+def read_transcript_as(text: str, *, name: str) -> ReadTranscript:
+    """A transcript's utterances, by whichever reader its content selects, and that reader.
 
     In order: WebVTT when the first non-blank line is `WEBVTT` or a cue timing
     line; otherwise speaker-and-time turns when at least two lines are
@@ -170,10 +210,10 @@ def read_transcript(text: str, *, name: str) -> tuple[Utterance, ...]:
                 f"{name} is a WebVTT file with no cue in it, so there is nothing "
                 f"said to read."
             )
-        return cues
+        return ReadTranscript(cues, TranscriptReader.WEBVTT)
     turns = _read_turns(lines)
     if turns is not None:
-        return turns
+        return ReadTranscript(turns, TranscriptReader.TURNS)
     utterances = _read_text(lines)
     if utterances is None:
         raise UnreadableTranscript(
@@ -181,7 +221,7 @@ def read_transcript(text: str, *, name: str) -> tuple[Utterance, ...]:
             f"no cue timing line, no lines of a speaker's name and a time, and "
             f"most of its lines are not `Speaker: words`."
         )
-    return utterances
+    return ReadTranscript(utterances, TranscriptReader.LINES)
 
 
 MIN_DROP_MINUTES = 1
@@ -516,6 +556,15 @@ def unmarked_line(line: str) -> str:
 def drop_utterances(text: str, *, name: str, from_docx: bool = False) -> tuple[Utterance, ...]:
     """A dropped file's utterances, or the refusal saying why there are none.
 
+    `drop_utterances_as`, without saying which reader it was.
+    """
+    return drop_utterances_as(text, name=name, from_docx=from_docx).utterances
+
+
+def drop_utterances_as(text: str, *, name: str, from_docx: bool = False) -> ReadTranscript:
+    """A dropped file's utterances and the reader that read them, or the refusal
+    saying why there are none (story 7g).
+
     `NothingSaid` for whitespace only, for a file a reader accepted that says
     nothing (cues or turns all empty), and for a `.docx` whose text holds no
     speaker-and-time line and that `Speaker: words` does not accept — a
@@ -528,7 +577,7 @@ def drop_utterances(text: str, *, name: str, from_docx: bool = False) -> tuple[U
             f"in it to read. Nothing was written."
         )
     try:
-        utterances = read_transcript(text, name=name)
+        read = read_transcript_as(text, name=name)
     except UnreadableTranscript:
         if from_docx and not has_turn_line(text):
             raise NothingSaid(
@@ -537,13 +586,13 @@ def drop_utterances(text: str, *, name: str, from_docx: bool = False) -> tuple[U
                 f"it to read. Nothing was written."
             ) from None
         raise
-    if not utterances:
+    if not read.utterances:
         what = "cue timings but none of its cues" if is_webvtt(text) else "turns but none of them"
         raise NothingSaid(
             f"{name} has {what} says anything, so there is nothing to extract "
             f"from it. Nothing was written."
         )
-    return utterances
+    return read
 
 
 def drop_capture_format(file_name: str, text: str, *, from_docx: bool = False) -> CaptureFormat:
@@ -609,14 +658,42 @@ def ingest(
 # ── A whole meeting (story 7b) ───────────────────────────────────────────────
 
 
+@dataclass(frozen=True, slots=True)
+class MeetingUtterances:
+    """One meeting's whole transcript, and when each utterance was said (story 7g).
+
+    `times` holds, for each utterance, its seconds from when transcription
+    started — part 1's `created` — or is `None` when the meeting has no times
+    to give: a `Speaker: words` text (its offsets are pm-ai's thirty-second
+    steps, not times), or stored parts without part 1, the only reference.
+    `part_one_missing` says which of the two, for the caller's log line.
+    """
+
+    utterances: tuple[Utterance, ...]
+    times: tuple[int, ...] | None
+    part_one_missing: bool = False
+
+    def __post_init__(self) -> None:
+        if self.times is not None and len(self.times) != len(self.utterances):
+            raise ValueError(
+                f"MeetingUtterances has {len(self.utterances)} utterances and "
+                f"{len(self.times)} times; each utterance has one time or none has."
+            )
+
+
+def part_shift(first: TranscriptPart, part: TranscriptPart) -> int:
+    """Seconds from part 1's `created` to `part`'s, partial seconds dropped, never negative."""
+    return max(0, math.floor((part.created - first.created).total_seconds()))
+
+
 def meeting_utterances(
     meeting_id: str,
     start: datetime,
     *,
     parts: Sequence[TranscriptPart],
     captures: Mapping[str, str],
-) -> tuple[Utterance, ...]:
-    """One meeting's whole transcript, as one sequence of utterances.
+) -> MeetingUtterances:
+    """One meeting's whole transcript, as one sequence of utterances, with their times.
 
     `parts` are the meeting's `transcript_parts` rows and `captures` its
     capture files' texts, by name; the reads are the caller's. In order:
@@ -628,6 +705,11 @@ def meeting_utterances(
     - otherwise its dropped capture (`-manual.vtt`, then `-manual.txt`), read
       as `transcript drop` read it.
 
+    Times (story 7g) are from when transcription started: part 1's are its
+    offsets as read, a later part's are its offsets plus `part_shift` from
+    part 1. Stored parts without part 1 have no times; nor does a capture read
+    as `Speaker: words` lines. A single capture's times are its offsets.
+
     `CaptureMissing` when a stored part's capture is not among `captures`
     (purged, or removed by hand) or when there is no capture at all.
     """
@@ -635,7 +717,10 @@ def meeting_utterances(
         (part for part in parts if part.state is PartState.STORED), key=lambda part: part.part
     )
     if stored:
+        first = stored[0] if stored[0].part == 1 else None
         utterances: list[Utterance] = []
+        times: list[int] = []
+        timed = True
         for part in stored:
             name = capture_name(meeting_id, start, CaptureFormat.GRAPH, part=part.part)
             text = captures.get(name)
@@ -644,19 +729,33 @@ def meeting_utterances(
                     f"part {part.part} of meeting {meeting_id}'s transcript ({name}) is "
                     f"not on disk: purged at 30 days, or removed by hand."
                 )
-            utterances.extend(read_transcript(text, name=name))
-        return tuple(utterances)
+            read = read_transcript_as(text, name=name)
+            timed = timed and read.reader.timed
+            shift = part_shift(first, part) if first is not None else 0
+            utterances.extend(read.utterances)
+            times.extend(u.offset_seconds + shift for u in read.utterances)
+        return MeetingUtterances(
+            tuple(utterances),
+            tuple(times) if timed and first is not None else None,
+            part_one_missing=first is None,
+        )
     graph = capture_name(meeting_id, start, CaptureFormat.GRAPH)
     if graph in captures:
-        return read_transcript(captures[graph], name=graph)
+        return _as_read(read_transcript_as(captures[graph], name=graph))
     for form in (CaptureFormat.MANUAL_VTT, CaptureFormat.MANUAL_TXT):
         name = capture_name(meeting_id, start, form)
         if name in captures:
-            return drop_utterances(captures[name], name=name)
+            return _as_read(drop_utterances_as(captures[name], name=name))
     raise CaptureMissing(
         f"meeting {meeting_id} has no transcript capture on disk: none was "
         f"captured, or it was purged at 30 days."
     )
+
+
+def _as_read(read: ReadTranscript) -> MeetingUtterances:
+    """A single capture's utterances, with their offsets as times when its reader has a clock."""
+    times = tuple(u.offset_seconds for u in read.utterances) if read.reader.timed else None
+    return MeetingUtterances(read.utterances, times)
 
 
 # ── The bind step ────────────────────────────────────────────────────────────

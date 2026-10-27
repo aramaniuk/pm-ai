@@ -64,6 +64,7 @@ from pm_ai.ports import (
     ModelTimedOut,
     OutputCapReached,
     PossiblyTruncated,
+    WindowReached,
 )
 from pm_ai.storage.service import ProposalNotFound
 from pm_ai.surfaces.cli.dispatch import EXIT_OK, EXIT_REFUSAL, dispatch
@@ -128,6 +129,9 @@ class FakeModel:
         return ModelAnswer(
             text=answer, model="fake:8b", local=True, prompt_tokens=120, output_tokens=60
         )
+
+    window = 32768
+    """The local adapter's window (story 7g): read only for a `WindowReached`."""
 
     def close(self) -> None:
         pass
@@ -239,7 +243,8 @@ def test_the_call_is_extraction_local_flowing_scope_to_scope_with_the_shape(tmp_
     assert call["shape"] is not None
     texts = [fragment.for_model for fragment in call["external"]]
     assert texts[0] == "Meeting title: Release sync"
-    assert texts[1].startswith("Ana: ") and texts[2].startswith("Bo: ")
+    # Story 7g: the first utterance carries the time mark; Bo's is in the same minute.
+    assert texts[1].startswith("[00:00:01] Ana: ") and texts[2].startswith("Bo: ")
 
 
 def test_the_harvest_summarises_after_it_ingests_and_a_re_harvest_keeps_block_and_notes(tmp_path):
@@ -317,7 +322,8 @@ def test_two_stored_parts_are_read_as_one_sequence_in_one_call(tmp_path):
     assert outcome.result is SummaryResult.SUMMARIZED
     (call,) = daemon.model.calls
     texts = [fragment.for_model for fragment in call["external"]]
-    assert texts[-1] == "Bo: Part two words." and texts[1].startswith("Ana: ")
+    # Story 7g: part 2 was created a minute after part 1, so its cue at 0:01 is 00:01:01.
+    assert texts[-1] == "[00:01:01] Bo: Part two words." and texts[1].startswith("[00:00:01] Ana: ")
 
 
 def test_a_later_part_re_opens_an_automatic_summary_and_keeps_a_requested_one(tmp_path):
@@ -826,7 +832,8 @@ def test_a_later_part_ingested_by_a_harvest_is_summarised_again_over_both_parts(
 
     assert daemon.meetings.get("AAMk-sync", scope=PERSONAL).summary.answer.summary == "Both parts."
     texts = [f.for_model for f in daemon.model.calls[-1]["external"]]
-    assert texts[-1] == "Bo: Part two words." and texts[1].startswith("Ana: ")
+    # Story 7g: part 2 was created 20 minutes after part 1.
+    assert texts[-1] == "[00:20:01] Bo: Part two words." and texts[1].startswith("[00:00:01] Ana: ")
 
 
 def test_a_part_kept_before_a_refused_one_is_summarised_alone_and_reopened_when_it_arrives(tmp_path):
@@ -875,7 +882,7 @@ def test_a_part_kept_before_a_refused_one_is_summarised_alone_and_reopened_when_
     assert daemon.meetings.get("AAMk-sync", scope=PERSONAL).summary.answer.summary == "Part one only."
     (call,) = daemon.model.calls
     texts = [f.for_model for f in call["external"]]
-    assert not any("Part two" in t for t in texts) and any(t.startswith("Ana: ") for t in texts)
+    assert not any("Part two" in t for t in texts) and any(t.startswith("[00:00:01] Ana: ") for t in texts)
     assert "T-2" not in _record_text(daemon, meeting), "the summary says nothing about a refused part"
 
     run_harvest(daemon, INSTANCE)
@@ -884,7 +891,8 @@ def test_a_part_kept_before_a_refused_one_is_summarised_alone_and_reopened_when_
     assert [r.part for r in daemon.storage.transcript_parts(PERSONAL)["AAMk-sync"]] == [1, 2]
     assert daemon.meetings.get("AAMk-sync", scope=PERSONAL).summary.answer.summary == "Both parts."
     texts = [f.for_model for f in daemon.model.calls[-1]["external"]]
-    assert texts[-1] == "Bo: Part two words."
+    # Story 7g: T-2 was created 19 minutes after T-1, so its cue at 0:01 is 00:19:01.
+    assert texts[-1] == "[00:19:01] Bo: Part two words."
 
 
 def test_a_summary_containing_notes_heading_round_trips_and_notes_stays_intact(tmp_path):
@@ -1374,7 +1382,7 @@ def test_the_label_the_model_sees_is_the_one_an_owner_must_match(tmp_path):
     outcome = summarize_meeting(daemon, PROJECT, "mtg_a")
 
     texts = [f.for_model for f in daemon.model.calls[0]["external"]]
-    assert texts[1].startswith("Ana: ")
+    assert texts[1].startswith("[00:00:01] Ana: ")
     assert outcome.result is SummaryResult.SUMMARIZED
 
 
@@ -1646,3 +1654,145 @@ def test_the_daemons_summary_jobs_submit_a_request_ahead_on_the_model_pool(monke
     jobs._model(lambda: None)
     jobs._model_first(lambda: None)
     assert calls == [False, True]
+
+
+# ── Story 7g: the window's advice, and times across parts ────────────────────
+
+
+def test_too_long_at_16384_names_the_window_and_the_larger_setting(tmp_path):
+    """Matrix "Too long at 16k": `WindowReached`; the reason adds the setting."""
+    daemon = _daemon(tmp_path, WindowReached("the prompt does not fit fake's 16384-token window"))
+    daemon.model.window = 16384
+    meeting = _ingested(daemon, _meeting())
+
+    outcome = summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    assert outcome.result is SummaryResult.FAILED and len(daemon.model.calls) == 1
+    reason = _state(daemon, meeting).reason
+    assert "16384-token window" in reason and "runs at 16384 tokens" in reason
+    assert "`local_model_window = 32768`" in reason and "about twice as much" in reason
+
+
+def test_too_long_at_32768_names_the_window_and_gives_no_setting_advice(tmp_path):
+    """Matrix "Too long at 32k"."""
+    reached = WindowReached("fake's prompt and answer together reach the 32768-token window")
+    daemon = _daemon(tmp_path, reached)
+    meeting = _ingested(daemon, _meeting())
+
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    reason = _state(daemon, meeting).reason
+    assert "32768-token window" in reason and "local_model_window" not in reason
+
+
+def test_a_missing_count_at_16384_gives_no_setting_advice(tmp_path):
+    """Matrix "Count missing": `PossiblyTruncated`, not a size refusal."""
+    daemon = _daemon(tmp_path, PossiblyTruncated("fake's answer carries no usable eval_count"))
+    daemon.model.window = 16384
+    meeting = _ingested(daemon, _meeting())
+
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    state = _state(daemon, meeting)
+    assert state.state is SummaryStateKind.FAILED and "local_model_window" not in state.reason
+
+
+PART_TWO_VTT = "WEBVTT\n\n00:00:10.000 --> 00:00:12.000\n<v Bo>Part two words.\n"
+
+
+def _two_parts(daemon, *, stored_first: bool = True) -> Meeting:
+    """A project meeting whose transcript is two stored parts, the second
+    created 1,800.6 seconds after the first."""
+    meeting = _meeting()
+    daemon.meetings.put(meeting)
+    for number, created, text in (
+        (1, START, VTT),
+        (2, START + timedelta(seconds=1800.6), PART_TWO_VTT),
+    ):
+        daemon.storage.record_pending_part(
+            PROJECT, "mtg_a", number, transcript_id=f"T-{number}",
+            created=created, ended=created + timedelta(minutes=30),
+        )
+        if number == 1 and not stored_first:
+            continue
+        daemon.storage.write_capture(
+            text, scope=PROJECT, name=capture_name("mtg_a", START, CaptureFormat.GRAPH, part=number)
+        )
+        daemon.storage.mark_part_stored(PROJECT, "mtg_a", number)
+    daemon.storage.record_transcript_state(
+        PROJECT, "mtg_a", TranscriptStateKind.INGESTED, "ingested", retryable=False
+    )
+    note_summary_input(daemon, PROJECT, "mtg_a", ingested_now=False)
+    return meeting
+
+
+def test_two_parts_continue_from_part_one_s_created(tmp_path):
+    """Matrix "Two parts" and acceptance 2: part 2's cue at 0:10 is 00:30:10,
+    every fragment a fixed point, and the prompt holds each kept time."""
+    from pm_ai.app.pipelines import _prepare
+    from pm_ai.domain.sanitize import sanitize
+
+    daemon = _daemon(tmp_path, _answer())
+    _two_parts(daemon)
+
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    texts = [f.for_model for f in daemon.model.calls[-1]["external"]]
+    assert texts[1:] == [
+        "[00:00:01] Ana: We ship on Friday, and we freeze scope today.",
+        "Bo: I will write the release notes by Thursday.",
+        "[00:30:10] Bo: Part two words.",
+    ]
+    for fragment in daemon.model.calls[-1]["external"]:
+        assert sanitize(fragment.for_model).for_model == fragment.for_model
+    prepared = _prepare(daemon, PROJECT, "mtg_a")  # noqa: SLF001
+    assert prepared.prompt.times == (1, 5, 1810)
+
+
+def test_without_part_one_no_mark_is_put_and_an_info_line_names_the_meeting(tmp_path, caplog):
+    """Matrix "Part 1 not stored"."""
+    import logging
+
+    daemon = _daemon(tmp_path, _answer(decisions=(), items=()))
+    _two_parts(daemon, stored_first=False)
+
+    with caplog.at_level(logging.INFO, logger="pm_ai.app.pipelines"):
+        summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    texts = [f.for_model for f in daemon.model.calls[-1]["external"]]
+    assert texts[1:] == ["Bo: Part two words."]
+    lines = [r.getMessage() for r in caplog.records if "time marks" in r.getMessage()]
+    assert len(lines) == 1 and "mtg_a" in lines[0] and "Part two" not in lines[0]
+    assert caplog.records[[r.getMessage() for r in caplog.records].index(lines[0])].levelno == logging.INFO
+
+
+def test_a_dropped_text_of_speaker_lines_is_sent_with_no_mark(tmp_path):
+    """Matrix "`.txt` as lines", through the job."""
+    daemon = _daemon(tmp_path, _answer())
+    _ingested(
+        daemon, _meeting(),
+        text="Ana: We ship on Friday.\nBo: I will write the notes.\n",
+        form=CaptureFormat.MANUAL_TXT,
+    )
+
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    (call,) = daemon.model.calls
+    texts = [f.for_model for f in call["external"]]
+    assert texts[1:] == ["Ana: We ship on Friday.", "Bo: I will write the notes."]
+    assert "[HH:MM:SS]" in call["instructions"]
+
+
+def test_a_dropped_text_in_turns_is_sent_with_marks(tmp_path):
+    """Matrix "`.txt` as turns"."""
+    daemon = _daemon(tmp_path, _answer())
+    _ingested(
+        daemon, _meeting(),
+        text="Ana 0:05\nWe ship on Friday.\n\nBo 1:10\nI will write the notes.\n",
+        form=CaptureFormat.MANUAL_TXT,
+    )
+
+    summarize_meeting(daemon, PROJECT, "mtg_a")
+
+    texts = [f.for_model for f in daemon.model.calls[-1]["external"]]
+    assert texts[1:] == ["[00:00:05] Ana: We ship on Friday.", "[00:01:10] Bo: I will write the notes."]

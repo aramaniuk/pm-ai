@@ -677,3 +677,35 @@ def test_the_api_carries_the_key_only_authenticated(tmp_path):
     assert client.post(FRONTIER_KEY_PATH, json={"key": KEY}).status_code == 401 and got == []
     answer = client.post(FRONTIER_KEY_PATH, json={"key": KEY}, headers={"Authorization": "Bearer " + "t" * 40})
     assert answer.status_code == 200 and got == [KEY] and KEY not in answer.text
+
+
+# ── Story 7g: the frontier summary gets the same marks ───────────────────────
+
+
+def test_a_timed_meeting_by_claude_is_sent_the_local_fragments_with_marks(tmp_path):
+    """Matrix "Frontier summary": the same fragments with marks, the same instructions."""
+    from pm_ai.app.pipelines import _prepare
+    from pm_ai.core.meeting_summary import instructions_for
+
+    vtt = (
+        "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n<v Ana>We ship on Friday.\n\n"
+        "00:00:05.000 --> 00:00:09.000\n<v Bo>I will write the notes.\n\n"
+        "00:02:05.000 --> 00:02:09.000\n<v Ana>Then we tag it.\n"
+    )
+    daemon = _daemon(tmp_path)
+    frontier = _claude(daemon, FakeFrontier(_answer()))
+    meeting = _ingested(daemon, _meeting(), text=vtt)
+
+    _ask(daemon, meeting)
+
+    (call,) = frontier.calls
+    texts = [f.for_model for f in call["external"]]
+    assert texts[1:] == [
+        "[00:00:01] Ana: We ship on Friday.",
+        "Bo: I will write the notes.",
+        "[00:02:05] Ana: Then we tag it.",
+    ]
+    prepared = _prepare(daemon, PROJECT, "mtg_a")  # noqa: SLF001
+    assert tuple(call["external"]) == prepared.prompt.fragments
+    assert call["instructions"] == instructions_for(None, language=prepared.prompt.language)
+    assert "[HH:MM:SS]" in call["instructions"]

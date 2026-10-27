@@ -7,19 +7,34 @@ matrix row.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from pm_ai.core.docx_text import docx_text
+from pm_ai.core.meeting_records import capture_name
 from pm_ai.core.transcripts import (
+    MeetingUtterances,
+    TranscriptReader,
     carried_minutes,
     drop_capture_format,
     drop_utterances,
+    drop_utterances_as,
     has_turn_line,
+    meeting_utterances,
+    part_shift,
     read_transcript,
+    read_transcript_as,
 )
-from pm_ai.domain.transcripts import CaptureFormat, NothingSaid, UnreadableTranscript, Utterance
+from pm_ai.domain.transcripts import (
+    CaptureFormat,
+    NothingSaid,
+    PartState,
+    TranscriptPart,
+    UnreadableTranscript,
+    Utterance,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "transcripts"
 RECORDED_TURNS = 180
@@ -229,3 +244,128 @@ def test_a_long_line_is_judged_in_time_proportional_to_it(line):
     with pytest.raises(UnreadableTranscript):
         read_transcript(f"{line}\n" * 50, name="x")
     assert time.perf_counter() - started < 1.0
+
+
+# ── Story 7g: which reader, and the meeting's times ──────────────────────────
+
+_START = datetime(2026, 3, 2, 10, 0, tzinfo=UTC)
+_MEETING = "mtg_0000000000000000000a"
+_VTT = (
+    "WEBVTT\n\n"
+    "00:00:05.000 --> 00:00:07.000\n<v Ana>We start.</v>\n\n"
+    "00:00:40.000 --> 00:00:42.000\n<v Bo>Fine.</v>\n\n"
+    "00:01:10.000 --> 00:01:12.000\n<v Ana>Next item.</v>\n"
+)
+_TURNS = "Ana 0:05\nWe start.\n\nBo 1:10\nNext item.\n"
+_LINES = "Ana: We start.\nBo: Fine.\nAna: Next item.\n"
+
+
+def _part(number: int, created: datetime, state: PartState = PartState.STORED) -> TranscriptPart:
+    return TranscriptPart(
+        meeting_id=_MEETING,
+        part=number,
+        transcript_id=f"t{number}",
+        created=created,
+        ended=created + timedelta(minutes=30),
+        state=state,
+    )
+
+
+def _graph(number: int) -> str:
+    return capture_name(_MEETING, _START, CaptureFormat.GRAPH, part=number)
+
+
+@pytest.mark.parametrize(
+    ("text", "reader"),
+    [(_VTT, TranscriptReader.WEBVTT), (_TURNS, TranscriptReader.TURNS), (_LINES, TranscriptReader.LINES)],
+)
+def test_the_reader_says_which_reader_it_used(text, reader):
+    read = read_transcript_as(text, name="x")
+    assert read.reader is reader
+    assert read.utterances == read_transcript(text, name="x")
+    assert reader.timed is (reader is not TranscriptReader.LINES)
+
+
+def test_a_drop_says_which_reader_it_used_and_drop_utterances_is_unchanged():
+    read = drop_utterances_as(_TURNS, name="x.txt")
+    assert read.reader is TranscriptReader.TURNS
+    assert read.utterances == drop_utterances(_TURNS, name="x.txt")
+    with pytest.raises(NothingSaid):
+        drop_utterances_as("   \n", name="x.txt")
+
+
+def test_one_part_s_times_are_its_offsets():
+    whole = meeting_utterances(
+        _MEETING, _START, parts=[_part(1, _START)], captures={_graph(1): _VTT}
+    )
+    assert whole.times == (5, 40, 70)
+    assert not whole.part_one_missing
+
+
+def test_a_later_part_s_times_continue_from_part_one_s_created_partial_seconds_dropped():
+    """Matrix "Two parts": created 1,800.6 s after part 1, its cue at 0:10 is 00:30:10."""
+    second = "WEBVTT\n\n00:00:10.000 --> 00:00:12.000\n<v Bo>Part two.</v>\n"
+    whole = meeting_utterances(
+        _MEETING,
+        _START,
+        parts=[_part(2, _START + timedelta(seconds=1800.6)), _part(1, _START)],
+        captures={_graph(1): _VTT, _graph(2): second},
+    )
+    assert [u.text for u in whole.utterances][-1] == "Part two."
+    assert whole.times == (5, 40, 70, 1810)
+
+
+def test_a_part_created_before_part_one_shifts_by_nothing():
+    """Matrix "Part times out of order": never negative."""
+    assert part_shift(_part(1, _START), _part(2, _START - timedelta(seconds=90))) == 0
+    whole = meeting_utterances(
+        _MEETING,
+        _START,
+        parts=[_part(1, _START), _part(2, _START - timedelta(seconds=90))],
+        captures={_graph(1): _VTT, _graph(2): _VTT},
+    )
+    assert whole.times == (5, 40, 70, 5, 40, 70)
+
+
+def test_without_part_one_there_are_no_times():
+    """Matrix "Part 1 not stored": parts 2 and 3 only."""
+    whole = meeting_utterances(
+        _MEETING,
+        _START,
+        parts=[
+            _part(1, _START, PartState.PENDING),
+            _part(2, _START + timedelta(minutes=30)),
+            _part(3, _START + timedelta(minutes=60)),
+        ],
+        captures={_graph(2): _VTT, _graph(3): _VTT},
+    )
+    assert whole.times is None and whole.part_one_missing
+    assert len(whole.utterances) == 6
+
+
+def test_a_single_graph_capture_s_times_are_its_offsets():
+    whole = meeting_utterances(_MEETING, _START, parts=[], captures={_graph(1): _VTT})
+    assert whole.times == (5, 40, 70)
+
+
+@pytest.mark.parametrize("form", [CaptureFormat.MANUAL_VTT, CaptureFormat.MANUAL_TXT])
+def test_a_dropped_capture_with_a_clock_has_times(form):
+    """Matrix "`.txt` as turns": the turns' times, as read."""
+    text = _VTT if form is CaptureFormat.MANUAL_VTT else _TURNS
+    name = capture_name(_MEETING, _START, form)
+    whole = meeting_utterances(_MEETING, _START, parts=[], captures={name: text})
+    assert whole.times == tuple(u.offset_seconds for u in whole.utterances)
+    assert whole.times[0] == 5
+
+
+def test_a_dropped_text_of_speaker_lines_has_no_times():
+    """Matrix "`.txt` as lines": the thirty-second steps are pm-ai's, not times."""
+    name = capture_name(_MEETING, _START, CaptureFormat.MANUAL_TXT)
+    whole = meeting_utterances(_MEETING, _START, parts=[], captures={name: _LINES})
+    assert whole.times is None and not whole.part_one_missing
+    assert [u.offset_seconds for u in whole.utterances] == [0, 30, 60]
+
+
+def test_meeting_utterances_holds_one_time_per_utterance_or_none():
+    with pytest.raises(ValueError):
+        MeetingUtterances((Utterance("Ana", "hi", 0),), (0, 1))

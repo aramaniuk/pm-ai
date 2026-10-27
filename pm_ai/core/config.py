@@ -33,8 +33,9 @@ which is how `verbose_loging = true` reads as configured forever. A closed set
 costs nothing here.
 
 The accepted keys are `blended_hourly_rate`, `verbose_logging`,
-`display_timezone`, `daemon_port` and `local_model`. `daemon_port` was added by
-story 4e, `local_model` by story 7a. There is no key naming the local model
+`display_timezone`, `daemon_port`, `local_model` and `local_model_window`.
+`daemon_port` was added by story 4e, `local_model` by story 7a,
+`local_model_window` by story 7g. There is no key naming the local model
 server's host: the address is a constant of the adapter, and a host key is
 refused like any other unknown key (AD-1 class LM).
 `pm_handle` was a key until story 2o removed it. Who the PM is now comes from
@@ -72,6 +73,8 @@ import tomllib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pm_ai.domain.model_calls import DEFAULT_LOCAL_MODEL_WINDOW, LOCAL_MODEL_WINDOWS
 
 __all__ = [
     "ACCEPTED_KEYS",
@@ -235,6 +238,28 @@ def _refuse_port(port: object) -> None:
         )
 
 
+def _refuse_window(window: object) -> None:
+    """Refuse a `local_model_window` the adapter does not run at (story 7g) — the one validator.
+
+    Exactly one of `LOCAL_MODEL_WINDOWS`, as a whole number: `bool` first, since
+    `True` is an `int`; a float is refused even when integral, as `daemon_port`
+    is, so the renderer's whole number round-trips.
+    """
+    low, high = LOCAL_MODEL_WINDOWS
+    if isinstance(window, bool) or not isinstance(window, int):
+        raise ConfigRefused(
+            f"local_model_window must be {low} or {high}, written as a whole number "
+            f"without quotes or a decimal point, but it is {_type_name(window)} "
+            f"({window!r}). Omit the key for the default, {DEFAULT_LOCAL_MODEL_WINDOW}."
+        )
+    if window not in LOCAL_MODEL_WINDOWS:
+        raise ConfigRefused(
+            f"local_model_window must be {low} or {high} tokens, not {window}: the "
+            f"local model runs at no other window. Omit the key for the default, "
+            f"{DEFAULT_LOCAL_MODEL_WINDOW}."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """The wave-1 vocabulary. Every field's default is its unconfigured state.
@@ -277,6 +302,11 @@ class Config:
     # names are put in that form for comparison, so the round trip holds on
     # what the person typed. pm-ai never pulls it.
     local_model: str = ""
+    # Story 7g: the local model's context window, in tokens — 16,384 or 32,768
+    # (`LOCAL_MODEL_WINDOWS`), 32,768 by default (Andrei, 2026-10-27). The
+    # composition root passes it to the adapter; a change takes effect at the
+    # next daemon start, as `local_model` does.
+    local_model_window: int = DEFAULT_LOCAL_MODEL_WINDOW
 
     def __post_init__(self) -> None:
         """Refuse a value no `Config` may hold, however it was constructed.
@@ -341,6 +371,7 @@ class Config:
             )
         _refuse_port(self.daemon_port)
         _refuse_model_name(self.local_model)
+        _refuse_window(self.local_model_window)
         if self.display_timezone:
             # Validated against the zone database rather than by shape. A
             # typo'd zone is not a syntax error — it is a silent shift in which
@@ -414,6 +445,7 @@ def load_config(raw: bytes | None) -> Config:
     zone = supplied.get("display_timezone")
     port = supplied.get("daemon_port")
     model = supplied.get("local_model")
+    window = supplied.get("local_model_window")
     return Config(
         blended_hourly_rate=(
             defaults.blended_hourly_rate
@@ -440,6 +472,10 @@ def load_config(raw: bytes | None) -> Config:
         ),
         local_model=(
             defaults.local_model if model is None else _text("local_model", model)
+        ),
+        local_model_window=(
+            # Passed through as written, as `daemon_port` is.
+            defaults.local_model_window if window is None else window  # type: ignore[arg-type]
         ),
     )
 
@@ -801,8 +837,8 @@ def _text(key: str, value: object) -> str:
     return value
 
 
-_WHOLE_NUMBER_KEYS = frozenset({"daemon_port"})
-"""The keys rendered as TOML integers rather than widened to floats (story 4e)."""
+_WHOLE_NUMBER_KEYS = frozenset({"daemon_port", "local_model_window"})
+"""The keys rendered as TOML integers rather than widened to floats (stories 4e, 7g)."""
 
 
 def _flag(key: str, value: object) -> bool:
