@@ -33,6 +33,7 @@ prevent.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ _REAL_HOME = Path(os.path.expanduser("~")).resolve()
 
 
 @pytest.fixture(autouse=True)
-def _never_the_real_pm_ai_home(monkeypatch: pytest.MonkeyPatch) -> None:
+def _never_the_real_pm_ai_home() -> Iterator[None]:
     """Fail any test that resolves pm-ai's layout under the real home (story 4r).
 
     `ScopePaths.production()` is the one place the pm-ai home is anchored to
@@ -51,7 +52,9 @@ def _never_the_real_pm_ai_home(monkeypatch: pytest.MonkeyPatch) -> None:
     developer's own `~/.pm-ai/private/operational.db` — and, since stores are
     prepared under their own claim, migrates it and leaves a sidecar there.
     Patched in this process only: `HOME` itself is untouched, so subprocesses
-    that need it (mypy, lint-imports, `uv`) still see it.
+    that need it (mypy, lint-imports, `uv`) still see it. Held in its own
+    patch context, not the test's `monkeypatch`: a test calling
+    `monkeypatch.undo()` midway once undid this guard and reached the real home.
     """
     from pm_ai.platform.paths import ScopePaths
 
@@ -67,7 +70,9 @@ def _never_the_real_pm_ai_home(monkeypatch: pytest.MonkeyPatch) -> None:
             )
         return real(cls, home=home, projects=projects)
 
-    monkeypatch.setattr(ScopePaths, "production", classmethod(guarded))
+    with pytest.MonkeyPatch.context() as guard:
+        guard.setattr(ScopePaths, "production", classmethod(guarded))
+        yield
 
 
 @pytest.fixture(autouse=True)
