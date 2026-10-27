@@ -28,3 +28,7 @@ Local-first AI PM assistant — daemon, CLI, Telegram bridge, connectors, MCP sk
 - `_bmad-output/` artifacts are skill-derived: `SPEC.md`, its companions, and `.memlog.md` are re-rendered from the memlog, so a hand-edit is overwritten on the next derive. Change the contract by re-running the skill.
 
 <!-- /bmad:context -->
+
+## Orchestrated development
+
+Work runs through an orchestrator session and builder sessions: `.agents/WORKFLOW.md` (stages, rules), `.agents/roles/*.md` (one brief per role, tool-neutral). The hard rules are enforced by `scripts/guards/guards.py`, called from `.claude/settings.json` hooks and from `scripts/git-hooks/` — turn the git side on in each clone with `git config core.hooksPath scripts/git-hooks`. Edits in a pm-ai worktree need a grant in `~/.claude/orchestrator/pm-ai/grants.json` (keyed by worktree folder name); a guard that blocks is reported, never routed around.
