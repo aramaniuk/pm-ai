@@ -62,6 +62,7 @@ from enum import Enum
 from types import MappingProxyType
 
 from pm_ai.core.aliases import AliasTable, normalise
+from pm_ai.core.commitment_cards import said_due_words
 from pm_ai.core.due_dates import meeting_day, resolve
 from pm_ai.core.meeting_summary import digest
 from pm_ai.core.rendering import code, cut_at_word, escape, fold_breaks
@@ -100,6 +101,7 @@ __all__ = [
     "UpdateLine",
     "Verdict",
     "Withdrawn",
+    "ItemCommitment",
     "ItemDecision",
     "candidates_of",
     "classification_prompt",
@@ -890,7 +892,7 @@ def people_of(work: object) -> People:
 
 
 def resolve_label(
-    label: str | None, meeting: str, *, aliases: AliasTable, people: People
+    label: str | None, meeting: str | None, *, aliases: AliasTable, people: People
 ) -> Person | None:
     """The person `label` names in `meeting`, by the saved table or one exact name.
 
@@ -898,10 +900,12 @@ def resolve_label(
     mapping names that person when they are among `people`; a removal names
     no one, and stops (2). (2) Exactly one active person whose display name
     or username equals the label under `normalise`; never for a generic label.
+    With no meeting (story 15d: a commitment line naming none), the
+    meeting-scoped rows are not consulted: only the unscoped row, then (2).
     """
     if label is None or not label.strip():
         return None
-    for scope in (meeting, None):
+    for scope in (meeting, None) if meeting is not None else (None,):
         row = aliases.row_for(label, scope)
         if row is None:
             continue
@@ -959,6 +963,7 @@ def _row(
     tz: tzinfo,
     estimated_from: Mapping[str, str | None] | None = None,
     machine_zone: tzinfo | None = None,
+    commitment: ItemCommitment | None = None,
 ) -> str:
     day = _local_day(line.start, tz)
     marker = "said in the meeting" if ledger.certain(line) else "model-matched"
@@ -974,6 +979,24 @@ def _row(
         if owner.handle not in {person.handle for person in issue.assignees}:
             who += " (not assigned in GitLab)"
     row = f"{head} — {who}: {_shown(line.text)}"
+    if commitment is not None:
+        # Story 15d: an approved item recorded in the ledger shows the
+        # commitment's due and state, never the proposal's due resolved again.
+        # The words the row prints: the line's, else the commitment's own.
+        said = line.due if line.due is not None else commitment.said
+        if said is not None:
+            row += f"; due as said in the meeting: {_shown(said)}"
+        if commitment.row_due:
+            # A parenthesis follows the words said; with none printed, the
+            # due stands alone (`row_due`'s own form), never a bare `(…)`.
+            if said is not None and commitment.row_due.startswith("("):
+                row += f" {commitment.row_due}"
+            elif not commitment.row_due.startswith("("):
+                row += f"; {commitment.row_due}"
+        row = f"{row} ({marker})"
+        if commitment.row_state:
+            row += f"; {commitment.row_state}"
+        return row
     if line.due is not None:
         row += f"; due as said in the meeting: {_shown(line.due)}"
         # Story 15a: the ledger's day rule — no date for a start from a file's
@@ -987,8 +1010,7 @@ def _row(
         )
         resolved = resolve_due(line.due, due_day)
         if resolved is not None:
-            estimated = " (meeting day estimated)" if source is not None else ""
-            row += f" ({resolved.isoformat()}){estimated}"
+            row += said_due_words(resolved, source is not None)
     return f"{row} ({marker})"
 
 
@@ -1010,6 +1032,25 @@ class ItemDecision:
     what: str | None = None
     owner: str | None = None
     due: str | None = None
+    commitment: ItemCommitment | None = None
+    """Story 15d: the item's commitment, joined from the one ledger read."""
+
+
+@dataclass(frozen=True, slots=True)
+class ItemCommitment:
+    """An approved action item's commitment, as its Team Activity row shows it (15d).
+
+    `owner` is the commitment's owner (the PM's when he set one), resolved to
+    a member as the row resolves an owner; `row_due` and `row_state` are
+    `commitment_cards`' words, under `TEAM_ROW_STATES` and `TEAM_ROW_PAST_DUE`.
+    """
+
+    owner: str | None
+    row_due: str = ""
+    row_state: str = ""
+    said: str | None = None
+    """The commitment's due as said, which `row_due` was worded against: the
+    row prints it when its own line holds none."""
 
 
 def _decided(
@@ -1031,6 +1072,9 @@ def _decided(
                 owner=decision.owner or None,
                 due=decision.due or None,
             )
+        if decision.commitment is not None:
+            # Story 15d: the commitment's owner, the PM's when he set one.
+            line = replace(line, owner=decision.commitment.owner or None)
         kept.append(line)
     return kept
 
@@ -1048,6 +1092,7 @@ def issue_notes_for(
     decisions_unreadable: int = 0,
     estimated_from: Mapping[str, str | None] | None = None,
     machine_zone: tzinfo | None = None,
+    decisions_failure: BaseException | None = None,
 ) -> IssueNotes:
     """The rows under each issue, and the closing lines, for one render.
 
@@ -1117,6 +1162,15 @@ def issue_notes_for(
             )
         )
         decisions = None
+    elif decisions_failure is not None:
+        # Story 15d: the proposals could not be read, and the ledger's join
+        # (a withdrawn item hidden, a commitment's state) still applies.
+        closing.append(
+            _sentence(
+                "Your decisions on the action items could not be read, so the meeting "
+                f"updates are shown as recorded: {_reason(decisions_failure)}"
+            )
+        )
     elif decisions_unreadable:
         n = decisions_unreadable
         closing.append(
@@ -1135,6 +1189,11 @@ def issue_notes_for(
         ),
         key=_order,
     )
+    joined = {
+        item: decision.commitment
+        for item, decision in (decisions or {}).items()
+        if decision.commitment is not None
+    }
     if not updates:
         return IssueNotes(
             closing=tuple(closing),
@@ -1166,6 +1225,7 @@ def issue_notes_for(
                 tz=tz,
                 estimated_from=estimated_from,
                 machine_zone=machine_zone,
+                commitment=joined.get(line.item) if line.kind is ItemKind.ACTION else None,
             )
             for line in lines[:MAX_ROWS_PER_ISSUE]
         ]

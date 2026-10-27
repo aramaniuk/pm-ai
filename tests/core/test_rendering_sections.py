@@ -2539,3 +2539,367 @@ def test_7d_an_item_with_no_due_date_shows_no_parenthesis():
     lines = body.split("\n")
     assert "  - Bo: Update the runbook" in lines
     assert "(null)" not in body and "(None)" not in body and "()" not in body
+
+
+# ── Story 15d: the block of open commitments, the meeting lines, the notes ───
+
+from pm_ai.core.rendering import MAX_PAGE_COMMITMENTS, MAX_PAGE_SCOPE_COMMANDS, render_project_dashboard  # noqa: E402
+from pm_ai.domain.renders import (  # noqa: E402
+    WITHHELD_CONFIDENTIAL,
+    WITHHELD_TEXT,
+    PageCommitment,
+    PageCommitments,
+)
+
+COMMITMENTS_GOLDEN = Path(__file__).parent / "goldens" / "dashboard_with_commitments.md"
+SYNC = "Example Weekly Sync-up"
+SINCE = datetime(2026, 9, 9, 5, 0, tzinfo=timezone.utc)
+
+
+def page_line(due: str = "due Thu 22 Oct", what: str = "send the cache TTL numbers", **fields) -> PageCommitment:
+    values: dict = dict(
+        scope=PERSONAL, promise=False, due=due, what=what, owner="Sam Rivera",
+        title=SYNC, day="Mon 19 Oct", meeting_id="mtg_a",
+    )
+    values.update(fields)
+    return PageCommitment(**values)
+
+
+def block(*lines: PageCommitment, **fields) -> PageCommitments:
+    values: dict = dict(
+        scopes=(PERSONAL,),
+        lines=lines,
+        open_scopes=tuple(dict.fromkeys(line.scope for line in lines)),
+        since=SINCE,
+    )
+    values.update(fields)
+    return PageCommitments(**values)
+
+
+def with_block(commitments: PageCommitments | None, *shown, **options) -> str:
+    return render_dashboard(
+        (), (), goals(), NOW, tz=DISPLAY, pm=NOBODY,
+        digests=MeetingDigests(shown=tuple(shown)) if shown else None,
+        commitments=commitments,
+        **options,
+    )
+
+
+def block_lines(text: str) -> list[str]:
+    return [line for line in time_critical(text).split("\n") if line.startswith("- ")]
+
+
+def test_15d_no_block_is_byte_identical_to_the_render_before():
+    """`commitments=None` prints nothing, so 7d's golden is unchanged."""
+    shown = digest(items=(DigestItem("book the room", approved=True),))
+    assert with_block(None, shown) == with_digests(shown)
+
+
+def test_15d_each_line_reads_as_the_spec_shows_it():
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    text = with_block(
+        block(
+            page_line("due Thu 22 Oct, past due", said="by Thursday", scope=alpha, name_scope=True),
+            page_line("due Fri 30 Oct (meeting day estimated)", "book the load test", owner="Alex Morgan"),
+            page_line(
+                "due Fri 30 Oct, set by you", "share the draft", promise=True, owner=None,
+                speaker="Sam Rivera", state="altered on Sat 24 Oct",
+            ),
+            page_line('no due date worked out from "next sprint"', "migrate the cache", owner="Alex Morgan"),
+            page_line("due cleared by you", "write the notes", owner=None),
+            scopes=(PERSONAL, alpha),
+        )
+    )
+    assert block_lines(text)[:5] == [
+        '- **due Thu 22 Oct, past due** Sam Rivera: send the cache TTL numbers ("by Thursday") — from Example Weekly Sync-up, Mon 19 Oct (`project:alpha`)',
+        "- **due Fri 30 Oct (meeting day estimated)** Alex Morgan: book the load test — from Example Weekly Sync-up, Mon 19 Oct",
+        "- **due Fri 30 Oct, set by you** said by Sam Rivera: share the draft — altered on Sat 24 Oct — from Example Weekly Sync-up, Mon 19 Oct",
+        '- **no due date worked out from "next sprint"** Alex Morgan: migrate the cache — from Example Weekly Sync-up, Mon 19 Oct',
+        "- **due cleared by you** unassigned: write the notes — from Example Weekly Sync-up, Mon 19 Oct",
+    ]
+    body = time_critical(text)
+    assert "Open commitments, soonest due first:" in body
+    # The block sits after the day and before the summaries; no fifth heading.
+    assert list(sections(text)) == list(HEADINGS)
+
+
+def test_15d_promise_and_origin_forms():
+    """Matrix "Promise, no speaker", "No title", "No meeting", "Same id twice"."""
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    text = with_block(
+        block(
+            page_line(promise=True, owner=None, speaker=None, what="send the notes"),
+            page_line(title=None, day=None, meeting_id="mtg_x"),
+            page_line(title=None, day=None, meeting_id=None, what="plan"),
+            page_line(promise=True, owner="Alex Morgan", speaker="Sam Rivera", what="x", also_in=(alpha,)),
+            page_line(title="", what="y"),
+        )
+    )
+    lines = block_lines(text)
+    assert lines[0] == "- **due Thu 22 Oct** send the notes — from Example Weekly Sync-up, Mon 19 Oct"
+    assert lines[1] == (
+        "- **due Thu 22 Oct** Sam Rivera: send the cache TTL numbers — from meeting mtg_x "
+        "(meeting record unavailable when it was approved)"
+    )
+    assert lines[2] == "- **due Thu 22 Oct** Sam Rivera: plan"
+    assert lines[3].startswith("- **due Thu 22 Oct** said by Sam Rivera, owner Alex Morgan: x")
+    assert lines[3].endswith("(also in `project:alpha`)")
+    assert "from (untitled), Mon 19 Oct" in lines[4]
+
+
+def test_15d_the_cap_and_the_more_line():
+    """Matrix "Cap, one more"."""
+    lines = [page_line(f"due {n} Nov", f"task {n}") for n in range(MAX_PAGE_COMMITMENTS + 1)]
+    shown = block_lines(with_block(block(*lines)))
+    assert len([line for line in shown if line.startswith("- **")]) == MAX_PAGE_COMMITMENTS
+    assert "- and 1 more open commitment: `pm-ai commitment list --scope personal`" in shown
+    assert "- to mark or correct them: `pm-ai commitment review --scope personal`" in shown
+
+
+def test_15d_the_more_line_names_only_the_scopes_left_out():
+    """Matrix "Cross-scope order"."""
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    lines = [page_line("due 20 Oct", scope=alpha), page_line("due 21 Oct", scope=alpha)]
+    lines += [page_line(f"due {n} Nov") for n in range(10)]
+    text = with_block(block(*lines, scopes=(PERSONAL, alpha), open_scopes=(PERSONAL, alpha)))
+    shown = block_lines(text)
+    assert "- and 2 more open commitments: `pm-ai commitment list --scope personal`" in shown
+    assert (
+        "- to mark or correct them: `pm-ai commitment review --scope personal`, "
+        "`pm-ai commitment review --scope project:alpha`"
+    ) in shown
+
+
+def test_15d_the_command_cap():
+    """Matrix "Command cap": past three scopes, one command without `--scope`."""
+    assert MAX_PAGE_SCOPE_COMMANDS == 3
+    projects = [DataScope(ScopeKind.PROJECT, project_id=name) for name in ("a", "b", "c", "d")]
+    scopes = (PERSONAL, *projects)
+    lines = [page_line(f"due {n} Nov", scope=scopes[n % 5]) for n in range(10)]
+    # Left out: one in each of four scopes, past the cap of three commands.
+    lines += [page_line("due 30 Nov", scope=scope) for scope in scopes[1:5]]
+    text = with_block(block(*lines, scopes=scopes, open_scopes=scopes))
+    shown = block_lines(text)
+    assert "- and 4 more open commitments: `pm-ai commitment list`" in shown
+    assert "- to mark or correct them: `pm-ai commitment review`" in shown
+
+
+def test_15d_the_closed_line():
+    """Matrix "Closed line"."""
+    text = with_block(
+        block(
+            page_line(),
+            closed="2 done (1 marked by you, 1 by telemetry), 1 broken (marked by you), 1 withdrawn (marked by you)",
+            closed_scopes=(PERSONAL,),
+        )
+    )
+    assert (
+        "- closed since 2026-09-09 07:00: 2 done (1 marked by you, 1 by telemetry), 1 broken "
+        "(marked by you), 1 withdrawn (marked by you): `pm-ai commitment list --scope personal --state all`"
+    ) in block_lines(text)
+
+
+def test_15d_none_open_names_the_scopes_read():
+    """Matrix "None open", "None open, one unreadable"."""
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    both = time_critical(with_block(block(scopes=(PERSONAL, alpha))))
+    assert "No open commitment in personal or project:alpha." in both
+    one = time_critical(with_block(block(unreadable=((alpha, "OSError"),))))
+    assert "No open commitment in personal." in one
+    assert (
+        "The commitments of `project:alpha` could not be read (OSError), so they are not "
+        "listed; only the approved action items of meetings summarised since 2026-09-09 07:00 "
+        "show, under their meetings: `pm-ai commitment list --scope project:alpha`."
+    ) in one
+    none = time_critical(with_block(block(scopes=(), unreadable=((PERSONAL, "OSError"),))))
+    assert "No open commitment" not in none and "could not be read (OSError)" in none
+
+
+def test_15d_the_ledger_notes():
+    """Matrix "Bad lines", "Old unrecorded", "Not enrolled"."""
+    gone = DataScope(ScopeKind.PROJECT, project_id="gone")
+    body = time_critical(
+        with_block(
+            block(
+                page_line(),
+                bad_lines=((PERSONAL, "commitments_log.md in personal: 1 line could not be read, 1 mark was not applied"),),
+                unrecorded=((PERSONAL, ("prp_a", "prp_b", "prp_c"), 4),),
+                not_enrolled=(gone,),
+            )
+        )
+    )
+    assert (
+        "commitments_log.md in personal: 1 line could not be read, 1 mark was not applied: "
+        "`pm-ai commitment list --scope personal`."
+    ) in body
+    assert (
+        "4 approved items in `personal` are not yet recorded as commitments: "
+        "`pm-ai proposal approve prp_a --scope personal`, `pm-ai proposal approve prp_b --scope "
+        "personal`, `pm-ai proposal approve prp_c --scope personal`, and 1 more: `pm-ai proposal "
+        "list --scope personal --state approved`."
+    ) in body
+    assert "`project:gone` is no longer enrolled, so its commitments are not listed." in body
+    assert "pm-ai commitment list --scope project:gone" not in body
+
+
+def test_15d_no_id_or_version_on_the_page():
+    body = time_critical(with_block(block(page_line(meeting_id="mtg_a"))))
+    assert "cml_" not in body and "--if-version" not in body
+
+
+def test_15d_the_meeting_line_counts_its_commitments():
+    """Matrix "Meeting line", "all and none", "one"."""
+    def meeting_line(n: int, opened: int) -> str:
+        found = time_critical(with_digests(digest(commitments=n, open_commitments=opened, items=())))
+        return next(line for line in found.split("\n") if "from this meeting" in line)
+
+    command = "`pm-ai commitment list --scope personal --meeting mtg_a --state all`"
+    assert meeting_line(1, 1) == f"  - 1 commitment from this meeting, open: {command}"
+    assert meeting_line(1, 0) == f"  - 1 commitment from this meeting, closed: {command}"
+    assert meeting_line(3, 3) == f"  - 3 commitments from this meeting, all open: {command}"
+    assert meeting_line(2, 0) == f"  - 2 commitments from this meeting, none open: {command}"
+    assert meeting_line(2, 1) == f"  - 2 commitments from this meeting, 1 open: {command}"
+    body = time_critical(with_digests(digest(commitments=2, open_commitments=1)))
+    assert "no open action item" not in body
+
+
+def test_15d_unrecorded_and_malformed_items_under_their_meeting():
+    """Matrix "Not recorded", "Malformed root"."""
+    body = time_critical(
+        with_digests(
+            digest(
+                items=(
+                    DigestItem("book the room", "Alex Morgan", "Friday", approved=True, unrecorded="prp_x_e1"),
+                    DigestItem("plan the demo", approved=True, malformed="prp_y"),
+                )
+            )
+        )
+    )
+    assert (
+        "  - Alex Morgan: book the room (Friday), approved, not yet recorded as a commitment: "
+        "`pm-ai proposal approve prp_x_e1 --scope personal`"
+    ) in body
+    assert (
+        "  - unassigned: plan the demo, approved; a line of commitments_log.md naming prp_y "
+        "does not parse; fix or remove it"
+    ) in body
+    assert "proposal approve prp_y" not in body
+
+
+def test_15d_the_overflow_names_staged_when_every_hidden_item_waits():
+    """Matrix "Overflow"."""
+    waiting = time_critical(with_digests(digest(hidden=2, hidden_waiting_only=True)))
+    assert "--meeting mtg_a --state staged`" in waiting
+    mixed = time_critical(with_digests(digest(hidden=2)))
+    assert "--meeting mtg_a --state open`" in mixed
+
+
+def test_15d_a_project_page_withholds_by_the_confidential_rules():
+    """Matrix "Confidential by link", "Links unread"."""
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    text = render_project_dashboard(
+        (), (), NOW, tz=DISPLAY, pm=NOBODY,
+        commitments=block(
+            page_line("due Fri 30 Oct", scope=alpha, withheld=WITHHELD_TEXT, what=""),
+            page_line("due Fri 30 Oct", scope=alpha, promise=True, owner=None, speaker=None,
+                      speaker_unresolved=True, withheld=WITHHELD_TEXT, what="", state="altered on Sat 24 Oct"),
+            PageCommitment(scope=alpha, promise=False, due="", withheld=WITHHELD_CONFIDENTIAL,
+                           title=SYNC, day="Mon 19 Oct", meeting_id="mtg_a"),
+            scopes=(alpha,), open_scopes=(alpha,), project=alpha,
+        ),
+    )
+    lines = block_lines(text)
+    assert lines[0] == (
+        "- **due Fri 30 Oct** Sam Rivera: an action item whose text is withheld — from Example "
+        "Weekly Sync-up, Mon 19 Oct"
+    )
+    assert lines[1] == (
+        "- **due Fri 30 Oct** said by someone in the meeting: a spoken promise whose text is "
+        "withheld — altered on Sat 24 Oct — from Example Weekly Sync-up, Mon 19 Oct"
+    )
+    assert lines[2] == "- an action item on a confidential issue — from Example Weekly Sync-up, Mon 19 Oct"
+    empty = time_critical(
+        render_project_dashboard(
+            (), (), NOW, tz=DISPLAY, pm=NOBODY,
+            commitments=block(scopes=(alpha,), open_scopes=(), project=alpha),
+        )
+    )
+    assert "No open commitment in `project:alpha`." in empty
+
+
+def test_15d_the_shown_under_an_issue_line():
+    """Matrix "Shown under an issue"."""
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    text = render_project_dashboard(
+        (), (), NOW, tz=DISPLAY, pm=NOBODY,
+        commitments=block(
+            scopes=(alpha,), open_scopes=(alpha,), project=alpha, under_issue=(12,), under_issue_count=1,
+        ),
+    )
+    assert "- 1 open commitment shown under #12 in Team Activity" in block_lines(text)
+    assert "No open commitment" not in time_critical(text)
+
+
+def test_15d_the_walls_between_the_pages():
+    """AD-25: the personal page takes no project's block; a project page no other scope."""
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    with pytest.raises(ValueError):
+        with_block(block(scopes=(alpha,), project=alpha))
+    with pytest.raises(ValueError):
+        render_project_dashboard((), (), NOW, tz=DISPLAY, pm=NOBODY, commitments=block())
+    with pytest.raises(ValueError):
+        block(page_line(scope=PERSONAL), scopes=(alpha,), project=alpha)
+    with pytest.raises(ValueError):
+        PageCommitment(scope=alpha, promise=False, due="due Fri 30 Oct", withheld=WITHHELD_CONFIDENTIAL)
+    with pytest.raises(ValueError):
+        block(page_line(withheld=WITHHELD_TEXT, what=""))  # the personal page withholds nothing
+
+
+def test_15d_the_render_with_commitments_matches_its_golden_file():
+    """The block, a meeting line and each note, byte for byte — read and regenerated deliberately."""
+    alpha = DataScope(ScopeKind.PROJECT, project_id="alpha")
+    gone = DataScope(ScopeKind.PROJECT, project_id="gone")
+    commitments = block(
+        page_line("due Thu 22 Oct, past due", said="by Thursday", scope=alpha, name_scope=True),
+        page_line("due Fri 30 Oct (meeting day estimated)", "book the load test", owner="Alex Morgan"),
+        page_line(
+            "due Fri 30 Oct, set by you", "share the draft", promise=True, owner=None,
+            speaker="Sam Rivera", state="altered on Sat 24 Oct",
+        ),
+        page_line('no due date worked out from "next sprint"', "migrate the cache", owner="Alex Morgan"),
+        page_line("due cleared by you", "write the notes", owner=None, state="pm-ai could not check by telemetry"),
+        scopes=(PERSONAL, alpha),
+        open_scopes=(PERSONAL, alpha),
+        closed="2 done (1 marked by you, 1 by telemetry), 1 withdrawn (marked by you)",
+        closed_scopes=(PERSONAL,),
+        bad_lines=((PERSONAL, "commitments_log.md in personal: 1 line could not be read"),),
+        unrecorded=((PERSONAL, ("prp_older",), 1),),
+        not_enrolled=(gone,),
+    )
+    shown = (
+        digest(
+            items=(
+                DigestItem(
+                    "send the deck", "Ваня", "Friday",
+                    review_by=datetime(2026, 9, 23, 7, 0, tzinfo=timezone.utc),
+                ),
+                DigestItem("book the room", approved=True, unrecorded="prp_room"),
+            ),
+            waiting=1,
+            commitments=3,
+            open_commitments=2,
+        ),
+        digest("mtg_c", scope=ALPHA, title="Alpha planning", maker=CLAUDE, commitments=1, open_commitments=0),
+    )
+    text = render_dashboard(
+        FULL_DAY_MEETINGS,
+        FULL_DAY_ENTRIES,
+        goals(),
+        NOW,
+        tz=DISPLAY,
+        pm=NOBODY,
+        digests=MeetingDigests(shown=shown),
+        spend=spend_total(cost_usd=4.25, breached=None, records=2, unknown=1),
+        commitments=commitments,
+    )
+    assert text == COMMITMENTS_GOLDEN.read_text(encoding="utf-8")

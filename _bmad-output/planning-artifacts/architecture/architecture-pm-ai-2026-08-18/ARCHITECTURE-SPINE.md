@@ -402,7 +402,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 - **Prevents:** debug noise destroying the value of the audit trail
 - **Rule:** `event_log/` records decisions, actions, and telemetry events — append-only and human-readable. **The ledger is a directory of dated segments** (`event_log/2026-08.md`), not a single file, per AD-5; "append-only" and FR-37's boundedness are reconciled by sealing and superseding whole segments, never by rotating or rewriting one. It exists **per scope**, and an entry belongs to the scope that owns its subject; an entry needing two scopes is two entries (AD-38). Diagnostic logging goes to rotating structured JSON under `~/.pm-ai/logs/`. Disclosure and cost records go to the application ledger (AD-38), not here. Writing debug output to the event ledger is prohibited.
 
-### AD-25 — Personal analytics are physically separated from project scope `[revised 2026-09-23]`
+### AD-25 — Personal analytics are physically separated from project scope `[revised 2026-09-23, 2026-10-26]`
 
 - **Binds:** FR-16, NFR-07
 - **Prevents:** FR-16's privacy charter being enforced only by a tag someone remembers to check
@@ -414,7 +414,7 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   **`people`-scope metrics are a different store again.** FR-30's per-employee monitored metrics describe a direct report, not the PM, and belong in `people` (AD-4) — never in the personal analytics database. The separation runs both ways: your burnout signal must not reach a report's dossier, and a report's performance trend is not personal-scope material that follows you to your next job.
 
-  **Per-member activity on a project page** `[2026-10-16, gate; Andrei's kernel amendment of 2026-10-16, 23g, 7e]`. A project page may list each member's own assigned work and what moved on it, from project-scope data only (the project's GitLab work, its meetings), ordered by something that does not depend on activity (name, milestone). It never prints a ranking, a comparison between members or with another day, or a per-member total, rate, trend or score — those are FR-30's monitored metrics, which live in `people` (AD-4) — and it never reads personal-scope or `people`-scope data.
+  **Per-member activity on a project page** `[2026-10-16, gate; Andrei's kernel amendment of 2026-10-16, 23g, 7e]`. A project page may list each member's own assigned work and what moved on it, from project-scope data only (the project's GitLab work, its meetings), ordered by something that does not depend on activity (name, milestone). It never prints a ranking, a comparison between members or with another day, or a per-member total, rate, trend or score — those are FR-30's monitored metrics, which live in `people` (AD-4) — and it never reads personal-scope or `people`-scope data. `[2026-10-26, 15d]` A project page may list the project's open commitments, ordered by due and never grouped, counted or ranked by member, from that project's ledger only, shows no more about a confidential issue than its Team Activity row does, and shows no broken or past-due mark `[2026-10-27, Andrei, 15d]`.
 
 ### AD-26 — macOS-only in v1, with OS-touching concerns behind ports
 

@@ -29,7 +29,11 @@ __all__ = [
     "DigestUnreadable",
     "MeetingDigest",
     "MeetingDigests",
+    "PageCommitment",
+    "PageCommitments",
     "ProjectMeetingDigests",
+    "WITHHELD_CONFIDENTIAL",
+    "WITHHELD_TEXT",
     "RenderRecord",
     "RenderUnrecorded",
     "ScopeUnreadable",
@@ -100,12 +104,19 @@ class DigestItem:
     """Story 13a: approved by the PM; otherwise waiting for review."""
     review_by: datetime | None = None
     """Story 13a: a waiting item's window end — "to review by <date>"."""
+    unrecorded: str | None = None
+    """Story 15d: an approved item the ledger holds no commitment for: the approved
+    proposal's own id, which `proposal approve` writes the line for."""
+    malformed: str | None = None
+    """Story 15d: an approved item whose root a malformed ledger line names."""
 
     def __post_init__(self) -> None:
         if self.confidential and self.what:
             raise ValueError(
                 "an action item on a confidential issue carries no text to the page."
             )
+        if (self.unrecorded or self.malformed) and not self.approved:
+            raise ValueError("only an approved item is recorded, or not, as a commitment.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,8 +163,21 @@ class MeetingDigest:
     """Story 13a: items that expired without review and have no replacement."""
     waiting: int = 0
     """Story 13a: items waiting for review, shown or not: the review line's cue."""
+    commitments: int = 0
+    """Story 15d: the commitments of this scope's ledger whose `pending` line names
+    this meeting, open and closed; 0 when the ledger could not be read."""
+    open_commitments: int = 0
+    """Story 15d: how many of `commitments` are open."""
+    hidden_waiting_only: bool = False
+    """Story 15d: every item `hidden` counts is waiting, so the overflow names
+    `--state staged`; otherwise `--state open`."""
 
     def __post_init__(self) -> None:
+        if not 0 <= self.open_commitments <= self.commitments:
+            raise ValueError(
+                f"{self.open_commitments} open of {self.commitments} commitments counts "
+                f"nothing real."
+            )
         for name in ("hidden", "placed_count", "unreadable_items", "expired", "waiting"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name}={getattr(self, name)} counts nothing; it is at least 0.")
@@ -300,3 +324,131 @@ class ProjectMeetingDigests:
                     f"{failure.scope} cannot be named on the {self.scope} dashboard "
                     f"(AD-38)."
                 )
+
+
+# ── Story 15d: the block of open commitments ─────────────────────────────────
+
+WITHHELD_CONFIDENTIAL = "confidential"
+"""A project page's commitment on a confidential issue: its kind and meeting only."""
+
+WITHHELD_TEXT = "text"
+"""A project page's commitment whose issue's confidentiality cannot be told: its
+text and its due as said are withheld; the date, owner and state stay."""
+
+
+@dataclass(frozen=True, slots=True)
+class PageCommitment:
+    """One open commitment as the block shows it (story 15d).
+
+    Every word about its state and due (`due`, `state`) was built by
+    `commitment_cards.page_parts` before the render; the renderer only
+    composes and escapes. `owner` and `speaker` are the names to show: as
+    recorded on the personal page; on a project page the member a name
+    resolves to, or `None` — and `speaker_unresolved` when a speaker was
+    said whom no member matches. `said` is the due as said, quoted only when
+    a date was worked out from it. `withheld` is `""`, `WITHHELD_TEXT` or
+    `WITHHELD_CONFIDENTIAL` (a project page only).
+    """
+
+    scope: DataScope
+    promise: bool
+    due: str
+    what: str = ""
+    what_cut: bool = False
+    owner: str | None = None
+    speaker: str | None = None
+    speaker_unresolved: bool = False
+    said: str | None = None
+    state: str = ""
+    title: str | None = None
+    day: str | None = None
+    """The meeting's start as the origin says it (`Mon 19 Oct`); `None` with no start on the line."""
+    meeting_id: str | None = None
+    also_in: tuple[DataScope, ...] = ()
+    withheld: str = ""
+    name_scope: bool = False
+    """On the personal page, a project's commitment names its scope."""
+
+    def __post_init__(self) -> None:
+        if self.withheld not in ("", WITHHELD_TEXT, WITHHELD_CONFIDENTIAL):
+            raise ValueError(f"{self.withheld!r} is no way of withholding a commitment.")
+        if self.withheld and (self.what or self.said is not None):
+            raise ValueError("a withheld commitment carries no text or due as said to the page.")
+        if self.withheld == WITHHELD_CONFIDENTIAL and (
+            self.due or self.owner or self.speaker or self.state or self.speaker_unresolved
+        ):
+            raise ValueError(
+                "a commitment on a confidential issue shows its kind and meeting only, as "
+                "Team Activity's row does."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PageCommitments:
+    """A page's block of open commitments, read from its scopes' ledgers (story 15d).
+
+    `scopes` are the scopes whose ledger was read, in page scope order
+    (personal first, then projects by id). `lines` is every open commitment
+    the block may list, in its order; the renderer shows the first
+    `MAX_PAGE_COMMITMENTS` and counts the rest. `under_issue` are the iids
+    Team Activity shows `under_issue_count` open ones under (a project
+    page). `open_scopes` are the scopes with an open commitment. `closed` is
+    the closed line's counts in words (`commitment_cards.closed_words`),
+    `closed_scopes` the scopes with one, `since` the window's start.
+    `unreadable` names each scope whose ledger could not be read and the
+    exception's type name; `bad_lines` each scope's counts of lines the fold
+    could not use; `unrecorded` each scope's approved items not yet recorded
+    and not under a meeting on this page (the first ids, and how many in
+    all); `not_enrolled` the projects no longer enrolled whose approved
+    items the store still holds. `project` is the project page's scope:
+    every scope named must be it (AD-25).
+    """
+
+    scopes: tuple[DataScope, ...] = ()
+    lines: tuple[PageCommitment, ...] = ()
+    under_issue: tuple[int, ...] = ()
+    under_issue_count: int = 0
+    open_scopes: tuple[DataScope, ...] = ()
+    closed: str = ""
+    closed_scopes: tuple[DataScope, ...] = ()
+    since: datetime | None = None
+    unreadable: tuple[tuple[DataScope, str], ...] = ()
+    bad_lines: tuple[tuple[DataScope, str], ...] = ()
+    unrecorded: tuple[tuple[DataScope, tuple[str, ...], int], ...] = ()
+    not_enrolled: tuple[DataScope, ...] = ()
+    project: DataScope | None = None
+
+    def __post_init__(self) -> None:
+        if self.under_issue_count and not self.under_issue:
+            raise ValueError("commitments are said to be shown under an issue, and none is named.")
+        named = [
+            *self.scopes,
+            *(line.scope for line in self.lines),
+            *(other for line in self.lines for other in line.also_in),
+            *self.open_scopes,
+            *self.closed_scopes,
+            *(scope for scope, _ in self.unreadable),
+            *(scope for scope, _ in self.bad_lines),
+            *(scope for scope, _, _ in self.unrecorded),
+            *self.not_enrolled,
+        ]
+        allowed = (ScopeKind.PERSONAL, ScopeKind.PROJECT)
+        for scope in named:
+            if scope.kind not in allowed:
+                raise ValueError(f"{scope} keeps no commitment ledger, so no page names it.")
+        if self.project is None:
+            if self.under_issue_count:
+                raise ValueError("the personal page has no Team Activity to show a commitment under.")
+            if any(line.withheld for line in self.lines):
+                raise ValueError("the personal page withholds nothing (7d).")
+            return
+        if self.project.kind is not ScopeKind.PROJECT:
+            raise ValueError(f"{self.project} is not a project, so it has no project page (AD-25).")
+        for scope in named:
+            if scope != self.project:
+                raise ValueError(
+                    f"{scope} cannot be named on the {self.project} dashboard: a project page "
+                    f"reads its own ledger only (AD-25)."
+                )
+        if self.not_enrolled:
+            raise ValueError("a project page names no other project (AD-25, AD-38).")

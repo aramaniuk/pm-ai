@@ -130,11 +130,13 @@ from pm_ai.core.commitment_cards import (
     CommitmentOutcome,
     CommitmentRefused,
     card_text as commitment_card_text,
+    is_placeholder,
     listing_json as commitment_listing_json,
     listing_text as commitment_listing_text,
     outcome_json as commitment_outcome_json,
     outcome_text as commitment_outcome_text,
     refusal_json as commitment_refusal_json,
+    placeholder_words,
     refusal_text as commitment_refusal_text,
     valid_version,
 )
@@ -5485,8 +5487,22 @@ def _walk_note() -> str | None:
         typed = _review_line("  note (Enter for none): ")
         if not typed:
             return None
+        if is_placeholder(typed):
+            # Story 15d: a placeholder is never a note; asked again.
+            _echo(f"  {placeholder_words('note')}.")
+            continue
         if len(" ".join(typed.split())) > COMMITMENT_NOTE_LIMIT:
             _echo(f"  a note is at most {COMMITMENT_NOTE_LIMIT} characters; write it shorter.")
+            continue
+        return typed
+
+
+def _walk_value(prompt: str, field_name: str) -> str:
+    """One of `a`'s questions, asked again while the answer is a placeholder (15d)."""
+    while True:
+        typed = _review_line(prompt)
+        if typed and is_placeholder(typed):
+            _echo(f"  {placeholder_words(field_name)}.")
             continue
         return typed
 
@@ -5539,11 +5555,11 @@ def _walk_altered(
     commitment = card.commitment
     what: str | None = None
     if commitment.type != IMPLICIT_COMMITMENT:
-        typed = _review_line(f"  wording [{commitment.what}] (Enter keeps): ")
+        typed = _walk_value(f"  wording [{commitment.what}] (Enter keeps): ", "what")
         what = typed or None
-    typed = _review_line(f"  owner [{commitment.owner or ''}] (Enter keeps, - clears): ")
+    typed = _walk_value(f"  owner [{commitment.owner or ''}] (Enter keeps, - clears): ", "owner")
     owner = None if not typed else ("" if typed == "-" else typed)
-    typed = _review_line(f"  due [{card.due_words}] (Enter keeps, - clears): ")
+    typed = _walk_value(f"  due [{card.due_words}] (Enter keeps, - clears): ", "due")
     due = None if not typed else ("" if typed == "-" else typed)
     note = _walk_note()
     return desk.altered(

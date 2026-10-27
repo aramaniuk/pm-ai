@@ -39,7 +39,7 @@ from pm_ai.app import commitment_indexing as indexing_module
 from pm_ai.app import daemon as daemon_module
 from pm_ai.app.commitment_indexing import CommitmentIndexing
 from pm_ai.core.commitment_index import derive, index_rows
-from pm_ai.core.commitment_log import fold, parse_ledger
+from pm_ai.core.commitment_log import FOLD_VERSION, fold, parse_ledger
 from pm_ai.core.jobs import source_md5
 from pm_ai.domain.commitments import COMMITMENTS_LOG, NotACommitmentScope
 from pm_ai.domain.identity import DataScope, ScopeKind
@@ -685,12 +685,12 @@ def _started_with(machine: Machine, caplog) -> Serving:
         (lambda path: _sql(path, "DROP TABLE index_format"), "partial"),
         (lambda path: _sql(path, "DELETE FROM index_format"), "format_row"),
         (lambda path: _sql(path, "UPDATE index_format SET index_format = 2"), "other_format"),
-        (lambda path: _sql(path, "UPDATE index_format SET fold_version = 2"), "other_format"),
+        (lambda path: _sql(path, f"UPDATE index_format SET fold_version = {FOLD_VERSION + 1}"), "other_format"),
         (lambda path: _sql(path, "UPDATE index_format SET index_format = 'one'"), "format_row"),
         (lambda path: _sql(path, "ALTER TABLE commitments ADD COLUMN owner TEXT"), "other_format"),
     ],
     ids=[
-        "not-a-database", "partly-made", "format-row-empty", "index-format-2", "fold-version-2",
+        "not-a-database", "partly-made", "format-row-empty", "index-format-2", "other-fold-version",
         "not-an-integer", "other-columns",
     ],
 )

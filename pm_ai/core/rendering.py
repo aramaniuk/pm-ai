@@ -121,9 +121,13 @@ from pm_ai.domain.meeting_summaries import SummaryMaker, SummaryStateKind
 from pm_ai.domain.meetings import Meeting
 from pm_ai.domain.payload_fields import decode_payload
 from pm_ai.domain.renders import (
+    WITHHELD_CONFIDENTIAL,
+    WITHHELD_TEXT,
     DigestUnreadable,
     MeetingDigest,
     MeetingDigests,
+    PageCommitment,
+    PageCommitments,
     ProjectMeetingDigests,
     ScopeUnreadable,
 )
@@ -198,6 +202,14 @@ the most recently recorded; the rest are counted."""
 
 MAX_DIGEST_ITEMS = 5
 """Open action items listed under one meeting (story 7d); the rest are counted."""
+
+MAX_PAGE_COMMITMENTS = 10
+"""Open commitments listed in a page's block (story 15d), soonest due first; the
+rest are counted, with the `pm-ai commitment list` commands that show them."""
+
+MAX_PAGE_SCOPE_COMMANDS = 3
+"""Per-scope commands one block line names (story 15d); with more scopes, one
+command without `--scope`, which covers personal and every enrolled project."""
 
 EXCERPT_LIMIT = 200
 """A summary's excerpt (and a digest's title, owner, due and model) cut to at
@@ -386,6 +398,7 @@ def render_dashboard(
     since: LookBack | None = None,
     digests: MeetingDigests | None = None,
     spend: SpendAnswer | None = None,
+    commitments: PageCommitments | None = None,
 ) -> str:
     """CAP-9's four sections, as Markdown, from these inputs and this instant.
 
@@ -433,11 +446,17 @@ def render_dashboard(
             f"render_dashboard takes the personal page's MeetingDigests, not "
             f"{type(digests).__name__}."
         )
+    if commitments is not None and commitments.project is not None:
+        raise ValueError(
+            f"render_dashboard takes the personal page's commitments, not "
+            f"{commitments.project}'s."
+        )
 
     return _document(
         HEADINGS,
         (
             _time_critical(meetings, now=now, tz=tz)
+            + _commitment_block(commitments, now=now, tz=tz)
             + _digest_block(digests, now=now, tz=tz, since=since),
             _proactive_enablement(entries, pm=pm, now=now, tz=tz, since=since),
             _strategic_milestones(goals),
@@ -457,6 +476,7 @@ def render_project_dashboard(
     work: WorkAnswer = None,
     issue_notes: IssueNotes = NO_ISSUE_NOTES,
     digests: ProjectMeetingDigests | None = None,
+    commitments: PageCommitments | None = None,
 ) -> str:
     """A project's day, as Markdown — and nothing of the PM's.
 
@@ -518,6 +538,21 @@ def render_project_dashboard(
             f"project page (AD-25)."
         )
 
+    if commitments is not None and commitments.project is None:
+        raise ValueError(
+            "render_project_dashboard takes one project's commitments only, never the "
+            "personal page's (AD-25)."
+        )
+    if (
+        commitments is not None
+        and digests is not None
+        and commitments.project != digests.scope
+    ):
+        raise ValueError(
+            f"{commitments.project}'s commitments cannot be shown on the {digests.scope} "
+            f"dashboard (AD-25)."
+        )
+
     activity = build_team_activity(
         work, entries, now=now, since=since, issue_notes=issue_notes
     )
@@ -525,6 +560,7 @@ def render_project_dashboard(
         PROJECT_HEADINGS,
         (
             _time_critical(meetings, now=now, tz=tz)
+            + _commitment_block(commitments, now=now, tz=tz)
             + _digest_block(digests, now=now, tz=tz, since=since),
             _proactive_enablement(entries, pm=pm, now=now, tz=tz, since=since),
             _team_activity(activity, notes=issue_notes, now=now, tz=tz),
@@ -985,7 +1021,18 @@ def _digest_lines(
         if due:
             line += f" ({due})"
         # Story 13a: each item is waiting for review or approved.
-        if item.approved:
+        if item.malformed is not None:
+            # Story 15d: no repair offered — 15a writes no line for such a root.
+            line += (
+                f", approved; a line of commitments_log.md naming {escape(item.malformed)} "
+                f"does not parse; fix or remove it"
+            )
+        elif item.unrecorded is not None:
+            line += (
+                f", approved, not yet recorded as a commitment: `pm-ai proposal approve "
+                f"{code(item.unrecorded)} --scope {code(str(digest.scope))}`"
+            )
+        elif item.approved:
             line += ", approved"
         elif item.review_by is not None:
             line += f", to review by {item.review_by.astimezone(tz).date().isoformat()}"
@@ -995,9 +1042,11 @@ def _digest_lines(
     listing = f"pm-ai proposal list --scope {scope_words} --meeting {meeting_words}"
     if digest.hidden:
         n = digest.hidden
+        # Story 15d: `staged` when every hidden item is waiting for review.
+        state_word = "staged" if digest.hidden_waiting_only else "open"
         lines.append(
             f"  - and {n} more open action {'item' if n == 1 else 'items'}: "
-            f"`{listing} --state open`"
+            f"`{listing} --state {state_word}`"
         )
     if digest.placed_count:
         n = digest.placed_count
@@ -1012,11 +1061,30 @@ def _digest_lines(
             f"  - {n} open action {'item' if n == 1 else 'items'} could not be read "
             f"from the proposals store, so {'it is' if n == 1 else 'they are'} not listed"
         )
+    if digest.commitments:
+        # Story 15d: one line counting this meeting's commitments, open and closed.
+        n, opened = digest.commitments, digest.open_commitments
+        if n == 1:
+            how = "open" if opened else "closed"
+        elif opened == n:
+            how = "all open"
+        elif not opened:
+            how = "none open"
+        else:
+            how = f"{opened} open"
+        lines.append(
+            f"  - {n} {'commitment' if n == 1 else 'commitments'} from this meeting, {how}: "
+            f"`pm-ai commitment list --scope {scope_words} --meeting {meeting_words} --state all`"
+        )
     if (
         state is not SummaryStateKind.NOTHING_SAID
         and digest.summary is not None
         and not (
-            digest.items or digest.hidden or digest.placed_count or digest.unreadable_items
+            digest.items
+            or digest.hidden
+            or digest.placed_count
+            or digest.unreadable_items
+            or digest.commitments
         )
     ):
         lines.append("  - no open action item")
@@ -1039,6 +1107,179 @@ def _digest_lines(
     )
     lines.append(f"  - meeting `{meeting}`; to ask for a summary: `{command}`")
     return lines
+
+
+# ── Story 15d: the block of open commitments ─────────────────────────────────
+
+
+def _joined_or(words: Sequence[str]) -> str:
+    """`a`, `a or b`, `a, b or c`."""
+    if len(words) <= 1:
+        return "".join(words)
+    return f"{', '.join(words[:-1])} or {words[-1]}"
+
+
+def _scope_commands(scopes: Sequence[DataScope], verb: str, extra: str = "") -> str:
+    """`` `pm-ai <verb> --scope <scope> <extra>` `` per scope, in page scope order.
+
+    Past `MAX_PAGE_SCOPE_COMMANDS` scopes, one command without `--scope`,
+    which covers personal and every enrolled project (15c): the one exception
+    to 15c's rule that every printed command carries `--scope`, so a page with
+    many projects stays readable.
+    """
+    tail = f" {extra}" if extra else ""
+    if len(scopes) > MAX_PAGE_SCOPE_COMMANDS:
+        return f"`pm-ai {verb}{tail}`"
+    return ", ".join(f"`pm-ai {verb} --scope {code(str(scope))}{tail}`" for scope in scopes)
+
+
+def _commitment_who(line: PageCommitment) -> str:
+    """Who, before the text: the owner or `unassigned`; `said by …[, owner …]`; or nothing."""
+    if not line.promise:
+        return _shown_text(line.owner) or "unassigned"
+    who: list[str] = []
+    if line.speaker:
+        who.append(f"said by {_shown_text(line.speaker)}")
+    elif line.speaker_unresolved:
+        who.append("said by someone in the meeting")
+    if line.owner:
+        who.append(f"owner {_shown_text(line.owner)}")
+    return ", ".join(who)
+
+
+def _commitment_origin(line: PageCommitment) -> str:
+    """`from <title>, <day>`, or the meeting id with no record, or nothing (15c's `_origin`)."""
+    if line.title is not None and line.day is not None:
+        return f"from {_shown_text(line.title) or '(untitled)'}, {escape(line.day)}"
+    if line.meeting_id is not None:
+        return (
+            f"from meeting {escape(line.meeting_id)} (meeting record unavailable when it "
+            f"was approved)"
+        )
+    return ""
+
+
+def _commitment_line(line: PageCommitment) -> str:
+    """One block line: the due in bold, who and what, the state, where it came from."""
+    origin = _commitment_origin(line)
+    kind = "a spoken promise" if line.promise else "an action item"
+    if line.withheld == WITHHELD_CONFIDENTIAL:
+        # Only what Team Activity's row shows for a confidential issue.
+        return f"- {kind} on a confidential issue" + (f" — {origin}" if origin else "")
+    who = _commitment_who(line)
+    if line.withheld == WITHHELD_TEXT:
+        what = f"{kind} whose text is withheld"
+    else:
+        text = line.what + ("…" if line.what_cut and not line.what.endswith("…") else "")
+        what = _shown_text(text) or "(no text recorded)"
+        if line.said:
+            what += f' ("{_shown_text(line.said)}")'
+    shown = f"- **{escape(line.due)}** " + (f"{who}: {what}" if who else what)
+    if line.state:
+        shown += f" — {escape(line.state)}"
+    if origin:
+        shown += f" — {origin}"
+    if line.name_scope:
+        shown += f" (`{code(str(line.scope))}`)"
+    if line.also_in:
+        others = ", ".join(f"`{code(str(scope))}`" for scope in line.also_in)
+        shown += f" (also in {others})"
+    return shown
+
+
+def _commitment_notes(commitments: PageCommitments, *, now: datetime, tz: tzinfo) -> list[str]:
+    """The ledger notes: unreadable ledgers, lines the fold could not use, unrecorded items."""
+    since = _local(commitments.since or now, tz=tz, now=now, dated=True)
+    notes = [
+        f"The commitments of `{code(str(scope))}` could not be read ({escape(kind)}), so "
+        f"they are not listed; only the approved action items of meetings summarised "
+        f"since {since} show, under their meetings: "
+        f"`pm-ai commitment list --scope {code(str(scope))}`."
+        for scope, kind in commitments.unreadable
+    ]
+    notes += [
+        f"{escape(words)}: `pm-ai commitment list --scope {code(str(scope))}`."
+        for scope, words in commitments.bad_lines
+    ]
+    for scope, ids, count in commitments.unrecorded:
+        where = code(str(scope))
+        named = ", ".join(
+            f"`pm-ai proposal approve {code(each)} --scope {where}`" for each in ids[:3]
+        )
+        note = (
+            f"{count} approved {'item' if count == 1 else 'items'} in `{where}` "
+            f"{'is' if count == 1 else 'are'} not yet recorded as "
+            f"{'a commitment' if count == 1 else 'commitments'}: {named}"
+        )
+        if count > 3:
+            note += (
+                f", and {count - 3} more: `pm-ai proposal list --scope {where} --state approved`"
+            )
+        notes.append(note + ".")
+    notes += [
+        f"`{code(str(scope))}` is no longer enrolled, so its commitments are not listed."
+        for scope in commitments.not_enrolled
+    ]
+    return notes
+
+
+def _commitment_block(
+    commitments: PageCommitments | None, *, now: datetime, tz: tzinfo
+) -> str:
+    """Story 15d: the page's open commitments, after the day's meetings.
+
+    Read from the ledgers whatever the meeting's age, soonest due first, at
+    most `MAX_PAGE_COMMITMENTS` lines, then what was left out and the
+    commands to see and mark them. No commitment id, version or
+    `--if-version`: a page is read hours after it is written. No heading of
+    its own (CAP-9's four stay four). Empty when no block was handed in, so a
+    render without one is byte-identical to one before 15d.
+    """
+    if commitments is None:
+        return ""
+    shown = commitments.lines[:MAX_PAGE_COMMITMENTS]
+    rest = commitments.lines[MAX_PAGE_COMMITMENTS:]
+    lines = [_commitment_line(line) for line in shown]
+    if commitments.under_issue_count:
+        n = commitments.under_issue_count
+        under = ", ".join(f"#{iid}" for iid in commitments.under_issue)
+        lines.append(
+            f"- {n} open {'commitment' if n == 1 else 'commitments'} shown under {under} "
+            f"in Team Activity"
+        )
+    if rest:
+        n = len(rest)
+        left_out = [scope for scope in commitments.scopes if any(line.scope == scope for line in rest)]
+        lines.append(
+            f"- and {n} more open {'commitment' if n == 1 else 'commitments'}: "
+            f"{_scope_commands(left_out, 'commitment list')}"
+        )
+    if commitments.open_scopes:
+        lines.append(
+            f"- to mark or correct them: {_scope_commands(commitments.open_scopes, 'commitment review')}"
+        )
+    if commitments.closed:
+        since = commitments.since if commitments.since is not None else now
+        lines.append(
+            f"- closed since {_local(since, tz=tz, now=now, dated=True)}: "
+            f"{escape(commitments.closed)}: "
+            f"{_scope_commands(commitments.closed_scopes, 'commitment list', '--state all')}"
+        )
+    tail = "".join(f"\n\n{note}" for note in _commitment_notes(commitments, now=now, tz=tz))
+    listed = "\n".join(lines)
+    if shown or commitments.under_issue_count:
+        return "\n\nOpen commitments, soonest due first:\n\n" + listed + tail
+    if not commitments.scopes:
+        # No ledger could be read: no sentence about what is open; the notes say why.
+        return ("\n\n" + listed if listed else "") + tail
+    if commitments.project is not None:
+        where = f"`{code(str(commitments.scopes[0]))}`"
+    else:
+        where = _joined_or([code(str(scope)) for scope in commitments.scopes])
+    body = f"No open commitment in {where}."
+    if listed:
+        body += "\n\n" + listed
+    return "\n\n" + body + tail
 
 
 # ── Proactive Enablement ─────────────────────────────────────────────────────

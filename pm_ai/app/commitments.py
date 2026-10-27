@@ -53,6 +53,9 @@ from pm_ai.core.commitment_cards import (
     change_words,
     closed_reason,
     date_words,
+    is_placeholder,
+    open_order,
+    placeholder_words,
     undo_until,
     valid_version,
 )
@@ -1508,6 +1511,8 @@ class CommitmentDesk:
         """
         started = self.monotonic()
         typed_note = _note(note)
+        _typed(what, "what")
+        _typed(due, "due")
         _version(if_version)
         wording: str | None = None
         if what is not None:
@@ -1683,6 +1688,7 @@ class CommitmentDesk:
             raise CommitmentMisused(
                 "the due's words are empty; write when it is due, or `--clear` to clear it."
             )
+        _typed(words, "due")
         _version(if_version)
         handle: list[tuple[str | None, bool]] = []
 
@@ -1893,9 +1899,16 @@ def pm_handle(storage: Any) -> tuple[str | None, bool]:
     return (handles[0] if handles else None), True
 
 
+def _typed(value: str | None, field_name: str) -> None:
+    """Story 15d: a placeholder typed as a value is a usage error; nothing is written."""
+    if value is not None and is_placeholder(value):
+        raise CommitmentMisused(f"`{value}` is a placeholder: {placeholder_words(field_name)}.")
+
+
 def _note(note: str | None) -> str | None:
     if note is None:
         return None
+    _typed(note, "note")
     folded = fold_typed(note)
     if len(folded) > NOTE_LIMIT:
         raise CommitmentMisused(f"`--note` is at most {NOTE_LIMIT} characters; it is {len(folded)}.")
@@ -1903,6 +1916,7 @@ def _note(note: str | None) -> str | None:
 
 
 def _owner(name: str, *, allow_clear: bool) -> str:
+    _typed(name, "owner")
     folded = typed_name(name)
     if not folded and not allow_clear:
         raise CommitmentMisused("the owner's name is empty; write a name, or `--clear` to clear it.")
@@ -1962,31 +1976,13 @@ def _passes(commitment: Commitment, state: str) -> bool:
     return current.value == state
 
 
-def _due_key(commitment: Commitment) -> tuple[int, date]:
-    found = commitment.due.date
-    if found is not None:
-        return (0, found)
-    return (1 if commitment.due.value == DUE_UNRESOLVED else 2, date.max)
-
-
 def _ordered(picked: Sequence[_Found]) -> list[_Found]:
     """`list`'s order (15c): open ones by due, then closed ones by `changed_at`, newest first."""
     opened = [each for each in picked if not each.commitment.state.is_terminal]
     closed = [each for each in picked if each.commitment.state.is_terminal]
 
-    def open_key(each: _Found) -> tuple[int, date, int, float, str]:
-        commitment = each.commitment
-        rank, found = _due_key(commitment)
-        start = commitment.start
-        return (
-            rank,
-            found,
-            0 if start is not None else 1,
-            -start.timestamp() if start is not None else 0.0,
-            commitment.commitment_id,
-        )
-
-    opened.sort(key=open_key)
+    # Story 15d: one order, in `core`, shared with every page's block.
+    opened.sort(key=lambda each: open_order(each.commitment))
     closed.sort(key=lambda each: (-each.details.changed_at.timestamp(), each.commitment.commitment_id))
     return [*opened, *closed]
 

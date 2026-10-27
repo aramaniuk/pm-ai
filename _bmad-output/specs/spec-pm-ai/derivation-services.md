@@ -120,11 +120,11 @@ The chain the design must support, end to end: a meeting ends → the Graph adap
 
 Rule 3, made concrete. Each is a class with a narrow interface over one Tier-1 resource, performing its I/O through `StorageService` (the single writer) rather than touching files:
 
-One stated exception reads and never writes: completion, and `commitment list` and `show` at a terminal, read `commitments_log.md` by path, because 4u's completion readers touch no `StorageService`, and parse it with the same `parse_ledger` and `fold` the accessor uses, so the file still has one parser (`15c`).
+One stated exception reads and never writes: completion, and `commitment list` and `show` and `proposal list` and `show` (`15d`) at a terminal, read `commitments_log.md` by path, because 4u's completion readers touch no `StorageService`, and parse it with the same `parse_ledger` and `fold` the accessor uses, so the file still has one parser (`15c`).
 
 | accessor | resource | used by |
 | --- | --- | --- |
-| `CommitmentLog` | `commitments_log.md` | the approval and its catch-up (append, `15a`), the PM's marks, the due and owner he sets (append, `15c`), `commitment list`, `show` and `review`, the dashboard digest and Team Activity (read, `15c`), the lifecycle job (append verdicts, story 16), indexing (read, `15b`) |
+| `CommitmentLog` | `commitments_log.md` | the approval and its catch-up (append, `15a`), the PM's marks, the due and owner he sets (append, `15c`), `commitment list`, `show` and `review`, the dashboard digest and Team Activity (read, `15c`), each page's block of open commitments and the proposal cards (read, `15d`), the lifecycle job (append verdicts, story 16), indexing (read, `15b`) |
 | `EventLog` | `event_log/` segments | harvest, transcript processing, every audit write |
 | `MeetingRecords` | `meetings/` | transcript processing (write), search indexing (read) |
 

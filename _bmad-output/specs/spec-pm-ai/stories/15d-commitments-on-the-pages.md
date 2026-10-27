@@ -2,7 +2,7 @@
 title: 'commitments on the pages'
 type: 'feature'
 created: '2026-10-26'
-status: 'draft'
+status: 'done'
 baseline_commit: '7a097a7'
 review_loop_iteration: 1
 context:
@@ -410,22 +410,22 @@ Anchors checked against `origin/main` at `7a097a7`.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] **The words.** `core/commitment_cards.py`: `PageParts` and `page_parts`, `said_due_words`, `TEAM_ROW_STATES`, `TEAM_ROW_PAST_DUE` and `PROJECT_PAGE_PAST_DUE`, `open_order` (moved from `app/commitments.py`, which then calls it), `PLACEHOLDERS`, `is_placeholder`. Tests first: every value of every field, past due, the order equal to 15c's on its matrix rows.
-- [ ] **The fold.** `core/commitment_log.py`: `Details.closed_at`. Tests: a second verdict, a confirming mark, an undone mark, file-order swaps.
-- [ ] **Placeholders.** `core/proposal_cards.py`: `Fill` and `CardAction.fill`, `reopen`; `build_card` and `closed_reason` with the placeholder words; `card_json` and the reject refusal (`app/proposals.py:889-890`) emitting `{command, fill}`. The value check in the commitment desk's inputs and `ProposalDesk.edit`, and in `review`'s questions (`surfaces/cli/dispatch.py`).
-- [ ] **The page values.** `domain/renders.py`: `PageCommitment`, `PageCommitments` (lines, under-issue count and iids, left out per scope, scopes with open ones, closed counts by state and source, notes); `MeetingDigest` gains `commitments`, `open_commitments`, `hidden_waiting_only`; `DigestItem` gains `unrecorded` and `malformed`.
-- [ ] **The pipeline.** `app/pipelines.py`: one ledger read per scope per render; the block with the owner rule, `spoken_numbers` withholding, duplicates and notes; `_meeting_digest` by `root_of`; `_item_decisions` taking the ledger, joining independently of the proposal read; the store read for unrecorded and not-enrolled notes.
-- [ ] **The render.** `core/rendering.py`: `MAX_PAGE_COMMITMENTS`, `MAX_PAGE_SCOPE_COMMANDS`, the block after the day's meetings on both pages, the meeting line, the unrecorded and malformed lines, the overflow's `--state`, the alias sentence's condition; `render_dashboard` and `render_project_dashboard` gain `commitments: PageCommitments | None = None`. With `None` and today's digests, the output is byte-identical to today's.
-- [ ] **Team Activity.** `core/member_updates.py`: `ItemCommitment`, `_decided` and `_row` from `page_parts`, `said_due_words`; `resolve_label(meeting: str | None)`.
-- [ ] **Proposal cards.** `core/proposal_cards.py` and `app/proposals.py`: the commitment line and JSON field, one read per scope, the bound.
-- [ ] **Tests** (each matrix row, plus):
+- [x] **The words.** `core/commitment_cards.py`: `PageParts` and `page_parts`, `said_due_words`, `TEAM_ROW_STATES`, `TEAM_ROW_PAST_DUE` and `PROJECT_PAGE_PAST_DUE`, `open_order` (moved from `app/commitments.py`, which then calls it), `PLACEHOLDERS`, `is_placeholder`. Tests first: every value of every field, past due, the order equal to 15c's on its matrix rows.
+- [x] **The fold.** `core/commitment_log.py`: `Details.closed_at`. Tests: a second verdict, a confirming mark, an undone mark, file-order swaps.
+- [x] **Placeholders.** `core/proposal_cards.py`: `Fill` and `CardAction.fill`, `reopen`; `build_card` and `closed_reason` with the placeholder words; `card_json` and the reject refusal (`app/proposals.py:889-890`) emitting `{command, fill}`. The value check in the commitment desk's inputs and `ProposalDesk.edit`, and in `review`'s questions (`surfaces/cli/dispatch.py`).
+- [x] **The page values.** `domain/renders.py`: `PageCommitment`, `PageCommitments` (lines, under-issue count and iids, left out per scope, scopes with open ones, closed counts by state and source, notes); `MeetingDigest` gains `commitments`, `open_commitments`, `hidden_waiting_only`; `DigestItem` gains `unrecorded` and `malformed`.
+- [x] **The pipeline.** `app/pipelines.py`: one ledger read per scope per render; the block with the owner rule, `spoken_numbers` withholding, duplicates and notes; `_meeting_digest` by `root_of`; `_item_decisions` taking the ledger, joining independently of the proposal read; the store read for unrecorded and not-enrolled notes.
+- [x] **The render.** `core/rendering.py`: `MAX_PAGE_COMMITMENTS`, `MAX_PAGE_SCOPE_COMMANDS`, the block after the day's meetings on both pages, the meeting line, the unrecorded and malformed lines, the overflow's `--state`, the alias sentence's condition; `render_dashboard` and `render_project_dashboard` gain `commitments: PageCommitments | None = None`. With `None` and today's digests, the output is byte-identical to today's.
+- [x] **Team Activity.** `core/member_updates.py`: `ItemCommitment`, `_decided` and `_row` from `page_parts`, `said_due_words`; `resolve_label(meeting: str | None)`.
+- [x] **Proposal cards.** `core/proposal_cards.py` and `app/proposals.py`: the commitment line and JSON field, one read per scope, the bound.
+- [x] **Tests** (each matrix row, plus):
   - `tests/core/test_commitment_cards.py`: `page_parts`, `open_order`, `fill`, `is_placeholder`;
   - `tests/core/test_rendering_sections.py`, `test_project_rendering.py`: the block, the meeting lines, the notes. **The golden** `tests/core/goldens/dashboard_with_summaries.md` is unchanged: its test passes digests built directly with `approved=True` and no `commitments`, and the render with `commitments=None` is byte-identical. A new golden, `dashboard_with_commitments.md`, records the block, the meeting line and each note;
   - `tests/core/test_member_updates.py`: rows with a commitment, broken and past due left off;
   - `tests/slice/test_dashboard_slice.py`: page rows, the one-read count (the same fixture asserted at 2 reads against `_item_decisions` as it is on 7a097a7, then 1), the timed render;
   - `tests/slice/test_commitment_commands.py` and `test_proposals.py`: placeholder and proposal card rows;
   - `tests/architecture`: the AD-25 test and the page-words check.
-- [ ] **Tests the change breaks, with the new expectations:**
+- [x] **Tests the change breaks, with the new expectations:**
   - `tests/slice/test_commitment_commands.py:1181` (`test_the_dashboard_leaves_out_closed_commitments`): every recorded approved item is absent from the meeting; the meeting line says "4 commitments from this meeting, 1 open"; the altered one is a block line; the waiting one is still listed;
   - `:1214` (`…fails_open_on_an_unreadable_ledger`): the items listed as approved, as today, and the page carries the note naming the scope and the type name;
   - `:1222` (`test_team_activity_hides_a_withdrawn_item`): the calls at `:1240` and `:1243` pass the folded ledger (`commitments=CommitmentLog(machine.storage).read(ALPHA)`, and `commitments=None`); `:1241` still asserts `hidden`; `:1242` becomes: `decisions[ids[1]].commitment.row_state == "commitment done on …"`, and `decisions[ids[2]].commitment.row_state == ""` (broken is not shown on a project page); `:1244` unchanged;
@@ -433,7 +433,7 @@ Anchors checked against `origin/main` at `7a097a7`.
   - `tests/slice/test_proposals.py:303` (`test_approve_prints_the_approved_card_and_the_dashboard_shows_it`): the page shows the item as a block line and "1 commitment from this meeting, open", not "approved" under the meeting;
   - `tests/slice/test_proposals.py:1285` (`test_the_dashboard_lists_waiting_then_approved_capped_at_five`): the 4 waiting items are listed, no overflow line, and "3 commitments from this meeting, all open";
   - `tests/slice/test_dashboard_slice.py:2306` (`test_7d_open_items_show_approved_…`): its approved item is staged directly with no ledger line, so it reads "approved, not yet recorded as a commitment:" with the `proposal approve` command.
-- [ ] **The contract.** Apply the amendments in Design Notes, in this order: `prd.md` through bmad-prd; then bmad-spec re-derives `derivation-services.md`; then `ARCHITECTURE-SPINE.md` through the architecture skill.
+- [x] **The contract.** Apply the amendments in Design Notes, in this order: `prd.md` through bmad-prd; then bmad-spec re-derives `derivation-services.md`; then `ARCHITECTURE-SPINE.md` through the architecture skill.
 
 **Acceptance Criteria:**
 - Given open personal commitments due before today, today and later, one estimated, when the personal page renders, then they are listed soonest due first and only the exact earlier date is called past due.
@@ -460,6 +460,15 @@ Anchors checked against `origin/main` at `7a097a7`.
 
 - **2026-10-27, Andrei's four answers: DECIDED 2026-10-27 (Andrei), frozen block edited (recorded here).** (1) Placement A: the block and the per-meeting count line. (2) Spoken promises A: both pages, withheld on a project page by the confidential rules. (3) Proposal cards A: they show the commitment's state (recommended, not objected to). (4) No broken and no past due on a project page's Team Activity, done and altered only; broken and past due on the personal page only, so the project block omits `, past due` (`PROJECT_PAGE_PAST_DUE = False`) and its closed line the broken count. `TEAM_ROW_STATES = {done, altered}`, `TEAM_ROW_PAST_DUE = False`. Ask First closed; matrix rows updated and two added.
 - **2026-10-27, approved for build (Andrei),** after the three-lens review and his answers.
+- **2026-10-27, built** (frozen block unchanged). Amendments applied first (PRD v0.16.3, `derivation-services.md`, AD-25). Choices the spec left open, made in the build:
+  - the block opens with one lead-in line, "Open commitments, soonest due first:", so its list does not run into the day's meetings above it;
+  - `PageParts` carries two fields beyond the listed ones, `block_due_unsaid` (the bold due without the quote, for withheld lines) and `origin_day`;
+  - the pipeline's block is built in a new module, `app/page_commitments.py`; the page tests are in a new `tests/slice/test_commitments_on_pages.py`, not in `test_dashboard_slice.py`;
+  - `_item_decisions` takes the folded ledger (read from its scope when none is passed) and returns the decisions, the unread count and the proposal-read failure;
+  - on a project page, the unrecorded-items note reads the store's approved rows narrowed to that project's summarised meetings (`proposal_index_at` has no scope filter), so a spoken promise from a project meeting with no summary row is not counted in that page's note;
+  - a Team Activity row with no due said in its line prints the commitment's said words, else the non-bracketed forms alone ("due set by you: …", "due cleared by you").
+  - **Matrix numbers that do not fit their own inputs,** asserted as the inputs give: "Cross-scope order" (2 + 1 + 9 = 12 open, so "and 2 more", not 3; only `--scope personal` named, as the row says); "Command cap" (3 left out cannot span 4 scopes, so the test leaves out 4 across 4 scopes); the 15c test listed under "Tests the change breaks" approves 5 items, so its meeting line says "5 commitments from this meeting, 1 open", not 4. "One read" is asserted at 1; the 2 reads on `7a097a7` were not re-run against the old code.
+- **2026-10-27, review (three lenses: blind, edge case, verification gap):** 11 patches applied (an unrecorded item's repair is in the scope's note unless its own line is printed under its meeting, covering an unreadable meeting, the overflow and items under an issue; a project page's store read narrowed to its own meetings, with the AD-25 test spying it; the store placement fails open; a hand copy counted once on its own meeting's line; a row never prints a bare "(date)"; `hidden_waiting_only` false when nothing is hidden; one `LEDGER_READ_FAILURES`; the dead `_item_decisions` wrapper removed; tests pinned to one output; tests added for an edited item in Team Activity, review asking each question again, the `--state staged` overflow command, and the matrix rows not yet named). One finding deferred to `deferred-work.md` (no sentence says why text is withheld when a named number is absent from a readable GitLab record).
 
 ## Design Notes
 
