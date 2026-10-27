@@ -7,7 +7,7 @@ paradigm: 'hexagonal (ports & adapters) around a plugin kernel; ingestion as pip
 scope: 'pm-ai — local-first AI PM assistant: daemon, CLI, Telegram bridge, connectors, MCP skills, storage'
 status: final
 created: '2026-08-18'
-updated: 2026-10-24
+updated: 2026-10-27
 binds: [FR-01..FR-40, NFR-01..NFR-14, UJ-1..UJ-10, SM-1..SM-5, SM-C1..SM-C3]
 sources: ['_bmad-output/planning-artifacts/prds/prd-pm-ai-2026-08-18/prd.md v0.14.2']
 companions: ['SOLUTION-DESIGN.md']
@@ -738,15 +738,15 @@ Dependencies point inward only: `app` → `surfaces` → adapters → `core` →
 
   **Three trigger kinds.** A change to a watched artifact (AD-46); a schedule, for work no file change can announce — a deadline passing writes nothing; and a **direct request from pm-ai's business logic** into the task manager, which is what `pm-ai reindex` uses. Trigger kind and job identity are independent, and that is what makes a request safe: a requested job whose inputs are unchanged does no work, because staleness is the stored per-entry checksum against the file (AD-46) rather than the word of whoever asked.
 
-  **Every job is a row in the durable queue** (AD-20), never an in-memory timer. **A resource shared by several jobs is reached through one accessor** — `CommitmentLog`, `EventLog`, `MeetingRecords` — each performing its I/O through the single writer (AD-5) rather than touching files, because three jobs parsing one Markdown file three ways is three chances to disagree.
+  **Every job is a row in the durable queue** (AD-20), never an in-memory timer. `[2026-10-26, Andrei, 15b]` Until story 10a, commitment indexing is the one derivation that runs without the queue: an in-memory task in the serving daemon (`pm_ai/app/commitment_indexing.py`), labelled temporary as `9a`'s timers are. 10a replaces it with a queued job and keeps its derivation, its schema and its stored checksums. **A resource shared by several jobs is reached through one accessor** — `CommitmentLog`, `EventLog`, `MeetingRecords` — each performing its I/O through the single writer (AD-5) rather than touching files, because three jobs parsing one Markdown file three ways is three chances to disagree.
 
   **The task manager enqueues direct consumers and builds no topological sort.** Derived, not estimated: every job either produces Tier 1 and is woken by a schedule or an external capture, or produces Tier 3 and is a **leaf**, since nothing follows an unwatched index. No chain exceeds one job-to-job edge. **Depth is deliberately not enforced in code**, but a job must not write an artifact that re-triggers it, or it spins forever. Compaction is one predicate from that shape already — it reads ageing `event_log/` segments and writes summary segments back into `event_log/` — and is saved only by being schedule-triggered. Making it event-driven feeds it to itself.
 
-### AD-46 — One change-detection pipeline: OS filesystem events behind a port `[NEW]`
+### AD-46 — One change-detection pipeline: OS filesystem events behind a port `[NEW]` `[revised 2026-10-26]`
 
-- **Binds:** AD-3, AD-5, AD-19, AD-26, AD-44, AD-45, AD-47
+- **Binds:** AD-3, AD-5, AD-19, AD-26, AD-44, AD-45, AD-47, `15b`
 - **Prevents:** two notification pipelines answering one question. They can disagree, each needs its own tests, and a job gets triggered twice or not at all depending on which fired
-- **Rule:** derived state is invalidated by **system-wide filesystem notifications and nothing else**. pm-ai publishes no change events from its own write path.
+- **Rule:** derived state is invalidated by **system-wide filesystem notifications and nothing else**. pm-ai publishes no change events from its own write path. `[2026-10-26, Andrei, 15b]` One stated exception, temporary until story 10a's watcher and queue replace it: in the serving daemon, each append to a `commitments_log.md` asks for that scope's commitment index to be derived again, and the daemon checks every scope's index rows against its ledger's checksum once at start. Appends another process makes, and hand edits, are seen at the daemon's next append to that scope or its next start, so a reader of the index compares the stored checksum with the ledger before it trusts a scope's rows.
 
   The argument for write-path events was true and insufficient: pm-ai is the single writer (AD-5), so its own writes are already known — but Markdown is hand-editable **by design** (AD-3, Tier 1), so write-path events cover only some of the writes and would have needed a second mechanism beside them. The OS sees the hand-editing PM and the daemon with one mechanism.
 

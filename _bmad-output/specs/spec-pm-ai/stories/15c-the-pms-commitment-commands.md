@@ -672,6 +672,7 @@ Anchors checked against `origin/main` at `689122a`.
   - the time left for `altered --what`'s edit is taken as 1.1 s (the 1-second busy wait plus one 100 ms step), an estimate, not a measurement.
 - **2026-10-26, review (three lenses: blind, edge case, verification gap):** 26 patches applied (the due shown from the commitment, not the heading; a refused `z` keeps its card; review `a` after `edit_refused`; re-read and disk failures never claim "nothing was written" unchecked; meeting choice by a code; narrowed exception sets; the walk's cap removed; tests for Team Activity through `_issue_notes`, prompt completion, the prompt's `via`, meeting filters, `--state all`, the unreadable-ledger reject, codes listed). Two findings deferred to `deferred-work.md` (the JSON commands' `"…"` placeholders; undo's file order beside the fold's sort order).
 - **2026-10-26, after the build (Andrei):** `altered --due` of only spaces is a usage error, as `due` refuses it; `--due ""` still clears. The build had cleared it, as 13a's edit does.
+- **2026-10-26, 15b's spec:** 15b's trigger runs after each append the serving daemon makes, not after every append through the store (`:361`, `:699`); an append a terminal process makes is indexed at the daemon's next append to that scope or its next start (Andrei, 2026-10-27, 15b's Ask First).
 
 ## Design Notes
 

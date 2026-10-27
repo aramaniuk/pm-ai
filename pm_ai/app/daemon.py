@@ -101,6 +101,7 @@ from types import FrameType
 from typing import Any
 
 from pm_ai.app.commitments import CommitmentCatchUp
+from pm_ai.app.commitment_indexing import CommitmentIndexing
 from pm_ai.app.concurrency import IOPool, ModelPool, WriterThread
 from pm_ai.app.prompts import (
     DAEMON_LOG_NAME,
@@ -1040,6 +1041,11 @@ def attach_background(state: Any, requests: RequestPath, *, now: Callable[[], da
     # Story 15a: once at each start, the commitment lines approvals left
     # unwritten — items approved before 15a among them.
     state.pm_ai_commitments = CommitmentCatchUp(requests=requests, now=now)
+    # Story 15b (temporary, until 10a): the commitment index, derived after
+    # each append this daemon makes to a ledger, and checked once at start.
+    indexing = CommitmentIndexing(requests=requests, now=now)
+    indexing.attach()
+    state.pm_ai_index = indexing
 
 
 @contextlib.asynccontextmanager
@@ -1070,13 +1076,22 @@ async def _lifespan(app: Any) -> AsyncIterator[None]:
         timers.append(asyncio.create_task(sweep.run(), name="pm-ai-proposal-sweep"))
     # Story 15a: a one-shot task, after the sweep; it never stops the start.
     commitments: CommitmentCatchUp | None = getattr(app.state, "pm_ai_commitments", None)
+    catching_up: asyncio.Task[None] | None = None
     if commitments is not None:
+        catching_up = asyncio.create_task(commitments.run(), name="pm-ai-commitment-catch-up")
+        timers.append(catching_up)
+    # Story 15b: the commitment index's task; its start check waits on the catch-up.
+    indexing: CommitmentIndexing | None = getattr(app.state, "pm_ai_index", None)
+    if indexing is not None:
         timers.append(
-            asyncio.create_task(commitments.run(), name="pm-ai-commitment-catch-up")
+            asyncio.create_task(indexing.run(catching_up), name="pm-ai-commitment-index")
         )
     try:
         yield
     finally:
+        if indexing is not None:
+            # The hook first: an append from here on starts nothing.
+            indexing.stop()
         for timer in timers:
             timer.cancel()
         for timer in timers:

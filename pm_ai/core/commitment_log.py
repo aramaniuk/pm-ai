@@ -64,6 +64,7 @@ __all__ = [
     "CommitmentLog",
     "Details",
     "DueSet",
+    "FOLD_VERSION",
     "Head",
     "MarkInForce",
     "Marked",
@@ -901,6 +902,15 @@ def _owner_line(pending: _Read, values: Sequence[_Read], lines: Sequence[_Read])
     return max(candidates, key=_order)
 
 
+FOLD_VERSION = 1
+"""What `fold` computes from a ledger, as a number (story 15b).
+
+`commitment_index.db` stores it beside its own format: an index derived by
+an older fold is dropped and rebuilt, never served as current. Bump it in the
+same change as any change to what `fold` computes (a new line kind, a changed
+rule)."""
+
+
 def fold(parsed: ParsedLedger) -> CommitmentLedger:
     """Each commitment from its lines, in an order of their own fields (AD-35, 15a).
 
@@ -915,6 +925,9 @@ def fold(parsed: ParsedLedger) -> CommitmentLedger:
     in force is the PM's own mark other than `altered` (after `altered` the
     commitment is still tracked, Andrei, 2026-10-24); else `PENDING`. A line
     for a commitment with no `pending` line is an orphan.
+
+    A change to what this computes bumps `FOLD_VERSION` in the same change
+    (story 15b), so the commitment index it was derived into is rebuilt.
     """
     groups: dict[str, list[_Read]] = {}
     for line in parsed.lines:

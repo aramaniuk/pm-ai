@@ -4149,6 +4149,11 @@ HANDED_CALLS: Mapping[str, tuple[str, _GitQuestion]] = {
     "append_member_updates": ("append the meeting's member updates", _named(MEMBER_UPDATES)),
     # Story 15a: a commitment ledger's lines; a project's asks `git` first.
     "append_commitments": ("append to the commitments ledger", _named(COMMITMENTS_LOG)),
+    # Story 15b: the commitment index, in the application scope's enclave,
+    # outside every working tree, so no `git` is asked.
+    "replace_commitment_rows": ("derive a scope's commitment index rows", _asks_none),
+    "remove_commitment_scopes": ("remove dropped projects' commitment index rows", _asks_none),
+    "drop_commitment_index": ("drop the commitment index", _asks_none),
     # Asks no `git`: the alias table's only home is the application scope,
     # outside every working tree, as `disclosure.md`'s is.
     "append_alias": ("append to the alias table", _asks_none),
@@ -4202,6 +4207,8 @@ PLAIN_READS: frozenset[str] = frozenset(
         "match_records",  # its own read-only connection (story 7e)
         "read_member_updates",  # a file read (story 7e)
         "read_commitments",  # a file read (story 15a)
+        "commitment_index_rows",  # its own read-only connection (story 15b)
+        "commitment_index_checksums",  # its own read-only connection (story 15b)
         "read_aliases",  # a file read (story 7e)
         "last_render",  # its own read-only connection
         "ask_git_exclusion",  # `git`'s answer, uncached: a bounded step
@@ -4238,6 +4245,7 @@ NEVER_FROM_A_JOB: frozenset[str] = frozenset(
         "diagnostic_log",  # opens a file for writing: the daemon's own, at start
         "proposal_write_wait",  # a terminal's own busy wait (story 13a)
         "register_proposal_rules",  # the composition root's, at start (story 13a)
+        "on_commitments_appended",  # the serving daemon's, at start and at shutdown (15b)
     }
 )
 """`StorageService` calls a job may not make at all through `HandedStorage`."""

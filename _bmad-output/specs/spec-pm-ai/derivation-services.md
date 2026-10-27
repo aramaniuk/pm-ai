@@ -66,7 +66,7 @@ Not periodic. A periodic sweep would be the second pipeline the ruling excludes;
 
 **Start the watcher first, then scan.** The reverse loses any write landing between the scan finishing and the watcher attaching — a window that is small, real, and silent. In this order the overlap produces duplicate work instead, which costs nothing: a job rebuilds from its declared inputs, so running it twice yields the same output.
 
-**Every index entry stores the MD5 of the source file it came from.** Not one watermark per index — one checksum per entry, in the row (`event_index.db`, `commitment_index.db`) or beside the embedding record (`vector_index/`), naming the source path and its MD5 as of the derivation that produced it.
+**Every index entry stores the MD5 of the source file it came from.** Not one watermark per index — one checksum per entry, in the row (`event_index.db`, `commitment_index.db`) or beside the embedding record (`vector_index/`), naming the source path and its MD5 as of the derivation that produced it. In `commitment_index.db` each row carries the MD5 of its scope's whole `commitments_log.md`, as read for the derivation that wrote it, and the scope names the file; a scope with no row is current when its ledger folds to no commitment (`15b`).
 
 Per-entry rather than per-index is what makes the re-index unit small. Group the entries by source path, compare the stored MD5 against the file's current MD5, and **the unit of work is one source file**: its entries are deleted and rebuilt, and every other file's entries are untouched. A per-index watermark would only ever have said *stale* about the whole index, so one edited meeting record would have cost a full rebuild of `rules/`, `event_log/` and `meetings/` together.
 
@@ -106,7 +106,7 @@ A job never enqueues its successor. It declares what it produced; the task manag
 | --- | --- | --- | --- |
 | **Harvest** | connector instance + cursor | normalized events → `event_log/` | schedule (240m ±15, per AD-9) |
 | **Transcript processing** | a capture in `transcripts/` | meeting summary → `meetings/`, decisions → `event_log/`, staged proposals, meeting updates → a project's `member_updates.md` | filesystem event in `transcripts/` |
-| **Commitment indexing** | `commitments_log.md` | `commitment_index.db` | filesystem event on that file |
+| **Commitment indexing** | `commitments_log.md` | `commitment_index.db` | filesystem event on that file (story 10a); until then, a request inside the serving daemon after each append it makes, and a check at daemon start (`15b`, temporary) |
 | **Search indexing** | `rules/`, `event_log/`, `meetings/` | `event_index.db` | filesystem event under any of them |
 | **Embedding** | `event_log/`, `meetings/`, `coaching_1on1_history.md` | `vector_index/` | filesystem event under any of them |
 | **Commitment lifecycle** | harvested telemetry + the clock (**not** the index, which it only reads) | commitment state transitions in `commitments_log.md` | schedule |
@@ -124,7 +124,7 @@ One stated exception reads and never writes: completion, and `commitment list` a
 
 | accessor | resource | used by |
 | --- | --- | --- |
-| `CommitmentLog` | `commitments_log.md` | the approval and its catch-up (append, `15a`), the PM's marks, the due and owner he sets (append, `15c`), `commitment list`, `show` and `review`, the dashboard digest and Team Activity (read, `15c`), the lifecycle job (append verdicts, story 16), indexing (read) |
+| `CommitmentLog` | `commitments_log.md` | the approval and its catch-up (append, `15a`), the PM's marks, the due and owner he sets (append, `15c`), `commitment list`, `show` and `review`, the dashboard digest and Team Activity (read, `15c`), the lifecycle job (append verdicts, story 16), indexing (read, `15b`) |
 | `EventLog` | `event_log/` segments | harvest, transcript processing, every audit write |
 | `MeetingRecords` | `meetings/` | transcript processing (write), search indexing (read) |
 
