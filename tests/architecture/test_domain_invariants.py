@@ -590,6 +590,398 @@ def test_ad3_indexes_rebuild_from_markdown_without_loss():
     )
 
 
+# ── Story 15b: the commitment index ──────────────────────────────────────────
+
+_INDEX_COLUMNS = {
+    "scope", "commitment_id", "proposal_id", "type", "state", "state_source", "state_at",
+    "due_value", "due_date", "due_estimated", "due_by_pm", "meeting_id", "meeting_start",
+    "day", "day_from", "approved_at", "changed_at", "version", "malformed_named", "source_md5",
+}
+"""The column table of story 15b's spec, as written there."""
+
+
+def _ledger_at(storage, scope, data: bytes) -> None:
+    from pathlib import Path
+
+    from pm_ai.domain.commitments import COMMITMENTS_LOG
+
+    Path(storage.paths.resolve(scope, COMMITMENTS_LOG, create=True)).write_bytes(data)
+
+
+def _fixture_ledgers(storage):
+    """Ledgers in personal and a project, by 15a's and 15c's own renderer (story 15b)."""
+    from datetime import date
+
+    import commitment_index_fixtures as f
+    from pm_ai.domain.commitments import Mark
+
+    _ledger_at(
+        storage,
+        f.PERSONAL,
+        f.ledger(
+            f.pending(f.commitment("prp_one")),
+            f.pending(f.commitment("prp_two", type="implicit_commitment", owner=None, speaker="Alex Morgan")),
+            f.marked("prp_one", Mark.FULFILLED, f.after(1)),
+        ),
+    )
+    _ledger_at(
+        storage,
+        f.ALPHA,
+        f.ledger(
+            f.pending(f.commitment("prp_alpha_one")),
+            f.due_set("prp_alpha_one", date(2026, 10, 30), f.after(2)),
+        ),
+    )
+    return [f.PERSONAL, f.ALPHA]
+
+
+def test_ad3_commitment_index_rebuilds_from_markdown_without_loss(tmp_path, monkeypatch):
+    """AD-3 (story 15b) — snapshot, drop, rebuild: the same rows, whatever the day or zone."""
+    import sqlite3
+    import time as _time
+    from dataclasses import fields
+    from datetime import datetime, timedelta, timezone
+
+    index = mod("pm_ai.core.commitment_index")
+    wiring = mod("pm_ai.app.wiring")
+    config = mod("pm_ai.core.config")
+    daemon = _daemon(tmp_path)
+    storage = daemon.storage
+    scopes = _fixture_ledgers(storage)
+    for scope in scopes:
+        index.derive(storage, scope)
+    first = index.commitment_index_snapshot(storage)
+    assert first, "AD-3: the derived index holds rows"
+    assert {(row.scope, row.commitment_id) for row in first} == {
+        ("personal", "prp_one"), ("personal", "prp_two"), ("project:alpha", "prp_alpha_one"),
+    }
+
+    identity = mod("pm_ai.domain.identity")
+    db = storage.paths.resolve(identity.DataScope(identity.ScopeKind.APPLICATION), "commitment_index.db")
+    files = [db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")]
+    held = sqlite3.connect(db)
+    held.execute("SELECT COUNT(*) FROM commitments").fetchone()
+    try:
+        assert all(path.exists() for path in files)
+        index.drop_commitment_index(storage)
+    finally:
+        held.close()
+    assert not any(path.exists() for path in files), "AD-3: the drop leaves no db, -wal or -shm"
+    assert index.commitment_index_snapshot(storage) == ()
+
+    report = index.rebuild_commitment_index(storage, scopes)
+    assert report.count("derived") == len(scopes) and report.count("current") == 0
+    assert index.commitment_index_snapshot(storage) == first, "AD-3: the rebuild is exact"
+
+    # Another day, another display zone, another machine zone: the same rows.
+    import os
+
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = "Pacific/Auckland"
+    _time.tzset()
+    try:
+        later = wiring.build(
+            tmp_path,
+            "alpha",
+            now=lambda: datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc) + timedelta(days=7),
+            config=config.Config(display_timezone="Asia/Tokyo"),
+        )
+        try:
+            index.drop_commitment_index(later.storage)
+            index.rebuild_commitment_index(later.storage, scopes)
+            assert index.commitment_index_snapshot(later.storage) == first
+        finally:
+            later.storage.close()
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        _time.tzset()
+
+    assert {field.name for field in fields(index.IndexRow)} == _INDEX_COLUMNS
+
+
+def test_ad3_commitment_index_drop_reaches_tier_3_only(tmp_path, monkeypatch):
+    """AD-3 (story 15b) — the drop guards the very key whose path it removes."""
+    from datetime import datetime, timezone
+
+    index = mod("pm_ai.core.commitment_index")
+    store = mod("pm_ai.storage.commitment_index_store")
+    tiers = mod("pm_ai.domain.storage_tiers")
+    identity = mod("pm_ai.domain.identity")
+    daemon = _daemon(tmp_path)
+    storage = daemon.storage
+    operational = storage.paths.resolve(identity.DataScope(identity.ScopeKind.APPLICATION), "operational.db")
+    files = [operational, operational.with_name("operational.db-wal"), operational.with_name("operational.db-shm")]
+    # A write through the store's own connection, so its `-wal` and `-shm` exist.
+    storage.record_render(identity.DataScope(identity.ScopeKind.PERSONAL), at=datetime.now(timezone.utc))
+    assert all(path.exists() for path in files)
+    monkeypatch.setattr(store, "COMMITMENT_INDEX", tiers.OPERATIONAL_DB)
+    with pytest.raises(tiers.TierViolation):
+        index.drop_commitment_index(storage)
+    assert all(path.exists() for path in files), "AD-3: Tier 2 survives a refused drop"
+
+
+def test_ad46_every_commitment_index_row_carries_its_ledgers_checksum(tmp_path):
+    """AD-46 (story 15b) — a row is the fold of the bytes whose MD5 it carries."""
+    import commitment_index_fixtures as f
+
+    index = mod("pm_ai.core.commitment_index")
+    jobs = mod("pm_ai.core.jobs")
+    log = mod("pm_ai.core.commitment_log")
+    daemon = _daemon(tmp_path)
+    storage = daemon.storage
+    scopes = _fixture_ledgers(storage)
+    a = storage.read_commitments(scope=f.PERSONAL)
+    grown = a + f.ledger(f.pending(f.commitment("prp_three")))
+
+    class Changing:
+        """The store, whose personal ledger is A at the first read and A plus a line after."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.reads = 0
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def read_commitments(self, *, scope):
+            if scope != f.PERSONAL:
+                return self._inner.read_commitments(scope=scope)
+            self.reads += 1
+            return a if self.reads == 1 else grown
+
+    changing = Changing(storage)
+    index.derive(changing, f.PERSONAL)
+    index.derive(changing, f.ALPHA)
+    rows = storage.commitment_index_rows("personal")
+    assert rows, "AD-46: rows were written"
+    assert {row.source_md5 for row in rows} == {jobs.source_md5(a)}
+    folded = log.fold(log.parse_ledger(a))
+    assert {row.commitment_id for row in rows} == set(folded.commitments)
+    assert {row.commitment_id: row.state for row in rows} == {
+        root: c.state.value for root, c in folded.commitments.items()
+    }
+    # At the next check: every row of the grown scope reads as stale, no other scope's does.
+    stored = storage.commitment_index_checksums()
+    assert stored["personal"].md5s == {jobs.source_md5(a)} != {jobs.source_md5(grown)}
+    alpha_bytes = storage.read_commitments(scope=f.ALPHA)
+    assert stored["project:alpha"].md5s == {jobs.source_md5(alpha_bytes)}
+    report = index.check(changing, scopes, registry_readable=True)
+    outcomes = {each.scope: each.outcome for each in report.derivations}
+    assert outcomes == {"personal": "derived", "project:alpha": "current"}
+
+
+def test_ad46_one_function_computes_source_checksums():
+    """AD-46 (story 15b) — `source_md5` is the only MD5 in `pm_ai`."""
+    import ast
+
+    mod("pm_ai.core.jobs")
+    found: list[str] = []
+    for path in sorted((REPO_ROOT / "pm_ai").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        allowed: set[int] = set()
+        if path.relative_to(REPO_ROOT).as_posix() == "pm_ai/core/jobs.py":
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "source_md5":
+                    allowed |= {id(inner) for inner in ast.walk(node)}
+        for node in ast.walk(tree):
+            if id(node) in allowed:
+                continue
+            spot = f"{path.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', 0)}"
+            if isinstance(node, ast.Attribute) and node.attr == "md5":
+                found.append(spot)
+            elif isinstance(node, ast.ImportFrom) and node.module == "hashlib":
+                if any(alias.name == "md5" for alias in node.names):
+                    found.append(spot)
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value.strip().lower() == "md5"
+            ):
+                # `hashlib.new("md5")`, `new(name="md5")`, `getattr(hashlib, "md5")`,
+                # `file_digest(f, "md5")`: the algorithm named as a string.
+                found.append(spot)
+    assert found == [], f"AD-46: an MD5 outside `source_md5`: {found}"
+
+
+def test_ad35_commitment_index_rows_are_the_fold(tmp_path):
+    """AD-35 (story 15b) — each row's values, written here from the case's own fold."""
+    from datetime import date, timezone
+
+    import commitment_index_fixtures as f
+    from pm_ai.domain.commitments import Mark
+
+    index = mod("pm_ai.core.commitment_index")
+    jobs = mod("pm_ai.core.jobs")
+    log = mod("pm_ai.core.commitment_log")
+    utc = timezone.utc
+
+    def instant(at):
+        return None if at is None else at.astimezone(utc).isoformat(timespec="microseconds")
+
+    def case(name, ledgers, checks):
+        daemon = _daemon(tmp_path / name)
+        storage = daemon.storage
+        for scope, data in ledgers.items():
+            _ledger_at(storage, scope, data)
+            index.derive(storage, scope)
+        for scope, data in ledgers.items():
+            folded = log.fold(log.parse_ledger(data))
+            md5 = jobs.source_md5(data)
+            rows = {row.commitment_id: row for row in storage.commitment_index_rows(str(scope))}
+            assert set(rows) == set(folded.commitments), name
+            for root, row in rows.items():
+                c, d = folded.commitments[root], folded.details[root]
+                # Each column from the case's Commitment and Details, by hand.
+                assert row.scope == str(scope), name
+                assert row.proposal_id == c.proposal_id and row.type == c.type, name
+                assert row.state == c.state.value and row.state_source == c.state_source.value, name
+                assert row.state_at == instant(d.state_at), name
+                assert row.due_value == c.due.value, name
+                assert row.due_date == (None if c.due.date is None else c.due.date.isoformat()), name
+                assert row.due_estimated == (1 if c.due.estimated else 0), name
+                assert row.due_by_pm == (1 if d.due_by_pm else 0), name
+                assert row.meeting_id == c.meeting_id and row.meeting_start == instant(c.start), name
+                assert row.day == (None if c.day is None else c.day.isoformat()) and row.day_from == c.day_from, name
+                assert row.approved_at == instant(c.approved_at) and row.changed_at == instant(d.changed_at), name
+                assert row.version == d.version, name
+                assert row.malformed_named == (1 if root in folded.malformed_roots else 0), name
+                assert row.source_md5 == md5, name
+            checks(rows, folded)
+
+    done_at, undo_at = f.after(1), f.after(2)
+    plain = f.commitment("prp_one")
+    case("plain", {f.PERSONAL: f.ledger(f.pending(plain))},
+         lambda rows, _: (rows["prp_one"].state, rows["prp_one"].state_at) == ("pending", None) or pytest.fail("plain"))
+    case(
+        "undone",
+        {f.PERSONAL: f.ledger(
+            f.pending(plain),
+            f.marked("prp_one", Mark.FULFILLED, done_at),
+            f.undone("prp_one", f.mark_entry("prp_one", Mark.FULFILLED, done_at), undo_at),
+        )},
+        lambda rows, folded: (rows["prp_one"].state, rows["prp_one"].state_source) == ("pending", "none")
+        or pytest.fail("undone"),
+    )
+    case(
+        "verdict",
+        {f.PERSONAL: f.ledger(f.pending(plain), f.verdict("prp_one", "fulfilled", done_at))},
+        lambda rows, _: (rows["prp_one"].state, rows["prp_one"].state_source, rows["prp_one"].state_at)
+        == ("fulfilled", "telemetry", instant(done_at)) or pytest.fail("verdict"),
+    )
+    case(
+        "revised",
+        {f.PERSONAL: f.ledger(f.pending(plain), f.revised("prp_one", "prp_one_e1", "send the numbers for the API", done_at))},
+        lambda rows, _: rows["prp_one"].proposal_id == "prp_one_e1" or pytest.fail("revised"),
+    )
+    case(
+        "due_and_owner",
+        {f.PERSONAL: f.ledger(
+            f.pending(plain),
+            f.due_set("prp_one", date(2026, 10, 30), done_at),
+            f.owner_set("prp_one", "Alex Morgan", undo_at),
+        )},
+        lambda rows, _: (rows["prp_one"].due_date, rows["prp_one"].due_by_pm, rows["prp_one"].due_estimated)
+        == ("2026-10-30", 1, 0) or pytest.fail("due and owner"),
+    )
+    case(
+        "malformed",
+        {f.PERSONAL: f.ledger(
+            f.pending(plain),
+            "- entry=cml_000000000001 commitment=prp_one kind=marked state=nonsense",
+            "- entry=cml_000000000002 commitment=prp_none kind=pending",
+        )},
+        lambda rows, _: (rows["prp_one"].malformed_named == 1 and "prp_none" not in rows) or pytest.fail("malformed"),
+    )
+    case(
+        "two_ledgers",
+        {f.PERSONAL: f.ledger(f.pending(plain)), f.ALPHA: f.ledger(f.pending(plain))},
+        lambda rows, _: len(rows) == 1 or pytest.fail("two ledgers"),
+    )
+    torn = f.ledger(f.pending(plain)) + f.pending(f.commitment("prp_torn")).encode()
+    case(
+        "torn",
+        {f.PERSONAL: torn},
+        lambda rows, _: (set(rows) == {"prp_one"} and rows["prp_one"].source_md5 == jobs.source_md5(torn))
+        or pytest.fail("torn"),
+    )
+    two = _daemon(tmp_path / "both")
+    for scope in (f.PERSONAL, f.ALPHA):
+        _ledger_at(two.storage, scope, f.ledger(f.pending(plain)))
+        index.derive(two.storage, scope)
+    assert [(row.scope, row.commitment_id) for row in two.storage.commitment_index_rows()] == [
+        ("personal", "prp_one"), ("project:alpha", "prp_one"),
+    ], "AD-35: the same id in two ledgers is two rows"
+
+
+def test_ad45_indexing_writes_no_ledger(tmp_path):
+    """AD-45 (story 15b) — a derivation holds no ledger claim and writes no ledger."""
+    import threading
+    from datetime import timedelta as delta, timezone
+
+    import commitment_index_fixtures as f
+    from pm_ai.domain.commitments import COMMITMENTS_LOG
+
+    index = mod("pm_ai.core.commitment_index")
+    desks = mod("pm_ai.app.commitments")
+    log = mod("pm_ai.core.commitment_log")
+    daemon, root, personal, at = _one_commitment(tmp_path)
+    storage = daemon.storage
+    fired: list[object] = []
+    storage.on_commitments_appended(fired.append)
+    before = storage.read_commitments(scope=personal)
+    claimed: list[bool] = []
+
+    class Watching:
+        def __init__(self, inner, *, hold=None, held=None):
+            self._inner = inner
+            self.hold = hold
+            self.held = held
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def read_commitments(self, *, scope):
+            claimed.append(self._inner.holds_claim(scope=scope, artifact=COMMITMENTS_LOG))
+            data = self._inner.read_commitments(scope=scope)
+            if self.hold is not None:
+                self.held.set()
+                assert self.hold.wait(10)
+            return data
+
+    assert index.derive(Watching(storage), personal).outcome == "derived"
+    assert storage.commitment_index_rows("personal"), "AD-45: the stale scope was derived"
+    assert storage.read_commitments(scope=personal) == before, "AD-45: the ledger's bytes are unchanged"
+    assert fired == [] and claimed == [False], "AD-45: no ledger claim, no append"
+
+    # A concurrent mark: the derivation is held at its read while 15c's done runs.
+    hold, held = threading.Event(), threading.Event()
+    _ledger_at(storage, personal, before + f.ledger(f.pending(f.commitment("prp_second"))))
+    result: list[object] = []
+    deriving = threading.Thread(
+        target=lambda: result.append(index.derive(Watching(storage, hold=hold, held=held), personal))
+    )
+    deriving.start()
+    assert held.wait(10)
+    desk = desks.CommitmentDesk(
+        now=lambda: at + delta(hours=1), paths=storage.paths, storage=storage, zone=timezone.utc
+    )
+    answer = desk.mark("done", root)
+    assert answer.outcome == "marked", "AD-45: the mark is not refused as busy"
+    hold.set()
+    deriving.join(10)
+    index.derive(storage, personal)  # the mark's append asks for this
+    after_mark = storage.read_commitments(scope=personal)
+    folded = log.fold(log.parse_ledger(after_mark))
+    rows = storage.commitment_index_rows("personal")
+    assert {row.commitment_id: row.state for row in rows} == {
+        key: c.state.value for key, c in folded.commitments.items()
+    }
+    assert rows[[row.commitment_id for row in rows].index(root)].state == "fulfilled"
+
+
 def test_ad23_transcript_pipeline_works_without_a_live_tenant():
     """AD-23 — the manual adapter keeps the meeting pipeline developable.
 

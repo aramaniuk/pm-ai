@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from pm_ai.domain.commitment_index import IndexRow, ReplacedRows, ScopeChecksums
 from pm_ai.domain.disclosure import DisclosureRecord
 from pm_ai.domain.event_entries import EventEntry
 from pm_ai.domain.events import NormalizedEvent, ObservedEventType
@@ -733,6 +734,24 @@ class TranscriptSourcePort(Protocol):
         """
 
 
+class CommitmentIndexUnusable(RuntimeError):
+    """`commitment_index.db` is not an index this pm-ai can use (story 15b, AD-49).
+
+    Only these: a file that is not a database or is corrupt; some of the
+    index's tables but not all; an `index_format` table with no row, several,
+    or a value that is not an integer; another `index_format` or
+    `fold_version`. The index is Tier 3 (AD-3), so the answer is to drop it
+    and rebuild it from the Markdown, never to migrate it. Busy, locked or a
+    full disk is not this: those pass through as the store's own error, and
+    nothing is dropped. `reason` is one of `not_a_database`, `partial`,
+    `format_row` and `other_format`.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+
+
 @runtime_checkable
 class StoragePort(Protocol):
     """AD-5 — the single writer, behind a port."""
@@ -814,6 +833,28 @@ class StoragePort(Protocol):
         `LedgerChanged` when it grew; `NotACommitmentScope` for a scope that
         keeps none. Returns the new size.
         """
+    # Story 15b: the commitment index, `commitment_index.db` (Tier 3, not
+    # encrypted). Every row is the fold of its scope's ledger and carries the
+    # MD5 of the bytes folded; `CommitmentIndexUnusable` when the file is not
+    # an index this pm-ai can use.
+    def replace_commitment_rows(
+        self, scope: DataScope, rows: Sequence[IndexRow], expected_md5s: frozenset[str]
+    ) -> ReplacedRows:
+        """Replace `scope`'s rows with `rows`, if its stored checksums are still `expected_md5s`.
+
+        One claimed step, one transaction: only rows that changed are
+        written, rows of commitments gone are deleted, and every remaining
+        row of the scope takes the new checksum. Writes nothing, and says
+        `changed`, when another writer derived the scope meanwhile.
+        """
+    def remove_commitment_scopes(self, scopes: Sequence[str]) -> int:
+        """Delete every row of `scopes` in one claimed step; how many went."""
+    def drop_commitment_index(self) -> None:
+        """Remove `commitment_index.db` and its `-wal` and `-shm`, guarded as Tier 3 only."""
+    def commitment_index_rows(self, scope: str | None = None) -> tuple[IndexRow, ...]:
+        """The rows, of one scope or all, ordered by `(scope, commitment_id)`; `()` when absent."""
+    def commitment_index_checksums(self) -> Mapping[str, ScopeChecksums]:
+        """Per scope, its rows' checksums and row count; `{}` when absent. A plain read."""
     # Story 7e: the two append-only ledgers, each read whole and appended to
     # only if it has not grown since (`LedgerChanged`).
     def read_member_updates(self, *, scope: DataScope) -> bytes:

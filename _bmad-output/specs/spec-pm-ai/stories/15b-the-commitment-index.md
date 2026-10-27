@@ -2,7 +2,7 @@
 title: 'the commitment index'
 type: 'feature'
 created: '2026-10-26'
-status: 'draft'
+status: 'done'
 baseline_commit: '7a097a7'
 review_loop_iteration: 1
 context:
@@ -379,20 +379,20 @@ Anchors checked against `origin/main` at `7a097a7`.
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] **The checksum.** `core/jobs.py`: `source_md5` with `usedforsecurity=False`. Test: raw bytes, no normalisation (CRLF and LF differ).
-- [ ] **The fold's version.** `core/commitment_log.py`: `FOLD_VERSION = 1` beside `fold`, and the bump rule in `fold`'s docstring.
-- [ ] **The rows.** `pm_ai/core/commitment_index.py` (new): `IndexRow`, `INDEX_FORMAT`, the pinned value writer, `index_rows`, `derive`, `check`, `commitment_index_snapshot`, `drop_commitment_index`, `rebuild_commitment_index`, each through `StoragePort` with a `step` for handed writes, as `catch_up` takes one. Tests first: the named fold cases.
-- [ ] **The port.** `ports/__init__.py`: the five index calls beside `read_commitments`, with `CommitmentIndexUnusable` declared with them (AD-49).
-- [ ] **The store.** `storage/service.py`: a connection per step, the index file created at `0600` in WAL, the schema and format row, the unusable rules, the conditional difference-only `replace_commitment_rows`, `remove_commitment_scopes`, `drop_commitment_index` as a claimed step through `assert_reindex_safe`, `commitment_index_rows` and `commitment_index_checksums` that open nothing for an absent file, `on_commitments_appended` and its `finally` in `append_commitments`.
-- [ ] **The classification.** `app/wiring.py`: the six calls in `HANDED_CALLS`, `PLAIN_READS` and `NEVER_FROM_A_JOB`.
-- [ ] **The temporary task.** `pm_ai/app/commitment_indexing.py` (new): `CommitmentIndexing` with the ordered set on the loop, the start check after `asyncio.wait` on the catch-up, the loop, the unusable latch, the shutdown count; the docstring labels it temporary and names 10a. `app/daemon.py`: built and hooked in `attach_background`, started in `_lifespan`, the hook cleared first in its `finally`.
-- [ ] **Tests.**
+- [x] **The checksum.** `core/jobs.py`: `source_md5` with `usedforsecurity=False`. Test: raw bytes, no normalisation (CRLF and LF differ).
+- [x] **The fold's version.** `core/commitment_log.py`: `FOLD_VERSION = 1` beside `fold`, and the bump rule in `fold`'s docstring.
+- [x] **The rows.** `pm_ai/core/commitment_index.py` (new): `IndexRow`, `INDEX_FORMAT`, the pinned value writer, `index_rows`, `derive`, `check`, `commitment_index_snapshot`, `drop_commitment_index`, `rebuild_commitment_index`, each through `StoragePort` with a `step` for handed writes, as `catch_up` takes one. Tests first: the named fold cases.
+- [x] **The port.** `ports/__init__.py`: the five index calls beside `read_commitments`, with `CommitmentIndexUnusable` declared with them (AD-49).
+- [x] **The store.** `storage/service.py`: a connection per step, the index file created at `0600` in WAL, the schema and format row, the unusable rules, the conditional difference-only `replace_commitment_rows`, `remove_commitment_scopes`, `drop_commitment_index` as a claimed step through `assert_reindex_safe`, `commitment_index_rows` and `commitment_index_checksums` that open nothing for an absent file, `on_commitments_appended` and its `finally` in `append_commitments`.
+- [x] **The classification.** `app/wiring.py`: the six calls in `HANDED_CALLS`, `PLAIN_READS` and `NEVER_FROM_A_JOB`.
+- [x] **The temporary task.** `pm_ai/app/commitment_indexing.py` (new): `CommitmentIndexing` with the ordered set on the loop, the start check after `asyncio.wait` on the catch-up, the loop, the unusable latch, the shutdown count; the docstring labels it temporary and names 10a. `app/daemon.py`: built and hooked in `attach_background`, started in `_lifespan`, the hook cleared first in its `finally`.
+- [x] **Tests.**
   - `tests/core/test_commitment_index.py` (new): the pinned values; snapshot order; the subset rebuild; the conditional replace.
   - `tests/slice/test_commitment_index.py` (new): one test per matrix row; the timed tests; the 50,000-line measurement; a terminal append not indexed until the next daemon append or start.
   - **The wiring slice test:** the very `state` `attach_background` filled is passed to `_lifespan`; an item is approved through `rig.path.prompt`; `commitment_index_rows` then holds its row. The test builds no indexer and calls no hook itself. Two more: the callback fired after `attach_background` and before `_lifespan` (covered by the start check), and one fired during shutdown (starts nothing; counted).
   - `tests/architecture/test_domain_invariants.py`: the six new tests; `tests/architecture/test_private_modes.py`: the modes test; `tests/architecture/README.md` gains their rows.
-- [ ] **The debt on record.** `_bmad-output/implementation-artifacts/deferred-work.md`: the temporary trigger and start task, owner 10a.
-- [ ] **The contract.** Apply the amendments in Design Notes: the PRD through bmad-prd; then bmad-spec re-derives `SPEC.md` and `derivation-services.md`; then the architecture skill amends the spine; then 15c's Change Log line.
+- [x] **The debt on record.** `_bmad-output/implementation-artifacts/deferred-work.md`: the temporary trigger and start task, owner 10a.
+- [x] **The contract.** Apply the amendments in Design Notes: the PRD through bmad-prd; then bmad-spec re-derives `SPEC.md` and `derivation-services.md`; then the architecture skill amends the spine; then 15c's Change Log line.
 
 **Acceptance Criteria:**
 - Given a personal fixture item approved through the daemon, when the indexer has run, then `commitment_index.db` holds one row at `pending` whose `source_md5` is the MD5 of `commitments_log.md`.
@@ -416,6 +416,17 @@ Anchors checked against `origin/main` at `7a097a7`.
   - **Anchors:** `derivation-services.md:127`'s amendment anchored on its unique phrase.
 - **2026-10-27, Ask First answered: DECIDED 2026-10-27 (Andrei), frozen block edited (recorded here).** Option A: only the serving daemon derives the index; an append a terminal process makes is indexed at the daemon's next append to that scope or at its next start. The Ask First is closed, the option markers are plain statements, the B and C replacement list is reduced to one line saying they were not chosen, and the FR-34 amendment stays as named.
 - **2026-10-27, approved for build (Andrei),** after the three-lens review and his answers.
+- **2026-10-27, built** (frozen block unchanged). Amendments applied first (PRD v0.16.3, `SPEC.md`, `derivation-services.md`, AD-45, AD-46). Choices the spec left open, or that the layering forced, made in the build:
+  - `IndexRow` (with `INDEX_COLUMNS`, `ScopeChecksums`, `ReplacedRows`) is declared in `pm_ai/domain/commitment_index.py` and re-exported by `pm_ai/core/commitment_index.py`: `StoragePort` may import only `pm_ai.domain` (AD-30), and it names the row in its calls;
+  - the SQLite of the index is in `pm_ai/storage/commitment_index_store.py` (schema, unusable rules, the steps); `StorageService` creates the file and takes the claim, and the drop's guarded key is that module's `COMMITMENT_INDEX`;
+  - the difference written by the replace compares every column but the checksum, not only `(commitment_id, version)`: `malformed_named` and `approved_at` can change while a commitment's newest line does not, and the rebuild must still give the same rows;
+  - a schema whose columns are not `INDEX_COLUMNS` is unusable (`other_format`), so a column changed without a new `INDEX_FORMAT` is dropped and rebuilt rather than failing every step as busy;
+  - `derive` takes `present` (from the registry the daemon read at start) for the project-root check; `ProjectRootMissing` is logged as the unreadable type;
+  - `check` reports a failed removal of dropped projects' rows (`remove_failed`), logged as `commitment index: rows of dropped projects not removed (<TypeName>); the next start tries again`;
+  - the core test file is `tests/core/test_commitment_index_rows.py`, not `tests/core/test_commitment_index.py`: the slice file has the same basename, and pytest's import mode refuses two;
+  - `stories.yaml` is unchanged: it is derived by bmad-spec and holds no done marker (as for 15c).
+- **2026-10-27, the claimed step, measured** (arm64, `tests/slice/test_commitment_index.py::test_the_claimed_step_stays_under_half_a_second`): inside the full suite, at 5,000 lines whole 0.042 s and one commitment changed 0.036 s, at 50,000 lines whole 0.418 s and one changed 0.318 s; after the index's connections were set to `synchronous=NORMAL` (review), one run alone gave 0.036 s and 0.024 s at 5,000 lines, 0.338 s and 0.259 s at 50,000, and the final full suite 0.031 s and 0.026 s at 5,000, 0.346 s and 0.234 s at 50,000. The read and fold on a worker, off the writer thread: 0.17 to 0.26 s at 5,000 lines and 2.0 to 2.1 s at 50,000 (no bound promised). The 50,000-line one-changed step is mostly the checksum update of every remaining row, which the spec requires.
+- **2026-10-27, review (three lenses: blind, edge case, verification gap):** patches applied (the shutdown's abandon is a `BaseException`, so it is never logged as a failure or a latch; a rebuild mid-run re-requests a scope found changed; columns checked against `INDEX_COLUMNS`; rows compared by column name; bad rows refused before the file is created; a naive instant refused; the hook's docstring says it fires after this call's claim; tests for an unusable index found while serving, a failed removal, the abandon at shutdown, a re-derivation after `changed` from newer bytes, a request during its own scope's derivation, the start check timed on the daemon's pool, the MD5 scan widened to the algorithm named as a string, the master-key test made to fail if the crypto is used, `TZ` restored). Two findings deferred to `deferred-work.md` (a golden test for `FOLD_VERSION`; an unreadable ledger has no rows after a drop and rebuild).
 
 ## Design Notes
 
@@ -488,3 +499,78 @@ Anchors checked against `origin/main` at `7a097a7`.
 **Manual checks:**
 - In a scratch home (`HOME=<scratch> PM_AI_DISABLE_ENCRYPTION=1`), start the daemon, drop and summarise the recorded fixture into personal, and approve two items at the prompt. Then `sqlite3 <scratch>/.pm-ai/private/commitment_index.db 'select commitment_id, state, source_md5 from commitments'` and `md5 <scratch>/.manager-ai/memory/commitments_log.md`. Expected: two rows at `pending`, each carrying the file's MD5.
 - Stop the daemon, add a comment line (`# note`) to the ledger by hand, which the reader skips, and start it again. Expected: the start log line counts personal as derived again and every other scope (projects with no ledger included) as current, and the rows carry the new MD5.
+
+## Suggested Review Order
+
+**Deriving a scope: the only way rows are written**
+
+- Entry point: read once, compare checksums, replace only when stale.
+  [`commitment_index.py:173`](../../../../pm_ai/core/commitment_index.py#L173)
+
+- The fold to rows, every value in its pinned form.
+  [`commitment_index.py:118`](../../../../pm_ai/core/commitment_index.py#L118)
+
+- The one writer of stored values; a naive instant refused.
+  [`commitment_index.py:77`](../../../../pm_ai/core/commitment_index.py#L77)
+
+- The start check: unusable dropped and rebuilt, gone projects removed.
+  [`commitment_index.py:304`](../../../../pm_ai/core/commitment_index.py#L304)
+
+- The one MD5, over raw bytes, change detection only.
+  [`jobs.py:30`](../../../../pm_ai/core/jobs.py#L30)
+
+- The fold's version, stored beside the index's format.
+  [`commitment_log.py:905`](../../../../pm_ai/core/commitment_log.py#L905)
+
+**The store**
+
+- Conditional, difference-only replace in one transaction.
+  [`commitment_index_store.py:198`](../../../../pm_ai/storage/commitment_index_store.py#L198)
+
+- The narrow unusable rules; busy passes through, never dropped.
+  [`commitment_index_store.py:110`](../../../../pm_ai/storage/commitment_index_store.py#L110)
+
+- Claimed steps; the file created at 0600 only at a write.
+  [`service.py:4546`](../../../../pm_ai/storage/service.py#L4546)
+
+- The drop guards the very key whose path it removes.
+  [`service.py:4568`](../../../../pm_ai/storage/service.py#L4568)
+
+- The hook fires once past the size check, in a `finally`.
+  [`service.py:4426`](../../../../pm_ai/storage/service.py#L4426)
+
+**The temporary trigger (10a replaces it)**
+
+- The callback only posts to the loop.
+  [`commitment_indexing.py:118`](../../../../pm_ai/app/commitment_indexing.py#L118)
+
+- After the catch-up, the start check; then requests first in, first out.
+  [`commitment_indexing.py:144`](../../../../pm_ai/app/commitment_indexing.py#L144)
+
+- The scope set from `open_world`, the registry's fault respected.
+  [`commitment_indexing.py:225`](../../../../pm_ai/app/commitment_indexing.py#L225)
+
+- Hooked by the serve path only; cleared first at shutdown.
+  [`daemon.py:1047`](../../../../pm_ai/app/daemon.py#L1047)
+
+**Types and classification**
+
+- The row, declared where the port can name it.
+  [`commitment_index.py:21`](../../../../pm_ai/domain/commitment_index.py#L21)
+
+- The five port calls and `CommitmentIndexUnusable`.
+  [`__init__.py:840`](../../../../pm_ai/ports/__init__.py#L840)
+
+- Handed writes ask no `git`; the hook never from a job.
+  [`wiring.py:4154`](../../../../pm_ai/app/wiring.py#L4154)
+
+**Tests**
+
+- One test per matrix row, the timed tests and the measurement.
+  [`test_commitment_index.py`](../../../../tests/slice/test_commitment_index.py#L1)
+
+- The six invariants: rebuild, drop guard, checksums, one MD5, the fold, no ledger write.
+  [`test_domain_invariants.py`](../../../../tests/architecture/test_domain_invariants.py#L1)
+
+- Pinned values, snapshot order, subset rebuild, conditional replace.
+  [`test_commitment_index_rows.py`](../../../../tests/core/test_commitment_index_rows.py#L1)

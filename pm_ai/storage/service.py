@@ -98,6 +98,11 @@ from pm_ai.domain.meeting_summaries import (
 )
 from pm_ai.domain.meetings import MEETING_RECORD_NAME
 from pm_ai.domain.commitments import COMMITMENTS_LOG, NotACommitmentScope
+from pm_ai.domain.commitment_index import IndexRow, ReplacedRows, ScopeChecksums
+from pm_ai.domain.storage_tiers import assert_reindex_safe
+from pm_ai.core.commitment_index import INDEX_FORMAT
+from pm_ai.core.commitment_log import FOLD_VERSION
+from pm_ai.storage import commitment_index_store as _index_store
 from pm_ai.domain.member_ledgers import (
     ALIAS_SCOPE,
     ALIAS_TABLE,
@@ -173,6 +178,9 @@ from pm_ai.storage.crypto import (
 # The application scope owns Tier 2 (AD-3). Resolved rather than remembered, so
 # the mapping from artifact to scope stays in the one table that owns it.
 APPLICATION = DataScope(ScopeKind.APPLICATION)
+
+_INDEX_FORMATS = (INDEX_FORMAT, FOLD_VERSION)
+"""`commitment_index.db`'s format row: its columns' format and the fold's (15b)."""
 
 # A capture filename's ceiling, in bytes. Well under the 255 every filesystem
 # this daemon runs on allows, because the name is one component of a path that
@@ -4425,19 +4433,30 @@ class StorageService:
         the personal one is not gitignored, so git is not asked; a ledger
         that is no longer `after` bytes long (`LedgerChanged`), which the
         caller reads again. Each line is one record. Returns the new size.
+
+        Story 15b: once past the size check, whether the append then returns
+        or raises, the hook `on_commitments_appended` set is called with the
+        scope, after the claim this call took is released (a caller that
+        already held the claim still holds it then).
         """
         _require_commitment_scope(scope, doing="write")
         text = _ledger_text(lines, ledger=COMMITMENTS_LOG)
         self._assert_git_excludes(scope, COMMITMENTS_LOG)
         target = self._prepared(scope, COMMITMENTS_LOG)
-        with self._claimed_unless_held(scope, COMMITMENTS_LOG):
-            return self._compare_and_append(
-                target,
-                text,
-                after=after,
-                declared_mode=restricted_mode(scope.kind, COMMITMENTS_LOG),
-                named=f"{scope}'s {COMMITMENTS_LOG}",
-            )
+        past: list[bool] = []
+        try:
+            with self._claimed_unless_held(scope, COMMITMENTS_LOG):
+                return self._compare_and_append(
+                    target,
+                    text,
+                    after=after,
+                    declared_mode=restricted_mode(scope.kind, COMMITMENTS_LOG),
+                    named=f"{scope}'s {COMMITMENTS_LOG}",
+                    past=past,
+                )
+        finally:
+            if past:
+                self._commitments_appended(scope)
 
     @contextlib.contextmanager
     def _claimed_unless_held(self, scope: DataScope, artifact: str) -> Iterator[None]:
@@ -4453,12 +4472,20 @@ class StorageService:
             yield
 
     def _compare_and_append(
-        self, target: Path, text: str, *, after: int, declared_mode: int | None, named: str
+        self,
+        target: Path,
+        text: str,
+        *,
+        after: int,
+        declared_mode: int | None,
+        named: str,
+        past: list[bool] | None = None,
     ) -> int:
         """Append `text` if `target` is still `after` bytes; the new size.
 
         A last line left without its newline — a hand edit, a torn write —
-        gets one first, so it cannot swallow the new record (AD-47).
+        gets one first, so it cannot swallow the new record (AD-47). `past`
+        gains `True` once the size check passed (story 15b).
         """
         size = _size_of(target)
         if size != after:
@@ -4466,12 +4493,100 @@ class StorageService:
                 f"{named} grew since it was read ({after} bytes then, {size} now), "
                 f"so nothing was appended; it is read again."
             )
+        if past is not None:
+            past.append(True)
         if not text:
             return size
         if size and not _ends_in_newline(target):
             text = "\n" + text
         self._append(target, text, declared_mode=declared_mode)
         return size + len(text.encode("utf-8"))
+
+    # ── Story 15b: the commitment index ──────────────────────────────────────
+    # `commitment_index.db` in the application scope's enclave: Tier 3, not
+    # encrypted, so no master key is asked for. Created at `0600` at the first
+    # write only; a read never creates it. Each step opens its own connection
+    # (`commitment_index_store`).
+
+    _commitments_hook: Callable[[DataScope], None] | None = None
+
+    def on_commitments_appended(self, callback: Callable[[DataScope], None] | None) -> None:
+        """The serving daemon's callback after each append to a ledger; `None` clears it (15b).
+
+        Temporary until story 10a's watcher. Set only by the serve path, and
+        never on `StoragePort`: a store a terminal command builds has none.
+        """
+        self._commitments_hook = callback
+
+    def _commitments_appended(self, scope: DataScope) -> None:
+        """Call the hook; one that raises is logged and never fails the append."""
+        hook = self._commitments_hook
+        if hook is None:
+            return
+        try:
+            hook(scope)
+        except Exception as failed:  # noqa: BLE001 — the line is written; the index waits
+            _storage_log.warning(
+                "commitment index: the request after an append to %s failed (%s); "
+                "the next append or start derives it",
+                scope,
+                type(failed).__name__,
+            )
+
+    def _commitment_index(self) -> Path:
+        return Path(self._paths.resolve(APPLICATION, _index_store.COMMITMENT_INDEX))
+
+    def _commitment_index_created(self) -> Path:
+        """The index's path, the file created at `0600` in a `0700` enclave if absent."""
+        target = self._commitment_index()
+        _mkdir_private(target.parent, enclave=True)
+        _create_private_file(target)
+        return target
+
+    def replace_commitment_rows(
+        self, scope: DataScope, rows: Sequence[IndexRow], expected_md5s: frozenset[str]
+    ) -> ReplacedRows:
+        """Replace `scope`'s rows, if its stored checksums are still `expected_md5s` (15b).
+
+        One claimed step under `exclusive` on the index, one transaction: the
+        format checked, the checksums compared again (`changed` and nothing
+        written when they moved), only the changed rows written, every
+        remaining row of the scope given the new checksum. All or nothing.
+        """
+        # Refused before the file exists: bad input creates nothing.
+        _index_store.checked_rows(str(scope), rows)
+        with self.exclusive(scope=APPLICATION, artifact=_index_store.COMMITMENT_INDEX):
+            return _index_store.replace_rows(
+                self._commitment_index_created(), str(scope), rows, expected_md5s, _INDEX_FORMATS
+            )
+
+    def remove_commitment_scopes(self, scopes: Sequence[str]) -> int:
+        """Delete every row of `scopes` in one claimed step; how many went (15b)."""
+        with self.exclusive(scope=APPLICATION, artifact=_index_store.COMMITMENT_INDEX):
+            return _index_store.remove_scopes(self._commitment_index(), scopes, _INDEX_FORMATS)
+
+    def drop_commitment_index(self) -> None:
+        """Remove the index and its `-wal` and `-shm`, as Tier 3 only (15b, AD-3).
+
+        A claimed step. `assert_reindex_safe` first, on the artifact key of
+        the very path removed, so the guard and the removal cannot name two
+        files. The claim's `.lock` sidecar stays (AD-5). Absent is nothing.
+        """
+        key = _index_store.COMMITMENT_INDEX
+        assert_reindex_safe(frozenset({key}))
+        with self.exclusive(scope=APPLICATION, artifact=key):
+            target = Path(self._paths.resolve(APPLICATION, key))
+            for path in (target, target.with_name(f"{target.name}-wal"), target.with_name(f"{target.name}-shm")):
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+
+    def commitment_index_rows(self, scope: str | None = None) -> tuple[IndexRow, ...]:
+        """The rows, of one scope or all, by `(scope, commitment_id)`; `()` when absent (15b)."""
+        return _index_store.rows(self._commitment_index(), scope, _INDEX_FORMATS)
+
+    def commitment_index_checksums(self) -> Mapping[str, ScopeChecksums]:
+        """Per scope, its rows' checksums and row count; `{}` when absent (15b). A plain read."""
+        return _index_store.checksums(self._commitment_index(), _INDEX_FORMATS)
 
     def read_aliases(self) -> bytes:
         """The application scope's `aliases.md` as stored; `b""` when there is none."""
