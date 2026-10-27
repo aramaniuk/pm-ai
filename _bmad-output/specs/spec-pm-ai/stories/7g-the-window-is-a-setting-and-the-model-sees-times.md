@@ -2,7 +2,7 @@
 title: 'The local window is a setting, and the model sees when things were said'
 type: 'feature'
 created: '2026-10-27'
-status: 'draft'
+status: 'ready-for-dev'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -125,6 +125,7 @@ context:
   - `7f`'s baseline is noted in Design Notes.
 
 - **2026-10-27, decisions:** frozen block edited (recorded here). The 300-second deadline stays at 32,768; a near-full fictional call is measured at verification, with a stop past 240 s for one call or 900 s for three (Andrei, 2026-10-27). Times are counted from when transcription started, part 1's `created` (orchestrator, 2026-10-27). `doctor` does not read the machine's memory, and gives no advice from it until a 16 GB machine is measured (orchestrator, 2026-10-27). No questions remain open.
+- **2026-10-27, approved for build (Andrei),** after the four-lens review and his answers (spec PR #133).
 
 ## Design Notes
 
