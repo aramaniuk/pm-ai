@@ -26,7 +26,7 @@ context:
 **Approach:**
 - **One index file** for every ledger the daemon composes, `~/.pm-ai/private/commitment_index.db`, one row per commitment per scope, plain SQLite, not encrypted, as declared.
 - **Rows are the fold.** A scope's rows are computed from its ledger's bytes by 15a's and 15c's own `parse_ledger` and `fold`, through `CommitmentLog`, and each row stores the MD5 of exactly those bytes. No row holds a commitment's words or a person's name, and nothing in a row depends on the clock.
-- **Re-derived after each append the serving daemon makes** to that scope (under option A of the Ask First): the approval, the PM's commands and the catch-up all append through one storage call, and that call asks for the scope to be derived again.
+- **Re-derived after each append the serving daemon makes** to that scope (Andrei, 2026-10-27): the approval, the PM's commands and the catch-up all append through one storage call, and that call asks for the scope to be derived again.
 - **Checked at daemon start:** every stale scope is derived again, rows of a scope positively gone from the enrolled projects are removed, and an unusable index file is dropped and rebuilt.
 - **Nothing reads it yet.** Every reader of commitments keeps reading the Markdown. Story 16 is the first reader.
 - **Temporary, as `9a`'s timers are:** the trigger and the start task are replaced by story 10a's job; the derivation, the schema and the checksums stay.
@@ -45,7 +45,7 @@ context:
 - **Decided by Andrei, 2026-10-24, not reopened here:** the index is started by a trigger inside the daemon until story 10's queue, plus a check at daemon start.
 - **Decided by story 15's entry, not reopened here:** the index is reconstructible from the Markdown alone; each row stores the MD5 of `commitments_log.md` as of the derivation that produced it, per row, not per index; the ledger is read through `CommitmentLog` and never parsed a second way.
 - **The slices of story 15:** 15a (ledger, done), **15b (this spec)**, 15c (commands, done), 15d (surfaces, specced in parallel). 15b depends on nothing in 15d, and 15d depends on nothing here.
-- **Open with Andrei:** who triggers a derivation after an append made by a terminal process (Ask First 1). The frozen text is written for option A, the recommendation, with every sentence that depends on it marked "(under option A)"; "What options B and C change" below lists the replacement for each, so either answer slots in without reopening the rest.
+- **Decided by Andrei, 2026-10-27:** only the serving daemon derives the index. An append a terminal process makes is indexed at the daemon's next append to that scope or at its next start.
 
 ### Where it is, and what it covers
 
@@ -123,10 +123,10 @@ context:
 - **An absent ledger** (`read_commitments` gives `b""`) folds to no commitment, so a scope that had rows has them deleted. This is how a ledger deleted while the daemon was down stops being served (AD-46). **A project whose repository root directory does not exist is not an absent ledger:** it is unreadable (below), and its rows stay. `derive` checks the root before step 1.
 - **One connection per claimed step.** Each write step opens its own connection to the index path and closes it when the step ends, so a file dropped and recreated by another store or process is always the file at the path; no connection outlives a step. Reads likewise open, read and close.
 
-### What starts a derivation (under option A)
+### What starts a derivation
 
 - **After each append the serving daemon makes to a ledger.** `StorageService.append_commitments` (`service.py:4418`) is the one storage call every writer uses: 15a's recorder (an approval through the daemon, and a repeated approve), 15a's catch-up at start, and 15c's desk (every mark, `due`, `owner`, `undo`, and `altered`'s mark and its `revised` line). Story 16's verdicts will use it too.
-- **The hook:** the serving daemon gives its store one callback, `StorageService.on_commitments_appended(callback)` (`None` clears it), set in `attach_background` (`daemon.py:1023`), which only the serve path calls. A store built by a command at a terminal has none (under option A). It is a `StorageService` call only, never declared on `StoragePort`.
+- **The hook:** the serving daemon gives its store one callback, `StorageService.on_commitments_appended(callback)` (`None` clears it), set in `attach_background` (`daemon.py:1023`), which only the serve path calls. A store built by a command at a terminal has none. It is a `StorageService` call only, never declared on `StoragePort`.
   - **When it fires:** in a `finally`, whenever the append got past its size check, whether it then returned or raised. An append that raised after its bytes reached the file is thereby covered, as 15c's re-read may report it made. An append refused before the size check (`LedgerChanged`, `NotACommitmentScope`, `UnprotectedCaptureDir`, a held claim) fires nothing: no byte was written.
   - **On the writer thread, after the claim is released,** with the scope.
   - **The callback does exactly one thing:** `loop.call_soon_threadsafe(indexer.request, scope)`. The set of requested scopes is touched only on the daemon's event loop, never from the writer thread, so it needs no lock. The writer call stays short (AD-5), and the client's command never waits for the index. A callback that raises is logged and never fails the append: the line is written.
@@ -136,25 +136,12 @@ context:
   - it removes a scope from the set **before** step 1's read, so a request arriving during that scope's derivation adds it again, and it is derived once more after the scopes ahead of it;
   - derivations run one at a time, never overlapping, so rows from an older read never replace rows from a newer one. This is AD-46's queue-level deduplication on `(job, artifact)`, held in memory until 10a;
   - **it never dies:** each derivation is wrapped in `try/except Exception`, which logs the type name and goes on to the next scope. Only its own cancellation ends it.
-- **Appends a terminal process makes, and hand edits, start nothing** (under option A). They are seen at the daemon's next append to that scope, which derives the whole file, or at its next start.
+- **Appends a terminal process makes, and hand edits, start nothing** (Andrei, 2026-10-27). They are seen at the daemon's next append to that scope, which derives the whole file, or at its next start.
 - **The indexer never writes a ledger.** It holds no ledger claim, so it can never make a ledger writer meet `LedgerChanged` or `ArtifactBusy`, and its own writes go to Tier 3, which nothing watches, so it cannot start itself (AD-45).
 
-### What options B and C change
+### Options not chosen
 
-Each line names the sentence above or below that it replaces; nothing else in the frozen text changes.
-- **Option B (every process that appends derives the scope itself):**
-  - the hook is set on every store that writes, not only the serving daemon's; at a terminal, the callback derives the scope at once, in that process, after its own append (no task, no loop);
-  - "A store built by a command at a terminal has none" and "Appends a terminal process makes … start nothing" become: a terminal's append is derived by that process before its command returns; a failure there is logged and never fails the command;
-  - two processes write the index, each under `exclusive` on `commitment_index.db`; `replace_commitment_rows`' checksum condition already makes the loser do nothing;
-  - 15c's verbs at a terminal gain a timed test: a mark plus its derivation on a 5,000-line ledger within 15c's 2 seconds;
-  - the matrix row "Terminal append" becomes: rows current when the command returns;
-  - 15c's sentence stands, so no 15c Change Log line; the PRD amendment is not needed;
-  - the spine and SPEC exception sentences say "each pm-ai process that appends", not "the serving daemon".
-- **Option C (a terminal's command asks the running daemon to derive the scope):**
-  - a new loopback request, `POST /v1/commitment-index/derive` with the scope, authenticated as every request is (AD-8), which only calls `indexer.request(scope)`; it joins AD-21's list as an inline request under 1 second;
-  - after a successful append, a terminal command that finds a daemon answering sends it; one that finds none sends nothing, and the scope waits for the next start;
-  - the matrix row "Terminal append" becomes: derived by the daemon shortly after the command, when a daemon answers;
-  - 15c's Change Log line and the PRD amendment say "when a daemon is running"; AD-21 gains the request.
+Andrei chose the daemon only (2026-10-27). Not chosen: every appending process deriving the scope itself, and a terminal command asking the running daemon to derive it.
 
 ### The check at daemon start
 
@@ -217,11 +204,11 @@ Each line names the sentence above or below that it replaces; nothing else in th
 
 - **Nothing in production reads its rows.** The start check and `derive` read only the stored checksums. Tests read the rows.
 - **Every reader of commitments keeps reading the Markdown:** 15c's desk (`list`, `show`, every verb, `review`), completion and the terminal readers by path, the dashboard digest and Team Activity, and 15d's pages. None switches: a ledger is small, 15c lists two 5,000-line ledgers within 1 second, and switching would add a staleness question to readers that have none today.
-- **The rule for the first reader (story 16), stated here so the index is never trusted blindly:** before trusting a scope's rows, a reader compares the stored checksum with `source_md5` of the ledger as it is now, and derives the scope again when they differ. This holds whoever wrote last: a terminal process (under option A), a hand edit, or a restore.
+- **The rule for the first reader (story 16), stated here so the index is never trusted blindly:** before trusting a scope's rows, a reader compares the stored checksum with `source_md5` of the ledger as it is now, and derives the scope again when they differ. This holds whoever wrote last: a terminal process, a hand edit, or a restore.
 
 ### Time bounds and what is logged
 
-- **The request path:** unchanged. The hook only posts a request to the loop; no command waits for the index, and no command's bound changes (under options A and C).
+- **The request path:** unchanged. The hook only posts a request to the loop; no command waits for the index, and no command's bound changes.
 - **The claimed step** stays inside AD-5's bound for a writer call (a client waits at most 1 second for the writer thread): it writes only the rows that changed and one checksum update. Its duration is measured by the build at a 5,000-line and a 50,000-line ledger, with one commitment changed and with the scope derived whole, and recorded in this spec's Change Log, as AD-5 asks of each slice that adds a claimed step. A test fails it above 0.5 seconds in each case.
 - **Timed tests:** after a daemon append on a 5,000-line project ledger, its rows are current within 2 seconds; the start check over a stale 5,000-line personal and a stale 5,000-line project ledger finishes within 2 seconds. The derivation of a 50,000-line ledger (on a worker, off the writer thread) is measured and recorded; no bound is promised for it.
 - **Logged** in the diagnostic log (AD-24), counts and type names only, never a commitment's words, a name, or an exception's text:
@@ -275,14 +262,7 @@ Each line names the sentence above or below that it replaces; nothing else in th
 
 Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam Rivera`) and `example.com` handles. Nothing reads the PM's own `~/.pm-ai` or `~/.manager-ai`.
 
-**Ask First:**
-
-1. **An append made by a terminal process.** The PM runs `pm-ai proposal approve` or `pm-ai commitment done` at a terminal (not through the prompt): that process writes the ledger itself, and no daemon sees the append. 15c's spec said "15b's trigger runs after every append through the store, so 15c's lines are indexed too" (`15c:361`, `:699`), and FR-34's consequence says approval creates "an index row" (`prd.md:675`). Andrei's decision says the trigger is inside the daemon.
-   - **(A, recommended) The daemon only.** A terminal's append is indexed at the daemon's next append to that scope or its next start. The index is stale until then, and harmless: nothing reads it in 15b, and its first reader (16) must compare checksums before trusting a scope anyway, because a hand edit leaves it stale in the same way. 15c's sentence is corrected by a Change Log line, and FR-34's consequence is amended (Design Notes).
-   - **(B) Every process that appends derives the scope after its own append.** The index is current after every pm-ai write, matching 15c's sentence and FR-34 as written. The cost: every terminal mark and approval also opens and writes the index (inside 15c's 2-second bound, which then needs a timed test), and two processes write the index, under its claim. Hand edits still leave it stale, so 16's checksum rule is needed anyway.
-   - **(C) A terminal's command asks the running daemon to derive the scope.** A new loopback request for something nothing reads yet, and it does nothing when no daemon runs.
-
-   What each changes in this spec is listed under "What options B and C change".
+**Ask First:** none open. The one question, who derives the index after an append made by a terminal process, was decided by Andrei on 2026-10-27: the daemon only (above).
 
 **Never:**
 
@@ -297,7 +277,7 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
   - no encryption, and no master key or keychain asked for;
   - no read that creates the file.
 - **Triggers:**
-  - no derivation on the request path, and no command waiting for one (under options A and C);
+  - no derivation on the request path, and no command waiting for one;
   - no periodic sweep, retry timer or polling (AD-46);
   - no watcher (10a's);
   - no trigger from a Tier-3 write;
@@ -323,7 +303,7 @@ Tests use `11d`'s fixture names (`Example Weekly Sync-up`, `Alex Morgan`, `Sam R
 | Hot scope | personal requested repeatedly while a project is requested once | the project is derived in its turn (first in, first out) | N/A |
 | Append raised after writing | the append's bytes reached the file, then it raised | the hook fired; the scope is derived | N/A |
 | Append refused early | `LedgerChanged` at the size check | no hook; nothing derived | N/A |
-| Terminal append (under option A) | `commitment done` at a terminal while the daemon runs | no derivation; the scope's rows keep the old checksum; derived at the daemon's next append to that scope or its next start | N/A |
+| Terminal append | `commitment done` at a terminal while the daemon runs | no derivation; the scope's rows keep the old checksum; derived at the daemon's next append to that scope or its next start | N/A |
 | Hand edit, daemon down | a line edited by hand, then a start | the checksum differs; the scope is derived again; other scopes current | N/A |
 | Nothing changed | a start with every ledger as last derived, personal having no ledger | every scope current, personal included (no rows, no commitment); nothing written; the start line counts them all as current | N/A |
 | Ledger deleted | a project's `commitments_log.md` removed while the daemon was down | its rows deleted at the start check | N/A |
@@ -408,11 +388,11 @@ Anchors checked against `origin/main` at `7a097a7`.
 - [ ] **The temporary task.** `pm_ai/app/commitment_indexing.py` (new): `CommitmentIndexing` with the ordered set on the loop, the start check after `asyncio.wait` on the catch-up, the loop, the unusable latch, the shutdown count; the docstring labels it temporary and names 10a. `app/daemon.py`: built and hooked in `attach_background`, started in `_lifespan`, the hook cleared first in its `finally`.
 - [ ] **Tests.**
   - `tests/core/test_commitment_index.py` (new): the pinned values; snapshot order; the subset rebuild; the conditional replace.
-  - `tests/slice/test_commitment_index.py` (new): one test per matrix row; the timed tests; the 50,000-line measurement; a terminal append not indexed until the next daemon append or start (under option A).
+  - `tests/slice/test_commitment_index.py` (new): one test per matrix row; the timed tests; the 50,000-line measurement; a terminal append not indexed until the next daemon append or start.
   - **The wiring slice test:** the very `state` `attach_background` filled is passed to `_lifespan`; an item is approved through `rig.path.prompt`; `commitment_index_rows` then holds its row. The test builds no indexer and calls no hook itself. Two more: the callback fired after `attach_background` and before `_lifespan` (covered by the start check), and one fired during shutdown (starts nothing; counted).
   - `tests/architecture/test_domain_invariants.py`: the six new tests; `tests/architecture/test_private_modes.py`: the modes test; `tests/architecture/README.md` gains their rows.
 - [ ] **The debt on record.** `_bmad-output/implementation-artifacts/deferred-work.md`: the temporary trigger and start task, owner 10a.
-- [ ] **The contract.** Apply the amendments in Design Notes for the option Andrei chose: the PRD through bmad-prd; then bmad-spec re-derives `SPEC.md` and `derivation-services.md`; then the architecture skill amends the spine; then 15c's Change Log line.
+- [ ] **The contract.** Apply the amendments in Design Notes: the PRD through bmad-prd; then bmad-spec re-derives `SPEC.md` and `derivation-services.md`; then the architecture skill amends the spine; then 15c's Change Log line.
 
 **Acceptance Criteria:**
 - Given a personal fixture item approved through the daemon, when the indexer has run, then `commitment_index.db` holds one row at `pending` whose `source_md5` is the MD5 of `commitments_log.md`.
@@ -424,7 +404,7 @@ Anchors checked against `origin/main` at `7a097a7`.
 ## Spec Change Log
 
 - **2026-10-26, created** from story 15's entry (its invoke notes and its 15b line), Andrei's decision of 2026-10-24 (a trigger inside the daemon until story 10, and a check at daemon start), 15a and 15c as built at `7a097a7`, 1h, `derivation-services.md` and the spine's AD-3, AD-5, AD-45, AD-46 and AD-47. One Ask First open.
-- **2026-10-26, review (three lenses: adversarial, edge case, verification gap), fixes decided by the coordinating session: frozen block edited (recorded here).** The Ask First stays open with Andrei.
+- **2026-10-26, review (three lenses: adversarial, edge case, verification gap), fixes decided by the coordinating session: frozen block edited (recorded here).** The Ask First stayed open with Andrei.
   - **The open question:** every sentence that depends on option A is marked so, and "What options B and C change" lists the replacements; the PRD is amended under A rather than said to hold.
   - **Privacy:** `owner`, `speaker` and `owner_by_pm` dropped; story 16 needs none, and `storage-contract.md:62` keeps names out of indexes.
   - **The file:** "unusable" defined narrowly; `OperationalError` is busy or disk, never a drop; an absent file is read as empty without opening it; a file with no tables gets its schema, a partial one is unusable; the sidecars' modes tested with a connection open; `fold_version` stored beside `index_format`; a failed drop or rebuild latches until the next start; a connection per claimed step, so a drop by another store is safe.
@@ -434,10 +414,11 @@ Anchors checked against `origin/main` at `7a097a7`.
   - **The port:** its five calls named; the hook on `StorageService` only.
   - **Tests:** the AD-3 test checks a non-empty snapshot, the removed files, a whole rebuild, another day and zone, and the field set; the fold test writes its expected values per named case; the checksum test uses a store that changes between reads; the drop guard ties the key to the path; the no-ledger-write test checks the claim and a concurrent mark; a wiring slice test through `attach_background` and `_lifespan`; the single-MD5 test is an AST scan.
   - **Anchors:** `derivation-services.md:127`'s amendment anchored on its unique phrase.
+- **2026-10-27, Ask First answered: DECIDED 2026-10-27 (Andrei), frozen block edited (recorded here).** Option A: only the serving daemon derives the index; an append a terminal process makes is indexed at the daemon's next append to that scope or at its next start. The Ask First is closed, the option markers are plain statements, the B and C replacement list is reduced to one line saying they were not chosen, and the FR-34 amendment stays as named.
 
 ## Design Notes
 
-**Readiness check (2026-10-26, against `origin/main` at `7a097a7`).** Verdict: **ready; one question for Andrei, which changes only who triggers.**
+**Readiness check (2026-10-26, against `origin/main` at `7a097a7`).** Verdict: **ready; one question for Andrei, which changes only who triggers** (decided 2026-10-27: the daemon only).
 - **Built as 15b needs:**
   - `CommitmentLog.read_with_bytes` returns the fold and the bytes it was folded from, so a row and its checksum come from one read;
   - `fold` takes no clock and no zone: the undo window compares two lines' `occurred`, and past due is computed by the card at display time. So rows can be clock-free and a rebuild exact;
@@ -447,9 +428,9 @@ Anchors checked against `origin/main` at `7a097a7`.
   - the index is declared, its path resolved, its tier and encryption tested.
 - **Missing, and added by 15b (none blocks):**
   - **no derived index exists at all,** so there is no pattern to follow: no SQLite file besides `operational.db`, no checksum function (`hashlib.md5` appears nowhere in `pm_ai`), no `pm_ai.storage.reindex`. 15b adds the first of each piece AD-46 names, and 1h, 18 and 10a reuse them;
-  - **the daemon has no hook after an append.** Added as one callback, set only on the serve path (under option A).
+  - **the daemon has no hook after an append.** Added as one callback, set only on the serve path.
 - **Contradictions found:**
-  - **15c's trigger sentence** (`15c:361`, `:699`: "after every append through the store") versus Andrei's "inside the daemon". A terminal process appends through its own store. Ask First 1;
+  - **15c's trigger sentence** (`15c:361`, `:699`: "after every append through the store") versus Andrei's "inside the daemon". A terminal process appends through its own store. Decided by Andrei on 2026-10-27: the daemon only, and 15c gets a Change Log line;
   - **1h's anchors are stale:** 1h names `assert_reindex_safe` at `storage_tiers.py:175`; it is at `:479`. 1h's spec is not 15b's to edit; noted for 1h's readiness check;
   - **SQLite under the runtime extra:** the brief expected the index might need `sqlite-vec`. It does not: this index is plain SQLite from the standard library. `sqlite-vec` is for `vector_index/` (10a), so 15b adds no dependency.
 
@@ -457,7 +438,7 @@ Anchors checked against `origin/main` at `7a097a7`.
 
 **Why the checksum covers the whole file, and only changed rows are rewritten.** The ledger is append-only, so any append changes the file, and the unit of re-derivation is one file (AD-46). The fold runs over the whole file, because a commitment's state depends on lines anywhere in it; but the claimed step writes only rows whose version changed, plus one checksum update for the scope, so the writer thread's work grows with what changed rather than with the file. AD-46 allows that as long as a rebuild produces the same rows, which the AD-3 test checks.
 
-**Why the replace is conditional.** Under option A only the daemon writes the index, and its derivations are serial, so the condition never fails there. It costs one read inside the transaction and makes a second writer (1h's `pm-ai reindex`, option B, a test's second store) unable to overwrite newer rows with older ones.
+**Why the replace is conditional.** Only the daemon writes the index, and its derivations are serial, so the condition never fails there. It costs one read inside the transaction and makes a second writer (1h's `pm-ai reindex`, a test's second store) unable to overwrite newer rows with older ones.
 
 **Why the trigger is in storage, not in each writer.** Three writers today and a fourth in story 16 all append through one call. A hook there cannot be forgotten by the next writer, and it fires only once bytes may have been written. It is a change event from the write path, which AD-46 forbids, so it is stated as a temporary exception and thrown away by 10a.
 
@@ -466,14 +447,14 @@ Anchors checked against `origin/main` at `7a097a7`.
 **Why readers do not switch.** Nothing needs it: 15c reads a ledger within its bounds. A reader that switched would have to handle a stale scope, which the Markdown readers never face. Story 16 is the first reader that wants a cross-scope "open, by due" query, and it brings the checksum rule with it.
 
 **Accepted limits:**
-- Until 10a, a terminal's append (under option A) and a hand edit are indexed late: at the daemon's next append to that scope, or its next start.
+- Until 10a, a terminal's append and a hand edit are indexed late: at the daemon's next append to that scope, or its next start.
 - A ledger with no commitment and no rows is read, hashed and folded at every check.
 - A column story 16 needs is a format change: the index is dropped and rebuilt at the next start.
 - An index the daemon could not drop or rebuild stays unused until the next start.
 
-**Amendments this depends on.** Named, not applied. Applied with the build, in this order: the PRD through bmad-prd; then bmad-spec re-derives `SPEC.md` and `derivation-services.md`; then the spine through the architecture skill; then 15c's Change Log. The sentences are for option A; "What options B and C change" says how each one changes.
+**Amendments this depends on.** Named, not applied. Applied with the build, in this order: the PRD through bmad-prd; then bmad-spec re-derives `SPEC.md` and `derivation-services.md`; then the spine through the architecture skill; then 15c's Change Log. The sentences are exact.
 
-*PRD (`prd.md`), through bmad-prd (under option A; not needed under B):*
+*PRD (`prd.md`), through bmad-prd:*
 - **FR-34 consequence** (`:675`): in "> * Approved spoken commitment creates a valid, structured Markdown entry in the meeting's scope's commitments\_log.md and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\].", "and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\]" becomes "and an index row in commitment\_index.db (Tier 3, disposable) with state \[PENDING\], written by the serving daemon at once for an approval it makes, and at its next append to that scope or its next start for one made at a terminal (2026-10-26, 15b)".
 
 *`SPEC.md`, re-derived by bmad-spec:*
@@ -492,8 +473,8 @@ Anchors checked against `origin/main` at `7a097a7`.
   - **Binds:** add `15b`;
   - after "pm-ai publishes no change events from its own write path.", add: "`[2026-10-26, Andrei, 15b]` One stated exception, temporary until story 10a's watcher and queue replace it: in the serving daemon, each append to a `commitments_log.md` asks for that scope's commitment index to be derived again, and the daemon checks every scope's index rows against its ledger's checksum once at start. Appends another process makes, and hand edits, are seen at the daemon's next append to that scope or its next start, so a reader of the index compares the stored checksum with the ledger before it trusts a scope's rows."
 
-*15c's spec (`stories/15c-the-pms-commitment-commands.md`), a Change Log line (under option A):*
-- "**2026-10-26, 15b's spec:** 15b's trigger runs after each append the serving daemon makes, not after every append through the store (`:361`, `:699`); an append a terminal process makes is indexed at the daemon's next append to that scope or its next start (Andrei, 15b's Ask First)."
+*15c's spec (`stories/15c-the-pms-commitment-commands.md`), a Change Log line:*
+- "**2026-10-26, 15b's spec:** 15b's trigger runs after each append the serving daemon makes, not after every append through the store (`:361`, `:699`); an append a terminal process makes is indexed at the daemon's next append to that scope or its next start (Andrei, 2026-10-27, 15b's Ask First)."
 
 ## Verification
 
