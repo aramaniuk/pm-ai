@@ -144,12 +144,10 @@ def check_command(command: str, cwd: Path, home: Path | None = None) -> None:
     """Bash: keychain commands, the real home, skipped gates, pushes to main."""
     home_path = (home or Path.home()).resolve()
     read_refusal: str | None = None  # computed once, on the first segment naming the home
-    for segment in _SEGMENT_SPLIT.split(_without_heredoc_bodies(command)):
-        seg = segment.strip()
-        if not seg:
-            continue
-        if _PM_AI_KEYCHAIN.search(seg):
-            raise Refused("`pm-ai setup` and `pm-ai key enrol` write the login keychain; only Andrei runs them")
+    segments = [s.strip() for s in _SEGMENT_SPLIT.split(_without_heredoc_bodies(command)) if s.strip()]
+    if any(_PM_AI_KEYCHAIN.search(seg) for seg in segments):  # first, so a home refusal never masks it
+        raise Refused("`pm-ai setup` and `pm-ai key enrol` write the login keychain; only Andrei runs them")
+    for seg in segments:
         sets_home = re.search(r"(?:^|\s)HOME=", seg) is not None
         hit = _home_hit(seg, home_path, with_var=not sets_home)
         if hit:
@@ -157,9 +155,10 @@ def check_command(command: str, cwd: Path, home: Path | None = None) -> None:
                 read_refusal = _home_read_refusal(command, home_path) or ""
             if read_refusal:
                 raise Refused(
-                    f"{hit} is the PM's real pm-ai home; {read_refusal}. Only reads go there "
-                    "(ls, cat, head, tail, wc, stat, file, du, grep, find, and cp/rsync out to an absolute "
-                    "path outside the home and outside any git checkout); for anything else use a throwaway HOME"
+                    f"{hit} is the PM's real pm-ai home; {read_refusal}. A command naming it is read-only "
+                    "end to end (ls, cat, head, tail, wc, stat, file, du, grep, cut, find, and cp/rsync out to an "
+                    "absolute path outside the home and outside any git checkout); for anything else use a "
+                    "throwaway HOME"
                 )
         if "--no-verify" in seg:
             raise Refused("--no-verify skips a gate; if a hook blocks, stop and report")
@@ -192,13 +191,12 @@ def _without_heredoc_bodies(command: str) -> str:
 # --- reading the real home ----------------------------------------------------------
 #
 # Andrei's transcripts live in the real home; the orchestrator copies them out to
-# a private folder for the reference sets. A command may name the home only when
-# every stage that names it is a read and every copy lands outside the home and
-# outside any git checkout (the repo is public). Anything the rule cannot read
-# with certainty is refused.
+# a private folder for the reference sets. A command that names the home is
+# read-only from end to end: every stage of every pipeline on every line is a
+# read, and every copy lands outside the home and outside any git checkout (the
+# repo is public). Anything the rule cannot read with certainty is refused.
 
-_READERS = frozenset({"ls", "cat", "head", "tail", "wc", "stat", "file", "du", "grep", "find", "cp", "rsync"})
-_FILTERS = frozenset({"head", "tail", "wc", "grep", "cut"})  # what a home read may pipe into
+_READERS = frozenset({"ls", "cat", "head", "tail", "wc", "stat", "file", "du", "grep", "cut", "find", "cp", "rsync"})
 _LIST_OPS = frozenset({";", "&&", "||", "&"})
 _FIND_WRITES = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"})
 _CP_FLAGS = re.compile(r"-[aRrpPLHfinvX]+")
@@ -250,19 +248,17 @@ def _home_read_refusal(command: str, home_path: Path) -> str | None:
         except ValueError:
             return "the command does not parse"
         for pipeline in _split_on(tokens, _LIST_OPS):
-            stages = _split_on(pipeline, frozenset({"|"}))
-            named = [any(_home_hit(t, home_path) for t in s) for s in stages]
-            if not any(named):
-                continue
-            saw_home = True
-            for stage, names_home in zip(stages, named, strict=True):
-                reason = _stage_refusal(stage, names_home, home_path)
+            if not pipeline:
+                continue  # a trailing `;` or `&`
+            for stage in _split_on(pipeline, frozenset({"|"})):
+                saw_home = saw_home or any(_home_hit(t, home_path) for t in stage)
+                reason = _stage_refusal(stage, home_path)
                 if reason:
                     return reason
     return None if saw_home else "the guard cannot tell how the command uses it"
 
 
-def _stage_refusal(tokens: list[str], names_home: bool, home_path: Path) -> str | None:
+def _stage_refusal(tokens: list[str], home_path: Path) -> str | None:
     args: list[str] = []
     i = 0
     while i < len(tokens):
@@ -287,9 +283,8 @@ def _stage_refusal(tokens: list[str], names_home: bool, home_path: Path) -> str 
     if not args or "=" in args[0]:
         return "it sets a variable" if args else "it has no command"
     prog, rest = args[0], args[1:]
-    allowed = _READERS if names_home else _FILTERS
-    if prog not in allowed:
-        return f"`{prog}` is not a read command" if names_home else f"`{prog}` is not a plain filter after a home read"
+    if prog not in _READERS:
+        return f"`{prog}` is not a read command"
     if prog == "find" and _FIND_WRITES.intersection(rest):
         return "find with -delete, -exec, -ok or -fprint is not a read"
     if prog == "file" and any(a == "-C" or a.startswith("--compile") for a in rest):

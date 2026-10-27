@@ -165,6 +165,8 @@ def private(tmp_path: Path) -> Path:
         "ls ~/.pm-ai/meetings | grep -c vtt",
         "cat < ~/.pm-ai/meetings/standup.vtt",
         "ls ~/.pm-ai 2>&1 | wc -l",
+        "ls ~/.pm-ai && wc -l ~/.pm-ai/a",
+        "ls ~/.pm-ai;",
     ],
 )
 def test_reading_the_real_home_is_allowed(tmp_path, command):
@@ -179,7 +181,7 @@ def test_reading_the_real_home_is_allowed(tmp_path, command):
         "cp -- ~/.pm-ai/a.vtt ~/.pm-ai/b.vtt {dest}",
         "rsync -av ~/.pm-ai/meetings/ {dest}/meetings/",
         "rsync --archive --dry-run $HOME/.manager-ai/meetings {dest}",
-        "mkdir -p {dest} && chmod 700 {dest} && cp ~/.pm-ai/meetings/*.vtt {dest}/",
+        "ls {dest} && cp ~/.pm-ai/meetings/*.vtt {dest}/",
     ],
 )
 def test_copying_transcripts_out_to_a_private_folder_is_allowed(tmp_path, private, template):
@@ -241,7 +243,12 @@ def test_copies_into_the_home_or_a_checkout_are_refused(repo, private, template,
         ("(cat ~/.pm-ai/config.toml)", "not a plain read"),
         ("ls ~/.pm-ai && rm ~/.manager-ai/config.toml", "`rm` is not a read command"),
         ("file -C -m ~/.pm-ai/magic", "writes a file"),
-        ("ls ~/.pm-ai | sort -o /tmp/list", "`sort` is not a plain filter"),
+        ("ls ~/.pm-ai | sort -o /tmp/list", "`sort` is not a read command"),
+        ("ls ~/.pm-ai && cd ~ && rm -rf .pm-ai", "`cd` is not a read command"),
+        ("cat ~/.pm-ai/x; rm -rf ~/x", "`rm` is not a read command"),
+        ("ls ~/.pm-ai\nrm -rf .pm-ai", "`rm` is not a read command"),
+        ("ls ~/.pm-ai; pushd ~", "`pushd` is not a read command"),
+        ("mkdir -p /srv/private && cp ~/.pm-ai/a.vtt /srv/private/", "`mkdir` is not a read command"),
     ],
 )
 def test_anything_but_a_read_of_the_home_is_refused(tmp_path, command, reason):
