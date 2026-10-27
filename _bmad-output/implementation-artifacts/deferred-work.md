@@ -1692,3 +1692,15 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/15d-commitments-on-the-pages.md`
   summary: On a project page, the "approved items not yet recorded" note finds approved rows through the project's summarised meetings, since `proposal_index_at` has no scope filter; a spoken promise from a project meeting with no summary row is not counted there (the personal page's catch-up read is unchanged).
   evidence: Blind-hunter review (AD-25: a project render read every scope's approved proposals). Narrowing by meeting keeps the read to project data without reshaping `storage/service.py`, which story 15b is changing in parallel. A scope filter on `proposal_index_at` would close it.
+
+## Surfaced by story 7g (2026-10-27)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7g-the-window-is-a-setting-and-the-model-sees-times.md`
+  summary: Whether 16 GB of memory is enough is open again, now at the default window of 32,768. This supersedes the decision of 2026-10-19 (7a), which settled `qwen3:8b` at 16,384 with the 16 GB question left open at a peak of 8,077 MB. pm-ai reads no memory and gives no memory-based advice until a 16 GB machine is measured; `doctor` says how to lower the window to 16,384.
+  evidence: Measured 2026-10-27 on an 18 GB M3 Pro with `qwen3:8b` and a fictional transcript: Ollama peaked at 9.4–9.7 GB at 32,768 against 7.0 GB at 16,384, and memory pressure reached warning. No 16 GB machine has been measured.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7g-the-window-is-a-setting-and-the-model-sees-times.md`
+  summary: For story 7k. A meeting near the window can hold the one model slot for up to 3 × 300 s across harvests: a timeout is an attempt, and the third fails the summary. The 300-second deadline stays at 32,768 (Andrei, 2026-10-27); the remedy, if one is needed, belongs to 7k.
+  evidence: A 27,000-token prompt took 182 s at 32,768 (2026-10-27, M3 Pro 18 GB), and up to 28,672 prompt tokens fit, so a near-full prompt with a long answer may pass 240 s. The near-full fictional call is measured by the orchestrator at verification.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7g-the-window-is-a-setting-and-the-model-sees-times.md`
+  summary: For story 7k. A `PossiblyTruncated` that is not a size refusal (a missing token count, or the server stopping for a reason other than `stop` below the window) is still stored with 7b's sentence "does not fit the local model's window in one call", which names the wrong cause now that the size cases are `WindowReached`.
+  evidence: Edge-case review of 7g. `_without_answer` in `pm_ai/app/pipelines.py` has one branch for every `PossiblyTruncated`; 7g only adds the setting advice for `WindowReached`, as its spec says. 7k amends the `PossiblyTruncated` advice anyway.

@@ -2,7 +2,8 @@
 title: 'The local window is a setting, and the model sees when things were said'
 type: 'feature'
 created: '2026-10-27'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '1a25781b5c1dc9d1ef7df70c96a97d14c72663fe'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-pm-ai-2026-08-18/ARCHITECTURE-SPINE.md'
@@ -86,18 +87,18 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `pm_ai/domain/model_calls.py` -- `LOCAL_MODEL_WINDOWS = (16384, 32768)`, `DEFAULT_LOCAL_MODEL_WINDOW = 32768` -- one copy of the two values
-- [ ] `pm_ai/core/config.py` -- `local_model_window` field, validation, loader pass-through, whole-number rendering, docstring -- the setting
-- [ ] `pm_ai/ports/__init__.py` -- `WindowReached(PossiblyTruncated)` -- the size cases named apart from the others
-- [ ] `pm_ai/models/local/ollama.py` -- `window` argument and property, refused outside the two values; the request and the four checks use it; the two size checks raise `WindowReached`; `local_model_presence` takes the window; `NUM_CTX` removed; docstrings carry the 2026-10-27 figures -- one window per adapter
-- [ ] `pm_ai/app/wiring.py`, `pm_ai/app/entry.py` -- the window passed to the adapter and to the presence check; the ready line names the window, the restart and, at 32,768, how to lower it -- the composition root is the only place config meets the adapter
-- [ ] `pm_ai/core/transcripts.py` -- the reader-reporting siblings of `read_transcript` and `drop_utterances`; `meeting_utterances` returns the utterances with their times from part 1's `created`, or none -- one reader decides
-- [ ] `pm_ai/core/meeting_summary.py` -- the amended format sentence; `summary_prompt` takes the times, puts a mark at each new minute and keeps each kept utterance's time in `SummaryPrompt` -- the model sees when, and `7h` reads the time in code
-- [ ] `pm_ai/app/pipelines.py` -- the times passed through; the too-long reason reads the adapter's `window` and adds the setting advice only for `WindowReached` at 16,384 -- the caller
-- [ ] `benchmarks/local_model.py` -- the window at both construction sites; `--num-ctx` limited to the two windows; the parser built by a function -- the monkeypatch would stop working
-- [ ] tests (files above) -- one test per matrix row; the request carries the configured window; the adapter refuses another; the instructions-are-constant test; a test pinning the mark count and character growth on the three fictional fixtures; `tests/tooling/test_local_model_benchmark.py` imports the benchmark and parses `--num-ctx 16384` and refuses `8192` -- the matrix is the contract
-- [ ] `stories/7a-the-local-model-behind-the-port.md`, `stories/7b-a-transcript-yields-summary-decisions-and-actions.md` -- a dated Change Log line each: the window is `local_model_window`, 32,768 by default; the size refusals are `WindowReached` (`7g`) -- earlier frozen blocks amended on the record
-- [ ] `_bmad-output/implementation-artifacts/deferred-work.md` -- a new entry: the 16 GB question re-opened at 32,768 (peak 9.4–9.7 GB on 18 GB), superseding the 16,384 decision of 2026-10-19; a near-full meeting can hold the model slot up to 3 × 300 s, remedy in `7k` -- the open questions carried forward
+- [x] `pm_ai/domain/model_calls.py` -- `LOCAL_MODEL_WINDOWS = (16384, 32768)`, `DEFAULT_LOCAL_MODEL_WINDOW = 32768` -- one copy of the two values
+- [x] `pm_ai/core/config.py` -- `local_model_window` field, validation, loader pass-through, whole-number rendering, docstring -- the setting
+- [x] `pm_ai/ports/__init__.py` -- `WindowReached(PossiblyTruncated)` -- the size cases named apart from the others
+- [x] `pm_ai/models/local/ollama.py` -- `window` argument and property, refused outside the two values; the request and the four checks use it; the two size checks raise `WindowReached`; `local_model_presence` takes the window; `NUM_CTX` removed; docstrings carry the 2026-10-27 figures -- one window per adapter
+- [x] `pm_ai/app/wiring.py`, `pm_ai/app/entry.py` -- the window passed to the adapter and to the presence check; the ready line names the window, the restart and, at 32,768, how to lower it -- the composition root is the only place config meets the adapter
+- [x] `pm_ai/core/transcripts.py` -- the reader-reporting siblings of `read_transcript` and `drop_utterances`; `meeting_utterances` returns the utterances with their times from part 1's `created`, or none -- one reader decides
+- [x] `pm_ai/core/meeting_summary.py` -- the amended format sentence; `summary_prompt` takes the times, puts a mark at each new minute and keeps each kept utterance's time in `SummaryPrompt` -- the model sees when, and `7h` reads the time in code
+- [x] `pm_ai/app/pipelines.py` -- the times passed through; the too-long reason reads the adapter's `window` and adds the setting advice only for `WindowReached` at 16,384 -- the caller
+- [x] `benchmarks/local_model.py` -- the window at both construction sites; `--num-ctx` limited to the two windows; the parser built by a function -- the monkeypatch would stop working
+- [x] tests (files above) -- one test per matrix row; the request carries the configured window; the adapter refuses another; the instructions-are-constant test; a test pinning the mark count and character growth on the three fictional fixtures; `tests/tooling/test_local_model_benchmark.py` imports the benchmark and parses `--num-ctx 16384` and refuses `8192` -- the matrix is the contract
+- [x] `stories/7a-the-local-model-behind-the-port.md`, `stories/7b-a-transcript-yields-summary-decisions-and-actions.md` -- a dated Change Log line each: the window is `local_model_window`, 32,768 by default; the size refusals are `WindowReached` (`7g`) -- earlier frozen blocks amended on the record
+- [x] `_bmad-output/implementation-artifacts/deferred-work.md` -- a new entry: the 16 GB question re-opened at 32,768 (peak 9.4–9.7 GB on 18 GB), superseding the 16,384 decision of 2026-10-19; a near-full meeting can hold the model slot up to 3 × 300 s, remedy in `7k` -- the open questions carried forward
 - [ ] **Orchestrator, not the builder:** through `bmad-architecture`, a dated note on AD-19 that the local window is a setting, 32,768 by default, with the 16 GB question open again, and on AD-49 that `WindowReached` joins `PossiblyTruncated` -- the spine is not edited by a builder
 
 **Acceptance Criteria:**
@@ -126,6 +127,8 @@ context:
 
 - **2026-10-27, decisions:** frozen block edited (recorded here). The 300-second deadline stays at 32,768; a near-full fictional call is measured at verification, with a stop past 240 s for one call or 900 s for three (Andrei, 2026-10-27). Times are counted from when transcription started, part 1's `created` (orchestrator, 2026-10-27). `doctor` does not read the machine's memory, and gives no advice from it until a 16 GB machine is measured (orchestrator, 2026-10-27). No questions remain open.
 - **2026-10-27, approved for build (Andrei),** after the four-lens review and his answers (spec PR #133).
+- **2026-10-27, build:** an edit outside the Code Map, approved by the orchestrator: `core/config.py` imports the two windows from `pm_ai.domain.model_calls`, so `tests/architecture/test_static_rules.py`'s `CONFIG_IMPORTS_ALLOWED` allows exactly that module, and its `_import_heads` keeps a `pm_ai` import's full dotted name so the allowance stays one module. A second edit outside the Code Map, also approved by the orchestrator: `tests/connectors/test_graph_calendar_mapping.py` pins `ACCEPTED_KEYS` as a whole set and gains `local_model_window`, as `4e` and `7a` added theirs. A third, also approved by the orchestrator: the `local_model_check` stub in `tests/surfaces/test_cli_dispatch.py`'s doctor fixture takes the keyword-only `window` doctor now passes; that doctor passes the configured window is asserted in `tests/slice/test_daemon_local_model.py`. `ConfigPort` in `pm_ai/ports` gains `local_model_window` (its parity with `Config` is tested), and the daemon's `LocalModel` protocol in `app/wiring.py` gains `window`, which the pipeline reads only for a `WindowReached`. An answer whose prompt and output reach the window is `WindowReached` whatever its `done_reason` (`length` included), so the window check now runs before the stop-reason check. Measured on the three fictional fixtures: 15, 4 and 17 marks, adding 165, 44 and 187 characters (2.26%, 1.85% and 1.46%; the Design Notes' 2.1% for `mixed_ru_en.vtt` was taken with another title). Tokens are not measured here.
+- **2026-10-27, review patches** (blind, edge-case and verification-gap reviews): setup's presence check is asked at the window `config.toml` names, not the default, since setup never changes it; `SummaryPrompt.times` is required and holds one entry per kept utterance; the format sentence says a mark holds "to the minute"; the setting advice writes the window as the adapter's sentences do (`16384`); the benchmark test checks the window `main` builds each adapter with, not the source text. Deferred: the 16 GB question re-opened at 32,768, the 3 × 300 s worst case, and the non-size `PossiblyTruncated` reason still saying the window (all three for `7k` or later).
 
 ## Design Notes
 
@@ -159,3 +162,70 @@ A mark is 11 characters, mostly digits, and digits tend to cost a token each, so
 **Manual checks:**
 - In a throwaway home, `config.toml` with `local_model_window = 8192`: `pm-ai doctor` names the refused value and both accepted ones.
 - Orchestrator, at verification: prompt tokens with and without marks on the three fictional fixtures (real Ollama, `prompt_eval_count`); the time, Ollama's peak memory and swap of a fictional call near 28,000 tokens at 32,768; on one real two-part meeting, whether part 2's marks line up with the recording, recorded as yes or no only.
+
+## Suggested Review Order
+
+**The window as a setting**
+
+- One copy of the two windows, read by config and the adapter.
+  [`model_calls.py:253`](../../../../pm_ai/domain/model_calls.py#L253)
+
+- The one place the setting reaches the adapter.
+  [`wiring.py:789`](../../../../pm_ai/app/wiring.py#L789)
+
+- The config refusal naming both accepted values.
+  [`config.py:241`](../../../../pm_ai/core/config.py#L241)
+
+- Every request sends the instance's window as `num_ctx`.
+  [`ollama.py:486`](../../../../pm_ai/models/local/ollama.py#L486)
+
+- The server's 400 refusal raised as `WindowReached`.
+  [`ollama.py:588`](../../../../pm_ai/models/local/ollama.py#L588)
+
+- Prompt plus answer at the window: `WindowReached`, checked before the stop reason.
+  [`ollama.py:646`](../../../../pm_ai/models/local/ollama.py#L646)
+
+- The size refusals named apart, still caught as `PossiblyTruncated`.
+  [`__init__.py:1286`](../../../../pm_ai/ports/__init__.py#L1286)
+
+- Setting advice only for `WindowReached` at 16,384.
+  [`pipelines.py:5081`](../../../../pm_ai/app/pipelines.py#L5081)
+
+**Doctor and setup**
+
+- The ready line names the window and how to lower it.
+  [`ollama.py:787`](../../../../pm_ai/models/local/ollama.py#L787)
+
+- Doctor asks at the file's window.
+  [`entry.py:1660`](../../../../pm_ai/app/entry.py#L1660)
+
+- Setup asks at the file's window, which it never changes.
+  [`entry.py:836`](../../../../pm_ai/app/entry.py#L836)
+
+**Times in the prompt**
+
+- Times from part 1's `created`; none without part 1 or a clock.
+  [`transcripts.py:689`](../../../../pm_ai/core/transcripts.py#L689)
+
+- The reader reports itself, so `Speaker: words` text gets no times.
+  [`transcripts.py:193`](../../../../pm_ai/core/transcripts.py#L193)
+
+- A mark at each new minute; labels read past it.
+  [`meeting_summary.py:310`](../../../../pm_ai/core/meeting_summary.py#L310)
+
+- Each kept utterance's time, for `7h` to read in code.
+  [`meeting_summary.py:282`](../../../../pm_ai/core/meeting_summary.py#L282)
+
+- The one amended format sentence.
+  [`meeting_summary.py:100`](../../../../pm_ai/core/meeting_summary.py#L100)
+
+- The pipeline passes times through and logs a missing part 1.
+  [`pipelines.py:4027`](../../../../pm_ai/app/pipelines.py#L4027)
+
+**Peripherals**
+
+- The benchmark takes one of the two windows; parser testable.
+  [`local_model.py:519`](../../../../benchmarks/local_model.py#L519)
+
+- Orchestrator-approved: config may import exactly `pm_ai.domain.model_calls`.
+  [`test_static_rules.py:631`](../../../../tests/architecture/test_static_rules.py#L631)
