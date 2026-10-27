@@ -2,7 +2,7 @@
 title: 'A reference set scores meeting summaries'
 type: 'feature'
 created: '2026-10-27'
-status: 'draft'
+status: 'ready-for-dev'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/stories/7b-a-transcript-yields-summary-decisions-and-actions.md'
@@ -114,6 +114,10 @@ match = [["dark mode"]]
 4. **No pass/fail threshold yet.** It is decided after the measured spread of the `--repeat 2` baseline; until then each slice's run is compared with the previous one (`--compare`) and Andrei decides (orchestrator, 2026-10-27).
 
 No questions are open.
+
+## Spec Change Log
+
+- **2026-10-27, approved for build (Andrei),** after the four-lens review and his answers (spec PR #132).
 
 ## Design Notes
 
