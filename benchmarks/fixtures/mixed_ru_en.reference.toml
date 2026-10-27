@@ -1,0 +1,99 @@
+# A reference for mixed_ru_en.vtt, in story 7f's format — fictional, like the meeting.
+#
+# The real references live in a private 0700 folder outside the repository;
+# this one is the example and what the tests score. A test copies it with the
+# transcript into a 0700 folder as m01.reference.toml and m01.vtt, since this
+# fixtures folder is inside the repository and so refused by design.
+#
+# A proposal ruled out in the meeting is a decision: D6–D9 here are the four
+# proposals mixed_ru_en.key.toml lists as distractors. not_an_item is only for
+# a topic raised and never decided (X1 here, which the key does not have).
+
+transcript = "m01.vtt"
+title = "Release 4.2 planning"
+
+[[decision]]
+id = "D1"
+about = "release 4.2 ships with the ORB-512 flag off"
+match = [["ORB-512"], ["flag", "флаг"]]
+
+[[decision]]
+id = "D2"
+about = "billing migrates to the new API"
+match = [["ORB-530"], ["billing", "биллинг", "migrat", "мигр"]]
+
+[[decision]]
+id = "D3"
+about = "code freeze on 2026-11-12"
+match = [["2026-11-12"], ["freeze", "фриз"]]
+
+[[decision]]
+id = "D4"
+about = "Redis cache dropped, cache kept in Postgres"
+match = [["ORB-544", "Redis"]]
+
+[[decision]]
+id = "D5"
+about = "onboarding redesign goes into sprint 48"
+match = [["ORB-561", "onboarding"]]
+
+[[decision]]
+id = "D6"
+about = "rewrite the frontend in Svelte — ruled out"
+match = [["ORB-570", "Svelte"]]
+
+[[decision]]
+id = "D7"
+about = "one-week sprints — ruled out"
+match = [["ORB-575"]]
+
+[[decision]]
+id = "D8"
+about = "hire a QA contractor — ruled out"
+match = [["ORB-581", "contractor", "подрядчик"]]
+
+[[decision]]
+id = "D9"
+about = "postpone the release to 2026-12-01 — ruled out"
+match = [["2026-12-01"]]
+
+[[action]]
+id = "A1"
+about = "billing migration script by Friday"
+owner = ["Speaker 2"]
+match = [["ORB-533", "скрипт", "script"]]
+
+[[action]]
+id = "A2"
+about = "load test report"
+owner = ["Speaker 3"]
+match = [["load test", "нагрузочн"], ["report", "отчёт", "2026-11-09"]]
+
+[[action]]
+id = "A3"
+about = "update the on-call runbook"
+owner = ["Speaker 4"]
+match = [["ORB-548", "runbook"]]
+
+[[action]]
+id = "A4"
+about = "release notes draft"
+owner = ["Speaker 1"]
+match = [["release notes"]]
+
+[[action]]
+id = "A5"
+about = "fix the noisy night alerts"
+owner = ["Speaker 2"]
+match = [["ORB-552", "алерт", "alert"]]
+
+[[action]]
+id = "A6"
+about = "call legal about the data terms"
+owner = ["Speaker 3"]
+match = [["юрист", "legal"]]
+
+[[not_an_item]]
+id = "X1"
+about = "the design team's new mockups — raised, never decided"
+match = [["mockup", "макет"]]

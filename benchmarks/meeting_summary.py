@@ -147,15 +147,28 @@ def measured(
     }
 
 
-def run(model_name: str, label: str, path: Path, root: Path) -> list[dict[str, Any]]:
-    daemon = build(root, PERSONAL, config=Config())
-    model = Recording(OllamaModel(model_name))
-    daemon.model = model  # type: ignore[assignment]
+def prepare(
+    model: Any,
+    label: str,
+    path: Path,
+    root: Path,
+    *,
+    config: Config | None = None,
+    title: str = "Benchmark meeting",
+) -> tuple[Any, Meeting]:
+    """A throwaway daemon in `root` with `model` as its model, and one meeting ready to summarise.
+
+    The meeting is recorded with `path` as its capture — a Graph capture for
+    `.vtt`, a manual text capture for `.txt` — and its transcript row
+    `ingested`. Shared by this script and `score_summaries.py` (story 7f).
+    """
+    daemon = build(root, PERSONAL, config=config if config is not None else Config())
+    daemon.model = model
     daemon.summaries = SummaryJobs()
     start = datetime.now(timezone.utc) - timedelta(hours=2)
     meeting = Meeting(
         meeting_id=f"mtg_bench_{label}",
-        title="Benchmark meeting",
+        title=title,
         start=start,
         duration_minutes=60,
         attendees=(Actor("email:pm@example.com"),),
@@ -165,11 +178,21 @@ def run(model_name: str, label: str, path: Path, root: Path) -> list[dict[str, A
     daemon.storage.write_capture(
         path.read_text(encoding="utf-8"),
         scope=PERSONAL,
-        name=capture_name(meeting.meeting_id, start, CaptureFormat.GRAPH),
+        name=capture_name(
+            meeting.meeting_id,
+            start,
+            CaptureFormat.MANUAL_TXT if path.suffix == ".txt" else CaptureFormat.GRAPH,
+        ),
     )
     daemon.storage.record_transcript_state(
         PERSONAL, meeting.meeting_id, TranscriptStateKind.INGESTED, "ingested", retryable=False
     )
+    return daemon, meeting
+
+
+def run(model_name: str, label: str, path: Path, root: Path) -> list[dict[str, Any]]:
+    model = Recording(OllamaModel(model_name))
+    daemon, meeting = prepare(model, label, path, root)
     rows = []
     started = time.monotonic()
     note_summary_input(daemon, PERSONAL, meeting.meeting_id, ingested_now=False)
