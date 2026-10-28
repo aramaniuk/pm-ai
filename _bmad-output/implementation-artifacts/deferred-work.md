@@ -1704,3 +1704,33 @@ From `_bmad-output/implementation-artifacts/field-test-2026-10-15.md`, which hol
 - source_spec: `_bmad-output/specs/spec-pm-ai/stories/7g-the-window-is-a-setting-and-the-model-sees-times.md`
   summary: For story 7k. A `PossiblyTruncated` that is not a size refusal (a missing token count, or the server stopping for a reason other than `stop` below the window) is still stored with 7b's sentence "does not fit the local model's window in one call", which names the wrong cause now that the size cases are `WindowReached`.
   evidence: Edge-case review of 7g. `_without_answer` in `pm_ai/app/pipelines.py` has one branch for every `PossiblyTruncated`; 7g only adds the setting advice for `WindowReached`, as its spec says. 7k amends the `PossiblyTruncated` advice anyway.
+
+## Surfaced by the story-7f review (2026-10-27)
+
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: A match word that ends in a digit also matches a longer number: `ORB-53` occurs in `ORB-533` and `2026-11-1` in `2026-11-12`, since the frozen rule asks only that a word start a word.
+  evidence: Blind and edge-case reviews. Harmless while references name whole ids; **recommendation:** a word ending in a digit must not be followed by a digit, decided in a spec change since the rule is frozen.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: Folding does not map dash variants (U+2010–U+2015, U+2212, the non-breaking hyphen U+2011) to `-`, so a model writing `ORB‑512` with one of them misses an item it found.
+  evidence: Blind review. The frozen fold names case, `ё` and whitespace only; NFC was added. **Recommendation:** map those dashes to `-` in the same spec change.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: Word groups cannot tell a ruled-out proposal restated as adopted ("we rewrite the frontend in Svelte") from the correct decision; both pair with D6.
+  evidence: Blind review. An admitted limit of matching without a model (Decision 1); the returned text is in the private run file, so such a pairing can be read there.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: The owner tie-break leans rather than guarantees: each reference item tries the actions naming its owner first, but augmenting paths do not maximise owner-correct pairs among all maximum matchings.
+  evidence: Blind review. The spec prescribes augmenting paths; a weighted assignment would guarantee it. Differs only when several returned actions match one reference action with different owners.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: An interrupted or crashed run writes no run file: results are held in memory and written once at the end, so local-model time spent before the stop cannot be rescored.
+  evidence: Blind and edge-case reviews. Ctrl-C now stops cleanly (exit 130, `.work/` removed). Writing each meeting as it finishes would keep a partial run; not needed while a baseline takes minutes.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: `benchmarks/meeting_summary.py` stops at its second path ("from the command"): `request_summary` refuses a re-summary of a meeting that already holds an automatic summary (`SummaryRefused`, added by 11f on 2026-10-22, after the benchmark's last change on 2026-10-20), so no row is printed and it exits 1.
+  evidence: 7f's manual check, run live on 2026-10-27 with qwen3:8b: the first summary was made, then the traceback named `_refuse_a_resummary`. 7f's extraction moved the setup unchanged (the diff is the move only), so the break predates it. **Recommendation:** the "from the command" path asks for a replacement, or runs on a second meeting — in 7h, the next slice to change `meeting_summary.py`.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: The references folder is refused only inside this repository's working trees (this checkout and its main checkout), not inside any git working tree: a folder inside another checkout, such as a dotfiles repository rooted at the home folder, passes, and a `git add -A` there would pick up real transcripts and run files.
+  evidence: Privacy-scope steward at 8be1780 (F2). The frozen rule says "inside the repo's working tree", so the build matches its contract. **Closed - Andrei, 2026-10-28: the folder lives outside the repo; no rule beyond the in-repo refusal.**
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: `prepare()` in `benchmarks/meeting_summary.py` builds the throwaway daemon with the real macOS keychain adapter. The summary path writes nothing encrypted today, so no key is read, but a later slice adding an encrypted artifact to that path would make the scorer fetch the real master key, or stop on `KeyNotFound`, while it processes real meetings.
+  evidence: Privacy-scope steward at 8be1780 (F4). **Recommendation:** for 7h, the next slice to change `meeting_summary.py`: `prepare()` passes an in-memory keychain or `encryption_disabled=True`, so the scorer never reaches real key custody.
+- source_spec: `_bmad-output/specs/spec-pm-ai/stories/7f-a-reference-set-scores-meeting-summaries.md`
+  summary: Should-fix items from the 7f code review left open: an upper-case suffix (`m01.VTT`, `m01.Reference.toml`) is skipped without a warning; the 25-decision and 15-action limits are tested above the boundary but not at it; the `timed out`, `nothing said` and `stopped` results are tested only through the code path `failed` shares; the compare setup row has no `same_scorer_commit`.
+  evidence: Code reviewer at 8be1780 (items 6, 10 and the acceptance notes). Each is low: the first only hides a misnamed file, which the run's meeting count shows; the others are test depth. **Recommendation:** fold them into 7h's work on the scorer if it touches these paths.
