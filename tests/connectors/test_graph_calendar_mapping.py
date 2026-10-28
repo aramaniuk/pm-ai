@@ -1379,8 +1379,8 @@ def test_the_config_vocabulary_stays_closed_and_holds_no_connector_setting():
     the two spellings this file happened to think of. Story 4g added the fourth
     member, story 2o removed `pm_handle`, and story 4e added `daemon_port` — a
     daemon setting, not a connector's — and story 7a `local_model`, the local
-    model's name, not a connector's either; the vocabulary is stated in
-    `pm_ai.core.config`.
+    model's name, not a connector's either, and story 7g `local_model_window`,
+    the local model's window; the vocabulary is stated in `pm_ai.core.config`.
     """
     assert ACCEPTED_KEYS == frozenset(
         {
@@ -1389,6 +1389,7 @@ def test_the_config_vocabulary_stays_closed_and_holds_no_connector_setting():
             "display_timezone",
             "daemon_port",
             "local_model",
+            "local_model_window",
         }
     )
 

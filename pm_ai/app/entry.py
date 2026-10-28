@@ -834,8 +834,18 @@ class _FirstRun:
         return storage.write_artifact(payload, scope=APPLICATION, artifact=CONFIG_ARTIFACT)
 
     def local_model(self, name: str) -> LocalModelPresence:
-        """Step 3's presence check of a named local model, through wiring (7a)."""
-        return local_model_check(name)
+        """Step 3's presence check of a named local model, through wiring (7a).
+
+        At the window `config.toml` names (story 7g): setup never asks for or
+        changes `local_model_window`, so the file's value is the one the
+        daemon will run at. A file that cannot be read is answered at the
+        default window; setup's own read reports it.
+        """
+        try:
+            window = load_config(self.read_config()).local_model_window
+        except Exception:  # noqa: BLE001 — the presence check reports, never raises
+            window = Config().local_model_window
+        return local_model_check(name, window=window)
 
     def diagnose(self) -> Report:
         """`1g`'s probes over a fresh read of both artifacts.
@@ -1653,17 +1663,19 @@ def _local_model_probe(composed: _Composition) -> Probe:
     Read now, as the renders line reads `display_timezone` — through the
     composed daemon's store when there is one. A config that cannot be read is
     reported by its own line above; this one then says it could not tell.
-    Never raises.
+    The window named (story 7g) is the composed daemon's adapter's when there
+    is one, since a changed `local_model_window` waits for a restart; with no
+    adapter, the one `config.toml` names, and the line says so. Never raises.
     """
     daemon = composed.daemon
     try:
         if daemon is not None:
             raw = daemon.storage.read_artifact(scope=APPLICATION, artifact=CONFIG_ARTIFACT)
-            name = load_config(raw).local_model
+            config = load_config(raw)
         elif composed.config.presence is Presence.READ:
-            name = load_config(composed.config.raw).local_model
+            config = load_config(composed.config.raw)
         elif composed.config.presence is Presence.ABSENT:
-            name = ""
+            config = load_config(None)
         else:
             raise ConfigRefused(composed.config.detail or "it could not be read")
     except Exception as unreadable:  # noqa: BLE001 — a probe reports, never raises
@@ -1674,7 +1686,11 @@ def _local_model_probe(composed: _Composition) -> Probe:
             f"unknown: {unreadable}",
             "Fix config.toml (its own line above says how), then run `pm-ai doctor` again.",
         )
-    return local_model_check(name).probe
+    if daemon is not None and daemon.model is not None:
+        return local_model_check(
+            config.local_model, window=daemon.model.window, from_adapter=True
+        ).probe
+    return local_model_check(config.local_model, window=config.local_model_window).probe
 
 
 SUMMARIES_PROBE = "meeting summaries"

@@ -123,10 +123,13 @@ def probes(monkeypatch):
     install(*HEALTHY)
     # Story 7a: the `local model` line asks the local Ollama server, which is
     # this machine's too; stood in as a pulled model, contacting nothing.
+    # Story 7g: doctor also passes the window `config.toml` names.
     monkeypatch.setattr(
         entry,
         "local_model_check",
-        lambda name: LocalModelPresence(Probe("local model", Health.OK, "stood in")),
+        lambda name, *, window, from_adapter=False: LocalModelPresence(
+            Probe("local model", Health.OK, "stood in")
+        ),
     )
     # Story 7c: the `frontier key` line, stood in as a key held; its own
     # behaviour is `tests/slice/test_frontier_summary.py`'s.

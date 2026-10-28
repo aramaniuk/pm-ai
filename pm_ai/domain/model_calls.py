@@ -48,7 +48,9 @@ __all__ = [
     "ModelAnswer",
     "ModelSide",
     "ScopeFlow",
+    "DEFAULT_LOCAL_MODEL_WINDOW",
     "LOCAL_MODEL_PROBE",
+    "LOCAL_MODEL_WINDOWS",
     "SERVER_LIMITS",
     "START_OLLAMA",
     "SUGGESTED_LOCAL_MODEL",
@@ -247,6 +249,18 @@ recall 9 of 11 on the authored meeting and the Ollama runner peaking at
 8,077 MB on an 18 GB Mac. Whether 16 GB is enough stays open. Figures are in
 the story's Design Notes.
 """
+
+LOCAL_MODEL_WINDOWS = (16384, 32768)
+"""The two context windows the local model may run at (`config.toml`'s `local_model_window`, story 7g).
+
+16,384 was the window from `7a` to `7g`; 32,768 holds an hour-long meeting in
+one call. Measured 2026-10-27 on an 18 GB M3 Pro with `qwen3:8b` and a
+fictional transcript: Ollama peaked at 9.4–9.7 GB at 32,768 against 7.0 GB at
+16,384. Whether 16 GB of memory is enough at 32,768 is open.
+"""
+
+DEFAULT_LOCAL_MODEL_WINDOW = 32768
+"""The window when `config.toml` names none (Andrei, 2026-10-27)."""
 
 LOCAL_MODEL_PROBE = "local model"
 """The name of `doctor`'s line about the local model (story 7a)."""

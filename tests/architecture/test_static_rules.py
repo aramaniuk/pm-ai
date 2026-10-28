@@ -17,6 +17,8 @@ from conftest import (
     CORE_FORBIDDEN_IMPORTS,
     PACKAGE_ROOT,
     REPO_ROOT,
+    SourceFile,
+    alias_map,
     calls,
     canonical_name,
     format_violations,
@@ -623,8 +625,21 @@ def test_every_event_entry_in_the_package_satisfies_its_category_schema():
 # `config.toml` (4a); `project_registry.py` reads `projects.toml` (4d).
 TOML_READERS = frozenset({"pm_ai/core/config.py", "pm_ai/core/project_registry.py"})
 
+# `pm_ai.domain.model_calls` is the one pm-ai module allowed, and by its full
+# name (story 7g, approved by the orchestrator 2026-10-27): it holds the two
+# local-model windows `local_model_window` is checked against, so the setting
+# and the adapter read one copy. Pure domain constants: it imports only the
+# standard library and `pm_ai.domain.health`/`identity`, and opens no file.
 CONFIG_IMPORTS_ALLOWED = frozenset(
-    {"__future__", "collections", "dataclasses", "math", "tomllib", "zoneinfo"}
+    {
+        "__future__",
+        "collections",
+        "dataclasses",
+        "math",
+        "tomllib",
+        "zoneinfo",
+        "pm_ai.domain.model_calls",
+    }
 )
 
 # Belt to the allowlist's braces: the builtin needs no import, and a read verb on
@@ -684,15 +699,35 @@ CONFIG_FILE_CALLS = READ_CALLS | CONFIG_WRITE_CALLS
 
 
 def _import_heads(source) -> set[str]:
-    """Top-level module of every import in one file, relative imports included."""
+    """Top-level module of every import in one file, relative imports included.
+
+    A `pm_ai` import is kept whole (`pm_ai.domain.model_calls`), so an
+    allowance names one module rather than the whole package (story 7g).
+    """
+
+    def head(name: str) -> str:
+        return name if name.split(".")[0] == "pm_ai" else name.split(".")[0]
+
     heads: set[str] = set()
     for node in ast.walk(source.tree):
         if isinstance(node, ast.Import):
-            heads |= {alias.name.split(".")[0] for alias in node.names}
+            heads |= {head(alias.name) for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
             prefix = "." * node.level
-            heads.add(f"{prefix}{(node.module or '').split('.')[0]}")
+            module = node.module or ""
+            heads.add(f"{prefix}{head(module) if not prefix else module.split('.')[0]}")
     return heads
+
+
+def _allowed_pm_ai_modules(allowed: frozenset[str]) -> list[SourceFile]:
+    """Each `pm_ai` module an import allowlist names, parsed; a missing one fails."""
+    files: list[SourceFile] = []
+    for module in sorted(name for name in allowed if name.split(".")[0] == "pm_ai"):
+        path = REPO_ROOT / (module.replace(".", "/") + ".py")
+        assert path.is_file(), f"{module} is allowed but {path} does not exist"
+        tree = ast.parse(path.read_text())
+        files.append(SourceFile(path=path, tree=tree, aliases=alias_map(tree)))
+    return files
 
 
 def test_story_4a_the_config_module_neither_reads_nor_writes_a_file():
@@ -718,6 +753,15 @@ def test_story_4a_the_config_module_neither_reads_nor_writes_a_file():
         f"{config.rel} imports {module}"
         for module in sorted(_import_heads(config) - CONFIG_IMPORTS_ALLOWED)
     ]
+    # Story 7g: a pm-ai module config may import is swept for the same file
+    # calls, so the allowance's premise — it opens no file — is checked, not
+    # only stated.
+    for allowed in _allowed_pm_ai_modules(CONFIG_IMPORTS_ALLOWED):
+        violations += [
+            f"{allowed.location(node)}  {name}(...) (imported by {config.rel})"
+            for _f, node, name in calls([allowed])
+            if name.split(".")[-1] in CONFIG_FILE_CALLS
+        ]
     assert not violations, format_violations(
         violations,
         "Stories 4a and 4g: pm_ai.core.config interprets and serializes bytes "
