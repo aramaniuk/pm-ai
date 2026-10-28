@@ -14,8 +14,8 @@ never a match word, an `about`, a `title` or transcript text.
 from __future__ import annotations
 
 import hashlib
-import re
 import os
+import re
 import stat
 import tomllib
 import unicodedata
@@ -216,6 +216,8 @@ def load_reference(path: Path, folder: Path) -> Reference:
     stem = path.name[: -len(REFERENCE_SUFFIX)]
     if not STEM.fullmatch(stem):
         raise Refused(f"a reference file's stem must match {STEM.pattern}")
+    if path.is_symlink() or not path.is_file() or path.resolve().parent != folder:
+        raise Refused(f"{stem}: the reference must be a plain file in the folder")
     raw_bytes = path.read_bytes()
     try:
         data = tomllib.loads(raw_bytes.decode("utf-8"))
@@ -272,12 +274,14 @@ class Scan:
     references: tuple[Reference, ...]
     unreferenced: tuple[str, ...]
     """Stems of transcripts no reference names: warned about, not run."""
+    second: tuple[str, ...] = ()
+    """Stems with both a `.vtt` and a `.txt`: the one the reference does not name is ignored."""
 
 
 def scan(folder: Path) -> Scan:
     """Every reference in the folder, checked, and the transcripts left without one."""
     references = []
-    transcripts = set()
+    transcripts: dict[str, int] = {}
     for entry in sorted(folder.iterdir()):
         if entry.name in SKIPPED:
             continue
@@ -286,11 +290,15 @@ def scan(folder: Path) -> Scan:
         elif entry.suffix in TRANSCRIPT_SUFFIXES:
             if not STEM.fullmatch(entry.stem):
                 raise Refused(f"a transcript's stem must match {STEM.pattern}")
-            transcripts.add(entry.stem)
+            transcripts[entry.stem] = transcripts.get(entry.stem, 0) + 1
     if not references:
         raise Refused("the references folder holds no m<NN>.reference.toml")
     named = {r.stem for r in references}
-    return Scan(tuple(references), tuple(sorted(transcripts - named)))
+    return Scan(
+        tuple(references),
+        tuple(sorted(set(transcripts) - named)),
+        tuple(sorted(stem for stem in named if transcripts.get(stem, 0) > 1)),
+    )
 
 
 def group_warnings(reference: Reference, transcript_text: str) -> list[str]:
@@ -421,7 +429,7 @@ def meeting_row(stem: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "meeting": stem,
         "results": [r["result"] for r in repeats],
-        "exceptions": [r["exception"] for r in repeats if r.get("exception")],
+        "exceptions": [r.get("exception") for r in repeats],
         "wall_s": [r["wall_s"] for r in repeats],
         "calls": [r["calls"] for r in repeats],
         "prompt_tokens": [r["prompt_tokens"] for r in repeats],
@@ -452,7 +460,10 @@ def totals(meetings: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         "meeting": "total",
         "meetings": len(meetings),
         "summaries": len(repeats),
-        "meetings_not_summarised": sum(not summarised(r["result"]) for r in repeats),
+        "meetings_not_summarised": sum(
+            any(not summarised(r["result"]) for r in entry["repeats"]) for entry in meetings.values()
+        ),
+        "summaries_not_made": sum(not summarised(r["result"]) for r in repeats),
         **{key: measured_sum(repeats, key) for key in MEASURED},
         **counts,
         **rates(counts),
@@ -463,26 +474,75 @@ def identical(values: Sequence[Any]) -> bool:
     return all(v == values[0] for v in values[1:])
 
 
-REPEAT_KEYS = frozenset({"result", "scores", "decisions", "action_items"})
+RESULTS = frozenset(
+    {"summarized", "nothing said", "waiting", "timed out", "failed", "stopped", "exception"}
+)
+"""7b's `SummaryResult` values, and the runner's own `exception`; a test holds them equal."""
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+RUN_MEASURED = ("wall_s", "calls", "prompt_tokens", "output_tokens")
+TEXT_FIELDS = {"decisions": ("statement", "said_by"), "action_items": ("what", "owner", "due")}
+
+
+def _number(value: object) -> bool:
+    """None, or an int or float — never a bool, never text."""
+    return value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
+
+
+def _repeat_in_shape(repeat: object) -> bool:
+    if not isinstance(repeat, dict):
+        return False
+    if repeat.get("result") not in RESULTS:
+        return False
+    exception = repeat.get("exception")
+    if exception is not None and not (isinstance(exception, str) and IDENTIFIER.fullmatch(exception)):
+        return False
+    if not all(key in repeat and _number(repeat[key]) for key in RUN_MEASURED):
+        return False
+    scores = repeat.get("scores")
+    if not isinstance(scores, dict) or not all(
+        isinstance(scores.get(key), int) and not isinstance(scores.get(key), bool) for key in COUNTS
+    ):
+        return False
+    for kind, fields in TEXT_FIELDS.items():
+        items = repeat.get(kind)
+        if not isinstance(items, list):
+            return False
+        for item in items:
+            if not isinstance(item, dict) or not all(
+                item.get(field) is None or isinstance(item.get(field), str) for field in fields
+            ):
+                return False
+    return True
 
 
 def check_run(data: object, name: str) -> Mapping[str, Any]:
-    """A run file of this format whose shape the scorer can read, or `Refused`."""
+    """A run file of this format whose every printed value is a stem, an enum, a number or a flag.
+
+    A run file is read back from the private folder and may have been edited by
+    hand, so nothing in it reaches the screen until it is checked. A refusal
+    names a meeting only once its key is known to be a stem — never a value.
+    """
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         raise Refused(f"{name}: not a run file of format {FORMAT}")
+    if not _number(data.get("repeat")):
+        raise Refused(f"{name}: repeat is not in the run file's shape")
     meetings = data.get("meetings")
-    if not isinstance(meetings, dict):
+    if not isinstance(meetings, dict) or not meetings:
         raise Refused(f"{name}: no meetings")
+    for stem in meetings:
+        if not isinstance(stem, str) or not STEM.fullmatch(stem):
+            raise Refused(f"{name}: a meeting key is not a stem m<NN>")
     for stem, entry in meetings.items():
-        label = stem if isinstance(stem, str) and STEM.fullmatch(stem) else "a meeting"
         if (
             not isinstance(entry, dict)
             or not isinstance(entry.get("reference_sha256"), str)
+            or not isinstance(entry.get("answers_identical"), bool)
+            or not isinstance(entry.get("scores_identical"), bool)
             or not isinstance(entry.get("repeats"), list)
             or not entry["repeats"]
-            or not all(isinstance(r, dict) and REPEAT_KEYS <= set(r) for r in entry["repeats"])
+            or not all(_repeat_in_shape(r) for r in entry["repeats"])
         ):
-            raise Refused(f"{name}: {label} is not in the run file's shape")
+            raise Refused(f"{name}: {stem} is not in the run file's shape")
     return data
 
 

@@ -20,7 +20,8 @@ including each returned item's text, so misses can be read — to
 `DIR/runs/<stamp>.json`, both `0600`.
 
 Exit 0 when scored, 1 when the local model is waiting (nothing is written)
-or something unexpected stopped the run, 2 when an input is refused.
+or something unexpected stopped the run, 2 when an input is refused, 130 when
+interrupted (nothing is written).
 """
 
 from __future__ import annotations
@@ -160,7 +161,7 @@ def settings_config(model: str, settings: Sequence[str]) -> tuple[Config, dict[s
     try:
         config = load_config("\n".join(lines).encode("utf-8"))
     except ConfigRefused:
-        raise scoring.Refused("a --setting value is one config.toml refuses") from None
+        raise scoring.Refused("a --model or --setting value is one config.toml refuses") from None
     return config, given
 
 
@@ -221,7 +222,11 @@ def recording_requests(sent: list[dict[str, Any]]) -> Iterator[None]:
 
 
 def local_model(config: Config) -> Any:
-    """The adapter wiring builds for `config` — so a window setting reaches it as in the daemon."""
+    """The adapter wiring builds for `config` — today from `local_model` alone.
+
+    No `--setting` changes the window until wiring passes one to the adapter
+    (7g); the window recorded is the one read from each request sent.
+    """
     from pm_ai.app.wiring import local_model as wired
 
     model = wired(config)
@@ -255,6 +260,7 @@ def summarise_once(
     first = len(sent)
     started = time.monotonic()
     model = None
+    daemon = None
     try:
         model = model_factory(config)
         daemon, meeting = prepare(
@@ -290,6 +296,9 @@ def summarise_once(
         if model is not None:
             with contextlib.suppress(Exception):
                 model.close()
+        if daemon is not None:
+            with contextlib.suppress(Exception):
+                daemon.storage.close()
     if outcome.result is SummaryResult.WAITING:
         raise Waiting(reference.stem)
     answer = outcome.answer if outcome.result is SummaryResult.SUMMARIZED else None
@@ -330,10 +339,15 @@ def write_run(runs: Path, name: str, run: dict[str, Any]) -> Path:
     return path
 
 
-def print_rows(run: dict[str, Any], out: IO[str]) -> None:
-    for stem, entry in run["meetings"].items():
-        say(out, json.dumps(scoring.meeting_row(stem, entry)))
-    say(out, json.dumps(run["totals"]))
+def rows(run: dict[str, Any]) -> list[str]:
+    """Every printed line, built before anything is written, so a failure leaves no file."""
+    lines = [json.dumps(scoring.meeting_row(stem, entry)) for stem, entry in run["meetings"].items()]
+    return [*lines, json.dumps(run["totals"])]
+
+
+def print_rows(lines: Sequence[str], out: IO[str]) -> None:
+    for line in lines:
+        say(out, line)
 
 
 def read_run(path: Path, folder: Path) -> dict[str, Any]:
@@ -349,6 +363,8 @@ def read_run(path: Path, folder: Path) -> dict[str, Any]:
 def warn_about(found: scoring.Scan, err: IO[str]) -> None:
     for stem in found.unreferenced:
         say(err, f"warning: {stem} has no reference; not run")
+    for stem in found.second:
+        say(err, f"warning: {stem} has a second transcript its reference does not name; ignored")
     for reference in found.references:
         text = reference.transcript.read_text(encoding="utf-8")
         for line in scoring.group_warnings(reference, text):
@@ -402,11 +418,14 @@ def score_run(
                     ),
                     "scores_identical": scoring.identical([r["scores"] for r in repeats]),
                 }
-    except Waiting as waiting:
+    except (Waiting, KeyboardInterrupt) as stopped:
         log.unlink(missing_ok=True)
         if created_runs:
             with contextlib.suppress(OSError):
                 runs.rmdir()
+        if not isinstance(stopped, Waiting):
+            raise
+        waiting = stopped
         say(
             err,
             f"stopped: {waiting.stem} is waiting for the local model (Ollama not answering "
@@ -429,8 +448,9 @@ def score_run(
         "meetings": meetings,
         "totals": scoring.totals(meetings),
     }
+    lines = rows(run)
     path = write_run(runs, name, run)
-    print_rows(run, out)
+    print_rows(lines, out)
     say(err, f"run file: runs/{path.name}")
     return 0
 
@@ -445,10 +465,11 @@ def rescore_run(args: argparse.Namespace, folder: Path, found: scoring.Scan, out
         dirty,
         args.rescore.resolve().name,
     )
+    lines = rows(run)
     runs = folder / "runs"
     private_dir(runs)
     path = write_run(runs, stamp(runs), run)
-    print_rows(run, out)
+    print_rows(lines, out)
     say(err, f"run file: runs/{path.name}")
     return 0
 
@@ -463,9 +484,9 @@ def compare_runs(args: argparse.Namespace, folder: Path, out: IO[str]) -> int:
 def parser() -> argparse.ArgumentParser:
     made = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     made.add_argument("--references", type=Path, required=True)
-    made.add_argument("--model", default="qwen3:8b")
-    made.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE")
-    made.add_argument("--repeat", type=int, default=1)
+    made.add_argument("--model", help="default qwen3:8b")
+    made.add_argument("--setting", action="append", metavar="KEY=VALUE")
+    made.add_argument("--repeat", type=int, help="default 1")
     mode = made.add_mutually_exclusive_group()
     mode.add_argument("--rescore", type=Path, metavar="RUN")
     mode.add_argument("--compare", type=Path, nargs=2, metavar=("OLD", "NEW"))
@@ -484,7 +505,18 @@ def main(
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
     args = parser().parse_args(argv)
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    # Until the run's private log exists, no record reaches the terminal.
+    root.handlers = [logging.NullHandler()]
     try:
+        if (args.rescore or args.compare) and (
+            args.model is not None or args.setting is not None or args.repeat is not None
+        ):
+            raise scoring.Refused("--model, --setting and --repeat do not apply to --rescore or --compare")
+        args.model = args.model if args.model is not None else "qwen3:8b"
+        args.setting = args.setting if args.setting is not None else []
+        args.repeat = args.repeat if args.repeat is not None else 1
         folder = scoring.check_folder(args.references, repo_trees())
         if args.compare:
             return compare_runs(args, folder, out)
@@ -502,6 +534,8 @@ def main(
     except Exception as raised:  # noqa: BLE001 — never a message on screen: it may quote a file
         say(err, f"stopped: {type(raised).__name__}")
         return 1
+    finally:
+        root.handlers = saved
 
 
 if __name__ == "__main__":

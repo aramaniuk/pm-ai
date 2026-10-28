@@ -455,8 +455,12 @@ def test_nothing_private_reaches_the_screen(folder):
     assert MARKER in run_path.with_suffix(".log").read_text(encoding="utf-8")
     run = json.loads(run_path.read_text(encoding="utf-8"))
     assert run["meetings"]["m01"]["repeats"][0]["scores"]["not_an_item_hits"] == 1
-    # A failure's reason sentence and an exception message stay off the screen too.
-    code, out, err = _main(folder, factory=Factory([f"{MARKER} not json", RuntimeError(MARKER)]))
+    # A failure's reason sentence (repeat 1) and an exception message (repeat 2) stay off the screen too.
+    code, out, err = _main(
+        folder, "--repeat", "2", factory=Factory([f"{MARKER} not json", RuntimeError(MARKER)])
+    )
+    assert code == 0, err
+    assert _rows(out)[0]["results"] == ["failed", "exception"]
     assert MARKER not in out + err
 
 
@@ -765,3 +769,222 @@ def test_totals_carry_time_and_tokens(folder):
     total = _rows(out)[-1]
     assert total["prompt_tokens"] == 200 and total["output_tokens"] == 40
     assert total["wall_s"] is not None
+
+
+# ── Added after the code and privacy reviews ─────────────────────────────────
+
+
+def test_the_results_accepted_are_7bs():
+    from pm_ai.app.pipelines import SummaryResult
+
+    assert scoring.RESULTS == {r.value for r in SummaryResult} | {"exception"}
+
+
+def _one_run(folder: Path) -> Path:
+    assert _main(folder)[0] == 0
+    return _runs(folder)[-1]
+
+
+def _poison(path: Path, change: Any) -> None:
+    run = json.loads(path.read_text(encoding="utf-8"))
+    change(run)
+    path.write_text(json.dumps(run), encoding="utf-8")
+
+
+def _repeat(run: dict[str, Any]) -> dict[str, Any]:
+    return run["meetings"]["m01"]["repeats"][0]
+
+
+POISONED = {
+    "meeting key": lambda run: run["meetings"].update({MARKER: run["meetings"].pop("m01")}),
+    "result": lambda run: _repeat(run).update(result=MARKER),
+    "exception": lambda run: _repeat(run).update(exception=f"{MARKER} text"),
+    "wall_s": lambda run: _repeat(run).update(wall_s=MARKER),
+    "calls": lambda run: _repeat(run).update(calls=True),
+    "prompt_tokens": lambda run: _repeat(run).update(prompt_tokens=MARKER),
+    "output_tokens": lambda run: _repeat(run).update(output_tokens=[MARKER]),
+    "repeat": lambda run: run.update(repeat=MARKER),
+}
+
+
+@pytest.mark.parametrize("field", sorted(POISONED))
+def test_a_run_file_value_out_of_pattern_never_reaches_the_screen(folder, field):
+    good = _one_run(folder)
+    bad = good.with_name("poisoned.json")
+    shutil.copy(good, bad)
+    _poison(bad, POISONED[field])
+    before = set(_runs(folder))
+    for argv in (("--rescore", str(bad)), ("--compare", str(good), str(bad)), ("--compare", str(bad), str(good))):
+        code, out, err = _main(folder, *argv, factory=_never)
+        assert code == 2, (argv, err)
+        assert MARKER not in out + err and MARKER.lower() not in out + err
+    assert set(_runs(folder)) == before, "a refused rescore writes no run file"
+
+
+SHAPES = {
+    "a score missing": lambda run: _repeat(run)["scores"].pop("owner_correct"),
+    "a score not a number": lambda run: _repeat(run)["scores"].update(owner_correct="1"),
+    "scores not a table": lambda run: _repeat(run).update(scores=[]),
+    "a decision not a table": lambda run: _repeat(run).update(decisions=["text"]),
+    "an action's text not text": lambda run: _repeat(run)["action_items"][0].update(what=3),
+    "action_items not a list": lambda run: _repeat(run).update(action_items={}),
+    "a measured key missing": lambda run: _repeat(run).pop("calls"),
+    "answers_identical missing": lambda run: run["meetings"]["m01"].pop("answers_identical"),
+    "scores_identical not a flag": lambda run: run["meetings"]["m01"].update(scores_identical=1),
+    "no meetings": lambda run: run.update(meetings={}),
+    "no repeats": lambda run: run["meetings"]["m01"].update(repeats=[]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(SHAPES))
+def test_a_run_file_out_of_shape_is_refused_by_rescore_and_compare(folder, case):
+    good = _one_run(folder)
+    bad = good.with_name("bad.json")
+    shutil.copy(good, bad)
+    _poison(bad, SHAPES[case])
+    before = set(_runs(folder))
+    for argv in (("--rescore", str(bad)), ("--compare", str(good), str(bad))):
+        code, _, err = _main(folder, *argv, factory=_never)
+        assert code == 2, (case, argv, err)
+        assert "not in the run file's shape" in err or "no meetings" in err
+    assert set(_runs(folder)) == before
+
+
+def test_the_real_home_is_never_opened(folder, tmp_path, monkeypatch):
+    import builtins
+    import io as io_module
+    import os
+
+    sentinel = tmp_path / "home"
+    sentinel.mkdir()
+    touched: list[str] = []
+    seen: list[int] = []
+
+    def under(path: Any) -> bool:
+        try:
+            return str(Path(os.fsdecode(path)).resolve()).startswith(str(sentinel.resolve()))
+        except (TypeError, ValueError):
+            return False
+
+    def spying(real: Any) -> Any:
+        def opened(file: Any, *args: Any, **kwargs: Any) -> Any:
+            seen.append(1)
+            if not isinstance(file, int) and under(file):
+                touched.append(str(file))
+            return real(file, *args, **kwargs)
+
+        return opened
+
+    monkeypatch.setenv("HOME", str(sentinel))
+    monkeypatch.setattr(runner, "commit", lambda: ("b" * 40, False))  # git would read ~/.gitconfig
+    monkeypatch.setattr(builtins, "open", spying(builtins.open))
+    monkeypatch.setattr(io_module, "open", spying(io_module.open))
+    monkeypatch.setattr(os, "open", spying(os.open))
+    sentinel.chmod(0o000)
+    try:
+        code, out, err = _main(folder)
+    finally:
+        sentinel.chmod(0o700)
+    assert code == 0, err
+    assert _rows(out)[0]["results"] == ["summarized"]
+    assert seen, "the spies saw the run's own opens"
+    assert touched == []
+    assert list(sentinel.iterdir()) == []
+
+
+def test_an_interrupt_stops_with_130_and_writes_nothing(folder):
+    code, out, err = _main(folder, factory=Factory(KeyboardInterrupt()))
+    assert code == 130 and out == ""
+    assert "interrupted" in err
+    assert not (folder / "runs").exists()
+    assert not (folder / ".work").exists()
+
+
+def test_compare_counts_per_summary_and_flags_a_different_setup(folder):
+    assert _main(folder)[0] == 0
+    assert _main(folder, "--repeat", "2", "--setting", "verbose_logging=true")[0] == 0
+    old, new = _runs(folder)
+    code, out, err = _main(folder, "--compare", str(old), str(new), factory=_never)
+    assert code == 0, err
+    setup, meeting, total = _rows(out)
+    assert setup["same_settings"] is False and setup["same_model"] is True
+    assert setup["repeats"] == [1, 2]
+    # Two identical summaries pooled are the same per summary as one.
+    assert meeting["decisions_paired"] == 0 and meeting["decisions_reference"] == 0
+    assert total["prompt_tokens"] == 0
+
+
+def test_the_daemon_check_reads_the_process_list(monkeypatch):
+    import subprocess
+
+    def listing(text: str) -> Any:
+        def run(*args: Any, **kwargs: Any) -> Any:
+            return subprocess.CompletedProcess(args, 0, stdout=text, stderr="")
+
+        return run
+
+    monkeypatch.setattr(subprocess, "run", listing("/usr/bin/zsh\n/x/.venv/bin/pm-ai daemon run\n"))
+    assert runner.daemon_running() is True
+    monkeypatch.setattr(subprocess, "run", listing("/usr/bin/zsh\npm-ai doctor\n"))
+    assert runner.daemon_running() is False
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("no ps")
+
+    monkeypatch.setattr(subprocess, "run", broken)
+    assert runner.daemon_running() is None
+
+
+def test_meetings_not_summarised_counts_meetings_and_summaries_not_made_counts_summaries(folder):
+    code, out, _ = _main(folder, "--repeat", "2", factory=Factory([json.dumps(ANSWER), "not json"]))
+    assert code == 0
+    total = _rows(out)[-1]
+    assert total["meetings_not_summarised"] == 1 and total["summaries_not_made"] == 1
+    assert _rows(out)[0]["exceptions"] == [None, None]
+
+
+def test_a_reference_that_is_a_symlink_or_a_directory_is_refused(folder, tmp_path):
+    outside = tmp_path / "outside.toml"
+    shutil.move(folder / "m01.reference.toml", outside)
+    (folder / "m01.reference.toml").symlink_to(outside)
+    code, _, err = _main(folder, factory=_never)
+    assert code == 2 and "m01: the reference must be a plain file in the folder" in err
+    (folder / "m01.reference.toml").unlink()
+    (folder / "m01.reference.toml").mkdir()
+    code, _, err = _main(folder, factory=_never)
+    assert code == 2 and "m01: the reference must be a plain file" in err
+
+
+def test_a_second_transcript_the_reference_does_not_name_is_warned(folder):
+    shutil.copy(folder / "m01.vtt", folder / "m01.txt")
+    code, _, err = _main(folder)
+    assert code == 0
+    assert "warning: m01 has a second transcript its reference does not name; ignored" in err
+
+
+def test_run_options_with_rescore_or_compare_are_refused(folder):
+    first = _one_run(folder)
+    for extra in (("--model", "x:1b"), ("--repeat", "2"), ("--setting", "verbose_logging=true")):
+        code, _, err = _main(folder, "--rescore", str(first), *extra, factory=_never)
+        assert code == 2 and "do not apply to --rescore or --compare" in err
+        code, _, err = _main(folder, "--compare", str(first), str(first), *extra, factory=_never)
+        assert code == 2
+
+
+def test_no_log_record_reaches_the_terminal_outside_the_run(folder, capsys, monkeypatch):
+    # As when run as a script: no handler on the root logger, so Python's
+    # last-resort handler would print a warning to stderr.
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    real = scoring.scan
+
+    def logging_scan(found_folder: Path) -> Any:
+        logging.getLogger("pm_ai.test").error("%s before the run", MARKER)
+        return real(found_folder)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(scoring, "scan", logging_scan):
+        code, out, err = _main(folder)
+    assert code == 0
+    captured = capsys.readouterr()
+    assert MARKER not in out + err + captured.out + captured.err
