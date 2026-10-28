@@ -517,6 +517,25 @@ def test_a_mark_is_hh_mm_ss_with_at_least_two_hour_digits():
     assert time_mark(70) == "[00:01:10]"
     assert time_mark(1810) == "[00:30:10]"
     assert time_mark(100 * 3600 + 61) == "[100:01:01]"
+    with pytest.raises(ValueError):
+        time_mark(-1)
+
+
+def test_a_negative_time_is_clamped_once_for_the_mark_and_the_kept_time():
+    prompt = summary_prompt("Sync", [Utterance("Ana", "Hi.", 0)], name="x", times=[-3])
+    assert prompt.fragments[1].for_model == "[00:00:00] Ana: Hi."
+    assert prompt.times == (0,)
+
+
+def test_the_prompt_s_times_are_all_or_none():
+    """The shape `7h` reads: `None`, or one time per fragment after the title."""
+    title = sanitize("Meeting title: Sync")
+    one = sanitize("Ana: Hi.")
+    with pytest.raises(ValueError):
+        meeting_summary.SummaryPrompt((title, one), frozenset(), MeetingLanguage.ENGLISH, ())
+    assert meeting_summary.SummaryPrompt(
+        (title, one), frozenset(), MeetingLanguage.ENGLISH, None
+    ).times is None
 
 
 def test_one_part_gets_a_mark_at_each_new_minute_only():
@@ -558,7 +577,7 @@ def test_without_times_there_is_no_mark_and_each_time_is_none():
     utterances = [Utterance("Ana", "One.", 0), Utterance("Bo", "Two.", 30)]
     prompt = summary_prompt("Sync", utterances, name="x")
     assert [f.for_model for f in prompt.fragments[1:]] == ["Ana: One.", "Bo: Two."]
-    assert prompt.times == (None, None)
+    assert prompt.times is None
     assert "[HH:MM:SS]" in instructions_for(None, language=prompt.language)
 
 

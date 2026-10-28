@@ -394,7 +394,7 @@ class OllamaModel:
         if deadline_seconds <= 0:
             raise ValueError(f"a deadline is a positive number of seconds, not {deadline_seconds!r}.")
         self._name = name
-        self._window = int(window)
+        self._window = window
         self._deadline = float(deadline_seconds)
         self._clock = clock
         self._backend = backend if backend is not None else LoopbackBackend()
@@ -699,7 +699,8 @@ def _warning(
 def local_model_presence(
     model: str,
     *,
-    window: int = DEFAULT_LOCAL_MODEL_WINDOW,
+    window: int,
+    from_adapter: bool = False,
     transport: httpx.BaseTransport | None = None,
     timeout: float = PRESENCE_TIMEOUT_SECONDS,
 ) -> LocalModelPresence:
@@ -714,13 +715,17 @@ def local_model_presence(
     model that cannot complete, or one that runs elsewhere — each with its
     remedy. Never raises; carries no prompt text.
 
-    The ready line names `window`, the window the daemon's adapter uses (story
-    7g), and that a changed `local_model_window` takes effect at the next
-    daemon start; at 32,768 its advice says how to lower it. pm-ai does not
-    read the machine's memory, so the advice is the same on every machine.
+    The ready line names `window` (story 7g), required so no caller gets a
+    window it did not choose: with `from_adapter`, the window a composed
+    adapter runs at; otherwise the one `config.toml` names, said so. It adds
+    that a changed `local_model_window` takes effect at the next daemon start;
+    at 32,768 its advice says how to lower it. pm-ai does not read the
+    machine's memory, so the advice is the same on every machine.
     """
     try:
-        return _presence(model, window=window, transport=transport, timeout=timeout)
+        return _presence(
+            model, window=window, from_adapter=from_adapter, transport=transport, timeout=timeout
+        )
     except Exception as unexpected:  # noqa: BLE001 — a probe reports, never raises
         return _warning(
             f"the presence check failed unexpectedly ({type(unexpected).__name__}).",
@@ -729,7 +734,7 @@ def local_model_presence(
 
 
 def _presence(
-    model: str, *, window: int, transport: httpx.BaseTransport | None, timeout: float
+    model: str, *, window: int, from_adapter: bool, transport: httpx.BaseTransport | None, timeout: float
 ) -> LocalModelPresence:
     name = normalize_model_name(model)
     if not name:
@@ -777,8 +782,9 @@ def _presence(
             LOCAL_MODEL_PROBE,
             Health.OK,
             f"{name} is pulled and runs on this machine (Ollama on {ADDRESS}), "
-            f"window {window:,} tokens; a changed local_model_window takes effect at "
-            f"the next daemon start.",
+            f"{'window' if from_adapter else 'config.toml names window'} {window:,} "
+            f"tokens; a changed local_model_window takes effect at the next daemon "
+            f"start.",
             _window_advice(window),
         )
     )

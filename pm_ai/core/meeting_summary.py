@@ -283,22 +283,24 @@ class SummaryPrompt:
     """What one call carries: the fragments, the speaker labels as the model
     sees them, and the meeting's main language, found from the words said.
 
-    `times` (story 7g) holds, for each fragment after the title — each kept
-    utterance — its seconds from when transcription started, or `None` when
-    the transcript has no times. This, not a mark the model writes back, is
-    where an item's time is read from (`7h`).
+    `times` (story 7g) is all or none, as `MeetingUtterances.times` is: either
+    `None`, when the transcript has no times, or one whole number of seconds
+    from when transcription started, never negative, for each fragment after
+    the title — `times[i]` belongs to `fragments[i + 1]`, a kept utterance.
+    This, not a mark the model writes back, is where an item's time is read
+    from (`7h`).
     """
 
     fragments: tuple[Sanitized, ...]
     labels: frozenset[str]
     language: MeetingLanguage
-    times: tuple[int | None, ...]
+    times: tuple[int, ...] | None
 
     def __post_init__(self) -> None:
-        if len(self.times) != len(self.fragments) - 1:
+        if self.times is not None and len(self.times) != len(self.fragments) - 1:
             raise ValueError(
                 f"SummaryPrompt has {len(self.fragments) - 1} utterance fragments and "
-                f"{len(self.times)} times; each kept utterance has one time or None."
+                f"{len(self.times)} times; each kept utterance has one time or none has."
             )
 
     @property
@@ -335,7 +337,7 @@ def summary_prompt(
             f"times; each utterance has one time or none has."
         )
     fragments: list[Sanitized] = [sanitize(f"{TITLE_PREFIX}{title}")]
-    kept_times: list[int | None] = []
+    kept_times: list[int] = []
     labels: set[str] = set()
     said: list[str] = []
     shown: int | None = None
@@ -344,9 +346,11 @@ def summary_prompt(
         if not _has_words(words):
             continue
         said.append(words)
-        time = times[index] if times is not None else None
-        kept_times.append(time)
+        # Clamped once, so the mark and `SummaryPrompt.times` agree.
+        time = max(0, times[index]) if times is not None else None
         mark = ""
+        if time is not None:
+            kept_times.append(time)
         if time is not None and (shown is None or time // 60 != shown):
             mark = f"{time_mark(time)} "
             shown = time // 60
@@ -364,15 +368,20 @@ def summary_prompt(
             f"summarise and no call was made."
         )
     return SummaryPrompt(
-        tuple(fragments), frozenset(labels), main_language(said), tuple(kept_times)
+        tuple(fragments),
+        frozenset(labels),
+        main_language(said),
+        tuple(kept_times) if times is not None else None,
     )
 
 
 def time_mark(seconds: int) -> str:
     """`[HH:MM:SS]` for seconds from when transcription started; hours have at least two digits."""
-    hours, rest = divmod(max(0, seconds), 3600)
-    minutes, seconds = divmod(rest, 60)
-    return f"[{hours:02d}:{minutes:02d}:{seconds:02d}]"
+    if seconds < 0:
+        raise ValueError(f"a time mark is for a time from the start, not {seconds} seconds.")
+    hours, rest = divmod(seconds, 3600)
+    minutes, remainder = divmod(rest, 60)
+    return f"[{hours:02d}:{minutes:02d}:{remainder:02d}]"
 
 
 def _joined(utterance: Utterance, label: str, words: str, mark: str = "") -> Sanitized:

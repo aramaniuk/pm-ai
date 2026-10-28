@@ -14,7 +14,16 @@ from __future__ import annotations
 import ast
 
 from conftest import SourceFile, alias_map, canonical_name
-from test_static_rules import SHELL_CALLS, _mode_of, _write_mode
+import pytest
+from test_static_rules import (
+    CONFIG_FILE_CALLS,
+    CONFIG_IMPORTS_ALLOWED,
+    SHELL_CALLS,
+    _allowed_pm_ai_modules,
+    _import_heads,
+    _mode_of,
+    _write_mode,
+)
 
 
 def _call(src: str) -> ast.Call:
@@ -124,3 +133,59 @@ def test_shell_scan_covers_every_layer_that_may_not_spawn():
         if isinstance(el, ast.Constant)
     }
     assert {"app", "core", "connectors", "skills", "surfaces", "storage"} <= listed
+
+
+class TestImportHeads:
+    """Story 7g — config's allowance names one pm-ai module, never the package.
+
+    Planted imports, each judged against `CONFIG_IMPORTS_ALLOWED` exactly as
+    the config rule judges `config.py`. If `_import_heads` were cut back to
+    top-level names, with `pm_ai` put in the allowlist to keep config's import
+    passing, every refused case below would turn green.
+    """
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "from pm_ai.domain.model_calls import LOCAL_MODEL_WINDOWS",
+            "import pm_ai.domain.model_calls",
+            "import pm_ai.domain.model_calls as mc",
+            "from collections.abc import Mapping",
+            "import tomllib",
+        ],
+    )
+    def test_allowed(self, src):
+        assert not _import_heads(_file(src)) - CONFIG_IMPORTS_ALLOWED
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "from pm_ai.domain import model_calls",
+            "from pm_ai.domain.sanitize import sanitize",
+            "from pm_ai.storage.service import StorageService",
+            "import pm_ai",
+            "from pm_ai import storage",
+            "import pm_ai.domain.model_calls.sub",
+            "from .model_calls import LOCAL_MODEL_WINDOWS",
+            "from ..domain.model_calls import LOCAL_MODEL_WINDOWS",
+            "from . import model_calls",
+            "def f():\n    from pm_ai.platform import paths\n",
+            "import os",
+        ],
+    )
+    def test_refused(self, src):
+        assert _import_heads(_file(src)) - CONFIG_IMPORTS_ALLOWED
+
+    def test_no_whole_package_is_allowed(self):
+        assert not {"pm_ai", "pm_ai.domain"} & CONFIG_IMPORTS_ALLOWED
+
+    def test_every_allowed_pm_ai_module_is_swept_for_file_calls(self):
+        """The allowance's premise — the module opens no file — is checked,
+        and a planted read in such a module would be found."""
+        (swept,) = _allowed_pm_ai_modules(CONFIG_IMPORTS_ALLOWED)
+        assert swept.path.name == "model_calls.py"
+        planted = _file("from pathlib import Path\nPath('x').read_text()\n")
+        from conftest import calls
+
+        found = [name for _f, _n, name in calls([planted]) if name.split(".")[-1] in CONFIG_FILE_CALLS]
+        assert found

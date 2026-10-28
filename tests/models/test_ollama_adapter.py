@@ -276,7 +276,7 @@ def test_a_cloud_tag_is_refused_by_the_adapter_before_any_request(name):
 
 def test_a_cloud_tag_is_refused_by_the_presence_check_without_a_request():
     server = Server(tags=["gpt-oss:120b-cloud"])
-    presence = local_model_presence("gpt-oss:120b-cloud", transport=server.transport())
+    presence = local_model_presence("gpt-oss:120b-cloud", window=NUM_CTX, transport=server.transport())
     assert presence.runs_elsewhere
     assert presence.probe.health is Health.WARNING
     assert "OLLAMA_NO_CLOUD=1" in presence.probe.detail
@@ -295,7 +295,7 @@ def test_a_model_show_says_runs_elsewhere_is_refused_before_the_prompt(field):
 @pytest.mark.parametrize("field", ["remote_host", "remote_model"])
 def test_the_presence_check_refuses_a_model_show_says_runs_elsewhere(field):
     server = Server(show={field: "https://ollama.com:443"}, tags=["renamed-remote:latest"])
-    presence = local_model_presence("renamed-remote", transport=server.transport())
+    presence = local_model_presence("renamed-remote", window=NUM_CTX, transport=server.transport())
     assert presence.runs_elsewhere and presence.probe.health is Health.WARNING
     assert field in presence.probe.detail
 
@@ -321,7 +321,7 @@ def test_a_name_without_a_tag_is_compared_as_latest():
     assert normalize_model_name("qwen3:8b") == "qwen3:8b"
     assert normalize_model_name("host:5000/ns/qwen3") == "host:5000/ns/qwen3:latest"
     server = Server(tags=["qwen3:latest"])
-    assert local_model_presence("qwen3", transport=server.transport()).probe.health is Health.OK
+    assert local_model_presence("qwen3", window=NUM_CTX, transport=server.transport()).probe.health is Health.OK
     sent = Server()
     _call(_model(sent, "qwen3"))
     assert sent.sent("/api/show") == [{"model": "qwen3:latest"}]
@@ -503,16 +503,20 @@ def test_length_below_the_cap_is_still_possibly_truncated_and_not_logged(caplog)
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
-def test_length_at_the_window_is_a_window_refusal_not_the_cap():
+@pytest.mark.parametrize("window", [16384, 32768])
+def test_length_at_the_window_is_a_window_refusal_not_the_cap(window):
+    """At either window (story 7g), an answer at the cap that also reaches the
+    window is `WindowReached`, not `OutputCapReached`."""
     server = Server(
         chat=_chat_body(
             done_reason="length",
-            prompt_eval_count=NUM_CTX - NUM_PREDICT,
+            prompt_eval_count=window - NUM_PREDICT,
             eval_count=NUM_PREDICT,
         )
     )
-    with pytest.raises(PossiblyTruncated):
-        _call(_model(server))
+    with pytest.raises(WindowReached) as refused:
+        _call(_model(server, window=window))
+    assert f"{window}-token window" in str(refused.value)
 
 
 def test_a_prompt_longer_than_the_window_is_refused_by_the_server_and_named():
@@ -727,7 +731,7 @@ def test_the_model_pool_thread_does_not_keep_the_process_alive():
 
 
 def test_presence_ok_when_the_named_model_is_pulled():
-    presence = local_model_presence("qwen3:8b", transport=Server().transport())
+    presence = local_model_presence("qwen3:8b", window=NUM_CTX, transport=Server().transport())
     assert presence.probe.health is Health.OK and not presence.runs_elsewhere
     assert "OLLAMA_MAX_LOADED_MODELS=1" in presence.probe.remediation
     assert "OLLAMA_NUM_PARALLEL=1" in presence.probe.remediation
@@ -736,13 +740,13 @@ def test_presence_ok_when_the_named_model_is_pulled():
 
 
 def test_presence_warns_with_pull_when_not_pulled():
-    presence = local_model_presence("llama3.1:8b", transport=Server().transport())
+    presence = local_model_presence("llama3.1:8b", window=NUM_CTX, transport=Server().transport())
     assert presence.probe.health is Health.WARNING
     assert "ollama pull llama3.1:8b" in presence.probe.remediation
 
 
 def test_presence_warns_with_how_to_start_and_the_server_settings_when_nothing_answers():
-    presence = local_model_presence("qwen3:8b", transport=httpx.MockTransport(_refusing))
+    presence = local_model_presence("qwen3:8b", window=NUM_CTX, transport=httpx.MockTransport(_refusing))
     assert presence.probe.health is Health.WARNING
     assert ADDRESS in presence.probe.detail
     assert "Start Ollama" in presence.probe.remediation
@@ -760,7 +764,7 @@ def test_presence_warns_with_how_to_start_and_the_server_settings_when_nothing_a
 )
 def test_presence_warns_naming_what_came_back(response, named):
     presence = local_model_presence(
-        "qwen3:8b", transport=httpx.MockTransport(lambda request: response)
+        "qwen3:8b", window=NUM_CTX, transport=httpx.MockTransport(lambda request: response)
     )
     assert presence.probe.health is Health.WARNING
     assert named in presence.probe.detail
@@ -770,7 +774,7 @@ def test_presence_warns_when_the_answer_is_late():
     def late(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("late", request=request)
 
-    presence = local_model_presence("qwen3:8b", transport=httpx.MockTransport(late), timeout=0.5)
+    presence = local_model_presence("qwen3:8b", window=NUM_CTX, transport=httpx.MockTransport(late), timeout=0.5)
     assert presence.probe.health is Health.WARNING
     assert "within 0.5 seconds" in presence.probe.detail
 
@@ -781,7 +785,7 @@ def test_presence_ok_when_no_model_is_named_says_how_to_set_one_up_and_asks_noth
     def never(request: httpx.Request) -> httpx.Response:
         raise AssertionError("an unset local_model asks nothing")
 
-    presence = local_model_presence("", transport=httpx.MockTransport(never))
+    presence = local_model_presence("", window=NUM_CTX, transport=httpx.MockTransport(never))
     assert presence.probe.health is Health.OK
     assert "pattern matching only" in presence.probe.detail
     assert "pm-ai setup" in presence.probe.remediation
@@ -793,13 +797,13 @@ def test_the_probe_never_raises(monkeypatch):
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(ollama, "_presence", broken)
-    presence = local_model_presence("qwen3:8b")
+    presence = local_model_presence("qwen3:8b", window=NUM_CTX)
     assert presence.probe.health is Health.WARNING
 
 
 def test_the_suite_never_reaches_a_real_ollama():
     """`tests/conftest.py` replaces the real transport: wiring meets "not running"."""
-    presence = wiring.local_model_check("qwen3:8b")
+    presence = wiring.local_model_check("qwen3:8b", window=NUM_CTX)
     assert presence.probe.health is Health.WARNING
     assert "nothing is listening" in presence.probe.detail
 
@@ -884,21 +888,21 @@ def test_cloud_tags_are_read_without_regard_to_case():
 
 
 def test_the_presence_list_is_compared_without_regard_to_case():
-    presence = local_model_presence("Qwen3:8B", transport=Server(tags=["qwen3:8b"]).transport())
+    presence = local_model_presence("Qwen3:8B", window=NUM_CTX, transport=Server(tags=["qwen3:8b"]).transport())
     assert presence.probe.health is Health.OK
 
 
 def test_presence_warns_for_a_model_that_cannot_complete():
     server = Server(show={"capabilities": ["embedding"]}, tags=["nomic-embed-text:latest"])
-    presence = local_model_presence("nomic-embed-text", transport=server.transport())
+    presence = local_model_presence("nomic-embed-text", window=NUM_CTX, transport=server.transport())
     assert presence.probe.health is Health.WARNING
     assert "cannot complete" in presence.probe.detail and "embedding" in presence.probe.detail
     assert not presence.not_pulled
 
 
 def test_not_pulled_is_carried_as_a_field_only_when_the_server_does_not_list_it():
-    assert local_model_presence("llama3.1:8b", transport=Server().transport()).not_pulled
-    stopped = local_model_presence("qwen3:8b", transport=httpx.MockTransport(_refusing))
+    assert local_model_presence("llama3.1:8b", window=NUM_CTX, transport=Server().transport()).not_pulled
+    stopped = local_model_presence("qwen3:8b", window=NUM_CTX, transport=httpx.MockTransport(_refusing))
     assert not stopped.not_pulled
 
 
@@ -1207,7 +1211,7 @@ def test_window_reached_is_a_kind_of_possibly_truncated():
 
 def test_the_ready_line_names_the_window_the_restart_and_how_to_lower_it():
     """Matrix "Doctor": model ready, window 32,768."""
-    presence = local_model_presence("qwen3:8b", transport=Server().transport())
+    presence = local_model_presence("qwen3:8b", window=NUM_CTX, transport=Server().transport())
     assert presence.probe.health is Health.OK
     assert "window 32,768 tokens" in presence.probe.detail
     assert "next daemon start" in presence.probe.detail
@@ -1226,3 +1230,26 @@ def test_the_ready_line_reads_no_memory():
     source = inspect.getsource(ollama)
     for reader in ("psutil", "sysctl", "hw.memsize", "vm_stat", "os.sysconf"):
         assert reader not in source
+
+
+def test_the_ready_line_says_the_window_is_the_file_s_without_an_adapter():
+    presence = local_model_presence("qwen3:8b", window=16384, transport=Server().transport())
+    assert "config.toml names window 16,384 tokens" in presence.probe.detail
+
+
+def test_the_ready_line_names_the_adapter_s_window_as_the_window():
+    presence = local_model_presence(
+        "qwen3:8b", window=16384, from_adapter=True, transport=Server().transport()
+    )
+    assert "), window 16,384 tokens" in presence.probe.detail
+    assert "config.toml names" not in presence.probe.detail
+
+
+def test_the_presence_check_has_no_default_window():
+    """Story 7g review: a caller that forgets the window is a type error, not 32,768."""
+    import inspect as _inspect
+
+    for check in (local_model_presence, wiring.local_model_check):
+        parameter = _inspect.signature(check).parameters["window"]
+        assert parameter.default is _inspect.Parameter.empty
+        assert parameter.kind is _inspect.Parameter.KEYWORD_ONLY

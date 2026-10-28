@@ -239,7 +239,10 @@ def _refuse_port(port: object) -> None:
 
 
 def _refuse_window(window: object) -> None:
-    """Refuse a `local_model_window` the adapter does not run at (story 7g) — the one validator.
+    """Refuse a `local_model_window` the adapter does not run at (story 7g) — config's validator.
+
+    The adapter refuses another window on its own as a backstop, as a
+    `ValueError`; this is the check every `Config` passes, file or not.
 
     Exactly one of `LOCAL_MODEL_WINDOWS`, as a whole number: `bool` first, since
     `True` is an `int`; a float is refused even when integral, as `daemon_port`

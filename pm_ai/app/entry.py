@@ -1663,7 +1663,9 @@ def _local_model_probe(composed: _Composition) -> Probe:
     Read now, as the renders line reads `display_timezone` — through the
     composed daemon's store when there is one. A config that cannot be read is
     reported by its own line above; this one then says it could not tell.
-    The window named is the file's `local_model_window` (story 7g). Never raises.
+    The window named (story 7g) is the composed daemon's adapter's when there
+    is one, since a changed `local_model_window` waits for a restart; with no
+    adapter, the one `config.toml` names, and the line says so. Never raises.
     """
     daemon = composed.daemon
     try:
@@ -1684,6 +1686,10 @@ def _local_model_probe(composed: _Composition) -> Probe:
             f"unknown: {unreadable}",
             "Fix config.toml (its own line above says how), then run `pm-ai doctor` again.",
         )
+    if daemon is not None and daemon.model is not None:
+        return local_model_check(
+            config.local_model, window=daemon.model.window, from_adapter=True
+        ).probe
     return local_model_check(config.local_model, window=config.local_model_window).probe
 
 

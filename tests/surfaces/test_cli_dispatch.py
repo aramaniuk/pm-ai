@@ -127,7 +127,9 @@ def probes(monkeypatch):
     monkeypatch.setattr(
         entry,
         "local_model_check",
-        lambda name, *, window: LocalModelPresence(Probe("local model", Health.OK, "stood in")),
+        lambda name, *, window, from_adapter=False: LocalModelPresence(
+            Probe("local model", Health.OK, "stood in")
+        ),
     )
     # Story 7c: the `frontier key` line, stood in as a key held; its own
     # behaviour is `tests/slice/test_frontier_summary.py`'s.

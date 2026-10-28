@@ -17,6 +17,8 @@ from conftest import (
     CORE_FORBIDDEN_IMPORTS,
     PACKAGE_ROOT,
     REPO_ROOT,
+    SourceFile,
+    alias_map,
     calls,
     canonical_name,
     format_violations,
@@ -717,6 +719,17 @@ def _import_heads(source) -> set[str]:
     return heads
 
 
+def _allowed_pm_ai_modules(allowed: frozenset[str]) -> list[SourceFile]:
+    """Each `pm_ai` module an import allowlist names, parsed; a missing one fails."""
+    files: list[SourceFile] = []
+    for module in sorted(name for name in allowed if name.split(".")[0] == "pm_ai"):
+        path = REPO_ROOT / (module.replace(".", "/") + ".py")
+        assert path.is_file(), f"{module} is allowed but {path} does not exist"
+        tree = ast.parse(path.read_text())
+        files.append(SourceFile(path=path, tree=tree, aliases=alias_map(tree)))
+    return files
+
+
 def test_story_4a_the_config_module_neither_reads_nor_writes_a_file():
     """`pm_ai.core.config` moves bytes handed to it and reaches no filesystem.
 
@@ -740,6 +753,15 @@ def test_story_4a_the_config_module_neither_reads_nor_writes_a_file():
         f"{config.rel} imports {module}"
         for module in sorted(_import_heads(config) - CONFIG_IMPORTS_ALLOWED)
     ]
+    # Story 7g: a pm-ai module config may import is swept for the same file
+    # calls, so the allowance's premise — it opens no file — is checked, not
+    # only stated.
+    for allowed in _allowed_pm_ai_modules(CONFIG_IMPORTS_ALLOWED):
+        violations += [
+            f"{allowed.location(node)}  {name}(...) (imported by {config.rel})"
+            for _f, node, name in calls([allowed])
+            if name.split(".")[-1] in CONFIG_FILE_CALLS
+        ]
     assert not violations, format_violations(
         violations,
         "Stories 4a and 4g: pm_ai.core.config interprets and serializes bytes "

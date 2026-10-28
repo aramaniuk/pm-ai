@@ -138,10 +138,10 @@ from pm_ai.domain.health import Health
 assert "pm_ai.models.local.ollama" not in sys.modules
 assert "httpx" not in sys.modules
 assert wiring.local_model(Config(local_model="qwen3:8b")) is None
-probe = wiring.local_model_check("qwen3:8b").probe
+probe = wiring.local_model_check("qwen3:8b", window=32768).probe
 assert probe.health is Health.WARNING, probe
 assert "is not installed" in probe.detail and "runtime extra" in probe.detail, probe.detail
-unset = wiring.local_model_check("").probe
+unset = wiring.local_model_check("", window=32768).probe
 assert unset.health is Health.OK and "none named" in unset.detail, unset
 assert "pm_ai.models.local.ollama" not in sys.modules
 print("composes without the runtime extra")
@@ -189,23 +189,49 @@ def test_another_window_stops_composition_naming_both_values(home, value):
     assert "16384" in str(composed.failure) and "32768" in str(composed.failure)
 
 
-def test_doctor_asks_the_presence_check_at_the_configured_window(home, monkeypatch):
-    """Matrix row "Doctor": the line is asked about the window config.toml names."""
+def _asked(monkeypatch) -> list[tuple[str, int, bool]]:
     from pm_ai.domain.model_calls import LocalModelPresence, unset_local_model
 
-    asked: list[tuple[str, int]] = []
+    asked: list[tuple[str, int, bool]] = []
 
-    def check(model: str, *, window: int) -> LocalModelPresence:
-        asked.append((model, window))
+    def check(model: str, *, window: int, from_adapter: bool = False) -> LocalModelPresence:
+        asked.append((model, window, from_adapter))
         return unset_local_model()
 
     monkeypatch.setattr(entry, "local_model_check", check)
+    return asked
+
+
+def test_doctor_asks_the_presence_check_at_the_configured_window(home, monkeypatch):
+    """Matrix row "Doctor": composed with a model, the line names its adapter's window."""
+    asked = _asked(monkeypatch)
     (home / ".pm-ai" / "config.toml").write_text(
         'local_model = "qwen3:8b"\nlocal_model_window = 16384\n'
     )
     composed = entry._compose(Keychain(), APPLICATION)  # noqa: SLF001
     entry._local_model_probe(composed)  # noqa: SLF001
-    assert asked == [("qwen3:8b", 16384)]
+    assert asked == [("qwen3:8b", 16384, True)]
+
+
+def test_doctor_names_the_adapter_s_window_after_the_file_changed(home, monkeypatch):
+    """A changed window waits for a restart, so doctor names the one in use."""
+    asked = _asked(monkeypatch)
+    (home / ".pm-ai" / "config.toml").write_text('local_model = "qwen3:8b"\n')
+    composed = entry._compose(Keychain(), APPLICATION)  # noqa: SLF001
+    (home / ".pm-ai" / "config.toml").write_text(
+        'local_model = "qwen3:8b"\nlocal_model_window = 16384\n'
+    )
+    entry._local_model_probe(composed)  # noqa: SLF001
+    assert asked == [("qwen3:8b", 32768, True)]
+
+
+def test_doctor_with_no_adapter_names_the_file_s_window(home, monkeypatch):
+    asked = _asked(monkeypatch)
+    (home / ".pm-ai" / "config.toml").write_text("local_model_window = 16384\n")
+    composed = entry._compose(Keychain(), APPLICATION)  # noqa: SLF001
+    assert composed.daemon is not None and composed.daemon.model is None
+    entry._local_model_probe(composed)  # noqa: SLF001
+    assert asked == [("", 16384, False)]
 
 
 def test_config_show_marks_a_lowered_window_set(home, monkeypatch, capsys):
@@ -247,7 +273,8 @@ def test_setup_asks_the_presence_check_at_the_window_the_file_names(home, monkey
 
     asked: list[tuple[str, int]] = []
 
-    def check(model: str, *, window: int) -> LocalModelPresence:
+    def check(model: str, *, window: int, from_adapter: bool = False) -> LocalModelPresence:
+        assert not from_adapter, "setup has no adapter: the file's window"
         asked.append((model, window))
         return unset_local_model()
 

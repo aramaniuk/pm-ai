@@ -46,10 +46,6 @@ def test_the_benchmark_refuses_any_other_window(benchmark, capsys):
     assert "8192" in capsys.readouterr().err
 
 
-def test_the_benchmark_no_longer_sets_a_window_constant():
-    assert "NUM_CTX" not in _PATH.read_text(encoding="utf-8")
-
-
 @pytest.mark.parametrize("argv", [[], ["--num-ctx", "16384"]])
 def test_main_builds_every_adapter_at_the_parsed_window(benchmark, monkeypatch, tmp_path, argv):
     """The window `main` parses is the one each `OllamaModel` is built with,

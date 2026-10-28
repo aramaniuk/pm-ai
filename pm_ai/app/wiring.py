@@ -153,7 +153,6 @@ from pm_ai.domain.member_ledgers import MEMBER_UPDATES
 from pm_ai.domain.task_classes import TaskClass
 from pm_ai.core.frontier_key import held_frontier_key
 from pm_ai.domain.model_calls import (
-    DEFAULT_LOCAL_MODEL_WINDOW,
     LOCAL_MODEL_PROBE,
     LocalModelPresence,
     ModelSide,
@@ -818,15 +817,16 @@ def require_model(daemon: Daemon) -> LocalModel:
 
 
 def local_model_check(
-    model: str, *, window: int = DEFAULT_LOCAL_MODEL_WINDOW
+    model: str, *, window: int, from_adapter: bool = False
 ) -> LocalModelPresence:
     """The presence check `setup` and `doctor` make, through the composition root (7a).
 
     The adapter is imported here, not at module level, so a machine without the
     runtime extra still composes; there the check says the extra is missing.
     An unset model is answered before that, the same with or without the extra:
-    it is not a failure (Andrei, 2026-10-19). `window` is `config.toml`'s
-    `local_model_window`, which the ready line names (story 7g).
+    it is not a failure (Andrei, 2026-10-19). `window` is required (story
+    7g): a composed adapter's window with `from_adapter`, otherwise the one
+    `config.toml` names; the ready line names it and says which.
     """
     if not normalize_model_name(model):
         return unset_local_model()
@@ -842,7 +842,7 @@ def local_model_check(
                 "Run `uv sync --extra runtime`; the runtime packages line says what is missing.",
             )
         )
-    return local_model_presence(model, window=window)
+    return local_model_presence(model, window=window, from_adapter=from_adapter)
 
 
 def _transcript_sources(
