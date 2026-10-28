@@ -2,7 +2,8 @@
 title: 'A reference set scores meeting summaries'
 type: 'feature'
 created: '2026-10-27'
-status: 'ready-for-dev'
+status: 'done'
+baseline_commit: '1a25781b5c1dc9d1ef7df70c96a97d14c72663fe'
 review_loop_iteration: 0
 context:
   - '{project-root}/_bmad-output/specs/spec-pm-ai/stories/7b-a-transcript-yields-summary-decisions-and-actions.md'
@@ -94,11 +95,11 @@ match = [["dark mode"]]
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `benchmarks/reference_scoring.py` -- new, standard library only: folder and name checks, reference loading and validation, folding, maximum matching, rows, totals, run-file format, compare -- testable without a model or `pm_ai`.
-- [ ] `benchmarks/score_summaries.py` -- new runner: `--references DIR`, `--model` (default `qwen3:8b`), `--setting`, `--repeat`, `--rescore RUN`, `--compare OLD NEW`; per-meeting guard, logging to the private log, request recorder, daemon check, `.work/` lifecycle.
-- [ ] `benchmarks/meeting_summary.py` -- extract the shared setup with an injectable model.
-- [ ] `benchmarks/fixtures/mixed_ru_en.reference.toml` -- new fictional reference with `transcript = "m01.vtt"`; tests and the manual check copy it and `mixed_ru_en.vtt` into a `0700` folder as `m01.reference.toml` and `m01.vtt`, since the repo's own fixtures folder is refused by design.
-- [ ] `tests/benchmarks/test_reference_scoring.py` -- loads modules by file path; every matrix row; the matching rules; a case where greedy file order pairs fewer items than maximum matching; word-start and short-word rules; a canned model returning `waiting`, `failed` and a valid answer; a marker string placed in answers, references and an exception message never reaching stdout or stderr.
+- [x] `benchmarks/reference_scoring.py` -- new, standard library only: folder and name checks, reference loading and validation, folding, maximum matching, rows, totals, run-file format, compare -- testable without a model or `pm_ai`.
+- [x] `benchmarks/score_summaries.py` -- new runner: `--references DIR`, `--model` (default `qwen3:8b`), `--setting`, `--repeat`, `--rescore RUN`, `--compare OLD NEW`; per-meeting guard, logging to the private log, request recorder, daemon check, `.work/` lifecycle.
+- [x] `benchmarks/meeting_summary.py` -- extract the shared setup with an injectable model.
+- [x] `benchmarks/fixtures/mixed_ru_en.reference.toml` -- new fictional reference with `transcript = "m01.vtt"`; tests and the manual check copy it and `mixed_ru_en.vtt` into a `0700` folder as `m01.reference.toml` and `m01.vtt`, since the repo's own fixtures folder is refused by design.
+- [x] `tests/benchmarks/test_reference_scoring.py` -- loads modules by file path; every matrix row; the matching rules; a case where greedy file order pairs fewer items than maximum matching; word-start and short-word rules; a canned model returning `waiting`, `failed` and a valid answer; a marker string placed in answers, references and an exception message never reaching stdout or stderr.
 
 **Acceptance Criteria:**
 - Given the fictional reference and a canned answer returning D1 as a decision and A1 both as an action with the wrong owner and as a decision, when scored, then D1 is paired, A1's owner is wrong, and one decision is counted as restating an action.
@@ -118,6 +119,11 @@ No questions are open.
 ## Spec Change Log
 
 - **2026-10-27, approved for build (Andrei),** after the four-lens review and his answers (spec PR #132).
+- **2026-10-27, built.** Choices the frozen block left open: a reference's `transcript` must be `<its stem>.vtt` or `.txt`; with `--repeat N` the per-meeting rows and the totals pool every repeat (each repeat's scores stay in the run file), and `--compare` compares counts per summary made and the rates, after a `setup` row saying whether the model, settings and requests sent were the same; run files are named by UTC time to the microsecond; the setup is `prepare()` in `meeting_summary.py`, the model built by wiring's `local_model(config)`, which today builds the adapter from `local_model` alone — a `--setting` for the window reaches the adapter only once 7g passes the window through wiring; what is recorded is the window read from each request actually sent (the recorder wraps `ollama._default_transport`).
+- **2026-10-27, review fixes** (blind, edge-case and verification-gap reviews): folding applies Unicode NFC first; a tie between returned actions leans to the one naming an accepted owner (candidates ordered, still augmenting paths); a summary that raised records time, calls and tokens as not measured (`null`), and an unreadable process list records `daemon_running: null`; refused by name, exit 2: a folder with no reference, a transcript that is not UTF-8, a symlinked `runs/` or `.work/`, a `--setting` value that is not text, a number or true/false, no local adapter (runtime extra missing), a run file out of shape; the folder check compares by file identity, so other letter case on APFS is still inside the repository; totals carry wall time and tokens; Ctrl-C stops with exit 130 and no run file. Deferred: 5 lines in `deferred-work.md`.
+- **2026-10-27, manual check.** `meeting_summary.py` stops at its second path on 11f's re-summary refusal, which predates this slice; deferred (1 line).
+- **2026-10-28, NOT PASS fixes** (code reviewer and privacy-scope steward at 8be1780). Required: a run file read back is refused, without naming the value, unless every meeting key is a stem, every `result` one of 7b's values or `exception`, every `exception` a type name, every measured field and `repeat` a number or null (never a flag), every count in `scores` an integer, `decisions` and `action_items` lists of tables of text or null, each entry carries `answers_identical` and `scores_identical`, and `meetings` is not empty; `--rescore` builds its rows before writing; the docstring and the line above no longer say a window setting reaches the model; a test runs `main()` with `HOME` at an unreadable sentinel and spies on every open. Should-fix applied: no log record reaches the terminal from the start of `main` (a null handler until the run's log exists); Ctrl-C cleans up `runs/` and its log like `waiting`, documented and tested; throwaway storage closed after each summary; compare tested per summary and with a different setting; the `ps` check tested; `meetings_not_summarised` counts meetings and `summaries_not_made` counts summaries; a reference that is a symlink or a directory is refused; a second transcript of the same stem is warned about; `--model`, `--setting` and `--repeat` with `--rescore` or `--compare` are refused; a refused `--model` is no longer blamed on `--setting`; `exceptions` lines up with `results`. Should-fix deferred: upper-case suffixes (`m01.VTT`) are skipped without a warning; the 25/15 boundary and the `timed out`/`nothing said`/`stopped` results are tested only through the shared code path; `same_scorer_commit` is not in the setup row. Deferred: privacy F2 (any git working tree) and F4 (the real keychain adapter in `prepare()`), 3 more lines in `deferred-work.md`.
+- **2026-10-28, F2 closed (Andrei):** the reference folder lives outside the repository and nothing adds it to git, so no rule beyond the in-repo refusal; the deferral line is marked closed.
 
 ## Design Notes
 
