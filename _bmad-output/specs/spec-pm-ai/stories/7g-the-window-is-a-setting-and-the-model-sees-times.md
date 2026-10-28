@@ -181,7 +181,7 @@ A mark is 11 characters, mostly digits, and digits tend to cost a token each, so
   [`model_calls.py:253`](../../../../pm_ai/domain/model_calls.py#L253)
 
 - The one place the setting reaches the adapter.
-  [`wiring.py:789`](../../../../pm_ai/app/wiring.py#L789)
+  [`wiring.py:788`](../../../../pm_ai/app/wiring.py#L788)
 
 - The config refusal naming both accepted values.
   [`config.py:241`](../../../../pm_ai/core/config.py#L241)
@@ -204,7 +204,7 @@ A mark is 11 characters, mostly digits, and digits tend to cost a token each, so
 **Doctor and setup**
 
 - The ready line names the window and how to lower it.
-  [`ollama.py:787`](../../../../pm_ai/models/local/ollama.py#L787)
+  [`ollama.py:793`](../../../../pm_ai/models/local/ollama.py#L793)
 
 - Doctor asks at the file's window.
   [`entry.py:1660`](../../../../pm_ai/app/entry.py#L1660)
@@ -221,7 +221,7 @@ A mark is 11 characters, mostly digits, and digits tend to cost a token each, so
   [`transcripts.py:193`](../../../../pm_ai/core/transcripts.py#L193)
 
 - A mark at each new minute; labels read past it.
-  [`meeting_summary.py:310`](../../../../pm_ai/core/meeting_summary.py#L310)
+  [`meeting_summary.py:312`](../../../../pm_ai/core/meeting_summary.py#L312)
 
 - Each kept utterance's time, for `7h` to read in code.
   [`meeting_summary.py:282`](../../../../pm_ai/core/meeting_summary.py#L282)
@@ -238,4 +238,4 @@ A mark is 11 characters, mostly digits, and digits tend to cost a token each, so
   [`local_model.py:519`](../../../../benchmarks/local_model.py#L519)
 
 - Orchestrator-approved: config may import exactly `pm_ai.domain.model_calls`.
-  [`test_static_rules.py:631`](../../../../tests/architecture/test_static_rules.py#L631)
+  [`test_static_rules.py:633`](../../../../tests/architecture/test_static_rules.py#L633)
