@@ -1,0 +1,7 @@
+# pm-ai team overrides for bmad-build. Every slice gets both checkpoints
+# (.agents/WORKFLOW.md), so step-02's oneshot route is off in this project.
+
+[workflow]
+persistent_facts = [
+  "pm-ai: never take step-02's oneshot route. Always write the full spec, set `route: 'dispatch'`, and stop at CHECKPOINT 1 for approval, however small the change.",
+]
