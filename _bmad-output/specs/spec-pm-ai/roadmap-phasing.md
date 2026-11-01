@@ -34,8 +34,8 @@ Multi-HR tool MCP skill, career dossier pipeline, cohort and individual metric m
 
 ## Phase 1 checks the source flags
 
-- Benchmark concurrent Whisper transcription and local model parsing at the 16GB baseline before the hardware floor is trusted. *Wave 3 (story 7a) benchmarks the parsing model alone, beside a heavy harvest; Whisper is not in wave 3, so the concurrent question stays open.*
-- Select the specific 8B-class local model; the spec names a class, not a pin. *Wave 3 (story 7a): chosen by measurement between `llama3.1:8b` and `qwen3:8b` at `Q4_K_M`, recorded with its numbers.*
+- Benchmark concurrent Whisper transcription and local model parsing at the 18GB baseline before the hardware floor is trusted. *Wave 3 (story 7a) benchmarks the parsing model alone, beside a heavy harvest; Whisper is not in wave 3, so the concurrent question stays open.*
+- Select the specific local model. *Wave 3 (story 7a): `qwen3:8b` chosen by measurement over `llama3.1:8b`. 2026-11-01: `qwen3:14b` at `Q4_K_M` with the research v2 prompt, chosen from the labelled reference set (nfr-budgets.md).*
 - Pin the embedding model and dimension before the first index is written — a change is a reindex event.
 
 ## Delivery waves

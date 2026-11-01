@@ -56,7 +56,7 @@ An engineering PM's judgement is spent on retrieval: reconstructing what a team 
 
 - **CAP-8** (FR-08)
   - **intent:** Analyze a meeting the PM did not attend, from a provider transcript or one supplied by hand.
-  - **success:** "Fetch transcript for today's Payment Gateway Sync" locates the asset, sanitizes it, and renders the full dual-authorization Summary Card within 300 seconds; a missing asset returns an explanatory error card within 15 seconds; every ingested transcript binds to a meeting record.
+  - **success:** "Fetch transcript for today's Payment Gateway Sync" locates the asset, sanitizes it, and renders the full dual-authorization Summary Card, with no time cap and no model call left hanging past its 30-minute deadline; a missing asset returns an explanatory error card within 15 seconds; every ingested transcript binds to a meeting record.
 
 - **CAP-9** (FR-09)
   - **intent:** Give the PM a pre-rendered daily briefing that separates what is urgent from what is strategic.
@@ -211,7 +211,7 @@ An engineering PM's judgement is spent on retrieval: reconstructing what a team 
 - A coverage window is a **receipt for a request that reached the provider and was answered**, timed by pm-ai's own clock either side of that request — never a span computed from the clock alone. An empty answer is a receipt: asking and being told nothing is there is having looked. There is no window when the request failed (recorded as a failed attempt), when nothing that came back had a readable time, when everything that came back was rejected as unreadable, or when this machine's clock stepped backwards during the request. So *never looked*, *looked and failed* and *looked and found nothing* stay distinguishable — the distinction all three verdicts rest on.
 - All Markdown in every scope is **plaintext by design** — the PM can read, grep, diff, and hand-edit their own record without the system's cooperation. The encrypted set is defined, closed, and deliberately narrow: two files, the API credentials and the PM's own voice notes. Everything else — both operational stores, raw captures, team-member records, connector configuration and code — is 600-permissioned and unencrypted, with full-disk encryption as the backstop. Nothing encrypted is a database, so no page-level cipher is a dependency.
 - The daemon binds loopback only and exposes zero public ports; Telegram is reached by outbound HTTPS long-polling. **Webhooks are prohibited** — they require the public endpoint this same rule forbids.
-- Local workloads run on an 8B-class instruct model at `Q4_K_M` plus Whisper `small.en`. Minimum hardware is 16GB Apple Silicon, v1 is macOS-only, and models above 8B-class are out of scope for v1 — they cannot run concurrently with transcription at that baseline without swap thrashing.
+- Local workloads run on a 14B-class instruct model at `Q4_K_M` (`qwen3:14b`) plus Whisper `small.en`. Minimum hardware is 18GB Apple Silicon, v1 is macOS-only, and models above 14B-class are out of scope for v1. The meeting-summary prompt is chosen with the model and changes with it; one without the other measured worse.
 - The $20/month figure is a **monitored target, not a cap**. Breach warns; the system never silently degrades output quality, downgrades models, or disables features.
 - Self-improvement operates **inside** the architecture, never on it. The tunable surface is closed to persona and questioning strategy, retrieval weighting, and memory patterns — never the skill registry, declared permissions, egress classification, or scope boundaries.
 - pm-ai does not generate code — not to execute, not to test, and not as a diff for review. It names capability gaps in prose; a human writes the skill.
@@ -263,6 +263,6 @@ A PM finishes a 45-minute meeting, opens nothing, and within 10 minutes has the 
 
 ## Open Questions
 
-- Can concurrent Whisper transcription and Ollama parsing run under heavy background telemetry at the 16GB Apple Silicon baseline without swap thrashing? Needs Phase 1 benchmarking before the hardware floor is trusted.
+- Can concurrent Whisper transcription and the 14B-class Ollama model run under heavy background telemetry at the 18GB Apple Silicon baseline without swap thrashing? Needs Phase 1 benchmarking before the hardware floor is trusted.
 - What exactly are the inputs and scale of the pm-ai Performance Index (CAP-39)? A candidate definition — proposals surviving PM review, commitments reaching `[FULFILLED]` — should be validated against real usage history before being committed to.
 - `project-context.md` is referenced by this skill's configuration and does not exist in the repository. Should one be generated and adopted as a companion?
