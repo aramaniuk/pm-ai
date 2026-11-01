@@ -11,7 +11,7 @@ Companion to `SPEC.md`. Cross-cutting budgets every capability is built against.
 | **NFR-03** | Meeting transcripts are parsed, sanitized, anchors and commands extracted, Work Item state updated, and research tasks queued within **600 seconds** of meeting completion. |
 | **NFR-04** | Local database and vector **retrieval** returns within **50–150 ms**. Complex multi-source deep inquiries and pre-meeting briefings complete within **60 seconds** of trigger. |
 | **NFR-05** | Transcript-triggered background research synthesizes findings and dispatches email or Work Item follow-ups within **15 minutes** of meeting conclusion. |
-| **NFR-06** | On-demand missed-meeting download, sanitization, and full dual-authorization extraction render a summary card within **300 seconds** of invocation. |
+| **NFR-06** | On-demand missed-meeting download, sanitization, and full dual-authorization extraction render a summary card with **no time cap**; each local model call fails after a **30-minute** safety deadline rather than hanging. Measured 1–5½ min per meeting on 18GB Apple Silicon. |
 
 The 50–150 ms and 60-second figures describe **different operations**, not a contradiction: retrieval has no model in the path, synthesis does and is always asynchronous.
 
@@ -29,7 +29,7 @@ The 50–150 ms and 60-second figures describe **different operations**, not a c
 | --- | --- |
 | **NFR-10** | On network disruption, incoming audio notes, CLI commands, and state actions buffer in the operational store (plaintext at 600; the encrypted set is two files, neither a database) and replay sequentially without data loss on reconnection. |
 | **NFR-11** | Recovery is **tier-scoped**: Truth and Operational state both survive and are both declared backup targets — a target list, since no backup mechanism ships in v1 (deferred 2026-09-03); only Derived state is disposable and rebuilds with zero loss. Operational state is never a rebuild target, and restoring it opens a re-execution window the CLI must warn about. |
-| **NFR-12** | Local extraction, parsing, and transcription run on a quantized **8B-class** open-weight instruct model at `Q4_K_M` plus Whisper `small.en`. Minimum hardware **16GB RAM on Apple Silicon**; v1 is macOS-only, so the CUDA baseline is deferred alongside Linux. Models above 8B-class are out of scope for v1 — they cannot run concurrently with transcription at the 16GB baseline without swap thrashing. |
+| **NFR-12** | Local extraction, parsing, and transcription run on a quantized **14B-class** open-weight instruct model at `Q4_K_M` (`qwen3:14b`) plus Whisper `small.en`. Minimum hardware **18GB RAM on Apple Silicon**; v1 is macOS-only, so the CUDA baseline is deferred alongside Linux. Models above 14B-class are out of scope for v1. Whether whisper.cpp fits beside the 14B model at 18GB is open. |
 | **NFR-14** | The daemon binds **loopback only**, exposing zero public HTTP or WebSocket ports. Telegram runs over **outbound HTTPS long-polling** authenticated by paired user-IDs. Webhooks are prohibited: they require the public endpoint this same requirement forbids. |
 
 *(There is no NFR-13 in this group — it is the cost target below, numbered as in the source.)*
@@ -40,10 +40,11 @@ How NFR-12 is held when the local model first runs. Every figure below is a boun
 
 - **Loopback only, by construction.** Ollama is reached at `http://127.0.0.1:11434`, a constant: no host setting, no proxy, no redirect, no authorization header. A model whose tag contains `cloud`, or that the server reports as running elsewhere, is refused. pm-ai names the model in `config.toml` (`local_model`) and never pulls one.
 - **One heavy model job at a time**, on a model pool of one worker, never on the loop, the writer thread or an I/O worker; every request sends `keep_alive: 0`, temperature 0 and a fixed seed, so the model is unloaded between calls.
-- **The window and the model are chosen by measurement.** `num_ctx` is 8,192 until 7a's benchmark sets it; the model is picked between `llama3.1:8b` and `qwen3:8b` at `Q4_K_M` by validation, then recall on an authored transcript, then peak memory, then wall time. An answer that reaches the window or is cut short is refused, never used.
-- **Per summary:** each model call has 300 seconds; a long transcript is split at speaker turns and merged, never refused for length; one retry per call; at most 3 meetings offered per harvest, most recent first, none whose start is more than 30 days old (its transcript is purged at 30 days, NFR-09).
+- **The model and the prompt are chosen together, by measurement.** `qwen3:14b` at `Q4_K_M` with the research v2 summary prompt (whole meeting, no time marks), chosen 2026-11-01 over `qwen3:8b` from the private reference set labelled by Andrei (wrong items 33% → 16% on dev meetings, 25% → 19% on untouched ones). The 14B model with the old prompt measured worse than the shipped setup, so neither changes alone. An answer that reaches the window or is cut short is refused, never used.
+- **Per summary:** no time cap; each model call has a 30-minute safety deadline so a hung call fails. A meeting is read whole and split into parts only when it does not fit the window, then merged, never refused for length; one retry per call; at most 3 meetings offered per harvest, most recent first, none whose start is more than 30 days old (its transcript is purged at 30 days, NFR-09).
 - **Not claimed in wave 3:** NFR-03's 600 seconds from meeting end — pm-ai observes no meeting end yet and reads transcripts at the harvest. 7b measures ingestion-to-written and request-to-written instead, and asks before building on a figure over 600 seconds.
-- **Still open:** whether whisper.cpp and the parsing model fit together at 16GB (SPEC Open Questions). Whisper is not in wave 3, so 7a's benchmark measures the parsing model alone, with a GitLab-sized harvest persisting beside it.
+- **Ollama as installed.** pm-ai asks for no flash attention and no 8-bit KV cache: both are process-wide Ollama settings pm-ai cannot set per request. At the 32,768 window 37 of 41 layers are on the GPU, so output is identical on reruns when all 41 layers are resident and about 1 item in 80 differs otherwise. The 8-bit KV cache stays a research tool, not a default.
+- **Still open:** whether whisper.cpp and the 14B parsing model fit together at 18GB (SPEC Open Questions). Whisper is not in wave 3, so 7a's benchmark measures the parsing model alone, with a GitLab-sized harvest persisting beside it.
 
 ## Cost & token efficiency
 
